@@ -1,0 +1,46 @@
+# The spike's one app: `xcodegen generate --spec
+# spikes/s5-diff-tree/project.yml` produces `DiffTreeBench.xcodeproj`
+# (ignored). One target, the benchmark app, since the spike has no
+# framework or test bundle to split out.
+#
+# Adapted from L-K-M/Sweetbriar (apps/macos/project.yml): same Swift 6
+# strict-concurrency, warnings-as-errors and ad-hoc-signing settings.
+
+name: DiffTreeBench
+
+options:
+  bundleIdPrefix: ch.lkmc.foldover.spike
+  deploymentTarget:
+    macOS: "26.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+    GCC_TREAT_WARNINGS_AS_ERRORS: YES
+    ARCHS: arm64
+    ONLY_ACTIVE_ARCH: YES
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ""
+    OTHER_LDFLAGS: -Wl,-fatal_warnings
+
+targets:
+  DiffTreeBench:
+    type: application
+    platform: macOS
+    sources:
+      - DiffTreeBench
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ch.lkmc.foldover.spike.difftree
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  DiffTreeBench:
+    build:
+      targets:
+        DiffTreeBench: all
+    run:
+      config: Release

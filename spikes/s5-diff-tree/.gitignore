@@ -1,0 +1,3 @@
+# XcodeGen output and the local build tree.
+DiffTreeBench.xcodeproj
+build/
