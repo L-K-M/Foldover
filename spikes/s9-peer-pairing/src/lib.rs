@@ -12,6 +12,19 @@
 //! [`VerifierMode::Pinned`] accepts only fingerprints already in a
 //! [`TrustStore`]. The verifier reads the store at verify time, so
 //! `revoke` takes effect on the next handshake.
+//!
+//! The SAS comes from a commit-then-reveal nonce exchange inside the
+//! TLS session ([`pairing_code`]), not from the exporter alone: a relay
+//! acting as TLS server picks its random after seeing the client's, so
+//! it could otherwise retry until both legs show the same six digits.
+//!
+//! ```text
+//! dialer                                  listener
+//!   | -- C = H(commit label, exporter, Nd) --> |
+//!   | <------------------ Nl ----------------- |
+//!   | ------------------- Nd ----------------> |  checks C
+//!   SAS = H(SAS label, exporter, Nd, Nl, both fingerprints) mod 10^6
+//! ```
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -31,8 +44,19 @@ use sha2::{Digest, Sha256};
 /// ALPN identifier for the spike's peer protocol.
 pub const ALPN: &[u8] = b"foldover-peer-s9";
 
-/// RFC 5705 exporter label binding the SAS to this TLS session.
+/// RFC 5705 exporter label binding the SAS to this TLS session; also
+/// the domain separator of the SAS hash.
 const SAS_LABEL: &[u8] = b"foldover-sas-v1";
+
+/// Domain separator of the dialer's nonce commitment.
+const COMMIT_LABEL: &[u8] = b"foldover-sas-commit-v1";
+
+/// Pairing nonces: 256 random bits each.
+const NONCE_LEN: usize = 32;
+type Nonce = [u8; NONCE_LEN];
+
+/// SHA-256 output: the commitment and the SAS digest.
+type Digest32 = [u8; 32];
 
 /// SAS space: six decimal digits.
 const SAS_MODULUS: u32 = 1_000_000;
@@ -51,6 +75,7 @@ pub enum Error {
     Connection(quinn::ConnectionError),
     Write(quinn::WriteError),
     Read(quinn::ReadError),
+    ReadExact(quinn::ReadExactError),
     /// A stream finished by `finish()` could not be closed because the
     /// connection was already gone.
     ClosedStream(quinn::ClosedStream),
@@ -67,6 +92,11 @@ pub enum Error {
     NoPeerCertificate,
     /// The TLS keying-material exporter rejected the request.
     KeyExport,
+    /// The system random source failed while drawing a pairing nonce.
+    Random,
+    /// The dialer revealed a nonce that does not match its commitment:
+    /// pairing must abort, whatever code the screens show.
+    CommitmentMismatch,
     /// A connect or accept exceeded the test timeout.
     Timeout,
     /// Catch-all for harness-internal failures.
@@ -83,6 +113,7 @@ impl fmt::Display for Error {
             Error::Connection(e) => write!(f, "connection: {e}"),
             Error::Write(e) => write!(f, "stream write: {e}"),
             Error::Read(e) => write!(f, "stream read: {e}"),
+            Error::ReadExact(e) => write!(f, "stream read: {e}"),
             Error::ClosedStream(e) => write!(f, "stream closed: {e}"),
             Error::InitialCipherSuite(e) => {
                 write!(f, "no usable initial cipher suite: {e}")
@@ -91,6 +122,10 @@ impl fmt::Display for Error {
             Error::EndpointClosed => write!(f, "endpoint closed while accepting"),
             Error::NoPeerCertificate => write!(f, "peer presented no certificate"),
             Error::KeyExport => write!(f, "keying-material export unavailable"),
+            Error::Random => write!(f, "random source failed"),
+            Error::CommitmentMismatch => {
+                write!(f, "pairing nonce does not match its commitment")
+            }
             Error::Timeout => write!(f, "timed out"),
             Error::Other(m) => write!(f, "{m}"),
         }
@@ -107,6 +142,7 @@ impl std::error::Error for Error {
             Error::Connection(e) => Some(e),
             Error::Write(e) => Some(e),
             Error::Read(e) => Some(e),
+            Error::ReadExact(e) => Some(e),
             Error::ClosedStream(e) => Some(e),
             Error::InitialCipherSuite(e) => Some(e),
             Error::Join(e) => Some(e),
@@ -132,6 +168,7 @@ from_err!(Connect, quinn::ConnectError);
 from_err!(Connection, quinn::ConnectionError);
 from_err!(Write, quinn::WriteError);
 from_err!(Read, quinn::ReadError);
+from_err!(ReadExact, quinn::ReadExactError);
 from_err!(ClosedStream, quinn::ClosedStream);
 from_err!(
     InitialCipherSuite,
@@ -206,7 +243,7 @@ impl Identity {
 
 /// Device IDs the user has confirmed at pairing time. Read by the
 /// verifier at every handshake, so `revoke` takes effect on the next
-/// connection — the one-step revocation S9 must demonstrate.
+/// connection: the one-step revocation S9 must demonstrate.
 #[derive(Debug, Default)]
 pub struct TrustStore {
     pins: Mutex<BTreeSet<Fingerprint>>,
@@ -247,7 +284,7 @@ pub enum VerifierMode {
 
 /// One verifier for both roles: `ServerCertVerifier` when this node
 /// dials, `ClientCertVerifier` when it listens. `tls13_verified` counts
-/// TLS 1.3 CertificateVerify checks — observable proof that the TLS 1.3
+/// TLS 1.3 CertificateVerify checks, observable proof that the TLS 1.3
 /// signature path ran, since rustls calls it only for TLS 1.3.
 #[derive(Debug)]
 struct PeerVerifier {
@@ -562,25 +599,127 @@ pub fn session_secret(connection: &Connection) -> Result<[u8; 32], Error> {
     Ok(exported)
 }
 
-/// The six-digit code both devices show during pairing. Derived from the
-/// TLS keying-material exporter — so a relay that terminates both legs
-/// lands on different session keys — and hashed with both device
-/// fingerprints in canonical order, so it also binds the identities.
-pub fn session_sas(
+/// Which end of the pairing exchange this device plays: the side that
+/// dialed the connection, or the side that accepted it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PairingRole {
+    Dialer,
+    Listener,
+}
+
+/// The six-digit code both devices show during pairing. Runs the
+/// commit-then-reveal exchange on a fresh stream; both ends must call
+/// it concurrently, each with its own role.
+///
+/// Each code mixes the exporter output with a dialer nonce committed
+/// before the listener's nonce is sent. A relay terminating both legs
+/// therefore cannot steer either leg's code: on a leg it dials it
+/// commits before seeing the peer's nonce, and on a leg it accepts it
+/// picks its nonce before seeing the dialer's. The two codes match by
+/// chance only (1 in 1,000,000 per attempt).
+pub async fn pairing_code(
     connection: &Connection,
+    role: PairingRole,
     local: Fingerprint,
     peer: Fingerprint,
 ) -> Result<u32, Error> {
     let exported = session_secret(connection)?;
+    let (dialer_nonce, listener_nonce) = match role {
+        PairingRole::Dialer => dialer_exchange(connection, &exported).await?,
+        PairingRole::Listener => listener_exchange(connection, &exported).await?,
+    };
+    Ok(sas_digits(
+        &exported,
+        &dialer_nonce,
+        &listener_nonce,
+        local,
+        peer,
+    ))
+}
+
+/// Dialer side: commit, read the listener's nonce, then reveal.
+async fn dialer_exchange(
+    connection: &Connection,
+    exported: &[u8; 32],
+) -> Result<(Nonce, Nonce), Error> {
+    let nonce = random_nonce()?;
+    let (mut send, mut recv) = connection.open_bi().await?;
+    send.write_all(&commitment(exported, &nonce)).await?;
+
+    let mut listener_nonce = [0u8; NONCE_LEN];
+    recv.read_exact(&mut listener_nonce).await?;
+
+    send.write_all(&nonce).await?;
+    send.finish()?;
+    Ok((nonce, listener_nonce))
+}
+
+/// Listener side: take the commitment, send a nonce, then check the
+/// revealed dialer nonce against the commitment.
+async fn listener_exchange(
+    connection: &Connection,
+    exported: &[u8; 32],
+) -> Result<(Nonce, Nonce), Error> {
+    let nonce = random_nonce()?;
+    let (mut send, mut recv) = connection.accept_bi().await?;
+    let mut committed: Digest32 = [0u8; 32];
+    recv.read_exact(&mut committed).await?;
+
+    send.write_all(&nonce).await?;
+    send.finish()?;
+
+    let mut dialer_nonce = [0u8; NONCE_LEN];
+    recv.read_exact(&mut dialer_nonce).await?;
+    if commitment(exported, &dialer_nonce) != committed {
+        return Err(Error::CommitmentMismatch);
+    }
+    Ok((dialer_nonce, nonce))
+}
+
+/// A fresh nonce from the pinned provider's system random source.
+fn random_nonce() -> Result<Nonce, Error> {
+    let mut nonce = [0u8; NONCE_LEN];
+    crypto_provider()
+        .secure_random
+        .fill(&mut nonce)
+        .map_err(|_| Error::Random)?;
+    Ok(nonce)
+}
+
+/// The dialer's binding, hiding commitment to its nonce, tied to this
+/// session so a relay cannot replay it on its other leg.
+fn commitment(exported: &[u8; 32], nonce: &Nonce) -> Digest32 {
+    Sha256::new()
+        .chain_update(COMMIT_LABEL)
+        .chain_update(exported)
+        .chain_update(nonce)
+        .finalize()
+        .into()
+}
+
+/// Six digits from the session, both nonces and both device IDs (in
+/// canonical order, so both ends hash the same bytes).
+fn sas_digits(
+    exported: &[u8; 32],
+    dialer_nonce: &Nonce,
+    listener_nonce: &Nonce,
+    local: Fingerprint,
+    peer: Fingerprint,
+) -> u32 {
     let (lo, hi) = if local <= peer {
         (local, peer)
     } else {
         (peer, local)
     };
-    let digest = Sha256::new()
+    let digest: Digest32 = Sha256::new()
+        .chain_update(SAS_LABEL)
         .chain_update(exported)
+        .chain_update(dialer_nonce)
+        .chain_update(listener_nonce)
         .chain_update(lo.0)
         .chain_update(hi.0)
-        .finalize();
-    Ok(u32::from_be_bytes(digest[..4].try_into().unwrap()) % SAS_MODULUS)
+        .finalize()
+        .into();
+    let [b0, b1, b2, b3, ..] = digest;
+    u32::from_be_bytes([b0, b1, b2, b3]) % SAS_MODULUS
 }

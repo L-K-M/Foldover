@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# spikes/s9-peer-pairing/run.sh — build, test and benchmark the S9
+# spikes/s9-peer-pairing/run.sh: build, test and benchmark the S9
 # peer-pairing spike.
 #
 # Usage: spikes/s9-peer-pairing/run.sh [results.json]

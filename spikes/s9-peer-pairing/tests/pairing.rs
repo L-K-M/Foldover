@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use s9_peer_pairing::{
-    Error, Fingerprint, Identity, PeerNode, TrustStore, VerifierMode, offered_cipher_suites,
-    open_connection, peer_fingerprint, session_sas, session_secret,
+    Error, Fingerprint, Identity, PairingRole, PeerNode, TrustStore, VerifierMode,
+    offered_cipher_suites, open_connection, pairing_code, peer_fingerprint, session_secret,
 };
 
 /// Generous bound: every handshake here is local, so anything slower
@@ -27,6 +27,33 @@ async fn connect(
         Ok(result) => result,
         Err(_) => Err(Error::Timeout),
     }
+}
+
+/// Both ends of one connection run the pairing exchange, as two devices
+/// would. Returns (dialer's code, listener's code).
+async fn exchange_codes(
+    dialer: &quinn::Connection,
+    dialer_ids: (Fingerprint, Fingerprint),
+    listener: &quinn::Connection,
+    listener_ids: (Fingerprint, Fingerprint),
+) -> (u32, u32) {
+    let (dialer_code, listener_code) = tokio::time::timeout(TIMEOUT, async {
+        tokio::join!(
+            pairing_code(dialer, PairingRole::Dialer, dialer_ids.0, dialer_ids.1),
+            pairing_code(
+                listener,
+                PairingRole::Listener,
+                listener_ids.0,
+                listener_ids.1
+            ),
+        )
+    })
+    .await
+    .expect("pairing exchange hung");
+    (
+        dialer_code.expect("dialer pairing exchange"),
+        listener_code.expect("listener pairing exchange"),
+    )
 }
 
 /// Assert a connection attempt failed through the TLS layer (not by
@@ -79,8 +106,13 @@ async fn pair_devices() -> (
     assert_eq!(seen_by_a, b.fingerprint(), "A must see B's device ID");
     assert_eq!(seen_by_b, a.fingerprint(), "B must see A's device ID");
 
-    let sas_a = session_sas(&conn_a, a.fingerprint(), seen_by_a).expect("exporter A");
-    let sas_b = session_sas(&conn_b, b.fingerprint(), seen_by_b).expect("exporter B");
+    let (sas_a, sas_b) = exchange_codes(
+        &conn_a,
+        (a.fingerprint(), seen_by_a),
+        &conn_b,
+        (b.fingerprint(), seen_by_b),
+    )
+    .await;
     assert_eq!(sas_a, sas_b, "both sides must show the same code");
     assert!(sas_a < SAS_MODULUS, "SAS must be six decimal digits");
 
@@ -194,11 +226,11 @@ async fn mitm_relay_makes_sas_differ() {
     let b = PeerNode::bind(identity_b, VerifierMode::Pairing).expect("bind B");
 
     // Leg 1: A dials the attacker.
-    let (conn_a, _conn_m1) = connect(&a, &m, VerifierMode::Pairing)
+    let (conn_a, conn_m1) = connect(&a, &m, VerifierMode::Pairing)
         .await
         .expect("A to attacker leg");
     // Leg 2: the attacker dials B.
-    let (_conn_m2, conn_b) = connect(&m, &b, VerifierMode::Pairing)
+    let (conn_m2, conn_b) = connect(&m, &b, VerifierMode::Pairing)
         .await
         .expect("attacker to B leg");
 
@@ -207,8 +239,22 @@ async fn mitm_relay_makes_sas_differ() {
     assert_eq!(seen_by_a, m.fingerprint(), "A sees the attacker, not B");
     assert_eq!(seen_by_b, m.fingerprint(), "B sees the attacker, not A");
 
-    let sas_a = session_sas(&conn_a, a.fingerprint(), seen_by_a).expect("exporter A");
-    let sas_b = session_sas(&conn_b, b.fingerprint(), seen_by_b).expect("exporter B");
+    // The attacker runs the exchange honestly on both legs; it cannot
+    // steer either code, because each mixes a nonce it has not seen.
+    let (sas_a, _sas_m1) = exchange_codes(
+        &conn_a,
+        (a.fingerprint(), seen_by_a),
+        &conn_m1,
+        (m.fingerprint(), a.fingerprint()),
+    )
+    .await;
+    let (_sas_m2, sas_b) = exchange_codes(
+        &conn_m2,
+        (m.fingerprint(), b.fingerprint()),
+        &conn_b,
+        (b.fingerprint(), seen_by_b),
+    )
+    .await;
     assert_ne!(
         sas_a, sas_b,
         "a relay terminating both legs must make the codes differ"
@@ -283,6 +329,50 @@ async fn negotiated_tls13_with_aead_cipher() {
     assert_ne!(
         secret_a, secret_a2,
         "each session must get fresh keying material"
+    );
+    a.close();
+    b.close();
+}
+
+/// (7) The commitment binds: a dialer that reveals a nonce other than
+/// the one it committed to, as a relay trying to steer the code after
+/// seeing the listener's nonce would, makes the listener abort pairing.
+#[tokio::test]
+async fn cheating_dialer_fails_commitment_check() {
+    let identity_a = Arc::new(Identity::generate().expect("identity A"));
+    let identity_b = Arc::new(Identity::generate().expect("identity B"));
+    let a = PeerNode::bind(identity_a, VerifierMode::Pairing).expect("bind A");
+    let b = PeerNode::bind(identity_b, VerifierMode::Pairing).expect("bind B");
+    let (conn_a, conn_b) = connect(&a, &b, VerifierMode::Pairing)
+        .await
+        .expect("pairing connection");
+
+    // A plays the dialer by hand: an arbitrary commitment, then a nonce
+    // that does not open it.
+    let cheat = async {
+        let (mut send, mut recv) = conn_a.open_bi().await.expect("open stream");
+        send.write_all(&[0u8; 32]).await.expect("send commitment");
+        let mut listener_nonce = [0u8; 32];
+        recv.read_exact(&mut listener_nonce)
+            .await
+            .expect("read listener nonce");
+        send.write_all(&[1u8; 32]).await.expect("send nonce");
+        send.finish().expect("finish");
+        // Keep the stream open until the listener has judged it.
+        let _ = recv.read_to_end(0).await;
+    };
+    let honest = pairing_code(
+        &conn_b,
+        PairingRole::Listener,
+        b.fingerprint(),
+        a.fingerprint(),
+    );
+    let ((), verdict) = tokio::time::timeout(TIMEOUT, async { tokio::join!(cheat, honest) })
+        .await
+        .expect("pairing exchange hung");
+    assert!(
+        matches!(verdict, Err(Error::CommitmentMismatch)),
+        "listener must reject a nonce that does not open the commitment: {verdict:?}"
     );
     a.close();
     b.close();

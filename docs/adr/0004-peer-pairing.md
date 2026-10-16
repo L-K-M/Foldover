@@ -32,20 +32,32 @@ provider, rcgen, sha2, tokio; versions pinned exactly).
   and records its fingerprint; `Pinned` accepts only fingerprints in a
   trust store and rejects everything else. Both sides always present a
   certificate (mutual TLS). The verifier reads the store at verify
-  time, so removing a pin applies to the next handshake.
+  time, so removing a pin applies to the next handshake; a connection
+  already open survives it.
 - TLS is locked to version 1.3 and the suite list is filtered to the
   TLS 1.3 AEAD suites, so no TLS 1.2 or non-AEAD suite can be offered.
-- SAS: six decimal digits from the TLS keying-material exporter
-  (RFC 5705, label `foldover-sas-v1`) mixed with both device
-  fingerprints in canonical order, so the code binds to this session
-  and to the two identities.
+- SAS: six decimal digits from a commit-then-reveal exchange inside
+  the TLS session. The dialer sends a hash commitment to a random
+  nonce, the listener answers with its own nonce, the dialer reveals
+  its nonce and the listener checks it against the commitment. The
+  code hashes the TLS keying-material exporter output (RFC 5705, label
+  `foldover-sas-v1`), both nonces and both device fingerprints, so it
+  binds to this session and to the two identities.
+- Why the commitment: an exporter-only code can be steered. A relay
+  that is the TLS server on one leg picks its random after seeing the
+  client's, so it can finish the other leg first and then retry
+  candidate handshakes offline (about 500,000 signatures, seconds on a
+  multicore machine) until both legs show the same six digits. With
+  the commitment, each leg's code mixes a nonce the relay had not seen
+  when it fixed its own input, as in Bluetooth numeric comparison.
 - Tests: (1) honest pairing yields the same SAS on both sides and both
   pin each other; (2) a pinned reconnect carries data; (3) an unknown
   device is rejected in both directions; (4) a relay that terminates
   both legs with its own identity makes the two SAS codes differ; (5)
   removing a pin makes the next connection fail; (6) only TLS 1.3 AEAD
   suites are offered, the TLS 1.3 verification path ran on both ends,
-  and exporter output is session-unique.
+  and exporter output is session-unique; (7) a dialer that reveals a
+  nonce other than the one it committed to makes the listener abort.
 - Bench: bytes/s for 1 GiB over loopback on one stream and on four
   parallel streams.
 
@@ -66,9 +78,12 @@ From PLAN.md §8 S9, made precise:
    and 3 exercise both verifier roles).
 2. Unpaired peers get nothing: a peer whose fingerprint is not pinned
    cannot complete a handshake in either direction.
-3. MITM detected: a relay terminating both legs produces two different
-   TLS sessions, so the two 6-digit codes differ (a match by chance has
-   probability 1 in 1,000,000, inherent to six digits).
+3. MITM detected: a relay terminating both legs shows two different
+   6-digit codes, and it cannot steer them to match: a match is chance
+   only, 1 in 1,000,000 per pairing attempt. The harness shows the
+   difference for a relay that runs the exchange honestly (test 4) and
+   that a relay revealing a different nonce is caught (test 7); that no
+   strategy beats chance is argued in Method, not measured.
 4. One-step revocation: removing a pin makes the very next connection
    attempt fail.
 5. Throughput for 1 GiB loopback on one and four streams is recorded
@@ -86,11 +101,12 @@ Pending the first CI run of spike-s9.
 | mitm_relay_makes_sas_differ | |
 | revocation_breaks_next_connection | |
 | negotiated_tls13_with_aead_cipher | |
+| cheating_dialer_fails_commitment_check | |
 | Bench 1 stream, 1 GiB loopback (MiB/s) | |
 | Bench 4 streams, 1 GiB loopback (MiB/s) | |
 
 Local run on the development host (Linux, release build, 2026-10-16):
-6 of 6 tests passed; 270.7 MiB/s on one stream and 244.8 MiB/s on four
+7 of 7 tests passed; 270.7 MiB/s on one stream and 244.8 MiB/s on four
 streams. CI numbers supersede these.
 
 ## Decision
@@ -100,13 +116,14 @@ Pending.
 ## Consequences
 
 - All criteria pass: PLAN.md §4.11 keeps quinn + rustls, the
-  fingerprint device ID, the exporter-derived SAS and pinned
-  fingerprints as the P5 design; the recorded throughput feeds the P5
-  transfer budget.
-- SAS mismatch detection is judged too weak (six digits give a 1 in
-  1,000,000 chance that a relay shows matching codes): lengthen the
-  code or add a transcript hash comparison in §4.11, moving away from
-  the plain 6-digit pairing.
+  fingerprint device ID and pinned fingerprints as the P5 design, and
+  states the SAS precisely: derived from the session and a
+  commit-then-reveal nonce exchange, not from the fingerprints alone.
+  Revoking a device also closes its open connections. The recorded
+  throughput feeds the P5 transfer budget.
+- Six digits are judged too weak even at chance level (1 in 1,000,000
+  per attempt; repeated failed pairings should lock the window):
+  lengthen the code in §4.11.
 - Unpaired rejection or revocation fails: fall back to the §8 S9
   alternative, TOFU with fingerprint confirmation, and re-open the
   inbound policy ("ask, allow paired, allow list") before P5.
