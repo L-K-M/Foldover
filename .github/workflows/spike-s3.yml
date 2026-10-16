@@ -1,0 +1,90 @@
+name: spike-s3
+
+on:
+  pull_request:
+    paths:
+      - spikes/s3-change-detection/**
+      - .github/workflows/spike-s3.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# A named bash shell adds -o pipefail, so `run.sh | tee` fails when the
+# harness does instead of reporting tee's success.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # House style for shell scripts; same pinned shellcheck as ci.yml.
+  shellcheck:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: shellcheck@0.11.0
+
+      - name: Log toolchain and image
+        run: |
+          shellcheck --version
+          echo "Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+
+      - name: shellcheck run.sh
+        run: shellcheck spikes/s3-change-detection/run.sh
+
+  # The spike itself: builds and runs the harness as an unprivileged
+  # command-line process on macOS. The job fails only when the harness
+  # breaks; a missed measurement is data, recorded in the JSON and the ADR.
+  run:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Log toolchain and image
+        run: |
+          rustup show
+          rustc -Vv
+          sw_vers
+          echo "Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+
+      - name: Run the spike
+        run: spikes/s3-change-detection/run.sh "$RUNNER_TEMP/s3-results.json" | tee "$RUNNER_TEMP/s3-summary.txt"
+
+      # A crash in the hand-written FFI leaves no output; rerun under
+      # lldb so the log shows where it died.
+      - name: Backtrace on crash
+        if: failure()
+        run: |
+          lldb --batch -o run -k "thread backtrace all" -k "quit 1" -- \
+            spikes/s3-change-detection/target/release/spike-s3-change-detection \
+            "$RUNNER_TEMP/s3-crash.json" || true
+
+      - name: Append results to the step summary
+        if: always()
+        run: |
+          {
+            echo '## spike-s3 summary'
+            echo '```'
+            cat "$RUNNER_TEMP/s3-summary.txt" 2>/dev/null || echo '(no summary; harness failed)'
+            echo '```'
+            echo '### JSON'
+            echo '```json'
+            cat "$RUNNER_TEMP/s3-results.json" 2>/dev/null || echo '(no JSON; harness failed)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the JSON results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: spike-s3-results
+          path: ${{ runner.temp }}/s3-results.json
+          if-no-files-found: warn
