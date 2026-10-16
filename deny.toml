@@ -1,0 +1,56 @@
+# cargo-deny policy for Foldover's dependency graph, cargo-deny
+# 0.20.2 syntax. Adapted from L-K-M/Sweetbriar.
+
+[advisories]
+yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+ignore = []
+maximum-db-staleness = "P1D"
+unused-ignored-advisory = "warn"
+
+[licenses]
+confidence-threshold = 0.95
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "0BSD",
+    "Unlicense",
+    "CC0-1.0",
+    "Zlib",
+    "Unicode-3.0",
+]
+# MPL-2.0 is file-level copyleft, allowed by named exception per
+# package and version: the UniFFI crates only, which entered the
+# graph with foldover-ffi and foldover-bindgen in P0.
+exceptions = [
+    { crate = "uniffi@0.32.2", allow = ["MPL-2.0"] },
+    { crate = "uniffi_core@0.32.2", allow = ["MPL-2.0"] },
+    { crate = "uniffi_macros@0.32.2", allow = ["MPL-2.0"] },
+    { crate = "uniffi_meta@0.32.2", allow = ["MPL-2.0"] },
+    { crate = "uniffi_pipeline@0.32.2", allow = ["MPL-2.0"] },
+    { crate = "uniffi_bindgen@0.32.2", allow = ["MPL-2.0"] },
+    { crate = "uniffi_internal_macros@0.32.2", allow = ["MPL-2.0"] },
+    { crate = "uniffi_udl@0.32.2", allow = ["MPL-2.0"] },
+]
+
+# Foldover's own crates are publish = false; their Unlicense offering
+# is already on the allow list above.
+[licenses.private]
+ignore = false
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Internal path dependencies carry no version (so release bumps never
+# break the build); they are not wildcards from a registry, and every
+# crate is publish = false.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

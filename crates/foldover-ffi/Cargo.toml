@@ -1,0 +1,22 @@
+[package]
+name = "foldover-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+# This crate cannot opt into the workspace lints: `unsafe_code =
+# "forbid"` would reject UniFFI's scaffolding, which expands to
+# `unsafe extern "C"` shims. It contains no hand-written `unsafe`.
+
+# staticlib + cdylib: the staticlib goes into the XCFramework the
+# Swift package links; the bindgen reads the cdylib's metadata.
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[dependencies]
+foldover-client = { path = "../foldover-client" }
+# Proc-macro exports, no UDL; no CLI features here, those live in
+# `foldover-bindgen`. Pinned so bindings and runtime cannot drift.
+uniffi = { version = "=0.32.2", default-features = false }

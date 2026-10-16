@@ -1,0 +1,86 @@
+# The macOS app (PLAN.md §4.5): `xcodegen generate --spec
+# apple/project.yml` produces `Foldover.xcodeproj` (ignored). Layout:
+# the generated `FoldoverCore` Swift package (cargo xtask ffi), the
+# `Foldover` SwiftUI app, and the app-hosted `FoldoverTests`
+# Swift-Testing bundle.
+# Adapted from L-K-M/Sweetbriar
+
+name: Foldover
+
+options:
+  bundleIdPrefix: ch.lkmc.foldover
+  deploymentTarget:
+    macOS: "26.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+    GCC_TREAT_WARNINGS_AS_ERRORS: YES
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ""
+  configs:
+    # Debug builds only the machine's arch for turn-around speed; the
+    # Release app is universal because the FoldoverCore XCFramework
+    # carries a universal static library.
+    Debug:
+      ONLY_ACTIVE_ARCH: YES
+    Release:
+      ARCHS: arm64 x86_64
+      ONLY_ACTIVE_ARCH: NO
+
+packages:
+  FoldoverCore:
+    path: FoldoverCore
+
+targets:
+  Foldover:
+    type: application
+    platform: macOS
+    sources:
+      - Foldover
+    dependencies:
+      - package: FoldoverCore
+        product: FoldoverCore
+    # Xcode writes the Info.plist from these settings, so no plist file
+    # sits in the tree: an XcodeGen-written one would leave the tree
+    # dirty after every generate, which the release engine rejects.
+    # CFBundleShortVersionString and CFBundleVersion come from
+    # MARKETING_VERSION and CURRENT_PROJECT_VERSION.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ch.lkmc.foldover
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
+
+  FoldoverTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - FoldoverTests
+    dependencies:
+      - target: Foldover
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ch.lkmc.foldover.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Foldover.app/Contents/MacOS/Foldover
+        BUNDLE_LOADER: $(TEST_HOST)
+
+schemes:
+  Foldover:
+    build:
+      targets:
+        Foldover: all
+        FoldoverTests:
+          - test
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - FoldoverTests

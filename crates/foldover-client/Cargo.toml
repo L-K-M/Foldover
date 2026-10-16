@@ -1,0 +1,13 @@
+[package]
+name = "foldover-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+foldover-ipc = { path = "../foldover-ipc" }

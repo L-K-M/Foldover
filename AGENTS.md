@@ -1,19 +1,113 @@
-# AGENTS.md
+# AGENTS.md — working on Foldover
 
 Foldover syncs folders between a Mac's disks, NAS shares, SFTP servers and
-other Macs, previewing exactly what it will do — **planning stage**: the
-repo holds `PLAN.md` and `docs/research/`, not code yet.
+other Macs, previewing every change before it runs. A portable Rust engine
+runs in a background agent; each platform gets a native UI (SwiftUI now,
+GTK4 later). [`PLAN.md`](PLAN.md) is the source of truth for scope and
+design; [`docs/research`](docs/research/README.md) holds the evidence.
 
-- Documentation checks (CI runs them on every PR):
-  `python3 tools/doccheck/checkdocs.py .` for links, anchors, fences and
-  tables, and `node tools/doccheck/mmdcheck.mjs .` for Mermaid diagrams
-  (needs `npm --prefix tools/doccheck install --no-save mermaid@11 jsdom@25`
-  once).
-- When code lands: a Rust Cargo workspace engine plus a SwiftUI/AppKit
-  macOS UI (macOS 26, universal, Developer ID + notarized); macOS bundle
-  identifiers use the fleet `ch.lkmc.*` prefix.
-- `PLAN.md` §10 records owner decisions — check there before choosing
-  between alternatives it already settles.
+**Status:** P0 (foundations). Crate skeletons, the layer check, the UniFFI
+bridge and a placeholder macOS app exist; nothing syncs yet. The roadmap is
+PLAN.md §7.
+
+## Toolchain
+
+- **Rust:** rustup. `rust-toolchain.toml` pins 1.99.0 with rustfmt,
+  clippy and both Apple targets; rustup installs it on first use.
+- **macOS app:** macOS 26+, Xcode 26+, XcodeGen 2.46.0
+  (`brew install xcodegen`; CI pins the release by SHA-256).
+- **Scripts:** shellcheck (CI pins 0.11.0).
+- **Releases:** `lkm-release` from
+  [L-K-M/release-tool](https://github.com/L-K-M/release-tool)
+  (`./install.sh`).
+- **Dependency audit:** `cargo install --locked cargo-deny@0.20.2`.
+- **Doc checks:** Python 3 and Node 22 (`tools/doccheck`).
+
+## Commands
+
+| Task | Command |
+|---|---|
+| Linux CI gate (fmt, clippy, tests, docs, layer check, FFI drift) | `cargo xtask ci` |
+| Layer check only | `cargo xtask check-layers` |
+| Regenerate the Swift bindings (commit the result) | `cargo xtask ffi --bindings-only` |
+| Bindings + universal XCFramework (macOS) | `cargo xtask ffi` |
+| Dependency licenses and advisories | `cargo deny check` |
+| Generate the Xcode project | `xcodegen generate --spec apple/project.yml` |
+| Build everything this host can → `dist/` | `scripts/build.sh [core] [app] [--debug] [--clean] [--check]` |
+| Release (macOS, X.Y.Z only; publishing arrives with S6) | `scripts/release.sh X.Y.Z [--push]` |
+| Doc links, anchors, fences, tables | `python3 tools/doccheck/checkdocs.py .` |
+| Mermaid diagrams | `npm --prefix tools/doccheck install --no-save mermaid@11 jsdom@25` once, then `node tools/doccheck/mmdcheck.mjs .` |
+
+`cargo xtask ci`, `cargo deny check`, `shellcheck scripts/*.sh` and the
+two doc checks mirror the Linux CI jobs; the macOS job additionally runs the Apple-target
+tests, builds the XCFramework, and runs `xcodebuild build test`.
+
+## Layout
+
+| Path | What |
+|---|---|
+| `crates/` | The Rust workspace, one crate per box in PLAN.md §4.4 |
+| `xtask/` | Task runner: `ci`, `check-layers`, `ffi`, `check-ffi` |
+| `layers.toml` | The allowed dependency graph `check-layers` enforces |
+| `apple/project.yml` | XcodeGen spec for the app and its tests |
+| `apple/Foldover/` | The SwiftUI app: `App/`, `Views/`, `ViewModels/`, `Stores/` |
+| `apple/FoldoverCore/` | Swift package over the Rust core (generated bindings) |
+| `scripts/` | `build.sh`, `release.sh`, `sync-cargo-version.sh` |
+| `tools/doccheck/` | Documentation checks run by CI |
+
+## Architecture rules
+
+- **Layering** (PLAN.md §4.1, §4.4): a crate depends only on the crates
+  `layers.toml` lists for it, plus the vocabulary crates `foldover-types`
+  and `foldover-proto`. Calls back up go through traits defined by the
+  lower layer. Editing `layers.toml` is a design change: justify it in
+  the PR.
+- **Drivers own the mechanics:** raw file I/O, OS APIs, sockets and
+  SQLite live only in `foldover-fs`, `-watch`, `-net`, `-db`, `-os`.
+- **One engine process:** sync state has a single writer, the `foldoverd`
+  agent (PLAN.md §4.2). UIs and the CLI are clients.
+- **Swift app** (PLAN.md §4.5): Views → View models → Stores →
+  FoldoverCore. Only stores import FoldoverCore.
+- **API shape:** private by default; enums, never boolean parameters.
+- **Identifiers:** `ch.lkmc.foldover`, lowercase on every platform
+  (owner decision; it overrides the fleet's CamelCase rule for macOS
+  bundle IDs). Sub-identifiers scope under it: `ch.lkmc.foldover.agent`,
+  `ch.lkmc.foldover.tests`.
+- **Owner decisions:** PLAN.md §10 lists open decisions; check it before
+  choosing between alternatives it covers.
+- **No unsafe** outside `foldover-ffi`, whose UniFFI scaffolding needs it
+  (it contains no hand-written `unsafe`).
+
+## Generated files
+
+- `apple/FoldoverCore/Sources/` and `Headers/` are generated by
+  `cargo xtask ffi`, committed, and drift-checked by `check-ffi`. Never
+  edit them by hand.
+- `apple/Foldover.xcodeproj` is generated from `apple/project.yml` and
+  gitignored; edit the spec. The app's Info.plist is generated from build
+  settings (`INFOPLIST_KEY_*`).
+- `FoldoverCoreFFI.xcframework` is built on macOS and gitignored.
+
+## Versioning
+
+One version, in `[workspace.package]` of `Cargo.toml` and
+`MARKETING_VERSION` in `apple/project.yml`. `scripts/release.sh` moves
+both (the engine bumps the spec; `sync-cargo-version.sh` follows with
+Cargo). Internal path dependencies carry no version requirement, so a bump
+never breaks the build.
+
+## Footguns
+
+- UniFFI is pinned to `=0.32.2` in `foldover-ffi` and `foldover-bindgen`,
+  and `deny.toml` names each UniFFI crate's version in its MPL-2.0
+  exceptions. Bump them together, then regenerate the bindings.
+- UniFFI's Swift 6 support is partial: async exports are not fully
+  `Sendable`. Route callbacks through one actor (PLAN.md §4.5).
+- A Swift property named like an exported function shadows it; call the
+  function module-qualified (`FoldoverCore.coreVersion()`).
+- `scripts/release.sh` reads the version through the generated Xcode
+  project, which needs the XCFramework; the stub builds both when
+  missing.
 
 <!-- shared-rules:start -->
 

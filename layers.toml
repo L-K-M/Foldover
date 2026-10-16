@@ -1,0 +1,59 @@
+# layers.toml — the layer graph `cargo xtask check-layers` enforces
+# (PLAN.md §4.1, §4.4).
+#
+# Every workspace crate is classified in [crates] by crate name (the
+# underscored name that shows up in check-layers diagnostics):
+#
+#   { layer = "<name>", deps = [...] } — first-party code at a named
+#       layer. `deps` lists the first-party crates it may depend on,
+#       for every dependency kind (vocabulary crates are always
+#       allowed and need not be listed); dev-dependencies may also use
+#       dev-role crates.
+#   { role = "vocab", deps = [...] } — shared vocabulary. Any crate may
+#       depend on them; they may depend only on the vocabulary crates
+#       their `deps` lists, which fixes the direction proto -> types.
+#   { role = "dev" }  — test support. Any crate may list it as a
+#       dev-dependency only; its own dependencies are unrestricted.
+#   { role = "tool" } — outside the graph (xtask, foldover-bindgen);
+#       unrestricted.
+#
+# Names in `deps` are underscored crate names. A path dependency must
+# resolve to a classified workspace crate.
+
+[crates]
+# Vocabulary: data only, usable anywhere.
+foldover_types = { role = "vocab" }
+foldover_proto = { role = "vocab", deps = ["foldover_types"] }
+
+# Drivers: raw I/O, OS APIs, sockets and SQLite only.
+foldover_fs    = { layer = "driver", deps = [] }
+foldover_watch = { layer = "driver", deps = [] }
+foldover_net   = { layer = "driver", deps = [] }
+foldover_db    = { layer = "driver", deps = [] }
+foldover_os    = { layer = "driver", deps = [] }
+
+# Domain services over the drivers.
+foldover_endpoint = { layer = "domain", deps = ["foldover_fs", "foldover_watch", "foldover_net", "foldover_os"] }
+foldover_state    = { layer = "domain", deps = ["foldover_db"] }
+foldover_host     = { layer = "domain", deps = ["foldover_os"] }
+
+# The engine and the agent's API façade.
+foldover_engine  = { layer = "engine",  deps = ["foldover_endpoint", "foldover_state", "foldover_host"] }
+foldover_service = { layer = "service", deps = ["foldover_engine"] }
+
+# Transport is its own thin stack on the drivers: client -> ipc -> net.
+foldover_ipc = { layer = "transport", deps = ["foldover_net"] }
+
+# The agent binary composes service with ipc.
+foldoverd = { layer = "binary", deps = ["foldover_service", "foldover_ipc"] }
+
+# Clients of the agent: the shared client library, the Swift export
+# and the CLI.
+foldover_client = { layer = "client", deps = ["foldover_ipc"] }
+foldover_ffi    = { layer = "client", deps = ["foldover_client"] }
+foldover_cli    = { layer = "client", deps = ["foldover_client"] }
+
+# Outside the graph.
+foldover_sim     = { role = "dev" }
+xtask            = { role = "tool" }
+foldover_bindgen = { role = "tool" }

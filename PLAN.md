@@ -597,8 +597,9 @@ Foldover/
 └── .github/           # ci.yml, release.yml, nightly.yml, dependabot.yml, zai-code-review.yml
 ```
 
-- **Identifiers:** `ch.lkmc.Foldover`, agent `ch.lkmc.Foldover.agent`, Linux
-  app ID `ch.lkmc.foldover`.
+- **Identifiers:** `ch.lkmc.foldover` on every platform; sub-identifiers
+  scope under it (agent `ch.lkmc.foldover.agent`, tests
+  `ch.lkmc.foldover.tests`).
 - **Build:** `scripts/build.sh` follows the family's multi-target
   orchestrator style. Steps: Rust slices → `lipo` → XCFramework + UniFFI
   Swift bindings → Xcode build → `dist/`. A missing toolchain skips its
