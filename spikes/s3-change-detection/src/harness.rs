@@ -26,6 +26,14 @@ const WARMUP_WAIT: Duration = Duration::from_secs(20);
 const OP_WAIT: Duration = Duration::from_secs(12);
 const OP_SETTLE: Duration = Duration::from_millis(400);
 const HISTORY_WAIT: Duration = Duration::from_secs(90);
+/// Pause between the last change and reopening the replay stream. The
+/// agent resumes seconds or more after a change, by which time fseventsd
+/// has persisted it; reopening within milliseconds measures its flush
+/// lag instead (the first CI run missed the 500th file that way).
+const REPLAY_GAP: Duration = Duration::from_secs(3);
+/// How long live events after HistoryDone are still collected, to tell
+/// a late event from a lost one.
+const LIVE_SETTLE: Duration = Duration::from_secs(1);
 const DA_WAIT: Duration = Duration::from_secs(30);
 const BURST_QUIET: Duration = Duration::from_secs(5);
 const BURST_CAP: Duration = Duration::from_secs(180);
@@ -273,6 +281,7 @@ fn replay_probe(dir: &Path, count: usize, label: &str) -> Result<(ReplayDetail, 
 
     ops::create_files(dir, "replay", count).map_err(|e| format!("create files: {e}"))?;
     let names: Vec<String> = (0..count).map(|i| format!("replay-{i:06}.dat")).collect();
+    std::thread::sleep(REPLAY_GAP);
 
     let t0 = Instant::now();
     let stream2 = match EventStream::start(&[path], since, LATENCY_SECS) {
@@ -292,8 +301,9 @@ fn replay_probe(dir: &Path, count: usize, label: &str) -> Result<(ReplayDetail, 
             .find(|e| (e.flags & flags::event::HISTORY_DONE) != 0)
             .map(|e| e.at.duration_since(t0).as_secs_f64() * 1000.0)
     });
+    std::thread::sleep(LIVE_SETTLE);
     // Everything before the HistoryDone event counts as replayed history.
-    let (seen, missing, drop_flags, max_id) = shared2.inspect(|inner| {
+    let (seen, seen_total, missing, drop_flags, max_id) = shared2.inspect(|inner| {
         let hd_idx = inner
             .events
             .iter()
@@ -301,6 +311,7 @@ fn replay_probe(dir: &Path, count: usize, label: &str) -> Result<(ReplayDetail, 
             .unwrap_or(inner.events.len());
         let before = &inner.events[..hd_idx.min(inner.events.len())];
         let mut seen = 0usize;
+        let mut seen_total = 0usize;
         let mut missing = Vec::new();
         for n in &names {
             let p = dir.join(n);
@@ -309,10 +320,13 @@ fn replay_probe(dir: &Path, count: usize, label: &str) -> Result<(ReplayDetail, 
             } else if missing.len() < 10 {
                 missing.push(n.clone());
             }
+            if inner.events.iter().any(|e| path_is(&e.path, &p)) {
+                seen_total += 1;
+            }
         }
         let drop = before.iter().any(|e| (e.flags & flags::DROP_MASK) != 0);
         let max = before.iter().map(|e| e.id).max().unwrap_or(since);
-        (seen, missing, drop, max)
+        (seen, seen_total, missing, drop, max)
     });
     drop(stream2);
     let note = if warmed {
@@ -327,6 +341,7 @@ fn replay_probe(dir: &Path, count: usize, label: &str) -> Result<(ReplayDetail, 
             device_last_id_before: Some(device_last),
             changes_made: count,
             changes_seen: seen,
+            changes_seen_total: seen_total,
             history_done_arrived: history_done,
             replay_ms: replay_ms.map(|v| (v * 100.0).round() / 100.0),
             drop_flags_seen: drop_flags,

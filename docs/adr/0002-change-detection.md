@@ -35,8 +35,10 @@ release and writes a JSON report plus a human summary. Experiments:
    UseExtendedData; create, modify, rename, chmod, xattr-set, delete; per
    operation the union of item flags and operation-to-callback latency.
 2. **Replay** (`e2_replay`): record the last delivered event ID, stop the
-   stream, create 500 files, reopen with `sinceWhen` set to that ID;
-   count how many of the 500 appear before `HistoryDone`.
+   stream, create 500 files, wait 3 s (the agent never resumes within
+   milliseconds of a change), reopen with `sinceWhen` set to that ID;
+   count how many of the 500 appear before `HistoryDone`, and how many
+   at all once live events settle.
 3. **Device-relative stream** (`e3_device_stream`): whether
    `FSEventStreamCreateRelativeToDevice` creates, starts and delivers to
    an unprivileged process. Watches `/` on the temp dir's device (firmlinks
@@ -44,8 +46,9 @@ release and writes a JSON report plus a human summary. Experiments:
    named marker file.
 4. **Volume UUIDs** (`e4_volume_uuids`): `FSEventsCopyUUIDForDevice` for
    the boot volume and each attached image.
-5. **Disk images** (`e5_disk_images`): `hdiutil` APFS and ExFAT images;
-   experiments 1 and 2 on each, then detach, reattach, and check whether
+5. **Disk images** (`e5_disk_images`): `hdiutil` APFS and ExFAT images,
+   mounted browsable like a real external drive; experiments 1 and 2 on
+   each, then detach, reattach, and check whether
    the volume UUID and pre-detach event ID still replay.
 6. **DiskArbitration** (`e6_diskarbitration`): a session on a dedicated
    CFRunLoop thread registers appeared/disappeared callbacks while an

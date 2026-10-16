@@ -94,6 +94,9 @@ pub struct ReplayDetail {
     pub changes_made: usize,
     /// Changed paths visible in events delivered before HistoryDone.
     pub changes_seen: usize,
+    /// Changed paths seen at all, including live events after
+    /// HistoryDone: counted here but not above means late, not lost.
+    pub changes_seen_total: usize,
     pub history_done_arrived: bool,
     pub replay_ms: Option<f64>,
     pub drop_flags_seen: bool,
