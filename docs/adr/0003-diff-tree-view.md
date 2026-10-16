@@ -83,30 +83,29 @@ GitHub `macos-26` runner, Apple M1 (virtual, `VirtualMac2,1`), macOS
 | Memory growth while scrolling (%) | 1.3 | 19.7 |
 
 AppKit passes first rows and memory and fails both frame-time gates
-and the stall gate. Its stream stalls come from applying a 5,000-row
-batch every 50 ms with one `expandItem` call per new folder, so each
-batch re-lays out the whole outline. Scrolling holds 60 Hz at the
+and the stall gate. Applying a 5,000-row batch every 50 ms with one
+`expandItem` call per new folder is a suspected source of stream
+stalls; profiling is still needed. Scrolling holds 60 Hz at the
 median (p50 16.7 ms) but drops frames at p95.
 
 The SwiftUI numbers for scrolling are not valid: the harness could not
 read the list's rows or scroll offset (0 rows on screen, 0 points
 scrolled), so it measured an idle list. Its memory grew 19.7 % anyway.
 
-The runner is a virtual Mac without a GPU, which inflates frame times;
-these numbers are an upper bound, not a verdict on real hardware.
+These virtual-Mac measurements do not establish physical-Mac frame
+times. Hardware calibration is still required.
 
 ## Decision
 
 Provisional: keep `NSOutlineView` in `NSViewRepresentable`, as PLAN.md
-§4.5 plans. It is the only implementation with flat memory, a usable
-expansion API and measurable scrolling. The SwiftUI list is out on
-memory growth and missing APIs. The flat `Table` fallback is not
-triggered yet, because the failing gates point at how batches are
-applied, not at the view. Two follow-ups decide it before P2 builds
-the Preview:
+§4.5 plans. This harness measured flat memory and scrolling for AppKit;
+the SwiftUI comparison remains inconclusive because its scrolling
+was not exercised. The flat `Table` fallback remains open until the
+AppKit failures are investigated. Two follow-ups decide it before
+P3 builds the Preview:
 
-1. Apply streamed batches at most once per frame and expand new
-   folders without a per-folder `expandItem` pass, then re-run.
+1. Profile batch application, test coalesced updates and avoid
+   per-folder expansion passes, then re-run with valid SwiftUI scrolling.
 2. Re-run on a physical Mac, which CI cannot provide.
 
 ## Consequences
