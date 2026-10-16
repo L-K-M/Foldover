@@ -457,7 +457,7 @@ FSEvents is a hint, never the truth.
 
 | Source | Mechanism |
 |---|---|
-| Local volumes | One path-scoped FSEvents stream per pair root; event ID stored per volume UUID; replay after restart or sleep; any dropped-event, root-changed or UUID-changed flag → scoped or full rescan |
+| Local volumes | One path-scoped FSEvents stream per pair root; event ID stored with volume and FSEvents-store UUIDs; replay after restart or sleep only when both match. Missing/changed UUIDs, remounts, dropped events or root changes → full root metadata rescan ([ADR 0002](docs/adr/0002-change-detection.md)) |
 | Shares, SFTP | **Shallow** check on an adaptive interval (default 5 min): root and recently active directories, plus SMB change notifications if S3 shows they reach the agent. **Deep** attribute listing on run triggers and on the verification schedule, spaced by measured scan cost. The UI says how often other computers' changes are checked |
 | Peers | Remote change stream from the other agent |
 | Everything | Full metadata verification about hourly where cheap (scaled by scan cost on slow targets); content-hash pass weekly (catches same-size, same-mtime edits) |

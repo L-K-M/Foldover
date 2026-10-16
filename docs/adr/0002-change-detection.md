@@ -1,6 +1,6 @@
 # ADR 0002: Change detection from a non-app process
 
-Status: Proposed
+Status: Accepted with fallback (local probes only)
 
 ## Context
 
@@ -97,32 +97,49 @@ Verdict: fail. The harness completed, but replay missed its criterion.
 That run reopened immediately after writing and mounted images with
 `-nobrowse`. Persistence lag and mount eligibility are hypotheses, not
 established causes. The revised method above waits 3 s, counts late live
-events separately and uses browsable images. Its CI result is pending.
-An immediate-resume guarantee cannot be inferred from a settled replay.
-The burst produced no drop flags, so dropped-event recovery remains
+events separately and uses browsable images.
+
+Revised run
+([38963774123](https://github.com/L-K-M/Foldover/actions/runs/38963774123)),
+commit `2b369f2`, same macOS version and architecture:
+
+| Metric | Result |
+|---|---|
+| Boot replay before HistoryDone | 500/500, 21.09 ms |
+| APFS image replay before HistoryDone | 500/500, 14.81 ms |
+| ExFAT image replay before HistoryDone | 500/500, 14.01 ms |
+| Late live events needed to reach 500 | None on any volume |
+| APFS FSEvents-store UUID | Absent before and after reattach |
+| ExFAT FSEvents-store UUID | Present, but changed after reattach |
+| Reattach replay marker | Absent on both images |
+| Unprivileged device-relative stream | Marker delivered |
+| DiskArbitration appeared/disappeared | Both received; 79.85 / 301.80 ms |
+| Burst | All 100,000 paths in 100,045 events; no drop flags |
+
+The three harness verdict flags pass. Image continuity is not a verdict
+gate and did not pass: neither image replayed its reattach marker.
+An immediate-resume guarantee cannot be inferred from a settled replay,
+and these runs do not isolate the cause of the first run's misses.
+Neither burst produced drop flags, so dropped-event recovery remains
 unverified. SMB notifications, polling cost and deep-change detection
-are outside this harness.
+are outside this harness; the full S3 risk remains open.
 
 ## Decision
 
-Provisional: keep path-scoped watchers and DiskArbitration in the agent.
-Treat replay as a hint backed by metadata verification, as §4.8 requires.
-Do not rely on replay after remount when no FSEvents UUID is available.
-The revised run must be recorded before accepting replay completeness.
+Keep path-scoped watchers and DiskArbitration in the agent. Use replay
+only as a hint backed by metadata verification. Store a cursor with both
+the volume UUID and the FSEvents-store UUID; reuse it only when both match.
+A missing or changed UUID, or any remount, requires a full root metadata
+rescan. Remount replay must be proven before relaxing that fallback.
 
 ## Consequences
 
-- If replay is complete: `watch_cursor` in §4.8 stands; `foldover-watch`
-  persists the last event ID per volume UUID and resumes after restarts.
-  If replay loses events or IDs die with detach, the cursor degrades to
-  a hint and every restart or remount forces a full metadata rescan, which
-  strengthens the case for the §8 fallback line.
-- If mount callbacks arrive: mount management and watch lifecycle live in
-  the agent as designed. If they do not, the agent needs polling of the
-  mount table or IPC from the app, and §4.2/§4.8 change.
-- If per-device streams work unprivileged: a single stream per volume
-  replaces per-pair streams, simplifying `foldover-watch`. If not,
-  per-pair path streams stay.
-- The SMB notification part of S3 is not covered here; §4.8's shallow
-  interval and the "checked every N min" honesty line are unaffected by
-  this result.
+- `foldover-watch` owns change detection and mount lifecycle in the agent;
+  the measured callbacks do not require an app relay.
+- The FSEvents-store UUID is distinct from volume identity. A readable
+  volume alone does not make a saved cursor reusable.
+- A device-relative marker proves availability, not replay correctness;
+  keep per-root streams until their replacement is validated.
+- The SMB polling interval and the "checked every N min" line in §4.8
+  remain unvalidated. Forced-drop recovery and physical-volume tests
+  are still required before closing S3.
