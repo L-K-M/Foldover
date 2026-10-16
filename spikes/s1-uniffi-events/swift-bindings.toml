@@ -1,0 +1,10 @@
+# UniFFI's config for the Swift bindings, passed by run.sh as
+# `--config`. The generated Swift is the `S1BenchCore` module and
+# imports its C declarations from `S1BenchCoreFFI`: the module the
+# generated modulemap declares and the XCFramework carries. UniFFI's
+# defaults (`s1_ffi`, `s1_ffiFFI`) would import a module nothing
+# declares.
+# Adapted from L-K-M/Sweetbriar.
+[crates.s1_ffi.bindings.swift]
+module_name = "S1BenchCore"
+ffi_module_name = "S1BenchCoreFFI"
