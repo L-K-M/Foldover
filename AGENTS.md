@@ -34,7 +34,7 @@ PLAN.md §7.
 | Dependency licenses and advisories | `cargo deny check` |
 | Generate the Xcode project | `xcodegen generate --spec apple/project.yml` |
 | Build everything this host can → `dist/` | `scripts/build.sh [core] [app] [--debug] [--clean] [--check]` |
-| Release (macOS; publishing arrives with S6) | `scripts/release.sh X.Y.Z [--push]` |
+| Release (macOS, X.Y.Z only; publishing arrives with S6) | `scripts/release.sh X.Y.Z [--push]` |
 | Doc links, anchors, fences, tables | `python3 tools/doccheck/checkdocs.py .` |
 | Mermaid diagrams | `npm --prefix tools/doccheck install --no-save mermaid@11 jsdom@25` once, then `node tools/doccheck/mmdcheck.mjs .` |
 
@@ -94,14 +94,16 @@ never breaks the build.
 
 ## Footguns
 
-- UniFFI is pinned to `=0.32.2` in `foldover-ffi`, `foldover-bindgen` and
-  `xtask`. Bump all three together, then regenerate the bindings.
+- UniFFI is pinned to `=0.32.2` in `foldover-ffi` and `foldover-bindgen`,
+  and `deny.toml` names each UniFFI crate's version in its MPL-2.0
+  exceptions. Bump them together, then regenerate the bindings.
 - UniFFI's Swift 6 support is partial: async exports are not fully
   `Sendable`. Route callbacks through one actor (PLAN.md §4.5).
 - A Swift property named like an exported function shadows it; call the
   function module-qualified (`FoldoverCore.coreVersion()`).
-- The Xcode project must exist before `scripts/release.sh` can read the
-  version; the stub regenerates it.
+- `scripts/release.sh` reads the version through the generated Xcode
+  project, which needs the XCFramework; the stub builds both when
+  missing.
 
 <!-- shared-rules:start -->
 

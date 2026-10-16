@@ -129,6 +129,11 @@ jobs:
       - name: xtask ffi
         run: cargo xtask ffi
 
+      # Drift check plus the strict Swift 6 type-check of the committed
+      # bindings, which only runs on macOS.
+      - name: xtask check-ffi
+        run: cargo xtask check-ffi
+
       # XcodeGen writes the .xcodeproj (gitignored) the build and the
       # tests run from. Pinned and SHA-256-verified before unzipping.
       - name: Install XcodeGen

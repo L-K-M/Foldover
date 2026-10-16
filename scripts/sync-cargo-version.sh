@@ -16,10 +16,10 @@ die() { echo "error: $*" >&2; exit 1; }
 VERSION="${RELEASE_NEW_VERSION:-}"
 [[ -n "$VERSION" ]] \
   || die "RELEASE_NEW_VERSION is not set - this script is driven by scripts/release.sh"
-# The value goes straight into a sed replacement; anything exotic is a
-# bug upstream, not a format to support.
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z.-]+)?$ ]] \
-  || die "RELEASE_NEW_VERSION must look like X.Y or X.Y.Z (optionally -rc.N), got '$VERSION'"
+# The value goes straight into a sed replacement, and Cargo needs all
+# three components (release.sh rejects anything else up front).
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+  || die "RELEASE_NEW_VERSION must look like X.Y.Z, got '$VERSION'"
 
 TOML="Cargo.toml"
 [[ -f "$TOML" ]] || die "$TOML not found"
@@ -38,7 +38,8 @@ read_version() {
 if [[ "$(read_version)" == "$VERSION" ]]; then
   echo "-- $TOML already at $VERSION"
 else
-  tmp="$(mktemp)"
+  # An explicit template: BSD mktemp on older macOS needs one.
+  tmp="$(mktemp "${TMPDIR:-/tmp}/foldover-version.XXXXXX")"
   trap 'rm -f "$tmp"' EXIT
   sed -E "$IN_PACKAGE s/^([[:space:]]*version[[:space:]]*=[[:space:]]*\")[^\"]*(\".*)$/\1$VERSION\2/" "$TOML" > "$tmp"
 
