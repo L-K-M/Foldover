@@ -5,24 +5,25 @@
 # underscored name that shows up in check-layers diagnostics):
 #
 #   { layer = "<name>", deps = [...] } — first-party code at a named
-#       layer. `deps` lists the first-party crates it may take as
-#       normal or build dependencies (vocabulary crates are always
+#       layer. `deps` lists the first-party crates it may depend on,
+#       for every dependency kind (vocabulary crates are always
 #       allowed and need not be listed); dev-dependencies may also use
 #       dev-role crates.
-#   { role = "vocab" } — shared vocabulary. Any crate may depend on
-#       them; they may depend only on each other, in the direction
-#       proto -> types.
+#   { role = "vocab", deps = [...] } — shared vocabulary. Any crate may
+#       depend on them; they may depend only on the vocabulary crates
+#       their `deps` lists, which fixes the direction proto -> types.
 #   { role = "dev" }  — test support. Any crate may list it as a
 #       dev-dependency only; its own dependencies are unrestricted.
 #   { role = "tool" } — outside the graph (xtask, foldover-bindgen);
 #       unrestricted.
 #
-# Names in `deps` are underscored crate names.
+# Names in `deps` are underscored crate names. A path dependency must
+# resolve to a classified workspace crate.
 
 [crates]
 # Vocabulary: data only, usable anywhere.
 foldover_types = { role = "vocab" }
-foldover_proto = { role = "vocab" }
+foldover_proto = { role = "vocab", deps = ["foldover_types"] }
 
 # Drivers: raw I/O, OS APIs, sockets and SQLite only.
 foldover_fs    = { layer = "driver", deps = [] }
