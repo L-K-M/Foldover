@@ -63,7 +63,9 @@ final class PlanNode: Identifiable {
     /// `id` is also its flattened row rank when all folders expand.
     let nodeID: Int
 
-    var id: Int { nodeID }
+    /// Nonisolated so the `Identifiable` conformance doesn't cross
+    /// into main-actor code; `nodeID` is an immutable `Int`.
+    nonisolated var id: Int { nodeID }
 
     let name: String
     let isFolder: Bool

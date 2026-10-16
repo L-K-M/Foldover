@@ -46,8 +46,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             FileHandle.standardError.write(
                 Data(
-                    "s5-diff-tree: couldn't write \(path): "
-                        + "\(error.localizedDescription)\n".utf8
+                    ("s5-diff-tree: couldn't write \(path): "
+                        + "\(error.localizedDescription)\n").utf8
                 )
             )
         }
