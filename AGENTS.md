@@ -69,6 +69,10 @@ tests, builds the XCFramework, and runs `xcodebuild build test`.
 - **Swift app** (PLAN.md §4.5): Views → View models → Stores →
   FoldoverCore. Only stores import FoldoverCore.
 - **API shape:** private by default; enums, never boolean parameters.
+- **Identifiers:** `ch.lkmc.foldover`, lowercase on every platform
+  (owner decision; it overrides the fleet's CamelCase rule for macOS
+  bundle IDs). Sub-identifiers scope under it: `ch.lkmc.foldover.agent`,
+  `ch.lkmc.foldover.tests`.
 - **Owner decisions:** PLAN.md §10 lists open decisions; check it before
   choosing between alternatives it covers.
 - **No unsafe** outside `foldover-ffi`, whose UniFFI scaffolding needs it
