@@ -16,7 +16,7 @@ rust-version.workspace = true
 crate-type = ["lib", "staticlib", "cdylib"]
 
 [dependencies]
-foldover-client = { version = "0.1.0", path = "../foldover-client" }
+foldover-client = { path = "../foldover-client" }
 # Proc-macro exports, no UDL; no CLI features here, those live in
 # `foldover-bindgen`. Pinned so bindings and runtime cannot drift.
 uniffi = { version = "=0.32.2", default-features = false }

@@ -3,6 +3,7 @@
 // stores own the client session and event streams.
 
 import FoldoverCore
+import Observation
 
 /// Information about the Rust core, fetched once at start.
 @Observable

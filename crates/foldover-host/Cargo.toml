@@ -10,4 +10,4 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-foldover-os = { version = "0.1.0", path = "../foldover-os" }
+foldover-os = { path = "../foldover-os" }

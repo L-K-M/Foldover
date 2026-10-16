@@ -10,7 +10,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-foldover-fs = { version = "0.1.0", path = "../foldover-fs" }
-foldover-watch = { version = "0.1.0", path = "../foldover-watch" }
-foldover-net = { version = "0.1.0", path = "../foldover-net" }
-foldover-os = { version = "0.1.0", path = "../foldover-os" }
+foldover-fs = { path = "../foldover-fs" }
+foldover-watch = { path = "../foldover-watch" }
+foldover-net = { path = "../foldover-net" }
+foldover-os = { path = "../foldover-os" }

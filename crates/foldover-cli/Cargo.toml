@@ -15,4 +15,4 @@ name = "foldover"
 path = "src/main.rs"
 
 [dependencies]
-foldover-client = { version = "0.1.0", path = "../foldover-client" }
+foldover-client = { path = "../foldover-client" }

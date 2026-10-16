@@ -29,22 +29,29 @@ TOML="Cargo.toml"
 # keys elsewhere in the file out of the edit.
 IN_PACKAGE='/^\[workspace\.package\]/,/^\[/'
 
-tmp="$(mktemp)"
-trap 'rm -f "$tmp"' EXIT
-sed -E "$IN_PACKAGE s/^([[:space:]]*version[[:space:]]*=[[:space:]]*\")[^\"]*(\".*)$/\1$VERSION\2/" "$TOML" > "$tmp"
-
-# sed exits 0 on a pattern that matched nothing, so compare instead.
-if cmp -s "$TOML" "$tmp"; then
-  die "no [workspace.package] version line found in $TOML"
-fi
-# Write through the existing file so its permissions survive.
-cat "$tmp" > "$TOML"
-
 read_version() {
   sed -nE "$IN_PACKAGE s/^[[:space:]]*version[[:space:]]*=[[:space:]]*\"([^\"]*)\".*$/\1/p" "$TOML" | head -n 1
 }
-[[ "$(read_version)" == "$VERSION" ]] \
-  || die "$TOML version is '$(read_version)' after the edit, expected '$VERSION'"
+
+# Already at the target version (a hand edit, or a re-run): nothing to
+# rewrite, but Cargo.lock still has to follow below.
+if [[ "$(read_version)" == "$VERSION" ]]; then
+  echo "-- $TOML already at $VERSION"
+else
+  tmp="$(mktemp)"
+  trap 'rm -f "$tmp"' EXIT
+  sed -E "$IN_PACKAGE s/^([[:space:]]*version[[:space:]]*=[[:space:]]*\")[^\"]*(\".*)$/\1$VERSION\2/" "$TOML" > "$tmp"
+
+  # sed exits 0 on a pattern that matched nothing, so compare instead.
+  if cmp -s "$TOML" "$tmp"; then
+    die "no [workspace.package] version line found in $TOML"
+  fi
+  # Write through the existing file so its permissions survive.
+  cat "$tmp" > "$TOML"
+
+  [[ "$(read_version)" == "$VERSION" ]] \
+    || die "$TOML version is '$(read_version)' after the edit, expected '$VERSION'"
+fi
 
 # A missing cargo must fail the release, not silently ship a stale
 # lockfile.

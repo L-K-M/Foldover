@@ -10,4 +10,4 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-foldover-ipc = { version = "0.1.0", path = "../foldover-ipc" }
+foldover-ipc = { path = "../foldover-ipc" }

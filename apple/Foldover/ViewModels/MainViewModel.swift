@@ -3,6 +3,7 @@
 // FoldoverCore.
 
 import Foundation
+import Observation
 
 /// Text for the main window and the menu-bar extra.
 @Observable

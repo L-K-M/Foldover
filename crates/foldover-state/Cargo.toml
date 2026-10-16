@@ -10,4 +10,4 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-foldover-db = { version = "0.1.0", path = "../foldover-db" }
+foldover-db = { path = "../foldover-db" }

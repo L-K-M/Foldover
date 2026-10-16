@@ -46,23 +46,16 @@ targets:
     dependencies:
       - package: FoldoverCore
         product: FoldoverCore
-    info:
-      path: Foldover/Info.plist
-      properties:
-        CFBundleDevelopmentRegion: en
-        CFBundleExecutable: $(EXECUTABLE_NAME)
-        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
-        CFBundleInfoDictionaryVersion: "6.0"
-        CFBundleName: $(PRODUCT_NAME)
-        CFBundlePackageType: APPL
-        CFBundleShortVersionString: $(MARKETING_VERSION)
-        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
-        LSApplicationCategoryType: public.app-category.utilities
-        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
-        NSPrincipalClass: NSApplication
+    # Xcode writes the Info.plist from these settings, so no plist file
+    # sits in the tree: an XcodeGen-written one would leave the tree
+    # dirty after every generate, which the release engine rejects.
+    # CFBundleShortVersionString and CFBundleVersion come from
+    # MARKETING_VERSION and CURRENT_PROJECT_VERSION.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ch.lkmc.Foldover
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
 
   FoldoverTests:
     type: bundle.unit-test
