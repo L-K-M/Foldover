@@ -1,0 +1,36 @@
+# Spike S1's own Cargo workspace: the empty [workspace] table keeps
+# the repo's root workspace from absorbing this crate (the spike is
+# throwaway and pins its own dependencies).
+
+[package]
+name = "s1-ffi"
+version = "0.0.0"
+edition = "2024"
+publish = false
+rust-version = "1.99"
+description = "Spike S1: UniFFI event bridge under Swift 6 (PLAN.md section 8)"
+
+# staticlib + cdylib, like foldover-ffi: the staticlib goes into the
+# XCFramework the Swift package links; the bindgen reads the cdylib's
+# metadata. `lib` keeps `cargo test` working on the host.
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+# The Swift bindings generator (UniFFI's own CLI entry point),
+# declared as a bin in this package so the workspace stays a single
+# crate. Feature unification gives the library's `uniffi` the `cli`
+# feature too; only s1-bindgen calls it.
+[[bin]]
+name = "s1-bindgen"
+path = "src/bin/s1-bindgen.rs"
+
+[dependencies]
+# `tokio` is the exported async runtime (async_runtime = "tokio");
+# `cli` is the bindgen entry point. `cargo-metadata` stays off, as
+# in the repo's foldover-bindgen.
+uniffi = { version = "=0.32.2", default-features = false, features = ["cli", "tokio"] }
+# `sync` for the stream's Notify, `time` for echo_after's sleep;
+# `rt` + `macros` only serve the unit tests.
+tokio = { version = "=1.53.2", default-features = false, features = ["sync", "time", "rt", "macros"] }
+
+[workspace]
