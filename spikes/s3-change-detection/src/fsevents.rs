@@ -62,12 +62,12 @@ unsafe fn extract_path(paths: sys::CFArrayRef, i: sys::CFIndex) -> (String, Opti
         let tid = sys::CFGetTypeID(el);
         if tid == sys::CFDictionaryGetTypeID() {
             let dict = el as sys::CFDictionaryRef;
-            let path_val =
-                sys::CFDictionaryGetValue(dict, sys::kFSEventStreamEventExtendedDataPathKey.cast());
+            let path_key = CFString::from_static_string(sys::FSEVENT_EXTENDED_DATA_PATH_KEY);
+            let file_id_key = CFString::from_static_string(sys::FSEVENT_EXTENDED_FILE_ID_KEY);
+            let path_val = sys::CFDictionaryGetValue(dict, path_key.as_concrete_TypeRef().cast());
             let path = sys::cf_str_to_string(path_val as sys::CFStringRef)
                 .unwrap_or_else(|| "<unreadable path>".into());
-            let fid_val =
-                sys::CFDictionaryGetValue(dict, sys::kFSEventStreamEventExtendedFileIDKey.cast());
+            let fid_val = sys::CFDictionaryGetValue(dict, file_id_key.as_concrete_TypeRef().cast());
             let file_id =
                 if !fid_val.is_null() && sys::CFGetTypeID(fid_val) == sys::CFNumberGetTypeID() {
                     let mut v: i64 = 0;

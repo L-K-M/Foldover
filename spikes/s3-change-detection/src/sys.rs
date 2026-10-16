@@ -106,12 +106,13 @@ unsafe extern "C" {
         dev: dev_t,
         time: CFAbsoluteTime,
     ) -> FSEventStreamEventId;
-
-    /// Dictionary keys present on each element of `event_paths` when the
-    /// stream was created with kFSEventStreamCreateFlagUseExtendedData.
-    pub static kFSEventStreamEventExtendedDataPathKey: CFStringRef;
-    pub static kFSEventStreamEventExtendedFileIDKey: CFStringRef;
 }
+
+/// Keys of each `event_paths` dictionary when the stream was created with
+/// kFSEventStreamCreateFlagUseExtendedData. FSEvents.h defines them as
+/// `CFSTR()` macros, so there is no symbol to link against.
+pub const FSEVENT_EXTENDED_DATA_PATH_KEY: &str = "path";
+pub const FSEVENT_EXTENDED_FILE_ID_KEY: &str = "fileID";
 
 #[link(name = "DiskArbitration", kind = "framework")]
 unsafe extern "C" {
