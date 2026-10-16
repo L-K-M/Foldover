@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # Manual runs. Added because GitHub throttled webhook delivery during an
+  # Actions incident and pull_request events stopped starting workflows at
+  # all — dispatch goes through the API instead and is unaffected.
+  workflow_dispatch:
+
+# Least privilege: the docs checks only read the repo.
+permissions:
+  contents: read
+
+# Cancel an in-progress run when a *PR branch* is pushed again — but never a
+# push to main, or that commit keeps a permanently "cancelled" status.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  docs:
+    name: Documentation checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      # Actions are pinned to immutable commit SHAs: a mutable tag can be
+      # repointed at tampered code after the fact, a commit SHA cannot.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      - name: Check links, anchors, fences and tables
+        run: python3 tools/doccheck/checkdocs.py .
+
+      - name: Parse every Mermaid diagram
+        run: |
+          npm --prefix tools/doccheck install --no-save mermaid@11 jsdom@25
+          node tools/doccheck/mmdcheck.mjs .

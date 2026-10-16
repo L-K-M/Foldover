@@ -1,0 +1,11 @@
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Build outputs (when code lands)
+build/
+dist/
+node_modules/
