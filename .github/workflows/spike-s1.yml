@@ -18,6 +18,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# A named bash shell adds -o pipefail, so `run.sh | tee` fails when the
+# harness does instead of reporting tee's success.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   bench:
     runs-on: macos-26
