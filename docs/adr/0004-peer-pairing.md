@@ -107,9 +107,14 @@ GitHub `ubuntu-24.04` runner, release build.
 | Bench 1 stream, 1 GiB loopback (MiB/s) | 455.0 |
 | Bench 4 streams, 1 GiB loopback (MiB/s) | 528.9 |
 
-Criteria 1 to 4 pass. Loopback leaves the network out, so the
-throughput is an upper bound on what encryption and QUIC framing
-allow, not a LAN figure.
+The initial unknown-device test exercised the listener twice. The
+corrected test covers both verifier roles and all seven tests pass
+locally on Linux. Temporarily bypassing the client's pin check left
+the old test green but made the corrected test fail; restoring the
+check made it pass.
+
+Criteria 1 to 4 pass within this harness. Loopback throughput does
+not establish LAN performance.
 
 ## Decision
 

@@ -198,16 +198,13 @@ async fn unknown_device_rejected_in_both_directions() {
     a.close();
     b.close();
 
-    // A dials B's pinned listener: A accepts B's certificate, but B
-    // rejects A's client certificate and the handshake fails.
+    // A dials B's pairing listener: B accepts A, but A's pinned
+    // client verifier must reject B's unknown server certificate.
     let identity_a2 = Arc::new(Identity::generate().expect("identity A dialer"));
     let a2 = PeerNode::bind(identity_a2, VerifierMode::Pairing).expect("bind A pairing");
-    let b2 = PeerNode::bind(identity_b, VerifierMode::Pinned(empty_b)).expect("bind B pinned");
-    let result = connect(&a2, &b2, VerifierMode::Pairing).await;
-    assert_rejected(
-        result,
-        "pinned listener refusing an unknown server-side peer",
-    );
+    let b2 = PeerNode::bind(identity_b, VerifierMode::Pairing).expect("bind B pairing");
+    let result = connect(&a2, &b2, VerifierMode::Pinned(empty_b)).await;
+    assert_rejected(result, "pinned dialer refusing an unknown server");
     a2.close();
     b2.close();
 }
