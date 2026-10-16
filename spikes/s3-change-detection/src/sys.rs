@@ -37,7 +37,8 @@ pub type DASessionRef = *mut c_void;
 pub type DADiskRef = *const c_void;
 pub type DispatchQueue = *mut c_void;
 
-pub const K_CF_STRING_ENCODING_UTF8: CFStringEncoding = 0x8000_0100;
+/// CFString.h `kCFStringEncodingUTF8`.
+pub const K_CF_STRING_ENCODING_UTF8: CFStringEncoding = 0x0800_0100;
 pub const K_CF_NUMBER_SINT64_TYPE: CFNumberType = 4;
 
 /// FSEvents.h: `typedef struct FSEventStreamContext`.
@@ -79,16 +80,17 @@ unsafe extern "C" {
 
     /// `paths_to_watch` entries are interpreted relative to the root of
     /// `device`. Historically restricted; this spike measures whether an
-    /// unprivileged process can use it at all.
+    /// unprivileged process can use it at all. The device comes fourth,
+    /// before the paths, as in the C prototype.
     pub fn FSEventStreamCreateRelativeToDevice(
         allocator: CFAllocatorRef,
         callback: FSEventStreamCallback,
         context: *const FSEventStreamContext,
+        device: dev_t,
         paths_to_watch: CFArrayRef,
         since_when: FSEventStreamEventId,
         latency: CFTimeInterval,
         flags: FSEventStreamCreateFlags,
-        device: dev_t,
     ) -> FSEventStreamRef;
 
     /// Schedules the stream on a libdispatch queue instead of a run loop.

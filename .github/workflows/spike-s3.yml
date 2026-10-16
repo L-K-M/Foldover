@@ -58,6 +58,15 @@ jobs:
       - name: Run the spike
         run: spikes/s3-change-detection/run.sh "$RUNNER_TEMP/s3-results.json" | tee "$RUNNER_TEMP/s3-summary.txt"
 
+      # A crash in the hand-written FFI leaves no output; rerun under
+      # lldb so the log shows where it died.
+      - name: Backtrace on crash
+        if: failure()
+        run: |
+          lldb --batch -o run -k "thread backtrace all" -k "quit 1" -- \
+            spikes/s3-change-detection/target/release/spike-s3-change-detection \
+            "$RUNNER_TEMP/s3-crash.json" || true
+
       - name: Append results to the step summary
         if: always()
         run: |

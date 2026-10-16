@@ -209,11 +209,11 @@ impl EventStream {
                     ptr::null(),
                     on_events,
                     &*ctx,
+                    dev,
                     paths_arr.as_concrete_TypeRef() as sys::CFArrayRef,
                     since,
                     latency_secs,
                     crate::flags::STREAM_CREATE_FLAGS,
-                    dev,
                 ),
             };
             if raw.is_null() {
