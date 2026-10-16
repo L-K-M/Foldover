@@ -11,10 +11,10 @@ import Observation
 final class MainViewModel {
     private let appInfo: AppInfoStore
 
-    /// `nonisolated` so `FoldoverApp`'s `@State` initializer can build
-    /// the object graph without an actor hop; it only assigns a stored
-    /// `let`.
-    nonisolated init(appInfo: AppInfoStore) {
+    /// Main-actor isolated like the rest of the class: `FoldoverApp`
+    /// (an `App`, so main-actor isolated too) builds it in its `@State`
+    /// initializer.
+    init(appInfo: AppInfoStore) {
         self.appInfo = appInfo
     }
 
