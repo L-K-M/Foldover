@@ -1,6 +1,6 @@
 # ADR 0001: UniFFI event bridge under Swift 6
 
-Status: Proposed
+Status: Accepted
 
 ## Context
 
@@ -14,9 +14,9 @@ P1 builds on it.
 
 ## Question
 
-Can a UniFFI 0.32.2 boundary carry Foldover's intended API shape —
-async calls in, high-rate event streams out through a
-Swift-implemented callback — under Swift 6 strict concurrency with
+Can a UniFFI 0.32.2 boundary carry Foldover's intended API shape
+(async calls in, high-rate event streams out through a
+Swift-implemented callback) under Swift 6 strict concurrency with
 warnings as errors, fast enough and without leaks?
 
 ## Method
@@ -70,26 +70,37 @@ than a 1-hour soak:
 
 ## Results
 
-Pending the first CI run of spike-s1.
+First CI run of spike-s1
+([run 38943571515](https://github.com/L-K-M/Foldover/actions/runs/38943571515)):
+GitHub `macos-26` runner, Apple M1 (virtual), macOS 26.6.2, Xcode 26.6,
+Swift 6.3.3. A virtual runner is slower than real hardware, so treat
+the numbers as a floor.
 
 | Metric | Result | Pass |
 |---|---|---|
-| Events/s, batch 1 | | |
-| Events/s, batch 64 | | |
-| Events/s, batch 1024 | | |
-| Echo p50 (µs) | | |
-| Echo p95 (µs) | | |
-| Memory growth (%) | | |
-| Cancel stops early | | |
-| Order complete | | |
-| Concurrency escapes needed | | |
+| Events/s, batch 1 | 155,551 | yes |
+| Events/s, batch 64 | 434,973 | yes |
+| Events/s, batch 1024 | 538,071 | yes |
+| Echo p50 (µs) | 1.71 | n/a |
+| Echo p95 (µs) | 1.83 | n/a |
+| Memory growth (%) | 3.89 (20 streams of 100,000 events) | yes |
+| Cancel stops early | 54,272 of 1,000,000,000 delivered | yes |
+| Order complete | every run, 0 out of order | yes |
+| Concurrency escapes needed | none | yes |
+
+The generated bindings also compiled under complete strict
+concurrency without a warning; the `-warnings-as-errors` bench
+compiled with no `nonisolated(unsafe)`, `@unchecked Sendable` or
+`@preconcurrency`.
 
 ## Decision
 
-Pending. If the criteria pass, keep UniFFI event streams as the
-client API's push channel, batched by `on_batch`, with the single
-actor the plan already mandates. The measured batch size at which
-throughput peaks becomes the default batching granularity.
+Accepted: UniFFI event streams are the client API's push channel.
+Rust delivers batches through a foreign `EventSink.on_batch`, and the
+Swift side forwards each batch into one actor. Batches hold up to
+1,024 events: unbatched delivery already clears the target three
+times over, so batching is headroom for richer events, not a
+requirement.
 
 ## Consequences
 
@@ -99,7 +110,7 @@ documented house rule for every push channel. The spike proves the
 generated `EventSink` protocol compiles clean under Swift 6, so no
 per-module language-mode exception is needed.
 
-**On throughput miss:** apply the §8 fallback order — batch events
+**On throughput miss:** apply the §8 fallback order: batch events
 per 100 ms (larger `batch_size` from Rust), then Swift 5 language
 mode for the bridge module only, then a C ABI for the event channel.
 Each step trades API cleanliness for headroom; the spike's per-batch
