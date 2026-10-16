@@ -46,6 +46,10 @@ ignore = false
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Internal path dependencies carry no version (so release bumps never
+# break the build); they are not wildcards from a registry, and every
+# crate is publish = false.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
