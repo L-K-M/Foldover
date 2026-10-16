@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/foldover-types",
+    "crates/foldover-proto",
+    "crates/foldover-fs",
+    "crates/foldover-watch",
+    "crates/foldover-net",
+    "crates/foldover-db",
+    "crates/foldover-os",
+    "crates/foldover-endpoint",
+    "crates/foldover-state",
+    "crates/foldover-host",
+    "crates/foldover-engine",
+    "crates/foldover-service",
+    "crates/foldover-ipc",
+    "crates/foldoverd",
+    "crates/foldover-client",
+    "crates/foldover-ffi",
+    "crates/foldover-cli",
+    "crates/foldover-sim",
+    "crates/foldover-bindgen",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense"
+publish = false
+rust-version = "1.99"
+
+# Every crate opts in with `[lints] workspace = true` except
+# foldover-ffi: UniFFI's scaffolding macro expands to
+# `unsafe extern "C"` shims, so it cannot forbid unsafe code (its
+# Cargo.toml explains).
+[workspace.lints.rust]
+unsafe_code = "forbid"

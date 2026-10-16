@@ -1,0 +1,13 @@
+[package]
+name = "foldover-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+foldover-endpoint = { version = "0.1.0", path = "../foldover-endpoint" }

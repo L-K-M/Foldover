@@ -1,0 +1,10 @@
+# UniFFI's config for the Swift bindings, passed by `cargo xtask ffi`
+# and `check-ffi` as `--config`. The generated Swift is the
+# `FoldoverCore` package's code and imports its C declarations from
+# `FoldoverCoreFFI`: the module the modulemap declares and the
+# XCFramework carries. UniFFI's defaults (`foldover_ffi`,
+# `foldover_ffiFFI`) would import a module nothing declares.
+# Adapted from L-K-M/Sweetbriar.
+[crates.foldover_ffi.bindings.swift]
+module_name = "FoldoverCore"
+ffi_module_name = "FoldoverCoreFFI"
