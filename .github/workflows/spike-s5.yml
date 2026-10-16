@@ -1,0 +1,78 @@
+name: spike-s5
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'spikes/s5-diff-tree/**'
+      - '.github/workflows/spike-s5.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # The diff-tree benchmark (ADR docs/adr/0003-diff-tree-view.md):
+  # builds the Release app and drives it through `open -W` the way
+  # Sweetbriar's list benchmark does. run.sh fails only when the
+  # harness itself breaks; a measured miss is data for the ADR.
+  bench:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: shellcheck@0.11.0
+
+      - name: Log toolchain and image
+        run: |
+          xcodebuild -version
+          shellcheck --version
+          echo "Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+
+      - name: shellcheck run.sh
+        run: shellcheck spikes/s5-diff-tree/run.sh
+
+      # XcodeGen writes the .xcodeproj (gitignored) the build runs
+      # from. Pinned and SHA-256-verified before unzipping, same as
+      # the root macOS job.
+      - name: Install XcodeGen
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/xcodegen.zip" \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
+          echo "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  $RUNNER_TEMP/xcodegen.zip" \
+            | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP"
+          "$RUNNER_TEMP/xcodegen/bin/xcodegen" --version
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+
+      - name: Run the benchmark
+        timeout-minutes: 30
+        run: spikes/s5-diff-tree/run.sh "$RUNNER_TEMP/s5-diff-tree.json"
+
+      - name: Append the report to the step summary
+        if: always()
+        run: |
+          {
+            echo '### spike-s5 diff tree'
+            echo
+            echo '```'
+            cat spikes/s5-diff-tree/build/app.log 2>/dev/null || echo '(no app log)'
+            echo '```'
+            echo
+            echo '```json'
+            cat "$RUNNER_TEMP/s5-diff-tree.json" 2>/dev/null || echo '(no report)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: s5-diff-tree-report
+          path: ${{ runner.temp }}/s5-diff-tree.json
+          if-no-files-found: warn
