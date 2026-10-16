@@ -1,0 +1,26 @@
+// The app shell (PLAN.md §4.5): one main window plus the menu-bar
+// extra. This file only wires the scenes; state lives in the stores
+// and view models.
+
+import SwiftUI
+
+@main
+struct FoldoverApp: App {
+    @State private var viewModel = MainViewModel(appInfo: AppInfoStore())
+
+    var body: some Scene {
+        // The "main" id lets the menu-bar extra reopen this window
+        // through openWindow after the user closed it.
+        WindowGroup(id: "main") {
+            MainView(viewModel: viewModel)
+        }
+
+        // .window style hosts a regular SwiftUI view instead of the
+        // default menu rendering, which is what the status surfaces in
+        // PLAN.md §3.8 need.
+        MenuBarExtra("Foldover", systemImage: "arrow.triangle.2.circlepath") {
+            MenuBarView(viewModel: viewModel)
+        }
+        .menuBarExtraStyle(.window)
+    }
+}
