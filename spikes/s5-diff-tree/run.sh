@@ -11,7 +11,7 @@
 # short summary to stdout. Requires macOS, Xcode 26 and xcodegen on
 # PATH (CI installs the pinned release). A measured miss is data for
 # the ADR, not a script failure: the script fails only when the
-# harness itself breaks — no report, or a report that is not JSON.
+# harness itself breaks: no report, or a report that is not JSON.
 
 set -euo pipefail
 

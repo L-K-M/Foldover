@@ -1,6 +1,6 @@
 # The spike's one app: `xcodegen generate --spec
 # spikes/s5-diff-tree/project.yml` produces `DiffTreeBench.xcodeproj`
-# (ignored). One target — the benchmark app — since the spike has no
+# (ignored). One target, the benchmark app, since the spike has no
 # framework or test bundle to split out.
 #
 # Adapted from L-K-M/Sweetbriar (apps/macos/project.yml): same Swift 6
