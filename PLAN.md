@@ -511,7 +511,7 @@ FSEvents is a hint, never the truth.
 | Discovery | mDNS `_foldover._tcp` (mdns-sd), with the Local Network permission explained before the prompt |
 | Transport | QUIC (quinn + rustls), one control stream plus data streams; LAN only in 1.0; iroh evaluated for WAN later |
 | Identity | Ed25519 device key in Keychain; device ID = certificate fingerprint |
-| Pairing | Both Macs show a 6-digit code derived from both fingerprints; the user confirms; keys pinned. Inbound policy: ask, allow paired, allow list. One-click revoke |
+| Pairing | Both Macs show a 6-digit code derived from the TLS session, both fingerprints and a commit-then-reveal nonce exchange ([ADR 0004](docs/adr/0004-peer-pairing.md)); the user confirms; keys pinned. Inbound policy: ask, allow paired, allow list. One-click revoke, which also closes open connections |
 | Scope | A paired Mac sees only the roots its owner shared with that device. Every request carries a pair ID and is refused outside those roots |
 | Ownership | One reconciler per pair: the Mac that created it. The other Mac serves its root and streams its changes, and shows the pair read-only. If the owner is offline, the pair waits. A second pair over the same roots is rejected |
 | Wire | Versioned protobuf frames (`foldover-proto::peer`): hello, index offer (delta by index ID + sequence, as in Syncthing's BEP), block request/response, change stream, staged-write commit. Names in NFC. A reserved version-vector field leaves room for mesh sync |

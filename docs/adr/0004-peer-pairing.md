@@ -1,6 +1,6 @@
 # ADR 0004: Peer pairing over QUIC with pinned fingerprints
 
-Status: Proposed
+Status: Accepted
 
 ## Context
 
@@ -91,27 +91,34 @@ From PLAN.md §8 S9, made precise:
 
 ## Results
 
-Pending the first CI run of spike-s9.
+First CI run of spike-s9
+([run 38951986555](https://github.com/L-K-M/Foldover/actions/runs/38951986555)),
+GitHub `ubuntu-24.04` runner, release build.
 
 | Metric | Result |
 | --- | --- |
-| honest_pairing_shows_matching_sas_and_pins | |
-| pinned_reconnect_succeeds | |
-| unknown_device_rejected_in_both_directions | |
-| mitm_relay_makes_sas_differ | |
-| revocation_breaks_next_connection | |
-| negotiated_tls13_with_aead_cipher | |
-| cheating_dialer_fails_commitment_check | |
-| Bench 1 stream, 1 GiB loopback (MiB/s) | |
-| Bench 4 streams, 1 GiB loopback (MiB/s) | |
+| honest_pairing_shows_matching_sas_and_pins | ok |
+| pinned_reconnect_succeeds | ok |
+| unknown_device_rejected_in_both_directions | ok |
+| mitm_relay_makes_sas_differ | ok |
+| revocation_breaks_next_connection | ok |
+| negotiated_tls13_with_aead_cipher | ok |
+| cheating_dialer_fails_commitment_check | ok |
+| Bench 1 stream, 1 GiB loopback (MiB/s) | 455.0 |
+| Bench 4 streams, 1 GiB loopback (MiB/s) | 528.9 |
 
-Local run on the development host (Linux, release build, 2026-10-16):
-7 of 7 tests passed; 270.7 MiB/s on one stream and 244.8 MiB/s on four
-streams. CI numbers supersede these.
+Criteria 1 to 4 pass. Loopback leaves the network out, so the
+throughput is an upper bound on what encryption and QUIC framing
+allow, not a LAN figure.
 
 ## Decision
 
-Pending.
+Accepted: P5 builds peer mode on quinn and rustls (ring), TLS 1.3
+only, with self-signed Ed25519 device certificates, the certificate
+fingerprint as device ID, and a trust store read at every handshake.
+The six-digit pairing code comes from the commit-then-reveal exchange,
+never from the exporter or the fingerprints alone. Revoking a device
+also closes its open connections. The TOFU fallback is not needed.
 
 ## Consequences
 
