@@ -54,6 +54,16 @@ jobs:
         timeout-minutes: 30
         run: spikes/s5-diff-tree/run.sh "$RUNNER_TEMP/s5-diff-tree.json"
 
+      # A crashed app leaves no report; its crash log says why.
+      - name: Print crash reports
+        if: failure()
+        run: |
+          shopt -s nullglob
+          for f in ~/Library/Logs/DiagnosticReports/DiffTreeBench*; do
+            echo "== $f"
+            head -c 20000 "$f"
+          done
+
       - name: Append the report to the step summary
         if: always()
         run: |

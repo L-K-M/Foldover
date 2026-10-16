@@ -250,7 +250,10 @@ final class BenchRunner {
             backing: .buffered,
             defer: false
         )
-        window.title = "Diff Tree — \(implementation.rawValue)"
+        // A code-built window defaults to releasing itself on close,
+        // which over-releases it under ARC and crashes after `close()`.
+        window.isReleasedWhenClosed = false
+        window.title = "Diff Tree: \(implementation.rawValue)"
         window.contentView = NSHostingView(
             rootView: BenchRootView(
                 implementation: implementation,

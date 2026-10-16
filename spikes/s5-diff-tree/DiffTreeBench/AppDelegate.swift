@@ -73,6 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
+        window.isReleasedWhenClosed = false
         window.title = "DiffTreeBench"
         window.contentView = NSHostingView(
             rootView: Text(
