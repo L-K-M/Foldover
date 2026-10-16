@@ -21,6 +21,7 @@ PLAN.md §7.
   [L-K-M/release-tool](https://github.com/L-K-M/release-tool)
   (`./install.sh`).
 - **Dependency audit:** `cargo install --locked cargo-deny@0.20.2`.
+- **Doc checks:** Python 3 and Node 22 (`tools/doccheck`).
 
 ## Commands
 
@@ -34,9 +35,11 @@ PLAN.md §7.
 | Generate the Xcode project | `xcodegen generate --spec apple/project.yml` |
 | Build everything this host can → `dist/` | `scripts/build.sh [core] [app] [--debug] [--clean] [--check]` |
 | Release (macOS; publishing arrives with S6) | `scripts/release.sh X.Y.Z [--push]` |
+| Doc links, anchors, fences, tables | `python3 tools/doccheck/checkdocs.py .` |
+| Mermaid diagrams | `npm --prefix tools/doccheck install --no-save mermaid@11 jsdom@25` once, then `node tools/doccheck/mmdcheck.mjs .` |
 
-`cargo xtask ci` plus `cargo deny check` and `shellcheck scripts/*.sh`
-mirror the Linux CI jobs; the macOS job additionally runs the Apple-target
+`cargo xtask ci`, `cargo deny check`, `shellcheck scripts/*.sh` and the
+two doc checks mirror the Linux CI jobs; the macOS job additionally runs the Apple-target
 tests, builds the XCFramework, and runs `xcodebuild build test`.
 
 ## Layout
@@ -50,6 +53,7 @@ tests, builds the XCFramework, and runs `xcodebuild build test`.
 | `apple/Foldover/` | The SwiftUI app: `App/`, `Views/`, `ViewModels/`, `Stores/` |
 | `apple/FoldoverCore/` | Swift package over the Rust core (generated bindings) |
 | `scripts/` | `build.sh`, `release.sh`, `sync-cargo-version.sh` |
+| `tools/doccheck/` | Documentation checks run by CI |
 
 ## Architecture rules
 
@@ -65,6 +69,8 @@ tests, builds the XCFramework, and runs `xcodebuild build test`.
 - **Swift app** (PLAN.md §4.5): Views → View models → Stores →
   FoldoverCore. Only stores import FoldoverCore.
 - **API shape:** private by default; enums, never boolean parameters.
+- **Owner decisions:** PLAN.md §10 lists open decisions; check it before
+  choosing between alternatives it covers.
 - **No unsafe** outside `foldover-ffi`, whose UniFFI scaffolding needs it
   (it contains no hand-written `unsafe`).
 

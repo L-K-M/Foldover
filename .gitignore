@@ -16,4 +16,10 @@ DerivedData/
 dist/
 build/
 
+# The doc checks' npm install (tools/doccheck).
+node_modules/
+
+# macOS and editors.
 .DS_Store
+.vscode/
+.idea/

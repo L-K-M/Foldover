@@ -9,6 +9,8 @@ All notable changes to this project are documented here. The format follows
 ### Added
 
 - Competitor research and the product plan ([#1](https://github.com/L-K-M/Foldover/pull/1)).
+- Fleet conventions: README, AGENTS.md, CLAUDE.md, the GLM review
+  workflow and documentation checks ([#2](https://github.com/L-K-M/Foldover/pull/2)).
 - P0 foundations: Rust workspace with crate skeletons and a layer check,
   macOS app skeleton bridged to the core through UniFFI, build and release
   scripts, CI.

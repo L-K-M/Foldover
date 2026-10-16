@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Manual runs: dispatch goes through the API, so it still works when
+  # webhook delivery is throttled and pull_request events stop arriving.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -74,6 +77,29 @@ jobs:
 
       - name: shellcheck scripts/*.sh
         run: shellcheck scripts/*.sh
+
+  # Links, anchors, fences and tables in every tracked Markdown file, plus
+  # every Mermaid diagram (tools/doccheck).
+  docs:
+    name: Documentation checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      - name: Check links, anchors, fences and tables
+        run: python3 tools/doccheck/checkdocs.py .
+
+      - name: Parse every Mermaid diagram
+        run: |
+          npm --prefix tools/doccheck install --no-save mermaid@11 jsdom@25
+          node tools/doccheck/mmdcheck.mjs .
 
   # Rust tests on the Apple silicon target, then the UniFFI
   # XCFramework, the XcodeGen project and an app `build test`. Ends by
@@ -160,7 +186,7 @@ jobs:
   # needed job fails; succeeds only when every other job succeeded.
   ci:
     if: always()
-    needs: [rust, deny, shellcheck, macos]
+    needs: [rust, deny, shellcheck, docs, macos]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
