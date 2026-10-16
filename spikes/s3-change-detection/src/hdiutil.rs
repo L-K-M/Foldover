@@ -148,9 +148,8 @@ pub fn attach(dmg: &Path, mount_point: &Path) -> Result<AttachedImage, String> {
     let out = run(
         "hdiutil",
         &args(
-            // Browsable like a real external drive: the first CI run
-            // mounted with -nobrowse and fseventsd kept no history for
-            // the images (no FSEvents UUID, nothing to replay).
+            // Retry browsable mounts: the -nobrowse run reported no
+            // FSEvents UUID and replayed no image changes.
             &["attach", "-noverify", "-mountpoint"],
             &[mount_point, dmg],
         ),

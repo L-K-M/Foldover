@@ -26,10 +26,8 @@ const WARMUP_WAIT: Duration = Duration::from_secs(20);
 const OP_WAIT: Duration = Duration::from_secs(12);
 const OP_SETTLE: Duration = Duration::from_millis(400);
 const HISTORY_WAIT: Duration = Duration::from_secs(90);
-/// Pause between the last change and reopening the replay stream. The
-/// agent resumes seconds or more after a change, by which time fseventsd
-/// has persisted it; reopening within milliseconds measures its flush
-/// lag instead (the first CI run missed the 500th file that way).
+/// Probe settled history separately from immediate resume, which missed
+/// the 500th file in the first run. This delay does not prove its cause.
 const REPLAY_GAP: Duration = Duration::from_secs(3);
 /// How long live events after HistoryDone are still collected, to tell
 /// a late event from a lost one.

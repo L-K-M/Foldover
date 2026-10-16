@@ -35,8 +35,8 @@ release and writes a JSON report plus a human summary. Experiments:
    UseExtendedData; create, modify, rename, chmod, xattr-set, delete; per
    operation the union of item flags and operation-to-callback latency.
 2. **Replay** (`e2_replay`): record the last delivered event ID, stop the
-   stream, create 500 files, wait 3 s (the agent never resumes within
-   milliseconds of a change), reopen with `sinceWhen` set to that ID;
+   stream, create 500 files, wait 3 s to probe settled history,
+   reopen with `sinceWhen` set to that ID;
    count how many of the 500 appear before `HistoryDone`, and how many
    at all once live events settle.
 3. **Device-relative stream** (`e3_device_stream`): whether
@@ -75,32 +75,47 @@ From PLAN.md §8, made precise:
 
 ## Results
 
-Pending the first CI run of spike-s3.
+First complete run
+([38952352242](https://github.com/L-K-M/Foldover/actions/runs/38952352242)),
+commit `6146b60`, GitHub `macos-26` runner, macOS 26.6.2 (25G83), arm64.
+Verdict: fail. The harness completed, but replay missed its criterion.
 
 | Metric | Value |
 |---|---|
-| e1 flags per operation (create, modify, rename, chmod, xattr, delete) | |
-| e1 operation-to-callback latency, mean ms | |
-| e2 changes replayed (of 500) | |
-| e2 HistoryDone arrived | |
-| e3 device-relative stream available | |
-| e4 boot volume FSEvents UUID | |
-| e5 APFS image: replayed, UUID stable across reattach | |
-| e5 ExFAT image: replayed, UUID stable across reattach | |
-| e5 reattach replay from pre-detach event ID | |
-| e6 appeared/disappeared callbacks, latency ms | |
-| e7 events delivered for 100,000 files, drop flags | |
+| e1 operations observed | All six; no drop flags |
+| e1 mean callback latency by operation (ms) | Create 81.54; modify 11.56; rename 11.55; chmod 10.96; xattr 11.41; delete 10.89 |
+| e2 changes replayed (of 500) | 499; last file absent before HistoryDone |
+| e2 HistoryDone arrived | Yes, after 171.26 ms |
+| e3 device-relative stream available | Yes; marker delivered without privilege |
+| e4 boot volume FSEvents UUID | Present |
+| e5 APFS image | 0/500 replayed; FSEvents UUID absent before and after reattach |
+| e5 ExFAT image | 0/500 replayed; FSEvents UUID absent before and after reattach |
+| e5 reattach replay from pre-detach event ID | Marker absent on both images |
+| e6 appeared/disappeared callbacks, latency ms | Both received; 70.64 / 77.18 |
+| e7 events delivered for 100,000 files | 100,043 events, all 100,000 paths; no drop flags |
+
+That run reopened immediately after writing and mounted images with
+`-nobrowse`. Persistence lag and mount eligibility are hypotheses, not
+established causes. The revised method above waits 3 s, counts late live
+events separately and uses browsable images. Its CI result is pending.
+An immediate-resume guarantee cannot be inferred from a settled replay.
+The burst produced no drop flags, so dropped-event recovery remains
+unverified. SMB notifications, polling cost and deep-change detection
+are outside this harness.
 
 ## Decision
 
-Pending.
+Provisional: keep path-scoped watchers and DiskArbitration in the agent.
+Treat replay as a hint backed by metadata verification, as §4.8 requires.
+Do not rely on replay after remount when no FSEvents UUID is available.
+The revised run must be recorded before accepting replay completeness.
 
 ## Consequences
 
 - If replay is complete: `watch_cursor` in §4.8 stands; `foldover-watch`
   persists the last event ID per volume UUID and resumes after restarts.
   If replay loses events or IDs die with detach, the cursor degrades to
-  a hint and every restart or remount forces a shallow rescan, which
+  a hint and every restart or remount forces a full metadata rescan, which
   strengthens the case for the §8 fallback line.
 - If mount callbacks arrive: mount management and watch lifecycle live in
   the agent as designed. If they do not, the agent needs polling of the
