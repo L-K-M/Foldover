@@ -1,0 +1,38 @@
+# Empty workspace table: keeps this spike out of the root Foldover
+# workspace. It builds with the repo's pinned toolchain
+# (rust-toolchain.toml at the repo root).
+[workspace]
+
+[package]
+name = "s9-peer-pairing"
+version = "0.0.0"
+edition = "2024"
+license = "Unlicense"
+publish = false
+
+[dependencies]
+# ring provider throughout; quinn's `rustls-ring` feature pulls the
+# matching rustls feature so both ends use one provider.
+quinn = { version = "=0.11.12", default-features = false, features = [
+    "rustls-ring",
+    "runtime-tokio",
+    "log",
+] }
+rustls = { version = "=0.23.46", default-features = false, features = [
+    "ring",
+    "std",
+    "logging",
+] }
+rcgen = { version = "=0.14.10", default-features = false, features = [
+    "ring",
+    "pem",
+] }
+sha2 = "=0.11.1"
+tokio = { version = "=1.53.3", features = [
+    "macros",
+    "rt-multi-thread",
+    "net",
+    "time",
+    "io-util",
+    "sync",
+] }
