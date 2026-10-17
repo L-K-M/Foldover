@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Bounded BLAKE3 reads of observed local data forks, with cancellation,
+  no-follow access, change detection and protected endpoint paths.
 - Mutual installed-code authentication for private macOS IPC, bound to kernel
   audit tokens, Hardened Runtime and a process-pinned verified bundle.
 - Streaming local folder metadata inventory, with protected internal paths,
