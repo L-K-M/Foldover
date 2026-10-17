@@ -18,14 +18,15 @@ cursor is worthless and watch design changes.
 ## Question
 
 What does a plain command-line process actually get from FSEvents and
-DiskArbitration on macOS 26, and do persisted event IDs replay reliably?
+DiskArbitration on the supported macOS, and do persisted event IDs replay
+reliably?
 
 ## Method
 
 A throwaway Rust binary under `spikes/s3-change-detection/` calls
 CoreServices FSEvents and DiskArbitration through a small documented
 extern layer (`src/sys.rs`), with no `notify` dependency so `sinceWhen`
-stays explicit. CI runs it on `macos-26` via
+stays explicit. CI now uses the macOS 27 `xcode-27` image via
 `spikes/s3-change-detection/run.sh <output.json>` (workflow
 [spike-s3.yml](../../.github/workflows/spike-s3.yml)), which builds
 release and writes a JSON report plus a human summary. Experiments:
@@ -123,6 +124,25 @@ and these runs do not isolate the cause of the first run's misses.
 Neither burst produced drop flags, so dropped-event recovery remains
 unverified. SMB notifications, polling cost and deep-change detection
 are outside this harness; the full S3 risk remains open.
+
+### macOS 27 follow-up
+
+[Run 39019031434](https://github.com/L-K-M/Foldover/actions/runs/39019031434),
+commit `305d6ee`, used macOS 27.0.1 (26A434), arm64. All three harness
+verdicts passed; the remount and dropped-event limits remained:
+
+| Metric | Result |
+|---|---|
+| Settled replay before HistoryDone | 500/500 on boot, APFS and exFAT |
+| Replay latency | 17.41 / 8.98 / 38.27 ms, respectively |
+| Image replay marker after reattach | Absent on both |
+| APFS FSEvents-store UUID | Absent before detach, present after reattach |
+| exFAT FSEvents-store UUID | Changed after reattach |
+| Mount/unmount callbacks | Both received; 91.72 / 121.40 ms |
+| Burst | All 100,000 paths in 100,015 events; no drop flags |
+
+Keep the full-root-rescan fallback. This run does not prove remount
+continuity, forced-drop recovery, share polling or physical-volume behavior.
 
 ## Decision
 
