@@ -14,6 +14,8 @@ the peer user, negotiate protocol/core versions, and report `HealthOnly`.
 All other methods fail closed as unimplemented. No sync paths, file data,
 pairs or history are exposed. Privileged methods require the installed-code
 authentication and scope gates in [ADR 0006](0006-ad-hoc-client-identity.md).
+The transport now checks installed-code identity in both directions before
+private dispatch; method/root scope is still required before adding pair APIs.
 
 Use bounded newline JSON-RPC frames, request deadlines, bounded connection
 and batch counts, exact response IDs, and notification suppression. A private
@@ -62,6 +64,6 @@ file-access permissions or a sync workflow.
 ## Remaining gates
 
 Clean-Mac registration/approval, TCC attribution, update/downgrade, crash-loop
-safe mode, native state-error guidance, installed-client authentication,
+safe mode, native state-error guidance, privileged method/root scope,
 subscriptions, reconnect and all sync operations remain required. Packaging
 or health success does not close S6, S7, P2 or P3.

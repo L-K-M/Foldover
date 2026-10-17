@@ -1,6 +1,6 @@
 # ADR 0006: Audit-token-bound ad-hoc client identity
 
-Status: Accepted mechanism, S7 partial
+Status: Implemented transport policy, S7 partial
 
 ## Context
 
@@ -60,10 +60,48 @@ The production trust set must come from verified installed artifacts, not
 request fields, paths, PIDs or client-supplied hashes. The harness's trusted
 fixture argument is not that production trust mechanism.
 
+## Installed-code transport policy
+
+The Rust `net` driver derives the installation from its own canonical
+executable location inside a Foldover app bundle. It reads the app, agent
+and CLI signing information through the system `codesign` tool, then checks
+the whole bundle and nested code with Security.framework. Dynamic validation
+also binds the running executable to its expected installed code hash.
+Identifier/path matches alone never authorize a peer.
+
+This enrolls an owner-trusted local installation. Authenticating its initial
+distribution and updates remains the S6 distribution responsibility.
+
+Require Hardened Runtime and reject debugging, JIT, unsigned executable
+memory, DYLD-environment and disabled-validation/protection entitlements.
+Pin the validated app code hash and peer requirements for the process
+lifetime. Each private call resolves a fresh kernel audit token, checks the
+live peer's exact code identity and revalidates the pinned bundle. A changed
+installation fails closed until the process restarts and enrolls the current
+verified bundle. There is no client-supplied trust argument or PID lookup.
+
+The agent accepts the installed app/CLI identities; clients accept only the
+installed agent identity. Clients verify before sending private parameters.
+Only exact `session.hello` and `daemon.status` names bypass code validation.
+Standalone/debug builds retain user-gated health access; private methods fail
+closed when installed-code evidence is unavailable. Linux retains its user
+boundary.
+
+Signing-tool output and deadlines are bounded. Security.framework calls use
+a bounded blocking pool whose permits survive caller timeouts. Diagnostics
+stay on stderr; authorization replies contain no installation paths.
+
+Portable tests cover ambiguous signing-output rejection and the public-method
+allowlist. Apple-target cross-checks run locally. macOS CI runs real signed
+process fixtures for installed app/CLI access, relocated identity,
+same-identifier lookalikes, interpreters, changed bundles, restart rotation
+and fake agents receiving no private payload. This transport policy does not
+enable pair APIs or establish their method/root scope.
+
 ## Remaining gates
 
-- Installed-bundle trust, allowlist rotation and app/agent updates.
-- Hardened Runtime, debugging and library-injection policy for shipping code.
+- Full app/agent update lifecycle and authenticated distribution.
+- Shipping-bundle debugging/injection and permission behavior after updates.
 - Different-user rejection and maximum/long UTF-8 socket paths.
 - TCC attribution and guided access for Full Disk Access, removable/network
   volumes and Local Network, including permission behavior after updates.
