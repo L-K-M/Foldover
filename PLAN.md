@@ -357,6 +357,9 @@ trait Endpoint {
 They are probed on every mount or connect, re-probed after a capability error
 (`ENOTSUP`, failed rename-over), and drive both the engine and the UI's
 fidelity warnings.
+Filesystem support and driver operation fidelity are separate probes:
+[ADR 0005](docs/adr/0005-metadata-fidelity.md) records the local baseline's
+symlink, sparse-copy and exFAT Unicode failures.
 
 Endpoint-layer rules, not filters:
 - `.foldover/` and temp files are never reported by `scan`.
