@@ -443,6 +443,8 @@ Endpoint-layer rules, not filters:
 | v | — | — | drop from base |
 
 Entry classification and per-side baselines: [ADR 0007](docs/adr/0007-entry-reconciliation.md).
+Pure deletion-review thresholds: [ADR 0013](docs/adr/0013-deletion-review-fuse.md).
+Plan-bound confirmations and execution-time gates remain pending.
 
 **Mode rules:**
 - Mirror makes the target match the chosen source. Backup copies new,

@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Exact interactive/unattended deletion-review thresholds, with validated
+  counts and finite-model boundary checks; execution integration remains pending.
 - Authenticated local pair create/read/update APIs, paged lists and CLI commands,
   with cross-pair/state-root overlap checks and revision-checked updates.
 - Bounded BLAKE3 reads of observed local data forks, with cancellation,
