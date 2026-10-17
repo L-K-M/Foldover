@@ -40,6 +40,16 @@ directory protections and service dispatch.
 macOS CI additionally runs the smoke on the signed embedded executables and
 checks the bundle's architecture, minimum OS, nested signatures and plist.
 
+### Owner check, 2026-10-17
+
+The owner tested the app artifact from
+[run 39032942392](https://github.com/L-K-M/Foldover/actions/runs/39032942392).
+The window showed `Agent 0.1.0 connected. Sync is not available yet.` without
+an approval prompt; the owner supplied a screenshot of that state. This
+confirms a live app-to-agent health connection on the tested Mac. It does
+not establish clean-install approval behavior, login/restart persistence,
+file-access permissions or a sync workflow.
+
 ## Remaining gates
 
 Clean-Mac registration/approval, TCC attribution, update/downgrade, crash-loop
