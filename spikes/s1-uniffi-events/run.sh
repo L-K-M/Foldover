@@ -37,7 +37,7 @@ RESULTS_JSON="$1"
 SPIKE_DIR="$(cd "$(dirname "$0")" && pwd)"
 CRATE="s1_ffi"
 TARGET="aarch64-apple-darwin"
-DEPLOYMENT_TARGET="26.0"
+DEPLOYMENT_TARGET="27.0"
 CORE_DIR="$SPIKE_DIR/swift/S1BenchCore"
 GEN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/s1-bindings.XXXXXX")"
 trap 'rm -rf "$GEN_DIR"' EXIT

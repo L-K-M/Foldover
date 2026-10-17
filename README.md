@@ -11,6 +11,9 @@ Sync folders between your Mac's disks, NAS shares, SFTP servers and other
 Macs, and see exactly what will happen before it happens. No cloud, no
 account, no subscription.
 
+Free and open-source under the Unlicense. No sponsorships or paid features.
+The macOS app requires macOS 27 and Apple silicon.
+
 > [!NOTE]
 > **Status: foundations.** Nothing syncs yet. [`PLAN.md`](PLAN.md) is the
 > source of truth for scope and design; the research behind it lives in
@@ -32,11 +35,24 @@ account, no subscription.
 ```
 scripts/build.sh            # everything this host can build, staged in dist/
 scripts/build.sh core       # Rust agent and CLI (macOS or Linux)
-scripts/build.sh app        # macOS app (macOS 26+, Xcode, XcodeGen)
+scripts/build.sh app        # macOS app (macOS 27+, Xcode 27+, XcodeGen)
 cargo xtask ci              # the Linux CI gate
 ```
 
 Toolchain details and every other command: [`AGENTS.md`](AGENTS.md).
+
+## Opening a downloaded build
+
+Builds are signed ad hoc, without Developer ID or notarization. Extract the
+download, move `Foldover.app` to `/Applications`, then run:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/Foldover.app"
+open "/Applications/Foldover.app"
+```
+
+This removes quarantine only from Foldover and its embedded code. File
+access requires separate permissions.
 
 ## License
 

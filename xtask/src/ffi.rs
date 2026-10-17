@@ -6,8 +6,7 @@
 //! installs the generated Swift under
 //! `apple/FoldoverCore/Sources/FoldoverCore/`, the C header and
 //! modulemap under `apple/FoldoverCore/Headers/`. On macOS it then
-//! builds the release staticlibs for both architectures, lipo's them
-//! into one universal library and wraps it, with the committed
+//! builds the arm64 release staticlib and wraps it, with the committed
 //! headers, in the XCFramework the Swift package links; elsewhere the
 //! full command generates the bindings and fails clearly.
 //!
@@ -41,10 +40,10 @@ const BINDINGS_CONFIG: &str = "crates/foldover-bindgen/swift-bindings.toml";
 
 /// The app's minimum macOS (PLAN.md §1). The Swift type-check targets
 /// it and the staticlibs are built for it.
-const MACOS_DEPLOYMENT_TARGET: &str = "26.0";
+const MACOS_DEPLOYMENT_TARGET: &str = "27.0";
 
-/// The architectures the universal XCFramework library ships.
-const MACOS_TARGETS: [&str; 2] = ["aarch64-apple-darwin", "x86_64-apple-darwin"];
+/// The app supports only Apple silicon.
+const MACOS_TARGET: &str = "aarch64-apple-darwin";
 
 /// The modulemap's filename (`--modulemap-filename`).
 const MODULEMAP_FILENAME: &str = "module.modulemap";
@@ -414,62 +413,30 @@ fn finish(root: &Path, output: FfiOutput) -> Result<(), ToolError> {
     build_xcframework(root)
 }
 
-/// Build the release staticlib for each macOS architecture, lipo them
-/// into one universal `libfoldover_ffi.a` and wrap it, with the
-/// committed headers, in the XCFramework (macOS only — `lipo` and
-/// `xcodebuild` exist nowhere else).
+/// Wrap the arm64 release staticlib and committed headers in the
+/// XCFramework (macOS only).
 fn build_xcframework(root: &Path) -> Result<(), ToolError> {
-    let mut slices = Vec::new();
-    for target in MACOS_TARGETS {
-        slices.push(build_library_with_env(
-            root,
-            &[
-                "build",
-                "-p",
-                "foldover-ffi",
-                "--release",
-                "--target",
-                target,
-            ],
-            None,
-            &[("MACOSX_DEPLOYMENT_TARGET", Some(MACOS_DEPLOYMENT_TARGET))],
-            FFI_CRATE,
-            LibraryKind::Staticlib,
-        )?);
-    }
-
-    // One universal staticlib keeps the XCFramework to a single macOS
-    // slice; lipo writes into a scratch dir removed before returning.
-    let fat_dir = temp_dir("foldover-ffi-lipo");
-    fs::create_dir_all(&fat_dir).map_err(io("create", &fat_dir))?;
-    let outcome = lipo_and_wrap(root, &slices, &fat_dir);
-    let _ = fs::remove_dir_all(&fat_dir);
-    outcome
-}
-
-/// lipo `slices` into `fat_dir`/libfoldover_ffi.a and run
-/// `xcodebuild -create-xcframework` on it; separated from the builds
-/// so the scratch dir cleans up on every exit path.
-fn lipo_and_wrap(root: &Path, slices: &[PathBuf], fat_dir: &Path) -> Result<(), ToolError> {
-    let fat = fat_dir.join("libfoldover_ffi.a");
-    let mut lipo = vec!["-create".to_string()];
-    for slice in slices {
-        lipo.push(path_string(slice)?);
-    }
-    lipo.push("-output".to_string());
-    lipo.push(path_string(&fat)?);
-    run(
-        "lipo",
-        &lipo.iter().map(String::as_str).collect::<Vec<_>>(),
+    let library = build_library_with_env(
         root,
+        &[
+            "build",
+            "-p",
+            "foldover-ffi",
+            "--release",
+            "--target",
+            MACOS_TARGET,
+        ],
         None,
+        &[("MACOSX_DEPLOYMENT_TARGET", Some(MACOS_DEPLOYMENT_TARGET))],
+        FFI_CRATE,
+        LibraryKind::Staticlib,
     )?;
 
     let output = xcframework_path(root);
     if output.exists() {
         fs::remove_dir_all(&output).map_err(io("remove", &output))?;
     }
-    let library = path_string(&fat)?;
+    let library = path_string(&library)?;
     let headers = path_string(&headers_dir(root))?;
     let output = path_string(&output)?;
     run(

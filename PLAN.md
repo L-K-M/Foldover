@@ -1,6 +1,6 @@
 # Foldover — Plan
 
-Status: proposal, 2026-10-16. Evidence: [docs/research](docs/research/README.md)
+Status: P1 implementation, 2026-10-17. Evidence: [docs/research](docs/research/README.md)
 (competitor review: [competitors.md](docs/research/competitors.md)).
 
 ## 1. Summary
@@ -21,9 +21,9 @@ and AppKit now, GTK4/libadwaita on Linux later.
 | Sync model | Three-way reconciliation against a stored last-synced base | The only reliable way to tell "deleted here" from "created there" |
 | NAS shares | SMB and NFS through OS mounts that Foldover manages | Pure-Rust SMB clients are 0.x; revisit after 1.0 |
 | Mac-to-Mac | Built-in peer mode: Bonjour discovery, code pairing, encrypted QUIC | Top unmet need; competitors charge extra or need an account |
-| Distribution | Developer ID, notarized, Sparkle 2 updates; no Mac App Store | The sandbox cripples a background sync engine (see ChronoSync Express) |
-| Minimum OS | macOS 26 Tahoe, universal binary | Liquid Glass baseline. macOS 27 (2026-09-14) is Apple-silicon only |
-| Price | Free signed builds + sponsorship ([decision 1](#10-decisions-for-the-owner)) | Public-domain code; users reject subscriptions |
+| Distribution | Ad-hoc-signed downloads, explicit `xattr` activation, Sparkle 2 updates; no Mac App Store | Owner decision: no Developer ID or notarization |
+| Minimum OS | macOS 27, Apple silicon only | Owner decision; no Intel build |
+| Price | Free and open-source, no sponsorships or paid features | Owner decision; public-domain code |
 
 ## 2. Why Foldover can win
 
@@ -250,17 +250,19 @@ and implemented by the upper one.
 
 - JSON-RPC 2.0, newline-delimited, over a Unix domain socket owned by the
   `net` driver.
-  - **macOS:** the socket lives in the App Group container under a one-letter
-    name, so later sandboxed extensions can reach it. The agent fails loudly
-    if the path exceeds the 104-byte socket limit; S7 decides the fallback
-    (a launchd Mach service).
+  - **macOS:** S7 selects a private per-user directory and a short socket
+    name within the 104-byte limit. Ad-hoc distribution cannot assume an
+    entitled App Group container. The agent fails loudly if no safe path is
+    available; S7 evaluates a launchd Mach service for later extensions.
   - **Linux:** `$XDG_RUNTIME_DIR/foldover/`.
 - Socket mode `0600`. The agent checks the peer's user ID and, on macOS,
   the client's code signature via its audit token.
-  - Every method and event subscription requires a Foldover-signed client
-    (the app or the bundled CLI), because plans, history and events all
-    expose paths. Otherwise any process of the user could borrow the agent's
-    Full Disk Access.
+  - Every privileged method and event subscription must authenticate the
+    installed app or bundled CLI, because plans, history and events expose
+    paths. S7 must validate exact ad-hoc code identities against the
+    installed bundle, bound to the connecting process's audit token. A
+    bundle identifier or executable path alone is insufficient; missing
+    identity evidence fails closed. Developer ID team trust is unavailable.
   - Only `session.hello` and `daemon.status` stay user-gated.
   - On Linux there is no code signing, so only the user ID is checked.
 - Handshake `session.hello` negotiates the protocol version.
@@ -601,7 +603,7 @@ Foldover/
   scope under it (agent `ch.lkmc.foldover.agent`, tests
   `ch.lkmc.foldover.tests`).
 - **Build:** `scripts/build.sh` follows the family's multi-target
-  orchestrator style. Steps: Rust slices → `lipo` → XCFramework + UniFFI
+  orchestrator style. Steps: arm64 Rust library → XCFramework + UniFFI
   Swift bindings → Xcode build → `dist/`. A missing toolchain skips its
   target by default and fails it when named.
 - **Versioning:** one version, bumped in lockstep (workspace `Cargo.toml`,
@@ -613,10 +615,11 @@ Foldover/
   - Swift build with strict concurrency;
   - lint: fmt, clippy, cargo-deny, layering;
   - nightly simulation and device matrix.
-- **Release:** `release.yml` runs on `v*` tags. Order: test → build → sign
-  innermost-out (Rust dylib, agent, extensions, app) → notarize → staple →
-  DMG → Sparkle appcast (EdDSA) → GitHub release. Pre-release tags never
-  become "latest".
+- **Release:** `release.yml` runs on `v*` tags. Order: test → build → ad-hoc
+  sign innermost-out (embedded code, agent, extensions, app) → verify
+  signatures → archive → Sparkle appcast (EdDSA) → GitHub release. Publish
+  explicit quarantine-removal instructions. No Developer ID, notarization
+  or stapling. Pre-release tags never become "latest".
 - **Pinned:** `rust-toolchain.toml`, Xcode version, UniFFI version, action
   SHAs.
 
@@ -627,7 +630,7 @@ Rough sizes assume one developer with AI agents; the spikes recalibrate them.
 | Phase | Size | Delivers | Exit criteria |
 |---|---|---|---|
 | **P0 Foundations** | ~1 wk | Repo conventions (README with LLM disclosure, AGENTS.md, CLAUDE.md, CHANGELOG, CI, dependabot, review workflow), workspace and Xcode skeletons, layering lint | Fresh clone → `scripts/build.sh` → green CI on macOS and Linux |
-| **P1 Spikes** | ~4–6 wk | S1–S9 (§8), run in parallel by agents, each closed by an ADR in `docs/adr/` | Every spike has a recorded pass/fail and decision; a notarized hello-world app with embedded agent installs on a clean Mac |
+| **P1 Spikes** | ~4–6 wk | S1–S9 (§8), each closed by an ADR in `docs/adr/` | Every spike has a recorded pass/fail and decision; an ad-hoc-signed hello-world app with embedded agent installs on a clean macOS 27 Mac using the documented activation command |
 | **P2 Engine** → v0.1 | ~6 wk | Types, state, journal, reconciler, gates, archive, `local` endpoint, basic filters, CLI, simulation and property suites | Suites green; kill -9 at any journal state recovers; 3 local pairs dogfooded for 2 weeks with zero manual repair |
 | **P3 Agent + Mac app** → v0.2 | ~5 wk | `foldoverd`, service, IPC, client, UniFFI. Main window, pair creation, streamed preview with per-item overrides, menu bar, history, onboarding | App quit mid-sync → agent finishes; 200k-row preview at 60 fps; a new user creates a first pair in < 3 min |
 | **P4 Shares, SFTP, automation** → v0.3 | ~6 wk | `share` and `sftp` endpoints. Mount management, capability and readiness warnings, full filters. Watchers, triggers, scheduler. Conflict center, archive browser, Undo, notifications, App Intents | SMB (Samba ± fruit, macOS server), NFS and SFTP pairs run unattended for 7 days; unplug or sleep mid-run loses nothing |
@@ -654,36 +657,32 @@ Engine correctness gates are never traded for dates.
 | S3 | Change detection: path-scoped FSEvents replay; mount events inside the agent; whether SMB change notifications reach it | 3 d | No missed change after forced event loss; a change in an active share directory is seen ≤ 30 s at ≤ 2 % CPU; deep changes are bounded by the verification interval | Shallow polling only, with the honest "checked every N min" line |
 | S4 | Metadata and operation fidelity across APFS, exFAT, Samba ± fruit, SFTP | 4 d: round-trip corpus (tags, forks, ACLs, flags, NFC/NFD and `:` names, case pairs, sparse, bundles), exFAT mtime granularity, SFTP `posix-rename` and hard links | No silent loss: every change is predicted by `Capabilities` | Per-target warnings; AppleDouble export option |
 | S5 | Diff tree performance | 3 d: `NSOutlineView` in SwiftUI, 200k streamed rows, Quick Look, VoiceOver | 60 fps, flat memory, first rows < 1 s | Flat `Table` mode for huge plans |
-| S6 | Signing and notarization of app + agent + Rust code; `SMAppService`; Sparkle | 3 d | Clean-VM install opens first time, agent registers, Sparkle update and downgrade both behave | None acceptable; fix before P2 ends |
-| S7 | Permissions (TCC) are attributed to the agent, not the app: Full Disk Access, removable and network volumes, Local Network. App Group socket path and access; client code-signature check | 3 d | Prompts name Foldover; one guided flow grants what the agent needs; socket reachable at realistic path lengths; unsigned clients refused for privileged methods | Onboarding card that grants the agent separately; folder-scoped access as the default so Full Disk Access stays optional; Mach service for extensions |
-| S8 | Finder Sync extension unreliable on macOS 26/27 | 2 d | Loads and badges across 20 mount cycles on both | Stays off by default; status never depends on it |
+| S6 | Ad-hoc signing of app + agent + Rust code; `SMAppService`; Sparkle | 3 d | Clean-VM install opens after documented `xattr` activation, agent registers, Sparkle update and downgrade both behave | None acceptable; fix before P2 ends |
+| S7 | Agent permissions: Full Disk Access, removable/network volumes, Local Network. Private socket path and audit-token-bound ad-hoc client identity | 3 d | Prompts name Foldover; guided access flow; socket reachable at realistic path lengths; unrelated, unsigned and modified clients refused for privileged methods; permission behavior checked after an update | Onboarding card that grants the agent separately; folder-scoped access by default; Mach service for extensions |
+| S8 | Finder Sync extension unreliable on macOS 27 | 2 d | Loads and badges across 20 mount cycles | Stays off by default; status never depends on it |
 | S9 | Peer pairing security | 4 d (may move to P5) | No plaintext on the wire; unpaired peers get nothing; one-click revoke | TOFU with fingerprint confirmation |
 | R10 | One developer, public-domain code, a crowded market | Process | — | Narrow 1.0 scope (§3.9), test pyramid, public capability matrix, responsive issue triage |
 
 ## 9. Distribution and pricing
 
-Direct download only: notarized DMG, Sparkle 2 updates, Homebrew cask later.
-No account and no telemetry; an opt-in diagnostics bundle helps support.
+Direct downloads for macOS 27 on Apple silicon, signed ad hoc. No Developer
+ID, notarization or stapling. The installation instructions explain how to
+remove `com.apple.quarantine` from the installed app before opening it.
+Sparkle 2 updates require their own EdDSA signature; ad-hoc code signing
+does not authenticate a downloaded update.
 
-The code is public domain, so license keys would be unenforceable and would
-burn goodwill. Users rate subscriptions as disqualifying for sync tools. Fair
-one-time prices in this market run from about $23 (SyncTime) to $50
-(ChronoSync, CCC). The recommendation:
-
-- 1.0: free, signed builds and GitHub Sponsors (perks: beta channel,
-  credits; never gated features).
-- After 1.0, if needed: an optional one-time "Pro" build ($29–39). One
-  candidate is cloud connectors. The sync engine never goes on a
-  subscription.
+Foldover is free and open-source under the Unlicense. No sponsorships,
+subscriptions, paid builds, gated features or license checks. No account or
+telemetry; an opt-in diagnostics bundle helps support.
 
 ## 10. Decisions for the owner
 
-1. **Pricing:** free + sponsors for 1.0 (recommended) or a paid build from
-   day one?
-2. **Mac-to-Mac in 1.0:** yes, gated at P5 (recommended), or defer to 1.1 to
-   ship sooner?
-3. **OS floor:** macOS 26 with Intel support (recommended) or macOS 27,
-   Apple silicon only (simpler, smaller audience)?
-4. **Archive location:** `.foldover/archive/` at each endpoint root
-   (recommended: same volume, instant, works on shares) or the system Trash
-   where available?
+Resolved by the owner, 2026-10-17:
+
+1. **Pricing:** free and open-source, with no sponsorships or paid features.
+2. **Mac-to-Mac in 1.0:** include if P5 passes its gates.
+3. **OS floor:** macOS 27, Apple silicon only.
+4. **Archive location:** `.foldover/archive/` at each endpoint root, with
+   30-day retention.
+5. **Distribution:** ad-hoc-signed builds activated with `xattr`; no
+   Developer ID or notarization.

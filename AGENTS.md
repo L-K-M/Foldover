@@ -6,15 +6,15 @@ runs in a background agent; each platform gets a native UI (SwiftUI now,
 GTK4 later). [`PLAN.md`](PLAN.md) is the source of truth for scope and
 design; [`docs/research`](docs/research/README.md) holds the evidence.
 
-**Status:** P0 (foundations). Crate skeletons, the layer check, the UniFFI
-bridge and a placeholder macOS app exist; nothing syncs yet. The roadmap is
-PLAN.md §7.
+**Status:** P1 (spikes). Foundations and the S1, S3, S5 and S9 harnesses
+exist; nothing syncs yet. Measurements and limits live in `docs/adr/`.
+The roadmap is PLAN.md §7.
 
 ## Toolchain
 
 - **Rust:** rustup. `rust-toolchain.toml` pins 1.99.0 with rustfmt,
-  clippy and both Apple targets; rustup installs it on first use.
-- **macOS app:** macOS 26+, Xcode 26+, XcodeGen 2.46.0
+  clippy and the Apple-silicon target; rustup installs it on first use.
+- **macOS app:** macOS 27+, Apple silicon, Xcode 27+, XcodeGen 2.46.0
   (`brew install xcodegen`; CI pins the release by SHA-256).
 - **Scripts:** shellcheck (CI pins 0.11.0).
 - **Releases:** `lkm-release` from
@@ -30,7 +30,7 @@ PLAN.md §7.
 | Linux CI gate (fmt, clippy, tests, docs, layer check, FFI drift) | `cargo xtask ci` |
 | Layer check only | `cargo xtask check-layers` |
 | Regenerate the Swift bindings (commit the result) | `cargo xtask ffi --bindings-only` |
-| Bindings + universal XCFramework (macOS) | `cargo xtask ffi` |
+| Bindings + arm64 XCFramework (macOS) | `cargo xtask ffi` |
 | Dependency licenses and advisories | `cargo deny check` |
 | Generate the Xcode project | `xcodegen generate --spec apple/project.yml` |
 | Build everything this host can → `dist/` | `scripts/build.sh [core] [app] [--debug] [--clean] [--check]` |
@@ -73,8 +73,9 @@ tests, builds the XCFramework, and runs `xcodebuild build test`.
   (owner decision; it overrides the fleet's CamelCase rule for macOS
   bundle IDs). Sub-identifiers scope under it: `ch.lkmc.foldover.agent`,
   `ch.lkmc.foldover.tests`.
-- **Owner decisions:** PLAN.md §10 lists open decisions; check it before
-  choosing between alternatives it covers.
+- **Owner decisions:** PLAN.md §10 records the scope: free and open-source,
+  no sponsorships, macOS 27 on Apple silicon, endpoint-local archives,
+  peers gated at P5, and ad-hoc signing without notarization.
 - **No unsafe** outside `foldover-ffi`, whose UniFFI scaffolding needs it
   (it contains no hand-written `unsafe`).
 
