@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import platform
 import plistlib
+import re
 import stat
 import struct
 import subprocess
@@ -52,15 +53,41 @@ def command(*args: str | Path) -> bytes:
         timeout=COMMAND_TIMEOUT_SECONDS, check=False,
     )
     if result.returncode:
+        error = result.stderr.decode(errors="replace").strip()
+        if args[0] == "/usr/bin/xattr":
+            number = re.search(r"\[Errno (\d+)\]", error)
+            if number:
+                raise OSError(int(number[1]), error)
         raise RuntimeError(
             f"{args[0]} exited {result.returncode}: "
-            f"{result.stderr.decode(errors='replace').strip()}"
+            f"{error}"
         )
     return result.stdout
 
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+# Python's os xattr functions are Linux-only. The corpus owns these names;
+# the production driver needs native byte APIs rather than line-delimited names.
+def xattr_names(path: Path) -> list[str]:
+    if sys.platform == "darwin":
+        return command("/usr/bin/xattr", path).decode().splitlines()
+    return os.listxattr(path, follow_symlinks=False)
+
+
+def xattr_get(path: Path, name: str) -> bytes:
+    if sys.platform == "darwin":
+        return bytes.fromhex(command("/usr/bin/xattr", "-px", name, path).decode())
+    return os.getxattr(path, name, follow_symlinks=False)
+
+
+def xattr_set(path: Path, name: str, value: bytes) -> None:
+    if sys.platform == "darwin":
+        command("/usr/bin/xattr", "-wx", name, value.hex(), path)
+        return
+    os.setxattr(path, name, value, follow_symlinks=False)
 
 
 def probe(operation) -> dict:
@@ -177,8 +204,8 @@ def capabilities_at(root: Path) -> dict:
 
         for name, value in attribute_values().items():
             def xattr(name=name, value=value):
-                os.setxattr(item, name, value)
-                return os.getxattr(item, name) == value
+                xattr_set(item, name, value)
+                return xattr_get(item, name) == value
 
             results[f"xattr:{name}"] = probe(xattr)
 
@@ -272,8 +299,8 @@ def snapshot(root: Path) -> dict:
             "flags": getattr(info, "st_flags", 0),
             "acl": acl(path),
             "xattrs": {
-                name: digest(os.getxattr(path, name, follow_symlinks=False))
-                for name in sorted(os.listxattr(path, follow_symlinks=False))
+                name: digest(xattr_get(path, name))
+                for name in sorted(xattr_names(path))
             },
         })
         if kind == "file":
@@ -356,7 +383,7 @@ def create_corpus(root: Path) -> list[dict]:
     metadata = root / "metadata.bin"
     metadata.write_bytes(b"metadata data fork")
     for name, value in attribute_values().items():
-        os.setxattr(metadata, name, value)
+        xattr_set(metadata, name, value)
     command("/bin/chmod", "+a", ACL_RULE, metadata)
     os.chflags(metadata, stat.UF_HIDDEN)
     add("tags-fork-finderinfo-acl-flags", metadata.name)
@@ -394,7 +421,7 @@ def create_corpus(root: Path) -> list[dict]:
         "CFBundleIdentifier": "ch.lkmc.foldover.spike.s4.fixture",
         "CFBundlePackageType": "BNDL",
     }))
-    os.setxattr(bundle, FINDER_INFO, attribute_values()[FINDER_INFO])
+    xattr_set(bundle, FINDER_INFO, attribute_values()[FINDER_INFO])
     add("bundle-tree", bundle.name)
 
     # Fractional timestamps expose coarse targets without relying on clock speed.

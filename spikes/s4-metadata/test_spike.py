@@ -1,8 +1,10 @@
 import copy
+import errno
 import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import Mock, call, patch
 
 import spike
 
@@ -107,6 +109,34 @@ class FidelityTests(unittest.TestCase):
             captured = spike.snapshot(root)
             self.assertEqual(captured["sidecars"], [])
             self.assertIn("._file", captured["entries"])
+
+    def test_macos_attributes_use_the_native_tool(self):
+        path = Path("fixture")
+        with patch.object(spike.sys, "platform", "darwin"), \
+                patch.object(spike, "command", side_effect=[b"tag\n", b"00 FF\n", b""]) as native:
+            self.assertEqual(spike.xattr_names(path), ["tag"])
+            self.assertEqual(spike.xattr_get(path, "tag"), b"\x00\xff")
+            spike.xattr_set(path, "tag", b"\x00\xff")
+        self.assertEqual(native.call_args_list, [
+            call("/usr/bin/xattr", path),
+            call("/usr/bin/xattr", "-px", "tag", path),
+            call("/usr/bin/xattr", "-wx", "tag", "00ff", path),
+        ])
+
+    def test_native_attribute_errors_preserve_unsupported_errno(self):
+        failed = Mock(returncode=1, stdout=b"", stderr=(
+            f"xattr: [Errno {errno.ENOTSUP}] Operation not supported".encode()
+        ))
+        with patch.object(spike.subprocess, "run", return_value=failed):
+            with self.assertRaises(OSError) as caught:
+                spike.command("/usr/bin/xattr", "fixture")
+        self.assertEqual(caught.exception.errno, errno.ENOTSUP)
+
+    def test_unrecognized_native_error_remains_unavailable(self):
+        failed = Mock(returncode=1, stdout=b"", stderr=b"tool failed without a typed errno")
+        with patch.object(spike.subprocess, "run", return_value=failed):
+            result = spike.probe(lambda: spike.command("/usr/bin/xattr", "fixture"))
+        self.assertEqual(result["state"], "unavailable")
 
 
 if __name__ == "__main__":
