@@ -8,6 +8,9 @@ mod gates;
 mod plan;
 mod reconcile;
 
+#[cfg(test)]
+mod plan_properties;
+
 pub use configuration::{Engine, Error, ErrorKind};
 pub use foldover_state::StateLocation;
 pub use gates::{DeletionCounts, DeletionReview, InvalidDeletionCounts, RunContext};

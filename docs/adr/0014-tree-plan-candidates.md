@@ -47,6 +47,19 @@ invalid tree shapes, raw-byte ordering and cancellation at every checkpoint.
 A finite tree model checks side symmetry and conflict blocking across Sync,
 Mirror and Backup.
 
+Proptest also generates independently edited directory/file/symlink trees,
+including raw-byte paths. It checks complete ordered row coverage, one-way
+authority, Backup's no-deletion rule, changed-survivor protection, conflicted
+branches and side symmetry. Failures shrink to edit histories and persist
+regression seeds. A 100,000-case local release run passed:
+
+```sh
+PROPTEST_CASES=100000 cargo test -p foldover-engine --release generated_trees_preserve_plan_safety
+```
+
+These are planner properties. They do not replace the whole-engine crash,
+network and filesystem simulation or its 14-night acceptance gate.
+
 The opt-in release measurement builds 500,000 paths across 5,000 directories.
 On the Linux development host with Rust 1.99.0, candidate generation took
 354.1 ms, excluding input generation. Run it with:

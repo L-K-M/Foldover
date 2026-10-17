@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Shrinking property tests for hierarchy-aware planning over independently
+  edited raw-byte trees, with persisted failure seeds.
 - Deterministic tree-plan candidates, with hierarchy validation, conflicted-branch
   blocking, per-target deletion review and cancellation; no execution API yet.
 - Exact interactive/unattended deletion-review thresholds, with validated
