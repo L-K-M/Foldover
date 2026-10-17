@@ -19,6 +19,8 @@ file operations, migrations and backups stay in `foldover-db`.
 - Default paths are macOS Application Support and Linux XDG data storage.
   The directory must be owned by the user with mode 0700; database and writer
   lock files require 0600 and are opened without following symlinks.
+  After rejecting a symlinked state directory, resolve parent aliases such
+  as macOS `/var` before SQLite's all-components no-symlink open.
 - An exclusive state-directory lock precedes database access. It is separate
   from the health agent's runtime/socket lock.
 - WAL, FULL synchronous mode and foreign-key enforcement are required.

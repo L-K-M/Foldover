@@ -131,6 +131,8 @@ impl Database {
         {
             return Err(Error::UnsafeLocation);
         }
+        // SQLite NOFOLLOW also rejects system parent aliases such as macOS /var.
+        let directory = fs::canonicalize(directory)?;
         require_local(&File::open(&directory)?)?;
         let writer = private_file(&directory.join(WRITER_LOCK))?;
         writer
@@ -502,6 +504,28 @@ mod tests {
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o755)).unwrap();
         assert!(matches!(
             Database::open(&location),
+            Err(Error::UnsafeLocation)
+        ));
+    }
+
+    #[test]
+    fn resolves_parent_aliases_but_rejects_a_symlinked_state_directory() {
+        let (directory, _) = location();
+        let alias = directory.path().join("parent-alias");
+        symlink(directory.path(), &alias).unwrap();
+        let state = alias.join("state");
+        let location = StateLocation::Directory(state);
+        let mut database = Database::open(&location).unwrap();
+        let saved = database.create_pair(&values()).unwrap();
+        drop(database);
+        let database = Database::open(&location).unwrap();
+        assert_eq!(database.pair(&saved.id).unwrap().unwrap().id, saved.id);
+        drop(database);
+
+        let state_alias = directory.path().join("state-alias");
+        symlink(directory.path().join("state"), &state_alias).unwrap();
+        assert!(matches!(
+            Database::open(&StateLocation::Directory(state_alias)),
             Err(Error::UnsafeLocation)
         ));
     }
