@@ -4,3 +4,9 @@
 
 #[cfg(unix)]
 pub mod local;
+
+#[cfg(any(target_os = "macos", test))]
+mod code_identity;
+
+#[cfg(target_os = "macos")]
+mod installed;

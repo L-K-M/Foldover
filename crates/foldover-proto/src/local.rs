@@ -11,6 +11,7 @@ pub const METHOD_NOT_FOUND: i32 = -32601;
 pub const INVALID_PARAMS: i32 = -32602;
 pub const INTERNAL_ERROR: i32 = -32603;
 pub const VERSION_MISMATCH: i32 = -32001;
+pub const PERMISSION_DENIED: i32 = -32002;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Hello {

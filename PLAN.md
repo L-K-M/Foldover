@@ -269,6 +269,9 @@ lifecycle gates are recorded in [ADR 0008](docs/adr/0008-agent-health-path.md).
     The measured primitive and remaining gates are in
     [ADR 0006](docs/adr/0006-ad-hoc-client-identity.md).
   - Only `session.hello` and `daemon.status` stay user-gated.
+  - Clients also verify the installed agent before sending private parameters.
+    The transport pins verified bundle/code identities for its process lifetime
+    and rejects installation changes until restart; see ADR 0006.
   - On Linux there is no code signing, so only the user ID is checked.
 - Handshake `session.hello` negotiates the protocol version.
   - **Method groups:** `pair.*`, `run.*`, `preview.*` (paged plan rows),
