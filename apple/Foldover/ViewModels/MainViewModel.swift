@@ -10,12 +10,14 @@ import Observation
 @MainActor
 final class MainViewModel {
     private let appInfo: AppInfoStore
+    private let agent: AgentStore
 
     /// Main-actor isolated like the rest of the class: `FoldoverApp`
     /// (an `App`, so main-actor isolated too) builds it in its `@State`
     /// initializer.
-    init(appInfo: AppInfoStore) {
+    init(appInfo: AppInfoStore, agent: AgentStore = AgentStore()) {
         self.appInfo = appInfo
+        self.agent = agent
     }
 
     var title: String { "Foldover" }
@@ -26,4 +28,23 @@ final class MainViewModel {
     var statusLine: String { emptyState }
 
     var coreVersionText: String { "Core \(appInfo.coreVersion)" }
+
+    var agentStatusText: String {
+        switch agent.connection {
+        case .disconnected: String(localized: "Background agent is off")
+        case .connecting: String(localized: "Connecting to the background agent…")
+        case .approvalRequired: String(localized: "Approve Foldover in Login Items, then refresh")
+        case .connected(let version): String(localized: "Agent \(version) connected. Sync is not available yet.")
+        case .failed(let message): String(localized: "Background agent unavailable: \(message)")
+        }
+    }
+
+    var agentNeedsApproval: Bool {
+        if case .approvalRequired = agent.connection { return true }
+        return false
+    }
+
+    func refreshAgent() async { await agent.refresh() }
+    func enableAgent() async { await agent.enable() }
+    func openLoginItems() { agent.openLoginItems() }
 }

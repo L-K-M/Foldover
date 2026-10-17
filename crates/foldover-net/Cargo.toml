@@ -8,3 +8,11 @@ rust-version.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+rustix = { version = "1", features = ["fs", "process"] }
+tokio = { version = "1.53.2", features = ["net", "io-util"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread"] }

@@ -3,38 +3,59 @@
 //! foldover-service and foldover-ipc. See PLAN.md §4.4.
 
 use std::env;
+use std::ffi::OsString;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 /// How a usage failure exits.
 const USAGE_EXIT: u8 = 2;
 
-/// What the arguments ask for. Anything but `--version` alone prints
-/// usage: the agent itself arrives in P3.
 enum Request {
     /// `--version`: print `foldoverd <version>` and exit 0.
     Version,
-    /// Any other arguments, or none: a usage line and exit 2.
+    Run(foldover_ipc::SocketLocation),
     Usage,
 }
 
-fn main() -> ExitCode {
-    match request(env::args().skip(1)) {
+#[tokio::main]
+async fn main() -> ExitCode {
+    match request(env::args_os().skip(1)) {
         Request::Version => {
             println!("foldoverd {}", foldover_service::version());
             ExitCode::SUCCESS
         }
+        Request::Run(location) => match run(location).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("foldoverd: {error}");
+                ExitCode::FAILURE
+            }
+        },
         Request::Usage => {
-            eprintln!("usage: foldoverd --version  (the background agent arrives in P3)");
+            eprintln!("usage: foldoverd [--socket PATH] | --version");
             ExitCode::from(USAGE_EXIT)
         }
     }
 }
 
-/// Exactly `--version` selects the version; everything else is usage.
-fn request(args: impl Iterator<Item = String>) -> Request {
-    let args: Vec<String> = args.collect();
+async fn run(location: foldover_ipc::SocketLocation) -> Result<(), foldover_ipc::Error> {
+    let listener = foldover_ipc::bind(&location)?;
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        result = foldover_ipc::serve(listener, foldover_service::handle) => result,
+        signal = tokio::signal::ctrl_c() => { signal?; Ok(()) },
+        _ = terminate.recv() => Ok(()),
+    }
+}
+
+fn request(args: impl Iterator<Item = OsString>) -> Request {
+    let args: Vec<OsString> = args.collect();
     match args.as_slice() {
+        [] => Request::Run(foldover_ipc::SocketLocation::Default),
         [arg] if arg == "--version" => Request::Version,
+        [arg, path] if arg == "--socket" => {
+            Request::Run(foldover_ipc::SocketLocation::Path(PathBuf::from(path)))
+        }
         _ => Request::Usage,
     }
 }
@@ -44,7 +65,7 @@ mod tests {
     use super::*;
 
     fn req(args: &[&str]) -> Request {
-        request(args.iter().map(|a| a.to_string()))
+        request(args.iter().map(|argument| OsString::from(*argument)))
     }
 
     #[test]
@@ -54,15 +75,15 @@ mod tests {
 
     #[test]
     fn anything_else_is_usage() {
-        for args in [
-            &[][..],
-            &["--help"],
-            &["run"],
-            &["--version", "extra"],
-            &["-V"],
-        ] {
+        for args in [&["--help"][..], &["run"], &["--version", "extra"], &["-V"]] {
             assert!(matches!(req(args), Request::Usage), "{args:?}");
         }
+    }
+
+    #[test]
+    fn no_arguments_or_an_explicit_socket_start_the_agent() {
+        assert!(matches!(req(&[]), Request::Run(_)));
+        assert!(matches!(req(&["--socket", "/tmp/test/s"]), Request::Run(_)));
     }
 
     #[test]

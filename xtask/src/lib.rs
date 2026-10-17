@@ -4,6 +4,7 @@
 
 // Adapted from L-K-M/Sweetbriar.
 
+pub mod agent;
 pub mod ffi;
 pub mod layers;
 

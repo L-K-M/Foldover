@@ -1,6 +1,4 @@
-// The main window's placeholder content: title, empty state, core
-// version. The pair sidebar, live plan and inspector arrive in P3
-// (PLAN.md §3.8).
+// Pair-empty content and background-agent controls (PLAN.md §3.8).
 
 import SwiftUI
 
@@ -22,7 +20,22 @@ struct MainView: View {
             Text(viewModel.coreVersionText)
                 .font(.caption)
                 .foregroundStyle(.tertiary)
+
+            Text(viewModel.agentStatusText)
+                .font(.callout)
+                .multilineTextAlignment(.center)
+
+            HStack {
+                Button("Enable Background Agent") {
+                    Task { await viewModel.enableAgent() }
+                }
+                if viewModel.agentNeedsApproval {
+                    Button("Open Login Items") { viewModel.openLoginItems() }
+                }
+                Button("Refresh") { Task { await viewModel.refreshAgent() } }
+            }
         }
         .frame(minWidth: 480, minHeight: 320)
+        .task { await viewModel.refreshAgent() }
     }
 }

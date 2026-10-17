@@ -15,7 +15,7 @@ Free and open-source under the Unlicense. No sponsorships or paid features.
 The macOS app requires macOS 27 and Apple silicon.
 
 > [!NOTE]
-> **Status: foundations.** Nothing syncs yet. [`PLAN.md`](PLAN.md) is the
+> **Status: engine and agent foundations.** Nothing syncs yet. [`PLAN.md`](PLAN.md) is the
 > source of truth for scope and design; the research behind it lives in
 > [`docs/research`](docs/research/README.md).
 
@@ -40,6 +40,23 @@ cargo xtask ci              # the Linux CI gate
 ```
 
 Toolchain details and every other command: [`AGENTS.md`](AGENTS.md).
+
+## Background agent
+
+The app embeds the Rust agent and CLI. Choose **Enable Background Agent**;
+if macOS requests approval, open Login Items and allow Foldover, then refresh.
+The current agent exposes health/version checks only. It cannot sync files.
+
+For development, run these in separate terminals:
+
+```sh
+cargo run -p foldoverd
+cargo run -p foldover-cli -- status
+```
+
+`cargo xtask agent-smoke` tests the built agent and CLI in a private runtime
+directory, including single-instance locking, malformed requests, crash
+restart and shutdown. It also runs inside `cargo xtask ci`.
 
 ## Opening a downloaded build
 

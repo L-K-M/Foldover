@@ -16,3 +16,4 @@ path = "src/main.rs"
 
 [dependencies]
 foldover-client = { path = "../foldover-client" }
+tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread"] }

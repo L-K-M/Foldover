@@ -13,4 +13,6 @@ func textsIncludeTheCoreVersion() {
     #expect(viewModel.coreVersionText == "Core \(store.coreVersion)")
     #expect(!viewModel.emptyState.isEmpty)
     #expect(!viewModel.statusLine.isEmpty)
+    #expect(!viewModel.agentStatusText.isEmpty)
+    #expect(!viewModel.agentNeedsApproval)
 }

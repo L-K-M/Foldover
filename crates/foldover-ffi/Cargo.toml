@@ -19,4 +19,5 @@ crate-type = ["lib", "staticlib", "cdylib"]
 foldover-client = { path = "../foldover-client" }
 # Proc-macro exports, no UDL; no CLI features here, those live in
 # `foldover-bindgen`. Pinned so bindings and runtime cannot drift.
-uniffi = { version = "=0.32.2", default-features = false }
+uniffi = { version = "=0.32.2", default-features = false, features = ["tokio"] }
+thiserror = "2"

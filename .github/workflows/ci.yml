@@ -126,6 +126,9 @@ jobs:
       - name: cargo test (aarch64-apple-darwin)
         run: cargo test --workspace --target aarch64-apple-darwin
 
+      - name: Agent and CLI process smoke
+        run: cargo xtask agent-smoke
+
       # Builds the arm64 FoldoverCoreFFI.xcframework plus the Swift
       # bindings; the app links it below.
       - name: xtask ffi
@@ -184,6 +187,16 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")" = 27.0
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign -d --verbose=4 "$app" 2>&1 | grep -Fx 'Signature=adhoc'
+          for executable in foldoverd foldover; do
+            helper="$app/Contents/Library/LaunchServices/$executable"
+            test "$(lipo -archs "$helper")" = arm64
+            codesign --verify --strict "$helper"
+            codesign -d --verbose=4 "$helper" 2>&1 | grep -E 'flags=.*runtime'
+          done
+          plutil -lint "$app/Contents/Library/LaunchAgents/ch.lkmc.foldover.agent.plist"
+          python3 scripts/test-agent.py \
+            "$app/Contents/Library/LaunchServices/foldoverd" \
+            "$app/Contents/Library/LaunchServices/foldover"
           ditto -c -k --sequesterRsrc --keepParent \
             "$app" \
             "$RUNNER_TEMP/Foldover.zip"
