@@ -12,6 +12,10 @@ mod root;
 mod materialization;
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod volume;
+
+#[cfg(target_os = "macos")]
 use materialization::prevent_materialization;
 
 #[cfg(not(target_os = "macos"))]

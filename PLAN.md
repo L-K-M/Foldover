@@ -352,6 +352,9 @@ contract and required residency/metadata gates before exposure.
 Darwin stat observations include dataless flags. Known placeholders stop
 inventory and hashing; macOS reads enforce a non-materializing thread policy.
 Provider verification and cloud-root readiness remain required before agent exposure.
+Held-root macOS volume UUID observations are available below the agent API;
+[ADR 0015](docs/adr/0015-held-volume-uuid.md) records the probe and remaining
+mount-continuity/readiness gates.
 
 ```rust
 trait Endpoint {

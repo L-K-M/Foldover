@@ -6,8 +6,8 @@ license.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 
-# The macOS materialization binding is the only audited unsafe module. Other
-# filesystem code explicitly forbids unsafe; other crates inherit the workspace.
+# Only audited macOS binding modules allow unsafe. Filesystem traversal
+# explicitly forbids it; other crates inherit the workspace prohibition.
 [lints.rust]
 unsafe_code = "deny"
 
@@ -19,6 +19,7 @@ blake3 = "1.8.2"
 libc = "0.2.190"
 nix = { version = "0.31.3", features = ["fs"] }
 thiserror = "2"
+uuid = "1"
 
 [dev-dependencies]
 tempfile = "3"

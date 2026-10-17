@@ -404,6 +404,7 @@ dependencies = [
  "nix",
  "tempfile",
  "thiserror",
+ "uuid",
 ]
 
 [[package]]

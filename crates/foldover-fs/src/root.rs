@@ -246,6 +246,49 @@ impl Root {
         })
     }
 
+    /// Observe the held root's filesystem UUID without following its ambient
+    /// path. Missing platform/filesystem support is not a persistent identity.
+    /// Mount continuity and endpoint identity still require separate gates.
+    pub fn volume_uuid(&self) -> io::Result<Option<uuid::Uuid>> {
+        prevent_materialization()?;
+        #[cfg(target_os = "macos")]
+        {
+            let device = crate::volume::real_device(&self.directory)?;
+            let mut directory = self.directory.try_clone()?;
+            let mut visited = HashSet::new();
+            for _ in 0..MAX_ROOT_ANCESTORS {
+                let identity = FileIdentity::from_cap(&directory.dir_metadata()?);
+                if !visited.insert(identity) {
+                    return Err(io::Error::other(
+                        "Volume ancestry changed or contains a cycle",
+                    ));
+                }
+                let parent = directory.open_parent_dir(cap_std::ambient_authority())?;
+                let parent_device = crate::volume::real_device(&parent)?;
+                let parent_identity = FileIdentity::from_cap(&parent.dir_metadata()?);
+                if parent_device != device || parent_identity == identity {
+                    // Volume attributes require the physical mount root. Real
+                    // device IDs prevent APFS volume groups from hiding its edge.
+                    let uuid = crate::volume::uuid(&directory)?;
+                    if crate::volume::real_device(&self.directory)? != device {
+                        return Err(io::Error::other(
+                            "Root volume changed during identity lookup",
+                        ));
+                    }
+                    return Ok(uuid);
+                }
+                directory = parent;
+            }
+            Err(io::Error::other(
+                "Volume ancestry exceeds the verification limit",
+            ))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(None)
+        }
+    }
+
     /// Compare held directories, including selected symlink/case aliases.
     /// This observes current ancestry; callers must recheck before executing.
     pub fn relation_to(&self, other: &Self) -> io::Result<RootRelation> {
