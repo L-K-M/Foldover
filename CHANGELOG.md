@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Streaming local folder metadata inventory, with protected internal paths,
+  cancellation and explicit errors for changed or unsupported entries.
 - Health-only background agent, typed Unix-socket client, `foldover status`,
   native registration/status controls, and embedded ad-hoc-signed helpers.
 - Read-only local metadata access through held directory handles, with

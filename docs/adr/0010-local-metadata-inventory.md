@@ -1,0 +1,64 @@
+# ADR 0010: Streaming local metadata inventory
+
+Status: Implemented library; content snapshots and preview integration pending
+
+## Scope
+
+`LocalEndpoint::scan_metadata` walks a held local root through the filesystem
+driver. It emits exact root-relative name bytes, observed attributes and
+symlink target bytes. It never opens regular file data or follows a symlink.
+This is metadata inventory, not a content snapshot or an executable plan.
+
+The driver can clone a root handle and hold descendant directories without
+following any symlink component. The endpoint owns traversal and exclusions;
+raw directory operations remain in `foldover-fs`.
+
+## Traversal and protected paths
+
+Rows stream depth-first in filesystem enumeration order. The scanner retains
+one iterator per active directory rather than buffering and sorting a whole
+wide directory before the first row. Plans must impose their own stable path
+ordering. Depth does not consume the Rust call stack.
+
+At every depth, exclude `.foldover`, the reserved `.foldover-tmp-` filename
+prefix and default Finder state `.DS_Store`. Reserve ASCII case aliases too,
+because the other endpoint may be case-insensitive. These internal paths
+cannot become user data on another endpoint. A skipped directory's children
+are never visited. Future writers must use this temporary-file namespace.
+
+Special file types and entries on a different observed device stop the scan.
+An ancestor identity check also rejects directory cycles. Device/inode values
+are session observations, not volume UUIDs or proof of mount availability.
+
+Until native-xattr/AppleDouble capability classification exists, `._` names
+stop the scan with an explicit sidecar-classification error. They are neither
+silently omitted nor treated as ordinary content. The need for separate
+filesystem and operation-fidelity probes remains as recorded in
+[ADR 0005](0005-metadata-fidelity.md).
+
+## Completion and errors
+
+Only a finished traversal returns statistics. Cancellation, I/O failure,
+unsupported entries and detected mutations return errors; a caller must
+discard any partial rows. A missing or unreadable directory must never look
+like an empty, successfully scanned subtree.
+
+Recheck each emitted entry, every opened directory's identity/attributes and
+its parent's binding when leaving it. Recheck directory attributes after its
+last row too. These detect observed races; they do not create an atomic tree
+snapshot. Content changes after a row, restored timestamps and watcher gaps
+still require watcher coordination, content hashes and per-operation freshness
+checks. Cancellation occurs between rows, not inside a blocked filesystem call.
+
+## Verification and remaining gates
+
+Tests exercise nested/empty folders, protected names at multiple depths,
+outside/dangling links, raw names and targets, cancellation, directory-to-link
+replacement, disappearing directories, special items, sidecar rejection,
+last-row mutations and replacement of the root's ambient path. Linux checks
+run locally; macOS coverage runs in CI.
+
+Content hashing, full metadata capture, dataless-file policy, naming and
+capability probes, root/overlap validation, volume UUIDs, stable snapshots,
+readiness gates and performance calibration remain required. The agent still
+exposes only health methods.
