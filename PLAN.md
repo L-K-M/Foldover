@@ -341,6 +341,10 @@ contract and remaining snapshot gates are recorded in
 `LocalPair::open` rejects equal or nested selected roots through held-directory
 identities. Pair-catalog checks and execution-time readiness remain pending.
 
+Observed regular-file data-fork hashing is available below the agent API;
+[ADR 0012](docs/adr/0012-local-content-hashing.md) records its bounded-read
+contract and required residency/metadata gates before exposure.
+
 ```rust
 trait Endpoint {
     fn capabilities(&self) -> &Capabilities;
