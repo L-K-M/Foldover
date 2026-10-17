@@ -215,7 +215,7 @@ fn requirement(hashes: &[&str]) -> String {
         .join(" or ");
     let mut expression = format!("({hashes})");
     for entitlement in FORBIDDEN_ENTITLEMENTS {
-        expression.push_str(&format!(" and not entitlement[\"{entitlement}\"] exists"));
+        expression.push_str(&format!(" and !(entitlement[\"{entitlement}\"] exists)"));
     }
     expression
 }
@@ -270,4 +270,24 @@ fn denied() -> io::Error {
         io::ErrorKind::PermissionDenied,
         "Installed peer identity is unavailable or no longer valid",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apple_parser_accepts_generated_single_and_multiple_identity_requirements() {
+        let hashes = [
+            "0123456789abcdef0123456789abcdef01234567",
+            "abcdef0123456789abcdef0123456789abcdef01",
+        ];
+        for count in 1..=hashes.len() {
+            let expression = requirement(&hashes[..count]);
+            assert!(
+                expression.parse::<SecRequirement>().is_ok(),
+                "Apple rejected generated requirement: {expression}",
+            );
+        }
+    }
 }
