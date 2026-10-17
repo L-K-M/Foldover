@@ -1,12 +1,13 @@
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 pub use foldover_net::local::SocketLocation;
 use foldover_net::local::{Connection as Channel, Listener};
 use foldover_proto::local::{
-    DAEMON_STATUS, INVALID_REQUEST, PARSE_ERROR, PERMISSION_DENIED, Request, Response, RpcError,
-    SESSION_HELLO,
+    DAEMON_STATUS, Hello, INTERNAL_ERROR, INVALID_REQUEST, PARSE_ERROR, PERMISSION_DENIED,
+    PROTOCOL_VERSION, Request, Response, RpcError, SESSION_HELLO, VERSION_MISMATCH,
 };
 use serde_json::Value;
 use tokio::sync::Semaphore;
@@ -60,6 +61,11 @@ pub async fn connect(location: &SocketLocation) -> Result<Connection, Error> {
 }
 
 impl Connection {
+    /// Authenticate before even a public handshake when a private call follows.
+    pub async fn authenticate(&self) -> Result<(), Error> {
+        Ok(self.channel.require_installed_peer().await?)
+    }
+
     pub async fn call(&mut self, request: Request) -> Result<Value, Error> {
         let expected = request
             .id()
@@ -161,11 +167,12 @@ where
                 channel,
                 pending: Vec::new(),
             };
+            let session = AtomicBool::new(false);
             while let Some(frame) = connection.read_frame().await? {
                 let output = match serde_json::from_slice(&frame) {
                     Ok(value) => {
                         dispatch(value, &|request| {
-                            authorized(request, &connection.channel, &*handler)
+                            authorized(request, &connection.channel, &session, &*handler)
                         })
                         .await
                     }
@@ -186,6 +193,7 @@ where
 async fn authorized<F, Fut>(
     request: Request,
     channel: &Channel,
+    session: &AtomicBool,
     handler: &F,
 ) -> Result<Value, RpcError>
 where
@@ -197,7 +205,40 @@ where
             RpcError::new(PERMISSION_DENIED, "Installed peer authentication required")
         })?;
     }
-    handler(request).await
+    negotiated(request, session, handler).await
+}
+
+async fn negotiated<F, Fut>(
+    request: Request,
+    session: &AtomicBool,
+    handler: &F,
+) -> Result<Value, RpcError>
+where
+    F: Fn(Request) -> Fut,
+    Fut: Future<Output = Result<Value, RpcError>>,
+{
+    let hello = request.method() == SESSION_HELLO;
+    if hello {
+        session.store(false, Ordering::Relaxed);
+    } else if privileged(request.method()) && !session.load(Ordering::Relaxed) {
+        return Err(RpcError::new(
+            VERSION_MISMATCH,
+            "Negotiate session.hello before private requests",
+        ));
+    }
+    let response = handler(request).await?;
+    if hello {
+        let response: Hello = serde_json::from_value(response.clone())
+            .map_err(|_| RpcError::new(VERSION_MISMATCH, "Invalid protocol negotiation"))?;
+        if response.protocol_version != PROTOCOL_VERSION {
+            return Err(RpcError::new(
+                VERSION_MISMATCH,
+                "Unsupported agent protocol version",
+            ));
+        }
+        session.store(true, Ordering::Relaxed);
+    }
+    Ok(response)
 }
 
 fn privileged(method: &str) -> bool {
@@ -222,8 +263,16 @@ where
         );
     }
     let mut output = Vec::new();
+    let mut response_bytes: usize = 2; // JSON array brackets.
     for value in batch {
         if let Some(response) = dispatch_one(value, handler).await {
+            let bytes = serde_json::to_vec(&response).map_or(MAX_FRAME_BYTES, |bytes| bytes.len());
+            response_bytes = response_bytes.saturating_add(bytes + usize::from(!output.is_empty()));
+            if response_bytes > MAX_FRAME_BYTES {
+                // A batch is not a transaction; stop allocating and dispatching further work.
+                return Some(Response::error(Value::Null, RpcError::new(INTERNAL_ERROR,
+                    "Batch response exceeds frame limit; refresh state and request fewer results")).to_value());
+            }
             output.push(response);
         }
     }
@@ -255,6 +304,69 @@ where
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn private_dispatch_requires_a_successful_current_session() {
+        let session = AtomicBool::new(false);
+        let calls = std::sync::Mutex::new(Vec::new());
+        let handler = |request: Request| {
+            calls.lock().unwrap().push(request.method().to_owned());
+            async move {
+                if request.method() == SESSION_HELLO {
+                    return Ok(
+                        json!({"protocol_version": request.params().unwrap()["protocol_version"], "core_version":"test"}),
+                    );
+                }
+                Ok(json!("private"))
+            }
+        };
+        assert_eq!(
+            negotiated(Request::call(1, "pair.list", None), &session, &handler)
+                .await
+                .unwrap_err()
+                .code(),
+            VERSION_MISMATCH
+        );
+        assert!(calls.lock().unwrap().is_empty());
+        negotiated(
+            Request::call(
+                2,
+                SESSION_HELLO,
+                Some(json!({"protocol_version":PROTOCOL_VERSION})),
+            ),
+            &session,
+            &handler,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            negotiated(Request::call(3, "pair.list", None), &session, &handler)
+                .await
+                .unwrap(),
+            "private"
+        );
+        assert!(
+            negotiated(
+                Request::call(
+                    4,
+                    SESSION_HELLO,
+                    Some(json!({"protocol_version":PROTOCOL_VERSION + 1}))
+                ),
+                &session,
+                &handler
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            negotiated(Request::call(5, "pair.list", None), &session, &handler)
+                .await
+                .unwrap_err()
+                .code(),
+            VERSION_MISMATCH
+        );
+        assert_eq!(calls.lock().unwrap().len(), 3);
+    }
 
     #[test]
     fn only_exact_health_method_names_bypass_code_authentication() {
@@ -299,6 +411,31 @@ mod tests {
             dispatch(json!([]), &handler).await.unwrap()["error"]["code"],
             INVALID_REQUEST
         );
+    }
+
+    #[tokio::test]
+    async fn batch_results_stop_before_accumulating_oversized_private_pages() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let handler = |_request| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            async { Ok(json!("x".repeat(MAX_FRAME_BYTES / 2))) }
+        };
+        let response = dispatch(
+            json!([
+                {"jsonrpc":"2.0", "method":"pair.list", "id":1},
+                {"jsonrpc":"2.0", "method":"pair.list", "id":2},
+                {"jsonrpc":"2.0", "method":"pair.list", "id":3}
+            ]),
+            &handler,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response["error"]["code"],
+            foldover_proto::local::INTERNAL_ERROR
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert!(serde_json::to_vec(&response).unwrap().len() < MAX_FRAME_BYTES);
     }
 
     #[tokio::test]

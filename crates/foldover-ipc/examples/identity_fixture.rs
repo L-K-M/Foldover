@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 use foldover_net::local::{Connection as Channel, Listener};
-use foldover_proto::local::{DAEMON_STATUS, Request, RpcError};
+use foldover_proto::local::{DAEMON_STATUS, PROTOCOL_VERSION, Request, RpcError, SESSION_HELLO};
 use serde_json::{Value, json};
 
 const PRIVATE_METHOD: &str = "fixture.private";
@@ -30,6 +30,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match request.method() {
                     PRIVATE_METHOD => Ok(json!({"marker": MARKER})),
                     DAEMON_STATUS => Ok(json!("public")),
+                    SESSION_HELLO => {
+                        Ok(json!({"protocol_version":PROTOCOL_VERSION, "core_version":"fixture"}))
+                    }
                     _ => Err(RpcError::new(
                         foldover_proto::local::METHOD_NOT_FOUND,
                         "Unknown fixture method",
@@ -40,8 +43,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         "call" => {
             let mut connection = foldover_ipc::connect(&location).await?;
+            if let Err(error) = connection.authenticate().await {
+                println!("{}", json!({"error":error.to_string()}));
+                return Ok(());
+            }
+            connection
+                .call(Request::call(
+                    1,
+                    SESSION_HELLO,
+                    Some(json!({"protocol_version":PROTOCOL_VERSION})),
+                ))
+                .await?;
             let request = Request::call(
-                1,
+                2,
                 PRIVATE_METHOD,
                 Some(json!({"private": "must-not-reach-a-fake-agent"})),
             );
@@ -53,8 +67,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         "raw" => {
             let mut connection = Channel::connect(&location).await?;
-            let mut request =
-                serde_json::to_vec(&Request::call(1, PRIVATE_METHOD, None).to_value())?;
+            let mut request = serde_json::to_vec(&json!([
+                Request::call(
+                    1,
+                    SESSION_HELLO,
+                    Some(json!({"protocol_version": PROTOCOL_VERSION}))
+                )
+                .to_value(),
+                Request::call(2, PRIVATE_METHOD, None).to_value()
+            ]))?;
             request.push(b'\n');
             connection.write_all(&request).await?;
             let mut bytes = Vec::new();
@@ -67,7 +88,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 bytes.extend_from_slice(&chunk[..count]);
             }
             let response: Value = serde_json::from_slice(&bytes)?;
-            println!("{response}");
+            let private = response
+                .as_array()
+                .and_then(|batch| batch.iter().find(|reply| reply["id"] == 2))
+                .ok_or("Missing private fixture response")?;
+            println!("{private}");
         }
         "capture" => {
             let listener = Listener::bind(&location)?;

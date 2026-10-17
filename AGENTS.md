@@ -7,7 +7,8 @@ GTK4 later). [`PLAN.md`](PLAN.md) is the source of truth for scope and
 design; [`docs/research`](docs/research/README.md) holds the evidence.
 
 **Status:** P1/P2/P3 foundations. Native spikes, reconciliation, held-root
-metadata access and a health-only agent/client path exist; nothing syncs yet.
+metadata access and an authenticated pair-configuration agent/client path exist;
+nothing syncs yet.
 Measurements and limits live in `docs/adr/`.
 The roadmap is PLAN.md §7.
 

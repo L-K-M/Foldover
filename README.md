@@ -45,7 +45,7 @@ Toolchain details and every other command: [`AGENTS.md`](AGENTS.md).
 
 The app embeds the Rust agent and CLI. Choose **Enable Background Agent**;
 if macOS requests approval, open Login Items and allow Foldover, then refresh.
-The current agent exposes health/version checks only. It cannot sync files.
+The agent exposes health checks and local pair configuration. It cannot sync files.
 
 For development, run these in separate terminals:
 
@@ -57,6 +57,34 @@ cargo run -p foldover-cli -- status
 `cargo xtask agent-smoke` tests the built agent and CLI in a private runtime
 directory, including single-instance locking, malformed requests, crash
 restart and shutdown. It also runs inside `cargo xtask ci`.
+
+### Pair configuration
+
+On macOS, use the installed app's bundled CLI. Standalone development builds
+can check health but cannot access private configuration. Linux checks the
+connecting user ID.
+
+```sh
+"/Applications/Foldover.app/Contents/Library/LaunchServices/foldover" pairs
+"/Applications/Foldover.app/Contents/Library/LaunchServices/foldover" pairs add \
+  "Photos backup" "/Users/you/Pictures" "/Volumes/Backup/Photos" backup-left
+```
+
+Both selected folders must exist. Roots must be disjoint from each other,
+every configured pair and Foldover's state directory. Reconnect unavailable
+configured roots before adding or changing pairs, so overlap checks can finish.
+Configuration does not scan contents or authorize sync execution.
+
+Modes: `sync`, `mirror-left`, `mirror-right`, `backup-left`, `backup-right`.
+The suffix selects the source. `pairs show ID` reads one pair;
+`pairs update ID REVISION NAME LEFT RIGHT MODE` requires its current revision.
+Commands output JSON lines with exact root-byte arrays. Lists are paged by
+identity and are not an atomic catalog snapshot. Refresh after concurrent edits.
+If a command times out, inspect the catalog before retrying: a disconnected
+client does not cancel a committing configuration change.
+
+The API contract and remaining gates are in
+[ADR 0011](docs/adr/0011-pair-configuration-api.md).
 
 ## Opening a downloaded build
 

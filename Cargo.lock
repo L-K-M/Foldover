@@ -296,6 +296,8 @@ name = "foldover-cli"
 version = "0.1.0"
 dependencies = [
  "foldover-client",
+ "foldover-proto",
+ "serde_json",
  "tokio",
 ]
 
@@ -305,6 +307,7 @@ version = "0.1.0"
 dependencies = [
  "foldover-ipc",
  "foldover-proto",
+ "foldover-types",
  "serde_json",
 ]
 
@@ -342,6 +345,8 @@ dependencies = [
  "foldover-host",
  "foldover-state",
  "foldover-types",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
@@ -402,6 +407,7 @@ version = "0.1.0"
 name = "foldover-proto"
 version = "0.1.0"
 dependencies = [
+ "foldover-types",
  "serde",
  "serde_json",
 ]
@@ -412,7 +418,10 @@ version = "0.1.0"
 dependencies = [
  "foldover-engine",
  "foldover-proto",
+ "foldover-types",
+ "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

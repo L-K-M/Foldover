@@ -6,7 +6,10 @@ mod pair;
 mod reconcile;
 mod sync_path;
 
-pub use pair::{InvalidPair, LocalRoot, PairConfig, PairDraft, PairId};
+pub use pair::{
+    InvalidPair, LocalRoot, MAX_LOCAL_ROOT_BYTES, MAX_PAIR_NAME_BYTES, PairConfig, PairDraft,
+    PairId,
+};
 
 pub use reconcile::{
     BaselineEntry, BaselineMismatch, ChangeKind, ConflictKind, Digest, EntryContent, EntryDecision,

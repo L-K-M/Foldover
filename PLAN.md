@@ -222,8 +222,9 @@ and implemented by the upper one.
 
 ### 4.2 Process model
 
-The health-only agent/client path is implemented; its boundary and remaining
-lifecycle gates are recorded in [ADR 0008](docs/adr/0008-agent-health-path.md).
+The agent/client path supports health and local pair configuration. Lifecycle
+gates are recorded in [ADR 0008](docs/adr/0008-agent-health-path.md); configuration
+scope is in [ADR 0011](docs/adr/0011-pair-configuration-api.md).
 
 - `foldoverd` ships inside the app bundle and is registered with
   `SMAppService.agent` (plist in `Contents/Library/LaunchAgents`,
@@ -339,7 +340,8 @@ The read-only local metadata inventory is implemented in
 contract and remaining snapshot gates are recorded in
 [ADR 0010](docs/adr/0010-local-metadata-inventory.md).
 `LocalPair::open` rejects equal or nested selected roots through held-directory
-identities. Pair-catalog checks and execution-time readiness remain pending.
+identities. Configuration also checks the pair catalog and agent state directory.
+Execution-time readiness remains pending.
 
 ```rust
 trait Endpoint {
@@ -391,8 +393,8 @@ Endpoint-layer rules, not filters:
 **State DB:**
 - Pair configuration and initial writer/format guards:
   [ADR 0009](docs/adr/0009-pair-state-storage.md). The agent owns this store
-  before serving requests; configuration APIs and the remaining state tables
-  are pending.
+  before serving requests. Authenticated create/read/update APIs and the CLI
+  are implemented; the remaining state tables are pending.
 - Lives in `~/Library/Application Support/Foldover/state.db`: local disk,
   because WAL does not work on network file systems. The directory is
   excluded from Time Machine; the search index uses a `.noindex` suffix.

@@ -1,9 +1,12 @@
-use std::fmt;
+use std::{fmt, str::FromStr};
 
 use crate::SyncMode;
 
+pub const MAX_PAIR_NAME_BYTES: usize = 1024;
+pub const MAX_LOCAL_ROOT_BYTES: usize = 4096;
+
 /// Opaque persisted identity. Creation belongs to the storage driver.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PairId([u8; Self::BYTE_LEN]);
 
 impl PairId {
@@ -30,6 +33,27 @@ impl fmt::Display for PairId {
     }
 }
 
+impl FromStr for PairId {
+    type Err = InvalidPair;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.len() != Self::BYTE_LEN * 2 {
+            return Err(InvalidPair::Identity);
+        }
+        let mut bytes = [0; Self::BYTE_LEN];
+        let (digits, _) = value.as_bytes().as_chunks::<2>();
+        for (byte, digits) in bytes.iter_mut().zip(digits) {
+            let digit = |value: u8| match value {
+                b'0'..=b'9' => Ok(value - b'0'),
+                b'a'..=b'f' => Ok(value - b'a' + 10),
+                _ => Err(InvalidPair::Identity),
+            };
+            *byte = digit(digits[0])? * 16 + digit(digits[1])?;
+        }
+        Self::from_bytes(bytes)
+    }
+}
+
 /// Selected absolute POSIX root bytes. This validates syntax only; endpoint
 /// identity, overlap, availability and permissions still require driver probes.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -37,7 +61,10 @@ pub struct LocalRoot(Vec<u8>);
 
 impl LocalRoot {
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidPair> {
-        if bytes.first() != Some(&b'/') || bytes.contains(&b'\0') {
+        if bytes.first() != Some(&b'/')
+            || bytes.contains(&b'\0')
+            || bytes.len() > MAX_LOCAL_ROOT_BYTES
+        {
             return Err(InvalidPair::Root);
         }
         Ok(Self(bytes))
@@ -63,7 +90,7 @@ impl PairDraft {
         right: LocalRoot,
         mode: SyncMode,
     ) -> Result<Self, InvalidPair> {
-        if name.trim().is_empty() || name.contains('\0') {
+        if name.trim().is_empty() || name.contains('\0') || name.len() > MAX_PAIR_NAME_BYTES {
             return Err(InvalidPair::Name);
         }
         if left == right {
@@ -133,9 +160,9 @@ pub enum InvalidPair {
 impl fmt::Display for InvalidPair {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::Identity => "Pair identity must not be empty",
-            Self::Name => "Pair name must contain text and no NUL characters",
-            Self::Root => "Local root must be absolute and contain no NUL bytes",
+            Self::Identity => "Pair identity must be 32 lowercase hex digits and not all zero",
+            Self::Name => "Pair name needs text, no NUL characters and at most 1024 bytes",
+            Self::Root => "Local root must be absolute, without NUL bytes, and at most 4096 bytes",
             Self::IdenticalRoots => "A pair needs two different selected roots",
             Self::Revision => "Pair revision is outside the supported range",
         })
@@ -163,5 +190,40 @@ mod tests {
         let id = PairId::from_bytes([1; PairId::BYTE_LEN]).unwrap();
         assert!(PairConfig::from_stored(id, 0, draft.clone()).is_err());
         assert!(PairConfig::from_stored(id, u64::MAX, draft).is_err());
+    }
+
+    #[test]
+    fn identity_text_round_trips_and_rejects_noncanonical_input() {
+        let id = PairId::from_bytes([0xab; PairId::BYTE_LEN]).unwrap();
+        assert_eq!(id.to_string().parse(), Ok(id));
+        for text in ["", "00", &"0".repeat(32), &"A".repeat(32), &"é".repeat(16)] {
+            assert!(text.parse::<PairId>().is_err());
+        }
+    }
+
+    #[test]
+    fn configuration_sizes_bound_wire_responses() {
+        let left = LocalRoot::from_bytes(b"/left".to_vec()).unwrap();
+        let right = LocalRoot::from_bytes(b"/right".to_vec()).unwrap();
+        assert!(
+            PairDraft::new(
+                "a".repeat(MAX_PAIR_NAME_BYTES),
+                left.clone(),
+                right.clone(),
+                SyncMode::Sync
+            )
+            .is_ok()
+        );
+        assert!(
+            PairDraft::new(
+                "a".repeat(MAX_PAIR_NAME_BYTES + 1),
+                left,
+                right,
+                SyncMode::Sync
+            )
+            .is_err()
+        );
+        assert!(LocalRoot::from_bytes(vec![b'/'; MAX_LOCAL_ROOT_BYTES]).is_ok());
+        assert!(LocalRoot::from_bytes(vec![b'/'; MAX_LOCAL_ROOT_BYTES + 1]).is_err());
     }
 }
