@@ -396,7 +396,7 @@ dependencies = [
  "cap-std",
  "foldover-types",
  "libc",
- "rustix",
+ "nix",
  "tempfile",
  "thiserror",
 ]
