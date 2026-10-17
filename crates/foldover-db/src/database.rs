@@ -1,0 +1,646 @@
+use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::io;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+
+const APPLICATION_ID: i64 = 0x464f4c44; // FOLD
+const SCHEMA_VERSION: i64 = 1;
+const DIRECTORY_MODE: u32 = 0o700;
+const FILE_MODE: u32 = 0o600;
+const PERMISSION_BITS: u32 = 0o777;
+const DATABASE_NAME: &str = "state.db";
+const WRITER_LOCK: &str = "writer.lock";
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode";
+const SCHEMA: &str = "
+CREATE TABLE state_meta (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    minimum_reader INTEGER NOT NULL CHECK(minimum_reader > 0)
+) STRICT;
+INSERT INTO state_meta VALUES (1, 1);
+CREATE TABLE pair (
+    id BLOB PRIMARY KEY NOT NULL CHECK(length(id) = 16 AND id != zeroblob(16)),
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    name TEXT NOT NULL CHECK(length(trim(name)) > 0 AND instr(name, char(0)) = 0),
+    left_root BLOB NOT NULL CHECK(length(left_root) > 0 AND substr(left_root,1,1) = x'2f' AND instr(left_root,x'00') = 0),
+    right_root BLOB NOT NULL CHECK(length(right_root) > 0 AND substr(right_root,1,1) = x'2f' AND instr(right_root,x'00') = 0),
+    mode TEXT NOT NULL CHECK(mode IN ('sync','mirror-left','mirror-right','backup-left','backup-right')),
+    CHECK(left_root != right_root)
+) STRICT;
+";
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("State I/O: {0}")]
+    Io(#[from] io::Error),
+    #[error("State database: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("State directory or file has unsafe ownership, type or permissions")]
+    UnsafeLocation,
+    #[error("State storage must be on a supported local filesystem")]
+    NonlocalStorage,
+    #[error("Another agent owns the state writer lock: {0}")]
+    WriterLocked(String),
+    #[error("Refusing an unrecognized database; existing data was not migrated")]
+    ForeignDatabase,
+    #[error("State requires schema reader {found}; this build supports {supported}")]
+    UnsupportedReader { found: i64, supported: i64 },
+    #[error("Invalid state metadata: {0}")]
+    InvalidState(&'static str),
+    #[error("Pair does not exist")]
+    PairNotFound,
+    #[error("Pair configuration changed; refresh before updating it")]
+    StaleRevision,
+}
+
+#[derive(Clone, Debug)]
+pub enum StateLocation {
+    Default,
+    Directory(PathBuf),
+}
+
+impl StateLocation {
+    fn directory(&self) -> Result<PathBuf, Error> {
+        if let Self::Directory(path) = self {
+            if !path.is_absolute() {
+                return Err(Error::InvalidState("State directory must be absolute"));
+            }
+            return Ok(path.clone());
+        }
+        #[cfg(target_os = "macos")]
+        let path = home()?.join("Library/Application Support/Foldover");
+        #[cfg(not(target_os = "macos"))]
+        let path = match std::env::var_os("XDG_DATA_HOME") {
+            Some(base) => PathBuf::from(base).join("foldover"),
+            None => home()?.join(".local/share/foldover"),
+        };
+        if !path.is_absolute() {
+            return Err(Error::InvalidState("State base directory must be absolute"));
+        }
+        Ok(path)
+    }
+}
+
+fn home() -> Result<PathBuf, Error> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or(Error::InvalidState("HOME is unavailable"))
+}
+
+/// Storage records stay separate from validated domain configuration.
+#[derive(Clone, Debug)]
+pub struct PairValues {
+    pub name: String,
+    pub left_root: Vec<u8>,
+    pub right_root: Vec<u8>,
+    pub mode: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct PairRow {
+    pub id: Vec<u8>,
+    pub revision: i64,
+    pub values: PairValues,
+}
+
+pub struct Database {
+    connection: Connection,
+    _writer: File,
+}
+
+#[derive(Clone, Copy)]
+enum FileShape {
+    Empty,
+    Existing,
+}
+
+impl Database {
+    pub fn open(location: &StateLocation) -> Result<Self, Error> {
+        let directory = location.directory()?;
+        DirBuilder::new()
+            .recursive(true)
+            .mode(DIRECTORY_MODE)
+            .create(&directory)?;
+        let metadata = fs::symlink_metadata(&directory)?;
+        if !metadata.is_dir()
+            || metadata.uid() != current_user()
+            || metadata.mode() & PERMISSION_BITS != DIRECTORY_MODE
+        {
+            return Err(Error::UnsafeLocation);
+        }
+        // SQLite NOFOLLOW also rejects system parent aliases such as macOS /var.
+        let directory = fs::canonicalize(directory)?;
+        require_local(&File::open(&directory)?)?;
+        let writer = private_file(&directory.join(WRITER_LOCK))?;
+        writer
+            .try_lock()
+            .map_err(|error| Error::WriterLocked(error.to_string()))?;
+        let path = directory.join(DATABASE_NAME);
+        let file = private_file(&path)?;
+        let shape = if file.metadata()?.len() == 0 {
+            FileShape::Empty
+        } else {
+            FileShape::Existing
+        };
+        drop(file);
+
+        // Compatibility checks precede writable SQLite opens and journal pragmas.
+        let reader = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        let old_schema = inspect(&reader, shape)?;
+        drop(reader);
+        let mut connection = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        connection.busy_timeout(BUSY_TIMEOUT)?;
+        let schema = inspect(&connection, shape)?;
+        if schema != old_schema {
+            return Err(Error::InvalidState("Schema changed while opening state"));
+        }
+        if schema < SCHEMA_VERSION {
+            if matches!(shape, FileShape::Existing) {
+                backup(&connection, &directory, schema)?;
+            }
+            migrate(&mut connection, SCHEMA)?;
+        }
+        connection.pragma_update(None, "foreign_keys", true)?;
+        connection.pragma_update(None, "synchronous", "FULL")?;
+        let mode: String =
+            connection.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
+        if !mode.eq_ignore_ascii_case("wal") {
+            return Err(Error::InvalidState("SQLite refused WAL mode"));
+        }
+        Ok(Self {
+            connection,
+            _writer: writer,
+        })
+    }
+
+    pub fn create_pair(&mut self, values: &PairValues) -> Result<PairRow, Error> {
+        let id = uuid::Uuid::new_v4().into_bytes();
+        self.connection.execute(
+            "INSERT INTO pair (id,revision,name,left_root,right_root,mode) VALUES (?1,1,?2,?3,?4,?5)",
+            params![id.as_slice(), values.name, values.left_root, values.right_root, values.mode],
+        )?;
+        self.pair(&id)?
+            .ok_or(Error::InvalidState("Inserted pair disappeared"))
+    }
+
+    pub fn pairs(&self) -> Result<Vec<PairRow>, Error> {
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT {PAIR_COLUMNS} FROM pair ORDER BY name COLLATE BINARY,id"
+        ))?;
+        let rows = statement.query_map([], pair_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn pair(&self, id: &[u8]) -> Result<Option<PairRow>, Error> {
+        Ok(self
+            .connection
+            .query_row(
+                &format!("SELECT {PAIR_COLUMNS} FROM pair WHERE id=?1"),
+                [id],
+                pair_row,
+            )
+            .optional()?)
+    }
+
+    pub fn update_pair(
+        &mut self,
+        id: &[u8],
+        revision: i64,
+        values: &PairValues,
+    ) -> Result<PairRow, Error> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
+            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6 WHERE id=?1 AND revision=?2",
+            params![id, revision, values.name, values.left_root, values.right_root, values.mode],
+        )?;
+        if changed == 0 {
+            let exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pair WHERE id=?1)",
+                [id],
+                |row| row.get(0),
+            )?;
+            return Err(if exists {
+                Error::StaleRevision
+            } else {
+                Error::PairNotFound
+            });
+        }
+        let row = transaction.query_row(
+            &format!("SELECT {PAIR_COLUMNS} FROM pair WHERE id=?1"),
+            [id],
+            pair_row,
+        )?;
+        transaction.commit()?;
+        Ok(row)
+    }
+}
+
+fn current_user() -> u32 {
+    rustix::process::geteuid().as_raw()
+}
+
+fn private_file(path: &Path) -> Result<File, Error> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(FILE_MODE)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != current_user()
+        || metadata.mode() & PERMISSION_BITS != FILE_MODE
+    {
+        return Err(Error::UnsafeLocation);
+    }
+    Ok(file)
+}
+
+fn require_local(file: &File) -> Result<(), Error> {
+    let filesystem = rustix::fs::fstatfs(file).map_err(io::Error::from)?;
+    #[cfg(target_os = "macos")]
+    if filesystem.f_flags & libc::MNT_LOCAL as u32 == 0 {
+        return Err(Error::NonlocalStorage);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use linux_raw_sys::general::{
+            BTRFS_SUPER_MAGIC, EXT4_SUPER_MAGIC, OVERLAYFS_SUPER_MAGIC, TMPFS_MAGIC,
+            XFS_SUPER_MAGIC,
+        };
+        // Unknown/network/FUSE storage is not a proven WAL location.
+        if ![
+            BTRFS_SUPER_MAGIC,
+            EXT4_SUPER_MAGIC,
+            OVERLAYFS_SUPER_MAGIC,
+            TMPFS_MAGIC,
+            XFS_SUPER_MAGIC,
+        ]
+        .contains(&(filesystem.f_type as u32))
+        {
+            return Err(Error::NonlocalStorage);
+        }
+    }
+    Ok(())
+}
+
+fn inspect(connection: &Connection, shape: FileShape) -> Result<i64, Error> {
+    let application: i64 =
+        connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
+    let schema: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if schema < 0 {
+        return Err(Error::InvalidState("Negative schema version"));
+    }
+    if application != APPLICATION_ID {
+        let objects: i64 = connection.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
+            [],
+            |row| row.get(0),
+        )?;
+        if matches!(shape, FileShape::Existing) || application != 0 || schema != 0 || objects != 0 {
+            return Err(Error::ForeignDatabase);
+        }
+    }
+    if schema > SCHEMA_VERSION {
+        return Err(Error::UnsupportedReader {
+            found: schema,
+            supported: SCHEMA_VERSION,
+        });
+    }
+    if schema == SCHEMA_VERSION {
+        if application != APPLICATION_ID {
+            return Err(Error::ForeignDatabase);
+        }
+        let minimum: i64 = connection.query_row(
+            "SELECT minimum_reader FROM state_meta WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?;
+        if minimum <= 0 {
+            return Err(Error::InvalidState("Invalid minimum reader"));
+        }
+        if minimum > SCHEMA_VERSION {
+            return Err(Error::UnsupportedReader {
+                found: minimum,
+                supported: SCHEMA_VERSION,
+            });
+        }
+    } else {
+        let objects: i64 = connection.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
+            [],
+            |row| row.get(0),
+        )?;
+        if objects != 0 {
+            return Err(Error::ForeignDatabase);
+        }
+    }
+    Ok(schema)
+}
+
+fn backup(connection: &Connection, directory: &Path, schema: i64) -> Result<(), Error> {
+    let path = directory.join(format!(
+        "state-before-v{schema}-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let destination = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(FILE_MODE)
+        .open(&path)?;
+    drop(destination);
+    connection.backup(rusqlite::MAIN_DB, &path, None)?;
+    File::open(&path)?.sync_all()?;
+    File::open(directory)?.sync_all()?;
+    Ok(())
+}
+
+fn migrate(connection: &mut Connection, statements: &str) -> Result<(), Error> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(statements)?;
+    transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
+    transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn pair_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairRow> {
+    Ok(PairRow {
+        id: row.get(0)?,
+        revision: row.get(1)?,
+        values: PairValues {
+            name: row.get(2)?,
+            left_root: row.get(3)?,
+            right_root: row.get(4)?,
+            mode: row.get(5)?,
+        },
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    fn location() -> (tempfile::TempDir, StateLocation) {
+        let directory = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(DIRECTORY_MODE))
+            .tempdir()
+            .unwrap();
+        let location = StateLocation::Directory(directory.path().to_owned());
+        (directory, location)
+    }
+
+    fn values() -> PairValues {
+        PairValues {
+            name: "pair".into(),
+            left_root: b"/left".to_vec(),
+            right_root: b"/right".to_vec(),
+            mode: "sync".into(),
+        }
+    }
+
+    #[test]
+    fn persists_pairs_in_wal_and_has_one_writer() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        assert!(matches!(
+            Database::open(&location),
+            Err(Error::WriterLocked(_))
+        ));
+        let saved = database.create_pair(&values()).unwrap();
+        let mode: String = database
+            .connection
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        drop(database);
+        let database = Database::open(&location).unwrap();
+        assert_eq!(database.pairs().unwrap().len(), 1);
+        assert_eq!(
+            database.pair(&saved.id).unwrap().unwrap().values.name,
+            "pair"
+        );
+    }
+
+    #[test]
+    fn schema_constraints_and_revision_guard_preserve_existing_data() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let saved = database.create_pair(&values()).unwrap();
+        let mut update = values();
+        update.name = "'; DROP TABLE pair; --".into();
+        let changed = database
+            .update_pair(&saved.id, saved.revision, &update)
+            .unwrap();
+        assert_eq!(changed.revision, saved.revision + 1);
+        assert!(matches!(
+            database.update_pair(&saved.id, saved.revision, &values()),
+            Err(Error::StaleRevision)
+        ));
+        assert_eq!(
+            database.pair(&saved.id).unwrap().unwrap().values.name,
+            update.name
+        );
+        update.left_root = b"relative".to_vec();
+        assert!(database.create_pair(&update).is_err());
+        update = values();
+        update.mode = "unknown".into();
+        assert!(database.create_pair(&update).is_err());
+        assert_eq!(database.pairs().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn refuses_future_and_foreign_databases_without_changing_bytes() {
+        for future in [true, false] {
+            let (directory, location) = location();
+            let path = directory.path().join(DATABASE_NAME);
+            let file = private_file(&path).unwrap();
+            drop(file);
+            let connection = Connection::open(&path).unwrap();
+            if future {
+                connection
+                    .pragma_update(None, "application_id", APPLICATION_ID)
+                    .unwrap();
+                connection
+                    .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+                    .unwrap();
+            } else {
+                connection
+                    .execute_batch(
+                        "CREATE TABLE unrelated(value TEXT); INSERT INTO unrelated VALUES('keep');",
+                    )
+                    .unwrap();
+            }
+            drop(connection);
+            let before = fs::read(&path).unwrap();
+            assert!(Database::open(&location).is_err());
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn rejects_symlink_files_and_unsafe_directories() {
+        let (directory, location) = location();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        symlink(outside.path(), directory.path().join(DATABASE_NAME)).unwrap();
+        assert!(Database::open(&location).is_err());
+        assert_eq!(outside.as_file().metadata().unwrap().len(), 0);
+        fs::remove_file(directory.path().join(DATABASE_NAME)).unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(
+            Database::open(&location),
+            Err(Error::UnsafeLocation)
+        ));
+    }
+
+    #[test]
+    fn resolves_parent_aliases_but_rejects_a_symlinked_state_directory() {
+        let (directory, _) = location();
+        let alias = directory.path().join("parent-alias");
+        symlink(directory.path(), &alias).unwrap();
+        let state = alias.join("state");
+        let location = StateLocation::Directory(state);
+        let mut database = Database::open(&location).unwrap();
+        let saved = database.create_pair(&values()).unwrap();
+        drop(database);
+        let database = Database::open(&location).unwrap();
+        assert_eq!(database.pair(&saved.id).unwrap().unwrap().id, saved.id);
+        drop(database);
+
+        let state_alias = directory.path().join("state-alias");
+        symlink(directory.path().join("state"), &state_alias).unwrap();
+        assert!(matches!(
+            Database::open(&StateLocation::Directory(state_alias)),
+            Err(Error::UnsafeLocation)
+        ));
+    }
+
+    #[test]
+    fn refuses_an_unmarked_existing_sqlite_container_even_without_tables() {
+        let (directory, location) = location();
+        let path = directory.path().join(DATABASE_NAME);
+        drop(private_file(&path).unwrap());
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("VACUUM").unwrap();
+        drop(connection);
+        let before = fs::read(&path).unwrap();
+        assert!(!before.is_empty());
+        assert!(matches!(
+            Database::open(&location),
+            Err(Error::ForeignDatabase)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn minimum_reader_refusal_preserves_current_schema_data() {
+        let (directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        database.create_pair(&values()).unwrap();
+        database
+            .connection
+            .execute(
+                "UPDATE state_meta SET minimum_reader=?1",
+                [SCHEMA_VERSION + 1],
+            )
+            .unwrap();
+        drop(database);
+        let path = directory.path().join(DATABASE_NAME);
+        let before = fs::read(&path).unwrap();
+        assert!(matches!(
+            Database::open(&location),
+            Err(Error::UnsupportedReader { .. })
+        ));
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn online_backup_includes_committed_wal_rows() {
+        let (directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let saved = database.create_pair(&values()).unwrap();
+        assert!(
+            fs::metadata(directory.path().join("state.db-wal"))
+                .unwrap()
+                .len()
+                > 0
+        );
+        backup(&database.connection, directory.path(), SCHEMA_VERSION).unwrap();
+        let entry = fs::read_dir(directory.path())
+            .unwrap()
+            .map(Result::unwrap)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("state-before-v1-")
+            })
+            .unwrap();
+        let copy =
+            Connection::open_with_flags(entry.path(), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let name: String = copy
+            .query_row("SELECT name FROM pair WHERE id=?1", [saved.id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(name, saved.values.name);
+    }
+
+    #[test]
+    fn initial_migration_backs_up_existing_container_and_rolls_back_bad_sql() {
+        let (directory, location) = location();
+        let path = directory.path().join(DATABASE_NAME);
+        drop(private_file(&path).unwrap());
+        let mut connection = Connection::open(&path).unwrap();
+        connection
+            .pragma_update(None, "application_id", APPLICATION_ID)
+            .unwrap();
+        assert!(migrate(&mut connection, "CREATE TABLE partial(value); INVALID SQL;").is_err());
+        let partial: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name='partial'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(partial, 0);
+        drop(connection);
+        let database = Database::open(&location).unwrap();
+        assert!(database.pairs().unwrap().is_empty());
+        let backups = fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("state-before-v0-")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(backups.len(), 1);
+        let original =
+            Connection::open_with_flags(backups[0].path(), OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        assert_eq!(
+            original
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            0
+        );
+    }
+}

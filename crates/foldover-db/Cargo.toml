@@ -8,3 +8,18 @@ rust-version.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+rusqlite = { version = "0.40.2", default-features = false, features = ["libsqlite3-sys", "bundled", "backup"] }
+rustix = { version = "1", features = ["fs", "process"] }
+thiserror = "2"
+uuid = { version = "1.28.0", features = ["v4"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+linux-raw-sys = { version = "0.12.1", features = ["general"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
