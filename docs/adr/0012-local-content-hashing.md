@@ -47,6 +47,14 @@ live process-context verification are candidates; neither is established by
 this read primitive. A hand-written unsafe wrapper is not permitted by the
 repository's Rust rules. Account-backed File Provider verification remains open.
 
+The packaged LaunchAgent now explicitly sets `MaterializeDatalessFiles=false`.
+CI checks the template and runs isolated launchd jobs with disabled/enabled
+policies, inspecting the main thread, worker threads and a child through native
+`getiopolicy_np`. This verifies managed-launch policy inheritance without
+reading cloud data. It does not verify that a manually started agent has that
+policy, or close the account-backed File Provider gate. A production runtime
+context check is still required before exposing content methods.
+
 ## Verification
 
 Tests cover official empty/`abc` BLAKE3 vectors, multichunk reads, cancellation,
