@@ -102,8 +102,9 @@ def configuration(cli, endpoint, directory, policy):
     left, right = directory / "left", directory / "right"
     left.mkdir()
     right.mkdir()
-    # Include undecodable bytes: neither the CLI nor the wire may replace them.
-    raw = os.path.join(os.fsencode(left), b"raw-\xff")
+    # Linux permits undecodable names; APFS requires a valid UTF-8 fixture.
+    name = b"raw-\xff" if sys.platform == "linux" else "raw-é".encode()
+    raw = os.path.join(os.fsencode(left), name)
     os.mkdir(raw)
     arguments = ("pairs", "add", "Photos", raw, str(right), "backup-left")
     created = invoke(cli, endpoint, arguments)
