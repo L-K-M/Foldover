@@ -135,6 +135,7 @@ final class BenchRunner {
         var batchProfiles: [BenchBatchProfile] = []
         while delivered < records.count, !overBudget() {
             let end = min(delivered + Self.batchSize, records.count)
+            text.resetProfile()
             let before = CACurrentMediaTime()
             model.deliver(records[delivered ..< end], text: text)
             let delivery = (CACurrentMediaTime() - before) * 1_000
@@ -148,7 +149,11 @@ final class BenchRunner {
                 expansionMilliseconds: outline?.expansionMilliseconds,
                 parentGroups: outline?.parentGroups,
                 newFolders: outline?.newFolders,
-                visibleRows: outline?.visibleRows
+                visibleRows: outline?.visibleRows,
+                dateFormattingMilliseconds: text.dateFormattingMilliseconds,
+                sizeFormattingMilliseconds: text.sizeFormattingMilliseconds,
+                formattedDates: text.formattedDates,
+                formattedSizes: text.formattedSizes
             ))
             delivered = end
             try? await Task.sleep(for: Self.batchInterval)

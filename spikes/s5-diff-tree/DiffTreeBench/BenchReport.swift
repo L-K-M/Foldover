@@ -62,6 +62,8 @@ struct DiffTreeBenchReport: Codable {
                 lines.append("    batch p95: model=\(format(BenchStatistics.percentile(run.batches.map(\.modelMilliseconds), p: 95)))ms"
                     + " inserts=\(format(BenchStatistics.percentile(run.batches.compactMap(\.insertionMilliseconds), p: 95)))ms"
                     + " expansion=\(format(BenchStatistics.percentile(run.batches.compactMap(\.expansionMilliseconds), p: 95)))ms")
+                lines.append("    formatting p95: dates=\(format(BenchStatistics.percentile(run.batches.map(\.dateFormattingMilliseconds), p: 95)))ms"
+                    + " sizes=\(format(BenchStatistics.percentile(run.batches.map(\.sizeFormattingMilliseconds), p: 95)))ms")
             }
             for failure in run.failures {
                 lines.append("    failed: \(failure)")
@@ -144,6 +146,10 @@ struct BenchBatchProfile: Codable {
     let parentGroups: Int?
     let newFolders: Int?
     let visibleRows: Int?
+    let dateFormattingMilliseconds: Double
+    let sizeFormattingMilliseconds: Double
+    let formattedDates: Int
+    let formattedSizes: Int
 }
 
 /// One phase's reduced numbers: frame intervals between the phase's
