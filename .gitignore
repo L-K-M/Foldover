@@ -19,6 +19,9 @@ build/
 # The doc checks' npm install (tools/doccheck).
 node_modules/
 
+# Python spike and documentation test imports.
+__pycache__/
+
 # macOS and editors.
 .DS_Store
 .vscode/

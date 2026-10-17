@@ -1,0 +1,40 @@
+# S4: Metadata fidelity
+
+Run on macOS 27:
+
+```sh
+python3 -m unittest discover -s spikes/s4-metadata -v
+mkdir -p target
+python3 spikes/s4-metadata/spike.py target/s4-results.json
+```
+
+The harness creates a case-sensitive APFS source image and APFS/exFAT
+target images. It probes each target before copying a corpus through
+`ditto --rsrc --extattr --acl` and back. The corpus covers content, mode,
+fractional mtime, Finder tags, resource forks, FinderInfo, ACLs, flags,
+symlinks, hard links, sparse files, NFC/NFD names, colons, case collisions
+and bundle trees. Directory-root metadata is included.
+
+Each difference is retained in JSON. Unsupported metadata predicts its
+absence, never corrupted content or attribute values. Unavailable probes
+do not excuse losses. Known name collisions and unrepresentable entry kinds
+are blocked before copying. AppleDouble sidecars are identified by a
+bounded v2 header/table check and recorded separately from logical entries.
+
+To add an existing Samba mount, use a unique label and its mount point:
+
+```sh
+python3 spikes/s4-metadata/spike.py target/s4-results.json \
+  --mounted-target samba-fruit=/Volumes/S4Fruit \
+  --mounted-target samba-no-fruit=/Volumes/S4Plain
+```
+
+Writes use fresh temporary directories inside those mounts. Existing data
+is not copied, replaced or deleted. Only the harness's disk images are
+detached. Cleanup failure fails the harness.
+
+The command's success means measurements completed. Inspect
+`tested_targets_passed`, per-case differences and `unavailable_targets`.
+`full_s4_passed` remains false: SFTP extension/operation probes and physical
+target validation are outstanding. `ditto` is a baseline, not a claim about
+the future Rust endpoint. Rename-over success does not prove crash atomicity.

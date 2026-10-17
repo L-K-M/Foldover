@@ -1,0 +1,49 @@
+name: spike-s4
+
+on:
+  pull_request:
+    paths:
+      - spikes/s4-metadata/**
+      - .github/workflows/spike-s4.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  logic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Test loss classification and snapshot boundaries
+        run: python3 -m unittest discover -s spikes/s4-metadata -v
+
+  measure:
+    runs-on: xcode-27
+    timeout-minutes: 25
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Log the measured environment
+        run: |
+          sw_vers
+          xcodebuild -version
+          python3 --version
+      - name: Test loss classification and snapshot boundaries
+        run: python3 -m unittest discover -s spikes/s4-metadata -v
+      # A completed measurement can miss its gate; inspect JSON before deciding.
+      - name: Measure APFS and exFAT round trips
+        run: python3 spikes/s4-metadata/spike.py "$RUNNER_TEMP/s4-results.json"
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: s4-results
+          path: ${{ runner.temp }}/s4-results.json
+          if-no-files-found: error
