@@ -31,7 +31,7 @@ final class BenchRunner {
     private let clock = ContinuousClock()
     private let startedAt = ContinuousClock.now
 
-    /// The whole benchmark: generate the plan once, run both
+    /// The whole benchmark: generate the plan once, run all
     /// implementations over it, reduce to the report. Never throws.
     func run() async -> DiffTreeBenchReport {
         var environment = BenchEnvironment.collect()
@@ -42,7 +42,7 @@ final class BenchRunner {
         environment.baselineFootprintBytes = SystemProbes.physicalFootprint()
         var runs: [BenchRun] = []
         var failures: [String] = []
-        for implementation in [Implementation.appkit, .swiftui] {
+        for implementation in Implementation.allCases {
             let unsettled = await settle()
             let run = await runOnce(
                 implementation,
@@ -58,7 +58,7 @@ final class BenchRunner {
         }
         let checks = evaluate(runs: runs)
         let verdict: String
-        if runs.count != 2 {
+        if runs.count != Implementation.allCases.count {
             verdict = "incomplete"
         } else {
             verdict = checks.allSatisfy { !$0.gate || $0.pass } ? "pass" : "fail"
@@ -117,8 +117,8 @@ final class BenchRunner {
         let footprint = FootprintSampler()
         sampler.extras = { [weak appkitRefs, weak swiftUISeam] in
             switch implementation {
-            case .appkit:
-                (appkitRefs?.outlineView?.numberOfRows ?? 0) > 0
+            case .appkit, .flatTable:
+                (appkitRefs?.tableView?.numberOfRows ?? 0) > 0
             case .swiftui:
                 swiftUISeam?.firstRowAppearedAt != nil
             }
@@ -168,6 +168,9 @@ final class BenchRunner {
         let rowsOnScreen = rowsOnScreen(
             implementation, appkitRefs: appkitRefs, swiftUISeam: swiftUISeam
         )
+        if rowsOnScreen != records.count {
+            failures.append("only \(rowsOnScreen) of \(records.count) rows were available for scrolling")
+        }
         let total = model.deliveredCount
         if total > 1 {
             for step in 0 ..< Self.scrollSteps where !overBudget() {
@@ -182,27 +185,41 @@ final class BenchRunner {
         let scrollReached = scrollPosition(
             implementation, appkitRefs: appkitRefs, swiftUISeam: swiftUISeam
         )
+        if scrollReached <= 0 {
+            failures.append("the scroll sweep did not move")
+        }
+        let reachedLastRow = lastRowReached(
+            implementation, total: total,
+            appkitRefs: appkitRefs, swiftUISeam: swiftUISeam
+        )
+        if !reachedLastRow {
+            failures.append("the scroll sweep did not reach the last row")
+        }
         let afterScroll = SystemProbes.physicalFootprint()
 
         // Phases "collapseAll"/"expandAll": AppKit's native pair vs
         // the model-driven pair the SwiftUI API forces.
-        sampler.currentPhase = "collapseAll"
-        let collapseAt = CACurrentMediaTime()
-        collapseAll(
-            implementation, model: model,
-            appkitRefs: appkitRefs, swiftUISeam: swiftUISeam
-        )
-        callWalls["collapseAll"] = (CACurrentMediaTime() - collapseAt) * 1_000
-        await waitForTicks(4, sampler: sampler)
+        // A flat list has no disclosure operation. Omit these phases instead of
+        // reporting a zero-cost no-op as a successful hierarchy benchmark.
+        if implementation != .flatTable {
+            sampler.currentPhase = "collapseAll"
+            let collapseAt = CACurrentMediaTime()
+            collapseAll(
+                implementation, model: model,
+                appkitRefs: appkitRefs, swiftUISeam: swiftUISeam
+            )
+            callWalls["collapseAll"] = (CACurrentMediaTime() - collapseAt) * 1_000
+            await waitForTicks(4, sampler: sampler)
 
-        sampler.currentPhase = "expandAll"
-        let expandAt = CACurrentMediaTime()
-        expandAll(
-            implementation, model: model,
-            appkitRefs: appkitRefs, swiftUISeam: swiftUISeam
-        )
-        callWalls["expandAll"] = (CACurrentMediaTime() - expandAt) * 1_000
-        await waitForTicks(4, sampler: sampler)
+            sampler.currentPhase = "expandAll"
+            let expandAt = CACurrentMediaTime()
+            expandAll(
+                implementation, model: model,
+                appkitRefs: appkitRefs, swiftUISeam: swiftUISeam
+            )
+            callWalls["expandAll"] = (CACurrentMediaTime() - expandAt) * 1_000
+            await waitForTicks(4, sampler: sampler)
+        }
 
         sampler.currentPhase = "drain"
         await waitForTicks(2, sampler: sampler)
@@ -245,7 +262,8 @@ final class BenchRunner {
             memoryGrowthPercent: growth,
             rowsOnScreenAtScroll: rowsOnScreen,
             scrollReachedPoints: scrollReached,
-            batches: batchProfiles
+            batches: batchProfiles,
+            lastRowReached: reachedLastRow
         )
     }
 
@@ -289,8 +307,8 @@ final class BenchRunner {
         swiftUISeam: SwiftUITreeSeam
     ) -> Int {
         switch implementation {
-        case .appkit:
-            appkitRefs.outlineView?.numberOfRows ?? 0
+        case .appkit, .flatTable:
+            appkitRefs.tableView?.numberOfRows ?? 0
         case .swiftui:
             Int(swiftUISeam.metrics.contentHeight / DiffTreeMetrics.pitch)
         }
@@ -303,10 +321,27 @@ final class BenchRunner {
         swiftUISeam: SwiftUITreeSeam
     ) -> Double {
         switch implementation {
-        case .appkit:
+        case .appkit, .flatTable:
             Double(appkitRefs.scrollView?.contentView.bounds.minY ?? 0)
         case .swiftui:
             Double(swiftUISeam.metrics.top)
+        }
+    }
+
+    private func lastRowReached(
+        _ implementation: Implementation,
+        total: Int,
+        appkitRefs: AppKitTreeRefs,
+        swiftUISeam: SwiftUITreeSeam
+    ) -> Bool {
+        switch implementation {
+        case .appkit, .flatTable:
+            guard let table = appkitRefs.tableView else { return false }
+            let visible = table.rows(in: table.visibleRect)
+            return visible.location != NSNotFound && NSMaxRange(visible) >= total
+        case .swiftui:
+            let metrics = swiftUISeam.metrics
+            return metrics.top > 0 && metrics.top + metrics.height >= metrics.contentHeight
         }
     }
 
@@ -321,14 +356,14 @@ final class BenchRunner {
         swiftUISeam: SwiftUITreeSeam
     ) {
         switch implementation {
-        case .appkit:
-            guard let outline = appkitRefs.outlineView,
-                  let scroll = appkitRefs.scrollView,
-                  rank >= 0, rank < outline.numberOfRows
+        case .appkit, .flatTable:
+            guard let table = appkitRefs.tableView,
+                   let scroll = appkitRefs.scrollView,
+                   rank >= 0, rank < table.numberOfRows
             else {
                 return
             }
-            let top = outline.rect(ofRow: rank).minY
+            let top = table.rect(ofRow: rank).minY
             let clip = scroll.contentView
             clip.scroll(to: NSPoint(x: 0, y: top))
             scroll.reflectScrolledClipView(clip)
@@ -351,6 +386,8 @@ final class BenchRunner {
             appkitRefs.outlineView?.collapseItem(nil, collapseChildren: true)
         case .swiftui:
             model.collapseAllChildren()
+        case .flatTable:
+            break
         }
     }
 
@@ -366,6 +403,8 @@ final class BenchRunner {
             appkitRefs.outlineView?.expandItem(nil, expandChildren: true)
         case .swiftui:
             model.expandAllChildren()
+        case .flatTable:
+            break
         }
     }
 
@@ -508,18 +547,28 @@ final class BenchRunner {
         )
     }
 
-    /// The pass criteria (PLAN.md §8 S5, made precise): the AppKit run
-    /// gates — first rows under a second, frame-interval p95 at or
+    /// The pass criteria (PLAN.md §8 S5, made precise): both AppKit candidates
+    /// gate — first rows under a second, frame-interval p95 at or
     /// under the 60 Hz frame while streaming and scrolling, no stall
     /// past 100 ms, memory flat while scrolling. The same numbers are
     /// evaluated for SwiftUI, recorded without gating.
     private func evaluate(runs: [BenchRun]) -> [BenchCheck] {
         var checks: [BenchCheck] = []
         for run in runs {
-            let gate = run.implementation == Implementation.appkit.rawValue
+            let gate = run.implementation != Implementation.swiftui.rawValue
             let stream = run.phases.first { $0.name == "stream" }
             let scroll = run.phases.first { $0.name == "scroll" }
             let worstStall = run.phases.map(\.maxStallMilliseconds).max()
+            checks.append(BenchCheck(
+                name: "\(run.implementation).completeExercise",
+                implementation: run.implementation,
+                pass: run.ok && run.rowsOnScreenAtScroll == PlanGenerator.rowCount
+                    && run.scrollReachedPoints > 0 && run.lastRowReached,
+                detail: "all plan rows available and the last row reached, with no run failures",
+                value: Double(run.rowsOnScreenAtScroll),
+                limit: Double(PlanGenerator.rowCount),
+                gate: gate
+            ))
             checks.append(BenchCheck(
                 name: "\(run.implementation).firstRows<1000ms",
                 implementation: run.implementation,
@@ -532,7 +581,7 @@ final class BenchRunner {
             checks.append(BenchCheck(
                 name: "\(run.implementation).stream.p95<=16.7ms",
                 implementation: run.implementation,
-                pass: stream.map { $0.frameP95Milliseconds <= 16.7 } ?? false,
+                pass: stream.map { $0.frameCount > 0 && $0.frameP95Milliseconds <= 16.7 } ?? false,
                 detail: "frame-interval p95 at or under the 60 Hz frame while streaming",
                 value: stream?.frameP95Milliseconds,
                 limit: 16.7,
@@ -541,7 +590,7 @@ final class BenchRunner {
             checks.append(BenchCheck(
                 name: "\(run.implementation).scroll.p95<=16.7ms",
                 implementation: run.implementation,
-                pass: scroll.map { $0.frameP95Milliseconds <= 16.7 } ?? false,
+                pass: scroll.map { $0.frameCount > 0 && $0.frameP95Milliseconds <= 16.7 } ?? false,
                 detail: "frame-interval p95 at or under the 60 Hz frame while scrolling",
                 value: scroll?.frameP95Milliseconds,
                 limit: 16.7,
