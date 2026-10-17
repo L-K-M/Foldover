@@ -2,10 +2,15 @@
 """Exercise the built CLI and a real agent over a private Unix socket."""
 
 import argparse
+from contextlib import closing
 import json
+import os
 from pathlib import Path
 import socket
+import sqlite3
+import stat
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -22,9 +27,10 @@ def invoke(cli, endpoint):
                           capture_output=True, text=True, timeout=COMMAND_SECONDS)
 
 
-def start(agent, cli, endpoint):
+def start(agent, cli, endpoint, environment):
     child = subprocess.Popen([str(agent), "--socket", str(endpoint)],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                             env=environment, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.PIPE, text=True)
     try:
         deadline = time.monotonic() + STARTUP_SECONDS
         while time.monotonic() < deadline:
@@ -67,13 +73,29 @@ def main():
     arguments = parser.parse_args()
     agent, cli = arguments.agent.resolve(), arguments.cli.resolve()
     with tempfile.TemporaryDirectory(prefix="foldover-agent-") as directory:
+        home = Path(directory)
+        environment = dict(os.environ, HOME=str(home), XDG_DATA_HOME=str(home / "data"))
+        state = (home / "Library/Application Support/Foldover" if sys.platform == "darwin"
+                 else home / "data/foldover")
         endpoint = Path(directory) / "s"
-        child = start(agent, cli, endpoint)
+        child = start(agent, cli, endpoint, environment)
         try:
             duplicate = subprocess.run([str(agent), "--socket", str(endpoint)],
-                                       capture_output=True, text=True, timeout=COMMAND_SECONDS)
+                                       env=environment, capture_output=True,
+                                       text=True, timeout=COMMAND_SECONDS)
             if duplicate.returncode == 0 or "runtime lock" not in duplicate.stderr:
                 raise RuntimeError(f"Second agent was not rejected: {duplicate.stderr}")
+
+            other = Path(directory) / "other" / "s"
+            duplicate = subprocess.run([str(agent), "--socket", str(other)],
+                                       env=environment, capture_output=True,
+                                       text=True, timeout=COMMAND_SECONDS)
+            if duplicate.returncode == 0 or "state writer lock" not in duplicate.stderr:
+                raise RuntimeError(f"A second socket bypassed state ownership: {duplicate.stderr}")
+            for path, mode in [(state, 0o700), (state / "state.db", 0o600),
+                               (state / "writer.lock", 0o600)]:
+                if stat.S_IMODE(path.stat().st_mode) != mode:
+                    raise RuntimeError(f"Unsafe state permissions: {path}")
 
             unknown = exchange(endpoint, b'{"jsonrpc":"2.0","method":"pair.list","id":"private"}\n')
             if unknown.get("error", {}).get("code") != METHOD_NOT_FOUND:
@@ -92,17 +114,31 @@ def main():
             if invoke(cli, endpoint).returncode == 0:
                 raise RuntimeError("CLI reported an unavailable agent as connected")
             child.stderr.close()
-            child = start(agent, cli, endpoint)
+            child = start(agent, cli, endpoint, environment)
             child.terminate()
             if child.wait(timeout=COMMAND_SECONDS) != 0:
                 raise RuntimeError("Agent did not shut down cleanly on SIGTERM")
+
+            database = state / "state.db"
+            with closing(sqlite3.connect(database)) as connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                connection.execute(f"PRAGMA user_version={version + 1}")
+                connection.commit()
+            before = database.read_bytes()
+            incompatible = subprocess.run([str(agent), "--socket", str(endpoint)],
+                                          env=environment, capture_output=True,
+                                          text=True, timeout=COMMAND_SECONDS)
+            if incompatible.returncode == 0 or "schema reader" not in incompatible.stderr:
+                raise RuntimeError(f"Incompatible state was not refused: {incompatible.stderr}")
+            if database.read_bytes() != before:
+                raise RuntimeError("Incompatible-state refusal changed the database")
         finally:
             if child.poll() is None:
                 child.kill()
                 child.wait(timeout=COMMAND_SECONDS)
             if child.stderr is not None:
                 child.stderr.close()
-    print("Agent/CLI startup, handshake, single ownership, framing, crash restart and shutdown passed")
+    print("Agent/CLI startup, state ownership, compatibility refusal, framing, crash restart and shutdown passed")
 
 
 if __name__ == "__main__":

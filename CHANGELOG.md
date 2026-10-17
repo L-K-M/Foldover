@@ -9,7 +9,7 @@ All notable changes to this project are documented here. The format follows
 ### Added
 
 - Typed local pair configuration and SQLite WAL persistence, with exclusive
-  writer ownership, compatibility guards, migration backups and revision checks.
+  agent-owned writer locks, compatibility guards, migration backups and revision checks.
 - Health-only background agent, typed Unix-socket client, `foldover status`,
   native registration/status controls, and embedded ad-hoc-signed helpers.
 - Read-only local metadata access through held directory handles, with

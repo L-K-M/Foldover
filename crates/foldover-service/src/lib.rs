@@ -13,6 +13,12 @@ pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// Acquire persistent state before serving requests. The returned owner must
+/// outlive the server, even while the API exposes only health methods.
+pub fn open_state() -> Result<impl Send, impl std::error::Error + Send + Sync> {
+    foldover_engine::open_state()
+}
+
 /// Only the user-gated health methods exist. Privileged routes remain closed
 /// until installed-client authentication and method scope are implemented.
 pub async fn handle(request: Request) -> Result<Value, RpcError> {

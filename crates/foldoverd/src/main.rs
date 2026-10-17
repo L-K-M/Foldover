@@ -38,14 +38,16 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run(location: foldover_ipc::SocketLocation) -> Result<(), foldover_ipc::Error> {
+async fn run(location: foldover_ipc::SocketLocation) -> Result<(), Box<dyn std::error::Error>> {
     let listener = foldover_ipc::bind(&location)?;
+    let _state = foldover_service::open_state()?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
-        result = foldover_ipc::serve(listener, foldover_service::handle) => result,
-        signal = tokio::signal::ctrl_c() => { signal?; Ok(()) },
-        _ = terminate.recv() => Ok(()),
+        result = foldover_ipc::serve(listener, foldover_service::handle) => result?,
+        signal = tokio::signal::ctrl_c() => signal?,
+        _ = terminate.recv() => (),
     }
+    Ok(())
 }
 
 fn request(args: impl Iterator<Item = OsString>) -> Request {

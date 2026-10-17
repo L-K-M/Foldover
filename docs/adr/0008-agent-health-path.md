@@ -19,8 +19,14 @@ Use bounded newline JSON-RPC frames, request deadlines, bounded connection
 and batch counts, exact response IDs, and notification suppression. A private
 0700 runtime directory, 0600 socket and exclusive runtime lock prevent
 duplicate default agents. A stale socket is removed only after locking;
-regular files and symlinks are refused. This is not yet the state-directory
-writer lock required for persistence.
+regular files and symlinks are refused.
+
+Before serving requests, `service → engine → state` opens the persistent
+store and the agent holds its exclusive writer guard until shutdown.
+Different runtime/socket locations cannot bypass state ownership. An unsafe,
+already-owned or incompatible state location causes startup to fail with an
+error on stderr before a health connection can succeed. The runtime and
+state-directory locks protect separate resources.
 
 The macOS app embeds arm64 agent/CLI executables and a `BundleProgram`
 LaunchAgent plist. Helpers are signed ad hoc with Hardened Runtime.
@@ -31,10 +37,13 @@ Quitting the app does not stop the separately launched agent.
 ## Verification
 
 `cargo xtask agent-smoke` builds the exact Cargo-reported executables and
-checks the real CLI/agent lifecycle: startup, handshake, duplicate rejection,
+checks the real CLI/agent lifecycle: startup, handshake, duplicate rejection
+through both the same and different sockets, private state permissions,
 unknown/malformed requests, notification/null-ID handling, unavailable-agent
-failure, SIGKILL restart and clean SIGTERM shutdown. The smoke also runs
-inside `cargo xtask ci`. Unit tests cover wire validation, framing, runtime
+failure, SIGKILL restart and clean SIGTERM shutdown. It then verifies that a
+future state schema prevents startup without changing database bytes.
+The smoke uses isolated HOME/XDG data directories and also runs inside
+`cargo xtask ci`. Unit tests cover wire validation, framing, runtime
 directory protections and service dispatch.
 
 macOS CI additionally runs the smoke on the signed embedded executables and
@@ -53,6 +62,6 @@ file-access permissions or a sync workflow.
 ## Remaining gates
 
 Clean-Mac registration/approval, TCC attribution, update/downgrade, crash-loop
-safe mode, installed-client authentication, persistent writer ownership,
+safe mode, native state-error guidance, installed-client authentication,
 subscriptions, reconnect and all sync operations remain required. Packaging
 or health success does not close S6, S7, P2 or P3.
