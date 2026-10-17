@@ -114,6 +114,12 @@ def main():
             report["server_stderr"] = errors
             if process.returncode:
                 raise RuntimeError(f"Server exited {process.returncode}: {errors}")
+        except Exception:
+            if process.poll() is None:
+                process.kill()
+            output, errors = process.communicate(timeout=STARTUP_TIMEOUT_SECONDS)
+            sys.stderr.write(f"Server observations before harness failure:\n{output}\n{errors}\n")
+            raise
         finally:
             if process.poll() is None:
                 process.kill()

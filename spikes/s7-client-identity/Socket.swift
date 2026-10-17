@@ -101,8 +101,16 @@ enum ProbeSocket {
                 tv_sec: Int(remaining / NSEC_PER_SEC),
                 tv_usec: suseconds_t(max(1, (remaining % NSEC_PER_SEC) / NSEC_PER_USEC))
             )
-            try check(setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout,
-                                 socklen_t(MemoryLayout.size(ofValue: timeout))), "read deadline")
+            let timeoutBytes = socklen_t(MemoryLayout.size(ofValue: timeout))
+            let configured = setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, timeoutBytes)
+            let error = errno
+            guard configured == 0 else {
+                throw ProbeError.invalid(
+                    "read deadline errno=\(error), seconds=\(timeout.tv_sec), " +
+                    "microseconds=\(timeout.tv_usec), bytes=\(timeoutBytes), " +
+                    "stride=\(MemoryLayout<timeval>.stride)"
+                )
+            }
             var byte: UInt8 = 0
             let count = recv(descriptor, &byte, 1, 0)
             guard count == 1 else { throw ProbeError.system("recv", count == 0 ? ECONNRESET : errno) }
