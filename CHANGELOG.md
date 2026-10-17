@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Deterministic tree-plan candidates, with hierarchy validation, conflicted-branch
+  blocking, per-target deletion review and cancellation; no execution API yet.
 - Exact interactive/unattended deletion-review thresholds, with validated
   counts and finite-model boundary checks; execution integration remains pending.
 - Authenticated local pair create/read/update APIs, paged lists and CLI commands,
