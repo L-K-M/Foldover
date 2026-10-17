@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Validated root-relative sync paths that preserve exact name bytes and
+  reject traversal, rooted paths and ambiguous components.
 - Three-way entry classification for Sync, Mirror and Backup, with
   per-side metadata baselines and finite-model safety checks.
 - Competitor research and the product plan ([#1](https://github.com/L-K-M/Foldover/pull/1)).
