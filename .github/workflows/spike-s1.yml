@@ -6,6 +6,12 @@ name: spike-s1
 # job fails only when the harness itself breaks.
 on:
   workflow_dispatch:
+    inputs:
+      soak_seconds:
+        description: Soak duration (0 runs only the original benchmark)
+        type: choice
+        options: ['0', '3600']
+        default: '3600'
   pull_request:
     paths:
       - spikes/s1-uniffi-events/**
@@ -27,7 +33,10 @@ defaults:
 jobs:
   bench:
     runs-on: macos-26
-    timeout-minutes: 30
+    timeout-minutes: 90
+    env:
+      # PRs exercise teardown and heap scanning without claiming the hour gate passed.
+      S1_SOAK_SECONDS: ${{ inputs.soak_seconds || '10' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28

@@ -3,6 +3,7 @@
 # event-bridge benchmark on macOS and write its JSON report.
 #
 # Usage: spikes/s1-uniffi-events/run.sh <results.json>
+# Set S1_SOAK_SECONDS=3600 for the one-hour memory and lifecycle probe.
 #
 # What it does:
 #   1. Builds the s1-ffi release staticlib for aarch64-apple-darwin.
@@ -82,6 +83,8 @@ xcodebuild -create-xcframework \
 # 4. Build and run the benchmark under the strict flags; it prints
 # the human summary.
 cd "$SPIKE_DIR/swift"
+# Swift Testing re-enters this executable's CLI on macOS; use XCTest discovery.
+swift test -c release --disable-swift-testing
 swift run -c release Bench "$RESULTS_JSON"
 
 if [ ! -f "$RESULTS_JSON" ]; then

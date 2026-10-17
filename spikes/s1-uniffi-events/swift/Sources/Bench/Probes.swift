@@ -7,6 +7,28 @@
 import Foundation
 
 enum Probes {
+    /// Scan this still-live process after stream teardown, preserving failures verbatim.
+    static func scanHeap() -> HeapScan {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/leaks")
+        process.arguments = ["\(ProcessInfo.processInfo.processIdentifier)"]
+        process.standardOutput = output
+        process.standardError = output
+
+        do {
+            try process.run()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            return HeapScan(
+                exitStatus: process.terminationStatus,
+                output: String(decoding: data, as: UTF8.self)
+            )
+        } catch {
+            return HeapScan(exitStatus: nil, output: "\(error)")
+        }
+    }
+
     /// The process's `phys_footprint` — what the memory check reads
     /// before and after the repeated streams.
     static func physicalFootprint() -> UInt64 {

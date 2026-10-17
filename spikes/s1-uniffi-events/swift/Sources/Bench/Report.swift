@@ -16,6 +16,7 @@ struct BenchReport: Codable {
     var echo: EchoMeasurement
     var memory: MemoryMeasurement
     var cancelCheck: CancelMeasurement
+    var soak: SoakMeasurement?
     var concurrencyEscapes: [String]
     var checks: [PassCheck]
 
@@ -51,6 +52,13 @@ struct BenchReport: Codable {
             "  memory growth over \(memory.streams) streams: "
                 + "\(String(format: "%.2f", memory.growthPercent))%"
         )
+        if let soak {
+            lines.append(
+                "  soak: \(String(format: "%.2f", soak.elapsedSeconds))s, \(soak.streams) streams, "
+                    + "\(String(format: "%.2f", soak.growthPercent))% growth, "
+                    + "\(soak.retainedObjects) retained objects"
+            )
+        }
         lines.append(
             "  concurrency escapes: "
                 + (concurrencyEscapes.isEmpty ? "none" : concurrencyEscapes.joined(separator: "; "))

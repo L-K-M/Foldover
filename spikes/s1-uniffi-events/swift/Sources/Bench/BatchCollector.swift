@@ -18,8 +18,6 @@ actor BatchCollector {
     struct Counters: Sendable, Equatable {
         var events: UInt64 = 0
         var batches: UInt64 = 0
-        var highestSeq: UInt64 = 0
-        var sawAnySeq = false
         var outOfOrder: UInt64 = 0
     }
 
@@ -32,13 +30,12 @@ actor BatchCollector {
         mailbox.withLock { counters in
             counters.batches += 1
             for event in events {
-                if counters.sawAnySeq && event.seq < counters.highestSeq {
+                // Contiguous from zero also rejects duplicates and missing events.
+                if event.seq != counters.events {
                     counters.outOfOrder += 1
                 }
-                counters.sawAnySeq = true
-                counters.highestSeq = max(counters.highestSeq, event.seq)
+                counters.events += 1
             }
-            counters.events += UInt64(events.count)
         }
     }
 
