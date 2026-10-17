@@ -18,6 +18,7 @@ Cases cover the trusted client, a different binary claiming its identifier,
 an interpreter, a relocated copy of the trusted code, user-gated status,
 unknown methods and malformed requests. Socket paths are bounded by the
 SDK's `sun_path` capacity; reads have a frame limit and monotonic deadline.
+A native socket-pair regression checks buffered replies after a peer closes.
 
 `authorization_checks_passed` reports only these cases. `full_s7_passed`
 remains false: TCC, Full Disk Access, removable/network volumes, Local

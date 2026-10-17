@@ -96,23 +96,20 @@ enum ProbeSocket {
         while bytes.count < frameLimit {
             let now = DispatchTime.now().uptimeNanoseconds
             guard now < deadline else { throw ProbeError.invalid("Request deadline exceeded") }
-            let remaining = deadline - now
-            var timeout = timeval(
-                tv_sec: Int(remaining / NSEC_PER_SEC),
-                tv_usec: suseconds_t(max(1, (remaining % NSEC_PER_SEC) / NSEC_PER_USEC))
-            )
-            let timeoutBytes = socklen_t(MemoryLayout.size(ofValue: timeout))
-            let configured = setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, timeoutBytes)
-            let error = errno
-            guard configured == 0 else {
-                throw ProbeError.invalid(
-                    "read deadline errno=\(error), seconds=\(timeout.tv_sec), " +
-                    "microseconds=\(timeout.tv_usec), bytes=\(timeoutBytes), " +
-                    "stride=\(MemoryLayout<timeval>.stride)"
-                )
+            // Drain buffered replies without mutating socket timeout state after a peer closes.
+            var readiness = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+            let remainingMilliseconds = Int32(max(1, (deadline - now) / NSEC_PER_MSEC))
+            let ready = poll(&readiness, 1, remainingMilliseconds)
+            if ready < 0 {
+                if errno == EINTR { continue }
+                throw ProbeError.system("poll", errno)
+            }
+            guard ready > 0 else {
+                throw ProbeError.invalid("Request deadline exceeded")
             }
             var byte: UInt8 = 0
-            let count = recv(descriptor, &byte, 1, 0)
+            let count = recv(descriptor, &byte, 1, MSG_DONTWAIT)
+            if count < 0 && (errno == EINTR || errno == EAGAIN) { continue }
             guard count == 1 else { throw ProbeError.system("recv", count == 0 ? ECONNRESET : errno) }
             if byte == UInt8(ascii: "\n") { return bytes }
             bytes.append(byte)
