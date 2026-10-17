@@ -83,7 +83,8 @@ final class AgentStore {
 
     private func message(for error: Error) -> String {
         switch error {
-        case AgentError.Connection(let message), AgentError.NotRunning(let message): message
+        case AgentError.Connection(let message), AgentError.NotRunning(let message),
+             AgentError.Request(let message): message
         default: error.localizedDescription
         }
     }

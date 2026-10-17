@@ -325,6 +325,9 @@ scope is in [ADR 0011](docs/adr/0011-pair-configuration-api.md).
 
 ### 4.5 Swift app
 
+Native pair creation and configuration editing use this stack; streamed preview,
+execution and the remaining surfaces are pending.
+
 `Views → View models → Stores → FoldoverCore`. Stores (`PairStore`,
 `ActivityStore`, `ConflictStore`, …) own the client session and turn API
 messages into view state. A sibling `System` module beside FoldoverCore wraps

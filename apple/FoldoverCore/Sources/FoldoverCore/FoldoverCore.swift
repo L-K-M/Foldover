@@ -465,6 +465,22 @@ fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
+    typealias FfiType = UInt64
+    typealias SwiftType = UInt64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterString: FfiConverter {
     typealias SwiftType = String
     typealias FfiType = RustBuffer
@@ -505,6 +521,24 @@ fileprivate struct FfiConverterString: FfiConverter {
         let len = Int32(value.utf8.count)
         writeInt(&buf, len)
         writeBytes(&buf, value.utf8)
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterData: FfiConverterRustBuffer {
+    typealias SwiftType = Data
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Data {
+        let len: Int32 = try readInt(&buf)
+        return Data(try readBytes(&buf, count: Int(len)))
+    }
+
+    public static func write(_ value: Data, into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        writeBytes(&buf, value)
     }
 }
 
@@ -560,6 +594,180 @@ public func FfiConverterTypeAgentHealth_lift(_ buf: RustBuffer) throws -> AgentH
 #endif
 public func FfiConverterTypeAgentHealth_lower(_ value: AgentHealth) -> RustBuffer {
     return FfiConverterTypeAgentHealth.lower(value)
+}
+
+
+public struct LocalPairConfiguration: Equatable, Hashable {
+    public var id: String
+    public var revision: UInt64
+    public var configuration: LocalPairDraft
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, revision: UInt64, configuration: LocalPairDraft) {
+        self.id = id
+        self.revision = revision
+        self.configuration = configuration
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension LocalPairConfiguration: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLocalPairConfiguration: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LocalPairConfiguration {
+        return
+            try LocalPairConfiguration(
+                id: FfiConverterString.read(from: &buf), 
+                revision: FfiConverterUInt64.read(from: &buf), 
+                configuration: FfiConverterTypeLocalPairDraft.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: LocalPairConfiguration, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterUInt64.write(value.revision, into: &buf)
+        FfiConverterTypeLocalPairDraft.write(value.configuration, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLocalPairConfiguration_lift(_ buf: RustBuffer) throws -> LocalPairConfiguration {
+    return try FfiConverterTypeLocalPairConfiguration.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLocalPairConfiguration_lower(_ value: LocalPairConfiguration) -> RustBuffer {
+    return FfiConverterTypeLocalPairConfiguration.lower(value)
+}
+
+
+public struct LocalPairDraft: Equatable, Hashable {
+    public var name: String
+    public var leftRoot: Data
+    public var rightRoot: Data
+    public var mode: PairMode
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, leftRoot: Data, rightRoot: Data, mode: PairMode) {
+        self.name = name
+        self.leftRoot = leftRoot
+        self.rightRoot = rightRoot
+        self.mode = mode
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension LocalPairDraft: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLocalPairDraft: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LocalPairDraft {
+        return
+            try LocalPairDraft(
+                name: FfiConverterString.read(from: &buf), 
+                leftRoot: FfiConverterData.read(from: &buf), 
+                rightRoot: FfiConverterData.read(from: &buf), 
+                mode: FfiConverterTypePairMode.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: LocalPairDraft, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterData.write(value.leftRoot, into: &buf)
+        FfiConverterData.write(value.rightRoot, into: &buf)
+        FfiConverterTypePairMode.write(value.mode, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLocalPairDraft_lift(_ buf: RustBuffer) throws -> LocalPairDraft {
+    return try FfiConverterTypeLocalPairDraft.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLocalPairDraft_lower(_ value: LocalPairDraft) -> RustBuffer {
+    return FfiConverterTypeLocalPairDraft.lower(value)
+}
+
+
+public struct PairConfigurationPage: Equatable, Hashable {
+    public var pairs: [LocalPairConfiguration]
+    public var next: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(pairs: [LocalPairConfiguration], next: String?) {
+        self.pairs = pairs
+        self.next = next
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PairConfigurationPage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePairConfigurationPage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PairConfigurationPage {
+        return
+            try PairConfigurationPage(
+                pairs: FfiConverterSequenceTypeLocalPairConfiguration.read(from: &buf), 
+                next: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PairConfigurationPage, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeLocalPairConfiguration.write(value.pairs, into: &buf)
+        FfiConverterOptionString.write(value.next, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePairConfigurationPage_lift(_ buf: RustBuffer) throws -> PairConfigurationPage {
+    return try FfiConverterTypePairConfigurationPage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePairConfigurationPage_lower(_ value: PairConfigurationPage) -> RustBuffer {
+    return FfiConverterTypePairConfigurationPage.lower(value)
 }
 
 
@@ -638,6 +846,8 @@ enum AgentError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     )
     case Connection(message: String
     )
+    case Request(message: String
+    )
 
     
 
@@ -673,6 +883,9 @@ public struct FfiConverterTypeAgentError: FfiConverterRustBuffer {
         case 2: return .Connection(
             message: try FfiConverterString.read(from: &buf)
             )
+        case 3: return .Request(
+            message: try FfiConverterString.read(from: &buf)
+            )
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -694,6 +907,11 @@ public struct FfiConverterTypeAgentError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(2))
             FfiConverterString.write(message, into: &buf)
             
+        
+        case let .Request(message):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(message, into: &buf)
+            
         }
     }
 }
@@ -711,6 +929,142 @@ public func FfiConverterTypeAgentError_lift(_ buf: RustBuffer) throws -> AgentEr
 #endif
 public func FfiConverterTypeAgentError_lower(_ value: AgentError) -> RustBuffer {
     return FfiConverterTypeAgentError.lower(value)
+}
+
+
+
+public enum PairMode: Equatable, Hashable {
+    
+    case sync
+    case mirrorLeft
+    case mirrorRight
+    case backupLeft
+    case backupRight
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PairMode: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePairMode: FfiConverterRustBuffer {
+    typealias SwiftType = PairMode
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PairMode {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .sync
+        
+        case 2: return .mirrorLeft
+        
+        case 3: return .mirrorRight
+        
+        case 4: return .backupLeft
+        
+        case 5: return .backupRight
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PairMode, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .sync:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .mirrorLeft:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .mirrorRight:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .backupLeft:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .backupRight:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePairMode_lift(_ buf: RustBuffer) throws -> PairMode {
+    return try FfiConverterTypePairMode.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePairMode_lower(_ value: PairMode) -> RustBuffer {
+    return FfiConverterTypePairMode.lower(value)
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
+    typealias SwiftType = String?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterString.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeLocalPairConfiguration: FfiConverterRustBuffer {
+    typealias SwiftType = [LocalPairConfiguration]
+
+    public static func write(_ value: [LocalPairConfiguration], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeLocalPairConfiguration.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [LocalPairConfiguration] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [LocalPairConfiguration]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeLocalPairConfiguration.read(from: &buf))
+        }
+        return seq
+    }
 }
 private let UNIFFI_RUST_FUTURE_POLL_READY: Int8 = 0
 private let UNIFFI_RUST_FUTURE_POLL_WAKE: Int8 = 1
@@ -784,6 +1138,48 @@ public func coreVersion() -> String  {
     )
 })
 }
+public func pairCreate(configuration: LocalPairDraft)async throws  -> LocalPairConfiguration  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_pair_create(FfiConverterTypeLocalPairDraft_lower(configuration)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeLocalPairConfiguration_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+public func pairPage(after: String?)async throws  -> PairConfigurationPage  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_pair_page(FfiConverterOptionString.lower(after)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePairConfigurationPage_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+public func pairUpdate(id: String, revision: UInt64, configuration: LocalPairDraft)async throws  -> LocalPairConfiguration  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_pair_update(FfiConverterString.lower(id),FfiConverterUInt64.lower(revision),FfiConverterTypeLocalPairDraft_lower(configuration)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeLocalPairConfiguration_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
 
 private enum InitializationResult {
     case ok
@@ -804,6 +1200,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_core_version() != 27554) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_pair_create() != 28129) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_pair_page() != 7401) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_pair_update() != 2038) {
         return InitializationResult.apiChecksumMismatch
     }
 
