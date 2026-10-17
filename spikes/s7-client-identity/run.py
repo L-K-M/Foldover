@@ -67,6 +67,9 @@ def main():
         common = ["xcrun", "swiftc", "-swift-version", "6", "-strict-concurrency=complete",
                   "-warnings-as-errors", "-parse-as-library", "-target", "arm64-apple-macos27.0",
                   source / "Socket.swift"]
+        socket_tests = directory / "socket-tests"
+        run(*common, source / "SocketTests.swift", "-o", socket_tests)
+        print(run(socket_tests), end="")
         run(*common, source / "Server.swift", "-o", server)
         run(*common, source / "Client.swift", "-o", trusted)
         run(*common, "-D", "LOOKALIKE", source / "Client.swift", "-o", lookalike)
