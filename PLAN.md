@@ -222,6 +222,9 @@ and implemented by the upper one.
 
 ### 4.2 Process model
 
+The health-only agent/client path is implemented; its boundary and remaining
+lifecycle gates are recorded in [ADR 0008](docs/adr/0008-agent-health-path.md).
+
 - `foldoverd` ships inside the app bundle and is registered with
   `SMAppService.agent` (plist in `Contents/Library/LaunchAgents`,
   `BundleProgram` key; `RunAtLoad`; restart on crash). On Linux it is a

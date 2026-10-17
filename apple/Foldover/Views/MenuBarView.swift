@@ -17,6 +17,9 @@ struct MenuBarView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
+            Text(viewModel.agentStatusText)
+                .font(.caption)
+
             Divider()
 
             // The WindowGroup's "main" id; if a window is already open

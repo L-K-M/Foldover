@@ -12,3 +12,4 @@ workspace = true
 [dependencies]
 foldover-service = { path = "../foldover-service" }
 foldover-ipc = { path = "../foldover-ipc" }
+tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "signal"] }

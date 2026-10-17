@@ -1,6 +1,5 @@
-// The store boundary (PLAN.md §4.5): the only file that may import
-// FoldoverCore in P0. Reads the one exported call eagerly; later
-// stores own the client session and event streams.
+// The store boundary (PLAN.md §4.5): stores own core calls and sessions.
+// The workspace version is immutable, so read it once.
 
 import FoldoverCore
 import Observation

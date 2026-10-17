@@ -507,6 +507,266 @@ fileprivate struct FfiConverterString: FfiConverter {
         writeBytes(&buf, value.utf8)
     }
 }
+
+
+public struct AgentHealth: Equatable, Hashable {
+    public var coreVersion: String
+    public var capability: AgentCapability
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(coreVersion: String, capability: AgentCapability) {
+        self.coreVersion = coreVersion
+        self.capability = capability
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension AgentHealth: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAgentHealth: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AgentHealth {
+        return
+            try AgentHealth(
+                coreVersion: FfiConverterString.read(from: &buf), 
+                capability: FfiConverterTypeAgentCapability.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AgentHealth, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.coreVersion, into: &buf)
+        FfiConverterTypeAgentCapability.write(value.capability, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAgentHealth_lift(_ buf: RustBuffer) throws -> AgentHealth {
+    return try FfiConverterTypeAgentHealth.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAgentHealth_lower(_ value: AgentHealth) -> RustBuffer {
+    return FfiConverterTypeAgentHealth.lower(value)
+}
+
+
+
+public enum AgentCapability: Equatable, Hashable {
+    
+    case healthOnly
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AgentCapability: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAgentCapability: FfiConverterRustBuffer {
+    typealias SwiftType = AgentCapability
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AgentCapability {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .healthOnly
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AgentCapability, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .healthOnly:
+            writeInt(&buf, Int32(1))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAgentCapability_lift(_ buf: RustBuffer) throws -> AgentCapability {
+    return try FfiConverterTypeAgentCapability.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAgentCapability_lower(_ value: AgentCapability) -> RustBuffer {
+    return FfiConverterTypeAgentCapability.lower(value)
+}
+
+
+
+public 
+enum AgentError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+    
+    
+    case NotRunning(message: String
+    )
+    case Connection(message: String
+    )
+
+    
+
+    
+
+    
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+    
+}
+
+#if compiler(>=6)
+extension AgentError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAgentError: FfiConverterRustBuffer {
+    typealias SwiftType = AgentError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AgentError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        
+
+        
+        case 1: return .NotRunning(
+            message: try FfiConverterString.read(from: &buf)
+            )
+        case 2: return .Connection(
+            message: try FfiConverterString.read(from: &buf)
+            )
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AgentError, into buf: inout [UInt8]) {
+        switch value {
+
+        
+
+        
+        
+        case let .NotRunning(message):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(message, into: &buf)
+            
+        
+        case let .Connection(message):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(message, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAgentError_lift(_ buf: RustBuffer) throws -> AgentError {
+    return try FfiConverterTypeAgentError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAgentError_lower(_ value: AgentError) -> RustBuffer {
+    return FfiConverterTypeAgentError.lower(value)
+}
+private let UNIFFI_RUST_FUTURE_POLL_READY: Int8 = 0
+private let UNIFFI_RUST_FUTURE_POLL_WAKE: Int8 = 1
+
+fileprivate let uniffiContinuationHandleMap = UniffiHandleMap<UnsafeContinuation<Int8, Never>>()
+
+fileprivate func uniffiRustCallAsync<F, T>(
+    rustFutureFunc: () -> UInt64,
+    pollFunc: (UInt64, @escaping UniffiRustFutureContinuationCallback, UInt64) -> (),
+    completeFunc: (UInt64, UnsafeMutablePointer<RustCallStatus>) -> F,
+    freeFunc: (UInt64) -> (),
+    liftFunc: (F) throws -> T,
+    errorHandler: ((RustBuffer) throws -> Swift.Error)?
+) async throws -> T {
+    // Make sure to call the ensure init function since future creation doesn't have a
+    // RustCallStatus param, so doesn't use makeRustCall()
+    uniffiEnsureFoldoverFfiInitialized()
+    let rustFuture = rustFutureFunc()
+    defer {
+        freeFunc(rustFuture)
+    }
+    var pollResult: Int8;
+    repeat {
+        pollResult = await withUnsafeContinuation {
+            pollFunc(
+                rustFuture,
+                { handle, pollResult in
+                    uniffiFutureContinuationCallback(handle: handle, pollResult: pollResult)
+                },
+                uniffiContinuationHandleMap.insert(obj: $0)
+            )
+        }
+    } while pollResult != UNIFFI_RUST_FUTURE_POLL_READY
+
+    return try liftFunc(makeRustCall(
+        { completeFunc(rustFuture, $0) },
+        errorHandler: errorHandler
+    ))
+}
+
+// Callback handlers for an async calls.  These are invoked by Rust when the future is ready.  They
+// lift the return value or error and resume the suspended function.
+fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: Int8) {
+    if let continuation = try? uniffiContinuationHandleMap.remove(handle: handle) {
+        continuation.resume(returning: pollResult)
+    } else {
+        print("uniffiFutureContinuationCallback invalid handle")
+    }
+}
+public func agentStatus()async throws  -> AgentHealth  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_agent_status(
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeAgentHealth_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
 /**
  * `coreVersion()` in Swift: the workspace version, via the client.
  */
@@ -532,6 +792,9 @@ private let initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_foldover_ffi_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_agent_status() != 7308) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_core_version() != 27554) {
         return InitializationResult.apiChecksumMismatch

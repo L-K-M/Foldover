@@ -24,6 +24,7 @@ fn main() -> ExitCode {
         "check-layers" => check_layers(),
         "ffi" => ffi(),
         "check-ffi" => check_ffi(),
+        "agent-smoke" => agent_smoke(),
         _ => {
             usage();
             ExitCode::FAILURE
@@ -67,10 +68,11 @@ fn check_ffi() -> ExitCode {
 /// step.
 fn ci() -> ExitCode {
     let root = workspace_root();
-    let steps: [(&str, Step); 6] = [
+    let steps: [(&str, Step); 7] = [
         ("fmt", step_fmt),
         ("clippy", step_clippy),
         ("test", step_test),
+        ("agent-smoke", step_agent_smoke),
         ("doc", step_doc),
         ("check-layers", step_check_layers),
         ("check-ffi", step_check_ffi),
@@ -109,6 +111,22 @@ fn step_clippy(root: &Path) -> bool {
 
 fn step_test(root: &Path) -> bool {
     run(&mut cargo(root, &["test", "--workspace"]))
+}
+
+fn agent_smoke() -> ExitCode {
+    if env::args().nth(2).is_some() {
+        usage();
+        return ExitCode::FAILURE;
+    }
+    if xtask::agent::smoke() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+fn step_agent_smoke(_root: &Path) -> bool {
+    xtask::agent::smoke()
 }
 
 fn step_doc(root: &Path) -> bool {
@@ -197,5 +215,5 @@ fn workspace_root() -> PathBuf {
 }
 
 fn usage() {
-    eprintln!("usage: cargo xtask <ci|check-layers|ffi [--bindings-only]|check-ffi>");
+    eprintln!("usage: cargo xtask <ci|check-layers|ffi [--bindings-only]|check-ffi|agent-smoke>");
 }

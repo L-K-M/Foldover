@@ -6,8 +6,9 @@ runs in a background agent; each platform gets a native UI (SwiftUI now,
 GTK4 later). [`PLAN.md`](PLAN.md) is the source of truth for scope and
 design; [`docs/research`](docs/research/README.md) holds the evidence.
 
-**Status:** P1/P2. Native spike harnesses, entry reconciliation and validated
-paths exist; nothing syncs yet. Measurements and limits live in `docs/adr/`.
+**Status:** P1/P2/P3 foundations. Native spikes, reconciliation, held-root
+metadata access and a health-only agent/client path exist; nothing syncs yet.
+Measurements and limits live in `docs/adr/`.
 The roadmap is PLAN.md §7.
 
 ## Toolchain
@@ -29,6 +30,7 @@ The roadmap is PLAN.md §7.
 |---|---|
 | Linux CI gate (fmt, clippy, tests, docs, layer check, FFI drift) | `cargo xtask ci` |
 | Layer check only | `cargo xtask check-layers` |
+| Agent/CLI process lifecycle smoke | `cargo xtask agent-smoke` |
 | Regenerate the Swift bindings (commit the result) | `cargo xtask ffi --bindings-only` |
 | Bindings + arm64 XCFramework (macOS) | `cargo xtask ffi` |
 | Dependency licenses and advisories | `cargo deny check` |
@@ -52,7 +54,8 @@ tests, builds the XCFramework, and runs `xcodebuild build test`.
 | `apple/project.yml` | XcodeGen spec for the app and its tests |
 | `apple/Foldover/` | The SwiftUI app: `App/`, `Views/`, `ViewModels/`, `Stores/` |
 | `apple/FoldoverCore/` | Swift package over the Rust core (generated bindings) |
-| `scripts/` | `build.sh`, `release.sh`, `sync-cargo-version.sh` |
+| `apple/FoldoverSystem/` | Native service-registration boundary, imported only by stores |
+| `scripts/` | Build/release orchestration, agent embedding and process smoke |
 | `tools/doccheck/` | Documentation checks run by CI |
 
 ## Architecture rules
@@ -67,7 +70,7 @@ tests, builds the XCFramework, and runs `xcodebuild build test`.
 - **One engine process:** sync state has a single writer, the `foldoverd`
   agent (PLAN.md §4.2). UIs and the CLI are clients.
 - **Swift app** (PLAN.md §4.5): Views → View models → Stores →
-  FoldoverCore. Only stores import FoldoverCore.
+  FoldoverCore and FoldoverSystem. Only stores import those modules.
 - **API shape:** private by default; enums, never boolean parameters.
 - **Identifiers:** `ch.lkmc.foldover`, lowercase on every platform
   (owner decision; it overrides the fleet's CamelCase rule for macOS
