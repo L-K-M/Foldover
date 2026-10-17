@@ -2,7 +2,7 @@
 // cancel path across the UniFFI bridge, ending in a JSON report and
 // a short stdout summary.
 //
-// Usage: Bench <results.json>
+// Usage: S1_SOAK_SECONDS=3600 Bench <results.json> (omit the variable to skip the soak)
 //
 // Exit code 0 whenever the harness ran to the end — a missed target
 // is a measurement the JSON records, not a harness failure. Exit 1
@@ -27,7 +27,13 @@ struct BenchMain {
             FileHandle.standardError.write(Data("usage: Bench <results.json>\n".utf8))
             exit(2)
         }
-        let code = await BenchRunner(resultsPath: args[1]).run()
+        guard let soakSeconds = UInt64(ProcessInfo.processInfo.environment["S1_SOAK_SECONDS"] ?? "0"),
+              soakSeconds <= SoakMeasurement.fullHourSeconds else {
+            FileHandle.standardError.write(Data("S1_SOAK_SECONDS must be 0...3600\n".utf8))
+            exit(2)
+        }
+
+        let code = await BenchRunner(resultsPath: args[1], soakSeconds: soakSeconds).run()
         exit(code)
     }
 }
@@ -35,6 +41,7 @@ struct BenchMain {
 /// The measurements, in run order.
 struct BenchRunner {
     let resultsPath: String
+    let soakSeconds: UInt64
 
     /// Run the bench, write the JSON, print the summary; the process
     /// exit code.
@@ -68,10 +75,12 @@ struct BenchRunner {
         let echo = await measureEcho(calls: 1_000)
         let memory = await measureMemory(streams: 20, eventsPerStream: 100_000, batchSize: 64)
         let cancel = await measureCancel()
+        let soak = soakSeconds > 0 ? try await measureSoak() : nil
 
-        let checks = passChecks(
+        var checks = passChecks(
             throughput: throughput, echo: echo, memory: memory, cancel: cancel
         )
+        checks += soak?.checks ?? []
         return BenchReport(
             spike: "s1-uniffi-events",
             ok: checks.allSatisfy(\.pass),
@@ -87,6 +96,7 @@ struct BenchRunner {
             echo: echo,
             memory: memory,
             cancelCheck: cancel,
+            soak: soak,
             concurrencyEscapes: concurrencyEscapes,
             checks: checks
         )
@@ -181,6 +191,70 @@ struct BenchRunner {
             reportedCancelled: report.cancelled,
             stoppedEarly: report.deliveredEvents < total
         )
+    }
+
+    /// Repeated creation and teardown expose leaks hidden by one long-lived stream.
+    private func measureSoak() async throws -> SoakMeasurement {
+        let start = ContinuousClock.now
+        var samples = [FootprintSample(elapsedSeconds: 0, bytes: Probes.physicalFootprint())]
+        var nextSample = SoakMeasurement.sampleIntervalSeconds
+        var streams = 0
+        var failedStreams = 0
+        var retainedObjects = 0
+
+        repeat {
+            let (ordered, references) = await completedSoakStream()
+            streams += 1
+            if !ordered { failedStreams += 1 }
+
+            // Rust notifies waiters before its thread releases the callback closure.
+            for _ in 0..<SoakMeasurement.releasePollAttempts {
+                if references.retainedCount == 0 { break }
+                try await Task.sleep(for: SoakMeasurement.releasePollInterval)
+            }
+            retainedObjects += references.retainedCount
+
+            let elapsed = seconds(since: start)
+            if elapsed >= nextSample {
+                let footprint = Probes.physicalFootprint()
+                samples.append(FootprintSample(elapsedSeconds: elapsed, bytes: footprint))
+                nextSample += SoakMeasurement.sampleIntervalSeconds
+                print("  soak \(Int(elapsed))s: \(streams) streams, \(footprint) bytes")
+            }
+        } while seconds(since: start) < Double(soakSeconds)
+
+        let elapsed = seconds(since: start)
+        samples.append(FootprintSample(elapsedSeconds: elapsed, bytes: Probes.physicalFootprint()))
+        return SoakMeasurement(
+            requestedSeconds: soakSeconds, elapsedSeconds: elapsed, streams: streams,
+            failedStreams: failedStreams, retainedObjects: retainedObjects,
+            samples: samples, heapScan: Probes.scanHeap()
+        )
+    }
+
+    private struct StreamReferences: Sendable {
+        weak var collector: BatchCollector?
+        weak var sink: CountingSink?
+        weak var handle: StreamHandle?
+
+        var retainedCount: Int {
+            (collector == nil ? 0 : 1) + (sink == nil ? 0 : 1) + (handle == nil ? 0 : 1)
+        }
+    }
+
+    /// Return only weak references so the soak can check foreign-object teardown.
+    private func completedSoakStream() async -> (Bool, StreamReferences) {
+        let collector = BatchCollector()
+        let sink = CountingSink(collector: collector)
+        let handle = startStream(
+            sink: sink, total: SoakMeasurement.eventsPerStream,
+            batchSize: SoakMeasurement.batchSize
+        )
+        let report = await handle.wait()
+        let counters = await collector.snapshot()
+        let ordered = report.deliveredEvents == SoakMeasurement.eventsPerStream
+            && counters.events == SoakMeasurement.eventsPerStream && counters.outOfOrder == 0
+        return (ordered, StreamReferences(collector: collector, sink: sink, handle: handle))
     }
 
     /// PLAN.md section 8 S1, evaluated against the measurements.

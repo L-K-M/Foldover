@@ -49,5 +49,9 @@ let package = Package(
                 .unsafeFlags(["-warnings-as-errors", "-strict-concurrency=complete"]),
             ]
         ),
+        .testTarget(
+            name: "BenchTests",
+            dependencies: ["Bench"]
+        ),
     ]
 )
