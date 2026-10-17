@@ -21,9 +21,9 @@
 # folder with the final outputs), and on macOS dist/ is opened in the
 # Finder when anything landed there.
 #
-# App builds sign ad hoc (CODE_SIGN_IDENTITY=-), which is enough to run
-# locally and in CI. Developer ID signing and notarization belong to the
-# release workflow that arrives with spike S6 (PLAN.md §8).
+# App builds target macOS 27 on Apple silicon and sign ad hoc
+# (CODE_SIGN_IDENTITY=-). Downloaded builds need the quarantine-removal
+# command in README.md; Developer ID and notarization are not used.
 #
 # Exit status is non-zero if any requested target fails to build. Targets
 # that cannot build on this host are reported as skipped, and only fail

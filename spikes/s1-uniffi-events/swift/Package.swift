@@ -11,7 +11,7 @@ import PackageDescription
 
 let package = Package(
     name: "S1Bench",
-    platforms: [.macOS("26.0")],
+    platforms: [.macOS("27.0")],
     products: [
         .executable(name: "Bench", targets: ["Bench"])
     ],

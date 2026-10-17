@@ -10,7 +10,7 @@ name: Foldover
 options:
   bundleIdPrefix: ch.lkmc.foldover
   deploymentTarget:
-    macOS: "26.0"
+    macOS: "27.0"
 
 settings:
   base:
@@ -23,14 +23,12 @@ settings:
     CODE_SIGN_IDENTITY: "-"
     CODE_SIGN_STYLE: Manual
     DEVELOPMENT_TEAM: ""
+    ARCHS: arm64
   configs:
-    # Debug builds only the machine's arch for turn-around speed; the
-    # Release app is universal because the FoldoverCore XCFramework
-    # carries a universal static library.
+    # Both configurations ship only the supported Apple-silicon slice.
     Debug:
       ONLY_ACTIVE_ARCH: YES
     Release:
-      ARCHS: arm64 x86_64
       ONLY_ACTIVE_ARCH: NO
 
 packages:

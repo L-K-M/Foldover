@@ -32,7 +32,7 @@ fn main() {
     {
         eprintln!(
             "spike-s3-change-detection measures macOS FSEvents and DiskArbitration;\n\
-             build and run it on macOS (the spike-s3 workflow runs it on macos-26)."
+             build and run it on macOS (the spike-s3 workflow uses the xcode-27 image)."
         );
         std::process::exit(1);
     }

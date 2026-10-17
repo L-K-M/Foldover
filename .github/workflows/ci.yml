@@ -105,9 +105,11 @@ jobs:
   # XCFramework, the XcodeGen project and an app `build test`. Ends by
   # uploading the zipped Release app for whoever pulls artifacts.
   macos:
-    runs-on: macos-26
+    # The xcode-27 image runs macOS 27 on Apple silicon.
+    runs-on: xcode-27
     timeout-minutes: 60
     env:
+      DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
     steps:
@@ -124,7 +126,7 @@ jobs:
       - name: cargo test (aarch64-apple-darwin)
         run: cargo test --workspace --target aarch64-apple-darwin
 
-      # Builds the universal FoldoverCoreFFI.xcframework plus the Swift
+      # Builds the arm64 FoldoverCoreFFI.xcframework plus the Swift
       # bindings; the app links it below.
       - name: xtask ffi
         run: cargo xtask ffi
@@ -166,8 +168,8 @@ jobs:
           path: ${{ runner.temp }}/Foldover.xcresult
 
       # A Release app for whoever pulls the artifact: same signing,
-      # zipped the way Finder would make it. The generic destination
-      # keeps the Release build universal (arm64 + x86_64).
+      # zipped the way Finder would make it. The spec restricts both the
+      # app and its XCFramework to Apple silicon.
       - name: Release build and zip the app
         run: |
           xcodebuild -project apple/Foldover.xcodeproj \
@@ -177,8 +179,13 @@ jobs:
             -configuration Release \
             CODE_SIGN_IDENTITY=- \
             build
+          app="$RUNNER_TEMP/DerivedData/Build/Products/Release/Foldover.app"
+          test "$(lipo -archs "$app/Contents/MacOS/Foldover")" = arm64
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")" = 27.0
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -d --verbose=4 "$app" 2>&1 | grep -Fx 'Signature=adhoc'
           ditto -c -k --sequesterRsrc --keepParent \
-            "$RUNNER_TEMP/DerivedData/Build/Products/Release/Foldover.app" \
+            "$app" \
             "$RUNNER_TEMP/Foldover.zip"
 
       - name: Upload the app

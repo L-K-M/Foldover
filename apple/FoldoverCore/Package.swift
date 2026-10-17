@@ -10,7 +10,7 @@ import PackageDescription
 
 let package = Package(
     name: "FoldoverCore",
-    platforms: [.macOS("26.0")],
+    platforms: [.macOS("27.0")],
     products: [
         .library(name: "FoldoverCore", targets: ["FoldoverCore"])
     ],

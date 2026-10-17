@@ -11,7 +11,7 @@ name: DiffTreeBench
 options:
   bundleIdPrefix: ch.lkmc.foldover.spike
   deploymentTarget:
-    macOS: "26.0"
+    macOS: "27.0"
 
 settings:
   base:

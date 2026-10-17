@@ -32,9 +32,10 @@ defaults:
 
 jobs:
   bench:
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 90
     env:
+      DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
       # PRs exercise teardown and heap scanning without claiming the hour gate passed.
       S1_SOAK_SECONDS: ${{ inputs.soak_seconds || '10' }}
     steps:
