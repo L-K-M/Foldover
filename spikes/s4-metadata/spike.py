@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import errno
+from enum import Enum
 import hashlib
 import json
 import os
@@ -46,6 +47,11 @@ FINDER_BUNDLE_FLAG = 0x2000
 ACL_RULE = "everyone allow read,readattr,readextattr,readsecurity"
 UNSUPPORTED_ERRORS = {errno.ENOTSUP, errno.EOPNOTSUPP, errno.EINVAL}
 REQUIRED_TARGETS = ["apfs", "exfat", "samba-fruit", "samba-no-fruit", "sftp"]
+
+
+class CorpusOwner(Enum):
+    OWNED_IMAGE = "owned-image"
+    EXISTING_MOUNT = "existing-mount"
 
 
 def command(*args: str | Path) -> bytes:
@@ -140,10 +146,9 @@ def attribute_values() -> dict[str, bytes]:
     }
 
 
-def capabilities_at(root: Path) -> dict:
+def capabilities_at(root: Path, owner: CorpusOwner, cleanup_errors: list) -> dict:
     results = {}
-    with tempfile.TemporaryDirectory(prefix="foldover-s4-probe-", dir=root) as directory:
-        directory = Path(directory)
+    with corpus_directory(root, "foldover-s4-probe-", owner, cleanup_errors) as directory:
         item = directory / "probe"
         item.write_bytes(b"old")
 
@@ -460,21 +465,39 @@ def detach_image(mount: Path) -> None:
 
 
 @contextlib.contextmanager
-def corpus_directory(parent: Path, prefix: str):
+def corpus_directory(parent: Path, prefix: str, owner: CorpusOwner, cleanup_errors: list):
     directory = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
     try:
         yield directory
     finally:
-        # Use native cleanup on exFAT, where Python rmtree reported ENOTEMPTY.
-        # Only this fresh fixture directory is removed; sync operations must archive instead.
-        if sys.platform == "darwin":
-            command("/bin/rm", "-rf", "--", directory)
-        else:
-            shutil.rmtree(directory)
+        try:
+            if sys.platform == "darwin":
+                command("/bin/rm", "-rf", "--", directory)
+            else:
+                shutil.rmtree(directory)
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            remaining, inventory_errors = [], []
+            for base, directories, files in os.walk(
+                directory, followlinks=False, onerror=lambda error: inventory_errors.append(str(error))
+            ):
+                remaining.extend(
+                    os.fsencode((Path(base) / name).relative_to(directory)).hex()
+                    for name in directories + files
+                )
+            cleanup_errors.append({
+                "error": str(error), "remaining_name_bytes_hex": remaining,
+                "inventory_errors": inventory_errors,
+                "disposition": "deferred-to-owned-image-detach" if owner == CorpusOwner.OWNED_IMAGE
+                else "cleanup-failed",
+            })
+            if owner != CorpusOwner.OWNED_IMAGE:
+                raise
+            # The failure remains measurement data. Detach and image deletion still must succeed.
 
 
-def measure_target(source: Path, cases: list[dict], target: Path, workspace: Path) -> dict:
-    capabilities = capabilities_at(target)
+def measure_target(source: Path, cases: list[dict], target: Path, workspace: Path, owner: CorpusOwner) -> dict:
+    probe_cleanup_errors = []
+    capabilities = capabilities_at(target, owner, probe_cleanup_errors)
     results = []
     for case in cases:
         origin = source / case["path"]
@@ -487,10 +510,10 @@ def measure_target(source: Path, cases: list[dict], target: Path, workspace: Pat
                             "unsupported": blocked, "collisions": collisions})
             continue
 
-        with corpus_directory(target, "foldover-s4-copy-") as out, \
-                corpus_directory(workspace, "foldover-s4-return-") as back:
+        result = {"name": case["name"], "state": "measured", "cleanup_errors": []}
+        with corpus_directory(target, "foldover-s4-copy-", owner, result["cleanup_errors"]) as out, \
+                corpus_directory(workspace, "foldover-s4-return-", CorpusOwner.OWNED_IMAGE, result["cleanup_errors"]) as back:
             destination, returned = out / case["path"], back / case["path"]
-            result = {"name": case["name"], "state": "measured"}
             try:
                 command("/usr/bin/ditto", "--rsrc", "--extattr", "--acl", origin, destination)
                 outward = case_snapshot(destination)
@@ -509,9 +532,12 @@ def measure_target(source: Path, cases: list[dict], target: Path, workspace: Pat
             except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
                 result.update({"state": "copy-failed", "error": str(error),
                                "no_unpredicted_loss": False})
-            results.append(result)
+        if result["cleanup_errors"]:
+            result["no_unpredicted_loss"] = False
+        results.append(result)
 
-    return {"capabilities": capabilities, "cases": results, "no_unpredicted_loss": all(
+    return {"capabilities": capabilities, "cases": results, "probe_cleanup_errors": probe_cleanup_errors,
+            "no_unpredicted_loss": not probe_cleanup_errors and all(
         case.get("no_unpredicted_loss", case["state"] == "blocked-before-copy") for case in results
     )}
 
@@ -571,9 +597,13 @@ def main() -> int:
             report["source"] = snapshot(source)
             for label, filesystem in [("apfs", "APFS"), ("exfat", "ExFAT")]:
                 with disk_image(workspace, label, filesystem) as target:
-                    report["targets"][label] = measure_target(source, cases, target, source_volume)
+                    report["targets"][label] = measure_target(
+                        source, cases, target, source_volume, CorpusOwner.OWNED_IMAGE
+                    )
             for label, target in mounted.items():
-                report["targets"][label] = measure_target(source, cases, target, source_volume)
+                report["targets"][label] = measure_target(
+                    source, cases, target, source_volume, CorpusOwner.EXISTING_MOUNT
+                )
 
     print(json.dumps({name: report[name] for name in
                       ("tested_targets_passed", "full_s4_passed", "unavailable_targets")}, indent=2))

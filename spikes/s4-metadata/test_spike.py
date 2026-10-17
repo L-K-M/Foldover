@@ -191,7 +191,7 @@ class FidelityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             parent = Path(directory)
             with patch.object(spike.sys, "platform", "darwin"), patch.object(spike, "command") as native:
-                with spike.corpus_directory(parent, "test-corpus-") as created:
+                with spike.corpus_directory(parent, "test-corpus-", spike.CorpusOwner.EXISTING_MOUNT, []) as created:
                     self.assertEqual(created.parent, parent)
                     self.assertTrue(created.is_dir())
                 native.assert_called_once_with("/bin/rm", "-rf", "--", created)
@@ -201,8 +201,19 @@ class FidelityTests(unittest.TestCase):
             with patch.object(spike.sys, "platform", "darwin"), \
                     patch.object(spike, "command", side_effect=RuntimeError("cleanup failed")):
                 with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
-                    with spike.corpus_directory(Path(directory), "test-corpus-"):
+                    with spike.corpus_directory(Path(directory), "test-corpus-", spike.CorpusOwner.EXISTING_MOUNT, []):
                         pass
+
+    def test_owned_image_cleanup_failure_is_recorded_until_image_detach(self):
+        issues = []
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(spike.sys, "platform", "darwin"), \
+                    patch.object(spike, "command", side_effect=RuntimeError("directory not empty")):
+                with spike.corpus_directory(Path(directory), "test-corpus-", spike.CorpusOwner.OWNED_IMAGE, issues):
+                    pass
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0]["disposition"], "deferred-to-owned-image-detach")
+        self.assertIn("directory not empty", issues[0]["error"])
 
 
 if __name__ == "__main__":

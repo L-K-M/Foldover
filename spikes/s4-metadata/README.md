@@ -34,6 +34,11 @@ is not copied, replaced or deleted. Only the harness's disk images are
 detached, with a forced retry if an owned image is busy. Final cleanup
 failure fails the harness.
 
+If a fixture directory inside an owned image cannot be removed, its error
+and remaining name bytes are recorded as a failed operation. The harness
+continues only because detaching and deleting that image removes the whole
+owned filesystem. Cleanup failure on an existing mount still aborts.
+
 The command's success means measurements completed. Inspect
 `harness_completed`, `tested_targets_passed`, per-case differences and
 `unavailable_targets`. Failures retain completed measurements with a failed
