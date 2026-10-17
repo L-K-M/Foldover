@@ -18,6 +18,15 @@ import SwiftUI
 final class AppKitTreeRefs {
     var outlineView: NSOutlineView?
     var scrollView: NSScrollView?
+    var lastBatchProfile: OutlineBatchProfile?
+}
+
+struct OutlineBatchProfile {
+    let insertionMilliseconds: Double
+    let expansionMilliseconds: Double
+    let parentGroups: Int
+    let newFolders: Int
+    let visibleRows: Int
 }
 
 /// The SwiftUI side of the AppKit implementation: the whole tree is a
@@ -28,7 +37,7 @@ struct OutlineTreeRepresentable: NSViewRepresentable {
     let refs: AppKitTreeRefs
 
     func makeCoordinator() -> OutlineCoordinator {
-        OutlineCoordinator(model: model)
+        OutlineCoordinator(model: model, refs: refs)
     }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -79,16 +88,19 @@ final class OutlineCoordinator: NSObject {
     )
 
     private let model: PlanModel
+    private weak var refs: AppKitTreeRefs?
     weak var outlineView: NSOutlineView?
 
-    init(model: PlanModel) {
+    init(model: PlanModel, refs: AppKitTreeRefs) {
         self.model = model
+        self.refs = refs
     }
 
     /// One batch's changes: the inserts, then an expand per new folder
     /// so the tree stays fully expanded while it grows.
     func apply(_ journal: BatchJournal) {
         guard let outlineView else { return }
+        let started = CACurrentMediaTime()
         outlineView.beginUpdates()
         for entry in journal.entries {
             outlineView.insertItems(
@@ -98,9 +110,18 @@ final class OutlineCoordinator: NSObject {
             )
         }
         outlineView.endUpdates()
+        let inserted = CACurrentMediaTime()
         for folder in journal.newFolders {
             outlineView.expandItem(folder)
         }
+        let expanded = CACurrentMediaTime()
+        refs?.lastBatchProfile = OutlineBatchProfile(
+            insertionMilliseconds: (inserted - started) * 1_000,
+            expansionMilliseconds: (expanded - inserted) * 1_000,
+            parentGroups: journal.entries.count,
+            newFolders: journal.newFolders.count,
+            visibleRows: outlineView.numberOfRows
+        )
     }
 }
 

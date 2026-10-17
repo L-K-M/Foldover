@@ -132,9 +132,24 @@ final class BenchRunner {
         // every 50 ms, while the sampler watches the frames.
         sampler.currentPhase = "stream"
         var delivered = 0
+        var batchProfiles: [BenchBatchProfile] = []
         while delivered < records.count, !overBudget() {
             let end = min(delivered + Self.batchSize, records.count)
+            let before = CACurrentMediaTime()
             model.deliver(records[delivered ..< end], text: text)
+            let delivery = (CACurrentMediaTime() - before) * 1_000
+            let outline = appkitRefs.lastBatchProfile
+            batchProfiles.append(BenchBatchProfile(
+                rows: end - delivered,
+                deliveryMilliseconds: delivery,
+                modelMilliseconds: max(0, delivery - (outline?.insertionMilliseconds ?? 0)
+                    - (outline?.expansionMilliseconds ?? 0)),
+                insertionMilliseconds: outline?.insertionMilliseconds,
+                expansionMilliseconds: outline?.expansionMilliseconds,
+                parentGroups: outline?.parentGroups,
+                newFolders: outline?.newFolders,
+                visibleRows: outline?.visibleRows
+            ))
             delivered = end
             try? await Task.sleep(for: Self.batchInterval)
         }
@@ -229,7 +244,8 @@ final class BenchRunner {
             memoryPeakBytes: max(peakBytes, afterScroll),
             memoryGrowthPercent: growth,
             rowsOnScreenAtScroll: rowsOnScreen,
-            scrollReachedPoints: scrollReached
+            scrollReachedPoints: scrollReached,
+            batches: batchProfiles
         )
     }
 
