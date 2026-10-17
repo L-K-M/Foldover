@@ -1,6 +1,6 @@
 # ADR 0011: Authenticated local pair configuration
 
-Status: Implemented API and CLI; native pair UI pending
+Status: Implemented API, CLI and native pair controls
 
 ## Boundary
 
@@ -61,6 +61,21 @@ permissions, cloud-provider policy, free space, capabilities, canaries or
 execution freshness. Concurrent namespace changes still require execution-time
 revalidation. Configuration never reads file contents or changes endpoints.
 
+## Native controls
+
+The main window lists configured pairs and edits them in a folder-selection
+sheet. The mode sentence explains direction and policy. Saving configures a
+pair; it does not scan or execute it. The menu bar reports configuration, not
+sync success. Unknown or failed catalog loads are not presented as an empty
+catalog, and incomplete pages never replace cached rows.
+
+The Swift store converts generated client records inside one actor and returns
+native Sendable values to the UI actor. Folder bytes remain separate from display
+text, including when an existing path is not UTF-8. Editing preserves the saved
+revision and retains unsaved fields on error. Cancel and Save have keyboard
+actions; save-in-progress controls prevent duplicate submission. Closing a
+successful editor selects its saved pair.
+
 ## Verification and remaining work
 
 Tests cover serialized competing creations, rejected mutations, revisions,
@@ -72,5 +87,8 @@ and successful configuration through the signed embedded release helpers.
 
 If a request times out, its accepted command may still commit. Refresh before
 retrying. A catalog overlap prevents duplicate creation over the same roots.
-Native pair controls, endpoint identities, readiness, snapshots, plans and
-execution remain separate required work.
+Native store tests cover paged publication, stale refreshes, failed saves,
+direction, raw paths and post-save selection. Native build/tests require macOS
+CI; interactive first-pair timing, VoiceOver and permission/update flows remain
+unverified. Endpoint identities, readiness, snapshots, plans and execution are
+still required.
