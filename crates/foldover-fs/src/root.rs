@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::io;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -7,6 +8,8 @@ use std::time::SystemTime;
 use cap_fs_ext::{DirExt, MetadataExt};
 use cap_std::fs::{Dir, Metadata};
 use foldover_types::SyncPath;
+
+const MAX_ROOT_ANCESTORS: usize = 4096;
 
 /// An opened root directory, independent of later changes to its ambient path.
 /// This read-only surface does not establish mount availability, volume UUIDs
@@ -19,6 +22,14 @@ pub struct Root {
 pub enum DirectoryScope<'a> {
     Root,
     At(&'a SyncPath),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RootRelation {
+    Same,
+    Contains,
+    Within,
+    Disjoint,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,6 +54,13 @@ impl FileIdentity {
 
     pub fn inode(self) -> u64 {
         self.inode
+    }
+
+    fn from_cap(metadata: &Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
     }
 }
 
@@ -86,10 +104,7 @@ impl EntryMetadata {
             kind,
             size: metadata.len(),
             modified: metadata.modified()?.into_std(),
-            identity: FileIdentity {
-                device: metadata.dev(),
-                inode: metadata.ino(),
-            },
+            identity: FileIdentity::from_cap(&metadata),
         })
     }
 }
@@ -126,6 +141,23 @@ impl Root {
         Ok(Self {
             directory: self.directory.try_clone()?,
         })
+    }
+
+    /// Compare held directories, including selected symlink/case aliases.
+    /// This observes current ancestry; callers must recheck before executing.
+    pub fn relation_to(&self, other: &Self) -> io::Result<RootRelation> {
+        let left = self.root_metadata()?.identity();
+        let right = other.root_metadata()?.identity();
+        if left == right {
+            return Ok(RootRelation::Same);
+        }
+        if other.has_ancestor(left)? {
+            return Ok(RootRelation::Contains);
+        }
+        if self.has_ancestor(right)? {
+            return Ok(RootRelation::Within);
+        }
+        Ok(RootRelation::Disjoint)
     }
 
     /// Hold a descendant directory without following any symlink component.
@@ -168,6 +200,32 @@ impl Root {
         }))
     }
 
+    fn has_ancestor(&self, target: FileIdentity) -> io::Result<bool> {
+        let mut directory = self.directory.try_clone()?;
+        let mut visited = HashSet::new();
+        for _ in 0..MAX_ROOT_ANCESTORS {
+            let identity = FileIdentity::from_cap(&directory.dir_metadata()?);
+            if identity == target {
+                return Ok(true);
+            }
+            if !visited.insert(identity) {
+                return Err(io::Error::other(
+                    "Directory ancestry changed or contains a cycle",
+                ));
+            }
+            // Ambient authority is confined to ancestor identity probes for root
+            // selection. Parent handles never escape into sync traversal.
+            let parent = directory.open_parent_dir(cap_std::ambient_authority())?;
+            if FileIdentity::from_cap(&parent.dir_metadata()?) == identity {
+                return Ok(false);
+            }
+            directory = parent;
+        }
+        Err(io::Error::other(
+            "Directory ancestry exceeds the verification limit",
+        ))
+    }
+
     fn directory_at(&self, path: &SyncPath) -> io::Result<Dir> {
         let mut directory = self.directory.try_clone()?;
         // One component per open makes no-follow apply to every ancestor.
@@ -196,6 +254,65 @@ mod tests {
 
     fn path(bytes: &[u8]) -> SyncPath {
         SyncPath::try_from(bytes).unwrap()
+    }
+
+    #[test]
+    fn compares_physical_roots_without_name_prefix_assumptions() {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temporary.path().join("one/child")).unwrap();
+        fs::create_dir(temporary.path().join("one-more")).unwrap();
+        symlink("one", temporary.path().join("alias")).unwrap();
+        let one = Root::open(&temporary.path().join("one")).unwrap();
+        let child = Root::open(&temporary.path().join("one/child")).unwrap();
+        let alias = Root::open(&temporary.path().join("alias")).unwrap();
+        let sibling = Root::open(&temporary.path().join("one-more")).unwrap();
+        assert_eq!(one.relation_to(&alias).unwrap(), RootRelation::Same);
+        assert_eq!(one.relation_to(&child).unwrap(), RootRelation::Contains);
+        assert_eq!(child.relation_to(&alias).unwrap(), RootRelation::Within);
+        assert_eq!(one.relation_to(&sibling).unwrap(), RootRelation::Disjoint);
+        assert_eq!(sibling.relation_to(&one).unwrap(), RootRelation::Disjoint);
+    }
+
+    #[test]
+    fn root_relations_follow_held_directories_after_moves() {
+        let temporary = tempfile::tempdir().unwrap();
+        let selected = temporary.path().join("selected");
+        let container = temporary.path().join("container");
+        fs::create_dir(&selected).unwrap();
+        fs::create_dir(&container).unwrap();
+        let held = Root::open(&selected).unwrap();
+        let parent = Root::open(&container).unwrap();
+        assert_eq!(held.relation_to(&parent).unwrap(), RootRelation::Disjoint);
+        fs::rename(&selected, container.join("moved")).unwrap();
+        fs::create_dir(&selected).unwrap();
+        assert_eq!(held.relation_to(&parent).unwrap(), RootRelation::Within);
+        assert_eq!(parent.relation_to(&held).unwrap(), RootRelation::Contains);
+        let replacement = Root::open(&selected).unwrap();
+        assert_eq!(
+            held.relation_to(&replacement).unwrap(),
+            RootRelation::Disjoint
+        );
+    }
+
+    #[test]
+    fn case_aliases_use_filesystem_identity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let selected = temporary.path().join("MixedCase");
+        let alias = temporary.path().join("mixedcase");
+        fs::create_dir(&selected).unwrap();
+        let original = Root::open(&selected).unwrap();
+        match Root::open(&alias) {
+            Ok(alias) => assert_eq!(original.relation_to(&alias).unwrap(), RootRelation::Same),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir(&alias).unwrap();
+                let alias = Root::open(&alias).unwrap();
+                assert_eq!(
+                    original.relation_to(&alias).unwrap(),
+                    RootRelation::Disjoint
+                );
+            }
+            Err(error) => panic!("Cannot probe case alias: {error}"),
+        }
     }
 
     #[test]

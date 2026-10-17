@@ -13,6 +13,25 @@ The driver can clone a root handle and hold descendant directories without
 following any symlink component. The endpoint owns traversal and exclusions;
 raw directory operations remain in `foldover-fs`.
 
+## Selected root overlap
+
+`LocalPair::open` holds both selected roots and rejects equal or nested
+directories. The filesystem driver compares device/inode identities and
+walks held parent directories, so selected symlink/case aliases and later
+ambient-path replacements do not turn overlap into a string-prefix check.
+`LocalEndpoint::relation_to` also exposes this observation for comparisons
+with other selected roots.
+
+The ancestry probe uses ambient authority only to inspect parent identities.
+It exposes no parent handles, enumerates no parent entries and reads no file
+contents. Lookup failures, detected cycles and the 4096-ancestor limit are
+errors. Each probe retains only its current parent handle and visited IDs.
+
+This is a selection-time geometry check. Pair-catalog overlap checks, volume
+UUIDs, mount/readiness policy and execution-time revalidation remain required.
+Moving a held root changes its observed relation without switching it to a
+replacement directory at its original path.
+
 ## Traversal and protected paths
 
 Rows stream depth-first in filesystem enumeration order. The scanner retains
@@ -57,8 +76,11 @@ outside/dangling links, raw names and targets, cancellation, directory-to-link
 replacement, disappearing directories, special items, sidecar rejection,
 last-row mutations and replacement of the root's ambient path. Linux checks
 run locally; macOS coverage runs in CI.
+Root-selection tests cover equal/nested roots, selected symlink aliases,
+filesystem-dependent case aliases, prefix-only siblings, held-root moves,
+unavailable selections and scanning through a checked disjoint pair.
 
 Content hashing, full metadata capture, dataless-file policy, naming and
-capability probes, root/overlap validation, volume UUIDs, stable snapshots,
+capability probes, pair-catalog overlap validation, volume UUIDs, stable snapshots,
 readiness gates and performance calibration remain required. The agent still
 exposes only health methods.

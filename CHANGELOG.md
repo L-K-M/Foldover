@@ -17,7 +17,7 @@ All notable changes to this project are documented here. The format follows
 - Health-only background agent, typed Unix-socket client, `foldover status`,
   native registration/status controls, and embedded ad-hoc-signed helpers.
 - Read-only local metadata access through held directory handles, with
-  no-follow traversal and exact name/link-target bytes.
+  no-follow traversal, exact name/link-target bytes and identity-based root-overlap checks.
 - Validated root-relative sync paths that preserve exact name bytes and
   reject traversal, rooted paths and ambiguous components.
 - Three-way entry classification for Sync, Mirror and Backup, with
