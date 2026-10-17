@@ -58,6 +58,11 @@ struct DiffTreeBenchReport: Codable {
                     }.or("")
                 )
             }
+            if !run.batches.isEmpty {
+                lines.append("    batch p95: model=\(format(BenchStatistics.percentile(run.batches.map(\.modelMilliseconds), p: 95)))ms"
+                    + " inserts=\(format(BenchStatistics.percentile(run.batches.compactMap(\.insertionMilliseconds), p: 95)))ms"
+                    + " expansion=\(format(BenchStatistics.percentile(run.batches.compactMap(\.expansionMilliseconds), p: 95)))ms")
+            }
             for failure in run.failures {
                 lines.append("    failed: \(failure)")
             }
@@ -124,6 +129,20 @@ struct BenchRun: Codable {
     /// The scroll offset the phase actually reached, in points of
     /// content — proof the scroll moved.
     var scrollReachedPoints: Double
+    var batches: [BenchBatchProfile] = []
+}
+
+/// Synchronous stage walls. Deferred layout/render work remains in frame/stall
+/// measurements and is not attributed to these stage timers.
+struct BenchBatchProfile: Codable {
+    let rows: Int
+    let deliveryMilliseconds: Double
+    let modelMilliseconds: Double
+    let insertionMilliseconds: Double?
+    let expansionMilliseconds: Double?
+    let parentGroups: Int?
+    let newFolders: Int?
+    let visibleRows: Int?
 }
 
 /// One phase's reduced numbers: frame intervals between the phase's

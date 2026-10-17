@@ -40,6 +40,12 @@ hosted in SwiftUI via `NSViewRepresentable` with SwiftUI
   main-thread stall per phase, plus `phys_footprint` after load and
   after scrolling.
 
+Each batch also records synchronous model construction, grouped outline
+insertion and per-folder expansion walls, with group/folder/visible-row counts.
+These stage timers help locate stream stalls; deferred layout and rendering
+remain visible only in the frame/stall measurements. Row shape, batch cadence
+and performance criteria are unchanged by this instrumentation.
+
 Run it with `spikes/s5-diff-tree/run.sh <report.json>`; it builds the
 Release app with XcodeGen and xcodebuild, launches it through
 `open -W` with `-runBench`, writes the JSON report and prints a short
