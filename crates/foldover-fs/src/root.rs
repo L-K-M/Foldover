@@ -122,6 +122,19 @@ impl Root {
         EntryMetadata::from_cap(self.directory.dir_metadata()?)
     }
 
+    pub fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self {
+            directory: self.directory.try_clone()?,
+        })
+    }
+
+    /// Hold a descendant directory without following any symlink component.
+    pub fn open_directory(&self, path: &SyncPath) -> io::Result<Self> {
+        Ok(Self {
+            directory: self.directory_at(path)?,
+        })
+    }
+
     /// Does not follow leaf or intermediate symlinks. Errors remain errors,
     /// including disappearing entries; callers must not turn them into empty scans.
     pub fn metadata(&self, path: &SyncPath) -> io::Result<EntryMetadata> {

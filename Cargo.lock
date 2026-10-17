@@ -306,7 +306,10 @@ dependencies = [
  "foldover-fs",
  "foldover-net",
  "foldover-os",
+ "foldover-types",
  "foldover-watch",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

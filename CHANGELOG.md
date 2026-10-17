@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Streaming local folder metadata inventory, with protected internal paths,
+  cancellation and explicit errors for changed or unsupported entries.
 - Typed local pair configuration and SQLite WAL persistence, with exclusive
   writer ownership, compatibility guards, migration backups and revision checks.
 - Health-only background agent, typed Unix-socket client, `foldover status`,

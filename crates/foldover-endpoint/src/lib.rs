@@ -2,3 +2,12 @@
 //! capabilities, credentials, `.foldover/` management and the `local`,
 //! `share`, `sftp` and `peer` backends. Depends on foldover-fs,
 //! foldover-watch, foldover-net and foldover-os. See PLAN.md §4.4.
+
+#[cfg(unix)]
+mod local;
+
+#[cfg(unix)]
+pub use local::{LocalEndpoint, LocalEntry, ScanControl, ScanError, ScanStats};
+
+#[cfg(unix)]
+pub use foldover_fs::{EntryMetadata, FileIdentity, NodeKind};

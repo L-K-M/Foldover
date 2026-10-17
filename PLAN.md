@@ -331,6 +331,11 @@ the API favors event streams over many small calls.
 
 ### 4.6 Endpoints
 
+The read-only local metadata inventory is implemented in
+`LocalEndpoint::scan_metadata`. Its protected namespace, streaming/error
+contract and remaining snapshot gates are recorded in
+[ADR 0010](docs/adr/0010-local-metadata-inventory.md).
+
 ```rust
 trait Endpoint {
     fn capabilities(&self) -> &Capabilities;

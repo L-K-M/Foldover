@@ -10,7 +10,12 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+foldover-types = { path = "../foldover-types" }
 foldover-fs = { path = "../foldover-fs" }
 foldover-watch = { path = "../foldover-watch" }
 foldover-net = { path = "../foldover-net" }
 foldover-os = { path = "../foldover-os" }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
