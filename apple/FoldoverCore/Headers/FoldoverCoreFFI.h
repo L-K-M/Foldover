@@ -255,6 +255,21 @@ RustBuffer uniffi_foldover_ffi_fn_func_core_version(RustCallStatus *_Nonnull out
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_PAIR_CREATE
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_PAIR_CREATE
+uint64_t uniffi_foldover_ffi_fn_func_pair_create(RustBuffer configuration
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_PAIR_PAGE
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_PAIR_PAGE
+uint64_t uniffi_foldover_ffi_fn_func_pair_page(RustBuffer after
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_PAIR_UPDATE
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_PAIR_UPDATE
+uint64_t uniffi_foldover_ffi_fn_func_pair_update(RustBuffer id, uint64_t revision, RustBuffer configuration
+);
+#endif
 #ifndef UNIFFI_FFIDEF_FFI_FOLDOVER_FFI_RUSTBUFFER_ALLOC
 #define UNIFFI_FFIDEF_FFI_FOLDOVER_FFI_RUSTBUFFER_ALLOC
 RustBuffer ffi_foldover_ffi_rustbuffer_alloc(uint64_t size, RustCallStatus *_Nonnull out_status
@@ -524,6 +539,24 @@ uint16_t uniffi_foldover_ffi_checksum_func_agent_status(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_CORE_VERSION
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_CORE_VERSION
 uint16_t uniffi_foldover_ffi_checksum_func_core_version(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_PAIR_CREATE
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_PAIR_CREATE
+uint16_t uniffi_foldover_ffi_checksum_func_pair_create(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_PAIR_PAGE
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_PAIR_PAGE
+uint16_t uniffi_foldover_ffi_checksum_func_pair_page(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_PAIR_UPDATE
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_PAIR_UPDATE
+uint16_t uniffi_foldover_ffi_checksum_func_pair_update(void
     
 );
 #endif

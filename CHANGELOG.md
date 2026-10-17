@@ -12,6 +12,8 @@ All notable changes to this project are documented here. The format follows
   blocking, per-target deletion review and cancellation; no execution API yet.
 - Exact interactive/unattended deletion-review thresholds, with validated
   counts and finite-model boundary checks; execution integration remains pending.
+- Native pair sidebar, folder selection and revision-checked settings editor,
+  with paged loading through UniFFI and preserved drafts on save failures.
 - Authenticated local pair create/read/update APIs, paged lists and CLI commands,
   with cross-pair/state-root overlap checks and revision-checked updates.
 - Bounded BLAKE3 reads of observed local data forks, with cancellation,

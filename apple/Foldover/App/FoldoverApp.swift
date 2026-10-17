@@ -9,9 +9,8 @@ struct FoldoverApp: App {
     @State private var viewModel = MainViewModel(appInfo: AppInfoStore())
 
     var body: some Scene {
-        // The "main" id lets the menu-bar extra reopen this window
-        // through openWindow after the user closed it.
-        WindowGroup(id: "main") {
+        // One configuration window shares the same selection and editor as the menu bar.
+        Window("Foldover", id: "main") {
             MainView(viewModel: viewModel)
         }
 
