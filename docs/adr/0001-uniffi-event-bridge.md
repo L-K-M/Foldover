@@ -114,13 +114,37 @@ compiled with no `nonisolated(unsafe)`, `@unchecked Sendable` or
 
 ### One-hour follow-up
 
-Pending a full macOS CI run. The original twenty-stream result does
-not establish the one-hour criterion.
+Full soak [run 39002938713](https://github.com/L-K-M/Foldover/actions/runs/39002938713),
+commit `39f0252`, on a virtual Apple M1, macOS 26.6.2,
+Xcode 26.6 and Swift 6.3.3. Every measurement check passed.
+
+| Metric | Result |
+|---|---|
+| Soak elapsed | 3,600.11 s |
+| Completed streams | 24,633 × 100,000 events, batch 1,024 |
+| Events checked during the soak | 2,463,300,000 |
+| Failed delivery or ordering checks | 0 |
+| Retained collectors, sinks or handles after teardown | 0 |
+| `phys_footprint`, start → end | 2,819,136 → 2,901,056 bytes (+2.91 %) |
+| Largest sampled footprint | 2,917,440 bytes |
+| Heap scan | 0 leaked allocations, 0 leaked bytes, exit 0 |
+| Best throughput before the soak | 582,667 events/s, batch 1,024 |
+| Swift regression and policy tests | 7 passed |
+
+The footprint settled after the first two minutes, with occasional
+16 KiB fluctuations. No leak was observed over the hour. This closes
+the short probe's duration gap for the in-process UniFFI boundary;
+agent IPC and physical-Mac performance are not measured here.
 
 The follow-up also closes an ordering blind spot: the old collector
 only rejected decreasing sequence numbers. It accepted duplicates and
 gaps, including `0, 1, 1, 3`. Regression tests now require contiguous
 sequence numbers from zero, including across callback batches.
+
+The preceding [smoke run](https://github.com/L-K-M/Foldover/actions/runs/39001933830)
+completed 63 streams in 10.14 seconds with zero retained objects and
+zero leaks. Its one-hour check correctly failed. XCTest runs these
+tests because the macOS Swift Testing runner re-entered the CLI.
 
 ## Decision
 
