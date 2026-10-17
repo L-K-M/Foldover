@@ -83,7 +83,8 @@ xcodebuild -create-xcframework \
 # 4. Build and run the benchmark under the strict flags; it prints
 # the human summary.
 cd "$SPIKE_DIR/swift"
-swift test -c release
+# Swift Testing re-enters this executable's CLI on macOS; use XCTest discovery.
+swift test -c release --disable-swift-testing
 swift run -c release Bench "$RESULTS_JSON"
 
 if [ ! -f "$RESULTS_JSON" ]; then
