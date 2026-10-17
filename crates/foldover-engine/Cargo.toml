@@ -14,3 +14,7 @@ foldover-types = { path = "../foldover-types" }
 foldover-endpoint = { path = "../foldover-endpoint" }
 foldover-state = { path = "../foldover-state" }
 foldover-host = { path = "../foldover-host" }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

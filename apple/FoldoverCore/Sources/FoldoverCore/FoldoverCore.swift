@@ -567,6 +567,7 @@ public func FfiConverterTypeAgentHealth_lower(_ value: AgentHealth) -> RustBuffe
 public enum AgentCapability: Equatable, Hashable {
     
     case healthOnly
+    case pairConfiguration
 
 
 
@@ -590,6 +591,8 @@ public struct FfiConverterTypeAgentCapability: FfiConverterRustBuffer {
         
         case 1: return .healthOnly
         
+        case 2: return .pairConfiguration
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -600,6 +603,10 @@ public struct FfiConverterTypeAgentCapability: FfiConverterRustBuffer {
         
         case .healthOnly:
             writeInt(&buf, Int32(1))
+        
+        
+        case .pairConfiguration:
+            writeInt(&buf, Int32(2))
         
         }
     }

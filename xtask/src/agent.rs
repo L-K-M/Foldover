@@ -52,7 +52,17 @@ fn check() -> Result<String, ToolError> {
     let cli = cli.ok_or_else(|| ToolError("Cargo reported no foldover executable".to_owned()))?;
     run(
         "python3",
-        &["scripts/test-agent.py", &agent, &cli],
+        &[
+            "scripts/test-agent.py",
+            &agent,
+            &cli,
+            "--configuration",
+            if cfg!(target_os = "macos") {
+                "denied"
+            } else {
+                "required"
+            },
+        ],
         &root,
         None,
     )

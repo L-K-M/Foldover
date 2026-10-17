@@ -12,4 +12,5 @@ workspace = true
 [dependencies]
 foldover-ipc = { path = "../foldover-ipc" }
 foldover-proto = { path = "../foldover-proto" }
+foldover-types = { path = "../foldover-types" }
 serde_json = "1"

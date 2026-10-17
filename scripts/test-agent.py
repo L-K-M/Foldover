@@ -6,6 +6,7 @@ from contextlib import closing
 import json
 import os
 from pathlib import Path
+import plistlib
 import socket
 import sqlite3
 import stat
@@ -21,10 +22,23 @@ RETRY_SECONDS = 0.05
 METHOD_NOT_FOUND = -32601
 PERMISSION_DENIED = -32002
 PARSE_ERROR = -32700
+PROTOCOL_VERSION = 2
+VERSION_MISMATCH = -32001
+ROOT_OVERLAP = -32006
+STALE_REVISION = -32004
+FORBIDDEN_ENTITLEMENTS = (
+    "com.apple.security.get-task-allow",
+    "com.apple.security.cs.debugger",
+    "com.apple.security.cs.allow-jit",
+    "com.apple.security.cs.allow-unsigned-executable-memory",
+    "com.apple.security.cs.allow-dyld-environment-variables",
+    "com.apple.security.cs.disable-library-validation",
+    "com.apple.security.cs.disable-executable-page-protection",
+)
 
 
-def invoke(cli, endpoint):
-    return subprocess.run([str(cli), "status", "--socket", str(endpoint)],
+def invoke(cli, endpoint, arguments=("status",)):
+    return subprocess.run([str(cli), *arguments, "--socket", str(endpoint)],
                           capture_output=True, text=True, timeout=COMMAND_SECONDS)
 
 
@@ -37,7 +51,7 @@ def start(agent, cli, endpoint, environment):
         while time.monotonic() < deadline:
             status = invoke(cli, endpoint)
             if status.returncode == 0:
-                if "health API only (sync unavailable)" not in status.stdout:
+                if "pair configuration available (sync unavailable)" not in status.stdout:
                     raise RuntimeError(f"Unexpected CLI status: {status.stdout}")
                 return child
             if child.poll() is not None:
@@ -67,12 +81,76 @@ def exchange(endpoint, frames):
         return json.loads(response)
 
 
+def private_exchange(endpoint, method, params=None):
+    frames = [{"jsonrpc": "2.0", "method": "session.hello", "id": "hello",
+               "params": {"protocol_version": PROTOCOL_VERSION}},
+              {"jsonrpc": "2.0", "method": method, "id": "private"}]
+    if params is not None:
+        frames[1]["params"] = params
+    response = exchange(endpoint, json.dumps(frames).encode() + b"\n")
+    return next(reply for reply in response if reply.get("id") == "private")
+
+
+def configuration(cli, endpoint, directory, policy):
+    listing = invoke(cli, endpoint, ("pairs",))
+    if policy == "denied":
+        if listing.returncode == 0 or "Installed peer identity is unavailable or no longer valid" not in listing.stderr:
+            raise RuntimeError(f"Development client accessed private configuration: {listing}")
+        return None
+    if listing.returncode != 0 or listing.stdout.strip():
+        raise RuntimeError(f"Initial catalog is not empty: {listing}")
+    left, right = directory / "left", directory / "right"
+    left.mkdir()
+    right.mkdir()
+    # Linux permits undecodable names; APFS requires a valid UTF-8 fixture.
+    name = b"raw-\xff" if sys.platform == "linux" else "raw-é".encode()
+    raw = os.path.join(os.fsencode(left), name)
+    os.mkdir(raw)
+    arguments = ("pairs", "add", "Photos", raw, str(right), "backup-left")
+    created = invoke(cli, endpoint, arguments)
+    if created.returncode != 0:
+        raise RuntimeError(f"Pair creation failed: {created.stderr}")
+    pair = json.loads(created.stdout)
+    if pair["configuration"]["left_root"] != list(raw):
+        raise RuntimeError("Pair creation changed raw root bytes")
+    duplicate = invoke(cli, endpoint, arguments)
+    if duplicate.returncode == 0 or str(ROOT_OVERLAP) not in duplicate.stderr:
+        raise RuntimeError(f"Overlapping pair was not rejected: {duplicate}")
+    update = ("pairs", "update", pair["id"], str(pair["revision"]), "Renamed",
+              raw, str(right), "mirror-right")
+    saved = invoke(cli, endpoint, update)
+    if saved.returncode != 0 or json.loads(saved.stdout)["revision"] != pair["revision"] + 1:
+        raise RuntimeError(f"Pair update failed: {saved}")
+    stale = invoke(cli, endpoint, update)
+    if stale.returncode == 0 or str(STALE_REVISION) not in stale.stderr:
+        raise RuntimeError(f"Stale update was not rejected: {stale}")
+    return json.loads(saved.stdout)
+
+
+def verify_release_entitlements(agent, cli):
+    bundle = agent.parents[3]
+    if bundle.suffix != ".app" or cli.parents[3] != bundle:
+        raise RuntimeError("Private macOS smoke requires helpers in one signed app bundle")
+    for path in (bundle, agent, cli):
+        signed = subprocess.run(["/usr/bin/codesign", "--display", "--xml", "--entitlements", "-", str(path)],
+                                capture_output=True, timeout=COMMAND_SECONDS, check=True)
+        entitlements = plistlib.loads(signed.stdout) if signed.stdout.strip() else {}
+        if not isinstance(entitlements, dict):
+            raise RuntimeError(f"Invalid signed entitlements: {path}")
+        forbidden = sorted(set(entitlements).intersection(FORBIDDEN_ENTITLEMENTS))
+        if forbidden:
+            raise RuntimeError(f"Release code contains forbidden entitlements: {path}: {forbidden}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("agent", type=Path)
     parser.add_argument("cli", type=Path)
+    parser.add_argument("--configuration", choices=("required", "denied"), default="required")
     arguments = parser.parse_args()
     agent, cli = arguments.agent.resolve(), arguments.cli.resolve()
+    if sys.platform == "darwin" and arguments.configuration == "required":
+        verify_release_entitlements(agent, cli)
     with tempfile.TemporaryDirectory(prefix="foldover-agent-") as directory:
         home = Path(directory)
         environment = dict(os.environ, HOME=str(home), XDG_DATA_HOME=str(home / "data"))
@@ -98,10 +176,15 @@ def main():
                 if stat.S_IMODE(path.stat().st_mode) != mode:
                     raise RuntimeError(f"Unsafe state permissions: {path}")
 
-            unknown = exchange(endpoint, b'{"jsonrpc":"2.0","method":"pair.list","id":"private"}\n')
+            unknown = private_exchange(endpoint, "not.implemented")
             expected = PERMISSION_DENIED if sys.platform == "darwin" else METHOD_NOT_FOUND
             if unknown.get("error", {}).get("code") != expected:
                 raise RuntimeError(f"Unimplemented privileged route was not closed: {unknown}")
+            unnegotiated = exchange(endpoint, b'{"jsonrpc":"2.0","method":"pair.list","id":1}\n')
+            expected = PERMISSION_DENIED if sys.platform == "darwin" else VERSION_MISMATCH
+            if unnegotiated.get("error", {}).get("code") != expected:
+                raise RuntimeError(f"Private route accepted an unnegotiated session: {unnegotiated}")
+            pair = configuration(cli, endpoint, home, arguments.configuration)
             malformed = exchange(endpoint, b'{\n')
             if malformed.get("error", {}).get("code") != PARSE_ERROR:
                 raise RuntimeError(f"Malformed request was not rejected: {malformed}")
@@ -117,6 +200,10 @@ def main():
                 raise RuntimeError("CLI reported an unavailable agent as connected")
             child.stderr.close()
             child = start(agent, cli, endpoint, environment)
+            if pair is not None:
+                saved = invoke(cli, endpoint, ("pairs", "show", pair["id"]))
+                if saved.returncode != 0 or json.loads(saved.stdout) != pair:
+                    raise RuntimeError(f"Configuration did not survive agent crash: {saved}")
             child.terminate()
             if child.wait(timeout=COMMAND_SECONDS) != 0:
                 raise RuntimeError("Agent did not shut down cleanly on SIGTERM")
@@ -140,7 +227,7 @@ def main():
                 child.wait(timeout=COMMAND_SECONDS)
             if child.stderr is not None:
                 child.stderr.close()
-    print("Agent/CLI startup, state ownership, compatibility refusal, framing, crash restart and shutdown passed")
+    print(f"Agent/CLI lifecycle, state, framing and configuration ({arguments.configuration}) passed")
 
 
 if __name__ == "__main__":

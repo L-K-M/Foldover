@@ -109,6 +109,7 @@ pub struct PairRow {
 pub struct Database {
     connection: Connection,
     _writer: File,
+    directory: PathBuf,
 }
 
 #[derive(Clone, Copy)]
@@ -179,7 +180,12 @@ impl Database {
         Ok(Self {
             connection,
             _writer: writer,
+            directory,
         })
+    }
+
+    pub fn directory(&self) -> &Path {
+        &self.directory
     }
 
     pub fn create_pair(&mut self, values: &PairValues) -> Result<PairRow, Error> {
@@ -197,6 +203,18 @@ impl Database {
             "SELECT {PAIR_COLUMNS} FROM pair ORDER BY name COLLATE BINARY,id"
         ))?;
         let rows = statement.query_map([], pair_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn pairs_after(&self, after: Option<&[u8]>, limit: usize) -> Result<Vec<PairRow>, Error> {
+        let limit = i64::try_from(limit)
+            .ok()
+            .filter(|limit| *limit > 0)
+            .ok_or(Error::InvalidState("Pair page limit must be positive"))?;
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT {PAIR_COLUMNS} FROM pair WHERE ?1 IS NULL OR id > ?1 ORDER BY id LIMIT ?2"
+        ))?;
+        let rows = statement.query_map(params![after, limit], pair_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 

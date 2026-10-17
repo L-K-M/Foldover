@@ -1,8 +1,14 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+mod pair;
+pub use pair::{
+    PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_UPDATE, PairInput, PairKey, PairList,
+    PairMode, PairPage, PairRecord, PairSide, PairUpdate,
+};
+
 pub const JSON_RPC_VERSION: &str = "2.0";
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const SESSION_HELLO: &str = "session.hello";
 pub const DAEMON_STATUS: &str = "daemon.status";
 pub const PARSE_ERROR: i32 = -32700;
@@ -12,6 +18,10 @@ pub const INVALID_PARAMS: i32 = -32602;
 pub const INTERNAL_ERROR: i32 = -32603;
 pub const VERSION_MISMATCH: i32 = -32001;
 pub const PERMISSION_DENIED: i32 = -32002;
+pub const PAIR_NOT_FOUND: i32 = -32003;
+pub const STALE_REVISION: i32 = -32004;
+pub const ROOT_UNAVAILABLE: i32 = -32005;
+pub const ROOT_OVERLAP: i32 = -32006;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Hello {
@@ -23,6 +33,7 @@ pub struct Hello {
 #[serde(rename_all = "camelCase")]
 pub enum AgentCapability {
     HealthOnly,
+    PairConfiguration,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

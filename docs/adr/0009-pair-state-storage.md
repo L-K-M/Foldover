@@ -1,6 +1,6 @@
 # ADR 0009: Pair configuration and state writer ownership
 
-Status: Implemented initial store and agent ownership; configuration API pending
+Status: Implemented initial store and agent ownership
 
 ## Scope
 
@@ -25,7 +25,8 @@ file operations, migrations and backups stay in `foldover-db`.
   from the health agent's runtime/socket lock.
 - Agent startup opens the store through service/engine/state and retains the
   writer guard for the server lifetime. Another socket cannot acquire the
-  same store. Startup failures are explicit; the API remains health-only.
+same store. Startup failures are explicit. Configuration dispatch is covered by
+[ADR 0011](0011-pair-configuration-api.md).
 - WAL, FULL synchronous mode and foreign-key enforcement are required.
   macOS requires a local-volume flag. Linux currently supports ext-family,
   btrfs, XFS, overlay and tmpfs; unknown, network and FUSE storage is refused.
@@ -59,5 +60,5 @@ rollback and committed-WAL backup contents. State tests cover every mode,
 raw paths, stale revisions and invalid domain records.
 
 Linux checks pass locally. macOS filesystem/backup behavior is checked by CI.
-Configuration APIs, complete schema, journal crash recovery and release
-reliability gates remain required.
+Complete schema, journal crash recovery and release reliability gates remain
+required.

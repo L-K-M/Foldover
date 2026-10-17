@@ -1,5 +1,6 @@
 use foldover_db::{Database, PairRow, PairValues, StateLocation};
 use foldover_types::{InvalidPair, LocalRoot, PairConfig, PairDraft, PairId, Side, SyncMode};
+use std::os::unix::ffi::OsStrExt;
 
 const SYNC: &str = "sync";
 const MIRROR_LEFT: &str = "mirror-left";
@@ -10,11 +11,25 @@ const BACKUP_RIGHT: &str = "backup-right";
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
-    Storage(#[from] foldover_db::Error),
+    Storage(foldover_db::Error),
     #[error(transparent)]
     InvalidPair(#[from] InvalidPair),
     #[error("Stored pair configuration is invalid: {0}")]
     InvalidStored(&'static str),
+    #[error("Pair does not exist")]
+    PairNotFound,
+    #[error("Pair configuration changed; refresh before updating it")]
+    StaleRevision,
+}
+
+impl From<foldover_db::Error> for Error {
+    fn from(error: foldover_db::Error) -> Self {
+        match error {
+            foldover_db::Error::PairNotFound => Self::PairNotFound,
+            foldover_db::Error::StaleRevision => Self::StaleRevision,
+            error => Self::Storage(error),
+        }
+    }
 }
 
 pub struct PairStore {
@@ -32,12 +47,30 @@ impl PairStore {
         from_row(self.database.create_pair(&values(draft))?)
     }
 
+    pub fn root(&self) -> Result<LocalRoot, Error> {
+        Ok(LocalRoot::from_bytes(
+            self.database.directory().as_os_str().as_bytes().to_vec(),
+        )?)
+    }
+
     pub fn pairs(&self) -> Result<Vec<PairConfig>, Error> {
         self.database.pairs()?.into_iter().map(from_row).collect()
     }
 
     pub fn pair(&self, id: PairId) -> Result<Option<PairConfig>, Error> {
         self.database.pair(id.as_bytes())?.map(from_row).transpose()
+    }
+
+    pub fn pairs_after(
+        &self,
+        after: Option<PairId>,
+        limit: usize,
+    ) -> Result<Vec<PairConfig>, Error> {
+        self.database
+            .pairs_after(after.as_ref().map(|id| id.as_bytes().as_slice()), limit)?
+            .into_iter()
+            .map(from_row)
+            .collect()
     }
 
     pub fn update(
@@ -170,7 +203,7 @@ mod tests {
         assert_eq!(updated.revision(), original.revision() + 1);
         assert!(matches!(
             store.update(original.id(), original.revision(), original.draft()),
-            Err(Error::Storage(foldover_db::Error::StaleRevision))
+            Err(Error::StaleRevision)
         ));
         assert_eq!(store.pair(original.id()).unwrap(), Some(updated));
     }
