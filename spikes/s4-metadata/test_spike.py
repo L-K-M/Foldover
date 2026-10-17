@@ -68,6 +68,13 @@ class FidelityTests(unittest.TestCase):
         after = {"entries": {}, "hard_links": [], "sidecars": []}
         self.assertFalse(spike.differences(self.before, after, {})[0]["predicted"])
 
+    def test_changed_entry_kind_is_a_measurement_failure_not_a_harness_crash(self):
+        link = {"entries": {"file": {"kind": "symlink", "link_target": "target", "mtime_ns": 123}},
+                "hard_links": [], "sidecars": []}
+        changes = spike.differences(link, self.before, {})
+        self.assertEqual(changes, [{"path": "file", "field": "kind", "before": "symlink",
+                                    "after": "file", "predicted": False}])
+
     def test_snapshot_preserves_link_identity_without_following_symlinks(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

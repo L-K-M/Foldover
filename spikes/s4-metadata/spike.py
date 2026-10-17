@@ -342,6 +342,10 @@ def differences(before: dict, after: dict, capabilities: dict) -> list[dict]:
         if original is None or stored is None:
             changes.append({"path": path, "field": "presence", "predicted": False})
             continue
+        if original["kind"] != stored["kind"]:
+            changes.append({"path": path, "field": "kind", "before": original["kind"],
+                            "after": stored["kind"], "predicted": False})
+            continue
         for field in sorted(original.keys() | stored.keys()):
             left, right = original.get(field), stored.get(field)
             if left == right:
