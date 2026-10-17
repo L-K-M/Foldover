@@ -46,6 +46,8 @@ Toolchain details and every other command: [`AGENTS.md`](AGENTS.md).
 The app embeds the Rust agent and CLI. Choose **Enable Background Agent**;
 if macOS requests approval, open Login Items and allow Foldover, then refresh.
 The agent exposes health checks and local pair configuration. It cannot sync files.
+Choose **New Pair**, select both folders and a mode, then save. Select a pair
+to review or edit its settings. Saves do not start a sync.
 
 For development, run these in separate terminals:
 
