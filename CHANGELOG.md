@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Native pair sidebar, folder selection and revision-checked settings editor,
+  with paged loading through UniFFI and preserved drafts on save failures.
 - Authenticated local pair create/read/update APIs, paged lists and CLI commands,
   with cross-pair/state-root overlap checks and revision-checked updates.
 - Mutual installed-code authentication for private macOS IPC, bound to kernel
