@@ -13,3 +13,10 @@ pub use reconcile::{
     EntryKind, EntryVersion, Side, SyncMode,
 };
 pub use sync_path::{InvalidSyncPath, SyncPath};
+
+/// Cooperative cancellation between bounded scan/read steps.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScanControl {
+    Continue,
+    Cancel,
+}

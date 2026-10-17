@@ -2,9 +2,11 @@ use std::io;
 use std::path::Path;
 
 use foldover_fs::{
-    DirectoryEntry, DirectoryScope, EntryMetadata, FileIdentity, NodeKind, Root, RootRelation,
+    DirectoryEntry, DirectoryScope, EntryMetadata, FileIdentity, HashError, NodeKind, Root,
+    RootRelation,
 };
-use foldover_types::{InvalidSyncPath, SyncPath};
+pub use foldover_types::ScanControl;
+use foldover_types::{Digest, InvalidSyncPath, SyncPath};
 
 const INTERNAL_DIRECTORY: &[u8] = b".foldover";
 const TEMPORARY_PREFIX: &[u8] = b".foldover-tmp-";
@@ -17,12 +19,6 @@ pub struct LocalEndpoint {
     identity: FileIdentity,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ScanControl {
-    Continue,
-    Cancel,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum ScanError {
     #[error("Metadata scan failed at {path:?}: {source}")]
@@ -33,7 +29,7 @@ pub enum ScanError {
     },
     #[error("Invalid directory entry: {0}")]
     InvalidPath(#[from] InvalidSyncPath),
-    #[error("Metadata scan cancelled; partial rows are not a complete inventory")]
+    #[error("Scan cancelled; partial results are not complete")]
     Cancelled,
     #[error("Entry changed during metadata scan: {0:?}")]
     Changed(Option<SyncPath>),
@@ -45,6 +41,8 @@ pub enum ScanError {
     UnsupportedEntry(SyncPath),
     #[error("AppleDouble sidecar needs metadata classification before scanning: {0:?}")]
     UnclassifiedSidecar(SyncPath),
+    #[error("Internal endpoint path is protected: {0:?}")]
+    ProtectedPath(SyncPath),
 }
 
 /// Exact path and observed attributes. A link target is data, never a scan root.
@@ -116,6 +114,39 @@ impl LocalEndpoint {
 
     pub fn relation_to(&self, other: &Self) -> Result<RootRelation, ScanError> {
         at(&None, self.root.relation_to(&other.root))
+    }
+
+    /// Hash only an observed regular entry. A digest does not include xattrs,
+    /// ACLs or resource forks and cannot authorize an executable plan by itself.
+    pub fn hash_file(
+        &self,
+        entry: &LocalEntry,
+        control: &mut impl FnMut(u64) -> ScanControl,
+    ) -> Result<Digest, ScanError> {
+        if entry.path.components().any(protected) {
+            return Err(ScanError::ProtectedPath(entry.path.clone()));
+        }
+        if entry
+            .path
+            .components()
+            .any(|component| component.starts_with(b"._"))
+        {
+            return Err(ScanError::UnclassifiedSidecar(entry.path.clone()));
+        }
+        if entry.metadata.identity().device() != self.identity.device() {
+            return Err(ScanError::NestedFilesystem(entry.path.clone()));
+        }
+        self.root
+            .hash_file(entry.path(), entry.metadata(), control)
+            .map_err(|error| match error {
+                HashError::Io(source) => ScanError::Io {
+                    path: Some(entry.path.clone()),
+                    source,
+                },
+                HashError::Changed => ScanError::Changed(Some(entry.path.clone())),
+                HashError::NotRegular => ScanError::UnsupportedEntry(entry.path.clone()),
+                HashError::Cancelled => ScanError::Cancelled,
+            })
     }
 
     /// Stream depth-first metadata rows without opening file data or buffering a
@@ -240,6 +271,68 @@ mod tests {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::symlink;
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn hashes_observed_regular_files_but_never_follows_links() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("file"), b"abc").unwrap();
+        symlink("/outside", directory.path().join("link")).unwrap();
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        let mut entries = Vec::new();
+        endpoint
+            .scan_metadata(&mut |entry| {
+                entries.push(entry);
+                ScanControl::Continue
+            })
+            .unwrap();
+        let file = entries
+            .iter()
+            .find(|entry| entry.path.as_bytes() == b"file")
+            .unwrap();
+        let digest = endpoint
+            .hash_file(file, &mut |_| ScanControl::Continue)
+            .unwrap();
+        let expected = [
+            0x64, 0x37, 0xb3, 0xac, 0x38, 0x46, 0x51, 0x33, 0xff, 0xb6, 0x3b, 0x75, 0x27, 0x3a,
+            0x8d, 0xb5, 0x48, 0xc5, 0x58, 0x46, 0x5d, 0x79, 0xdb, 0x03, 0xfd, 0x35, 0x9c, 0x6c,
+            0xd5, 0xbd, 0x9d, 0x85,
+        ];
+        assert_eq!(digest.as_bytes(), &expected);
+        let link = entries
+            .iter()
+            .find(|entry| entry.path.as_bytes() == b"link")
+            .unwrap();
+        assert!(matches!(
+            endpoint.hash_file(link, &mut |_| ScanControl::Continue),
+            Err(ScanError::UnsupportedEntry(_))
+        ));
+        fs::write(directory.path().join("file"), b"changed").unwrap();
+        assert!(matches!(
+            endpoint.hash_file(file, &mut |_| ScanControl::Continue),
+            Err(ScanError::Changed(_))
+        ));
+    }
+
+    #[test]
+    fn content_access_keeps_internal_names_protected_independently_of_inventory() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join(".foldover")).unwrap();
+        fs::write(directory.path().join(".foldover/private"), b"private").unwrap();
+        fs::write(directory.path().join("._sidecar"), b"metadata").unwrap();
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        for bytes in [b".foldover/private".as_slice(), b"._sidecar"] {
+            let path = SyncPath::try_from(bytes).unwrap();
+            let entry = LocalEntry {
+                metadata: endpoint.root.metadata(&path).unwrap(),
+                path,
+                link_target: None,
+            };
+            assert!(matches!(
+                endpoint.hash_file(&entry, &mut |_| panic!("Protected reads must not start")),
+                Err(ScanError::ProtectedPath(_) | ScanError::UnclassifiedSidecar(_))
+            ));
+        }
+    }
 
     #[test]
     fn an_empty_root_completes_without_inventing_entries() {
