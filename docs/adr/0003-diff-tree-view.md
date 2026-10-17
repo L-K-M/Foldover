@@ -120,6 +120,26 @@ AppKit still fails the frame-time and stall gates. SwiftUI again reported
 zero rows and zero scroll distance; its apparent scroll result cannot
 support a performance decision. The provisional choice and follow-ups stand.
 
+### Synchronous batch profile
+
+[Run 39065753885](https://github.com/L-K-M/Foldover/actions/runs/39065753885),
+commit `e1a9246`, used the same macOS 27.0.1 virtual M1 workload. AppKit showed
+all 200,000 rows and scrolled 4,799,976 points. Stream frame p95 was 333.3 ms;
+the longest stall was 566.0 ms. Synchronous batch-stage p95 was:
+
+| Stage | Milliseconds |
+|---|---|
+| Model construction | 26.21 |
+| Grouped insertion | 3.02 |
+| Per-folder expansion | 375.19 |
+
+Expansion is the dominant synchronous stream cost. The next experiment expands
+only roots of new branches recursively, rather than issuing one top-level
+update per new folder. It preserves the generated tree and batch cadence and
+adds an explicit full-visible-row check before scrolling. No performance pass
+is implied; collapse/expand stalls, SwiftUI coverage and physical-Mac calibration
+remain open.
+
 ## Decision
 
 Provisional: keep `NSOutlineView` in `NSViewRepresentable`, as PLAN.md

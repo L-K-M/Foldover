@@ -142,6 +142,7 @@ struct BenchBatchProfile: Codable {
     let expansionMilliseconds: Double?
     let parentGroups: Int?
     let newFolders: Int?
+    let expansionCalls: Int?
     let visibleRows: Int?
 }
 

@@ -26,6 +26,7 @@ struct OutlineBatchProfile {
     let expansionMilliseconds: Double
     let parentGroups: Int
     let newFolders: Int
+    let expansionCalls: Int
     let visibleRows: Int
 }
 
@@ -79,8 +80,8 @@ struct OutlineTreeRepresentable: NSViewRepresentable {
 }
 
 /// The outline's data source and delegate: reads the model's node tree
-/// directly, and applies each delivered batch as grouped inserts plus
-/// an `expandItem` per new folder (the streamed reveal).
+/// directly, and applies each delivered batch as grouped inserts followed by
+/// recursive expansion of new branches (the streamed reveal).
 @MainActor
 final class OutlineCoordinator: NSObject {
     private static let cellIdentifier = NSUserInterfaceItemIdentifier(
@@ -96,8 +97,7 @@ final class OutlineCoordinator: NSObject {
         self.refs = refs
     }
 
-    /// One batch's changes: the inserts, then an expand per new folder
-    /// so the tree stays fully expanded while it grows.
+    /// Insert one batch, then reveal its new branches so the tree stays expanded.
     func apply(_ journal: BatchJournal) {
         guard let outlineView else { return }
         let started = CACurrentMediaTime()
@@ -111,8 +111,15 @@ final class OutlineCoordinator: NSObject {
         }
         outlineView.endUpdates()
         let inserted = CACurrentMediaTime()
-        for folder in journal.newFolders {
-            outlineView.expandItem(folder)
+        let newFolders = Set(journal.newFolders.map { ObjectIdentifier($0) })
+        let branches = journal.newFolders.filter { folder in
+            guard let parent = folder.parent else { return true }
+            return !newFolders.contains(ObjectIdentifier(parent))
+        }
+        // One recursive update per new branch avoids rebuilding visible-row
+        // indexes separately for each descendant while revealing the same rows.
+        for folder in branches {
+            outlineView.expandItem(folder, expandChildren: true)
         }
         let expanded = CACurrentMediaTime()
         refs?.lastBatchProfile = OutlineBatchProfile(
@@ -120,6 +127,7 @@ final class OutlineCoordinator: NSObject {
             expansionMilliseconds: (expanded - inserted) * 1_000,
             parentGroups: journal.entries.count,
             newFolders: journal.newFolders.count,
+            expansionCalls: branches.count,
             visibleRows: outlineView.numberOfRows
         )
     }

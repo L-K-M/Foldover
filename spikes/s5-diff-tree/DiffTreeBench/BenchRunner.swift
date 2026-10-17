@@ -148,6 +148,7 @@ final class BenchRunner {
                 expansionMilliseconds: outline?.expansionMilliseconds,
                 parentGroups: outline?.parentGroups,
                 newFolders: outline?.newFolders,
+                expansionCalls: outline?.expansionCalls,
                 visibleRows: outline?.visibleRows
             ))
             delivered = end
@@ -520,6 +521,15 @@ final class BenchRunner {
             let stream = run.phases.first { $0.name == "stream" }
             let scroll = run.phases.first { $0.name == "scroll" }
             let worstStall = run.phases.map(\.maxStallMilliseconds).max()
+            checks.append(BenchCheck(
+                name: "\(run.implementation).allRowsVisible",
+                implementation: run.implementation,
+                pass: run.rowsOnScreenAtScroll == PlanGenerator.rowCount,
+                detail: "the full generated plan is expanded before scrolling",
+                value: Double(run.rowsOnScreenAtScroll),
+                limit: Double(PlanGenerator.rowCount),
+                gate: gate
+            ))
             checks.append(BenchCheck(
                 name: "\(run.implementation).firstRows<1000ms",
                 implementation: run.implementation,
