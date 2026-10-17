@@ -31,6 +31,8 @@ settings:
     Release:
       ONLY_ACTIVE_ARCH: NO
       ENABLE_HARDENED_RUNTIME: YES
+      # Ad-hoc signing otherwise injects get-task-allow, which private IPC refuses.
+      CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
 
 packages:
   FoldoverCore:
