@@ -1,41 +1,70 @@
-// Pair-empty content and background-agent controls (PLAN.md §3.8).
+// Pair configuration and background-agent controls (PLAN.md §3.8).
 
 import SwiftUI
 
 struct MainView: View {
-    let viewModel: MainViewModel
+    @Bindable var viewModel: MainViewModel
 
     var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "arrow.triangle.2.circlepath")
-                .font(.system(size: 48))
-                .foregroundStyle(.secondary)
-
-            Text(viewModel.title)
-                .font(.largeTitle)
-
-            Text(viewModel.emptyState)
-                .foregroundStyle(.secondary)
-
-            Text(viewModel.coreVersionText)
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-
-            Text(viewModel.agentStatusText)
-                .font(.callout)
-                .multilineTextAlignment(.center)
-
-            HStack {
-                Button("Enable Background Agent") {
-                    Task { await viewModel.enableAgent() }
+        NavigationSplitView {
+            List(selection: $viewModel.selectedPairID) {
+                Section("Pairs") {
+                    ForEach(viewModel.pairs) { pair in
+                        VStack(alignment: .leading) {
+                            Text(pair.settings.name)
+                            Text(pair.settings.mode.title).font(.caption).foregroundStyle(.secondary)
+                        }
+                        .tag(pair.id)
+                    }
                 }
-                if viewModel.agentNeedsApproval {
-                    Button("Open Login Items") { viewModel.openLoginItems() }
+            }
+            .navigationTitle(viewModel.title)
+            .overlay {
+                if viewModel.pairsLoading { ProgressView("Loading pairs…") }
+            }
+            .safeAreaInset(edge: .bottom) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(viewModel.agentStatusText).font(.caption)
+                    Button("Enable Background Agent") { Task { await viewModel.enableAgent() } }
+                    if viewModel.agentNeedsApproval {
+                        Button("Open Login Items") { viewModel.openLoginItems() }
+                    }
+                    if let error = viewModel.pairError {
+                        Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                    }
                 }
-                Button("Refresh") { Task { await viewModel.refreshAgent() } }
+                .padding()
+            }
+        } detail: {
+            if let pair = viewModel.selectedPair {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(pair.settings.name).font(.title)
+                    LabeledContent("Folder A", value: PairEditorViewModel.pathText(pair.settings.left))
+                    LabeledContent("Folder B", value: PairEditorViewModel.pathText(pair.settings.right))
+                    Text(pair.settings.mode.title).font(.headline)
+                    Text(pair.settings.mode.explanation).foregroundStyle(.secondary)
+                    Button("Edit Pair") { viewModel.editPair() }.disabled(!viewModel.canConfigurePairs)
+                    Text("Configuration saved. Preview and sync are not available yet.")
+                        .foregroundStyle(.secondary)
+                }
+                .textSelection(.enabled)
+                .padding(24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            } else {
+                ContentUnavailableView(viewModel.detailTitle, systemImage: "folder.badge.plus",
+                    description: Text("Choose two folders and a sync mode. Preview and sync are not available yet."))
             }
         }
-        .frame(minWidth: 480, minHeight: 320)
+        .toolbar {
+            Button("New Pair", systemImage: "plus") { viewModel.newPair() }
+                .keyboardShortcut("n")
+                .disabled(!viewModel.canConfigurePairs)
+            Button("Refresh", systemImage: "arrow.clockwise") { Task { await viewModel.refreshAgent() } }
+        }
+        .sheet(item: Binding(get: { viewModel.editor }, set: { _ in viewModel.dismissEditor() })) { editor in
+            PairEditorView(viewModel: editor)
+        }
+        .frame(minWidth: 800, minHeight: 460)
         .task { await viewModel.refreshAgent() }
     }
 }

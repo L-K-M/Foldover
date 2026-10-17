@@ -22,7 +22,7 @@ struct MenuBarView: View {
 
             Divider()
 
-            // The WindowGroup's "main" id; if a window is already open
+            // The window's "main" id; if a window is already open
             // it is brought forward instead.
             Button("Open Foldover") {
                 openWindow(id: "main")
