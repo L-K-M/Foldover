@@ -1,7 +1,9 @@
 use std::io;
 use std::path::Path;
 
-use foldover_fs::{DirectoryEntry, DirectoryScope, EntryMetadata, FileIdentity, NodeKind, Root};
+use foldover_fs::{
+    DirectoryEntry, DirectoryScope, EntryMetadata, FileIdentity, NodeKind, Root, RootRelation,
+};
 use foldover_types::{InvalidSyncPath, SyncPath};
 
 const INTERNAL_DIRECTORY: &[u8] = b".foldover";
@@ -110,6 +112,10 @@ impl LocalEndpoint {
         let root = at(&None, Root::open(path))?;
         let identity = at(&None, root.root_metadata())?.identity();
         Ok(Self { root, identity })
+    }
+
+    pub fn relation_to(&self, other: &Self) -> Result<RootRelation, ScanError> {
+        at(&None, self.root.relation_to(&other.root))
     }
 
     /// Stream depth-first metadata rows without opening file data or buffering a

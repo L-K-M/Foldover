@@ -7,7 +7,13 @@
 mod local;
 
 #[cfg(unix)]
+mod local_pair;
+
+#[cfg(unix)]
 pub use local::{LocalEndpoint, LocalEntry, ScanControl, ScanError, ScanStats};
 
 #[cfg(unix)]
-pub use foldover_fs::{EntryMetadata, FileIdentity, NodeKind};
+pub use foldover_fs::{EntryMetadata, FileIdentity, NodeKind, RootRelation};
+
+#[cfg(unix)]
+pub use local_pair::{LocalPair, PairRootError};

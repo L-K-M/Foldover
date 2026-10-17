@@ -7,4 +7,6 @@
 mod root;
 
 #[cfg(unix)]
-pub use root::{DirectoryEntry, DirectoryScope, EntryMetadata, FileIdentity, NodeKind, Root};
+pub use root::{
+    DirectoryEntry, DirectoryScope, EntryMetadata, FileIdentity, NodeKind, Root, RootRelation,
+};
