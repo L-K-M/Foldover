@@ -40,18 +40,25 @@ descriptor `fstat` observation as the entry identity. Known dataless files
 are refused before content open. Other platforms report `NotReported`, never
 inventing a materialized observation. Sparse allocation is not a residency test.
 
-This observation does not close the eviction race between stat and open.
-Opening file data can still materialize a newly evicted cloud placeholder.
-Content reads must remain inaccessible through the
-agent until the host enforces a tested non-materializing policy and cloud-root
-readiness is implemented.
-
 Apple documents process/thread materialization policy in
 [`getiopolicy_np`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man3/getiopolicy_np.3).
-Launchd also exposes `MaterializeDatalessFiles`. A managed-launch policy and
-live process-context verification are candidates; neither is established by
-this read primitive. A hand-written unsafe wrapper is not permitted by the
-repository's Rust rules. Account-backed File Provider verification remains open.
+The filesystem driver now enforces and reads back `OFF` on the calling thread
+before namespace I/O and every content read. Iteration checks the consuming
+thread, including after an iterator moves between threads. Hash callbacks
+cannot leave materialization enabled for a subsequent read. The driver leaves
+the thread policy disabled; it does not restore an inherited permissive policy.
+Policy setup/query failures are I/O errors, never complete scans or digests.
+
+The owner approved a narrow unsafe exception for audited macOS driver bindings
+on 2026-10-17. The binding accepts only C integers, has safe internal interfaces
+and `SAFETY` comments, and is isolated from filesystem traversal, which still
+forbids unsafe. Other layers retain the workspace prohibition. Native tests
+compare constants against the installed Darwin SDK and exercise policy changes
+on real worker threads and across callbacks.
+
+Launchd's `MaterializeDatalessFiles=false` is an additional managed-launch
+defense. Account-backed File Provider verification, cloud-root readiness and
+full metadata/volume gates remain open. Content reads remain below the agent API.
 
 ## Verification
 

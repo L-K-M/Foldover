@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Enforced macOS non-materializing thread policy around filesystem traversal
+  and hashing, isolated behind audited driver bindings and native tests.
 - Darwin dataless-file observations, with explicit scan/hash refusal for known
   placeholders and no inferred residency on other platforms.
 - Authenticated local pair create/read/update APIs, paged lists and CLI commands,

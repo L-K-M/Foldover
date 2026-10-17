@@ -4,7 +4,20 @@
 //! See PLAN.md §4.4.
 
 #[cfg(unix)]
+#[forbid(unsafe_code)]
 mod root;
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod materialization;
+
+#[cfg(target_os = "macos")]
+use materialization::prevent_materialization;
+
+#[cfg(not(target_os = "macos"))]
+fn prevent_materialization() -> std::io::Result<()> {
+    Ok(())
+}
 
 #[cfg(unix)]
 pub use root::{
