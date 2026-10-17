@@ -10,6 +10,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+foldover-types = { path = "../foldover-types" }
 foldover-endpoint = { path = "../foldover-endpoint" }
 foldover-state = { path = "../foldover-state" }
 foldover-host = { path = "../foldover-host" }
