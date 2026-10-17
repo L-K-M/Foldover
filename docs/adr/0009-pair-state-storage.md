@@ -1,6 +1,6 @@
 # ADR 0009: Pair configuration and state writer ownership
 
-Status: Implemented library; agent/API integration pending
+Status: Implemented initial store and agent ownership; configuration API pending
 
 ## Scope
 
@@ -23,6 +23,9 @@ file operations, migrations and backups stay in `foldover-db`.
   as macOS `/var` before SQLite's all-components no-symlink open.
 - An exclusive state-directory lock precedes database access. It is separate
   from the health agent's runtime/socket lock.
+- Agent startup opens the store through service/engine/state and retains the
+  writer guard for the server lifetime. Another socket cannot acquire the
+  same store. Startup failures are explicit; the API remains health-only.
 - WAL, FULL synchronous mode and foreign-key enforcement are required.
   macOS requires a local-volume flag. Linux currently supports ext-family,
   btrfs, XFS, overlay and tmpfs; unknown, network and FUSE storage is refused.
@@ -56,5 +59,5 @@ rollback and committed-WAL backup contents. State tests cover every mode,
 raw paths, stale revisions and invalid domain records.
 
 Linux checks pass locally. macOS filesystem/backup behavior is checked by CI.
-Agent integration, complete schema, crash recovery and release reliability
-gates remain required.
+Configuration APIs, complete schema, journal crash recovery and release
+reliability gates remain required.
