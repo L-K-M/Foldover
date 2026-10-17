@@ -8,3 +8,11 @@ rust-version.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+cap-fs-ext = "4.0.3"
+cap-std = "4.0.3"
+foldover-types = { path = "../foldover-types" }
+
+[dev-dependencies]
+tempfile = "3"
