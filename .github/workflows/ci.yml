@@ -129,6 +129,9 @@ jobs:
       - name: Agent and CLI process smoke
         run: cargo xtask agent-smoke
 
+      - name: Installed-code IPC authentication
+        run: python3 scripts/test-installed-identity.py
+
       # Builds the arm64 FoldoverCoreFFI.xcframework plus the Swift
       # bindings; the app links it below.
       - name: xtask ffi

@@ -23,7 +23,8 @@ let package = Package(
             name: "FoldoverCore",
             dependencies: ["FoldoverCoreFFI"],
             path: "Sources/FoldoverCore",
-            swiftSettings: [.swiftLanguageMode(.v6)]
+            swiftSettings: [.swiftLanguageMode(.v6)],
+            linkerSettings: [.linkedFramework("Security"), .linkedFramework("CoreFoundation")]
         ),
     ]
 )

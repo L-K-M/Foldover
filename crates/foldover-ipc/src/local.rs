@@ -4,7 +4,10 @@ use std::time::Duration;
 
 pub use foldover_net::local::SocketLocation;
 use foldover_net::local::{Connection as Channel, Listener};
-use foldover_proto::local::{INVALID_REQUEST, PARSE_ERROR, Request, Response, RpcError};
+use foldover_proto::local::{
+    DAEMON_STATUS, INVALID_REQUEST, PARSE_ERROR, PERMISSION_DENIED, Request, Response, RpcError,
+    SESSION_HELLO,
+};
 use serde_json::Value;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -62,6 +65,9 @@ impl Connection {
             .id()
             .ok_or(Error::Protocol("A call needs an ID"))?
             .clone();
+        if privileged(request.method()) {
+            self.channel.require_installed_peer().await?;
+        }
         self.write_value(&request.to_value()).await?;
         let frame = self
             .read_frame()
@@ -157,7 +163,12 @@ where
             };
             while let Some(frame) = connection.read_frame().await? {
                 let output = match serde_json::from_slice(&frame) {
-                    Ok(value) => dispatch(value, &*handler).await,
+                    Ok(value) => {
+                        dispatch(value, &|request| {
+                            authorized(request, &connection.channel, &*handler)
+                        })
+                        .await
+                    }
                     Err(_) => Some(
                         Response::error(Value::Null, RpcError::new(PARSE_ERROR, "Parse error"))
                             .to_value(),
@@ -170,6 +181,27 @@ where
             Ok::<(), Error>(())
         });
     }
+}
+
+async fn authorized<F, Fut>(
+    request: Request,
+    channel: &Channel,
+    handler: &F,
+) -> Result<Value, RpcError>
+where
+    F: Fn(Request) -> Fut,
+    Fut: Future<Output = Result<Value, RpcError>>,
+{
+    if privileged(request.method()) {
+        channel.require_installed_peer().await.map_err(|_| {
+            RpcError::new(PERMISSION_DENIED, "Installed peer authentication required")
+        })?;
+    }
+    handler(request).await
+}
+
+fn privileged(method: &str) -> bool {
+    !matches!(method, SESSION_HELLO | DAEMON_STATUS)
 }
 
 async fn dispatch<F, Fut>(value: Value, handler: &F) -> Option<Value>
@@ -223,6 +255,22 @@ where
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn only_exact_health_method_names_bypass_code_authentication() {
+        assert!(!privileged(SESSION_HELLO));
+        assert!(!privileged(DAEMON_STATUS));
+        for method in [
+            "pair.list",
+            "preview.list",
+            "events.subscribe",
+            "daemon.status ",
+            "SESSION.HELLO",
+            "",
+        ] {
+            assert!(privileged(method), "{method}");
+        }
+    }
 
     #[tokio::test]
     async fn batches_preserve_ids_and_suppress_notifications() {

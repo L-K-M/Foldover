@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Mutual installed-code authentication for private macOS IPC, bound to kernel
+  audit tokens, Hardened Runtime and a process-pinned verified bundle.
 - Streaming local folder metadata inventory, with protected internal paths,
   cancellation and explicit errors for changed or unsupported entries.
 - Typed local pair configuration and SQLite WAL persistence, with exclusive

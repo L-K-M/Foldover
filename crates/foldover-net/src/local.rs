@@ -87,7 +87,24 @@ impl Connection {
             path.parent()
                 .ok_or_else(|| io::Error::other("Socket has no parent"))?,
         )?;
-        Self::checked(UnixStream::connect(path).await?)
+        let connection = Self::checked(UnixStream::connect(path).await?)?;
+        #[cfg(target_os = "macos")]
+        crate::installed::prepare().await;
+        Ok(connection)
+    }
+
+    /// Privileged callers authenticate the live peer before sending any payload.
+    /// Linux uses its user boundary; macOS also verifies installed code identity.
+    pub async fn require_installed_peer(&self) -> io::Result<()> {
+        if self.stream.peer_cred()?.uid() != current_user() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Agent peer user changed",
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        crate::installed::require(&self.stream).await?;
+        Ok(())
     }
 
     pub async fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
@@ -168,6 +185,8 @@ impl Listener {
     }
 
     pub async fn accept(&self) -> io::Result<Connection> {
+        #[cfg(target_os = "macos")]
+        crate::installed::prepare().await;
         let (stream, _) = self.listener.accept().await?;
         Connection::checked(stream)
     }

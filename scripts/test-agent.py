@@ -19,6 +19,7 @@ STARTUP_SECONDS = 10
 COMMAND_SECONDS = 10
 RETRY_SECONDS = 0.05
 METHOD_NOT_FOUND = -32601
+PERMISSION_DENIED = -32002
 PARSE_ERROR = -32700
 
 
@@ -98,7 +99,8 @@ def main():
                     raise RuntimeError(f"Unsafe state permissions: {path}")
 
             unknown = exchange(endpoint, b'{"jsonrpc":"2.0","method":"pair.list","id":"private"}\n')
-            if unknown.get("error", {}).get("code") != METHOD_NOT_FOUND:
+            expected = PERMISSION_DENIED if sys.platform == "darwin" else METHOD_NOT_FOUND
+            if unknown.get("error", {}).get("code") != expected:
                 raise RuntimeError(f"Unimplemented privileged route was not closed: {unknown}")
             malformed = exchange(endpoint, b'{\n')
             if malformed.get("error", {}).get("code") != PARSE_ERROR:
