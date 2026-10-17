@@ -6,6 +6,7 @@ from contextlib import closing
 import json
 import os
 from pathlib import Path
+import plistlib
 import socket
 import sqlite3
 import stat
@@ -25,6 +26,15 @@ PROTOCOL_VERSION = 2
 VERSION_MISMATCH = -32001
 ROOT_OVERLAP = -32006
 STALE_REVISION = -32004
+FORBIDDEN_ENTITLEMENTS = (
+    "com.apple.security.get-task-allow",
+    "com.apple.security.cs.debugger",
+    "com.apple.security.cs.allow-jit",
+    "com.apple.security.cs.allow-unsigned-executable-memory",
+    "com.apple.security.cs.allow-dyld-environment-variables",
+    "com.apple.security.cs.disable-library-validation",
+    "com.apple.security.cs.disable-executable-page-protection",
+)
 
 
 def invoke(cli, endpoint, arguments=("status",)):
@@ -116,6 +126,21 @@ def configuration(cli, endpoint, directory, policy):
     return json.loads(saved.stdout)
 
 
+def verify_release_entitlements(agent, cli):
+    bundle = agent.parents[3]
+    if bundle.suffix != ".app" or cli.parents[3] != bundle:
+        raise RuntimeError("Private macOS smoke requires helpers in one signed app bundle")
+    for path in (bundle, agent, cli):
+        signed = subprocess.run(["/usr/bin/codesign", "--display", "--xml", "--entitlements", "-", str(path)],
+                                capture_output=True, timeout=COMMAND_SECONDS, check=True)
+        entitlements = plistlib.loads(signed.stdout) if signed.stdout.strip() else {}
+        if not isinstance(entitlements, dict):
+            raise RuntimeError(f"Invalid signed entitlements: {path}")
+        forbidden = sorted(set(entitlements).intersection(FORBIDDEN_ENTITLEMENTS))
+        if forbidden:
+            raise RuntimeError(f"Release code contains forbidden entitlements: {path}: {forbidden}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("agent", type=Path)
@@ -123,6 +148,8 @@ def main():
     parser.add_argument("--configuration", choices=("required", "denied"), default="required")
     arguments = parser.parse_args()
     agent, cli = arguments.agent.resolve(), arguments.cli.resolve()
+    if sys.platform == "darwin" and arguments.configuration == "required":
+        verify_release_entitlements(agent, cli)
     with tempfile.TemporaryDirectory(prefix="foldover-agent-") as directory:
         home = Path(directory)
         environment = dict(os.environ, HOME=str(home), XDG_DATA_HOME=str(home / "data"))

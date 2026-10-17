@@ -17,6 +17,10 @@ also authenticate the agent before their handshake and recheck before sending
 private parameters. Linux retains the user-ID boundary. Standalone macOS
 development clients remain health-only. See [ADR 0006](0006-ad-hoc-client-identity.md).
 
+Ad-hoc Release builds disable Xcode's base-entitlement injection. Otherwise
+Xcode adds `get-task-allow` and the installed-code policy correctly refuses the
+bundle. Process smoke inspects signed app/helper entitlements before private calls.
+
 ## Methods and representation
 
 - `pair.create`: validated local roots, name and explicit mode/source.
