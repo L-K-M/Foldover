@@ -187,6 +187,23 @@ class FidelityTests(unittest.TestCase):
         self.assertFalse(retained["full_s4_passed"])
         self.assertIn("exfat", retained["unavailable_targets"])
 
+    def test_macos_corpus_cleanup_uses_only_the_fresh_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            with patch.object(spike.sys, "platform", "darwin"), patch.object(spike, "command") as native:
+                with spike.corpus_directory(parent, "test-corpus-") as created:
+                    self.assertEqual(created.parent, parent)
+                    self.assertTrue(created.is_dir())
+                native.assert_called_once_with("/bin/rm", "-rf", "--", created)
+
+    def test_corpus_cleanup_failure_is_not_suppressed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(spike.sys, "platform", "darwin"), \
+                    patch.object(spike, "command", side_effect=RuntimeError("cleanup failed")):
+                with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
+                    with spike.corpus_directory(Path(directory), "test-corpus-"):
+                        pass
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,7 @@ from pathlib import Path
 import platform
 import plistlib
 import re
+import shutil
 import stat
 import struct
 import subprocess
@@ -458,6 +459,20 @@ def detach_image(mount: Path) -> None:
         command("hdiutil", "detach", "-force", mount)
 
 
+@contextlib.contextmanager
+def corpus_directory(parent: Path, prefix: str):
+    directory = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+    try:
+        yield directory
+    finally:
+        # Use native cleanup on exFAT, where Python rmtree reported ENOTEMPTY.
+        # Only this fresh fixture directory is removed; sync operations must archive instead.
+        if sys.platform == "darwin":
+            command("/bin/rm", "-rf", "--", directory)
+        else:
+            shutil.rmtree(directory)
+
+
 def measure_target(source: Path, cases: list[dict], target: Path, workspace: Path) -> dict:
     capabilities = capabilities_at(target)
     results = []
@@ -472,9 +487,9 @@ def measure_target(source: Path, cases: list[dict], target: Path, workspace: Pat
                             "unsupported": blocked, "collisions": collisions})
             continue
 
-        with tempfile.TemporaryDirectory(prefix="foldover-s4-copy-", dir=target) as out, \
-                tempfile.TemporaryDirectory(prefix="foldover-s4-return-", dir=workspace) as back:
-            destination, returned = Path(out) / case["path"], Path(back) / case["path"]
+        with corpus_directory(target, "foldover-s4-copy-") as out, \
+                corpus_directory(workspace, "foldover-s4-return-") as back:
+            destination, returned = out / case["path"], back / case["path"]
             result = {"name": case["name"], "state": "measured"}
             try:
                 command("/usr/bin/ditto", "--rsrc", "--extattr", "--acl", origin, destination)
