@@ -23,7 +23,7 @@ hosted in SwiftUI via `NSViewRepresentable` with SwiftUI
 
 ## Method
 
-`spikes/s5-diff-tree` builds DiffTreeBench, a macOS 26 app that:
+`spikes/s5-diff-tree` now builds DiffTreeBench for macOS 27. The app:
 
 - generates a deterministic 200,000-row plan (a folder tree of depth
   3 to 5; each row carries an action glyph, name, size, date and
@@ -44,8 +44,8 @@ Run it with `spikes/s5-diff-tree/run.sh <report.json>`; it builds the
 Release app with XcodeGen and xcodebuild, launches it through
 `open -W` with `-runBench`, writes the JSON report and prints a short
 summary. The workflow `.github/workflows/spike-s5.yml` does this on
-macos-26 and uploads the report as an artifact. A measured miss is
-data for this ADR, not a harness failure.
+the macOS 27 `xcode-27` image and uploads the report as an artifact. A
+measured miss is data for this ADR, not a harness failure.
 
 ## Pass criteria
 
@@ -94,6 +94,25 @@ scrolled), so it measured an idle list. Its memory grew 19.7 % anyway.
 
 These virtual-Mac measurements do not establish physical-Mac frame
 times. Hardware calibration is still required.
+
+### macOS 27 follow-up
+
+[Run 39019031441](https://github.com/L-K-M/Foldover/actions/runs/39019031441),
+commit `305d6ee`, used macOS 27.0.1 (26A434), Xcode 27.0 (27A266a) and
+a virtual Apple M1, with the same row count, window size and 60 Hz sampler.
+Verdict: fail.
+
+| Metric | AppKit | SwiftUI |
+|---|---|---|
+| First visible rows (ms) | 185.1 | 73.1 |
+| Stream frame p95 (ms) | 406.7 | 56.1 |
+| Scroll frame p95 (ms) | 34.0 | 16.7 (invalid) |
+| Longest main-thread stall (ms) | 782.5 | 67.4 |
+| Memory growth while scrolling (%) | 1.07 | 0.02 (scroll unexercised) |
+
+AppKit still fails the frame-time and stall gates. SwiftUI again reported
+zero rows and zero scroll distance; its apparent scroll result cannot
+support a performance decision. The provisional choice and follow-ups stand.
 
 ## Decision
 

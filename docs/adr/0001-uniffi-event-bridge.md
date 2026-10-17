@@ -1,6 +1,6 @@
 # ADR 0001: UniFFI event bridge under Swift 6
 
-Status: Accepted
+Status: Accepted with a macOS 27 memory caveat
 
 ## Context
 
@@ -30,7 +30,7 @@ Spike `spikes/s1-uniffi-events` builds:
   `on_batch(events: Vec<Event>)`, and
   `start_stream(sink, total, batch_size)` returning a `StreamHandle`
   with `cancel()` and an async `wait()`;
-- a SwiftPM package (swift-tools-version 6.0, macOS 26) over an
+- a SwiftPM package (swift-tools-version 6.0, macOS 27) over an
   XCFramework binary target, where `Bench` compiles in Swift 6
   language mode with `-warnings-as-errors` and
   `-strict-concurrency=complete`, implements `EventSink` in a final
@@ -52,8 +52,8 @@ spikes/s1-uniffi-events/run.sh results.json
 ```
 
 In CI, `spike-s1` (`.github/workflows/spike-s1.yml`) runs it on
-`macos-26` and uploads the JSON. The job fails only when the harness
-itself breaks; a measured miss is recorded here instead.
+the macOS 27 `xcode-27` image and uploads the JSON. The job fails only when
+the harness itself breaks; a measured miss is recorded here instead.
 
 The follow-up soak repeats 100,000-event streams at batch size 1,024
 for one hour. It samples `phys_footprint` every minute after teardown,
@@ -145,6 +145,31 @@ The preceding [smoke run](https://github.com/L-K-M/Foldover/actions/runs/3900193
 completed 63 streams in 10.14 seconds with zero retained objects and
 zero leaks. Its one-hour check correctly failed. XCTest runs these
 tests because the macOS Swift Testing runner re-entered the CLI.
+
+### macOS 27 follow-up
+
+The owner moved the app to macOS 27 on Apple silicon. Full soak
+[run 39019690780](https://github.com/L-K-M/Foldover/actions/runs/39019690780),
+commit `3a26989`, used macOS 27.0.1 (26A434), Xcode 27.0 and a virtual
+Apple M1. The hour checks passed, but the aggregate verdict was false:
+
+| Metric | Result |
+|---|---|
+| Soak elapsed | 3,600.01 s |
+| Completed streams | 25,356 × 100,000 events, batch 1,024 |
+| Events checked during the soak | 2,535,600,000 |
+| Failed delivery or ordering checks | 0 |
+| Retained collectors, sinks or handles | 0 |
+| Soak footprint | 3,048,832 → 3,147,136 bytes (+3.22 %) |
+| Heap scan | 0 leaked allocations, 0 leaked bytes, exit 0 |
+| Best throughput | 574,983 events/s, batch 1,024 |
+| Separate 20-stream footprint | 2,835,840 → 2,999,680 bytes (+5.78 %): fail |
+
+The short probe exceeded its 5 % limit; its cause is not established.
+Keep the actor/batching design while carrying this memory miss into
+production verification. The hour checks cover in-process lifetimes and a
+live heap scan on this VM. Agent IPC and physical-Mac performance remain
+unmeasured.
 
 ## Decision
 
