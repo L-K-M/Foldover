@@ -27,7 +27,10 @@ allow = [
 # MPL-2.0 is file-level copyleft, allowed by named exception per
 # package and version: the UniFFI crates only, which entered the
 # graph with foldover-ffi and foldover-bindgen in P0.
+# cap-std's Windows backend, winx, uses Apache with the permissive LLVM
+# exception; allow that package/version without broadening the general list.
 exceptions = [
+    { crate = "winx@0.36.4", allow = ["Apache-2.0 WITH LLVM-exception"] },
     { crate = "uniffi@0.32.2", allow = ["MPL-2.0"] },
     { crate = "uniffi_core@0.32.2", allow = ["MPL-2.0"] },
     { crate = "uniffi_macros@0.32.2", allow = ["MPL-2.0"] },

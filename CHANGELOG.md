@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Read-only local metadata access through held directory handles, with
+  no-follow traversal and exact name/link-target bytes.
 - Validated root-relative sync paths that preserve exact name bytes and
   reject traversal, rooted paths and ambiguous components.
 - Three-way entry classification for Sync, Mirror and Backup, with
