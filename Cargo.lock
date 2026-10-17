@@ -209,6 +209,7 @@ dependencies = [
  "foldover-endpoint",
  "foldover-host",
  "foldover-state",
+ "foldover-types",
 ]
 
 [[package]]

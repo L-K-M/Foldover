@@ -414,9 +414,13 @@ Endpoint-layer rules, not filters:
 | v | — | v′ | **conflict**: deleted vs edited (and mirrored) |
 | v | — | — | drop from base |
 
+Entry classification and per-side baselines: [ADR 0007](docs/adr/0007-entry-reconciliation.md).
+
 **Mode rules:**
-- Mirror and Backup consider only source-side changes. Backup never removes
-  anything.
+- Mirror makes the target match the chosen source. Backup copies new,
+  missing and source-changed entries; independent target edits wait until
+  the source changes. Backup never removes target-only entries. Neither
+  mode copies target changes back to its source.
 - Content leaves a target only if it equals the base or has been archived.
   Everything else that must go is archived: Mirror's never-synced extras,
   overwritten versions, conflict losers. The one exception is an archive-less
