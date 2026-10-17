@@ -26,6 +26,7 @@ PROTOCOL_VERSION = 2
 VERSION_MISMATCH = -32001
 ROOT_OVERLAP = -32006
 STALE_REVISION = -32004
+PAIR_NOT_FOUND = -32003
 FORBIDDEN_ENTITLEMENTS = (
     "com.apple.security.get-task-allow",
     "com.apple.security.cs.debugger",
@@ -141,6 +142,25 @@ def verify_release_entitlements(agent, cli):
             raise RuntimeError(f"Release code contains forbidden entitlements: {path}: {forbidden}")
 
 
+def remove_configuration(cli, endpoint, pair):
+    original = Path(os.fsdecode(bytes(pair["configuration"]["left_root"])))
+    kept = original / "kept"
+    kept.write_bytes(b"unchanged")
+    detached = original.with_name("detached")
+    original.rename(detached)
+    stale = invoke(cli, endpoint, ("pairs", "remove", pair["id"], str(pair["revision"] - 1)))
+    if stale.returncode == 0 or str(STALE_REVISION) not in stale.stderr:
+        raise RuntimeError(f"Stale removal was not rejected: {stale}")
+    removed = invoke(cli, endpoint, ("pairs", "remove", pair["id"], str(pair["revision"])))
+    if removed.returncode != 0 or json.loads(removed.stdout) != pair:
+        raise RuntimeError(f"Offline configuration removal failed: {removed}")
+    if (detached / "kept").read_bytes() != b"unchanged":
+        raise RuntimeError("Removing configuration changed endpoint data")
+    missing = invoke(cli, endpoint, ("pairs", "show", pair["id"]))
+    if missing.returncode == 0 or str(PAIR_NOT_FOUND) not in missing.stderr:
+        raise RuntimeError(f"Removed pair is still available: {missing}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("agent", type=Path)
@@ -203,6 +223,7 @@ def main():
                 saved = invoke(cli, endpoint, ("pairs", "show", pair["id"]))
                 if saved.returncode != 0 or json.loads(saved.stdout) != pair:
                     raise RuntimeError(f"Configuration did not survive agent crash: {saved}")
+                remove_configuration(cli, endpoint, pair)
             child.terminate()
             if child.wait(timeout=COMMAND_SECONDS) != 0:
                 raise RuntimeError("Agent did not shut down cleanly on SIGTERM")

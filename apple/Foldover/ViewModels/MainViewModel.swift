@@ -14,6 +14,8 @@ final class MainViewModel {
     private let pairStore: PairStore
     var selectedPairID: String?
     private(set) var editor: PairEditorViewModel?
+    private(set) var removalTarget: SyncPair?
+    private(set) var operationError: String?
 
     /// Main-actor isolated like the rest of the class: `FoldoverApp`
     /// (an `App`, so main-actor isolated too) builds it in its `@State`
@@ -73,6 +75,7 @@ final class MainViewModel {
     }
 
     func refreshAgent() async {
+        operationError = nil
         await agent.refresh()
         if case .connected = agent.connection { await pairStore.refresh() }
     }
@@ -94,5 +97,23 @@ final class MainViewModel {
     func dismissEditor() {
         if let saved = editor?.savedPairID { selectedPairID = saved }
         editor = nil
+    }
+
+    func requestRemoval() {
+        guard canConfigurePairs, let selectedPair else { return }
+        removalTarget = selectedPair
+    }
+
+    func cancelRemoval() { removalTarget = nil }
+
+    func removePair(_ pair: SyncPair) async {
+        guard canConfigurePairs else { return }
+        operationError = nil
+        do {
+            try await pairStore.remove(pair)
+            if selectedPairID == pair.id { selectedPairID = nil }
+        } catch {
+            operationError = PairStore.message(for: error)
+        }
     }
 }

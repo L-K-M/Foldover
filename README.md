@@ -80,6 +80,8 @@ Configuration does not scan contents or authorize sync execution.
 Modes: `sync`, `mirror-left`, `mirror-right`, `backup-left`, `backup-right`.
 The suffix selects the source. `pairs show ID` reads one pair;
 `pairs update ID REVISION NAME LEFT RIGHT MODE` requires its current revision.
+`pairs remove ID REVISION` removes settings, including for an offline pair;
+your folders stay in place. The app offers the same **Remove Pair** action.
 Commands output JSON lines with exact root-byte arrays. Lists are paged by
 identity and are not an atomic catalog snapshot. Refresh after concurrent edits.
 If a command times out, inspect the catalog before retrying: a disconnected

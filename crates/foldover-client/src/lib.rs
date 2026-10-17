@@ -10,6 +10,7 @@ use foldover_proto::local::{
     PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_UPDATE, PairInput, PairKey, PairList,
     PairRecord, PairUpdate,
 };
+use foldover_proto::local::{PAIR_REMOVE, PairRevision};
 pub use foldover_types::{InvalidPair, LocalRoot, PairConfig, PairDraft, PairId, Side, SyncMode};
 use serde_json::Value;
 use serde_json::json;
@@ -85,6 +86,30 @@ pub async fn update_pair(
         )
         .await?,
     )
+}
+
+pub async fn remove_pair(
+    location: &SocketLocation,
+    id: PairId,
+    revision: u64,
+) -> Result<PairConfig, Error> {
+    let removed = decode_pair(
+        call(
+            location,
+            PAIR_REMOVE,
+            Some(serde_json::to_value(PairRevision {
+                id: id.to_string(),
+                revision,
+            })?),
+        )
+        .await?,
+    )?;
+    if removed.id() != id || removed.revision() != revision {
+        return Err(Error::Protocol(
+            "Removed pair does not match the requested revision",
+        ));
+    }
+    Ok(removed)
 }
 
 fn decode_pair(value: Value) -> Result<PairConfig, Error> {

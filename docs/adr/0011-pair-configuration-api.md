@@ -26,6 +26,7 @@ bundle. Process smoke inspects signed app/helper entitlements before private cal
 - `pair.create`: validated local roots, name and explicit mode/source.
 - `pair.get`: an existing pair ID.
 - `pair.update`: ID, expected positive revision and replacement configuration.
+- `pair.remove`: ID and expected revision; returns the removed configuration.
 - `pair.list`: optional exclusive `after` ID; at most 16 records and a next ID.
 
 IDs are 32 lowercase hex digits, excluding all zero. Roots use byte arrays,
@@ -37,7 +38,13 @@ Lists use stable identity order, not mutable names or offsets. They are bounded
 queries, not multi-request snapshots; refresh to observe concurrent insertions
 behind the cursor. Clients reject malformed, unordered or nonadvancing pages.
 Missing pairs, stale revisions, unavailable roots and overlap have distinct
-errors. No implicit retry or pair deletion is added.
+errors. There is no implicit retry.
+
+Removal changes only configuration and performs no endpoint probes or deletion.
+This permits removal of an offline pair that otherwise blocks catalog checks.
+Stored domain values are decoded before deletion; corrupt records are retained
+as explicit errors. Future run/journal state must enforce idle/recovery guards
+before removal, rather than cascading active work away.
 
 Batch replies share the same frame budget. Dispatch stops with an explicit
 error when the aggregate would exceed it. Earlier commands may have committed:

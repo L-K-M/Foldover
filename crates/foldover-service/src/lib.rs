@@ -12,6 +12,7 @@ use foldover_proto::local::{
     ROOT_OVERLAP, ROOT_UNAVAILABLE, Request, RpcError, SESSION_HELLO, STALE_REVISION,
     VERSION_MISMATCH,
 };
+use foldover_proto::local::{PAIR_REMOVE, PairRevision};
 use foldover_types::{PairDraft, PairId};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -74,6 +75,10 @@ enum Command {
         revision: u64,
         configuration: PairDraft,
     },
+    Remove {
+        id: PairId,
+        revision: u64,
+    },
 }
 
 impl Command {
@@ -101,13 +106,17 @@ impl Command {
             }
             PAIR_UPDATE => {
                 let params: PairUpdate = parameters(request)?;
-                if params.revision == 0 || params.revision > i64::MAX as u64 {
-                    return Err(invalid(foldover_types::InvalidPair::Revision));
-                }
                 Ok(Self::Update {
                     id: params.id.parse().map_err(invalid)?,
-                    revision: params.revision,
+                    revision: expected_revision(params.revision)?,
                     configuration: params.configuration.try_into().map_err(invalid)?,
+                })
+            }
+            PAIR_REMOVE => {
+                let params: PairRevision = parameters(request)?;
+                Ok(Self::Remove {
+                    id: params.id.parse().map_err(invalid)?,
+                    revision: expected_revision(params.revision)?,
                 })
             }
             _ => Err(RpcError::new(METHOD_NOT_FOUND, "Method not found")),
@@ -144,8 +153,21 @@ impl Command {
                     .update_pair(id, revision, &configuration)
                     .map_err(engine_error)?,
             )),
+            Self::Remove { id, revision } => encode(PairRecord::from(
+                &engine.remove_pair(id, revision).map_err(engine_error)?,
+            )),
         }
     }
+}
+
+fn expected_revision(revision: u64) -> Result<u64, RpcError> {
+    if revision == 0 || revision > i64::MAX as u64 {
+        return Err(RpcError::new(
+            INVALID_PARAMS,
+            foldover_types::InvalidPair::Revision.to_string(),
+        ));
+    }
+    Ok(revision)
 }
 
 fn parameters<T: DeserializeOwned>(request: &Request) -> Result<T, RpcError> {
@@ -389,6 +411,74 @@ mod tests {
             .collect();
         assert_eq!(ids.len(), count);
         assert!(ids.windows(2).all(|ids| ids[0] < ids[1]));
+    }
+
+    #[tokio::test]
+    async fn removal_is_scoped_to_the_validated_pair_revision() {
+        let (directory, service) = fixture();
+        let pair = service
+            .handle(Request::call(
+                1,
+                PAIR_CREATE,
+                Some(input(directory.path(), "Photos")),
+            ))
+            .await
+            .unwrap();
+        for params in [
+            json!({"id":pair["id"], "revision":0}),
+            json!({"id":pair["id"], "revision":1, "root":"/elsewhere"}),
+        ] {
+            assert_eq!(
+                service
+                    .handle(Request::call(1, PAIR_REMOVE, Some(params)))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                INVALID_PARAMS
+            );
+        }
+        assert_eq!(
+            service
+                .handle(Request::call(
+                    1,
+                    PAIR_REMOVE,
+                    Some(json!({"id":pair["id"], "revision":2}))
+                ))
+                .await
+                .unwrap_err()
+                .code(),
+            STALE_REVISION
+        );
+        assert_eq!(
+            service
+                .handle(Request::call(1, PAIR_GET, Some(json!({"id":pair["id"]}))))
+                .await
+                .unwrap(),
+            pair
+        );
+        assert_eq!(
+            service
+                .handle(Request::call(
+                    1,
+                    PAIR_REMOVE,
+                    Some(json!({"id":pair["id"], "revision":1}))
+                ))
+                .await
+                .unwrap(),
+            pair
+        );
+        assert_eq!(
+            service
+                .handle(Request::call(
+                    1,
+                    PAIR_REMOVE,
+                    Some(json!({"id":pair["id"], "revision":1}))
+                ))
+                .await
+                .unwrap_err()
+                .code(),
+            PAIR_NOT_FOUND
+        );
     }
 
     #[tokio::test]

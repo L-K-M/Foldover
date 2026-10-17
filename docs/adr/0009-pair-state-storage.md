@@ -49,7 +49,8 @@ adds Unicode-aware name checks and preserves all five mode/direction forms.
 
 Updates require the expected revision. A stale request leaves the new
 configuration unchanged. Missing pairs and invalid stored values are errors,
-never silently omitted rows. No pair configuration deletes are added yet.
+never silently omitted rows. Removal requires the current revision and leaves
+endpoint data in place; its API scope is in [ADR 0011](0011-pair-configuration-api.md).
 
 ## Verification
 

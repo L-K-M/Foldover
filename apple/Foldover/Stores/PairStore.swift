@@ -37,6 +37,7 @@ protocol PairClient: Sendable {
     func page(after: String?) async throws -> PairCatalogPage
     func create(_ settings: PairSettings) async throws -> SyncPair
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair
+    func remove(_ pair: SyncPair) async throws -> SyncPair
 }
 
 // Keep generated async values inside one actor; only native Sendable records leave it.
@@ -54,6 +55,10 @@ private actor CorePairClient: PairClient {
         self.pair(try await FoldoverCore.pairUpdate(
             id: pair.id, revision: pair.revision, configuration: configuration(settings)
         ))
+    }
+
+    func remove(_ pair: SyncPair) async throws -> SyncPair {
+        self.pair(try await FoldoverCore.pairRemove(id: pair.id, revision: pair.revision))
     }
 
     private func configuration(_ settings: PairSettings) -> LocalPairDraft {
@@ -172,6 +177,17 @@ final class PairStore {
         }
         guard let bytes else { throw PairStoreError.invalidFolder }
         return SelectedFolder(bytes: bytes)
+    }
+
+    func remove(_ pair: SyncPair) async throws {
+        guard !isSaving else { throw PairStoreError.saving }
+        generation += 1
+        isLoading = false
+        isSaving = true
+        defer { isSaving = false }
+        let removed = try await client.remove(pair)
+        guard removed.id == pair.id, removed.revision == pair.revision else { throw PairStoreError.invalidPage }
+        pairs.removeAll { $0.id == pair.id }
     }
 
     static func message(for error: Error) -> String {

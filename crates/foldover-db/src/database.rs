@@ -243,16 +243,7 @@ impl Database {
             params![id, revision, values.name, values.left_root, values.right_root, values.mode],
         )?;
         if changed == 0 {
-            let exists: bool = transaction.query_row(
-                "SELECT EXISTS(SELECT 1 FROM pair WHERE id=?1)",
-                [id],
-                |row| row.get(0),
-            )?;
-            return Err(if exists {
-                Error::StaleRevision
-            } else {
-                Error::PairNotFound
-            });
+            return Err(revision_error(&transaction, id)?);
         }
         let row = transaction.query_row(
             &format!("SELECT {PAIR_COLUMNS} FROM pair WHERE id=?1"),
@@ -262,6 +253,34 @@ impl Database {
         transaction.commit()?;
         Ok(row)
     }
+
+    pub fn remove_pair(&mut self, id: &[u8], revision: i64) -> Result<(), Error> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if transaction.execute(
+            "DELETE FROM pair WHERE id=?1 AND revision=?2",
+            params![id, revision],
+        )? == 0
+        {
+            return Err(revision_error(&transaction, id)?);
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+}
+
+fn revision_error(connection: &Connection, id: &[u8]) -> Result<Error, Error> {
+    let exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pair WHERE id=?1)",
+        [id],
+        |row| row.get(0),
+    )?;
+    Ok(if exists {
+        Error::StaleRevision
+    } else {
+        Error::PairNotFound
+    })
 }
 
 fn current_user() -> u32 {

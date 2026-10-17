@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Revision-checked pair removal in the app and CLI, including offline pairs,
+  while preserving endpoint folders and files.
 - Native pair sidebar, folder selection and revision-checked settings editor,
   with paged loading through UniFFI and preserved drafts on save failures.
 - Authenticated local pair create/read/update APIs, paged lists and CLI commands,
