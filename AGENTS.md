@@ -6,8 +6,8 @@ runs in a background agent; each platform gets a native UI (SwiftUI now,
 GTK4 later). [`PLAN.md`](PLAN.md) is the source of truth for scope and
 design; [`docs/research`](docs/research/README.md) holds the evidence.
 
-**Status:** P1 (spikes). Foundations and the S1, S3, S5 and S9 harnesses
-exist; nothing syncs yet. Measurements and limits live in `docs/adr/`.
+**Status:** P1/P2. Native spike harnesses, entry reconciliation and validated
+paths exist; nothing syncs yet. Measurements and limits live in `docs/adr/`.
 The roadmap is PLAN.md §7.
 
 ## Toolchain

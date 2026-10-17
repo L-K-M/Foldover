@@ -263,6 +263,8 @@ and implemented by the upper one.
     installed bundle, bound to the connecting process's audit token. A
     bundle identifier or executable path alone is insufficient; missing
     identity evidence fails closed. Developer ID team trust is unavailable.
+    The measured primitive and remaining gates are in
+    [ADR 0006](docs/adr/0006-ad-hoc-client-identity.md).
   - Only `session.hello` and `daemon.status` stay user-gated.
   - On Linux there is no code signing, so only the user ID is checked.
 - Handshake `session.hello` negotiates the protocol version.
