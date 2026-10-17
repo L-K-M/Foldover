@@ -138,6 +138,16 @@ class FidelityTests(unittest.TestCase):
             result = spike.probe(lambda: spike.command("/usr/bin/xattr", "fixture"))
         self.assertEqual(result["state"], "unavailable")
 
+    def test_case_sensitive_image_uses_the_apfs_formatter_option(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(spike, "command") as native:
+            root = Path(directory)
+            with spike.disk_image(root, "source", "APFSX"):
+                pass
+        self.assertEqual(native.call_args_list[0], call(
+            "hdiutil", "create", "-size", "256m", "-fs", "APFS", "-fsargs", "-e",
+            "-volname", "foldover-s4-source", root / "source.dmg",
+        ))
+
 
 if __name__ == "__main__":
     unittest.main()

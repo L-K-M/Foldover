@@ -433,7 +433,9 @@ def create_corpus(root: Path) -> list[dict]:
 @contextlib.contextmanager
 def disk_image(workspace: Path, label: str, filesystem: str):
     image, mount = workspace / f"{label}.dmg", workspace / label
-    command("hdiutil", "create", "-size", "256m", "-fs", filesystem,
+    # hdiutil accepts APFS, not diskutil's APFSX personality; newfs_apfs -e selects case sensitivity.
+    formatting = ["-fs", "APFS", "-fsargs", "-e"] if filesystem == "APFSX" else ["-fs", filesystem]
+    command("hdiutil", "create", "-size", "256m", *formatting,
             "-volname", f"foldover-s4-{label}", image)
     mount.mkdir()
     command("hdiutil", "attach", "-noverify", "-mountpoint", mount, image)
