@@ -31,7 +31,7 @@ private func success(_ status: OSStatus, _ operation: String) throws {
 private func requirement(for executable: String) throws -> SecRequirement {
     var code: SecStaticCode?
     try success(SecStaticCodeCreateWithPath(URL(fileURLWithPath: executable) as CFURL,
-                                          SecCSFlags(rawValue: kSecCSDefaultFlags), &code), "static code")
+                                          SecCSFlags(), &code), "static code")
     guard let code else { throw ProbeError.invalid("No static code") }
     try success(SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSStrictValidate), nil),
                 "trusted fixture validity")
@@ -45,7 +45,7 @@ private func requirement(for executable: String) throws -> SecRequirement {
     let hex = hash.map { String(format: "%02x", $0) }.joined()
     var requirement: SecRequirement?
     try success(SecRequirementCreateWithString("cdhash H\"\(hex)\"" as CFString,
-                                              SecCSFlags(rawValue: kSecCSDefaultFlags), &requirement),
+                                              SecCSFlags(), &requirement),
                 "code-hash requirement")
     guard let requirement else { throw ProbeError.invalid("No requirement") }
     return requirement
@@ -77,13 +77,13 @@ private func decide(_ descriptor: Int32, method: String, required: SecRequiremen
     let attributes = [kSecGuestAttributeAudit as String: withUnsafeBytes(of: token) { Data($0) }]
     var guest: SecCode?
     let resolved = SecCodeCopyGuestWithAttributes(nil, attributes as CFDictionary,
-                                                SecCSFlags(rawValue: kSecCSDefaultFlags), &guest)
+                                                SecCSFlags(), &guest)
     guard resolved == errSecSuccess, let guest else {
         return Decision(method: method, peerUID: user, user: .passed, auditToken: .passed,
                         signatureStatus: resolved, access: .denied, reason: "audit-token lookup failed")
     }
     // Dynamic validation binds the requirement to this socket's live peer, not a PID or claimed path.
-    let validity = SecCodeCheckValidity(guest, SecCSFlags(rawValue: kSecCSDefaultFlags), required)
+    let validity = SecCodeCheckValidity(guest, SecCSFlags(), required)
     return Decision(method: method, peerUID: user, user: .passed, auditToken: .passed,
                     signatureStatus: validity, access: validity == errSecSuccess ? .permitted : .denied,
                     reason: validity == errSecSuccess ? "exact code identity" : "code identity rejected")
