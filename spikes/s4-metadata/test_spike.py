@@ -1,5 +1,6 @@
 import copy
 import errno
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -152,8 +153,39 @@ class FidelityTests(unittest.TestCase):
                 pass
         self.assertEqual(native.call_args_list[0], call(
             "hdiutil", "create", "-size", "256m", "-fs", "APFS", "-fsargs", "-e",
-            "-volname", "foldover-s4-source", root / "source.dmg",
+            "-volname", "folds4source", root / "source.dmg",
         ))
+
+    def test_exfat_fixture_label_fits_the_native_formatter_limit(self):
+        max_label_utf16_units = 11
+        with tempfile.TemporaryDirectory() as directory, patch.object(spike, "command") as native:
+            with spike.disk_image(Path(directory), "exfat", "ExFAT"):
+                pass
+        arguments = native.call_args_list[0].args
+        label = arguments[arguments.index("-volname") + 1]
+        self.assertLessEqual(len(label.encode("utf-16-le")) // 2, max_label_utf16_units)
+
+    def test_busy_owned_image_is_detached_before_temporary_directory_cleanup(self):
+        mount = Path("owned-image")
+        with patch.object(spike, "command", side_effect=[RuntimeError("resource busy"), b""]) as native:
+            spike.detach_image(mount)
+        self.assertEqual(native.call_args_list, [
+            call("hdiutil", "detach", mount), call("hdiutil", "detach", "-force", mount),
+        ])
+
+    def test_failure_retains_partial_measurements_without_a_success_verdict(self):
+        report = {"targets": {"apfs": {"no_unpredicted_loss": True}}}
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "results.json"
+            with self.assertRaisesRegex(RuntimeError, "unavailable fixture"):
+                with spike.measurement_report(output, report):
+                    raise RuntimeError("unavailable fixture")
+            retained = json.loads(output.read_text())
+        self.assertEqual(retained["targets"], report["targets"])
+        self.assertFalse(retained["harness_completed"])
+        self.assertFalse(retained["tested_targets_passed"])
+        self.assertFalse(retained["full_s4_passed"])
+        self.assertIn("exfat", retained["unavailable_targets"])
 
 
 if __name__ == "__main__":

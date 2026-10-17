@@ -44,7 +44,7 @@ FINDER_FLAGS_OFFSET = 8
 FINDER_BUNDLE_FLAG = 0x2000
 ACL_RULE = "everyone allow read,readattr,readextattr,readsecurity"
 UNSUPPORTED_ERRORS = {errno.ENOTSUP, errno.EOPNOTSUPP, errno.EINVAL}
-REMAINING_TARGETS = ["samba-fruit", "samba-no-fruit", "sftp"]
+REQUIRED_TARGETS = ["apfs", "exfat", "samba-fruit", "samba-no-fruit", "sftp"]
 
 
 def command(*args: str | Path) -> bytes:
@@ -439,15 +439,23 @@ def disk_image(workspace: Path, label: str, filesystem: str):
     image, mount = workspace / f"{label}.dmg", workspace / label
     # hdiutil accepts APFS, not diskutil's APFSX personality; newfs_apfs -e selects case sensitivity.
     formatting = ["-fs", "APFS", "-fsargs", "-e"] if filesystem == "APFSX" else ["-fs", filesystem]
+    # macOS's exFAT formatter limits volume labels to 11 UTF-16 units.
     command("hdiutil", "create", "-size", "256m", *formatting,
-            "-volname", f"foldover-s4-{label}", image)
+            "-volname", f"folds4{label}", image)
     mount.mkdir()
     command("hdiutil", "attach", "-noverify", "-mountpoint", mount, image)
     try:
         yield mount
     finally:
-        # Only detach this harness's image; a cleanup error fails the harness.
+        detach_image(mount)
+
+
+def detach_image(mount: Path) -> None:
+    try:
         command("hdiutil", "detach", mount)
+    except RuntimeError:
+        # Finder/indexers can keep an owned image busy after all corpus handles close.
+        command("hdiutil", "detach", "-force", mount)
 
 
 def measure_target(source: Path, cases: list[dict], target: Path, workspace: Path) -> dict:
@@ -493,6 +501,27 @@ def measure_target(source: Path, cases: list[dict], target: Path, workspace: Pat
     )}
 
 
+@contextlib.contextmanager
+def measurement_report(output: Path, report: dict):
+    report["harness_completed"] = False
+    report["harness_error"] = None
+    try:
+        yield
+    except Exception as error:
+        report["harness_error"] = f"{type(error).__name__}: {error}"
+        raise
+    else:
+        report["harness_completed"] = True
+    finally:
+        targets = report["targets"]
+        report["unavailable_targets"] = [name for name in REQUIRED_TARGETS if name not in targets]
+        report["tested_targets_passed"] = report["harness_completed"] and bool(targets) and all(
+            result["no_unpredicted_loss"] for result in targets.values()
+        )
+        report["full_s4_passed"] = False
+        output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
@@ -514,11 +543,11 @@ def main() -> int:
 
     report = {"system": platform.platform(), "machine": platform.machine(),
               "copier": "macOS ditto --rsrc --extattr --acl", "targets": {},
-              "unavailable_targets": [name for name in REMAINING_TARGETS if name not in mounted],
               "limitations": ["Disk images are not physical disks or NAS devices",
                               "SFTP extension negotiation and hard links need a separate transport probe",
                               "Rename-over success does not prove crash atomicity"]}
-    with tempfile.TemporaryDirectory(prefix="foldover-s4-") as workspace:
+    with measurement_report(args.output, report), \
+            tempfile.TemporaryDirectory(prefix="foldover-s4-") as workspace:
         workspace = Path(workspace)
         with disk_image(workspace, "source", "APFSX") as source_volume:
             source = source_volume / "corpus"
@@ -531,12 +560,6 @@ def main() -> int:
             for label, target in mounted.items():
                 report["targets"][label] = measure_target(source, cases, target, source_volume)
 
-    report["tested_targets_passed"] = all(
-        result["no_unpredicted_loss"] for result in report["targets"].values()
-    )
-    # SFTP is deliberately unimplemented here, even if a caller supplies that label.
-    report["full_s4_passed"] = False
-    args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     print(json.dumps({name: report[name] for name in
                       ("tested_targets_passed", "full_s4_passed", "unavailable_targets")}, indent=2))
     return 0

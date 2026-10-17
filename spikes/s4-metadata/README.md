@@ -31,10 +31,13 @@ python3 spikes/s4-metadata/spike.py target/s4-results.json \
 
 Writes use fresh temporary directories inside those mounts. Existing data
 is not copied, replaced or deleted. Only the harness's disk images are
-detached. Cleanup failure fails the harness.
+detached, with a forced retry if an owned image is busy. Final cleanup
+failure fails the harness.
 
 The command's success means measurements completed. Inspect
-`tested_targets_passed`, per-case differences and `unavailable_targets`.
+`harness_completed`, `tested_targets_passed`, per-case differences and
+`unavailable_targets`. Failures retain completed measurements with a failed
+harness verdict.
 `full_s4_passed` remains false: SFTP extension/operation probes and physical
 target validation are outstanding. `ditto` is a baseline, not a claim about
 the future Rust endpoint. Rename-over success does not prove crash atomicity.
