@@ -14,6 +14,8 @@ All notable changes to this project are documented here. The format follows
   with paged loading through UniFFI and preserved drafts on save failures.
 - Authenticated local pair create/read/update APIs, paged lists and CLI commands,
   with cross-pair/state-root overlap checks and revision-checked updates.
+- Bounded BLAKE3 reads of observed local data forks, with cancellation,
+  no-follow access, change detection and protected endpoint paths.
 - Mutual installed-code authentication for private macOS IPC, bound to kernel
   audit tokens, Hardened Runtime and a process-pinned verified bundle.
 - Streaming local folder metadata inventory, with protected internal paths,

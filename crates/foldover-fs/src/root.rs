@@ -5,9 +5,12 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use cap_fs_ext::{DirExt, MetadataExt};
-use cap_std::fs::{Dir, Metadata};
+use cap_fs_ext::DirExt;
+use cap_std::fs::{Dir, Metadata, MetadataExt};
 use foldover_types::SyncPath;
+
+mod content;
+pub use content::HashError;
 
 const MAX_ROOT_ANCESTORS: usize = 4096;
 
@@ -69,6 +72,7 @@ pub struct EntryMetadata {
     kind: NodeKind,
     size: u64,
     modified: SystemTime,
+    changed: (i64, i64),
     identity: FileIdentity,
 }
 
@@ -104,6 +108,7 @@ impl EntryMetadata {
             kind,
             size: metadata.len(),
             modified: metadata.modified()?.into_std(),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
             identity: FileIdentity::from_cap(&metadata),
         })
     }

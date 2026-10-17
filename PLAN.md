@@ -346,6 +346,10 @@ contract and remaining snapshot gates are recorded in
 identities. Configuration also checks the pair catalog and agent state directory.
 Execution-time readiness remains pending.
 
+Observed regular-file data-fork hashing is available below the agent API;
+[ADR 0012](docs/adr/0012-local-content-hashing.md) records its bounded-read
+contract and required residency/metadata gates before exposure.
+
 ```rust
 trait Endpoint {
     fn capabilities(&self) -> &Capabilities;
