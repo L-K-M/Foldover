@@ -127,7 +127,8 @@ jobs:
           echo "Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
 
       - name: cargo test (aarch64-apple-darwin)
-        run: cargo test --workspace --target aarch64-apple-darwin
+        # Report every failing crate in one run.
+        run: cargo test --workspace --no-fail-fast --target aarch64-apple-darwin
 
       - name: Agent and CLI process smoke
         run: cargo xtask agent-smoke

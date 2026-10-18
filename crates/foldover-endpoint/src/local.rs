@@ -1079,9 +1079,16 @@ mod tests {
         fs::write(&file_path, b"data").unwrap();
         let path = SyncPath::try_from(b"file".as_slice()).unwrap();
         let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        // APFS moves the mtime when a fork changes; leave times out so only
+        // the fork's effect on content and metadata is compared.
+        let policy = MetadataPolicy::new(
+            foldover_types::Propagation::Ignore,
+            foldover_types::Propagation::Sync,
+            foldover_types::Propagation::Sync,
+        );
         let observe = || {
             endpoint
-                .observe(ALL, &mut || ScanControl::Continue)
+                .observe(policy, &mut || ScanControl::Continue)
                 .unwrap()
                 .versions()[&path]
         };
