@@ -103,6 +103,10 @@ pub enum SyncJobState {
     Failed {
         message: String,
     },
+    /// An automatic run waits for this folder, e.g. an unmounted disk.
+    Waiting {
+        side: SyncSide,
+    },
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -177,6 +181,9 @@ impl From<SyncStatus> for SyncJobState {
                 result: result.into(),
             },
             SyncStatus::Failed { message } => Self::Failed { message },
+            SyncStatus::Waiting { side: waiting } => Self::Waiting {
+                side: side(waiting),
+            },
         }
     }
 }

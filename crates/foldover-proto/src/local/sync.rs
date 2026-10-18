@@ -160,6 +160,11 @@ pub enum SyncStatus {
     Failed {
         message: String,
     },
+    /// An unattended run is waiting for this side's folder, e.g. an
+    /// unmounted disk; it starts once the folder is back.
+    Waiting {
+        side: super::PairSide,
+    },
 }
 
 #[cfg(test)]

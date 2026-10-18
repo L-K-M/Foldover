@@ -21,6 +21,13 @@ is skipped until its job ends.
   change only starts a full observation, which reuses unchanged entries
   ([ADR 0018](0018-local-entry-versions.md)). Lost events and unwatchable
   folders, such as unmounted disks, are covered by the hourly run.
+  Unwatchable folders are retried every check; one that becomes watchable
+  counts as changed, since it may have changed while it was away.
+- **Missing folders:** when a due pair's folder path does not exist, as
+  for an unmounted disk or share, no run starts. The pair's status becomes
+  `waiting` for that side, without a notification or history entry, and the
+  run starts at the first check after the folder is back. A manual run
+  fails instead, naming the missing side.
 - Changes inside `.foldover`, temporaries and `.DS_Store` are ignored. A
   run's own writes still mark the pair changed, so one quick follow-up run
   finds nothing to do.

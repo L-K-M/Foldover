@@ -56,6 +56,7 @@ struct PairSyncViewModel {
         case .finished(let result) where result.failureCount > 0: String(localized: "\(result.failureCount) failed")
         case .finished: String(localized: "In sync")
         case .failed: String(localized: "Stopped")
+        case .waiting: String(localized: "Waiting for folder")
         }
     }
 
@@ -80,6 +81,8 @@ struct PairSyncViewModel {
             Self.summary(result)
         case .failed(let message):
             String(localized: "Sync stopped: \(message)")
+        case .waiting(let side):
+            String(localized: "\(Self.folderName(side)) is not connected. Automatic syncs resume when its disk or share is back.")
         }
     }
 

@@ -235,3 +235,15 @@ func finishedRunsRefreshTheHistory() async {
     ])
     #expect(viewModel.historyRows[0].when.hasSuffix("automatic"))
 }
+
+@MainActor
+@Test
+func automaticSyncsWaitingForAFolderSayWhichOneQuietly() async {
+    let store = SyncStore(client: ScriptedSyncClient([.waiting(.b)]), pollInterval: .milliseconds(1))
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, agentConnected: true)
+    await viewModel.refresh()
+    #expect(viewModel.statusText.hasPrefix("Folder B is not connected."))
+    #expect(viewModel.shortStatus == "Waiting for folder")
+    #expect(viewModel.canStart)
+    #expect(SyncStore.alert(for: pair(), state: .waiting(.b)) == nil)
+}

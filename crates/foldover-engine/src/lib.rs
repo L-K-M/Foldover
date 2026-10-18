@@ -7,6 +7,7 @@ mod archive;
 mod configuration;
 mod gates;
 mod plan;
+mod readiness;
 mod reconcile;
 mod run;
 mod watch;
@@ -23,6 +24,7 @@ pub use gates::{DeletionCounts, DeletionReview, InvalidDeletionCounts, RunContex
 pub use plan::{
     CandidateDecision, CandidatePlan, PlanError, PlanRow, TreeRole, plan_candidates, plan_resolved,
 };
+pub use readiness::missing_side;
 pub use reconcile::reconcile_entry;
 pub use run::{
     Action, Approval, Commit, Completion, Failure, PairRun, Preview, PreviewItem, RunError,

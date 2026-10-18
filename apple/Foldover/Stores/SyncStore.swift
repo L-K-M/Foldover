@@ -107,6 +107,8 @@ enum PairSyncState: Equatable, Sendable {
     case needsApproval(PreviewSummary)
     case finished(RunSummary)
     case failed(String)
+    /// An automatic sync waits for this folder, e.g. an unmounted disk.
+    case waiting(FolderSide)
 }
 
 protocol SyncClient: Sendable {
@@ -175,6 +177,7 @@ private actor CoreSyncClient: SyncClient {
         case .needsApproval(let preview): .needsApproval(summary(preview))
         case .finished(let result): .finished(summary(result))
         case .failed(let message): .failed(message)
+        case .waiting(let folder): .waiting(side(folder))
         }
     }
 

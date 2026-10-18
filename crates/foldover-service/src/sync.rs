@@ -124,6 +124,27 @@ impl Jobs {
             .map_err(crate::engine_error)
     }
 
+    /// Show that an unattended run waits for a missing folder. A working
+    /// job keeps its status; earlier conflicts stay resolvable.
+    pub(crate) fn wait_for(&self, id: PairId, side: Side) {
+        let mut jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
+        let waiting = SyncStatus::Waiting { side: side.into() };
+        match jobs.get_mut(&id) {
+            Some(job) if matches!(job.status, SyncStatus::Working { .. }) => {}
+            Some(job) => job.status = waiting,
+            None => {
+                jobs.insert(
+                    id,
+                    Job {
+                        status: waiting,
+                        cancel: Arc::new(AtomicBool::new(false)),
+                        conflicts: None,
+                    },
+                );
+            }
+        }
+    }
+
     pub(crate) fn cancel(&self, id: PairId) {
         let jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(job) = jobs.get(&id) {

@@ -89,7 +89,9 @@ pub(crate) fn record(
         SyncStatus::Failed { message } => unwritten(HistoryOutcome::Failed, Some(message.clone())),
         // Cancelled before anything was written.
         SyncStatus::Idle => unwritten(HistoryOutcome::Cancelled, None),
-        SyncStatus::Working { .. } | SyncStatus::Previewed { .. } => return,
+        SyncStatus::Working { .. } | SyncStatus::Previewed { .. } | SyncStatus::Waiting { .. } => {
+            return;
+        }
     };
     let _ = engine
         .lock()

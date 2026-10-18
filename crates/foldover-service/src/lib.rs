@@ -964,4 +964,44 @@ mod tests {
         assert_eq!(runs[0]["copied"], 1);
         assert!(runs[0]["finished_ms"].as_u64() >= runs[0]["started_ms"].as_u64());
     }
+
+    #[tokio::test]
+    async fn scheduled_runs_wait_for_a_missing_folder_without_failing() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Disk");
+        input["options"]["schedule"] = json!({"kind": "every", "minutes": 1});
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        settled(&service, &key).await;
+        let start = service.scheduler.started();
+        let at = |seconds| start + std::time::Duration::from_secs(seconds);
+
+        // Unmounting the disk removes its mount point.
+        let right = directory.path().join("Disk-right");
+        let unmounted = directory.path().join("unmounted");
+        fs::rename(&right, &unmounted).unwrap();
+        assert!(service.run_due(at(61)).is_empty());
+        let status = service
+            .handle(Request::call(3, SYNC_STATUS, Some(key.clone())))
+            .await
+            .unwrap();
+        assert_eq!(status, json!({"state": "waiting", "side": "right"}));
+
+        fs::rename(&unmounted, &right).unwrap();
+        assert_eq!(service.run_due(at(66)).len(), 1);
+        assert_eq!(settled(&service, &key).await["state"], "finished");
+        let history = service
+            .handle(Request::call(4, HISTORY_LIST, Some(key)))
+            .await
+            .unwrap();
+        assert_eq!(history["runs"].as_array().unwrap().len(), 2);
+    }
 }

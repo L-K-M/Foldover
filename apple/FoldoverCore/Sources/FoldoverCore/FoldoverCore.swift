@@ -2400,6 +2400,11 @@ public enum SyncJobState: Equatable, Hashable {
     )
     case failed(message: String
     )
+    /**
+     * An automatic run waits for this folder, e.g. an unmounted disk.
+     */
+    case waiting(side: SyncSide
+    )
 
 
 
@@ -2438,6 +2443,9 @@ public struct FfiConverterTypeSyncJobState: FfiConverterRustBuffer {
         case 6: return .failed(message: try FfiConverterString.read(from: &buf)
         )
         
+        case 7: return .waiting(side: try FfiConverterTypeSyncSide.read(from: &buf)
+        )
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -2474,6 +2482,11 @@ public struct FfiConverterTypeSyncJobState: FfiConverterRustBuffer {
         case let .failed(message):
             writeInt(&buf, Int32(6))
             FfiConverterString.write(message, into: &buf)
+            
+        
+        case let .waiting(side):
+            writeInt(&buf, Int32(7))
+            FfiConverterTypeSyncSide.write(side, into: &buf)
             
         }
     }

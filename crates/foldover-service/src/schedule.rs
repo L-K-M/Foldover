@@ -4,7 +4,7 @@
 //! because change notifications can be missed. Pairs that never completed
 //! a first sync are skipped: their first run is reviewed by a person.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -28,6 +28,8 @@ pub(crate) struct Scheduler {
     changed: Mutex<HashMap<PairId, Instant>>,
     watcher: Mutex<Option<PairWatcher>>,
     watched: Mutex<Vec<PairId>>,
+    /// Pairs with a folder that could not be watched, retried every tick.
+    unwatchable: Mutex<HashSet<PairId>>,
 }
 
 impl Scheduler {
@@ -38,6 +40,7 @@ impl Scheduler {
             changed: Mutex::default(),
             watcher: Mutex::default(),
             watched: Mutex::default(),
+            unwatchable: Mutex::default(),
         }
     }
 
@@ -94,22 +97,32 @@ impl Scheduler {
     }
 
     /// Watch exactly the folders of these pairs, if a watcher runs.
-    fn watch(&self, pairs: &[PairConfig]) {
+    /// Unwatchable folders (unmounted disks) are retried each tick and get
+    /// hourly runs meanwhile; one that becomes watchable counts as changed,
+    /// since it may have changed while it was away.
+    fn watch(&self, pairs: &[PairConfig], now: Instant) {
         let ids: Vec<_> = pairs.iter().map(PairConfig::id).collect();
         let mut watched = self.watched.lock().unwrap_or_else(PoisonError::into_inner);
-        if *watched == ids {
+        let mut unwatchable = self
+            .unwatchable
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if *watched == ids && unwatchable.is_empty() {
             return;
         }
-        if let Some(watcher) = self
-            .watcher
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .as_mut()
-        {
-            // Unwatchable folders (unmounted disks) still get hourly runs.
-            let _ = watcher.watch(pairs);
-        }
         *watched = ids;
+        let mut watcher = self.watcher.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(watcher) = watcher.as_mut() else {
+            return;
+        };
+
+        let failed: HashSet<_> = watcher.watch(pairs).into_iter().map(|(id, _)| id).collect();
+        for id in unwatchable.difference(&failed) {
+            if watched.contains(id) {
+                self.mark_changed(*id, now);
+            }
+        }
+        *unwatchable = failed;
     }
 }
 
@@ -156,11 +169,17 @@ impl Service {
             .filter(|pair| pair.draft().options().schedule() == Schedule::OnChange)
             .cloned()
             .collect();
-        self.scheduler.watch(&changing);
+        self.scheduler.watch(&changing, now);
 
         let mut started = Vec::new();
         for pair in candidates {
             if !self.scheduler.due(&pair, now) {
+                continue;
+            }
+            // An unmounted disk or share is waited for, not reported as a
+            // failure; the pair stays due and runs once the folder is back.
+            if let Some(side) = foldover_engine::missing_side(&pair) {
+                self.jobs.wait_for(pair.id(), side);
                 continue;
             }
             // A busy pair is not due again until its job ends.
@@ -179,5 +198,45 @@ impl Service {
     #[cfg(test)]
     pub(crate) fn mark_changed(&self, id: PairId, at: Instant) {
         self.scheduler.mark_changed(id, at);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    use foldover_types::{LocalRoot, PairDraft, PairOptions, SyncMode};
+
+    use super::*;
+
+    #[test]
+    fn a_folder_that_becomes_watchable_counts_as_changed() {
+        let directory = tempfile::tempdir().unwrap();
+        let left = directory.path().join("left");
+        let right = directory.path().join("right");
+        fs::create_dir(&left).unwrap();
+        let root =
+            |path: &Path| LocalRoot::from_bytes(path.as_os_str().as_bytes().to_vec()).unwrap();
+        let options = PairOptions::default().with_schedule(Schedule::OnChange);
+        let draft = PairDraft::new("Disk".into(), root(&left), root(&right), SyncMode::Sync)
+            .unwrap()
+            .with_options(options);
+        let pair =
+            PairConfig::from_stored(PairId::from_bytes([1; PairId::BYTE_LEN]).unwrap(), 1, draft)
+                .unwrap();
+        let start = Instant::now();
+        let scheduler = Scheduler::new(start);
+        *scheduler.watcher.lock().unwrap() = Some(PairWatcher::new(|_| {}).unwrap());
+        let at = |seconds| start + Duration::from_secs(seconds);
+
+        scheduler.watch(std::slice::from_ref(&pair), at(1));
+        assert!(!scheduler.due(&pair, at(10)));
+
+        fs::create_dir(&right).unwrap();
+        scheduler.watch(std::slice::from_ref(&pair), at(20));
+        assert!(!scheduler.due(&pair, at(21)));
+        assert!(scheduler.due(&pair, at(26)));
     }
 }

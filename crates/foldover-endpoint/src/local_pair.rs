@@ -12,6 +12,9 @@ pub enum PairRootError {
     Endpoint(#[from] ScanError),
     #[error("Selected local roots overlap: {0:?}")]
     Overlap(RootRelation),
+    /// Nothing is at that side's path, e.g. its disk is not mounted.
+    #[error("The {0:?} folder is missing; connect its disk or share")]
+    Missing(Side),
 }
 
 /// Two held roots checked for overlap at selection time. Volume identity,
@@ -23,8 +26,16 @@ pub struct LocalPair {
 
 impl LocalPair {
     pub fn open(left: &LocalRoot, right: &LocalRoot) -> Result<Self, PairRootError> {
-        let left = LocalEndpoint::open(Path::new(OsStr::from_bytes(left.as_bytes())))?;
-        let right = LocalEndpoint::open(Path::new(OsStr::from_bytes(right.as_bytes())))?;
+        let open = |root: &LocalRoot, side| {
+            LocalEndpoint::open(Path::new(OsStr::from_bytes(root.as_bytes()))).map_err(|error| {
+                match error {
+                    ScanError::RootMissing => PairRootError::Missing(side),
+                    error => PairRootError::Endpoint(error),
+                }
+            })
+        };
+        let left = open(left, Side::Left)?;
+        let right = open(right, Side::Right)?;
         let relation = left.relation_to(&right)?;
         if relation != RootRelation::Disjoint {
             return Err(PairRootError::Overlap(relation));
@@ -104,14 +115,19 @@ mod tests {
     }
 
     #[test]
-    fn an_unavailable_selected_root_is_an_error() {
+    fn an_unavailable_selected_root_names_its_side() {
         let temporary = tempfile::tempdir().unwrap();
+        let present = temporary.path().join("present");
+        fs::create_dir(&present).unwrap();
+        let missing = temporary.path().join("unmounted");
+
         assert!(matches!(
-            LocalPair::open(
-                &root(temporary.path()),
-                &root(&temporary.path().join("missing"))
-            ),
-            Err(PairRootError::Endpoint(ScanError::Io { .. })),
+            LocalPair::open(&root(&present), &root(&missing)),
+            Err(PairRootError::Missing(Side::Right))
+        ));
+        assert!(matches!(
+            LocalPair::open(&root(&missing), &root(&present)),
+            Err(PairRootError::Missing(Side::Left))
         ));
     }
 }

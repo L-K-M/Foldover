@@ -65,6 +65,9 @@ pub enum ScanError {
     InvalidIgnoreFile,
     #[error("No archived run has that name")]
     UnknownArchiveRun,
+    /// Nothing is at the root's path, e.g. its disk or share is not mounted.
+    #[error("The folder is missing; connect its disk or share")]
+    RootMissing,
     #[error("Extended metadata is unavailable at {path:?}: {source}")]
     Metadata {
         path: Option<SyncPath>,
@@ -259,7 +262,12 @@ impl Directory {
 
 impl LocalEndpoint {
     pub fn open(path: &Path) -> Result<Self, ScanError> {
-        let root = at(&None, Root::open(path))?;
+        let root = match Root::open(path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(ScanError::RootMissing);
+            }
+            result => at(&None, result)?,
+        };
         let identity = at(&None, root.root_metadata())?.identity();
         Ok(Self { root, identity })
     }

@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Automatic syncs wait for a disconnected disk or share instead of failing,
+  and resume once it is back.
 - Run history: each pair's last 100 syncs with their outcome and counts,
   shown in the app and printed by `foldover history`.
 - Archive browser: list each folder's archived syncs and put items back,
