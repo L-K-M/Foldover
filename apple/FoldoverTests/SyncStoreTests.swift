@@ -66,11 +66,11 @@ private struct UnreachableSyncClient: SyncClient {
 
 private func preview(archivesInA: UInt64, needsApproval: Bool) -> PreviewSummary {
     PreviewSummary(
-        changes: [PlannedChange(path: Data("photos/a.jpg".utf8), action: .copy(to: .b)),
+        changes: [PlannedChange(path: Data("photos/a.jpg".utf8), action: .copy(to: .b), bytes: 2_000_000),
                   PlannedChange(path: Data([0x6f, 0xff]), action: .archive(on: .a))],
         copies: 1, updates: 0, archives: archivesInA, conflicts: 0, blocked: 0, kept: 0,
         a: DeletionCheck(deletions: archivesInA, paths: 100, needsApproval: needsApproval),
-        b: DeletionCheck(deletions: 0, paths: 100, needsApproval: false)
+        b: DeletionCheck(deletions: 0, paths: 100, needsApproval: false), copyBytes: 2_000_000
     )
 }
 
@@ -91,9 +91,10 @@ func previewsPollUntilTheJobFinishes() async {
     let viewModel = PairSyncViewModel(pair: pair(), store: store, agentConnected: true)
     await viewModel.preview()
     #expect(store.state(for: pair().id) == .previewed(summary))
-    #expect(viewModel.statusText.contains("1 to copy"))
+    let size = PairSyncViewModel.byteText(2_000_000)
+    #expect(viewModel.statusText.contains("1 to copy (\(size))"))
     #expect(viewModel.statusText.contains("3 to archive"))
-    #expect(viewModel.rows.map(\.description) == ["Copy to Folder B", "Archive in Folder A"])
+    #expect(viewModel.rows.map(\.description) == ["Copy to Folder B · \(size)", "Archive in Folder A"])
     #expect(viewModel.rows[1].path == "o\u{FFFD}")
     #expect(viewModel.hiddenRowsText == "and 2 more")
     #expect(viewModel.canStart)

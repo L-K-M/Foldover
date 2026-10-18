@@ -39,7 +39,7 @@ struct ArchiveViewModel {
     var itemRows: [ArchiveItemRow] {
         store.items.map {
             ArchiveItemRow(id: $0.path, path: PairSyncViewModel.pathText($0.path),
-                           size: ByteCountFormatter.string(fromByteCount: Int64(clamping: $0.size), countStyle: .file))
+                           size: PairSyncViewModel.byteText($0.size))
         }
     }
 

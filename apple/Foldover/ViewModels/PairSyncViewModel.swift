@@ -106,7 +106,7 @@ struct PairSyncViewModel {
         case .previewed(let preview), .needsApproval(let preview):
             preview.changes.enumerated().map { index, change in
                 ChangeRow(id: index, path: Self.pathText(change.path),
-                          description: Self.description(change.action),
+                          description: Self.description(change),
                           resolvable: Self.resolvable(change.action) ? change.path : nil,
                           keepsBoth: change.action == .conflict(.bothChanged))
             }
@@ -179,7 +179,11 @@ struct PairSyncViewModel {
 
     static func summary(_ preview: PreviewSummary) -> String {
         var parts = [String]()
-        if preview.copies > 0 { parts.append(String(localized: "\(preview.copies) to copy")) }
+        if preview.copies > 0 {
+            parts.append(preview.copyBytes > 0
+                ? String(localized: "\(preview.copies) to copy (\(byteText(preview.copyBytes)))")
+                : String(localized: "\(preview.copies) to copy"))
+        }
         if preview.updates > 0 { parts.append(String(localized: "\(preview.updates) metadata updates")) }
         if preview.archives > 0 { parts.append(String(localized: "\(preview.archives) to archive")) }
         if preview.conflicts > 0 { parts.append(String(localized: "\(preview.conflicts) conflicts")) }
@@ -221,6 +225,15 @@ struct PairSyncViewModel {
         if run.conflicts > 0 { text += " " + String(localized: "\(run.conflicts) conflicts.") }
         if run.failures > 0 { text += " " + String(localized: "\(run.failures) failed.") }
         return text
+    }
+
+    static func description(_ change: PlannedChange) -> String {
+        let action = description(change.action)
+        return change.bytes > 0 ? "\(action) · \(byteText(change.bytes))" : action
+    }
+
+    static func byteText(_ bytes: UInt64) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(clamping: bytes), countStyle: .file)
     }
 
     static func description(_ action: ChangeAction) -> String {

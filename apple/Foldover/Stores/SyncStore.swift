@@ -27,6 +27,8 @@ enum ChangeAction: Equatable, Sendable {
 struct PlannedChange: Equatable, Sendable {
     let path: Data
     let action: ChangeAction
+    /// File data the change copies; 0 for everything else.
+    var bytes: UInt64 = 0
 }
 
 struct DeletionCheck: Equatable, Sendable {
@@ -46,6 +48,8 @@ struct PreviewSummary: Equatable, Sendable {
     let kept: UInt64
     let a: DeletionCheck
     let b: DeletionCheck
+    /// File data all copies move.
+    var copyBytes: UInt64 = 0
 
     var total: UInt64 { copies + updates + archives + conflicts + blocked + kept }
 }
@@ -189,10 +193,12 @@ private actor CoreSyncClient: SyncClient {
 
     private func summary(_ preview: SyncPreviewSummary) -> PreviewSummary {
         PreviewSummary(
-            changes: preview.changes.map { PlannedChange(path: $0.path, action: action($0.kind)) },
+            changes: preview.changes.map {
+                PlannedChange(path: $0.path, action: action($0.kind), bytes: $0.bytes)
+            },
             copies: preview.copies, updates: preview.updates, archives: preview.archives,
             conflicts: preview.conflicts, blocked: preview.blocked, kept: preview.kept,
-            a: check(preview.left), b: check(preview.right)
+            a: check(preview.left), b: check(preview.right), copyBytes: preview.copyBytes
         )
     }
 

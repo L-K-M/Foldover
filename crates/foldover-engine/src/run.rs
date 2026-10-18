@@ -26,8 +26,8 @@ use foldover_types::{
 };
 
 use crate::{
-    CandidateDecision, CandidatePlan, DeletionCounts, DeletionReview, PlanError, RunContext,
-    plan_resolved,
+    CandidateDecision, CandidatePlan, DeletionCounts, DeletionReview, PlanError, PlanRow,
+    RunContext, plan_resolved,
 };
 
 /// Base updates per commit: bounds the work a crash can make the next run redo.
@@ -135,6 +135,7 @@ pub struct PreviewItem {
     action: Action,
     left: Option<EntryVersion>,
     right: Option<EntryVersion>,
+    bytes: u64,
 }
 
 impl PreviewItem {
@@ -149,6 +150,11 @@ impl PreviewItem {
     /// What each side held when previewed; a resolution is bound to these.
     pub fn versions(&self) -> (Option<EntryVersion>, Option<EntryVersion>) {
         (self.left, self.right)
+    }
+
+    /// File data the item copies; 0 for everything else.
+    pub fn bytes(&self) -> u64 {
+        self.bytes
     }
 }
 
@@ -435,6 +441,7 @@ impl PairRun {
                     action,
                     left: version(Side::Left),
                     right: version(Side::Right),
+                    bytes: self.copied_bytes(row).map_or(0, |(_, bytes)| bytes),
                 })
             })
             .collect();
@@ -567,16 +574,24 @@ impl PairRun {
         self.plan
             .rows()
             .iter()
-            .filter_map(|row| match row.decision() {
-                CandidateDecision::Entry(EntryDecision::Propagate {
-                    from,
-                    change: ChangeKind::Create | ChangeKind::ReplaceContent,
-                }) if from.other() == side => self.observation(*from).entries().get(row.path()),
-                _ => None,
-            })
-            .filter(|source| source.version().kind() == foldover_types::EntryKind::File)
-            .map(ObservedEntry::size)
+            .filter_map(|row| self.copied_bytes(row))
+            .filter(|(to, _)| *to == side)
+            .map(|(_, bytes)| bytes)
             .fold(0, u64::saturating_add)
+    }
+
+    /// The side a row copies file data to, and how many bytes.
+    fn copied_bytes(&self, row: &PlanRow) -> Option<(Side, u64)> {
+        let CandidateDecision::Entry(EntryDecision::Propagate {
+            from,
+            change: ChangeKind::Create | ChangeKind::ReplaceContent,
+        }) = row.decision()
+        else {
+            return None;
+        };
+        let source = self.observation(*from).entries().get(row.path())?;
+        (source.version().kind() == foldover_types::EntryKind::File)
+            .then(|| (from.other(), source.size()))
     }
 
     fn observation(&self, side: Side) -> &Observation {

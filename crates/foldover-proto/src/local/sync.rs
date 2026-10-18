@@ -93,11 +93,15 @@ pub enum SyncAction {
 pub struct SyncItem {
     pub path: Vec<u8>,
     pub action: SyncAction,
+    /// File data the item copies; 0 for everything else.
+    pub bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SyncCounts {
+    /// File data all copies move, in bytes.
+    pub copy_bytes: u64,
     pub copies: u64,
     pub updates: u64,
     pub archives: u64,
@@ -200,6 +204,7 @@ mod tests {
                     action: SyncAction::Conflict {
                         conflict: SyncConflict::DeletedVersusEdited,
                     },
+                    bytes: u64::MAX,
                 };
                 SYNC_ITEM_LIMIT
             ],

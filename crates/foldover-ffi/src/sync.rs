@@ -35,6 +35,8 @@ pub enum SyncChangeKind {
 pub struct SyncChange {
     pub path: Vec<u8>,
     pub kind: SyncChangeKind,
+    /// File data the change copies; 0 for everything else.
+    pub bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
@@ -48,6 +50,8 @@ pub struct SyncSideDeletions {
 pub struct SyncPreviewSummary {
     /// The first changes in path order; the counts cover all of them.
     pub changes: Vec<SyncChange>,
+    /// File data all copies move, in bytes.
+    pub copy_bytes: u64,
     pub copies: u64,
     pub updates: u64,
     pub archives: u64,
@@ -205,8 +209,10 @@ impl From<SyncPreview> for SyncPreviewSummary {
                 .map(|item| SyncChange {
                     path: item.path,
                     kind: item.action.into(),
+                    bytes: item.bytes,
                 })
                 .collect(),
+            copy_bytes: preview.counts.copy_bytes,
             copies: preview.counts.copies,
             updates: preview.counts.updates,
             archives: preview.counts.archives,
@@ -300,8 +306,10 @@ mod tests {
             items: vec![SyncItem {
                 path: b"a/\xff".to_vec(),
                 action: SyncAction::Archive { on: PairSide::Left },
+                bytes: 0,
             }],
             counts: SyncCounts {
+                copy_bytes: 7,
                 copies: 1,
                 updates: 2,
                 archives: 3,
@@ -328,9 +336,11 @@ mod tests {
             preview.changes,
             [SyncChange {
                 path: b"a/\xff".to_vec(),
-                kind: SyncChangeKind::Archive { on: SyncSide::Left }
+                kind: SyncChangeKind::Archive { on: SyncSide::Left },
+                bytes: 0,
             }]
         );
+        assert_eq!(preview.copy_bytes, 7);
         assert_eq!(
             (
                 preview.copies,

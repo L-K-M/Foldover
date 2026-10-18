@@ -324,6 +324,7 @@ fn preview(preview: &Preview) -> SyncPreview {
     let mut items = Vec::new();
     for item in preview.items() {
         let action = action(item.action());
+        counts.copy_bytes = counts.copy_bytes.saturating_add(item.bytes());
         match action {
             SyncAction::Copy { .. } => counts.copies += 1,
             SyncAction::Update { .. } => counts.updates += 1,
@@ -336,6 +337,7 @@ fn preview(preview: &Preview) -> SyncPreview {
             items.push(SyncItem {
                 path: item.path().as_bytes().to_vec(),
                 action,
+                bytes: item.bytes(),
             });
         }
     }

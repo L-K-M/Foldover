@@ -167,6 +167,15 @@ fn edits_replace_and_archive_and_deletions_propagate_to_the_archive() {
             ),
         ]
     );
+    // Only copies move data; an archive moves nothing between folders.
+    assert_eq!(
+        preview
+            .items()
+            .iter()
+            .map(PreviewItem::bytes)
+            .collect::<Vec<_>>(),
+        [0, 2]
+    );
 
     let report = pair.sync();
     assert_eq!((report.copied(), report.archived()), (1, 1));

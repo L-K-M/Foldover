@@ -1246,12 +1246,20 @@ public func FfiConverterTypeRunHistoryEntry_lower(_ value: RunHistoryEntry) -> R
 public struct SyncChange: Equatable, Hashable {
     public var path: Data
     public var kind: SyncChangeKind
+    /**
+     * File data the change copies; 0 for everything else.
+     */
+    public var bytes: UInt64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(path: Data, kind: SyncChangeKind) {
+    public init(path: Data, kind: SyncChangeKind, 
+        /**
+         * File data the change copies; 0 for everything else.
+         */bytes: UInt64) {
         self.path = path
         self.kind = kind
+        self.bytes = bytes
     }
 
     
@@ -1271,13 +1279,15 @@ public struct FfiConverterTypeSyncChange: FfiConverterRustBuffer {
         return
             try SyncChange(
                 path: FfiConverterData.read(from: &buf), 
-                kind: FfiConverterTypeSyncChangeKind.read(from: &buf)
+                kind: FfiConverterTypeSyncChangeKind.read(from: &buf), 
+                bytes: FfiConverterUInt64.read(from: &buf)
         )
     }
 
     public static func write(_ value: SyncChange, into buf: inout [UInt8]) {
         FfiConverterData.write(value.path, into: &buf)
         FfiConverterTypeSyncChangeKind.write(value.kind, into: &buf)
+        FfiConverterUInt64.write(value.bytes, into: &buf)
     }
 }
 
@@ -1356,6 +1366,10 @@ public struct SyncPreviewSummary: Equatable, Hashable {
      * The first changes in path order; the counts cover all of them.
      */
     public var changes: [SyncChange]
+    /**
+     * File data all copies move, in bytes.
+     */
+    public var copyBytes: UInt64
     public var copies: UInt64
     public var updates: UInt64
     public var archives: UInt64
@@ -1370,8 +1384,12 @@ public struct SyncPreviewSummary: Equatable, Hashable {
     public init(
         /**
          * The first changes in path order; the counts cover all of them.
-         */changes: [SyncChange], copies: UInt64, updates: UInt64, archives: UInt64, conflicts: UInt64, blocked: UInt64, kept: UInt64, left: SyncSideDeletions, right: SyncSideDeletions) {
+         */changes: [SyncChange], 
+        /**
+         * File data all copies move, in bytes.
+         */copyBytes: UInt64, copies: UInt64, updates: UInt64, archives: UInt64, conflicts: UInt64, blocked: UInt64, kept: UInt64, left: SyncSideDeletions, right: SyncSideDeletions) {
         self.changes = changes
+        self.copyBytes = copyBytes
         self.copies = copies
         self.updates = updates
         self.archives = archives
@@ -1399,6 +1417,7 @@ public struct FfiConverterTypeSyncPreviewSummary: FfiConverterRustBuffer {
         return
             try SyncPreviewSummary(
                 changes: FfiConverterSequenceTypeSyncChange.read(from: &buf), 
+                copyBytes: FfiConverterUInt64.read(from: &buf), 
                 copies: FfiConverterUInt64.read(from: &buf), 
                 updates: FfiConverterUInt64.read(from: &buf), 
                 archives: FfiConverterUInt64.read(from: &buf), 
@@ -1412,6 +1431,7 @@ public struct FfiConverterTypeSyncPreviewSummary: FfiConverterRustBuffer {
 
     public static func write(_ value: SyncPreviewSummary, into buf: inout [UInt8]) {
         FfiConverterSequenceTypeSyncChange.write(value.changes, into: &buf)
+        FfiConverterUInt64.write(value.copyBytes, into: &buf)
         FfiConverterUInt64.write(value.copies, into: &buf)
         FfiConverterUInt64.write(value.updates, into: &buf)
         FfiConverterUInt64.write(value.archives, into: &buf)
