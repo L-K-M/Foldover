@@ -394,6 +394,12 @@ impl Root {
         })
     }
 
+    /// Bytes an unprivileged writer can still use on the held root's volume.
+    pub fn available_space(&self) -> io::Result<u64> {
+        let stat = rustix::fs::fstatvfs(&self.directory)?;
+        Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+    }
+
     pub fn root_metadata(&self) -> io::Result<EntryMetadata> {
         prevent_materialization()?;
         EntryMetadata::from_file(&self.directory)

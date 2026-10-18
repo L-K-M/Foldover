@@ -127,16 +127,19 @@ const RACY_WINDOW: Duration = Duration::from_secs(3);
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Fingerprint {
     key: Vec<u8>,
+    size: u64,
     observed_at: SystemTime,
 }
 
-/// Persisted form: seconds and nanoseconds of `observed_at`, then the key.
-const FINGERPRINT_TIME_BYTES: usize = 8 + 4;
+/// Persisted form: seconds and nanoseconds of `observed_at`, the size, then
+/// the stat key.
+const FINGERPRINT_HEADER_BYTES: usize = 8 + 4 + 8;
 
 impl Fingerprint {
     fn new(metadata: &EntryMetadata, observed_at: SystemTime) -> Self {
         Self {
             key: metadata.stat_key(),
+            size: metadata.size(),
             observed_at,
         }
     }
@@ -155,20 +158,22 @@ impl Fingerprint {
             .observed_at
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
-        let mut bytes = Vec::with_capacity(FINGERPRINT_TIME_BYTES + self.key.len());
+        let mut bytes = Vec::with_capacity(FINGERPRINT_HEADER_BYTES + self.key.len());
         bytes.extend_from_slice(&since.as_secs().to_le_bytes());
         bytes.extend_from_slice(&since.subsec_nanos().to_le_bytes());
+        bytes.extend_from_slice(&self.size.to_le_bytes());
         bytes.extend_from_slice(&self.key);
         bytes
     }
 
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
         let seconds = u64::from_le_bytes(bytes.get(..8)?.try_into().ok()?);
-        let nanoseconds =
-            u32::from_le_bytes(bytes.get(8..FINGERPRINT_TIME_BYTES)?.try_into().ok()?);
+        let nanoseconds = u32::from_le_bytes(bytes.get(8..12)?.try_into().ok()?);
+        let size = u64::from_le_bytes(bytes.get(12..FINGERPRINT_HEADER_BYTES)?.try_into().ok()?);
         let observed_at = UNIX_EPOCH.checked_add(Duration::new(seconds, nanoseconds))?;
         Some(Self {
-            key: bytes.get(FINGERPRINT_TIME_BYTES..)?.to_vec(),
+            key: bytes.get(FINGERPRINT_HEADER_BYTES..)?.to_vec(),
+            size,
             observed_at,
         })
     }
@@ -183,6 +188,11 @@ pub struct ObservedEntry {
 impl ObservedEntry {
     pub fn version(&self) -> EntryVersion {
         self.version
+    }
+
+    /// Bytes a copy of this entry's data needs.
+    pub fn size(&self) -> u64 {
+        self.fingerprint.size
     }
 
     /// Opaque bytes for a snapshot store.
@@ -254,6 +264,11 @@ impl LocalEndpoint {
 
     pub fn relation_to(&self, other: &Self) -> Result<RootRelation, ScanError> {
         at(&None, self.root.relation_to(&other.root))
+    }
+
+    /// Bytes an unprivileged writer can still use on the root's volume.
+    pub fn available_space(&self) -> Result<u64, ScanError> {
+        at(&None, self.root.available_space())
     }
 
     pub fn filesystem_features(&self) -> Result<FilesystemFeatures, ScanError> {

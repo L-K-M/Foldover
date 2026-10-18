@@ -32,6 +32,9 @@ use crate::{
 
 /// Base updates per commit: bounds the work a crash can make the next run redo.
 const COMMIT_BATCH: usize = 256;
+/// Free space a run leaves on each volume, so the system and other writers
+/// are not starved by a sync.
+const SPACE_RESERVE: u64 = 256 * 1024 * 1024;
 /// Owner decision (PLAN.md §10): archived versions are kept for 30 days.
 const ARCHIVE_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
@@ -55,6 +58,15 @@ pub enum RunError {
         side: Side,
         #[source]
         source: ApplyError,
+    },
+    #[error(
+        "The {side:?} folder's disk has {available} bytes free; this sync needs {needed} plus a \
+         256 MiB reserve. Free space and sync again."
+    )]
+    InsufficientSpace {
+        side: Side,
+        needed: u64,
+        available: u64,
     },
     #[error(transparent)]
     Filter(#[from] InvalidFilter),
@@ -456,6 +468,21 @@ impl PairRun {
             }
         }
 
+        // Replaced versions stay in the archive on the same volume, so a
+        // copy needs its full size whether it creates or replaces.
+        for side in [Side::Left, Side::Right] {
+            let needed = self.bytes_to_copy(side);
+            if needed == 0 {
+                continue;
+            }
+            let available = self
+                .endpoints
+                .endpoint(side)
+                .available_space()
+                .map_err(|source| RunError::Observe { side, source })?;
+            require_space(side, needed, available)?;
+        }
+
         let revision = self.pair.revision();
         let options = self.pair.draft().options();
         if self.identities.side(Side::Left).is_none() || self.identities.side(Side::Right).is_none()
@@ -535,12 +562,41 @@ impl PairRun {
         Ok(RunOutcome::Ran(executor.report))
     }
 
+    /// Data bytes the plan copies to `side`.
+    fn bytes_to_copy(&self, side: Side) -> u64 {
+        self.plan
+            .rows()
+            .iter()
+            .filter_map(|row| match row.decision() {
+                CandidateDecision::Entry(EntryDecision::Propagate {
+                    from,
+                    change: ChangeKind::Create | ChangeKind::ReplaceContent,
+                }) if from.other() == side => self.observation(*from).entries().get(row.path()),
+                _ => None,
+            })
+            .filter(|source| source.version().kind() == foldover_types::EntryKind::File)
+            .map(ObservedEntry::size)
+            .fold(0, u64::saturating_add)
+    }
+
     fn observation(&self, side: Side) -> &Observation {
         match side {
             Side::Left => &self.left,
             Side::Right => &self.right,
         }
     }
+}
+
+fn require_space(side: Side, needed: u64, available: u64) -> Result<(), RunError> {
+    // Subtracting avoids overflow: needed + reserve could exceed u64::MAX.
+    if needed > available.saturating_sub(SPACE_RESERVE) {
+        return Err(RunError::InsufficientSpace {
+            side,
+            needed,
+            available,
+        });
+    }
+    Ok(())
 }
 
 fn is_archive(decision: &CandidateDecision) -> bool {

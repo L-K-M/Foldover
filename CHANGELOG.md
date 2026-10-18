@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Free-space gate: a sync stops before writing when a folder's disk cannot
+  hold the files copied to it plus a 256 MiB reserve.
 - Releases: pushing a version tag publishes the ad-hoc-signed app as a GitHub
   release with install instructions.
 - Menu bar: every pair's status with Sync and Sync All; notifications when an

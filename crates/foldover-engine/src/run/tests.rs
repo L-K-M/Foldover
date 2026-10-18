@@ -537,3 +537,38 @@ fn filters_from_the_pair_and_both_ignore_files_exclude_entries_on_both_sides() {
     assert_eq!(report.archived(), 0);
     assert!(pair.right.path().join("keep").exists());
 }
+
+#[test]
+fn runs_count_the_bytes_each_side_receives_and_check_free_space() {
+    let pair = fixture(SyncMode::Sync);
+    fs::write(pair.left.path().join("big"), vec![1; 4096]).unwrap();
+    fs::write(pair.right.path().join("small"), vec![2; 100]).unwrap();
+    fs::create_dir(pair.right.path().join("folder")).unwrap();
+    let run = pair.prepare();
+    assert_eq!(run.bytes_to_copy(Side::Right), 4096);
+    assert_eq!(run.bytes_to_copy(Side::Left), 100);
+    // A temporary volume has room for this.
+    assert!(
+        pair.prepare()
+            .endpoints
+            .endpoint(Side::Left)
+            .available_space()
+            .unwrap()
+            > 0
+    );
+}
+
+#[test]
+fn copies_need_their_size_plus_the_reserve() {
+    let reserve = super::SPACE_RESERVE;
+    assert!(super::require_space(Side::Left, 10, 10 + reserve).is_ok());
+    assert!(matches!(
+        super::require_space(Side::Right, 11, 10 + reserve),
+        Err(RunError::InsufficientSpace {
+            side: Side::Right,
+            needed: 11,
+            ..
+        })
+    ));
+    assert!(super::require_space(Side::Left, u64::MAX, u64::MAX).is_err());
+}

@@ -20,6 +20,10 @@ execute: deletion gate ─▶ archive leftovers
   different. Otherwise an unmounted disk that leaves an empty folder at its
   path would look like a mass deletion, and small trees fall below the
   deletion limits. Changing a root forgets that side's identity.
+- **Free space:** before any write, each side's volume must have room for
+  every file copied to it plus a 256 MiB reserve. Replaced versions stay in
+  the archive on the same volume, so a replacement needs its full size.
+  Otherwise the run stops with `InsufficientSpace` and writes nothing.
 - **Gate:** per target, the plan's deletions are reviewed
   ([ADR 0013](0013-deletion-review-fuse.md)). Interactive runs above the
   limit need an `Approval` covering at least that many deletions; unattended
