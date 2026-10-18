@@ -355,6 +355,9 @@ Provider verification and cloud-root readiness remain required before agent expo
 Held-root macOS volume UUID observations are available below the agent API;
 [ADR 0015](docs/adr/0015-held-volume-uuid.md) records the probe and remaining
 mount-continuity/readiness gates.
+Native stat fidelity fields, xattr/resource-fork digests and ACL observations
+are available below the agent API; [ADR 0016](docs/adr/0016-local-extended-metadata.md)
+records bounds, platform limits and remaining canonical-metadata/capability gates.
 
 ```rust
 trait Endpoint {

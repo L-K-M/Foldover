@@ -9,8 +9,9 @@ fork. It consumes an existing metadata fingerprint and a cooperative progress
 callback. `LocalEndpoint::hash_file` accepts an inventory entry, retains endpoint
 namespace/device checks and maps failures into scan errors.
 
-This does not produce a complete file version. Xattrs, ACLs, resource forks,
-flags, naming capabilities and canonical metadata digests are still required.
+This does not produce a complete file version. Native extended metadata is
+observed separately ([ADR 0016](0016-local-extended-metadata.md)); naming,
+capabilities and canonical metadata digests are still required.
 The agent and app do not expose content reads or sync execution yet.
 
 ## Read contract

@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Bounded held-root xattr/resource-fork digests, native ACL observations and
+  stat fidelity fields, with cancellation and explicit unsupported metadata errors.
 - Revision-checked pair removal in the app and CLI, including offline pairs,
   while preserving endpoint folders and files.
 - Held-root macOS volume UUID observations, with physical-device ancestry and

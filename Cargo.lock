@@ -420,6 +420,7 @@ dependencies = [
  "foldover-types",
  "libc",
  "nix",
+ "rustix",
  "tempfile",
  "thiserror",
  "uuid",

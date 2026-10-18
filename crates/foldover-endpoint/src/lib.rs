@@ -13,7 +13,10 @@ mod local_pair;
 pub use local::{LocalEndpoint, LocalEntry, ScanControl, ScanError, ScanStats};
 
 #[cfg(unix)]
-pub use foldover_fs::{EntryMetadata, FileIdentity, NodeKind, RootRelation};
+pub use foldover_fs::{
+    AccessControl, EntryMetadata, ExtendedAttribute, ExtendedMetadata, FileIdentity,
+    MetadataReadError, NodeKind, RootRelation,
+};
 
 #[cfg(unix)]
 pub use local_pair::{LocalPair, PairRootError};

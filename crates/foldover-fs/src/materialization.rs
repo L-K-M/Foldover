@@ -123,6 +123,12 @@ mod tests {
             })
             .unwrap();
             assert_eq!(policy().unwrap(), IOPOL_MATERIALIZE_DATALESS_FILES_OFF);
+            root.read_extended_metadata(&path, &metadata, &mut |_| {
+                set_policy(IOPOL_MATERIALIZE_DATALESS_FILES_ON).unwrap();
+                ScanControl::Continue
+            })
+            .unwrap();
+            assert_eq!(policy().unwrap(), IOPOL_MATERIALIZE_DATALESS_FILES_OFF);
         })
         .join()
         .unwrap();
