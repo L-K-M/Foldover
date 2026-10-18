@@ -72,6 +72,14 @@ atomic and require the pair's current revision, so a run planned for other
 roots or another mode cannot commit. Stored rows whose sides disagree on
 content, or whose kind or length is invalid, are errors.
 
+## Observation cache
+
+Snapshot versions and fingerprints only avoid rereading unchanged files.
+A malformed cached version is a cache miss, so the next full observation
+can replace it. Invalid snapshot paths and database failures still stop the
+read. Authoritative base versions, identities, pair configuration and
+conflict choices retain their strict validation.
+
 ## Verification
 
 Driver tests cover reopen durability, single-writer ownership, SQL/schema

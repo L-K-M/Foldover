@@ -194,13 +194,19 @@ impl PairStore {
         self.database
             .snapshot(id.as_bytes(), side_name(side))?
             .into_iter()
-            .map(|row| {
-                Ok(SnapshotEntry {
-                    path: SyncPath::try_from(row.path)
-                        .map_err(|_| Error::InvalidStored("snapshot path"))?,
+            .filter_map(|row| {
+                let path = match SyncPath::try_from(row.path) {
+                    Ok(path) => path,
+                    Err(_) => return Some(Err(Error::InvalidStored("snapshot path"))),
+                };
+                // Versions here are cache hints, not the authoritative base.
+                // A corrupt hint must allow the full observation that replaces it.
+                let version = decode(&row.version).ok()?;
+                Some(Ok(SnapshotEntry {
+                    path,
                     fingerprint: row.fingerprint,
-                    version: decode(&row.version)?,
-                })
+                    version,
+                }))
             })
             .collect()
     }
@@ -726,5 +732,92 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(path, resolution)]
         );
+    }
+
+    #[test]
+    fn malformed_snapshot_versions_are_cache_misses() {
+        use foldover_types::{Digest, EntryContent, EntryVersion};
+
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        let pair = store.create(&draft(SyncMode::Sync)).unwrap();
+        let version = EntryVersion::new(
+            EntryContent::Directory,
+            Digest::from_bytes([7; Digest::BYTE_LEN]),
+        );
+        let expected = SnapshotEntry {
+            path: SyncPath::try_from(b"kept".as_slice()).unwrap(),
+            fingerprint: b"opaque fingerprint".to_vec(),
+            version,
+        };
+        let mut unknown_kind = encode(version).to_vec();
+        unknown_kind[0] = u8::MAX;
+        let row = |path: &[u8], version: Vec<u8>| SnapshotRow {
+            path: path.to_vec(),
+            fingerprint: expected.fingerprint.clone(),
+            version,
+        };
+        store
+            .database
+            .replace_snapshot(
+                pair.id().as_bytes(),
+                database_revision(pair.revision()).unwrap(),
+                side_name(Side::Left),
+                &[
+                    row(expected.path.as_bytes(), encode(version).to_vec()),
+                    row(b"truncated", Vec::new()),
+                    row(b"unknown-kind", unknown_kind),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(store.snapshot(pair.id(), Side::Left).unwrap(), [expected]);
+    }
+
+    #[test]
+    fn invalid_snapshot_paths_and_authoritative_base_versions_still_fail() {
+        use foldover_types::{Digest, EntryContent, EntryVersion};
+
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        let pair = store.create(&draft(SyncMode::Sync)).unwrap();
+        let version = encode(EntryVersion::new(
+            EntryContent::Directory,
+            Digest::from_bytes([3; Digest::BYTE_LEN]),
+        ));
+        store
+            .database
+            .replace_snapshot(
+                pair.id().as_bytes(),
+                database_revision(pair.revision()).unwrap(),
+                side_name(Side::Left),
+                &[SnapshotRow {
+                    path: b"../outside".to_vec(),
+                    fingerprint: Vec::new(),
+                    version: version.to_vec(),
+                }],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.snapshot(pair.id(), Side::Left),
+            Err(Error::InvalidStored("snapshot path"))
+        ));
+
+        store
+            .database
+            .change_base(
+                pair.id().as_bytes(),
+                database_revision(pair.revision()).unwrap(),
+                &[BaseChange::Put {
+                    path: b"kept",
+                    left_version: &[],
+                    right_version: &version,
+                }],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.base(pair.id()),
+            Err(Error::InvalidStored(_))
+        ));
     }
 }
