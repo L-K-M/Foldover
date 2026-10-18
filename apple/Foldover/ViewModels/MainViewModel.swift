@@ -5,6 +5,14 @@
 import Foundation
 import Observation
 
+/// One pair in the menu bar.
+struct MenuPairRow: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let status: String
+    let canSync: Bool
+}
+
 /// Text for the main window and the menu-bar extra.
 @Observable
 @MainActor
@@ -69,6 +77,41 @@ final class MainViewModel {
         case .approvalRequired: String(localized: "Approve Foldover in Login Items, then refresh")
         case .connected(let version): String(localized: "Agent \(version) connected")
         case .failed(let message): String(localized: "Background agent unavailable: \(message)")
+        }
+    }
+
+    var menuRows: [MenuPairRow] {
+        pairs.map { pair in
+            let sync = sync(for: pair)
+            return MenuPairRow(id: pair.id, name: pair.settings.name, status: sync.shortStatus,
+                               canSync: sync.canStart)
+        }
+    }
+
+    var canSyncAll: Bool { menuRows.contains(where: \.canSync) }
+
+    func syncPair(id: String) async {
+        guard let pair = pairs.first(where: { $0.id == id }) else { return }
+        await sync(for: pair).sync()
+    }
+
+    func syncAll() async {
+        for pair in pairs where sync(for: pair).canStart {
+            await sync(for: pair).sync()
+        }
+    }
+
+    /// Keep every pair's status current while the app runs, so automatic
+    /// syncs show up and their problems become notifications.
+    func monitor(every interval: Duration = .seconds(15)) async {
+        while !Task.isCancelled {
+            if !pairStore.hasLoaded {
+                await refreshAgent()
+            }
+            if case .connected = agent.connection, pairStore.hasLoaded {
+                await syncStore.checkAll(pairStore.pairs)
+            }
+            try? await Task.sleep(for: interval)
         }
     }
 

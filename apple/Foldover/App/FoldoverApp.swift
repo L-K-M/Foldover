@@ -6,7 +6,14 @@ import SwiftUI
 
 @main
 struct FoldoverApp: App {
-    @State private var viewModel = MainViewModel(appInfo: AppInfoStore())
+    @State private var viewModel: MainViewModel
+
+    init() {
+        let viewModel = MainViewModel(appInfo: AppInfoStore())
+        _viewModel = State(initialValue: viewModel)
+        // Runs for the app's lifetime, with or without an open window.
+        Task { await viewModel.monitor() }
+    }
 
     var body: some Scene {
         // One configuration window shares the same selection and editor as the menu bar.

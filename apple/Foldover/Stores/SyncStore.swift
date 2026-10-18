@@ -1,4 +1,5 @@
 import FoldoverCore
+import FoldoverSystem
 import Foundation
 import Observation
 
@@ -175,6 +176,13 @@ private actor CoreSyncClient: SyncClient {
     }
 }
 
+/// A notification about an automatic sync that needs a person.
+struct SyncAlert: Equatable, Sendable {
+    let pairID: String
+    let title: String
+    let body: String
+}
+
 /// Starts previews and runs in the agent and polls each pair while its
 /// job works. Results stay until the pair's next job.
 @Observable
@@ -182,13 +190,55 @@ private actor CoreSyncClient: SyncClient {
 final class SyncStore {
     private let client: any SyncClient
     private let pollInterval: Duration
+    private let alert: @MainActor (SyncAlert) async -> Void
     private var polling: Set<String> = []
     private(set) var states: [String: PairSyncState] = [:]
     private(set) var requestErrors: [String: String] = [:]
 
-    init(client: any SyncClient = CoreSyncClient(), pollInterval: Duration = .milliseconds(500)) {
+    init(client: any SyncClient = CoreSyncClient(), pollInterval: Duration = .milliseconds(500),
+         alert: @escaping @MainActor (SyncAlert) async -> Void = SyncStore.postAlert) {
         self.client = client
         self.pollInterval = pollInterval
+        self.alert = alert
+    }
+
+    private static let alerts = UserAlerts()
+
+    private static func postAlert(_ alert: SyncAlert) async {
+        await alerts.post(identifier: alert.pairID, title: alert.title, body: alert.body)
+    }
+
+    /// Check every pair once. Automatic runs change state without the app;
+    /// outcomes that need a person become notifications. A pair's first
+    /// observation never alerts, so launching the app does not replay them.
+    func checkAll(_ pairs: [SyncPair]) async {
+        for pair in pairs where !polling.contains(pair.id) {
+            let previous = states[pair.id]
+            guard let state = try? await client.status(pair.id) else { continue }
+            states[pair.id] = state
+            guard let previous, previous != state, let alert = Self.alert(for: pair, state: state) else {
+                continue
+            }
+            await self.alert(alert)
+        }
+    }
+
+    nonisolated static func alert(for pair: SyncPair, state: PairSyncState) -> SyncAlert? {
+        let name = pair.settings.name
+        let body: String
+        switch state {
+        case .needsApproval(let preview):
+            body = String(localized: "An automatic sync stopped before archiving \(preview.archives) items. Open Foldover to review and approve it.")
+        case .failed(let message):
+            body = String(localized: "An automatic sync stopped: \(message)")
+        case .finished(let result) where result.conflicts > 0:
+            body = String(localized: "\(result.conflicts) conflicts need your decision.")
+        case .finished(let result) where result.failureCount > 0:
+            body = String(localized: "\(result.failureCount) items could not be synced. They will be retried.")
+        default:
+            return nil
+        }
+        return SyncAlert(pairID: pair.id, title: name, body: body)
     }
 
     func state(for id: String) -> PairSyncState { states[id] ?? .idle }

@@ -1,5 +1,5 @@
-// The menu-bar surface (PLAN.md §3.8): a status line, a way back to
-// the main window, and Quit.
+// The menu-bar surface (PLAN.md §3.8): every pair's status with a way to
+// sync it, Sync All, the main window, and Quit.
 
 import AppKit
 import SwiftUI
@@ -13,12 +13,28 @@ struct MenuBarView: View {
             Text(viewModel.statusLine)
                 .font(.headline)
 
-            Text(viewModel.coreVersionText)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            ForEach(viewModel.menuRows) { row in
+                HStack {
+                    VStack(alignment: .leading) {
+                        Text(row.name).lineLimit(1)
+                        Text(row.status).font(.caption).foregroundStyle(.secondary)
+                    }
+                    .accessibilityElement(children: .combine)
+                    Spacer()
+                    Button("Sync") { Task { await viewModel.syncPair(id: row.id) } }
+                        .disabled(!row.canSync)
+                        .accessibilityLabel("Sync \(row.name)")
+                }
+            }
+
+            if !viewModel.menuRows.isEmpty {
+                Button("Sync All") { Task { await viewModel.syncAll() } }
+                    .disabled(!viewModel.canSyncAll)
+            }
 
             Text(viewModel.agentStatusText)
                 .font(.caption)
+                .foregroundStyle(.secondary)
 
             Divider()
 
@@ -34,6 +50,6 @@ struct MenuBarView: View {
             .keyboardShortcut("q")
         }
         .padding()
-        .frame(width: 220)
+        .frame(width: 280)
     }
 }

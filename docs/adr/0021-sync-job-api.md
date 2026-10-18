@@ -42,6 +42,13 @@ and polls every 500 ms while one works. A run that needs approval shows the
 deletion counts; confirming retries with exactly those counts. Declining
 keeps the preview visible.
 
+While the app runs, with or without its window, it checks every pair's
+status every 15 seconds. Outcomes of automatic runs that need a person
+become notifications: a run stopped for approval, a failed run, conflicts,
+or items that failed. Previews, syncs started in the app, and states seen
+at launch never notify. The menu bar lists each pair's status with Sync and
+Sync All.
+
 ## Consequences
 
 - Polling, not events. A subscription stream can replace it without

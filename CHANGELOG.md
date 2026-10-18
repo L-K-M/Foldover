@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Menu bar: every pair's status with Sync and Sync All; notifications when an
+  automatic sync needs approval, fails, or leaves conflicts.
 - Filters: gitignore-style rules per pair and in `.foldoverignore` files,
   applied to both folders so excluded files are never deleted.
 - Sync when files change: pairs set to "When files change" watch both

@@ -165,3 +165,42 @@ func keepingASideResolvesThenPreviewsAgain() async throws {
     #expect(await client.kept == [.b])
     #expect(store.state(for: pair().id) == .previewed(resolved))
 }
+
+private actor AlertRecorder {
+    private(set) var alerts: [SyncAlert] = []
+    func record(_ alert: SyncAlert) { alerts.append(alert) }
+}
+
+@MainActor
+@Test
+func automaticOutcomesThatNeedAPersonBecomeAlertsOnlyOnChange() async {
+    let approval = preview(archivesInA: 60, needsApproval: true)
+    let conflicted = RunSummary(cancelled: false, copied: 0, updated: 0, archived: 0, recovered: 0,
+                                conflicts: 2, failures: [], failureCount: 0, archive: "run")
+    let client = ScriptedSyncClient([.finished(conflicted), .finished(conflicted),
+                                     .needsApproval(approval), .previewed(approval)])
+    let recorder = AlertRecorder()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1)) { alert in
+        await recorder.record(alert)
+    }
+    // Launch: existing conflicts are not replayed.
+    await store.checkAll([pair()])
+    await store.checkAll([pair()])
+    #expect(await recorder.alerts.isEmpty)
+    await store.checkAll([pair()])
+    let alerts = await recorder.alerts
+    #expect(alerts.count == 1)
+    #expect(alerts.first?.title == "Photos")
+    #expect(alerts.first?.body.contains("60") == true)
+    // Previews never alert.
+    await store.checkAll([pair()])
+    #expect(await recorder.alerts.count == 1)
+}
+
+@Test
+func alertTextsNameTheProblem() {
+    let conflicted = RunSummary(cancelled: false, copied: 0, updated: 0, archived: 0, recovered: 0,
+                                conflicts: 2, failures: [], failureCount: 0, archive: "run")
+    #expect(SyncStore.alert(for: pair(), state: .finished(conflicted))?.body.contains("2") == true)
+    #expect(SyncStore.alert(for: pair(), state: .idle) == nil)
+}

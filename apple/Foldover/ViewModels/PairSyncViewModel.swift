@@ -35,6 +35,23 @@ struct PairSyncViewModel {
     }
     var requestError: String? { store.requestError(for: pair.id) }
 
+    /// One or two words for the menu bar.
+    var shortStatus: String {
+        switch state {
+        case .idle: String(localized: "Ready")
+        case .working(.preview, _): String(localized: "Comparing…")
+        case .working(.run, _): String(localized: "Syncing…")
+        case .previewed(let preview):
+            preview.total == 0 ? String(localized: "In sync") : String(localized: "\(preview.total) changes")
+        case .needsApproval: String(localized: "Needs approval")
+        case .finished(let result) where result.cancelled: String(localized: "Cancelled")
+        case .finished(let result) where result.conflicts > 0: String(localized: "\(result.conflicts) conflicts")
+        case .finished(let result) where result.failureCount > 0: String(localized: "\(result.failureCount) failed")
+        case .finished: String(localized: "In sync")
+        case .failed: String(localized: "Stopped")
+        }
+    }
+
     var statusText: String {
         switch state {
         case .idle:
