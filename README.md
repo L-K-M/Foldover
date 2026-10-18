@@ -117,12 +117,18 @@ foldover sync ID --preview       # list changes; writes nothing
 foldover sync ID                 # run
 foldover sync ID --approve 60 0  # accept up to 60 deletions in A, 0 in B
 foldover sync ID --keep-right PATH  # resolve a previewed conflict with B's version
+foldover archive ID left         # archived runs in folder A, newest first
+foldover archive ID left RUN     # items one run archived
+foldover archive ID left RUN --put-back PATH
 ```
 
 Each command waits for its job and prints the final status as JSON. A run
 stops before writing when it would delete more than the automatic limits
 allow and exits with status 3; rerun with `--approve`. Replaced and removed
-files go to `.foldover/archive/<run>/` inside the folder where they were.
+files go to `.foldover/archive/<run>/` inside the folder where they were
+for 30 days. Put back returns one to its path, or beside it as
+`name (restored).ext` when that path is taken; the next sync copies it
+across ([ADR 0025](docs/adr/0025-archive-browser.md)).
 The first sync writes `.foldover/id` into both folders; later runs stop if
 either is missing or different, for example when a disk is not mounted.
 

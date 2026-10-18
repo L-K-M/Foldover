@@ -5,10 +5,50 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use foldover_fs::DirectoryScope;
-use foldover_types::SyncPath;
+use foldover_fs::{DirectoryScope, NodeKind, WriteError};
+use foldover_types::{Durability, SyncPath};
 
-use super::{ApplyError, LocalEndpoint, ScanError};
+use super::{ApplyError, LocalEndpoint, ScanError, protected};
+
+/// Names tried for one put-back: the original, then `(restored)`,
+/// `(restored 2)` and so on.
+const PUT_BACK_ATTEMPTS: u32 = 100;
+/// The longest file name APFS and most Unix filesystems store, in bytes.
+const NAME_MAX: usize = 255;
+
+/// One run's folder in a root's archive.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArchivedRun {
+    name: String,
+    started: SystemTime,
+}
+
+impl ArchivedRun {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn started(&self) -> SystemTime {
+        self.started
+    }
+}
+
+/// A file or link a run archived, at its original path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArchivedItem {
+    path: SyncPath,
+    size: u64,
+}
+
+impl ArchivedItem {
+    pub fn path(&self) -> &SyncPath {
+        &self.path
+    }
+
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+}
 
 pub(super) const ARCHIVE_ROOT: &[u8] = b".foldover/archive";
 const SECONDS_PER_DAY: u64 = 86_400;
@@ -87,7 +127,130 @@ fn days_from_civil(year: u64, month: u64, day: u64) -> Option<u64> {
     (era * DAYS_PER_ERA + day_of_era).checked_sub(EPOCH_DAY_OFFSET)
 }
 
+fn archive_root() -> SyncPath {
+    SyncPath::try_from(ARCHIVE_ROOT).expect("the archive path is valid")
+}
+
+/// The run's folder; only canonical run names, so nothing outside the
+/// archive can be addressed.
+fn run_folder(run: &str) -> Option<SyncPath> {
+    archive_time(run.as_bytes())?;
+    let mut bytes = ARCHIVE_ROOT.to_vec();
+    bytes.push(b'/');
+    bytes.extend_from_slice(run.as_bytes());
+    SyncPath::try_from(bytes).ok()
+}
+
+fn join(parent: &SyncPath, child: &[u8]) -> Result<SyncPath, ScanError> {
+    let mut bytes = parent.as_bytes().to_vec();
+    bytes.push(b'/');
+    bytes.extend_from_slice(child);
+    Ok(SyncPath::try_from(bytes)?)
+}
+
 impl LocalEndpoint {
+    /// Archived runs, newest first. Other folders in the archive are skipped.
+    pub fn archived_runs(&self) -> Result<Vec<ArchivedRun>, ScanError> {
+        let archive = archive_root();
+        let entries = match self.root.entries(DirectoryScope::At(&archive)) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => return Err(scan_error(&archive, source)),
+        };
+        let mut runs = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| scan_error(&archive, source))?;
+            let Some(started) = archive_time(entry.name()) else {
+                continue;
+            };
+            if let Ok(name) = String::from_utf8(entry.name().to_vec()) {
+                runs.push(ArchivedRun { name, started });
+            }
+        }
+        runs.sort_by_key(|run| std::cmp::Reverse(run.started));
+        Ok(runs)
+    }
+
+    /// Files and links `run` archived, in path order after `after`: at most
+    /// `limit`, and whether there are more.
+    pub fn archived_items(
+        &self,
+        run: &str,
+        after: Option<&SyncPath>,
+        limit: usize,
+    ) -> Result<(Vec<ArchivedItem>, bool), ScanError> {
+        let folder = run_folder(run).ok_or(ScanError::UnknownArchiveRun)?;
+        let mut items = Vec::new();
+        let mut pending: Vec<Option<SyncPath>> = vec![None];
+        while let Some(relative) = pending.pop() {
+            let directory = match &relative {
+                None => folder.clone(),
+                Some(relative) => join(&folder, relative.as_bytes())?,
+            };
+            let entries = self
+                .root
+                .entries(DirectoryScope::At(&directory))
+                .map_err(|source| scan_error(&directory, source))?;
+            for entry in entries {
+                let entry = entry.map_err(|source| scan_error(&directory, source))?;
+                let path = match &relative {
+                    None => SyncPath::try_from(entry.name())?,
+                    Some(relative) => join(relative, entry.name())?,
+                };
+                let listed = after.is_none_or(|after| &path > after);
+                match entry.metadata().kind() {
+                    NodeKind::Directory => pending.push(Some(path)),
+                    NodeKind::File | NodeKind::Symlink if listed => items.push(ArchivedItem {
+                        path,
+                        size: entry.metadata().size(),
+                    }),
+                    NodeKind::File | NodeKind::Symlink | NodeKind::Other => {}
+                }
+            }
+        }
+        items.sort_by(|left, right| left.path.cmp(&right.path));
+        let more = items.len() > limit;
+        items.truncate(limit);
+        Ok((items, more))
+    }
+
+    /// Put an archived item back at its original path, or beside it when
+    /// something is there: `docs/report.txt` becomes
+    /// `docs/report (restored).txt`. Nothing is replaced; the next sync
+    /// carries the item to the other folder. Returns where it went.
+    pub fn put_back(
+        &self,
+        run: &str,
+        path: &SyncPath,
+        durability: Durability,
+    ) -> Result<SyncPath, ApplyError> {
+        if path.components().any(protected) {
+            return Err(ApplyError::Unsupported(path.clone()));
+        }
+        let folder = run_folder(run).ok_or(ScanError::UnknownArchiveRun)?;
+        let archived = join(&folder, path.as_bytes())?;
+        for attempt in 0..PUT_BACK_ATTEMPTS {
+            let destination = match attempt {
+                0 => path.clone(),
+                attempt => restored_name(path, attempt)?,
+            };
+            match self.root.restore(&archived, &destination, durability) {
+                Ok(()) => return Ok(destination),
+                Err(WriteError::Exists) => continue,
+                Err(WriteError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(ApplyError::NotArchived(path.clone()));
+                }
+                Err(source) => {
+                    return Err(ApplyError::Write {
+                        path: destination,
+                        source,
+                    });
+                }
+            }
+        }
+        Err(ApplyError::Occupied(path.clone()))
+    }
+
     /// Permanently delete archived runs that started more than `retention`
     /// before `now`. Other folders in the archive are kept. Returns the
     /// number of runs removed.
@@ -120,6 +283,52 @@ impl LocalEndpoint {
                 })?;
         }
         Ok(expired.len() as u64)
+    }
+}
+
+/// `path` renamed for a put-back beside it: `a/report.txt` becomes
+/// `a/report (restored).txt` for attempt 1, `a/report (restored 2).txt`
+/// for attempt 2. Long names lose the end of their stem, never the extension.
+fn restored_name(path: &SyncPath, attempt: u32) -> Result<SyncPath, ApplyError> {
+    let name = path.file_name();
+    let split = match name.iter().rposition(|byte| *byte == b'.') {
+        Some(dot) if dot > 0 => dot,
+        _ => name.len(),
+    };
+    let (stem, extension) = name.split_at(split);
+    let suffix = match attempt {
+        1 => " (restored)".to_owned(),
+        attempt => format!(" (restored {attempt})"),
+    };
+    let room = NAME_MAX.saturating_sub(suffix.len() + extension.len());
+    let stem = &stem[..fitting(stem, room)];
+
+    let mut bytes = match path.parent() {
+        Some(parent) => [parent.as_bytes(), b"/"].concat(),
+        None => Vec::new(),
+    };
+    bytes.extend_from_slice(stem);
+    bytes.extend_from_slice(suffix.as_bytes());
+    bytes.extend_from_slice(extension);
+    Ok(SyncPath::try_from(bytes)?)
+}
+
+/// The length of `stem`'s longest prefix within `room` bytes that keeps a
+/// UTF-8 name valid, which APFS requires.
+fn fitting(stem: &[u8], room: usize) -> usize {
+    if stem.len() <= room {
+        return stem.len();
+    }
+    match std::str::from_utf8(stem) {
+        Ok(text) => text.floor_char_boundary(room),
+        Err(_) => room,
+    }
+}
+
+fn scan_error(path: &SyncPath, source: std::io::Error) -> ScanError {
+    ScanError::Io {
+        path: Some(path.clone()),
+        source,
     }
 }
 
@@ -193,5 +402,90 @@ mod tests {
         let empty = tempfile::tempdir().unwrap();
         let endpoint = LocalEndpoint::open(empty.path()).unwrap();
         assert_eq!(endpoint.prune_archive(retention, now).unwrap(), 0);
+    }
+
+    #[test]
+    fn runs_list_newest_first_and_items_go_back_where_they_were() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let older = archive_name(at(1_000));
+        let newer = archive_name(at(2_000));
+        fs::create_dir_all(root.join(".foldover/archive").join(&older).join("docs")).unwrap();
+        fs::create_dir_all(root.join(".foldover/archive").join(&newer)).unwrap();
+        fs::create_dir_all(root.join(".foldover/archive/not a run")).unwrap();
+        let run = root.join(".foldover/archive").join(&older);
+        fs::write(run.join("docs/b"), b"bb").unwrap();
+        fs::write(run.join("docs/a"), b"a").unwrap();
+        fs::write(run.join("top"), b"t").unwrap();
+        let endpoint = LocalEndpoint::open(root).unwrap();
+
+        let runs = endpoint.archived_runs().unwrap();
+        assert_eq!(
+            runs.iter().map(ArchivedRun::name).collect::<Vec<_>>(),
+            [&newer, &older]
+        );
+        let (items, more) = endpoint.archived_items(&older, None, 2).unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.path().as_bytes())
+                .collect::<Vec<_>>(),
+            [b"docs/a".as_slice(), b"docs/b"]
+        );
+        assert!(more);
+        assert_eq!(items[1].size(), 2);
+        let (rest, more) = endpoint
+            .archived_items(&older, Some(items[1].path()), 2)
+            .unwrap();
+        assert_eq!(rest.len(), 1);
+        assert!(!more);
+        assert!(matches!(
+            endpoint.archived_items("../etc", None, 10),
+            Err(ScanError::UnknownArchiveRun)
+        ));
+
+        let path = SyncPath::try_from(b"docs/a".as_slice()).unwrap();
+        let placed = endpoint
+            .put_back(&older, &path, Durability::Standard)
+            .unwrap();
+        assert_eq!(placed, path);
+        assert_eq!(fs::read(root.join("docs/a")).unwrap(), b"a");
+        assert!(matches!(
+            endpoint.put_back(&older, &path, Durability::Standard),
+            Err(ApplyError::NotArchived(_))
+        ));
+        fs::write(run.join("docs/a"), b"again").unwrap();
+        let placed = endpoint
+            .put_back(&older, &path, Durability::Standard)
+            .unwrap();
+        assert_eq!(placed.as_bytes(), b"docs/a (restored)");
+        assert_eq!(fs::read(root.join("docs/a")).unwrap(), b"a");
+        assert_eq!(fs::read(root.join("docs/a (restored)")).unwrap(), b"again");
+        let internal = SyncPath::try_from(b".foldover/id".as_slice()).unwrap();
+        assert!(
+            endpoint
+                .put_back(&older, &internal, Durability::Standard)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn restored_names_keep_extensions_and_fit_the_name_limit() {
+        let name = |path: &[u8], attempt| {
+            let path = SyncPath::try_from(path).unwrap();
+            restored_name(&path, attempt).unwrap().as_bytes().to_vec()
+        };
+        assert_eq!(name(b"a/report.txt", 1), b"a/report (restored).txt");
+        assert_eq!(name(b"report.tar.gz", 2), b"report.tar (restored 2).gz");
+        assert_eq!(name(b".profile", 1), b".profile (restored)");
+
+        let long = "é".repeat(200) + ".txt";
+        let restored = name(long.as_bytes(), 1);
+        assert!(restored.len() <= NAME_MAX);
+        assert!(
+            String::from_utf8(restored)
+                .unwrap()
+                .ends_with("é (restored).txt")
+        );
     }
 }

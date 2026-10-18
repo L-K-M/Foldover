@@ -143,11 +143,7 @@ pub async fn sync_resolve(
     keep: SyncSide,
 ) -> Result<SyncJobState, AgentError> {
     let id = id.parse().map_err(invalid_configuration)?;
-    let keep = match keep {
-        SyncSide::Left => foldover_client::Side::Left,
-        SyncSide::Right => foldover_client::Side::Right,
-    };
-    state(foldover_client::resolve_conflict(&SocketLocation::Default, id, &path, keep).await)
+    state(foldover_client::resolve_conflict(&SocketLocation::Default, id, &path, keep.into()).await)
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -257,6 +253,15 @@ impl From<SyncAction> for SyncChangeKind {
             },
             SyncAction::Blocked => Self::Blocked,
             SyncAction::Keep => Self::Keep,
+        }
+    }
+}
+
+impl From<SyncSide> for foldover_client::Side {
+    fn from(side: SyncSide) -> Self {
+        match side {
+            SyncSide::Left => Self::Left,
+            SyncSide::Right => Self::Right,
         }
     }
 }

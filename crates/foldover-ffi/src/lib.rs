@@ -8,6 +8,8 @@
 
 // Adapted from L-K-M/Sweetbriar.
 
+mod archive;
+pub use archive::*;
 mod sync;
 pub use sync::*;
 

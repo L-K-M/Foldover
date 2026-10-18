@@ -2,6 +2,7 @@
 //! `handle` request dispatch, validation and the event bus. Depends on
 //! foldover-engine. See PLAN.md §4.4.
 
+mod archive;
 mod schedule;
 mod sync;
 
@@ -9,13 +10,15 @@ use std::sync::{Arc, Mutex};
 
 use foldover_engine::{Approval, Engine, ErrorKind, StateLocation};
 use foldover_proto::local::{
+    ARCHIVE_ITEMS, ARCHIVE_PUT_BACK, ARCHIVE_RUNS, PAIR_REMOVE, PairRevision,
+};
+use foldover_proto::local::{
     AgentCapability, DAEMON_STATUS, DaemonStatus, Hello, INTERNAL_ERROR, INVALID_PARAMS,
     METHOD_NOT_FOUND, PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_NOT_FOUND, PAIR_PAGE_SIZE,
     PAIR_UPDATE, PROTOCOL_VERSION, PairInput, PairKey, PairList, PairPage, PairRecord, PairUpdate,
     ROOT_OVERLAP, ROOT_UNAVAILABLE, Request, RpcError, SESSION_HELLO, STALE_REVISION,
     VERSION_MISMATCH,
 };
-use foldover_proto::local::{PAIR_REMOVE, PairRevision};
 use foldover_proto::local::{
     SYNC_CANCEL, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS, SyncKey, SyncResolve, SyncRun,
 };
@@ -64,6 +67,12 @@ impl Service {
             SYNC_PREVIEW | SYNC_RUN | SYNC_STATUS | SYNC_CANCEL | SYNC_RESOLVE
         ) {
             return self.sync(&request);
+        }
+        if matches!(
+            request.method(),
+            ARCHIVE_RUNS | ARCHIVE_ITEMS | ARCHIVE_PUT_BACK
+        ) {
+            return archive::handle(&self.engine, &self.jobs, &request).await;
         }
         let command = Command::parse(&request)?;
         let permit = Arc::clone(&self.commands)
@@ -850,5 +859,68 @@ mod tests {
             created["configuration"]["options"]["filters"],
             json!(["*.tmp", "!keep.tmp"])
         );
+    }
+
+    #[tokio::test]
+    async fn archived_items_are_listed_and_put_back_on_their_side() {
+        let (directory, service) = fixture();
+        let created = service
+            .handle(Request::call(
+                1,
+                PAIR_CREATE,
+                Some(input(directory.path(), "Docs")),
+            ))
+            .await
+            .unwrap();
+        let left = directory.path().join("Docs-left");
+        let right = directory.path().join("Docs-right");
+        let key = json!({"id": created["id"]});
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        fs::write(left.join("file"), b"data").unwrap();
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run.clone())))
+            .await
+            .unwrap();
+        settled(&service, &key).await;
+        fs::remove_file(left.join("file")).unwrap();
+        service
+            .handle(Request::call(3, SYNC_RUN, Some(run.clone())))
+            .await
+            .unwrap();
+        assert_eq!(settled(&service, &key).await["result"]["archived"], 1);
+
+        let side = json!({"id": created["id"], "side": "right"});
+        let runs = service
+            .handle(Request::call(4, ARCHIVE_RUNS, Some(side)))
+            .await
+            .unwrap();
+        assert_eq!(runs["more"], false);
+        let name = runs["runs"][0]["name"].clone();
+        let query = json!({"id": created["id"], "side": "right", "run": name, "after": null});
+        let items = service
+            .handle(Request::call(5, ARCHIVE_ITEMS, Some(query)))
+            .await
+            .unwrap();
+        assert_eq!(items["items"], json!([{"path": b"file", "size": 4}]));
+
+        let put_back = json!({"id": created["id"], "side": "right", "run": name, "path": b"file"});
+        let placed = service
+            .handle(Request::call(6, ARCHIVE_PUT_BACK, Some(put_back.clone())))
+            .await
+            .unwrap();
+        assert_eq!(placed["path"], json!(b"file"));
+        assert_eq!(fs::read(right.join("file")).unwrap(), b"data");
+        let gone = service
+            .handle(Request::call(7, ARCHIVE_PUT_BACK, Some(put_back)))
+            .await
+            .unwrap_err();
+        assert_eq!(gone.code(), foldover_proto::local::ARCHIVE_NOT_FOUND);
+
+        service
+            .handle(Request::call(8, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        assert_eq!(settled(&service, &key).await["result"]["copied"], 1);
+        assert_eq!(fs::read(left.join("file")).unwrap(), b"data");
     }
 }

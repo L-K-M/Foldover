@@ -3,6 +3,7 @@
 //! the peer listener's request handler. Depends on foldover-endpoint,
 //! foldover-state and foldover-host. See PLAN.md §4.4.
 
+mod archive;
 mod configuration;
 mod gates;
 mod plan;
@@ -13,6 +14,7 @@ mod watch;
 #[cfg(test)]
 mod plan_properties;
 
+pub use archive::{ArchiveError, ArchiveErrorKind, ArchivedItem, ArchivedRun, PairArchive};
 pub use configuration::{Engine, Error, ErrorKind};
 pub use foldover_state::RecordedIdentities;
 pub use foldover_state::StateLocation;

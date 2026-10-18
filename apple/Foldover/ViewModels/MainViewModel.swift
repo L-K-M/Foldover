@@ -21,8 +21,11 @@ final class MainViewModel {
     private let agent: AgentStore
     private let pairStore: PairStore
     private let syncStore: SyncStore
+    private let archiveStore: ArchiveStore
     var selectedPairID: String?
     private(set) var editor: PairEditorViewModel?
+    /// The pair whose archive browser is open.
+    private(set) var archivePair: SyncPair?
     private(set) var removalTarget: SyncPair?
     private(set) var operationError: String?
 
@@ -30,11 +33,12 @@ final class MainViewModel {
     /// (an `App`, so main-actor isolated too) builds it in its `@State`
     /// initializer.
     init(appInfo: AppInfoStore, agent: AgentStore = AgentStore(), pairs: PairStore = PairStore(),
-         sync: SyncStore = SyncStore()) {
+         sync: SyncStore = SyncStore(), archive: ArchiveStore = ArchiveStore()) {
         self.appInfo = appInfo
         self.agent = agent
         pairStore = pairs
         syncStore = sync
+        archiveStore = archive
     }
 
     var title: String { "Foldover" }
@@ -120,6 +124,19 @@ final class MainViewModel {
         if case .connected = agent.connection { connected = true }
         return PairSyncViewModel(pair: pair, store: syncStore, agentConnected: connected)
     }
+
+    func archive(for pair: SyncPair) -> ArchiveViewModel {
+        var connected = false
+        if case .connected = agent.connection { connected = true }
+        return ArchiveViewModel(pair: pair, store: archiveStore, agentConnected: connected)
+    }
+
+    func openArchive() {
+        guard let selectedPair else { return }
+        archivePair = selectedPair
+    }
+
+    func dismissArchive() { archivePair = nil }
 
     var agentNeedsApproval: Bool {
         if case .approvalRequired = agent.connection { return true }

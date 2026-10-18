@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Archive browser: list each folder's archived syncs and put items back,
+  beside the current version when the original path is taken.
 - Free-space gate: a sync stops before writing when a folder's disk cannot
   hold the files copied to it plus a 256 MiB reserve.
 - Releases: pushing a version tag publishes the ad-hoc-signed app as a GitHub

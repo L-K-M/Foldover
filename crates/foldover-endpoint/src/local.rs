@@ -19,7 +19,7 @@ use foldover_types::{Digest, EntryVersion, InvalidSyncPath, MetadataPolicy, Sync
 use version::{Attribute, Observed, Payload, entry_version, metadata_version};
 
 pub use apply::{ApplyError, Expected, RunScope};
-pub use archive::archive_name;
+pub use archive::{ArchivedItem, ArchivedRun, archive_name};
 pub use filter::{Filter, InvalidFilter};
 
 const INTERNAL_DIRECTORY: &[u8] = b".foldover";
@@ -63,6 +63,8 @@ pub enum ScanError {
     InvalidIdentity,
     #[error("The folder's .foldoverignore file is not UTF-8 text")]
     InvalidIgnoreFile,
+    #[error("No archived run has that name")]
+    UnknownArchiveRun,
     #[error("Extended metadata is unavailable at {path:?}: {source}")]
     Metadata {
         path: Option<SyncPath>,

@@ -17,8 +17,9 @@ pub use watch::RootWatcher;
 
 #[cfg(unix)]
 pub use local::{
-    ApplyError, Expected, Filter, InvalidFilter, LocalEndpoint, LocalEntry, Observation,
-    ObservedEntry, RunScope, ScanControl, ScanError, ScanStats, archive_name,
+    ApplyError, ArchivedItem, ArchivedRun, Expected, Filter, InvalidFilter, LocalEndpoint,
+    LocalEntry, Observation, ObservedEntry, RunScope, ScanControl, ScanError, ScanStats,
+    archive_name,
 };
 
 #[cfg(unix)]

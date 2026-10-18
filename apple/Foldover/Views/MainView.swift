@@ -47,6 +47,7 @@ struct MainView: View {
                     Text(pair.settings.mode.title).font(.headline)
                     Text(pair.settings.mode.explanation).foregroundStyle(.secondary)
                     Button("Edit Pair") { viewModel.editPair() }.disabled(!viewModel.canConfigurePairs)
+                    Button("Browse Archive…") { viewModel.openArchive() }
                     Button("Remove Pair", role: .destructive) { viewModel.requestRemoval() }
                         .disabled(!viewModel.canConfigurePairs)
                     Divider()
@@ -68,6 +69,9 @@ struct MainView: View {
         }
         .sheet(item: Binding(get: { viewModel.editor }, set: { _ in viewModel.dismissEditor() })) { editor in
             PairEditorView(viewModel: editor)
+        }
+        .sheet(item: Binding(get: { viewModel.archivePair }, set: { _ in viewModel.dismissArchive() })) { pair in
+            ArchiveView(viewModel: viewModel.archive(for: pair))
         }
         .confirmationDialog("Remove Pair?", isPresented: Binding(
             get: { viewModel.removalTarget != nil }, set: { _ in viewModel.cancelRemoval() }

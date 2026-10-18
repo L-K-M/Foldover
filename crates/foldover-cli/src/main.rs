@@ -26,7 +26,14 @@ enum Request {
     Status(foldover_client::SocketLocation),
     Pairs(SocketLocation, PairCommand),
     Sync(SocketLocation, PairId, SyncCommand),
+    Archive(SocketLocation, PairId, Side, ArchiveCommand),
     Usage,
+}
+
+enum ArchiveCommand {
+    Runs,
+    Items(String),
+    PutBack { run: String, path: Vec<u8> },
 }
 
 enum SyncCommand {
@@ -121,9 +128,18 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Request::Archive(location, id, side, command) => {
+            match archive(&location, id, side, command).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("foldover: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT | --keep-left PATH | --keep-right PATH] [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT | --keep-left PATH | --keep-right PATH] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH]] [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -158,7 +174,36 @@ fn request(args: impl Iterator<Item = OsString>) -> Request {
                 _ => Request::Usage,
             }
         }
+        [command, id, side, rest @ ..] if command == "archive" => {
+            let side = match side.to_str() {
+                Some("left") => Some(Side::Left),
+                Some("right") => Some(Side::Right),
+                _ => None,
+            };
+            match (
+                id.to_str().and_then(|id| id.parse().ok()),
+                side,
+                archive_command(rest),
+            ) {
+                (Some(id), Some(side), Some(command)) => {
+                    Request::Archive(location, id, side, command)
+                }
+                _ => Request::Usage,
+            }
+        }
         _ => Request::Usage,
+    }
+}
+
+fn archive_command(args: &[OsString]) -> Option<ArchiveCommand> {
+    match args {
+        [] => Some(ArchiveCommand::Runs),
+        [run] => Some(ArchiveCommand::Items(run.to_str()?.to_owned())),
+        [run, flag, path] if flag == "--put-back" => Some(ArchiveCommand::PutBack {
+            run: run.to_str()?.to_owned(),
+            path: path.as_bytes().to_vec(),
+        }),
+        _ => None,
     }
 }
 
@@ -377,6 +422,47 @@ async fn sync(
     })
 }
 
+/// Print runs or every item as JSON lines, or put an item back and print
+/// where it went.
+async fn archive(
+    location: &SocketLocation,
+    id: PairId,
+    side: Side,
+    command: ArchiveCommand,
+) -> Result<(), foldover_client::Error> {
+    match command {
+        ArchiveCommand::Runs => {
+            let runs = foldover_client::archive_runs(location, id, side).await?;
+            for run in &runs.runs {
+                println!("{}", serde_json::to_string(run)?);
+            }
+            if runs.more {
+                eprintln!("foldover: older runs are not listed");
+            }
+        }
+        ArchiveCommand::Items(run) => {
+            let mut after = None;
+            loop {
+                let page =
+                    foldover_client::archive_items(location, id, side, &run, after.as_deref())
+                        .await?;
+                for item in &page.items {
+                    println!("{}", serde_json::to_string(item)?);
+                }
+                after = page.items.last().map(|item| item.path.clone());
+                if !page.more || after.is_none() {
+                    break;
+                }
+            }
+        }
+        ArchiveCommand::PutBack { run, path } => {
+            let placed = foldover_client::put_back(location, id, side, &run, &path).await?;
+            println!("{}", serde_json::json!({ "path": placed }));
+        }
+    }
+    Ok(())
+}
+
 fn print_pair(pair: &PairConfig) -> Result<(), foldover_client::Error> {
     // JSON lines preserve raw path bytes and escape terminal control characters.
     println!("{}", serde_json::to_string(&PairRecord::from(pair))?);
@@ -512,6 +598,31 @@ mod tests {
             vec!["sync", id, "--approve", "60"],
             vec!["sync", id, "--approve", "-1", "0"],
             vec!["sync", id, "--preview", "--cancel"],
+        ] {
+            assert!(matches!(req(&args), Request::Usage), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn archive_commands_select_runs_items_or_put_back() {
+        let id = "01010101010101010101010101010101";
+        assert!(matches!(
+            req(&["archive", id, "left"]),
+            Request::Archive(_, _, Side::Left, ArchiveCommand::Runs)
+        ));
+        assert!(matches!(
+            req(&["archive", id, "right", "2026-10-18T09-30-00.000Z"]),
+            Request::Archive(_, _, Side::Right, ArchiveCommand::Items(ref run)) if run == "2026-10-18T09-30-00.000Z"
+        ));
+        assert!(matches!(
+            req(&["archive", id, "left", "RUN", "--put-back", "docs/a"]),
+            Request::Archive(_, _, Side::Left, ArchiveCommand::PutBack { ref path, .. }) if path == b"docs/a"
+        ));
+        for args in [
+            vec!["archive", id],
+            vec!["archive", id, "a"],
+            vec!["archive", "bad", "left"],
+            vec!["archive", id, "left", "RUN", "--put-back"],
         ] {
             assert!(matches!(req(&args), Request::Usage), "{args:?}");
         }

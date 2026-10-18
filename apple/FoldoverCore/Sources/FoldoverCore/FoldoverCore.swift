@@ -637,6 +637,252 @@ public func FfiConverterTypeAgentHealth_lower(_ value: AgentHealth) -> RustBuffe
 }
 
 
+public struct ArchivedItemPage: Equatable, Hashable {
+    /**
+     * In path order.
+     */
+    public var items: [ArchivedItemRecord]
+    public var more: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * In path order.
+         */items: [ArchivedItemRecord], more: Bool) {
+        self.items = items
+        self.more = more
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ArchivedItemPage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeArchivedItemPage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ArchivedItemPage {
+        return
+            try ArchivedItemPage(
+                items: FfiConverterSequenceTypeArchivedItemRecord.read(from: &buf), 
+                more: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ArchivedItemPage, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeArchivedItemRecord.write(value.items, into: &buf)
+        FfiConverterBool.write(value.more, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeArchivedItemPage_lift(_ buf: RustBuffer) throws -> ArchivedItemPage {
+    return try FfiConverterTypeArchivedItemPage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeArchivedItemPage_lower(_ value: ArchivedItemPage) -> RustBuffer {
+    return FfiConverterTypeArchivedItemPage.lower(value)
+}
+
+
+public struct ArchivedItemRecord: Equatable, Hashable {
+    /**
+     * The original path in the synced folder.
+     */
+    public var path: Data
+    public var size: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The original path in the synced folder.
+         */path: Data, size: UInt64) {
+        self.path = path
+        self.size = size
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ArchivedItemRecord: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeArchivedItemRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ArchivedItemRecord {
+        return
+            try ArchivedItemRecord(
+                path: FfiConverterData.read(from: &buf), 
+                size: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ArchivedItemRecord, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.path, into: &buf)
+        FfiConverterUInt64.write(value.size, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeArchivedItemRecord_lift(_ buf: RustBuffer) throws -> ArchivedItemRecord {
+    return try FfiConverterTypeArchivedItemRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeArchivedItemRecord_lower(_ value: ArchivedItemRecord) -> RustBuffer {
+    return FfiConverterTypeArchivedItemRecord.lower(value)
+}
+
+
+public struct ArchivedRunList: Equatable, Hashable {
+    /**
+     * Newest first.
+     */
+    public var runs: [ArchivedRunRecord]
+    public var more: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Newest first.
+         */runs: [ArchivedRunRecord], more: Bool) {
+        self.runs = runs
+        self.more = more
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ArchivedRunList: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeArchivedRunList: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ArchivedRunList {
+        return
+            try ArchivedRunList(
+                runs: FfiConverterSequenceTypeArchivedRunRecord.read(from: &buf), 
+                more: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ArchivedRunList, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeArchivedRunRecord.write(value.runs, into: &buf)
+        FfiConverterBool.write(value.more, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeArchivedRunList_lift(_ buf: RustBuffer) throws -> ArchivedRunList {
+    return try FfiConverterTypeArchivedRunList.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeArchivedRunList_lower(_ value: ArchivedRunList) -> RustBuffer {
+    return FfiConverterTypeArchivedRunList.lower(value)
+}
+
+
+public struct ArchivedRunRecord: Equatable, Hashable {
+    /**
+     * The run's folder name, e.g. `2026-10-18T09-30-00.000Z`.
+     */
+    public var name: String
+    /**
+     * Milliseconds since the Unix epoch.
+     */
+    public var startedMs: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The run's folder name, e.g. `2026-10-18T09-30-00.000Z`.
+         */name: String, 
+        /**
+         * Milliseconds since the Unix epoch.
+         */startedMs: UInt64) {
+        self.name = name
+        self.startedMs = startedMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ArchivedRunRecord: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeArchivedRunRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ArchivedRunRecord {
+        return
+            try ArchivedRunRecord(
+                name: FfiConverterString.read(from: &buf), 
+                startedMs: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ArchivedRunRecord, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterUInt64.write(value.startedMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeArchivedRunRecord_lift(_ buf: RustBuffer) throws -> ArchivedRunRecord {
+    return try FfiConverterTypeArchivedRunRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeArchivedRunRecord_lower(_ value: ArchivedRunRecord) -> RustBuffer {
+    return FfiConverterTypeArchivedRunRecord.lower(value)
+}
+
+
 public struct LocalPairConfiguration: Equatable, Hashable {
     public var id: String
     public var revision: UInt64
@@ -2159,6 +2405,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
+    typealias SwiftType = Data?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterData.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterData.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -2176,6 +2446,56 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeArchivedItemRecord: FfiConverterRustBuffer {
+    typealias SwiftType = [ArchivedItemRecord]
+
+    public static func write(_ value: [ArchivedItemRecord], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeArchivedItemRecord.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ArchivedItemRecord] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ArchivedItemRecord]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeArchivedItemRecord.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeArchivedRunRecord: FfiConverterRustBuffer {
+    typealias SwiftType = [ArchivedRunRecord]
+
+    public static func write(_ value: [ArchivedRunRecord], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeArchivedRunRecord.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ArchivedRunRecord] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ArchivedRunRecord]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeArchivedRunRecord.read(from: &buf))
         }
         return seq
     }
@@ -2393,6 +2713,55 @@ public func pairUpdate(id: String, revision: UInt64, configuration: LocalPairDra
             errorHandler: FfiConverterTypeAgentError_lift
         )
 }
+/**
+ * A page of a run's items after `after`, the last path of the previous page.
+ */
+public func archiveItems(id: String, side: SyncSide, run: String, after: Data?)async throws  -> ArchivedItemPage  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_archive_items(FfiConverterString.lower(id),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run),FfiConverterOptionData.lower(after)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeArchivedItemPage_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+/**
+ * Put an item back; returns its path, which gains ` (restored)` when the
+ * original path is taken.
+ */
+public func archivePutBack(id: String, side: SyncSide, run: String, path: Data)async throws  -> Data  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_archive_put_back(FfiConverterString.lower(id),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run),FfiConverterData.lower(path)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterData.lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+public func archiveRuns(id: String, side: SyncSide)async throws  -> ArchivedRunList  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_archive_runs(FfiConverterString.lower(id),FfiConverterTypeSyncSide_lower(side)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeArchivedRunList_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
 public func syncCancel(id: String)async throws  -> SyncJobState  {
     return
         try  await uniffiRustCallAsync(
@@ -2501,6 +2870,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_pair_update() != 2038) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_archive_items() != 55648) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_archive_put_back() != 6455) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_archive_runs() != 43046) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_sync_cancel() != 20891) {

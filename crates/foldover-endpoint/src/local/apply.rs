@@ -81,6 +81,10 @@ pub enum ApplyError {
     ContentNotStored(SyncPath),
     #[error("Folder gained entries since the preview: {0:?}")]
     NotEmpty(SyncPath),
+    #[error("No free name was found to put {0:?} back beside")]
+    Occupied(SyncPath),
+    #[error("The archive no longer holds {0:?}")]
+    NotArchived(SyncPath),
     #[error("Operation does not apply to this entry kind: {0:?}")]
     Unsupported(SyncPath),
     #[error(transparent)]

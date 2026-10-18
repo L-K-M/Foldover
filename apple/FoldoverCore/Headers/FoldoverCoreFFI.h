@@ -281,6 +281,21 @@ uint64_t uniffi_foldover_ffi_fn_func_pair_remove(RustBuffer id, uint64_t revisio
 uint64_t uniffi_foldover_ffi_fn_func_pair_update(RustBuffer id, uint64_t revision, RustBuffer configuration
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_ARCHIVE_ITEMS
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_ARCHIVE_ITEMS
+uint64_t uniffi_foldover_ffi_fn_func_archive_items(RustBuffer id, RustBuffer side, RustBuffer run, RustBuffer after
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_ARCHIVE_PUT_BACK
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_ARCHIVE_PUT_BACK
+uint64_t uniffi_foldover_ffi_fn_func_archive_put_back(RustBuffer id, RustBuffer side, RustBuffer run, RustBuffer path
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_ARCHIVE_RUNS
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_ARCHIVE_RUNS
+uint64_t uniffi_foldover_ffi_fn_func_archive_runs(RustBuffer id, RustBuffer side
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_CANCEL
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_CANCEL
 uint64_t uniffi_foldover_ffi_fn_func_sync_cancel(RustBuffer id
@@ -605,6 +620,24 @@ uint16_t uniffi_foldover_ffi_checksum_func_pair_remove(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_PAIR_UPDATE
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_PAIR_UPDATE
 uint16_t uniffi_foldover_ffi_checksum_func_pair_update(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_ARCHIVE_ITEMS
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_ARCHIVE_ITEMS
+uint16_t uniffi_foldover_ffi_checksum_func_archive_items(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_ARCHIVE_PUT_BACK
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_ARCHIVE_PUT_BACK
+uint16_t uniffi_foldover_ffi_checksum_func_archive_put_back(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_ARCHIVE_RUNS
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_ARCHIVE_RUNS
+uint16_t uniffi_foldover_ffi_checksum_func_archive_runs(void
     
 );
 #endif

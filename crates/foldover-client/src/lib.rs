@@ -4,9 +4,14 @@
 //! foldover-ipc. See PLAN.md §4.4.
 
 pub use foldover_ipc::{Error, SocketLocation};
+use foldover_proto::local::{
+    ARCHIVE_ITEMS, ARCHIVE_PUT_BACK, ARCHIVE_RUNS, ArchiveItemQuery, ArchiveKey, ArchivePlaced,
+    ArchivePutBack,
+};
 pub use foldover_proto::local::{
-    AgentCapability, DaemonStatus, PairSide, SyncAction, SyncConflict, SyncCounts, SyncDeletions,
-    SyncFailure, SyncItem, SyncJob, SyncPreview, SyncResult, SyncStatus,
+    AgentCapability, ArchiveItem, ArchiveItems, ArchiveRun, ArchiveRuns, DaemonStatus, PairSide,
+    SyncAction, SyncConflict, SyncCounts, SyncDeletions, SyncFailure, SyncItem, SyncJob,
+    SyncPreview, SyncResult, SyncStatus,
 };
 use foldover_proto::local::{DAEMON_STATUS, Hello, PROTOCOL_VERSION, Request, SESSION_HELLO};
 use foldover_proto::local::{
@@ -81,6 +86,66 @@ pub async fn resolve_conflict(
 
 pub async fn cancel_sync(location: &SocketLocation, id: PairId) -> Result<SyncStatus, Error> {
     sync_call(location, SYNC_CANCEL, id).await
+}
+
+/// One side's archived runs, newest first.
+pub async fn archive_runs(
+    location: &SocketLocation,
+    id: PairId,
+    side: Side,
+) -> Result<ArchiveRuns, Error> {
+    let params = ArchiveKey {
+        id: id.to_string(),
+        side: side.into(),
+    };
+    Ok(serde_json::from_value(
+        call(location, ARCHIVE_RUNS, Some(serde_json::to_value(params)?)).await?,
+    )?)
+}
+
+/// A page of one archived run's items, in path order after `after`.
+pub async fn archive_items(
+    location: &SocketLocation,
+    id: PairId,
+    side: Side,
+    run: &str,
+    after: Option<&[u8]>,
+) -> Result<ArchiveItems, Error> {
+    let params = ArchiveItemQuery {
+        id: id.to_string(),
+        side: side.into(),
+        run: run.to_owned(),
+        after: after.map(<[u8]>::to_vec),
+    };
+    Ok(serde_json::from_value(
+        call(location, ARCHIVE_ITEMS, Some(serde_json::to_value(params)?)).await?,
+    )?)
+}
+
+/// Put an archived item back and return the path it went to: the original
+/// one, or a `(restored)` name beside it when that was taken.
+pub async fn put_back(
+    location: &SocketLocation,
+    id: PairId,
+    side: Side,
+    run: &str,
+    path: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let params = ArchivePutBack {
+        id: id.to_string(),
+        side: side.into(),
+        run: run.to_owned(),
+        path: path.to_vec(),
+    };
+    let placed: ArchivePlaced = serde_json::from_value(
+        call(
+            location,
+            ARCHIVE_PUT_BACK,
+            Some(serde_json::to_value(params)?),
+        )
+        .await?,
+    )?;
+    Ok(placed.path)
 }
 
 async fn sync_call(

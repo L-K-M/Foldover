@@ -1,6 +1,13 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+mod archive;
+pub use archive::{
+    ARCHIVE_ITEM_LIMIT, ARCHIVE_ITEMS, ARCHIVE_PUT_BACK, ARCHIVE_RUN_LIMIT, ARCHIVE_RUNS,
+    ArchiveItem, ArchiveItemQuery, ArchiveItems, ArchiveKey, ArchivePlaced, ArchivePutBack,
+    ArchiveRun, ArchiveRuns,
+};
+
 mod sync;
 pub use sync::{
     SYNC_CANCEL, SYNC_ITEM_LIMIT, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS, SyncAction,
@@ -33,6 +40,8 @@ pub const ROOT_OVERLAP: i32 = -32006;
 pub const SYNC_BUSY: i32 = -32007;
 /// A conflict choice needs a current preview that contains the conflict.
 pub const PREVIEW_REQUIRED: i32 = -32008;
+/// The archived run or item does not exist, e.g. it was put back already.
+pub const ARCHIVE_NOT_FOUND: i32 = -32009;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Hello {

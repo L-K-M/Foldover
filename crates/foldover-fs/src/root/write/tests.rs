@@ -549,3 +549,27 @@ fn trees_are_removed_without_following_links() {
     assert!(names(target).is_empty());
     assert!(roots.target.remove_tree(&path(b"missing")).is_err());
 }
+
+#[test]
+fn archived_entries_are_restored_without_replacing_anything() {
+    let roots = roots();
+    let target = roots.target_directory.path();
+    fs::create_dir_all(target.join(".foldover/archive/run/docs")).unwrap();
+    fs::write(target.join(".foldover/archive/run/docs/note"), b"old").unwrap();
+    let archived = path(b".foldover/archive/run/docs/note");
+    let restored = path(b"docs/note");
+
+    roots
+        .target
+        .restore(&archived, &restored, STANDARD)
+        .unwrap();
+    assert_eq!(fs::read(target.join("docs/note")).unwrap(), b"old");
+    assert_ne!(mode_of(&target.join("docs")), 0o700);
+
+    fs::write(target.join(".foldover/archive/run/docs/note"), b"older").unwrap();
+    assert!(matches!(
+        roots.target.restore(&archived, &restored, STANDARD),
+        Err(WriteError::Exists)
+    ));
+    assert_eq!(fs::read(target.join("docs/note")).unwrap(), b"old");
+}

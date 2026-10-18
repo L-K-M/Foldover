@@ -368,7 +368,7 @@ impl Root {
         destination: &SyncPath,
         durability: Durability,
     ) -> Result<(), WriteError> {
-        let (archive, archive_name) = self.create_parents(destination)?;
+        let (archive, archive_name) = self.create_parents(destination, Parents::Private)?;
         match rustix::fs::renameat_with(
             parent,
             name,
@@ -393,6 +393,32 @@ impl Root {
         Ok(())
     }
 
+    /// Move an archived entry back to `destination`, creating missing
+    /// folders. Nothing at the destination is ever replaced.
+    pub fn restore(
+        &self,
+        archived: &SyncPath,
+        destination: &SyncPath,
+        durability: Durability,
+    ) -> Result<(), WriteError> {
+        let (parent, name) = self.parent_of(archived)?;
+        let (target, target_name) = self.create_parents(destination, Parents::Default)?;
+        match rustix::fs::renameat_with(
+            &parent,
+            &name,
+            &target,
+            &target_name,
+            RenameFlags::NOREPLACE,
+        ) {
+            Ok(()) => {}
+            Err(Errno::EXIST) => return Err(WriteError::Exists),
+            Err(error) => return Err(error.into()),
+        }
+        sync_directory(&target, durability)?;
+        sync_directory(&parent, durability)?;
+        Ok(())
+    }
+
     /// Write a small private file that must not exist yet, creating private
     /// parents. The content appears complete or not at all.
     pub fn create_private_file(
@@ -401,7 +427,7 @@ impl Root {
         content: &[u8],
         durability: Durability,
     ) -> Result<(), WriteError> {
-        let (parent, name) = self.create_parents(path)?;
+        let (parent, name) = self.create_parents(path, Parents::Private)?;
         let (mut staged, mut file) = create_temporary_file(parent, PRIVATE_FILE_MODE)?;
         file.write_all(content)?;
         flush(&file, durability)?;
@@ -452,9 +478,13 @@ impl Root {
         Ok(Some(content))
     }
 
-    /// Open `path`'s parent, creating missing private directories without
+    /// Open `path`'s parent, creating missing directories without
     /// following links.
-    fn create_parents(&self, path: &SyncPath) -> io::Result<(Dir, PathBuf)> {
+    fn create_parents(&self, path: &SyncPath, parents: Parents) -> io::Result<(Dir, PathBuf)> {
+        let mode = match parents {
+            Parents::Private => PRIVATE_DIRECTORY_MODE,
+            Parents::Default => DEFAULT_DIRECTORY_MODE,
+        };
         let mut directory = self.directory.try_clone()?;
         let mut components: Vec<&[u8]> = path.components().collect();
         let name = PathBuf::from(OsStr::from_bytes(
@@ -462,7 +492,7 @@ impl Root {
         ));
         for component in components {
             let component = Path::new(OsStr::from_bytes(component));
-            match rustix::fs::mkdirat(&directory, component, PRIVATE_DIRECTORY_MODE) {
+            match rustix::fs::mkdirat(&directory, component, mode) {
                 Ok(()) | Err(Errno::EXIST) => {}
                 Err(error) => return Err(error.into()),
             }
@@ -470,6 +500,15 @@ impl Root {
         }
         Ok((directory, name))
     }
+}
+
+/// Who may read folders a write creates on the way to its destination.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Parents {
+    /// Foldover's own folders, such as the archive.
+    Private,
+    /// Folders in the user's tree; the umask applies.
+    Default,
 }
 
 /// Deeper trees fail rather than holding one descriptor per level.
