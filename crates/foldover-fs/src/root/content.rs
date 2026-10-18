@@ -4,6 +4,8 @@ use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{OpenOptions, OpenOptionsExt};
 use foldover_types::{Digest, ScanControl, SyncPath};
 
+use crate::prevent_materialization;
+
 use super::{DataResidency, EntryMetadata, NodeKind, Root};
 
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
@@ -24,8 +26,8 @@ pub enum HashError {
 
 impl Root {
     /// Hash a regular file's data fork with bounded memory and work limited to
-    /// its observed size. Residency/volume policy must precede caller exposure;
-    /// this primitive alone does not prevent File Provider materialization.
+    /// its observed size. macOS reads enforce non-materialization on the calling
+    /// thread; provider, metadata and volume gates still precede API exposure.
     pub fn hash_file(
         &self,
         path: &SyncPath,
@@ -63,6 +65,7 @@ impl Root {
         let mut total = 0;
         while total < before.size() {
             check_control(control, total)?;
+            prevent_materialization()?;
             let remaining = usize::try_from(before.size() - total).unwrap_or(usize::MAX);
             let requested = remaining.min(buffer.len());
             let count = match file.read(&mut buffer[..requested]) {
@@ -75,6 +78,7 @@ impl Root {
             total += count as u64;
         }
         check_control(control, total)?;
+        prevent_materialization()?;
         let mut extra = [0];
         if file.read(&mut extra)? != 0
             || EntryMetadata::from_file(&file)? != before

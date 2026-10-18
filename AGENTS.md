@@ -80,8 +80,11 @@ tests, builds the XCFramework, and runs `xcodebuild build test`.
 - **Owner decisions:** PLAN.md §10 records the scope: free and open-source,
   no sponsorships, macOS 27 on Apple silicon, endpoint-local archives,
   peers gated at P5, and ad-hoc signing without notarization.
-- **No unsafe** outside `foldover-ffi`, whose UniFFI scaffolding needs it
-  (it contains no hand-written `unsafe`).
+- **Unsafe:** only small, audited macOS driver-binding modules may contain
+  hand-written `unsafe`, behind safe interfaces with `SAFETY` comments and native
+  tests (owner decision, 2026-10-17). Other layers keep the workspace prohibition.
+  `foldover-ffi` separately permits generated UniFFI scaffolding; it contains no
+  hand-written `unsafe`.
 
 ## Generated files
 
