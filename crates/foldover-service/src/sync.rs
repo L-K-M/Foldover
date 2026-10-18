@@ -204,6 +204,14 @@ fn perform(
         Err(RunError::Cancelled) => return (SyncStatus::Idle, None),
         Err(error) => return failed(error.to_string()),
     };
+    // A cache: a failed store only means the next run rereads more data.
+    for side in [Side::Left, Side::Right] {
+        let snapshot = run.snapshot(side);
+        let _ = engine
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .store_snapshot(id, run.revision(), side, &snapshot);
+    }
     let (approval, context) = match work {
         Work::Preview => {
             let planned = run.preview();

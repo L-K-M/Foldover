@@ -11,8 +11,9 @@ and durability; existing pairs get the defaults. Version 4 adds each side's
 endpoint identity, recorded on the first sync and forgotten when that side's
 root changes ([ADR 0020](0020-run-execution.md)). Version 5 adds the
 schedule ([ADR 0022](0022-scheduled-runs.md)). Version 6 adds conflict
-choices ([ADR 0023](0023-conflict-resolution.md)). Snapshots and secrets
-are not stored yet.
+choices ([ADR 0023](0023-conflict-resolution.md)). Version 7 adds each
+side's last observation ([ADR 0018](0018-local-entry-versions.md)), a cache
+discarded with the base. Secrets are not stored yet.
 Configuration does not establish endpoint identity, overlap safety,
 permissions or readiness to sync.
 

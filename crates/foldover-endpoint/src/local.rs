@@ -6,7 +6,7 @@ mod version;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use foldover_fs::{
     DataResidency, DirectoryEntry, DirectoryScope, EntryMetadata, ExtendedMetadata, FileIdentity,
@@ -122,17 +122,51 @@ const RACY_WINDOW: Duration = Duration::from_secs(3);
 /// the version unchanged without rereading data, outside the racy window.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Fingerprint {
-    metadata: EntryMetadata,
+    key: Vec<u8>,
     observed_at: SystemTime,
 }
 
+/// Persisted form: seconds and nanoseconds of `observed_at`, then the key.
+const FINGERPRINT_TIME_BYTES: usize = 8 + 4;
+
 impl Fingerprint {
+    fn new(metadata: &EntryMetadata, observed_at: SystemTime) -> Self {
+        Self {
+            key: metadata.stat_key(),
+            observed_at,
+        }
+    }
+
     fn proves_unchanged(&self, current: &EntryMetadata) -> bool {
+        // Equal keys include equal mtimes, so `current` supplies it.
         let settled = self
             .observed_at
-            .duration_since(self.metadata.modified())
+            .duration_since(current.modified())
             .is_ok_and(|age| age >= RACY_WINDOW);
-        settled && *current == self.metadata
+        settled && current.stat_key() == self.key
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        let since = self
+            .observed_at
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let mut bytes = Vec::with_capacity(FINGERPRINT_TIME_BYTES + self.key.len());
+        bytes.extend_from_slice(&since.as_secs().to_le_bytes());
+        bytes.extend_from_slice(&since.subsec_nanos().to_le_bytes());
+        bytes.extend_from_slice(&self.key);
+        bytes
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let seconds = u64::from_le_bytes(bytes.get(..8)?.try_into().ok()?);
+        let nanoseconds =
+            u32::from_le_bytes(bytes.get(8..FINGERPRINT_TIME_BYTES)?.try_into().ok()?);
+        let observed_at = UNIX_EPOCH.checked_add(Duration::new(seconds, nanoseconds))?;
+        Some(Self {
+            key: bytes.get(FINGERPRINT_TIME_BYTES..)?.to_vec(),
+            observed_at,
+        })
     }
 }
 
@@ -145,6 +179,19 @@ pub struct ObservedEntry {
 impl ObservedEntry {
     pub fn version(&self) -> EntryVersion {
         self.version
+    }
+
+    /// Opaque bytes for a snapshot store.
+    pub fn fingerprint_bytes(&self) -> Vec<u8> {
+        self.fingerprint.to_bytes()
+    }
+
+    /// Rebuild a stored entry; `None` if the bytes are not a fingerprint.
+    pub fn restore(version: EntryVersion, fingerprint: &[u8]) -> Option<Self> {
+        Some(Self {
+            version,
+            fingerprint: Fingerprint::from_bytes(fingerprint)?,
+        })
     }
 }
 
@@ -387,6 +434,18 @@ impl LocalEndpoint {
         policy: MetadataPolicy,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<Observation, ScanError> {
+        self.observe_from(policy, &BTreeMap::new(), control)
+    }
+
+    /// `observe`, reusing a previous observation's version for every entry
+    /// whose stat is unchanged and settled, so unchanged data is not reread.
+    /// `previous` must come from the same root under the same policy.
+    pub fn observe_from(
+        &self,
+        policy: MetadataPolicy,
+        previous: &BTreeMap<SyncPath, ObservedEntry>,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<Observation, ScanError> {
         let mut entries = Vec::new();
         let stats = self.scan_metadata(&mut |entry| {
             entries.push(entry);
@@ -401,16 +460,19 @@ impl LocalEndpoint {
             if control() == ScanControl::Cancel {
                 return Err(ScanError::Cancelled);
             }
+            if let Some(known) = previous.get(&entry.path)
+                && known.fingerprint.proves_unchanged(&entry.metadata)
+            {
+                observation.entries.insert(entry.path, known.clone());
+                continue;
+            }
             let observed_at = SystemTime::now();
             let version = self.entry_version(&entry, policy, control)?;
             observation.entries.insert(
                 entry.path,
                 ObservedEntry {
                     version,
-                    fingerprint: Fingerprint {
-                        metadata: entry.metadata,
-                        observed_at,
-                    },
+                    fingerprint: Fingerprint::new(&entry.metadata, observed_at),
                 },
             );
         }
@@ -1035,5 +1097,78 @@ mod tests {
         set("com.apple.metadata:_kMDItemUserTags", b"tags");
         let tagged = observe();
         assert_ne!(tagged.metadata(), plain.metadata());
+    }
+
+    #[test]
+    fn previous_observations_skip_settled_unchanged_entries_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let past = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        for (name, content) in [("settled", b"one".as_slice()), ("edited", b"two")] {
+            fs::write(root.join(name), content).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(root.join(name))
+                .unwrap()
+                .set_modified(past)
+                .unwrap();
+        }
+        fs::write(root.join("recent"), b"three").unwrap();
+        let endpoint = LocalEndpoint::open(root).unwrap();
+        let first = endpoint
+            .observe(ALL, &mut || ScanControl::Continue)
+            .unwrap();
+
+        // Persisted fingerprints restore exactly.
+        let restored: BTreeMap<_, _> = first
+            .entries()
+            .iter()
+            .map(|(path, entry)| {
+                let bytes = entry.fingerprint_bytes();
+                (
+                    path.clone(),
+                    ObservedEntry::restore(entry.version(), &bytes).unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(&restored, first.entries());
+        assert!(
+            ObservedEntry::restore(
+                first.versions()[&SyncPath::try_from(b"settled".as_slice()).unwrap()],
+                b"short"
+            )
+            .is_none()
+        );
+
+        // A stale previous version shows whether it was reused.
+        let stale = EntryVersion::new(
+            foldover_types::EntryContent::File(Digest::from_bytes([9; Digest::BYTE_LEN])),
+            Digest::from_bytes([9; Digest::BYTE_LEN]),
+        );
+        let previous: BTreeMap<_, _> = restored
+            .iter()
+            .map(|(path, entry)| {
+                (
+                    path.clone(),
+                    ObservedEntry::restore(stale, &entry.fingerprint_bytes()).unwrap(),
+                )
+            })
+            .collect();
+        fs::write(root.join("edited"), b"TWO").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(root.join("edited"))
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+        let second = endpoint
+            .observe_from(ALL, &previous, &mut || ScanControl::Continue)
+            .unwrap()
+            .versions();
+        let path = |name: &[u8]| SyncPath::try_from(name).unwrap();
+        assert_eq!(second[&path(b"settled")], stale);
+        assert_ne!(second[&path(b"edited")], stale);
+        // Modified moments before its observation: never trusted.
+        assert_ne!(second[&path(b"recent")], stale);
     }
 }

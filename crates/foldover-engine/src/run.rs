@@ -19,7 +19,7 @@ use foldover_endpoint::{
     ApplyError, Expected, LocalEndpoint, LocalPair, Observation, ObservedEntry, PairRootError,
     RunScope, ScanError,
 };
-use foldover_state::{BaseUpdate, RecordedIdentities};
+use foldover_state::{BaseUpdate, RecordedIdentities, SnapshotEntry};
 use foldover_types::{
     BaselineEntry, ChangeKind, ConflictKind, EndpointId, EntryDecision, EntryVersion, PairConfig,
     Resolution, ScanControl, Side, SyncPath,
@@ -248,6 +248,8 @@ pub struct RunInputs {
     base: BTreeMap<SyncPath, BaselineEntry>,
     identities: RecordedIdentities,
     resolutions: BTreeMap<SyncPath, Resolution>,
+    left_snapshot: BTreeMap<SyncPath, ObservedEntry>,
+    right_snapshot: BTreeMap<SyncPath, ObservedEntry>,
 }
 
 impl RunInputs {
@@ -262,6 +264,22 @@ impl RunInputs {
             base,
             identities,
             resolutions,
+            left_snapshot: BTreeMap::new(),
+            right_snapshot: BTreeMap::new(),
+        }
+    }
+
+    /// Previous observations, whose versions are reused for entries with an
+    /// unchanged stat. They must come from the same roots and policy.
+    pub fn with_snapshots(
+        self,
+        left: BTreeMap<SyncPath, ObservedEntry>,
+        right: BTreeMap<SyncPath, ObservedEntry>,
+    ) -> Self {
+        Self {
+            left_snapshot: left,
+            right_snapshot: right,
+            ..self
         }
     }
 }
@@ -288,6 +306,8 @@ impl PairRun {
             base,
             identities,
             resolutions,
+            left_snapshot,
+            right_snapshot,
         } = inputs;
         let draft = pair.draft();
         let endpoints = LocalPair::open(draft.left(), draft.right())?;
@@ -305,9 +325,13 @@ impl PairRun {
         }
         let policy = draft.options().metadata();
         let observe = |side: Side, control: &mut dyn FnMut() -> ScanControl| {
+            let previous = match side {
+                Side::Left => &left_snapshot,
+                Side::Right => &right_snapshot,
+            };
             endpoints
                 .endpoint(side)
-                .observe(policy, &mut || control())
+                .observe_from(policy, previous, &mut || control())
                 .map_err(|source| match source {
                     ScanError::Cancelled => RunError::Cancelled,
                     source => RunError::Observe { side, source },
@@ -335,6 +359,23 @@ impl PairRun {
             right,
             plan,
         })
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.pair.revision()
+    }
+
+    /// This run's observation of one side, for the next run to reuse.
+    pub fn snapshot(&self, side: Side) -> Vec<SnapshotEntry> {
+        self.observation(side)
+            .entries()
+            .iter()
+            .map(|(path, entry)| SnapshotEntry {
+                path: path.clone(),
+                fingerprint: entry.fingerprint_bytes(),
+                version: entry.version(),
+            })
+            .collect()
     }
 
     pub fn preview(&self) -> Preview {

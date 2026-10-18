@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Faster repeat syncs: files whose complete stat is unchanged since the last
+  observation are not reread.
 - Conflict resolution: keep A or keep B for a previewed file conflict; the
   other version is archived, and choices expire if either side changes again.
 - Automatic sync on an interval, set per pair in the app or with

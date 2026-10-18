@@ -17,8 +17,8 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule_minutes";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 6] = [
-    SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6,
+const MIGRATIONS: [&str; 7] = [
+    SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -73,6 +73,17 @@ CREATE TABLE resolution (
     PRIMARY KEY (pair_id, path)
 ) STRICT, WITHOUT ROWID;
 ";
+// Each side's last observation, to skip rereading unchanged entries.
+const SCHEMA_V7: &str = "
+CREATE TABLE snapshot_entry (
+    pair_id BLOB NOT NULL REFERENCES pair(id) ON DELETE CASCADE,
+    side TEXT NOT NULL CHECK(side IN ('left','right')),
+    path BLOB NOT NULL CHECK(length(path) > 0 AND substr(path,1,1) != x'2f' AND instr(path,x'00') = 0),
+    fingerprint BLOB NOT NULL,
+    version BLOB NOT NULL,
+    PRIMARY KEY (pair_id, side, path)
+) STRICT, WITHOUT ROWID;
+";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -112,6 +123,14 @@ pub struct ResolutionRow {
     pub keep: String,
     pub left_version: Option<Vec<u8>>,
     pub right_version: Option<Vec<u8>>,
+}
+
+/// One side's stored observation of a path. Bytes are opaque to this driver.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SnapshotRow {
+    pub path: Vec<u8>,
+    pub fingerprint: Vec<u8>,
+    pub version: Vec<u8>,
 }
 
 /// One stored base row. Version bytes are opaque to this driver.
@@ -334,7 +353,7 @@ impl Database {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         // A base and conflict choices hold versions of these roots under
         // these metadata categories; changing either invalidates them.
-        for table in ["base_entry", "resolution"] {
+        for table in ["base_entry", "resolution", "snapshot_entry"] {
             transaction.execute(
                 &format!("DELETE FROM {table} WHERE pair_id=?1 AND EXISTS (SELECT 1 FROM pair WHERE id=?1 AND revision=?2 AND (left_root!=?3 OR right_root!=?4 OR modification_times!=?5 OR extended_attributes!=?6 OR permissions!=?7))"),
                 params![
@@ -411,6 +430,58 @@ impl Database {
         )? == 0
         {
             return Err(revision_error(&transaction, pair)?);
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// One side's stored observation, ordered by path.
+    pub fn snapshot(&self, pair: &[u8], side: &str) -> Result<Vec<SnapshotRow>, Error> {
+        let mut statement = self.connection.prepare(
+            "SELECT path,fingerprint,version FROM snapshot_entry WHERE pair_id=?1 AND side=?2 ORDER BY path",
+        )?;
+        let rows = statement.query_map(params![pair, side], |row| {
+            Ok(SnapshotRow {
+                path: row.get(0)?,
+                fingerprint: row.get(1)?,
+                version: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Replace one side's observation, only while the pair keeps `revision`.
+    pub fn replace_snapshot(
+        &mut self,
+        pair: &[u8],
+        revision: i64,
+        side: &str,
+        rows: &[SnapshotRow],
+    ) -> Result<(), Error> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<i64> = transaction
+            .query_row("SELECT revision FROM pair WHERE id=?1", [pair], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        match current {
+            None => return Err(Error::PairNotFound),
+            Some(current) if current != revision => return Err(Error::StaleRevision),
+            Some(_) => {}
+        }
+        transaction.execute(
+            "DELETE FROM snapshot_entry WHERE pair_id=?1 AND side=?2",
+            params![pair, side],
+        )?;
+        {
+            let mut insert = transaction.prepare(
+                "INSERT INTO snapshot_entry (pair_id,side,path,fingerprint,version) VALUES (?1,?2,?3,?4,?5)",
+            )?;
+            for row in rows {
+                insert.execute(params![pair, side, row.path, row.fingerprint, row.version])?;
+            }
         }
         transaction.commit()?;
         Ok(())
@@ -1187,5 +1258,47 @@ mod tests {
         moved.left_root = b"/moved".to_vec();
         database.update_pair(&pair.id, 1, &moved).unwrap();
         assert!(database.resolutions(&pair.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn snapshots_replace_whole_sides_and_follow_the_base_rules() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        let row = |path: &[u8]| SnapshotRow {
+            path: path.to_vec(),
+            fingerprint: b"f".to_vec(),
+            version: b"v".to_vec(),
+        };
+        database
+            .replace_snapshot(&pair.id, 1, "left", &[row(b"a"), row(b"b")])
+            .unwrap();
+        database
+            .replace_snapshot(&pair.id, 1, "right", &[row(b"c")])
+            .unwrap();
+        database
+            .replace_snapshot(&pair.id, 1, "left", &[row(b"b")])
+            .unwrap();
+        assert_eq!(database.snapshot(&pair.id, "left").unwrap(), [row(b"b")]);
+        assert_eq!(database.snapshot(&pair.id, "right").unwrap(), [row(b"c")]);
+        assert!(
+            database
+                .replace_snapshot(&pair.id, 1, "middle", &[row(b"d")])
+                .is_err()
+        );
+        assert!(matches!(
+            database.replace_snapshot(&pair.id, 2, "left", &[]),
+            Err(Error::StaleRevision)
+        ));
+
+        let mut renamed = values();
+        renamed.name = "renamed".into();
+        database.update_pair(&pair.id, 1, &renamed).unwrap();
+        assert_eq!(database.snapshot(&pair.id, "left").unwrap().len(), 1);
+        let mut ignoring = renamed.clone();
+        ignoring.modification_times = "ignore".into();
+        database.update_pair(&pair.id, 2, &ignoring).unwrap();
+        assert!(database.snapshot(&pair.id, "left").unwrap().is_empty());
+        assert!(database.snapshot(&pair.id, "right").unwrap().is_empty());
     }
 }

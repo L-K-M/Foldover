@@ -2,8 +2,12 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use foldover_endpoint::{LocalEndpoint, LocalPair, PairRootError, RootRelation, ScanError};
-use foldover_state::{PairStore, StateLocation};
+use std::collections::BTreeMap;
+
+use foldover_endpoint::{
+    LocalEndpoint, LocalPair, ObservedEntry, PairRootError, RootRelation, ScanError,
+};
+use foldover_state::{PairStore, SnapshotEntry, StateLocation};
 use foldover_types::{PairConfig, PairDraft, PairId, Resolution, Side, SyncPath};
 
 use crate::{Commit, RunInputs};
@@ -115,12 +119,36 @@ impl Engine {
 
     /// What a run reads from state, for work outside the engine lock.
     pub fn run_inputs(&self, id: PairId) -> Result<RunInputs, Error> {
+        // A malformed stored fingerprint only costs a reread of that entry.
+        let snapshot = |side| -> Result<BTreeMap<_, _>, Error> {
+            Ok(self
+                .pairs
+                .snapshot(id, side)?
+                .into_iter()
+                .filter_map(|entry| {
+                    let observed = ObservedEntry::restore(entry.version, &entry.fingerprint)?;
+                    Some((entry.path, observed))
+                })
+                .collect())
+        };
         Ok(RunInputs::new(
             self.pair(id)?,
             self.pairs.base(id)?,
             self.pairs.identities(id)?,
             self.pairs.resolutions(id)?,
-        ))
+        )
+        .with_snapshots(snapshot(Side::Left)?, snapshot(Side::Right)?))
+    }
+
+    /// Store a fresh observation of one side for the next run to reuse.
+    pub fn store_snapshot(
+        &mut self,
+        id: PairId,
+        revision: u64,
+        side: Side,
+        entries: &[SnapshotEntry],
+    ) -> Result<(), Error> {
+        Ok(self.pairs.replace_snapshot(id, revision, side, entries)?)
     }
 
     /// Store a person's conflict choice for the pair revision they previewed.

@@ -159,6 +159,42 @@ impl EntryMetadata {
         self.created
     }
 
+    /// Every observed field in a stable byte form, so equal keys mean equal
+    /// observations across processes. Persisted to skip unchanged entries.
+    pub fn stat_key(&self) -> Vec<u8> {
+        let mut key = Vec::with_capacity(STAT_KEY_BYTES);
+        key.push(match self.kind {
+            NodeKind::File => 1,
+            NodeKind::Directory => 2,
+            NodeKind::Symlink => 3,
+            NodeKind::Other => 4,
+        });
+        key.extend_from_slice(&self.size.to_le_bytes());
+        push_time(&mut key, Some(self.modified));
+        key.extend_from_slice(&self.changed.0.to_le_bytes());
+        key.extend_from_slice(&self.changed.1.to_le_bytes());
+        key.extend_from_slice(&self.identity.device.to_le_bytes());
+        key.extend_from_slice(&self.identity.inode.to_le_bytes());
+        key.push(match self.residency {
+            DataResidency::Materialized => 1,
+            DataResidency::Dataless => 2,
+            DataResidency::NotReported => 3,
+        });
+        key.extend_from_slice(&self.permissions.to_le_bytes());
+        key.extend_from_slice(&self.owner.to_le_bytes());
+        key.extend_from_slice(&self.group.to_le_bytes());
+        key.extend_from_slice(&self.links.to_le_bytes());
+        match self.flags {
+            None => key.push(0),
+            Some(flags) => {
+                key.push(1);
+                key.extend_from_slice(&flags.to_le_bytes());
+            }
+        }
+        push_time(&mut key, self.created);
+        key
+    }
+
     /// Flags an owner sets on the entry itself; `None` when flags are unreported.
     pub fn user_flags(&self) -> Option<u32> {
         self.flags.map(user_flags)
@@ -225,6 +261,24 @@ fn modified_time(seconds: i64, nanoseconds: i64) -> io::Result<SystemTime> {
     whole
         .and_then(|time| time.checked_add(Duration::from_nanos(u64::from(nanoseconds))))
         .ok_or_else(invalid_metadata)
+}
+
+/// Upper bound of `stat_key`'s length, to avoid reallocation.
+const STAT_KEY_BYTES: usize = 128;
+
+/// Absent, or a signed seconds/nanoseconds pair, so pre-1970 times stay exact.
+fn push_time(key: &mut Vec<u8>, time: Option<SystemTime>) {
+    let Some(time) = time else {
+        key.push(0);
+        return;
+    };
+    let (sign, duration) = match time.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(after) => (1, after),
+        Err(before) => (2, before.duration()),
+    };
+    key.push(sign);
+    key.extend_from_slice(&duration.as_secs().to_le_bytes());
+    key.extend_from_slice(&duration.subsec_nanos().to_le_bytes());
 }
 
 fn invalid_metadata() -> io::Error {
@@ -846,5 +900,33 @@ mod tests {
             .unwrap();
         assert_eq!(entry.name(), b"\xff");
         assert_eq!(root.metadata(&path(b"\xff")).unwrap().size(), 4);
+    }
+
+    #[test]
+    fn stat_keys_change_with_any_observed_field() {
+        let temporary = tempfile::tempdir().unwrap();
+        let file = temporary.path().join("file");
+        fs::write(&file, b"abc").unwrap();
+        let root = Root::open(temporary.path()).unwrap();
+        let first = root.metadata(&path(b"file")).unwrap();
+        assert_eq!(
+            first.stat_key(),
+            root.metadata(&path(b"file")).unwrap().stat_key()
+        );
+        assert!(first.stat_key().len() <= STAT_KEY_BYTES);
+
+        // Same size and mtime, new ctime from the permission change.
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(first.modified())
+            .unwrap();
+        let second = root.metadata(&path(b"file")).unwrap();
+        assert_eq!(second.size(), first.size());
+        assert_eq!(second.modified(), first.modified());
+        assert_ne!(second.stat_key(), first.stat_key());
     }
 }

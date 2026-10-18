@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::os::unix::ffi::OsStrExt;
 
-use foldover_db::{BaseChange, Database, PairRow, PairValues, ResolutionRow, StateLocation};
+use foldover_db::{
+    BaseChange, Database, PairRow, PairValues, ResolutionRow, SnapshotRow, StateLocation,
+};
 use foldover_types::{
     BaselineEntry, Durability, EndpointId, InvalidPair, LocalRoot, MetadataPolicy, PairConfig,
     PairDraft, PairId, PairOptions, Propagation, Resolution, Schedule, ScheduleInterval, Side,
@@ -167,6 +169,61 @@ impl PairStore {
 
 const KEEP_LEFT: &str = "left";
 const KEEP_RIGHT: &str = "right";
+
+/// One side's stored observation of a path. The fingerprint is opaque here;
+/// the endpoint that wrote it interprets it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SnapshotEntry {
+    pub path: SyncPath,
+    pub fingerprint: Vec<u8>,
+    pub version: foldover_types::EntryVersion,
+}
+
+fn side_name(side: Side) -> &'static str {
+    match side {
+        Side::Left => KEEP_LEFT,
+        Side::Right => KEEP_RIGHT,
+    }
+}
+
+impl PairStore {
+    pub fn snapshot(&self, id: PairId, side: Side) -> Result<Vec<SnapshotEntry>, Error> {
+        self.database
+            .snapshot(id.as_bytes(), side_name(side))?
+            .into_iter()
+            .map(|row| {
+                Ok(SnapshotEntry {
+                    path: SyncPath::try_from(row.path)
+                        .map_err(|_| Error::InvalidStored("snapshot path"))?,
+                    fingerprint: row.fingerprint,
+                    version: decode(&row.version)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Replace one side's observation, only while the pair keeps `revision`.
+    pub fn replace_snapshot(
+        &mut self,
+        id: PairId,
+        revision: u64,
+        side: Side,
+        entries: &[SnapshotEntry],
+    ) -> Result<(), Error> {
+        let revision = database_revision(revision)?;
+        let rows: Vec<_> = entries
+            .iter()
+            .map(|entry| SnapshotRow {
+                path: entry.path.as_bytes().to_vec(),
+                fingerprint: entry.fingerprint.clone(),
+                version: encode(entry.version).to_vec(),
+            })
+            .collect();
+        Ok(self
+            .database
+            .replace_snapshot(id.as_bytes(), revision, side_name(side), &rows)?)
+    }
+}
 
 impl PairStore {
     /// Conflict choices not yet applied, keyed by path.

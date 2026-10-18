@@ -69,8 +69,12 @@ empty attribute list.
 
 - Equal bytes and forks produce equal content on any local endpoint.
 - Metadata differences between endpoints are expected and stored per side.
-- Every observation reads all content. Snapshot reuse (same size, mtime,
-  ctime and file ID) is the next optimization.
+- Observations reuse the previous run's version for every entry whose
+  complete stat is unchanged (state schema v7 stores each side's last
+  observation). The stat must have been at least three seconds old when
+  that version was computed, because coarse timestamps cannot show an edit
+  within one tick. Snapshots are discarded with the base when roots or
+  metadata categories change.
 - A single entry changing during observation fails the run; the caller
   retries. Per-entry retry is pending.
 - Execution must read back the target's version and fail explicitly when

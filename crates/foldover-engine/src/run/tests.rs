@@ -463,3 +463,48 @@ fn resolved_conflicts_keep_the_chosen_side_until_either_side_changes() {
         [(path(b"file"), ConflictKind::BothChanged)]
     );
 }
+
+#[test]
+fn earlier_snapshots_supply_versions_for_settled_unchanged_entries() {
+    let pair = fixture(SyncMode::Sync);
+    let file = pair.left.path().join("file");
+    fs::write(&file, b"data").unwrap();
+    let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+    fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(past)
+        .unwrap();
+    let first = pair.prepare();
+
+    // A deliberately wrong stored version shows whether it was reused.
+    let stored = foldover_types::EntryVersion::new(
+        foldover_types::EntryContent::File(foldover_types::Digest::from_bytes([7; 32])),
+        foldover_types::Digest::from_bytes([7; 32]),
+    );
+    let left: BTreeMap<_, _> = first
+        .snapshot(Side::Left)
+        .into_iter()
+        .map(|entry| {
+            let observed =
+                foldover_endpoint::ObservedEntry::restore(stored, &entry.fingerprint).unwrap();
+            (entry.path, observed)
+        })
+        .collect();
+    let draft = PairDraft::new(
+        "pair".into(),
+        root(pair.left.path()),
+        root(pair.right.path()),
+        pair.mode,
+    )
+    .unwrap();
+    let config =
+        PairConfig::from_stored(PairId::from_bytes([1; 16]).unwrap(), pair.revision, draft)
+            .unwrap();
+    let inputs = RunInputs::new(config, BTreeMap::new(), pair.identities, BTreeMap::new())
+        .with_snapshots(left, BTreeMap::new());
+    let second = PairRun::prepare(inputs, &mut proceed).unwrap();
+    let preview = second.preview();
+    assert_eq!(preview.items()[0].versions().0, Some(stored));
+}
