@@ -2,8 +2,8 @@ use std::io;
 use std::path::Path;
 
 use foldover_fs::{
-    DataResidency, DirectoryEntry, DirectoryScope, EntryMetadata, FileIdentity, HashError,
-    NodeKind, Root, RootRelation,
+    DataResidency, DirectoryEntry, DirectoryScope, EntryMetadata, ExtendedMetadata, FileIdentity,
+    HashError, MetadataReadError, NodeKind, Root, RootRelation,
 };
 pub use foldover_types::ScanControl;
 use foldover_types::{Digest, InvalidSyncPath, SyncPath};
@@ -45,6 +45,12 @@ pub enum ScanError {
     ProtectedPath(SyncPath),
     #[error("Dataless entry cannot form a complete scan: {0:?}")]
     Dataless(Option<SyncPath>),
+    #[error("Extended metadata is unavailable at {path:?}: {source}")]
+    Metadata {
+        path: Option<SyncPath>,
+        #[source]
+        source: MetadataReadError,
+    },
 }
 
 /// Exact path and observed attributes. A link target is data, never a scan root.
@@ -126,6 +132,50 @@ impl LocalEndpoint {
         entry: &LocalEntry,
         control: &mut impl FnMut(u64) -> ScanControl,
     ) -> Result<Digest, ScanError> {
+        self.validate_content_access(entry)?;
+        self.root
+            .hash_file(entry.path(), entry.metadata(), control)
+            .map_err(|error| match error {
+                HashError::Io(source) => ScanError::Io {
+                    path: Some(entry.path.clone()),
+                    source,
+                },
+                HashError::Changed => ScanError::Changed(Some(entry.path.clone())),
+                HashError::NotRegular => ScanError::UnsupportedEntry(entry.path.clone()),
+                HashError::Dataless => ScanError::Dataless(Some(entry.path.clone())),
+                HashError::Cancelled => ScanError::Cancelled,
+            })
+    }
+
+    /// Observe native extended metadata under the same namespace/device rules as
+    /// data reads. Capabilities and naming policy still precede file versions.
+    pub fn read_extended_metadata(
+        &self,
+        entry: &LocalEntry,
+        control: &mut impl FnMut(u64) -> ScanControl,
+    ) -> Result<ExtendedMetadata, ScanError> {
+        self.validate_content_access(entry)?;
+        self.root
+            .read_extended_metadata(entry.path(), entry.metadata(), control)
+            .map_err(|source| metadata_error(Some(entry.path.clone()), source))
+    }
+
+    pub fn read_root_extended_metadata(
+        &self,
+        control: &mut impl FnMut(u64) -> ScanControl,
+    ) -> Result<(EntryMetadata, ExtendedMetadata), ScanError> {
+        let observed = at(&None, self.root.root_metadata())?;
+        if observed.identity() != self.identity {
+            return Err(ScanError::Changed(None));
+        }
+        let extended = self
+            .root
+            .read_root_extended_metadata(&observed, control)
+            .map_err(|source| metadata_error(None, source))?;
+        Ok((observed, extended))
+    }
+
+    fn validate_content_access(&self, entry: &LocalEntry) -> Result<(), ScanError> {
         if entry.path.components().any(protected) {
             return Err(ScanError::ProtectedPath(entry.path.clone()));
         }
@@ -139,18 +189,7 @@ impl LocalEndpoint {
         if entry.metadata.identity().device() != self.identity.device() {
             return Err(ScanError::NestedFilesystem(entry.path.clone()));
         }
-        self.root
-            .hash_file(entry.path(), entry.metadata(), control)
-            .map_err(|error| match error {
-                HashError::Io(source) => ScanError::Io {
-                    path: Some(entry.path.clone()),
-                    source,
-                },
-                HashError::Changed => ScanError::Changed(Some(entry.path.clone())),
-                HashError::NotRegular => ScanError::UnsupportedEntry(entry.path.clone()),
-                HashError::Dataless => ScanError::Dataless(Some(entry.path.clone())),
-                HashError::Cancelled => ScanError::Cancelled,
-            })
+        Ok(())
     }
 
     /// Stream depth-first metadata rows without opening file data or buffering a
@@ -240,6 +279,16 @@ impl LocalEndpoint {
             directories.push(child);
         }
         Ok(stats)
+    }
+}
+
+fn metadata_error(path: Option<SyncPath>, source: MetadataReadError) -> ScanError {
+    match source {
+        MetadataReadError::Io(source) => ScanError::Io { path, source },
+        MetadataReadError::Changed => ScanError::Changed(path),
+        MetadataReadError::Dataless => ScanError::Dataless(path),
+        MetadataReadError::Cancelled => ScanError::Cancelled,
+        source => ScanError::Metadata { path, source },
     }
 }
 
@@ -359,7 +408,44 @@ mod tests {
                 endpoint.hash_file(&entry, &mut |_| panic!("Protected reads must not start")),
                 Err(ScanError::ProtectedPath(_) | ScanError::UnclassifiedSidecar(_))
             ));
+            assert!(matches!(
+                endpoint.read_extended_metadata(&entry, &mut |_| panic!(
+                    "Protected reads must not start"
+                )),
+                Err(ScanError::ProtectedPath(_) | ScanError::UnclassifiedSidecar(_))
+            ));
         }
+    }
+
+    #[test]
+    fn extended_metadata_access_preserves_observations_and_cancellation() {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::write(temporary.path().join("file"), b"data").unwrap();
+        let endpoint = LocalEndpoint::open(temporary.path()).unwrap();
+        let mut entries = Vec::new();
+        endpoint
+            .scan_metadata(&mut |entry| {
+                entries.push(entry);
+                ScanControl::Continue
+            })
+            .unwrap();
+        let entry = &entries[0];
+        endpoint
+            .read_extended_metadata(entry, &mut |_| ScanControl::Continue)
+            .unwrap();
+        let (root, _) = endpoint
+            .read_root_extended_metadata(&mut |_| ScanControl::Continue)
+            .unwrap();
+        assert_eq!(root.identity(), endpoint.identity);
+        assert!(matches!(
+            endpoint.read_extended_metadata(entry, &mut |_| ScanControl::Cancel),
+            Err(ScanError::Cancelled)
+        ));
+        fs::write(temporary.path().join("file"), b"changed").unwrap();
+        assert!(matches!(
+            endpoint.read_extended_metadata(entry, &mut |_| ScanControl::Continue),
+            Err(ScanError::Changed(_))
+        ));
     }
 
     #[test]

@@ -16,6 +16,10 @@ mod materialization;
 mod volume;
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod mac_metadata;
+
+#[cfg(target_os = "macos")]
 use materialization::prevent_materialization;
 
 #[cfg(not(target_os = "macos"))]
@@ -25,6 +29,6 @@ fn prevent_materialization() -> std::io::Result<()> {
 
 #[cfg(unix)]
 pub use root::{
-    DataResidency, DirectoryEntry, DirectoryScope, EntryMetadata, FileIdentity, HashError,
-    NodeKind, Root, RootRelation,
+    AccessControl, DataResidency, DirectoryEntry, DirectoryScope, EntryMetadata, ExtendedAttribute,
+    ExtendedMetadata, FileIdentity, HashError, MetadataReadError, NodeKind, Root, RootRelation,
 };

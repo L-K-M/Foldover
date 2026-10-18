@@ -17,6 +17,9 @@ use crate::prevent_materialization;
 mod content;
 pub use content::HashError;
 
+mod extended;
+pub use extended::{AccessControl, ExtendedAttribute, ExtendedMetadata, MetadataReadError};
+
 const MAX_ROOT_ANCESTORS: usize = 4096;
 // Darwin sys/stat.h defines this synthetic, read-only flag; libc omits it.
 #[cfg(target_os = "macos")]
@@ -92,6 +95,12 @@ pub struct EntryMetadata {
     changed: (i64, i64),
     identity: FileIdentity,
     residency: DataResidency,
+    permissions: u32,
+    owner: u32,
+    group: u32,
+    links: u64,
+    flags: Option<u32>,
+    created: Option<SystemTime>,
 }
 
 impl EntryMetadata {
@@ -115,6 +124,31 @@ impl EntryMetadata {
         self.residency
     }
 
+    pub fn permissions(&self) -> u32 {
+        self.permissions
+    }
+
+    pub fn owner(&self) -> u32 {
+        self.owner
+    }
+
+    pub fn group(&self) -> u32 {
+        self.group
+    }
+
+    pub fn links(&self) -> u64 {
+        self.links
+    }
+
+    /// Native BSD flags; an unreported field is not an empty flag set.
+    pub fn flags(&self) -> Option<u32> {
+        self.flags
+    }
+
+    pub fn created(&self) -> Option<SystemTime> {
+        self.created
+    }
+
     fn from_file(file: &impl AsFd) -> io::Result<Self> {
         Self::from_stat(fstat(file)?)
     }
@@ -127,6 +161,10 @@ impl EntryMetadata {
         // Match std metadata's sign extension of Darwin's 32-bit dev_t.
         #[allow(clippy::unnecessary_cast)]
         let device = stat.st_dev as u64;
+        #[allow(clippy::unnecessary_cast)]
+        let permissions = (stat.st_mode as u32) & (nix::sys::stat::Mode::all().bits() as u32);
+        #[allow(clippy::unnecessary_cast)]
+        let links = stat.st_nlink as u64;
         let kind = match SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT {
             SFlag::S_IFLNK => NodeKind::Symlink,
             SFlag::S_IFDIR => NodeKind::Directory,
@@ -143,6 +181,12 @@ impl EntryMetadata {
                 inode: stat.st_ino,
             },
             residency: data_residency(&stat),
+            permissions,
+            owner: stat.st_uid,
+            group: stat.st_gid,
+            links,
+            flags: file_flags(&stat),
+            created: creation_time(&stat)?,
         })
     }
 }
@@ -165,6 +209,26 @@ fn modified_time(seconds: i64, nanoseconds: i64) -> io::Result<SystemTime> {
 
 fn invalid_metadata() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "Invalid filesystem metadata")
+}
+
+#[cfg(target_os = "macos")]
+fn file_flags(stat: &FileStat) -> Option<u32> {
+    Some(stat.st_flags)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn file_flags(_: &FileStat) -> Option<u32> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn creation_time(stat: &FileStat) -> io::Result<Option<SystemTime>> {
+    modified_time(stat.st_birthtime, stat.st_birthtime_nsec).map(Some)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn creation_time(_: &FileStat) -> io::Result<Option<SystemTime>> {
+    Ok(None)
 }
 
 #[cfg(target_os = "macos")]
@@ -423,6 +487,20 @@ mod tests {
             assert_eq!(observed.modified(), standard.modified().unwrap());
             assert_eq!(observed.identity().device(), standard.dev());
             assert_eq!(observed.identity().inode(), standard.ino());
+            assert_eq!(observed.owner(), standard.uid());
+            assert_eq!(observed.group(), standard.gid());
+            assert_eq!(observed.links(), standard.nlink());
+            #[cfg(target_os = "macos")]
+            {
+                use std::os::macos::fs::MetadataExt;
+                assert_eq!(observed.flags(), Some(standard.st_flags()));
+                assert_eq!(observed.created(), Some(standard.created().unwrap()));
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                assert_eq!(observed.flags(), None);
+                assert_eq!(observed.created(), None);
+            }
         }
         let descriptor = fs::File::open(file).unwrap();
         assert_eq!(
@@ -439,6 +517,26 @@ mod tests {
             root.root_metadata().unwrap().data_residency(),
             DataResidency::NotReported
         );
+    }
+
+    #[test]
+    fn permissions_and_hard_link_topology_are_observed_without_content_changes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let selected = temporary.path().join("file");
+        fs::write(&selected, b"unchanged").unwrap();
+        let root = Root::open(temporary.path()).unwrap();
+        let before = root.metadata(&path(b"file")).unwrap();
+        fs::set_permissions(&selected, fs::Permissions::from_mode(0o640)).unwrap();
+        fs::hard_link(&selected, temporary.path().join("other")).unwrap();
+        let after = root.metadata(&path(b"file")).unwrap();
+        assert_eq!(after.permissions(), 0o640);
+        assert_eq!(after.links(), before.links() + 1);
+        assert_eq!(after.size(), before.size());
+        assert_eq!(after.modified(), before.modified());
+        assert_eq!(after.identity(), before.identity());
+        assert_ne!(before, after);
     }
 
     #[test]
@@ -467,6 +565,29 @@ mod tests {
             modified_time(-1, 500_000_000).unwrap(),
             SystemTime::UNIX_EPOCH - Duration::from_millis(500)
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_flags_remain_part_of_the_observed_fingerprint() {
+        let temporary = tempfile::tempdir().unwrap();
+        let selected = temporary.path().join("file");
+        fs::write(&selected, b"unchanged").unwrap();
+        let root = Root::open(temporary.path()).unwrap();
+        let before = root.metadata(&path(b"file")).unwrap();
+        assert!(
+            std::process::Command::new("/usr/bin/chflags")
+                .arg("hidden")
+                .arg(&selected)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let after = root.metadata(&path(b"file")).unwrap();
+        assert_eq!(after.flags().unwrap() & libc::UF_HIDDEN, libc::UF_HIDDEN);
+        assert_eq!(before.modified(), after.modified());
+        assert_ne!(before.flags(), after.flags());
+        assert_ne!(before, after);
     }
 
     #[cfg(target_os = "macos")]
