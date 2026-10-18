@@ -19,6 +19,7 @@ import time
 STARTUP_SECONDS = 10
 COMMAND_SECONDS = 10
 RETRY_SECONDS = 0.05
+DISCONNECTED_CLIENTS = 64
 METHOD_NOT_FOUND = -32601
 PERMISSION_DENIED = -32002
 PARSE_ERROR = -32700
@@ -185,6 +186,14 @@ def main():
             if unnegotiated.get("error", {}).get("code") != expected:
                 raise RuntimeError(f"Private route accepted an unnegotiated session: {unnegotiated}")
             pair = configuration(cli, endpoint, home, arguments.configuration)
+            # Clients can close before the agent reads their kernel credentials.
+            for _ in range(DISCONNECTED_CLIENTS):
+                with socket.socket(socket.AF_UNIX) as connection:
+                    connection.settimeout(COMMAND_SECONDS)
+                    connection.connect(str(endpoint))
+            reachable = invoke(cli, endpoint)
+            if reachable.returncode != 0:
+                raise RuntimeError(f"Disconnected clients stopped the agent: {reachable.stderr}")
             malformed = exchange(endpoint, b'{\n')
             if malformed.get("error", {}).get("code") != PARSE_ERROR:
                 raise RuntimeError(f"Malformed request was not rejected: {malformed}")
@@ -221,6 +230,14 @@ def main():
                 raise RuntimeError(f"Incompatible state was not refused: {incompatible.stderr}")
             if database.read_bytes() != before:
                 raise RuntimeError("Incompatible-state refusal changed the database")
+        except Exception as error:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=COMMAND_SECONDS)
+            details = ""
+            if child.stderr is not None and not child.stderr.closed:
+                details = " | ".join(child.stderr.read().splitlines())
+            raise RuntimeError(f"{error}; agent exit {child.returncode}; stderr: {details}") from error
         finally:
             if child.poll() is None:
                 child.kill()
