@@ -13,6 +13,7 @@ use super::{ApplyError, LocalEndpoint, ScanError, protected};
 /// Names tried for one put-back: the original, then `(restored)`,
 /// `(restored 2)` and so on.
 const PUT_BACK_ATTEMPTS: u32 = 100;
+const RESTORED: &str = "restored";
 /// The longest file name APFS and most Unix filesystems store, in bytes.
 const NAME_MAX: usize = 255;
 
@@ -232,7 +233,7 @@ impl LocalEndpoint {
         for attempt in 0..PUT_BACK_ATTEMPTS {
             let destination = match attempt {
                 0 => path.clone(),
-                attempt => restored_name(path, attempt)?,
+                attempt => sibling_name(path, RESTORED, attempt)?,
             };
             match self.root.restore(&archived, &destination, durability) {
                 Ok(()) => return Ok(destination),
@@ -286,10 +287,22 @@ impl LocalEndpoint {
     }
 }
 
-/// `path` renamed for a put-back beside it: `a/report.txt` becomes
-/// `a/report (restored).txt` for attempt 1, `a/report (restored 2).txt`
-/// for attempt 2. Long names lose the end of their stem, never the extension.
-fn restored_name(path: &SyncPath, attempt: u32) -> Result<SyncPath, ApplyError> {
+/// The UTC date of `at`, e.g. `2026-10-18`.
+pub(super) fn date_name(at: SystemTime) -> String {
+    let seconds = at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let (year, month, day) = civil_from_days(seconds / SECONDS_PER_DAY);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// `path` renamed beside itself with `label`: with `restored`,
+/// `a/report.txt` becomes `a/report (restored).txt` for attempt 1 and
+/// `a/report (restored 2).txt` for attempt 2. Long names lose the end of
+/// their stem, never the extension.
+pub(super) fn sibling_name(
+    path: &SyncPath,
+    label: &str,
+    attempt: u32,
+) -> Result<SyncPath, ApplyError> {
     let name = path.file_name();
     let split = match name.iter().rposition(|byte| *byte == b'.') {
         Some(dot) if dot > 0 => dot,
@@ -297,8 +310,8 @@ fn restored_name(path: &SyncPath, attempt: u32) -> Result<SyncPath, ApplyError> 
     };
     let (stem, extension) = name.split_at(split);
     let suffix = match attempt {
-        1 => " (restored)".to_owned(),
-        attempt => format!(" (restored {attempt})"),
+        1 => format!(" ({label})"),
+        attempt => format!(" ({label} {attempt})"),
     };
     let room = NAME_MAX.saturating_sub(suffix.len() + extension.len());
     let stem = &stem[..fitting(stem, room)];
@@ -473,8 +486,12 @@ mod tests {
     fn restored_names_keep_extensions_and_fit_the_name_limit() {
         let name = |path: &[u8], attempt| {
             let path = SyncPath::try_from(path).unwrap();
-            restored_name(&path, attempt).unwrap().as_bytes().to_vec()
+            sibling_name(&path, RESTORED, attempt)
+                .unwrap()
+                .as_bytes()
+                .to_vec()
         };
+        assert_eq!(date_name(at(86_400_000 * 365)), "1971-01-01");
         assert_eq!(name(b"a/report.txt", 1), b"a/report (restored).txt");
         assert_eq!(name(b"report.tar.gz", 2), b"report.tar (restored 2).gz");
         assert_eq!(name(b".profile", 1), b".profile (restored)");

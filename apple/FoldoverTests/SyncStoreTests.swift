@@ -10,6 +10,7 @@ private actor ScriptedSyncClient: SyncClient {
     private(set) var approvals: [(UInt64, UInt64)] = []
     private(set) var cancelled = false
     private(set) var kept: [FolderSide] = []
+    private(set) var keptBoth: [Data] = []
     private let runs: [RunRecord]
 
     init(_ replies: [PairSyncState], history: [RunRecord] = []) {
@@ -18,6 +19,11 @@ private actor ScriptedSyncClient: SyncClient {
     }
 
     func history(_ id: String) async throws -> [RunRecord] { runs }
+
+    func keepBoth(_ id: String, path: Data) async throws -> PairSyncState {
+        keptBoth.append(path)
+        return next()
+    }
 
     func preview(_ id: String) async throws -> PairSyncState { next() }
     func status(_ id: String) async throws -> PairSyncState { next() }
@@ -53,6 +59,9 @@ private struct UnreachableSyncClient: SyncClient {
         throw SyncFixtureError.unreachable
     }
     func history(_ id: String) async throws -> [RunRecord] { throw SyncFixtureError.unreachable }
+    func keepBoth(_ id: String, path: Data) async throws -> PairSyncState {
+        throw SyncFixtureError.unreachable
+    }
 }
 
 private func preview(archivesInA: UInt64, needsApproval: Bool) -> PreviewSummary {
@@ -169,6 +178,28 @@ func keepingASideResolvesThenPreviewsAgain() async throws {
     await viewModel.keep(.b, for: rows[0])
     #expect(await client.kept == [.b])
     #expect(store.state(for: pair().id) == .previewed(resolved))
+}
+
+@MainActor
+@Test
+func keepBothIsOfferedOnlyForFilesChangedInBothFolders() async {
+    let conflicted = PreviewSummary(
+        changes: [PlannedChange(path: Data("notes.txt".utf8), action: .conflict(.bothChanged)),
+                  PlannedChange(path: Data("gone.txt".utf8), action: .conflict(.deletedVersusEdited))],
+        copies: 0, updates: 0, archives: 0, conflicts: 2, blocked: 0, kept: 0,
+        a: DeletionCheck(deletions: 0, paths: 2, needsApproval: false),
+        b: DeletionCheck(deletions: 0, paths: 2, needsApproval: false)
+    )
+    let client = ScriptedSyncClient([.previewed(conflicted), .previewed(conflicted), .previewed(conflicted)])
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, agentConnected: true)
+    await viewModel.preview()
+    let rows = viewModel.rows
+    #expect(rows.map(\.keepsBoth) == [true, false])
+
+    await viewModel.keepBoth(for: rows[1])
+    await viewModel.keepBoth(for: rows[0])
+    #expect(await client.keptBoth == [Data("notes.txt".utf8)])
 }
 
 private actor AlertRecorder {

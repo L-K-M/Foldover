@@ -150,6 +150,14 @@ pub async fn sync_resolve(
     state(foldover_client::resolve_conflict(&SocketLocation::Default, id, &path, keep.into()).await)
 }
 
+/// Keep both versions of a both-changed conflict: Folder B's is saved
+/// beside the entry and Folder A's wins at its path.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn sync_keep_both(id: String, path: Vec<u8>) -> Result<SyncJobState, AgentError> {
+    let id = id.parse().map_err(invalid_configuration)?;
+    state(foldover_client::keep_both(&SocketLocation::Default, id, &path).await)
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn sync_cancel(id: String) -> Result<SyncJobState, AgentError> {
     let id = id.parse().map_err(invalid_configuration)?;

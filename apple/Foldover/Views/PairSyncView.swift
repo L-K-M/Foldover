@@ -38,6 +38,11 @@ struct PairSyncView: View {
                                 .disabled(!viewModel.canStart)
                             Button("Keep B") { Task { await viewModel.keep(.b, for: row) } }
                                 .disabled(!viewModel.canStart)
+                            if row.keepsBoth {
+                                Button("Keep Both") { Task { await viewModel.keepBoth(for: row) } }
+                                    .disabled(!viewModel.canStart)
+                                    .help("Keep Folder A's version here and save Folder B's beside it, named \"(from Folder B, date)\".")
+                            }
                         }
                     }
                 }

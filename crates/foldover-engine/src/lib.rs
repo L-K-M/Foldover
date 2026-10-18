@@ -5,6 +5,7 @@
 
 mod archive;
 mod configuration;
+mod conflict;
 mod gates;
 mod plan;
 mod readiness;
@@ -17,6 +18,7 @@ mod plan_properties;
 
 pub use archive::{ArchiveError, ArchiveErrorKind, ArchivedItem, ArchivedRun, PairArchive};
 pub use configuration::{Engine, Error, ErrorKind};
+pub use conflict::{KeepBothError, keep_both};
 pub use foldover_state::RecordedIdentities;
 pub use foldover_state::StateLocation;
 pub use foldover_state::{HISTORY_LIMIT, HistoryEntry, HistoryOutcome, RunTrigger};

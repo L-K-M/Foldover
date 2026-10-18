@@ -15,13 +15,14 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 
 use foldover_engine::{
-    Action, Approval, Commit, Completion, DeletionReview, Engine, PairRun, Preview, RunContext,
-    RunError, RunOutcome, RunReport,
+    Action, Approval, Commit, Completion, DeletionReview, Engine, KeepBothError, PairRun, Preview,
+    RunContext, RunError, RunOutcome, RunReport,
 };
 use foldover_proto::local::RpcError;
 use foldover_proto::local::{
-    INTERNAL_ERROR, PREVIEW_REQUIRED, SYNC_BUSY, SYNC_ITEM_LIMIT, SyncAction, SyncConflict,
-    SyncCounts, SyncDeletions, SyncFailure, SyncItem, SyncJob, SyncPreview, SyncResult, SyncStatus,
+    INTERNAL_ERROR, INVALID_PARAMS, PREVIEW_REQUIRED, ROOT_UNAVAILABLE, SYNC_BUSY, SYNC_ITEM_LIMIT,
+    SyncAction, SyncConflict, SyncCounts, SyncDeletions, SyncFailure, SyncItem, SyncJob,
+    SyncPreview, SyncResult, SyncStatus,
 };
 use foldover_types::{
     ChangeKind, ConflictKind, EntryVersion, PairId, Resolution, ScanControl, Side, SyncPath,
@@ -44,10 +45,13 @@ impl Work {
     }
 }
 
+/// Each side's version of a conflicted path; `None` when absent.
+type ConflictVersions = (Option<EntryVersion>, Option<EntryVersion>);
+
 /// Conflict versions from a pair's latest preview; choices bind to them.
 struct Conflicts {
     revision: u64,
-    versions: HashMap<SyncPath, (Option<EntryVersion>, Option<EntryVersion>)>,
+    versions: HashMap<SyncPath, (ConflictKind, ConflictVersions)>,
 }
 
 impl Conflicts {
@@ -57,8 +61,10 @@ impl Conflicts {
             versions: preview
                 .items()
                 .iter()
-                .filter(|item| matches!(item.action(), Action::Conflict(_)))
-                .map(|item| (item.path().clone(), item.versions()))
+                .filter_map(|item| match item.action() {
+                    Action::Conflict(kind) => Some((item.path().clone(), (kind, item.versions()))),
+                    _ => None,
+                })
                 .collect(),
         }
     }
@@ -98,30 +104,66 @@ impl Jobs {
         path: &SyncPath,
         keep: Side,
     ) -> Result<(), RpcError> {
+        let (revision, _, (left, right)) = self.conflict(id, path)?;
+        engine
+            .lock()
+            .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?
+            .record_resolution(id, revision, path, Resolution::new(keep, left, right))
+            .map_err(crate::engine_error)
+    }
+
+    /// Save the right folder's version of a both-changed conflict beside
+    /// it, then keep the left folder's at the path; the next run syncs both.
+    pub(crate) fn keep_both(
+        &self,
+        engine: &Mutex<Engine>,
+        id: PairId,
+        path: &SyncPath,
+    ) -> Result<(), RpcError> {
+        let (_, kind, (_, right)) = self.conflict(id, path)?;
+        let (ConflictKind::BothChanged, Some(right)) = (kind, right) else {
+            return Err(RpcError::new(
+                INVALID_PARAMS,
+                "Keep both applies to files changed in both folders",
+            ));
+        };
+        let pair = engine
+            .lock()
+            .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?
+            .pair(id)
+            .map_err(crate::engine_error)?;
+        foldover_engine::keep_both(&pair, path, right, &mut || ScanControl::Continue).map_err(
+            |error| match error {
+                KeepBothError::Changed(_) => RpcError::new(PREVIEW_REQUIRED, error.to_string()),
+                error => RpcError::new(ROOT_UNAVAILABLE, error.to_string()),
+            },
+        )?;
+        self.resolve(engine, id, path, Side::Left)
+    }
+
+    /// A conflict from the pair's latest preview, while no job works.
+    fn conflict(
+        &self,
+        id: PairId,
+        path: &SyncPath,
+    ) -> Result<(u64, ConflictKind, ConflictVersions), RpcError> {
         let stale = || {
             RpcError::new(
                 PREVIEW_REQUIRED,
                 "This conflict is not in the pair's latest preview; preview again",
             )
         };
-        let (revision, (left, right)) = {
-            let jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
-            let job = jobs.get(&id).ok_or_else(stale)?;
-            if matches!(job.status, SyncStatus::Working { .. }) {
-                return Err(RpcError::new(
-                    SYNC_BUSY,
-                    "Wait for the current preview or sync to finish",
-                ));
-            }
-            let conflicts = job.conflicts.as_ref().ok_or_else(stale)?;
-            let versions = *conflicts.versions.get(path).ok_or_else(stale)?;
-            (conflicts.revision, versions)
-        };
-        engine
-            .lock()
-            .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?
-            .record_resolution(id, revision, path, Resolution::new(keep, left, right))
-            .map_err(crate::engine_error)
+        let jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
+        let job = jobs.get(&id).ok_or_else(stale)?;
+        if matches!(job.status, SyncStatus::Working { .. }) {
+            return Err(RpcError::new(
+                SYNC_BUSY,
+                "Wait for the current preview or sync to finish",
+            ));
+        }
+        let conflicts = job.conflicts.as_ref().ok_or_else(stale)?;
+        let (kind, versions) = *conflicts.versions.get(path).ok_or_else(stale)?;
+        Ok((conflicts.revision, kind, versions))
     }
 
     /// Show that an unattended run waits for a missing folder. A working

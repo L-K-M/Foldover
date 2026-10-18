@@ -13,14 +13,15 @@ pub use foldover_proto::local::{
     HistoryOutcome, HistoryRecord, HistoryTrigger, PairSide, SyncAction, SyncConflict, SyncCounts,
     SyncDeletions, SyncFailure, SyncItem, SyncJob, SyncPreview, SyncResult, SyncStatus,
 };
+use foldover_proto::local::{
+    ConflictKeep, SYNC_CANCEL, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS, SyncKey,
+    SyncResolve, SyncRun,
+};
 use foldover_proto::local::{DAEMON_STATUS, Hello, PROTOCOL_VERSION, Request, SESSION_HELLO};
 use foldover_proto::local::{HISTORY_LIST, PAIR_REMOVE, PairRevision};
 use foldover_proto::local::{
     PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_UPDATE, PairInput, PairKey, PairList,
     PairRecord, PairUpdate,
-};
-use foldover_proto::local::{
-    SYNC_CANCEL, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS, SyncKey, SyncResolve, SyncRun,
 };
 pub use foldover_types::{
     Durability, Filters, InvalidPair, LocalRoot, MetadataPolicy, PairConfig, PairDraft, PairId,
@@ -78,6 +79,23 @@ pub async fn resolve_conflict(
         id: id.to_string(),
         path: path.to_vec(),
         keep: keep.into(),
+    };
+    Ok(serde_json::from_value(
+        call(location, SYNC_RESOLVE, Some(serde_json::to_value(params)?)).await?,
+    )?)
+}
+
+/// Keep both versions of a both-changed conflict in the latest preview:
+/// the right side's is saved beside the entry, the left side's wins.
+pub async fn keep_both(
+    location: &SocketLocation,
+    id: PairId,
+    path: &[u8],
+) -> Result<SyncStatus, Error> {
+    let params = SyncResolve {
+        id: id.to_string(),
+        path: path.to_vec(),
+        keep: ConflictKeep::Both,
     };
     Ok(serde_json::from_value(
         call(location, SYNC_RESOLVE, Some(serde_json::to_value(params)?)).await?,

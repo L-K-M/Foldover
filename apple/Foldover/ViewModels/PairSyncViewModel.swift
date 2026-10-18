@@ -7,6 +7,8 @@ struct ChangeRow: Identifiable, Equatable {
     let description: String
     /// Raw path bytes of a conflict a person can resolve by keeping a side.
     let resolvable: Data?
+    /// Both versions can be kept: the conflict changed a file in both folders.
+    var keepsBoth = false
 }
 
 /// One finished run, ready to render.
@@ -105,7 +107,8 @@ struct PairSyncViewModel {
             preview.changes.enumerated().map { index, change in
                 ChangeRow(id: index, path: Self.pathText(change.path),
                           description: Self.description(change.action),
-                          resolvable: Self.resolvable(change.action) ? change.path : nil)
+                          resolvable: Self.resolvable(change.action) ? change.path : nil,
+                          keepsBoth: change.action == .conflict(.bothChanged))
             }
         case .finished(let result):
             result.failures.enumerated().map { index, failure in
@@ -158,6 +161,12 @@ struct PairSyncViewModel {
     func keep(_ side: FolderSide, for row: ChangeRow) async {
         guard let path = row.resolvable else { return }
         await store.resolve(pair.id, path: path, keep: side)
+    }
+
+    /// Keep both versions; Folder B's is saved beside the item.
+    func keepBoth(for row: ChangeRow) async {
+        guard row.keepsBoth, let path = row.resolvable else { return }
+        await store.keepBoth(pair.id, path: path)
     }
 
     /// A file or link conflict; a file-versus-folder clash needs manual repair.

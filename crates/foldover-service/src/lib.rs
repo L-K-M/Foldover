@@ -21,9 +21,10 @@ use foldover_proto::local::{
     VERSION_MISMATCH,
 };
 use foldover_proto::local::{
-    SYNC_CANCEL, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS, SyncKey, SyncResolve, SyncRun,
+    ConflictKeep, SYNC_CANCEL, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS, SyncKey,
+    SyncResolve, SyncRun,
 };
-use foldover_types::{PairDraft, PairId};
+use foldover_types::{PairDraft, PairId, Side};
 use schedule::Scheduler;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -67,7 +68,7 @@ impl Service {
             request.method(),
             SYNC_PREVIEW | SYNC_RUN | SYNC_STATUS | SYNC_CANCEL | SYNC_RESOLVE
         ) {
-            return self.sync(&request);
+            return self.sync(&request).await;
         }
         if matches!(
             request.method(),
@@ -100,7 +101,7 @@ impl Service {
 impl Service {
     /// Sync jobs bypass the configuration queue: they hold the engine only to
     /// read inputs and commit progress.
-    fn sync(&self, request: &Request) -> Result<Value, RpcError> {
+    async fn sync(&self, request: &Request) -> Result<Value, RpcError> {
         let pair = |id: &str| {
             id.parse::<PairId>()
                 .map_err(|error| RpcError::new(INVALID_PARAMS, error.to_string()))
@@ -111,8 +112,21 @@ impl Service {
                 let id = pair(&params.id)?;
                 let path = foldover_types::SyncPath::try_from(params.path)
                     .map_err(|error| RpcError::new(INVALID_PARAMS, error.to_string()))?;
-                self.jobs
-                    .resolve(&self.engine, id, &path, params.keep.into())?;
+                let keep = match params.keep {
+                    ConflictKeep::Left => Side::Left,
+                    ConflictKeep::Right => Side::Right,
+                    ConflictKeep::Both => {
+                        // Copying hashes the file; keep it off the runtime.
+                        let (jobs, engine) = (Arc::clone(&self.jobs), Arc::clone(&self.engine));
+                        tokio::task::spawn_blocking(move || jobs.keep_both(&engine, id, &path))
+                            .await
+                            .map_err(|_| {
+                                RpcError::new(INTERNAL_ERROR, "The sync engine failed")
+                            })??;
+                        return encode(self.jobs.status(id));
+                    }
+                };
+                self.jobs.resolve(&self.engine, id, &path, keep)?;
                 self.jobs.status(id)
             }
             SYNC_RUN => {
@@ -615,7 +629,8 @@ mod tests {
     }
 
     async fn settled(service: &Service, key: &Value) -> Value {
-        for _ in 0..1_000 {
+        // Generous: runs wait out the racy-timestamp window on slow hosts.
+        for _ in 0..3_000 {
             let status = service
                 .handle(Request::call(9, SYNC_STATUS, Some(key.clone())))
                 .await
@@ -1003,5 +1018,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(history["runs"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn keeping_both_saves_folder_b_beside_folder_a() {
+        let (directory, service) = fixture();
+        let created = service
+            .handle(Request::call(
+                1,
+                PAIR_CREATE,
+                Some(input(directory.path(), "Both")),
+            ))
+            .await
+            .unwrap();
+        let (left, right) = (
+            directory.path().join("Both-left"),
+            directory.path().join("Both-right"),
+        );
+        let key = json!({"id": created["id"]});
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        fs::write(left.join("text.md"), b"base").unwrap();
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run.clone())))
+            .await
+            .unwrap();
+        settled(&service, &key).await;
+        fs::write(left.join("text.md"), b"left").unwrap();
+        fs::write(right.join("text.md"), b"right").unwrap();
+        service
+            .handle(Request::call(3, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        settled(&service, &key).await;
+
+        let both = json!({"id": created["id"], "path": b"text.md", "keep": "both"});
+        service
+            .handle(Request::call(4, SYNC_RESOLVE, Some(both)))
+            .await
+            .unwrap();
+        service
+            .handle(Request::call(5, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        let finished = settled(&service, &key).await;
+        assert_eq!(finished["result"]["copied"], 2, "{finished}");
+
+        for folder in [&left, &right] {
+            assert_eq!(fs::read(folder.join("text.md")).unwrap(), b"left");
+            let copies: Vec<_> = fs::read_dir(folder)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .filter(|name| name.starts_with("text (from Folder B, "))
+                .collect();
+            assert_eq!(copies.len(), 1, "{copies:?}");
+            assert_eq!(fs::read(folder.join(&copies[0])).unwrap(), b"right");
+        }
     }
 }

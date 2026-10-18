@@ -13,9 +13,9 @@ pub use history::{HISTORY_LIST, History, HistoryOutcome, HistoryRecord, HistoryT
 
 mod sync;
 pub use sync::{
-    SYNC_CANCEL, SYNC_ITEM_LIMIT, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS, SyncAction,
-    SyncConflict, SyncCounts, SyncDeletions, SyncFailure, SyncItem, SyncJob, SyncKey, SyncPreview,
-    SyncResolve, SyncResult, SyncRun, SyncStatus,
+    ConflictKeep, SYNC_CANCEL, SYNC_ITEM_LIMIT, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS,
+    SyncAction, SyncConflict, SyncCounts, SyncDeletions, SyncFailure, SyncItem, SyncJob, SyncKey,
+    SyncPreview, SyncResolve, SyncResult, SyncRun, SyncStatus,
 };
 
 mod pair;

@@ -3083,6 +3083,24 @@ public func syncCancel(id: String)async throws  -> SyncJobState  {
             errorHandler: FfiConverterTypeAgentError_lift
         )
 }
+/**
+ * Keep both versions of a both-changed conflict: Folder B's is saved
+ * beside the entry and Folder A's wins at its path.
+ */
+public func syncKeepBoth(id: String, path: Data)async throws  -> SyncJobState  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_sync_keep_both(FfiConverterString.lower(id),FfiConverterData.lower(path)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeSyncJobState_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
 public func syncPreview(id: String)async throws  -> SyncJobState  {
     return
         try  await uniffiRustCallAsync(
@@ -3192,6 +3210,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_sync_cancel() != 20891) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_sync_keep_both() != 39119) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_sync_preview() != 51120) {

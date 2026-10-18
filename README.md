@@ -117,6 +117,7 @@ foldover sync ID --preview       # list changes; writes nothing
 foldover sync ID                 # run
 foldover sync ID --approve 60 0  # accept up to 60 deletions in A, 0 in B
 foldover sync ID --keep-right PATH  # resolve a previewed conflict with B's version
+foldover sync ID --keep-both PATH   # keep A's version; save B's beside it
 foldover history ID              # finished runs, newest first
 foldover archive ID left         # archived runs in folder A, newest first
 foldover archive ID left RUN     # items one run archived

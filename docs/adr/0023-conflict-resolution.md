@@ -27,7 +27,22 @@ exactly those versions; otherwise the conflict is reported again.
 - The app shows Keep A and Keep B on file conflicts and previews again
   after a choice. The CLI uses `--keep-left PATH` and `--keep-right PATH`.
 
+**Keep both** (`keep: "both"`, for files changed in both folders): the
+agent first copies B's version, after checking it is still the previewed
+one, to a free name beside it in B, then records "keep A".
+
+```text
+docs/report.txt  →  docs/report (from Folder B, 2026-10-18).txt
+```
+
+The date is the copied version's modification day (UTC); `2`, `3` and so
+on are appended when the name is taken. The next run replaces B's
+version with A's, archiving it as usual, and copies the new file to A.
+The app shows Keep Both on such conflicts; the CLI uses `--keep-both PATH`.
+
 ## Consequences
 
-- No "keep both" yet; it needs a naming scheme for the second copy.
 - A choice made from an old preview cannot overwrite a newer edit.
+- Keep both always keeps A's version at the original path.
+- Keep both writes before the next run: the copy stays even if the choice
+  is later discarded.

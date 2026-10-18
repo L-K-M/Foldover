@@ -117,6 +117,8 @@ protocol SyncClient: Sendable {
     func status(_ id: String) async throws -> PairSyncState
     func cancel(_ id: String) async throws -> PairSyncState
     func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState
+    /// Save B's version of a both-changed conflict beside it; A's wins.
+    func keepBoth(_ id: String, path: Data) async throws -> PairSyncState
     /// Finished runs, newest first.
     func history(_ id: String) async throws -> [RunRecord]
 }
@@ -143,6 +145,10 @@ private actor CoreSyncClient: SyncClient {
 
     func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState {
         state(try await FoldoverCore.syncResolve(id: id, path: path, keep: keep == .a ? .left : .right))
+    }
+
+    func keepBoth(_ id: String, path: Data) async throws -> PairSyncState {
+        state(try await FoldoverCore.syncKeepBoth(id: id, path: path))
     }
 
     func history(_ id: String) async throws -> [RunRecord] {
@@ -335,9 +341,20 @@ final class SyncStore {
     /// so the list shows what the choice will do.
     func resolve(_ id: String, path: Data, keep: FolderSide) async {
         let client = client
+        await choose(id) { _ = try await client.resolve(id, path: path, keep: keep) }
+    }
+
+    /// Keep both versions: Folder B's is saved beside the item and Folder
+    /// A's wins; the next sync copies both. Previews again afterwards.
+    func keepBoth(_ id: String, path: Data) async {
+        let client = client
+        await choose(id) { _ = try await client.keepBoth(id, path: path) }
+    }
+
+    private func choose(_ id: String, _ request: @Sendable () async throws -> Void) async {
         requestErrors[id] = nil
         do {
-            _ = try await client.resolve(id, path: path, keep: keep)
+            try await request()
         } catch {
             requestErrors[id] = PairStore.message(for: error)
             return

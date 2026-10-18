@@ -1,5 +1,6 @@
 mod apply;
 mod archive;
+mod conflict;
 mod filter;
 mod identity;
 mod version;

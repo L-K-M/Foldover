@@ -28,13 +28,31 @@ pub struct SyncRun {
 }
 
 /// Keep one side's version of a conflict from the latest preview; the
-/// other is archived by the next run.
+/// other is archived by the next run. `Both` first saves the right side's
+/// version beside the entry, then keeps the left side's.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SyncResolve {
     pub id: String,
     pub path: Vec<u8>,
-    pub keep: super::PairSide,
+    pub keep: ConflictKeep,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConflictKeep {
+    Left,
+    Right,
+    Both,
+}
+
+impl From<foldover_types::Side> for ConflictKeep {
+    fn from(side: foldover_types::Side) -> Self {
+        match side {
+            foldover_types::Side::Left => Self::Left,
+            foldover_types::Side::Right => Self::Right,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

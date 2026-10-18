@@ -50,6 +50,8 @@ enum SyncCommand {
         side: Side,
         path: Vec<u8>,
     },
+    /// Save B's version of a both-changed conflict beside it; A's wins.
+    KeepBoth(Vec<u8>),
 }
 
 enum PairCommand {
@@ -147,7 +149,7 @@ async fn main() -> ExitCode {
         },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT | --keep-left PATH | --keep-right PATH] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH]] [--socket PATH]\n       foldover history ID [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT | --keep-left PATH | --keep-right PATH | --keep-both PATH] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH]] [--socket PATH]\n       foldover history ID [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -269,6 +271,9 @@ fn sync_command(args: &[OsString]) -> Option<SyncCommand> {
                 },
                 path: path.as_bytes().to_vec(),
             })
+        }
+        [flag, path] if flag == "--keep-both" => {
+            Some(SyncCommand::KeepBoth(path.as_bytes().to_vec()))
         }
         [flag, left, right] if flag == "--approve" => Some(SyncCommand::Run {
             left: count(left)?,
@@ -412,6 +417,7 @@ async fn sync(
         SyncCommand::Keep { side, path } => {
             foldover_client::resolve_conflict(location, id, &path, side).await?
         }
+        SyncCommand::KeepBoth(path) => foldover_client::keep_both(location, id, &path).await?,
     };
     while matches!(status, SyncStatus::Working { .. }) {
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -607,6 +613,10 @@ mod tests {
         assert!(matches!(
             req(&["sync", id, "--keep-right", "docs/a.txt"]),
             Request::Sync(_, _, SyncCommand::Keep { side: Side::Right, ref path }) if path == b"docs/a.txt"
+        ));
+        assert!(matches!(
+            req(&["sync", id, "--keep-both", "a.txt"]),
+            Request::Sync(_, _, SyncCommand::KeepBoth(ref path)) if path == b"a.txt"
         ));
         assert!(matches!(
             req(&["sync", id, "--approve", "60", "0"]),
