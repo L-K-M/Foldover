@@ -18,10 +18,10 @@ use foldover_endpoint::{
     ApplyError, Expected, InvalidRunName, LocalEndpoint, LocalPair, Observation, ObservedEntry,
     PairRootError, RunScope, ScanError,
 };
-use foldover_state::BaseUpdate;
+use foldover_state::{BaseUpdate, RecordedIdentities};
 use foldover_types::{
-    BaselineEntry, ChangeKind, ConflictKind, EntryDecision, EntryVersion, PairConfig, ScanControl,
-    Side, SyncPath,
+    BaselineEntry, ChangeKind, ConflictKind, EndpointId, EntryDecision, EntryVersion, PairConfig,
+    ScanControl, Side, SyncPath,
 };
 
 use crate::{
@@ -42,6 +42,17 @@ pub enum RunError {
         #[source]
         source: ScanError,
     },
+    #[error(
+        "The {side:?} folder is not the one this pair synced before: its identity file is missing \
+         or different. Reconnect the original disk, or change the pair to start over."
+    )]
+    IdentityChanged { side: Side },
+    #[error("Writing the {side:?} folder's identity failed: {source}")]
+    IdentityWrite {
+        side: Side,
+        #[source]
+        source: ApplyError,
+    },
     #[error(transparent)]
     Plan(#[from] PlanError),
     #[error(transparent)]
@@ -50,6 +61,17 @@ pub enum RunError {
     Commit(#[source] crate::Error),
     #[error("Run cancelled before planning finished")]
     Cancelled,
+}
+
+/// Durable progress a run hands to the state store, in order.
+#[derive(Clone, Copy, Debug)]
+pub enum Commit<'a> {
+    /// First run only, before any other write.
+    Identities {
+        left: EndpointId,
+        right: EndpointId,
+    },
+    Base(&'a [BaseUpdate]),
 }
 
 /// What the user saw and accepted in a preview.
@@ -199,6 +221,7 @@ pub enum RunOutcome {
 /// Both sides observed and planned, ready to preview or execute.
 pub struct PairRun {
     pair: PairConfig,
+    identities: RecordedIdentities,
     endpoints: LocalPair,
     left: Observation,
     right: Observation,
@@ -206,13 +229,28 @@ pub struct PairRun {
 }
 
 impl PairRun {
+    /// Recorded identities must match the roots' identity files; until the
+    /// first run records them, any folder is accepted.
     pub fn prepare(
         pair: PairConfig,
         base: &BTreeMap<SyncPath, BaselineEntry>,
+        identities: RecordedIdentities,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<Self, RunError> {
         let draft = pair.draft();
         let endpoints = LocalPair::open(draft.left(), draft.right())?;
+        for side in [Side::Left, Side::Right] {
+            let Some(recorded) = identities.side(side) else {
+                continue;
+            };
+            let observed = endpoints
+                .endpoint(side)
+                .identity()
+                .map_err(|source| RunError::Observe { side, source })?;
+            if observed != Some(recorded) {
+                return Err(RunError::IdentityChanged { side });
+            }
+        }
         let policy = draft.options().metadata();
         let observe = |side: Side, control: &mut dyn FnMut() -> ScanControl| {
             endpoints
@@ -238,6 +276,7 @@ impl PairRun {
         })?;
         Ok(Self {
             pair,
+            identities,
             endpoints,
             left,
             right,
@@ -279,14 +318,14 @@ impl PairRun {
         }
     }
 
-    /// Execute the plan. `commit` stores base updates for the planned pair
+    /// Execute the plan. `commit` stores progress for the planned pair
     /// revision and fails if the pair changed; the run then stops.
     pub fn execute(
         self,
         approval: Approval,
         context: RunContext,
         run_name: &str,
-        commit: &mut impl FnMut(u64, &[BaseUpdate]) -> Result<(), crate::Error>,
+        commit: &mut impl FnMut(u64, Commit<'_>) -> Result<(), crate::Error>,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<RunOutcome, RunError> {
         for side in [Side::Left, Side::Right] {
@@ -301,7 +340,24 @@ impl PairRun {
             }
         }
 
-        let scope = RunScope::new(run_name, self.pair.draft().options())?;
+        let revision = self.pair.revision();
+        let options = self.pair.draft().options();
+        if self.identities.side(Side::Left).is_none() || self.identities.side(Side::Right).is_none()
+        {
+            let ensure = |side: Side| {
+                self.endpoints
+                    .endpoint(side)
+                    .ensure_identity(options.durability())
+                    .map_err(|source| RunError::IdentityWrite { side, source })
+            };
+            let identities = Commit::Identities {
+                left: ensure(Side::Left)?,
+                right: ensure(Side::Right)?,
+            };
+            commit(revision, identities).map_err(RunError::Commit)?;
+        }
+
+        let scope = RunScope::new(run_name, options)?;
         let mut executor = Executor {
             run: &self,
             scope,
@@ -309,9 +365,9 @@ impl PairRun {
             pending: Vec::new(),
             failed: Vec::new(),
         };
-        let revision = self.pair.revision();
-        let mut commit =
-            |updates: &[BaseUpdate]| commit(revision, updates).map_err(RunError::Commit);
+        let mut commit = |updates: &[BaseUpdate]| {
+            commit(revision, Commit::Base(updates)).map_err(RunError::Commit)
+        };
 
         for side in [Side::Left, Side::Right] {
             let observation = self.observation(side);

@@ -3,8 +3,8 @@ use std::os::unix::ffi::OsStrExt;
 
 use foldover_db::{BaseChange, Database, PairRow, PairValues, StateLocation};
 use foldover_types::{
-    BaselineEntry, Durability, InvalidPair, LocalRoot, MetadataPolicy, PairConfig, PairDraft,
-    PairId, PairOptions, Propagation, Side, SyncMode, SyncPath,
+    BaselineEntry, Durability, EndpointId, InvalidPair, LocalRoot, MetadataPolicy, PairConfig,
+    PairDraft, PairId, PairOptions, Propagation, Side, SyncMode, SyncPath,
 };
 
 use crate::BaseUpdate;
@@ -104,6 +104,63 @@ impl PairStore {
         let current = self.pair(id)?.ok_or(Error::PairNotFound)?;
         self.database.remove_pair(id.as_bytes(), revision)?;
         Ok(current)
+    }
+}
+
+/// Endpoint identities recorded on a pair's first sync.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RecordedIdentities {
+    left: Option<EndpointId>,
+    right: Option<EndpointId>,
+}
+
+impl RecordedIdentities {
+    pub const fn new(left: Option<EndpointId>, right: Option<EndpointId>) -> Self {
+        Self { left, right }
+    }
+
+    pub fn side(self, side: Side) -> Option<EndpointId> {
+        match side {
+            Side::Left => self.left,
+            Side::Right => self.right,
+        }
+    }
+}
+
+impl PairStore {
+    pub fn identities(&self, id: PairId) -> Result<RecordedIdentities, Error> {
+        let decode = |bytes: Option<Vec<u8>>| {
+            bytes
+                .map(|bytes| {
+                    bytes
+                        .try_into()
+                        .map(EndpointId::from_bytes)
+                        .map_err(|_| Error::InvalidStored("endpoint identity"))
+                })
+                .transpose()
+        };
+        let row = self.database.identities(id.as_bytes())?;
+        Ok(RecordedIdentities::new(
+            decode(row.left)?,
+            decode(row.right)?,
+        ))
+    }
+
+    /// Record both identities, only while the pair keeps `revision`.
+    pub fn record_identities(
+        &mut self,
+        id: PairId,
+        revision: u64,
+        left: EndpointId,
+        right: EndpointId,
+    ) -> Result<(), Error> {
+        let revision = database_revision(revision)?;
+        Ok(self.database.record_identities(
+            id.as_bytes(),
+            revision,
+            left.as_bytes(),
+            right.as_bytes(),
+        )?)
     }
 }
 

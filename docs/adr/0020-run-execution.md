@@ -1,6 +1,6 @@
 # ADR 0020: Run execution
 
-Status: Engine implemented; agent API, endpoint identity gate and app pending
+Status: Engine and identity gate implemented; agent API and app pending
 
 ## Decision
 
@@ -14,6 +14,12 @@ execute: deletion gate ─▶ archive leftovers
          ─▶ base commits in batches of 256, each bound to the pair revision
 ```
 
+- **Identity:** the first run writes `.foldover/id` (a random 128-bit ID)
+  into each root, reusing one that exists, and records both before any
+  other write. Later runs stop before planning if either file is missing or
+  different. Otherwise an unmounted disk that leaves an empty folder at its
+  path would look like a mass deletion, and small trees fall below the
+  deletion limits. Changing a root forgets that side's identity.
 - **Gate:** per target, the plan's deletions are reviewed
   ([ADR 0013](0013-deletion-review-fuse.md)). Interactive runs above the
   limit need an `Approval` covering at least that many deletions; unattended
@@ -41,5 +47,5 @@ atomic exchange may still need one.
   re-gates, so approvals are counts, not references to a stored plan.
 - Configuration changes during a run stop it at the next commit; up to one
   batch of writes may already have used the previous configuration's roots.
-- Missing: endpoint identity checks (a different disk at the same path),
-  free-space checks, progress events and cancellation from clients.
+- Missing: free-space checks, progress events and cancellation from
+  clients. Read-only roots cannot receive an identity file and cannot sync.

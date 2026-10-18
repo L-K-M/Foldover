@@ -7,4 +7,4 @@ mod pairs;
 
 pub use base::BaseUpdate;
 pub use foldover_db::StateLocation;
-pub use pairs::{Error, PairStore};
+pub use pairs::{Error, PairStore, RecordedIdentities};

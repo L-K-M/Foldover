@@ -496,3 +496,31 @@ fn forks_always_copy_hidden_follows_attributes_and_locks_stay_behind() {
     }
     chflags("nouchg");
 }
+
+#[test]
+fn private_files_are_created_once_and_read_without_following_links() {
+    let roots = roots();
+    let id = path(b".foldover/id");
+    assert_eq!(roots.target.read_private_file(&id, 64).unwrap(), None);
+    roots
+        .target
+        .create_private_file(&id, b"one", STANDARD)
+        .unwrap();
+    assert!(matches!(
+        roots.target.create_private_file(&id, b"two", STANDARD),
+        Err(WriteError::Exists)
+    ));
+    assert_eq!(
+        roots.target.read_private_file(&id, 64).unwrap().unwrap(),
+        b"one"
+    );
+    assert!(roots.target.read_private_file(&id, 2).is_err());
+    let target = roots.target_directory.path();
+    assert_eq!(names(&target.join(".foldover")), [b"id".to_vec()]);
+
+    let elsewhere = tempfile::tempdir().unwrap();
+    fs::write(elsewhere.path().join("id"), b"outside").unwrap();
+    fs::remove_file(target.join(".foldover/id")).unwrap();
+    symlink(elsewhere.path().join("id"), target.join(".foldover/id")).unwrap();
+    assert!(roots.target.read_private_file(&id, 64).is_err());
+}

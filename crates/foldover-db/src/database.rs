@@ -17,7 +17,7 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 3] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3];
+const MIGRATIONS: [&str; 4] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -51,6 +51,11 @@ ALTER TABLE pair ADD COLUMN extended_attributes TEXT NOT NULL DEFAULT 'sync' CHE
 ALTER TABLE pair ADD COLUMN permissions TEXT NOT NULL DEFAULT 'ignore' CHECK(permissions IN ('sync','ignore'));
 ALTER TABLE pair ADD COLUMN durability TEXT NOT NULL DEFAULT 'standard' CHECK(durability IN ('standard','full'));
 ";
+// Endpoint identities recorded on a pair's first sync; unknown until then.
+const SCHEMA_V4: &str = "
+ALTER TABLE pair ADD COLUMN left_identity BLOB CHECK(left_identity IS NULL OR length(left_identity) = 16);
+ALTER TABLE pair ADD COLUMN right_identity BLOB CHECK(right_identity IS NULL OR length(right_identity) = 16);
+";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -74,6 +79,13 @@ pub enum Error {
     PairNotFound,
     #[error("Pair configuration changed; refresh before updating it")]
     StaleRevision,
+}
+
+/// Endpoint identity bytes, unknown until a pair's first sync.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct IdentityRow {
+    pub left: Option<Vec<u8>>,
+    pub right: Option<Vec<u8>>,
 }
 
 /// One stored base row. Version bytes are opaque to this driver.
@@ -307,7 +319,8 @@ impl Database {
             ],
         )?;
         let changed = transaction.execute(
-            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10 WHERE id=?1 AND revision=?2",
+            // A changed root is a different endpoint; forget its identity.
+            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,left_identity=CASE WHEN left_root=?4 THEN left_identity END,right_identity=CASE WHEN right_root=?5 THEN right_identity END WHERE id=?1 AND revision=?2",
             params![
                 id,
                 revision,
@@ -331,6 +344,45 @@ impl Database {
         )?;
         transaction.commit()?;
         Ok(row)
+    }
+
+    /// The pair's recorded endpoint identities.
+    pub fn identities(&self, pair: &[u8]) -> Result<IdentityRow, Error> {
+        self.connection
+            .query_row(
+                "SELECT left_identity,right_identity FROM pair WHERE id=?1",
+                [pair],
+                |row| {
+                    Ok(IdentityRow {
+                        left: row.get(0)?,
+                        right: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or(Error::PairNotFound)
+    }
+
+    /// Record identities, only while the pair keeps `revision`.
+    pub fn record_identities(
+        &mut self,
+        pair: &[u8],
+        revision: i64,
+        left: &[u8],
+        right: &[u8],
+    ) -> Result<(), Error> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if transaction.execute(
+            "UPDATE pair SET left_identity=?3,right_identity=?4 WHERE id=?1 AND revision=?2",
+            params![pair, revision, left, right],
+        )? == 0
+        {
+            return Err(revision_error(&transaction, pair)?);
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Every base row of a pair, ordered by raw path bytes.
@@ -972,5 +1024,53 @@ mod tests {
             })
             .count();
         assert_eq!(backups, 1);
+    }
+
+    #[test]
+    fn identities_are_revision_bound_and_forgotten_per_changed_root() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        assert_eq!(
+            database.identities(&pair.id).unwrap(),
+            IdentityRow::default()
+        );
+        assert!(matches!(
+            database.record_identities(&pair.id, 2, &[1; 16], &[2; 16]),
+            Err(Error::StaleRevision)
+        ));
+        assert!(
+            database
+                .record_identities(&pair.id, 1, &[1; 15], &[2; 16])
+                .is_err()
+        );
+        database
+            .record_identities(&pair.id, 1, &[1; 16], &[2; 16])
+            .unwrap();
+
+        let mut renamed = values();
+        renamed.name = "renamed".into();
+        database.update_pair(&pair.id, 1, &renamed).unwrap();
+        assert_eq!(
+            database.identities(&pair.id).unwrap(),
+            IdentityRow {
+                left: Some(vec![1; 16]),
+                right: Some(vec![2; 16])
+            }
+        );
+        let mut moved = renamed.clone();
+        moved.right_root = b"/elsewhere".to_vec();
+        database.update_pair(&pair.id, 2, &moved).unwrap();
+        assert_eq!(
+            database.identities(&pair.id).unwrap(),
+            IdentityRow {
+                left: Some(vec![1; 16]),
+                right: None
+            }
+        );
+        assert!(matches!(
+            database.identities(&[9; 16]),
+            Err(Error::PairNotFound)
+        ));
     }
 }

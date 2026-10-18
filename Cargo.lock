@@ -388,6 +388,7 @@ dependencies = [
  "rustix",
  "tempfile",
  "thiserror",
+ "uuid",
 ]
 
 [[package]]

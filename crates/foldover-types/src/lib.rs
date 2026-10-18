@@ -2,6 +2,7 @@
 //! by every crate; data only, so it can't become a catch-all. May be
 //! used anywhere and depends on no other Foldover crate. See PLAN.md §4.4.
 
+mod endpoint_id;
 mod metadata_policy;
 mod options;
 mod pair;
@@ -13,6 +14,7 @@ pub use pair::{
     PairId,
 };
 
+pub use endpoint_id::EndpointId;
 pub use metadata_policy::{MetadataPolicy, Propagation};
 pub use options::{Durability, PairOptions};
 

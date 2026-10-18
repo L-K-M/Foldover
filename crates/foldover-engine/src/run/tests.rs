@@ -12,6 +12,7 @@ struct Fixture {
     mode: SyncMode,
     revision: u64,
     base: BTreeMap<SyncPath, BaselineEntry>,
+    identities: RecordedIdentities,
 }
 
 fn fixture(mode: SyncMode) -> Fixture {
@@ -21,6 +22,7 @@ fn fixture(mode: SyncMode) -> Fixture {
         mode,
         revision: 1,
         base: BTreeMap::new(),
+        identities: RecordedIdentities::default(),
     }
 }
 
@@ -38,6 +40,10 @@ fn path(bytes: &[u8]) -> SyncPath {
 
 impl Fixture {
     fn prepare(&self) -> PairRun {
+        self.try_prepare().unwrap()
+    }
+
+    fn try_prepare(&self) -> Result<PairRun, RunError> {
         let draft = PairDraft::new(
             "pair".into(),
             root(self.left.path()),
@@ -48,7 +54,7 @@ impl Fixture {
         let pair =
             PairConfig::from_stored(PairId::from_bytes([1; 16]).unwrap(), self.revision, draft)
                 .unwrap();
-        PairRun::prepare(pair, &self.base, &mut proceed).unwrap()
+        PairRun::prepare(pair, &self.base, self.identities, &mut proceed)
     }
 
     /// Run with an in-memory base that applies commits like the state store.
@@ -56,15 +62,23 @@ impl Fixture {
         let prepared = self.prepare();
         let revision = self.revision;
         let base = &mut self.base;
+        let identities = &mut self.identities;
         prepared
             .execute(
                 approval,
                 context,
                 "run",
-                &mut |planned, updates| {
+                &mut |planned, commit| {
                     if planned != revision {
                         return Err(crate::Error::StaleRevision);
                     }
+                    let updates = match commit {
+                        Commit::Identities { left, right } => {
+                            *identities = RecordedIdentities::new(Some(left), Some(right));
+                            return Ok(());
+                        }
+                        Commit::Base(updates) => updates,
+                    };
                     for update in updates {
                         match update {
                             BaseUpdate::Record(path, entry) => {
@@ -189,7 +203,8 @@ fn mass_deletions_need_approval_and_unattended_runs_stop() {
         panic!("expected an approval request");
     };
     assert_eq!(preview.deletions(Side::Left).deletions(), 60);
-    assert_eq!(fs::read_dir(pair.left.path()).unwrap().count(), 60);
+    // Every file plus the identity folder survives the refused run.
+    assert_eq!(fs::read_dir(pair.left.path()).unwrap().count(), 61);
     assert!(matches!(
         pair.run(Approval::new(60, 0), RunContext::Unattended),
         RunOutcome::NeedsApproval(_)
@@ -268,10 +283,12 @@ fn failed_folders_skip_their_contents_and_later_runs_recover_leftovers() {
             Approval::default(),
             RunContext::Interactive,
             "run",
-            &mut |_, updates| {
-                for update in updates {
-                    if let BaseUpdate::Record(path, entry) = update {
-                        base.insert(path.clone(), *entry);
+            &mut |_, commit| {
+                if let Commit::Base(updates) = commit {
+                    for update in updates {
+                        if let BaseUpdate::Record(path, entry) = update {
+                            base.insert(path.clone(), *entry);
+                        }
                     }
                 }
                 Ok(())
@@ -303,4 +320,29 @@ fn failed_folders_skip_their_contents_and_later_runs_recover_leftovers() {
         .unwrap(),
         b"displaced"
     );
+}
+
+#[test]
+fn a_replaced_folder_at_the_same_path_stops_before_any_change() {
+    let mut pair = fixture(SyncMode::Sync);
+    for index in 0..3 {
+        fs::write(pair.left.path().join(format!("{index}")), b"x").unwrap();
+    }
+    pair.sync();
+    assert!(pair.identities.side(Side::Left).is_some());
+    assert!(pair.identities.side(Side::Right).is_some());
+
+    // An unmounted disk can leave an empty folder at the same path.
+    let original = pair.right.path().with_extension("original");
+    fs::rename(pair.right.path(), &original).unwrap();
+    fs::create_dir(pair.right.path()).unwrap();
+    assert!(matches!(
+        pair.try_prepare(),
+        Err(RunError::IdentityChanged { side: Side::Right })
+    ));
+    assert_eq!(fs::read_dir(pair.left.path()).unwrap().count(), 4);
+
+    fs::remove_dir(pair.right.path()).unwrap();
+    fs::rename(&original, pair.right.path()).unwrap();
+    assert!(pair.prepare().preview().items().is_empty());
 }

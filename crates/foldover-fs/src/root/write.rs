@@ -13,7 +13,7 @@
 
 use std::ffi::OsStr;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -383,6 +383,65 @@ impl Root {
         sync_directory(&archive, durability)?;
         sync_directory(parent, durability)?;
         Ok(())
+    }
+
+    /// Write a small private file that must not exist yet, creating private
+    /// parents. The content appears complete or not at all.
+    pub fn create_private_file(
+        &self,
+        path: &SyncPath,
+        content: &[u8],
+        durability: Durability,
+    ) -> Result<(), WriteError> {
+        let (parent, name) = self.create_parents(path)?;
+        let (mut staged, mut file) = create_temporary_file(parent, PRIVATE_FILE_MODE)?;
+        file.write_all(content)?;
+        flush(&file, durability)?;
+        match rustix::fs::renameat_with(
+            &staged.parent,
+            &staged.name,
+            &staged.parent,
+            &name,
+            RenameFlags::NOREPLACE,
+        ) {
+            Ok(()) => {}
+            Err(Errno::EXIST) => return Err(WriteError::Exists),
+            Err(error) => return Err(error.into()),
+        }
+        staged.placed = true;
+        sync_directory(&staged.parent, durability)?;
+        Ok(())
+    }
+
+    /// Read a small regular file without following links; `None` if absent.
+    pub fn read_private_file(&self, path: &SyncPath, limit: u64) -> io::Result<Option<Vec<u8>>> {
+        let (parent, name) = match self.parent_of(path) {
+            Ok(found) => found,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let file =
+            match rustix::fs::openat(&parent, &name, open_flags(NodeKind::File), Mode::empty()) {
+                Ok(file) => File::from(file),
+                Err(Errno::NOENT) => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
+        let metadata = EntryMetadata::from_file(&file)?;
+        if metadata.kind() != NodeKind::File || metadata.size() > limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Expected a small regular file",
+            ));
+        }
+        let mut content = Vec::new();
+        file.take(limit + 1).read_to_end(&mut content)?;
+        if content.len() as u64 > limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "File grew while reading",
+            ));
+        }
+        Ok(Some(content))
     }
 
     /// Open `path`'s parent, creating missing private directories without

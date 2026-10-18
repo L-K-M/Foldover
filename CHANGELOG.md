@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Folder identity check: the first sync writes `.foldover/id` into both
+  folders, and later runs stop if either is missing or different, such as an
+  empty folder left at the path of an unmounted disk.
 - Sync runs in the engine: observe, plan, gate deletions, copy and archive in
   safe order, and commit the base in revision-bound batches; previews list
   every change, conflict and blocked path.

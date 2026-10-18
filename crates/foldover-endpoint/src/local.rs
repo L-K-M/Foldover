@@ -1,4 +1,5 @@
 mod apply;
+mod identity;
 mod version;
 
 use std::collections::BTreeMap;
@@ -54,6 +55,8 @@ pub enum ScanError {
     ProtectedPath(SyncPath),
     #[error("Dataless entry cannot form a complete scan: {0:?}")]
     Dataless(Option<SyncPath>),
+    #[error("The folder's .foldover/id file is not a Foldover identity")]
+    InvalidIdentity,
     #[error("Extended metadata is unavailable at {path:?}: {source}")]
     Metadata {
         path: Option<SyncPath>,

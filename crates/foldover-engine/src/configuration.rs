@@ -4,8 +4,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use foldover_endpoint::{LocalEndpoint, LocalPair, PairRootError, RootRelation, ScanError};
-use foldover_state::{BaseUpdate, PairStore, StateLocation};
+use foldover_state::{PairStore, RecordedIdentities, StateLocation};
 use foldover_types::{BaselineEntry, PairConfig, PairDraft, PairId, Side, SyncPath};
+
+use crate::Commit;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -107,24 +109,38 @@ impl Engine {
         Ok(self.pairs.update(id, revision, draft)?)
     }
 
-    /// The pair and its base, for a run that works outside the engine lock.
+    /// The pair, its base and recorded identities, for a run that works
+    /// outside the engine lock.
     pub fn run_inputs(
         &self,
         id: PairId,
-    ) -> Result<(PairConfig, BTreeMap<SyncPath, BaselineEntry>), Error> {
+    ) -> Result<
+        (
+            PairConfig,
+            BTreeMap<SyncPath, BaselineEntry>,
+            RecordedIdentities,
+        ),
+        Error,
+    > {
         let pair = self.pair(id)?;
         let base = self.pairs.base(id)?;
-        Ok((pair, base))
+        let identities = self.pairs.identities(id)?;
+        Ok((pair, base, identities))
     }
 
-    /// Store a run's base updates, only while the pair keeps `revision`.
-    pub fn commit_base(
+    /// Store a run's progress, only while the pair keeps `revision`.
+    pub fn commit_run(
         &mut self,
         id: PairId,
         revision: u64,
-        updates: &[BaseUpdate],
+        commit: Commit<'_>,
     ) -> Result<(), Error> {
-        Ok(self.pairs.update_base(id, revision, updates)?)
+        match commit {
+            Commit::Identities { left, right } => {
+                Ok(self.pairs.record_identities(id, revision, left, right)?)
+            }
+            Commit::Base(updates) => Ok(self.pairs.update_base(id, revision, updates)?),
+        }
     }
 
     pub fn remove_pair(&mut self, id: PairId, revision: u64) -> Result<PairConfig, Error> {
