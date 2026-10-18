@@ -24,17 +24,17 @@ func openAtLoginFollowsTheSystemAndReportsRefusals() {
     let viewModel = SettingsViewModel(store: store)
     #expect(!viewModel.opensAtLogin)
 
-    viewModel.setOpensAtLogin(true)
+    viewModel.setLoginLaunch(.open)
     #expect(viewModel.opensAtLogin)
     #expect(viewModel.loginNote.contains("Login Items"))
 
     loginItem.status = .enabled
     viewModel.refresh()
-    viewModel.setOpensAtLogin(false)
+    viewModel.setLoginLaunch(.stayClosed)
     #expect(!viewModel.opensAtLogin)
 
     loginItem.refuses = true
-    viewModel.setOpensAtLogin(true)
+    viewModel.setLoginLaunch(.open)
     #expect(!viewModel.opensAtLogin)
     #expect(viewModel.error != nil)
 }

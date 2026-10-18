@@ -18,8 +18,8 @@ struct SettingsViewModel {
 
     var error: String? { store.error }
 
-    func setOpensAtLogin(_ opens: Bool) {
-        store.setLoginLaunch(opens ? .open : .stayClosed)
+    func setLoginLaunch(_ launch: LoginLaunch) {
+        store.setLoginLaunch(launch)
     }
 
     func refresh() { store.refresh() }

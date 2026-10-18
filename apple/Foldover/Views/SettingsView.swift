@@ -7,7 +7,8 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Toggle("Open Foldover at login", isOn: Binding(
-                get: { viewModel.opensAtLogin }, set: { viewModel.setOpensAtLogin($0) }
+                get: { viewModel.opensAtLogin },
+                set: { opens in viewModel.setLoginLaunch(opens ? .open : .stayClosed) }
             ))
             Text(viewModel.loginNote).font(.callout).foregroundStyle(.secondary)
             if let error = viewModel.error {
