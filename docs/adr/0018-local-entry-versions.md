@@ -57,6 +57,10 @@ Never synced:
   open), `com.apple.macl` (per-Mac app access grants), `com.apple.provenance`
   (set by macOS for files from downloaded apps) and `com.apple.rootless`.
 
+`EntryMetadata::attribute_role` in the driver classifies xattrs; versions
+and writes ([ADR 0019](0019-local-write-primitives.md)) share it. On Linux
+only `user.` xattrs are synced.
+
 Linux symlinks report no extended metadata, because their xattrs cannot be
 read through a held descriptor. This is a distinct digest input, not an
 empty attribute list.

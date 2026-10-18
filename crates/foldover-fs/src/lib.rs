@@ -33,6 +33,7 @@ fn prevent_materialization() -> std::io::Result<()> {
 
 #[cfg(unix)]
 pub use root::{
-    AccessControl, DataResidency, DirectoryEntry, DirectoryScope, EntryMetadata, ExtendedAttribute,
-    ExtendedMetadata, FileIdentity, HashError, MetadataReadError, NodeKind, Root, RootRelation,
+    AccessControl, AttributeRole, DataResidency, DirectoryEntry, DirectoryScope, Displaced,
+    EntryMetadata, ExtendedAttribute, ExtendedMetadata, FileIdentity, HashError, MetadataReadError,
+    NodeKind, Placement, Root, RootRelation, Staged, StagedFile, WriteError,
 };

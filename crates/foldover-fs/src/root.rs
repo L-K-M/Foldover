@@ -18,7 +18,12 @@ mod content;
 pub use content::HashError;
 
 mod extended;
-pub use extended::{AccessControl, ExtendedAttribute, ExtendedMetadata, MetadataReadError};
+pub use extended::{
+    AccessControl, AttributeRole, ExtendedAttribute, ExtendedMetadata, MetadataReadError,
+};
+
+mod write;
+pub use write::{Displaced, Placement, Staged, StagedFile, WriteError};
 
 const MAX_ROOT_ANCESTORS: usize = 4096;
 // Darwin sys/stat.h defines this synthetic, read-only flag; libc omits it.

@@ -14,7 +14,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use foldover_fs::{AccessControl, NodeKind};
+use foldover_fs::{AccessControl, AttributeRole, NodeKind};
 use foldover_types::{Digest, EntryContent, EntryVersion, MetadataPolicy, Propagation};
 
 // Domain separation keeps content, link and metadata digests distinct from
@@ -22,18 +22,6 @@ use foldover_types::{Digest, EntryContent, EntryVersion, MetadataPolicy, Propaga
 const FILE_CONTEXT: &str = "ch.lkmc.foldover 2026-10-18 local file content v1";
 const LINK_CONTEXT: &str = "ch.lkmc.foldover 2026-10-18 local symlink target v1";
 const METADATA_CONTEXT: &str = "ch.lkmc.foldover 2026-10-18 local entry metadata v1";
-
-/// Part of file content, so metadata-only conflict policy cannot drop fork edits.
-const RESOURCE_FORK: &[u8] = b"com.apple.ResourceFork";
-/// Compression storage. Decompressed reads already cover the data.
-const COMPRESSION: &[u8] = b"com.apple.decmpfs";
-/// Maintained by macOS per Mac or per access; never user content.
-const SYSTEM_MANAGED: &[&[u8]] = &[
-    b"com.apple.lastuseddate#PS",
-    b"com.apple.macl",
-    b"com.apple.provenance",
-    b"com.apple.rootless",
-];
 
 const PERMISSION_BITS: u32 = 0o7777;
 const EXECUTE_BITS: u32 = 0o111;
@@ -46,6 +34,7 @@ pub(super) enum Payload<'a> {
 
 #[derive(Clone, Copy)]
 pub(super) struct Attribute<'a> {
+    pub(super) role: AttributeRole,
     pub(super) name: &'a [u8],
     pub(super) size: u64,
     pub(super) digest: Digest,
@@ -58,7 +47,6 @@ pub(super) struct Observed<'a> {
     pub(super) permissions: u32,
     pub(super) modified: SystemTime,
     pub(super) user_flags: Option<u32>,
-    pub(super) compressed: bool,
     pub(super) attributes: Option<Vec<Attribute<'a>>>,
     pub(super) access_control: Option<&'a AccessControl>,
 }
@@ -69,12 +57,11 @@ pub(super) fn entry_version(
     policy: MetadataPolicy,
 ) -> EntryVersion {
     let attributes = observed.attributes.as_deref().unwrap_or_default();
-    let fork = match payload {
-        Payload::File(_) if !observed.compressed => attributes
-            .iter()
-            .find(|attribute| attribute.name == RESOURCE_FORK),
-        _ => None,
-    };
+    // The driver gives the resource-fork role only to uncompressed files.
+    // Fork edits are content, so metadata-only conflict policy cannot drop them.
+    let fork = attributes
+        .iter()
+        .find(|attribute| attribute.role == AttributeRole::ResourceFork);
     let content = match payload {
         Payload::File(data) => EntryContent::File(file_content(data, fork)),
         Payload::Directory => EntryContent::Directory,
@@ -152,7 +139,7 @@ fn metadata_digest(observed: &Observed<'_>, policy: MetadataPolicy) -> Digest {
         Some(attributes) => {
             let tracked: Vec<_> = attributes
                 .iter()
-                .filter(|attribute| tracked_attribute(observed, attribute.name))
+                .filter(|attribute| attribute.role == AttributeRole::Synced)
                 .collect();
             hasher.update(&[1]);
             hasher.update(&(tracked.len() as u64).to_le_bytes());
@@ -176,17 +163,6 @@ fn update_access_control(hasher: &mut blake3::Hasher, access_control: Option<&Ac
             .update(&(acl.len() as u64).to_le_bytes())
             .update(acl),
     };
-}
-
-fn tracked_attribute(observed: &Observed<'_>, name: &[u8]) -> bool {
-    if SYSTEM_MANAGED.contains(&name) {
-        return false;
-    }
-    if observed.compressed && (name == COMPRESSION || name == RESOURCE_FORK) {
-        return false;
-    }
-    // A file's fork is content; elsewhere it is ordinary metadata.
-    !(observed.kind == NodeKind::File && name == RESOURCE_FORK)
 }
 
 /// Seconds and nanoseconds with an explicit sign, so pre-1970 times stay exact.
@@ -217,8 +193,12 @@ mod tests {
         Digest::from_bytes([byte; Digest::BYTE_LEN])
     }
 
-    fn attribute(name: &[u8], byte: u8) -> Attribute<'_> {
+    const FORK: &[u8] = b"com.apple.ResourceFork";
+    const TAGS: &[u8] = b"com.apple.metadata:_kMDItemUserTags";
+
+    fn attribute(role: AttributeRole, name: &[u8], byte: u8) -> Attribute<'_> {
         Attribute {
+            role,
             name,
             size: 1,
             digest: digest(byte),
@@ -231,7 +211,6 @@ mod tests {
             permissions: 0o100_644,
             modified: UNIX_EPOCH + Duration::from_secs(1_000),
             user_flags: Some(0),
-            compressed: false,
             attributes: Some(attributes),
             access_control: None,
         }
@@ -244,12 +223,9 @@ mod tests {
     #[test]
     fn resource_forks_are_content_but_other_xattrs_are_metadata() {
         let plain = version(&file(vec![]));
-        let fork = version(&file(vec![attribute(RESOURCE_FORK, 2)]));
-        let edited_fork = version(&file(vec![attribute(RESOURCE_FORK, 3)]));
-        let tagged = version(&file(vec![attribute(
-            b"com.apple.metadata:_kMDItemUserTags",
-            2,
-        )]));
+        let fork = version(&file(vec![attribute(AttributeRole::ResourceFork, FORK, 2)]));
+        let edited_fork = version(&file(vec![attribute(AttributeRole::ResourceFork, FORK, 3)]));
+        let tagged = version(&file(vec![attribute(AttributeRole::Synced, TAGS, 2)]));
 
         assert_ne!(plain.content(), fork.content());
         assert_ne!(fork.content(), edited_fork.content());
@@ -260,15 +236,13 @@ mod tests {
     }
 
     #[test]
-    fn compression_storage_and_system_attributes_do_not_change_versions() {
+    fn only_synced_attributes_change_metadata() {
         let plain = version(&file(vec![]));
-        let mut compressed = file(vec![attribute(COMPRESSION, 2), attribute(RESOURCE_FORK, 3)]);
-        compressed.compressed = true;
-        assert_eq!(version(&compressed), plain);
-
-        for name in SYSTEM_MANAGED {
-            assert_eq!(version(&file(vec![attribute(name, 4)])), plain);
-        }
+        let ignored = file(vec![
+            attribute(AttributeRole::CompressionStorage, FORK, 3),
+            attribute(AttributeRole::SystemManaged, b"com.apple.macl", 4),
+        ]);
+        assert_eq!(version(&ignored), plain);
     }
 
     #[test]
@@ -369,7 +343,7 @@ mod tests {
         executable.permissions = 0o100_744;
         let mut touched = file(vec![]);
         touched.modified += Duration::from_secs(1);
-        let tagged = file(vec![attribute(b"com.apple.metadata:_kMDItemUserTags", 2)]);
+        let tagged = file(vec![attribute(AttributeRole::Synced, TAGS, 2)]);
         let mut hidden = file(vec![]);
         hidden.user_flags = Some(0x8000);
         for changed in [executable, touched, tagged, hidden] {
@@ -388,14 +362,17 @@ mod tests {
 
         let mut touched = file(vec![]);
         touched.modified += Duration::from_secs(1);
-        let tagged = file(vec![attribute(b"com.apple.metadata:_kMDItemUserTags", 2)]);
+        let tagged = file(vec![attribute(AttributeRole::Synced, TAGS, 2)]);
         let mut hidden = file(vec![]);
         hidden.user_flags = Some(0x8000);
         for unchanged in [touched, tagged, hidden] {
             assert_eq!(with(&unchanged, nothing), plain);
         }
 
-        let forked = with(&file(vec![attribute(RESOURCE_FORK, 2)]), nothing);
+        let forked = with(
+            &file(vec![attribute(AttributeRole::ResourceFork, FORK, 2)]),
+            nothing,
+        );
         assert_ne!(forked.content(), plain.content());
         assert_eq!(forked.metadata(), plain.metadata());
     }

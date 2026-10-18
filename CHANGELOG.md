@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Local write primitives: staged copies placed by atomic no-replace or
+  exchange renames, archive-by-rename, metadata applied per pair policy and
+  durability; nothing is unlinked except empty folders and unplaced copies.
 - Per-pair options in the app, CLI and agent API: sync modification times,
   extended attributes and permissions independently, and choose standard or
   power-loss-safe durability. IPC protocol version 3.

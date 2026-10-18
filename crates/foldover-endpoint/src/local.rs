@@ -359,12 +359,12 @@ impl LocalEndpoint {
             permissions: entry.metadata.permissions(),
             modified: entry.metadata.modified(),
             user_flags: entry.metadata.user_flags(),
-            compressed: entry.metadata.is_compressed(),
             attributes: extended.as_ref().map(|extended| {
                 extended
                     .attributes()
                     .iter()
                     .map(|attribute| Attribute {
+                        role: entry.metadata.attribute_role(attribute.name()),
                         name: attribute.name(),
                         size: attribute.size(),
                         digest: attribute.digest(),

@@ -14,8 +14,9 @@ pub use local::{LocalEndpoint, LocalEntry, ScanControl, ScanError, ScanStats};
 
 #[cfg(unix)]
 pub use foldover_fs::{
-    AccessControl, DeclaredSupport, EntryMetadata, ExtendedAttribute, ExtendedMetadata,
-    FileIdentity, FilesystemFeature, FilesystemFeatures, MetadataReadError, NodeKind, RootRelation,
+    AccessControl, AttributeRole, DeclaredSupport, EntryMetadata, ExtendedAttribute,
+    ExtendedMetadata, FileIdentity, FilesystemFeature, FilesystemFeatures, MetadataReadError,
+    NodeKind, RootRelation,
 };
 
 #[cfg(unix)]
