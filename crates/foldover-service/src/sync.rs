@@ -76,16 +76,16 @@ struct Job {
 #[derive(Default)]
 struct State {
     jobs: HashMap<PairId, Job>,
-    /// Pairs whose configuration is being deleted refuse new job claims.
-    removing: HashSet<PairId>,
+    /// Pairs whose configuration is being replaced refuse new job claims.
+    mutating: HashSet<PairId>,
 }
 
 #[derive(Default)]
 pub(crate) struct Jobs {
     state: Mutex<State>,
-    /// Test-only rendezvous inside a pair removal.
+    /// Test-only rendezvous inside a mutating pair command.
     #[cfg(test)]
-    remove_gate: Mutex<Option<(Sender<()>, Receiver<()>)>>,
+    mutation_gate: Mutex<Option<(Sender<()>, Receiver<()>)>>,
 }
 
 impl Jobs {
@@ -188,24 +188,24 @@ impl Jobs {
             );
     }
 
-    /// Park the next pair removal between its busy check and the delete.
-    /// Returns a reached receiver and a release sender for the test.
+    /// Park the next mutating pair command between its busy check and the
+    /// engine write. Returns a reached receiver and a release sender.
     #[cfg(test)]
-    pub(crate) fn gate_removal(&self) -> (Receiver<()>, Sender<()>) {
+    pub(crate) fn gate_mutation(&self) -> (Receiver<()>, Sender<()>) {
         let (reached, reached_rx) = std::sync::mpsc::channel();
         let (release_tx, release) = std::sync::mpsc::channel();
         *self
-            .remove_gate
+            .mutation_gate
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some((reached, release));
         (reached_rx, release_tx)
     }
 
-    /// Wait on the rendezvous armed by `gate_removal`, if any.
+    /// Wait on the rendezvous armed by `gate_mutation`, if any.
     #[cfg(test)]
-    pub(crate) fn wait_remove_gate(&self) {
+    pub(crate) fn wait_mutation_gate(&self) {
         let gate = self
-            .remove_gate
+            .mutation_gate
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
@@ -215,13 +215,13 @@ impl Jobs {
         }
     }
 
-    /// Reserve the pair for configuration removal while no job runs. New
-    /// claims are refused until the returned guard drops; the reservation
-    /// is made under the same lock as `claim`, so a job cannot start
-    /// between the busy check and the delete that follows it.
-    pub(crate) fn removal(self: &Arc<Self>, id: PairId) -> Result<Removal, RpcError> {
+    /// Reserve the pair for a configuration change (update or removal)
+    /// while no job runs. New claims are refused until the returned guard
+    /// drops; the reservation is made under the same lock as `claim`, so a
+    /// job cannot start between the busy check and the write that follows.
+    pub(crate) fn mutation(self: &Arc<Self>, id: PairId) -> Result<Mutation, RpcError> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if state.removing.contains(&id)
+        if state.mutating.contains(&id)
             || matches!(
                 state.jobs.get(&id).map(|job| &job.status),
                 Some(SyncStatus::Working { .. })
@@ -232,8 +232,8 @@ impl Jobs {
                 "Wait for the current preview or sync to finish",
             ));
         }
-        state.removing.insert(id);
-        Ok(Removal {
+        state.mutating.insert(id);
+        Ok(Mutation {
             jobs: Arc::clone(self),
             id,
         })
@@ -244,8 +244,8 @@ impl Jobs {
     /// stays stopped until a manual preview or sync releases the pair.
     fn claim(&self, id: PairId, work: Work, cancel: &Arc<AtomicBool>) -> Result<(), RpcError> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let blocked = if state.removing.contains(&id) {
-            Some("The pair is being removed")
+        let blocked = if state.mutating.contains(&id) {
+            Some("The pair's configuration is changing")
         } else {
             match state.jobs.get(&id).map(|job| &job.status) {
                 Some(SyncStatus::Working { .. }) => {
@@ -307,19 +307,19 @@ impl Jobs {
     }
 }
 
-/// Holds a pair's removal reservation; dropping allows job claims again.
-pub(crate) struct Removal {
+/// Holds a pair's mutation reservation; dropping allows job claims again.
+pub(crate) struct Mutation {
     jobs: Arc<Jobs>,
     id: PairId,
 }
 
-impl Drop for Removal {
+impl Drop for Mutation {
     fn drop(&mut self) {
         self.jobs
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .removing
+            .mutating
             .remove(&self.id);
     }
 }

@@ -86,13 +86,13 @@ impl Service {
             let _permit = permit;
             // The reservation and the busy check are one lock acquisition,
             // so a job cannot start in between; the guard outlives the
-            // delete below. The jobs lock itself is never held across the
+            // write below. The jobs lock itself is never held across the
             // engine lock, keeping the two lock orders disjoint.
-            let _removal = if let Command::Remove { id, .. } = &command {
-                let removal = jobs.removal(*id)?;
+            let _mutation = if let Some(id) = command.mutation_target() {
+                let mutation = jobs.mutation(id)?;
                 #[cfg(test)]
-                jobs.wait_remove_gate();
-                Some(removal)
+                jobs.wait_mutation_gate();
+                Some(mutation)
             } else {
                 None
             };
@@ -203,6 +203,14 @@ impl Command {
                 })
             }
             _ => Err(RpcError::new(METHOD_NOT_FOUND, "Method not found")),
+        }
+    }
+
+    /// The existing pair whose configuration this command replaces.
+    fn mutation_target(&self) -> Option<PairId> {
+        match self {
+            Self::Update { id, .. } | Self::Remove { id, .. } => Some(*id),
+            Self::List(_) | Self::Get(_) | Self::Create(_) => None,
         }
     }
 
@@ -1126,7 +1134,7 @@ mod tests {
             .await
             .unwrap();
         fs::write(directory.path().join("Docs-left/file"), b"data").unwrap();
-        let (reached, release) = service.jobs.gate_removal();
+        let (reached, release) = service.jobs.gate_mutation();
         let removing = service.clone();
         let id = pair["id"].clone();
         let remover = tokio::spawn(async move {
@@ -1164,6 +1172,115 @@ mod tests {
                 .unwrap_err()
                 .code(),
             PAIR_NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pair_with_a_running_job_cannot_be_updated() {
+        let (directory, service) = fixture();
+        let input = input(directory.path(), "Docs");
+        let pair = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input.clone())))
+            .await
+            .unwrap();
+        let id: PairId = pair["id"].as_str().unwrap().parse().unwrap();
+        let mut renamed = input.clone();
+        renamed["name"] = json!("Renamed");
+        let update = || {
+            Request::call(
+                2,
+                PAIR_UPDATE,
+                Some(
+                    json!({"id": pair["id"], "revision": pair["revision"], "configuration": renamed.clone()}),
+                ),
+            )
+        };
+
+        service.jobs.force_status(
+            id,
+            SyncStatus::Working {
+                job: SyncJob::Run,
+                cancelling: false,
+            },
+        );
+        assert_eq!(
+            service.handle(update()).await.unwrap_err().code(),
+            foldover_proto::local::SYNC_BUSY
+        );
+        // The rejected update changed nothing.
+        assert_eq!(
+            service
+                .handle(Request::call(3, PAIR_GET, Some(json!({"id": pair["id"]}))))
+                .await
+                .unwrap()["configuration"]["name"],
+            "Docs"
+        );
+
+        service.jobs.force_status(
+            id,
+            SyncStatus::Failed {
+                message: "read error".into(),
+            },
+        );
+        assert_eq!(
+            service.handle(update()).await.unwrap()["configuration"]["name"],
+            "Renamed"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_update_in_progress_rejects_new_job_claims() {
+        let (directory, service) = fixture();
+        let input = input(directory.path(), "Docs");
+        let pair = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input.clone())))
+            .await
+            .unwrap();
+        fs::write(directory.path().join("Docs-left/file"), b"data").unwrap();
+        let mut renamed = input.clone();
+        renamed["name"] = json!("Renamed");
+        let (reached, release) = service.jobs.gate_mutation();
+        let updating = service.clone();
+        let id = pair["id"].clone();
+        let updater = tokio::spawn(async move {
+            updating
+                .handle(Request::call(
+                    2,
+                    PAIR_UPDATE,
+                    Some(json!({"id": id, "revision": 1, "configuration": renamed})),
+                ))
+                .await
+        });
+        // The update waits before its engine write.
+        tokio::task::spawn_blocking(move || reached.recv().unwrap())
+            .await
+            .unwrap();
+        // A claim landing in that window must not win.
+        let attempt = service
+            .handle(Request::call(
+                3,
+                SYNC_PREVIEW,
+                Some(json!({"id": pair["id"]})),
+            ))
+            .await;
+        release.send(()).unwrap();
+        let updated = updater.await.unwrap();
+        assert_eq!(
+            attempt.unwrap_err().code(),
+            foldover_proto::local::SYNC_BUSY
+        );
+        updated.unwrap();
+        // With the mutation done, the pair takes jobs again.
+        assert_eq!(
+            service
+                .handle(Request::call(
+                    4,
+                    SYNC_PREVIEW,
+                    Some(json!({"id": pair["id"]})),
+                ))
+                .await
+                .unwrap()["state"],
+            "working"
         );
     }
 }
