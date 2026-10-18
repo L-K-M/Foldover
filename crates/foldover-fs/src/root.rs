@@ -12,7 +12,7 @@ use foldover_types::SyncPath;
 use nix::fcntl::AtFlags;
 use nix::sys::stat::{FileStat, SFlag, fstat, fstatat};
 
-use crate::prevent_materialization;
+use crate::{FilesystemFeatures, prevent_materialization};
 
 mod content;
 pub use content::HashError;
@@ -322,6 +322,20 @@ impl Root {
         #[cfg(not(target_os = "macos"))]
         {
             Ok(None)
+        }
+    }
+
+    /// Read the held volume's declarations. Missing declarations are unknown;
+    /// this does not test copy/rename fidelity or authorize filesystem writes.
+    pub fn filesystem_features(&self) -> io::Result<FilesystemFeatures> {
+        prevent_materialization()?;
+        #[cfg(target_os = "macos")]
+        {
+            self.inspect_volume(crate::volume::filesystem_features)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(FilesystemFeatures::default())
         }
     }
 
@@ -645,6 +659,17 @@ mod tests {
         assert_eq!(
             held.relation_to(&replacement).unwrap(),
             RootRelation::Disjoint
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn an_unimplemented_volume_probe_keeps_all_features_unreported() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = Root::open(temporary.path()).unwrap();
+        assert_eq!(
+            root.filesystem_features().unwrap(),
+            FilesystemFeatures::default()
         );
     }
 

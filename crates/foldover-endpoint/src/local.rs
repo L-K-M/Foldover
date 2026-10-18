@@ -3,7 +3,7 @@ use std::path::Path;
 
 use foldover_fs::{
     DataResidency, DirectoryEntry, DirectoryScope, EntryMetadata, ExtendedMetadata, FileIdentity,
-    HashError, MetadataReadError, NodeKind, Root, RootRelation,
+    FilesystemFeatures, HashError, MetadataReadError, NodeKind, Root, RootRelation,
 };
 pub use foldover_types::ScanControl;
 use foldover_types::{Digest, InvalidSyncPath, SyncPath};
@@ -123,6 +123,19 @@ impl LocalEndpoint {
 
     pub fn relation_to(&self, other: &Self) -> Result<RootRelation, ScanError> {
         at(&None, self.root.relation_to(&other.root))
+    }
+
+    pub fn filesystem_features(&self) -> Result<FilesystemFeatures, ScanError> {
+        let before = at(&None, self.root.root_metadata())?;
+        if before.identity() != self.identity {
+            return Err(ScanError::Changed(None));
+        }
+        reject_dataless(before.data_residency(), &None)?;
+        let features = at(&None, self.root.filesystem_features())?;
+        if at(&None, self.root.root_metadata())? != before {
+            return Err(ScanError::Changed(None));
+        }
+        Ok(features)
     }
 
     /// Hash only an observed regular entry. A digest does not include xattrs,
@@ -445,6 +458,27 @@ mod tests {
         assert!(matches!(
             endpoint.read_extended_metadata(entry, &mut |_| ScanControl::Continue),
             Err(ScanError::Changed(_))
+        ));
+    }
+
+    #[test]
+    fn feature_observations_keep_the_held_root_and_reject_changed_identity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let selected = temporary.path().join("selected");
+        fs::create_dir(&selected).unwrap();
+        let mut endpoint = LocalEndpoint::open(&selected).unwrap();
+        let original = endpoint.filesystem_features().unwrap();
+        fs::rename(&selected, temporary.path().join("moved")).unwrap();
+        symlink("/unavailable", &selected).unwrap();
+        assert_eq!(endpoint.filesystem_features().unwrap(), original);
+        endpoint.identity = Root::open(temporary.path())
+            .unwrap()
+            .root_metadata()
+            .unwrap()
+            .identity();
+        assert!(matches!(
+            endpoint.filesystem_features(),
+            Err(ScanError::Changed(None))
         ));
     }
 

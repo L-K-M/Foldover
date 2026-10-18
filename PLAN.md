@@ -391,6 +391,9 @@ fidelity warnings.
 Filesystem support and driver operation fidelity are separate probes:
 [ADR 0005](docs/adr/0005-metadata-fidelity.md) records the local baseline's
 symlink, sparse-copy and exFAT Unicode failures.
+Held-volume filesystem declarations are available below the agent API;
+[ADR 0017](docs/adr/0017-filesystem-feature-declarations.md) records validity
+handling and the remaining operation/readiness gates.
 
 Endpoint-layer rules, not filters:
 - `.foldover/` and temp files are never reported by `scan`.

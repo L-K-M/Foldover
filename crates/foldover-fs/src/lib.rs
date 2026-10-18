@@ -3,6 +3,10 @@
 //! file metadata. Calls the OS directly and uses shared vocabulary.
 //! See PLAN.md §4.4.
 
+#[forbid(unsafe_code)]
+mod features;
+pub use features::{DeclaredSupport, FilesystemFeature, FilesystemFeatures};
+
 #[cfg(unix)]
 #[forbid(unsafe_code)]
 mod root;
