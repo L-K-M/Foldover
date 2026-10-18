@@ -72,12 +72,7 @@ pub struct Connection {
 
 impl Connection {
     fn checked(stream: UnixStream) -> io::Result<Self> {
-        if stream.peer_cred()?.uid() != current_user() {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "Agent peer has a different user ID",
-            ));
-        }
+        require_current_user(stream.peer_cred().map(|peer| peer.uid()))?;
         Ok(Self { stream })
     }
 
@@ -114,6 +109,18 @@ impl Connection {
     pub async fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.stream.write_all(bytes).await
     }
+}
+
+fn require_current_user(peer: io::Result<u32>) -> io::Result<()> {
+    // A failed credential lookup rejects this peer, not the listening socket.
+    let peer = peer.map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error))?;
+    if peer != current_user() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Agent peer has a different user ID",
+        ));
+    }
+    Ok(())
 }
 
 /// The runtime lock owns this listener. Stale sockets are removed only after
@@ -202,6 +209,58 @@ mod tests {
             .permissions(fs::Permissions::from_mode(DIRECTORY_MODE))
             .tempdir()
             .unwrap()
+    }
+
+    #[test]
+    fn unavailable_peer_credentials_reject_only_the_connection() {
+        for kind in [
+            io::ErrorKind::NotConnected,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::InvalidData,
+            io::ErrorKind::PermissionDenied,
+        ] {
+            assert_eq!(
+                require_current_user(Err(io::Error::from(kind)))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::PermissionDenied,
+                "{kind:?} must not escape as a fatal listener error"
+            );
+        }
+        assert!(require_current_user(Ok(current_user())).is_ok());
+        assert_eq!(
+            require_current_user(Ok(current_user().wrapping_add(1)))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[tokio::test]
+    async fn a_disconnected_peer_does_not_prevent_the_next_connection() {
+        let directory = private_directory();
+        let path = directory.path().join("s");
+        let listener = Listener::bind(&SocketLocation::Path(path.clone())).unwrap();
+        let peer = UnixStream::connect(&path).await.unwrap();
+        drop(peer);
+
+        // Darwin's peer PID lookup fails if the client closes before accept.
+        let accepted = tokio::time::timeout(std::time::Duration::from_secs(10), listener.accept())
+            .await
+            .expect("the disconnected connection was not accepted");
+        let mut buffer = [0];
+        match accepted {
+            Ok(mut connection) => assert_eq!(connection.read(&mut buffer).await.unwrap(), 0),
+            Err(error) => assert_eq!(error.kind(), io::ErrorKind::PermissionDenied),
+        }
+
+        let mut client = Connection::connect(&SocketLocation::Path(path))
+            .await
+            .unwrap();
+        let mut server = listener.accept().await.unwrap();
+        client.write_all(b"x").await.unwrap();
+        assert_eq!(server.read(&mut buffer).await.unwrap(), buffer.len());
+        assert_eq!(&buffer, b"x");
     }
 
     #[tokio::test]
