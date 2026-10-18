@@ -5,6 +5,7 @@ pub const PAIR_LIST: &str = "pair.list";
 pub const PAIR_GET: &str = "pair.get";
 pub const PAIR_CREATE: &str = "pair.create";
 pub const PAIR_UPDATE: &str = "pair.update";
+pub const PAIR_REMOVE: &str = "pair.remove";
 // Even maximum-length names and raw roots fit below the 1 MiB IPC frame limit.
 pub const PAIR_PAGE_SIZE: usize = 16;
 
@@ -142,6 +143,13 @@ pub struct PairList {
 #[serde(deny_unknown_fields)]
 pub struct PairKey {
     pub id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PairRevision {
+    pub id: String,
+    pub revision: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

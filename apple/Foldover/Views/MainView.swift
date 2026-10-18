@@ -32,6 +32,9 @@ struct MainView: View {
                     if let error = viewModel.pairError {
                         Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
                     }
+                    if let error = viewModel.operationError {
+                        Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                    }
                 }
                 .padding()
             }
@@ -44,6 +47,8 @@ struct MainView: View {
                     Text(pair.settings.mode.title).font(.headline)
                     Text(pair.settings.mode.explanation).foregroundStyle(.secondary)
                     Button("Edit Pair") { viewModel.editPair() }.disabled(!viewModel.canConfigurePairs)
+                    Button("Remove Pair", role: .destructive) { viewModel.requestRemoval() }
+                        .disabled(!viewModel.canConfigurePairs)
                     Text("Configuration saved. Preview and sync are not available yet.")
                         .foregroundStyle(.secondary)
                 }
@@ -63,6 +68,14 @@ struct MainView: View {
         }
         .sheet(item: Binding(get: { viewModel.editor }, set: { _ in viewModel.dismissEditor() })) { editor in
             PairEditorView(viewModel: editor)
+        }
+        .confirmationDialog("Remove Pair?", isPresented: Binding(
+            get: { viewModel.removalTarget != nil }, set: { _ in viewModel.cancelRemoval() }
+        ), presenting: viewModel.removalTarget) { pair in
+            Button("Remove Pair", role: .destructive) { Task { await viewModel.removePair(pair) } }
+            Button("Cancel", role: .cancel) { viewModel.cancelRemoval() }
+        } message: { pair in
+            Text("Remove settings for \(pair.settings.name)? Your folders stay in place.")
         }
         .frame(minWidth: 800, minHeight: 460)
         .task { await viewModel.refreshAgent() }

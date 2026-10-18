@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Revision-checked pair removal in the app and CLI, including offline pairs,
+  while preserving endpoint folders and files.
 - Held-root macOS volume UUID observations, with physical-device ancestry and
   validated attribute replies; mount-continuity/readiness integration remains pending.
 - Explicit non-materializing LaunchAgent policy, with native process/thread/child

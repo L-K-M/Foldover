@@ -106,6 +106,11 @@ impl Engine {
         Ok(self.pairs.update(id, revision, draft)?)
     }
 
+    pub fn remove_pair(&mut self, id: PairId, revision: u64) -> Result<PairConfig, Error> {
+        // shortcut: no run state exists yet; require idle/recovery guards when execution lands.
+        Ok(self.pairs.remove(id, revision)?)
+    }
+
     fn validate_roots(&self, draft: &PairDraft, replacing: Option<PairId>) -> Result<(), Error> {
         let selected = LocalPair::open(draft.left(), draft.right())?;
         for side in [Side::Left, Side::Right] {
@@ -221,5 +226,41 @@ mod tests {
         drop(engine);
         let engine = Engine::open(&location).unwrap();
         assert_eq!(engine.pair(saved.id()).unwrap(), updated);
+    }
+
+    #[test]
+    fn offline_removal_checks_revision_and_releases_catalog_roots() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut engine =
+            Engine::open(&StateLocation::Directory(temporary.path().join("state"))).unwrap();
+        let paths = ["a", "b", "c", "d"].map(|name| temporary.path().join(name));
+        for path in &paths {
+            fs::create_dir(path).unwrap();
+        }
+        let original = engine.create_pair(&draft(&paths[0], &paths[1])).unwrap();
+        let updated = engine
+            .update_pair(original.id(), original.revision(), original.draft())
+            .unwrap();
+        fs::write(paths[0].join("kept"), b"keep this file").unwrap();
+        let detached = temporary.path().join("detached");
+        fs::rename(&paths[0], &detached).unwrap();
+        assert!(matches!(
+            engine.remove_pair(original.id(), original.revision()),
+            Err(Error::StaleRevision)
+        ));
+        assert_eq!(engine.pair(updated.id()).unwrap(), updated);
+        assert_eq!(
+            engine
+                .remove_pair(updated.id(), updated.revision())
+                .unwrap(),
+            updated
+        );
+        assert!(matches!(
+            engine.pair(updated.id()),
+            Err(Error::PairNotFound)
+        ));
+        assert_eq!(fs::read(detached.join("kept")).unwrap(), b"keep this file");
+        assert!(paths[1].is_dir());
+        assert!(engine.create_pair(&draft(&paths[2], &paths[3])).is_ok());
     }
 }

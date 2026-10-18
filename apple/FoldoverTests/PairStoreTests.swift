@@ -17,6 +17,7 @@ private actor PairFixtureClient: PairClient {
     private let outcome: SaveOutcome
     private(set) var updatedRevision: UInt64?
     private(set) var savedSettings: PairSettings?
+    private(set) var removedRevision: UInt64?
 
     init(catalog: [SyncPair] = [], outcome: SaveOutcome = .succeeds) {
         self.catalog = catalog
@@ -39,6 +40,12 @@ private actor PairFixtureClient: PairClient {
         savedSettings = settings
         if case .fails = outcome { throw PairFixtureError.changedElsewhere }
         return SyncPair(id: pair.id, revision: pair.revision + 1, settings: settings)
+    }
+
+    func remove(_ pair: SyncPair) async throws -> SyncPair {
+        removedRevision = pair.revision
+        if case .fails = outcome { throw PairFixtureError.changedElsewhere }
+        return pair
     }
 }
 
@@ -83,6 +90,7 @@ private actor DeferredPairClient: PairClient {
 
     func create(_ settings: PairSettings) async throws -> SyncPair { pairFixture() }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { pair }
+    func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
 }
 
 @MainActor
@@ -107,6 +115,7 @@ private actor FailingPairPageClient: PairClient {
 
     func create(_ settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
+    func remove(_ pair: SyncPair) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
 }
 
 @MainActor
@@ -180,4 +189,38 @@ func mainViewSelectsTheSavedPairAfterClosingItsEditor() async {
     #expect(viewModel.selectedPair?.settings.name == "Photos")
     #expect(viewModel.editor == nil)
     #expect(viewModel.statusLine.contains("1"))
+}
+
+@MainActor
+@Test
+func removalUsesTheConfirmedRevisionAndClearsOnlyThatPair() async {
+    let original = pairFixture()
+    let client = PairFixtureClient(catalog: [original])
+    let store = PairStore(client: client)
+    let viewModel = MainViewModel(appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { "test" }), pairs: store)
+    await viewModel.refreshAgent()
+    viewModel.selectedPairID = original.id
+    viewModel.requestRemoval()
+    let confirmed = viewModel.removalTarget!
+    viewModel.cancelRemoval()
+    await viewModel.removePair(confirmed)
+    #expect(await client.removedRevision == original.revision)
+    #expect(store.pairs.isEmpty)
+    #expect(viewModel.selectedPairID == nil)
+    #expect(viewModel.operationError == nil)
+}
+
+@MainActor
+@Test
+func rejectedRemovalKeepsTheCachedPair() async {
+    let original = pairFixture()
+    let store = PairStore(client: PairFixtureClient(catalog: [original], outcome: .fails))
+    await store.refresh()
+    do {
+        try await store.remove(original)
+        Issue.record("Removal should fail")
+    } catch {
+        #expect(store.pairs == [original])
+        #expect(!store.isSaving)
+    }
 }

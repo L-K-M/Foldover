@@ -1166,6 +1166,20 @@ public func pairPage(after: String?)async throws  -> PairConfigurationPage  {
             errorHandler: FfiConverterTypeAgentError_lift
         )
 }
+public func pairRemove(id: String, revision: UInt64)async throws  -> LocalPairConfiguration  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_pair_remove(FfiConverterString.lower(id),FfiConverterUInt64.lower(revision)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeLocalPairConfiguration_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
 public func pairUpdate(id: String, revision: UInt64, configuration: LocalPairDraft)async throws  -> LocalPairConfiguration  {
     return
         try  await uniffiRustCallAsync(
@@ -1206,6 +1220,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_pair_page() != 7401) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_pair_remove() != 12423) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_pair_update() != 2038) {

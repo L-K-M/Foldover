@@ -406,7 +406,7 @@ Endpoint-layer rules, not filters:
 **State DB:**
 - Pair configuration and initial writer/format guards:
   [ADR 0009](docs/adr/0009-pair-state-storage.md). The agent owns this store
-  before serving requests. Authenticated create/read/update APIs and the CLI
+  before serving requests. Authenticated create/read/update/remove APIs and the CLI
   are implemented; the remaining state tables are pending.
 - Lives in `~/Library/Application Support/Foldover/state.db`: local disk,
   because WAL does not work on network file systems. The directory is

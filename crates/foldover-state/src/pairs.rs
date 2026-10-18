@@ -79,15 +79,27 @@ impl PairStore {
         revision: u64,
         draft: &PairDraft,
     ) -> Result<PairConfig, Error> {
-        let revision = i64::try_from(revision)
-            .ok()
-            .filter(|revision| *revision > 0)
-            .ok_or(InvalidPair::Revision)?;
+        let revision = database_revision(revision)?;
         from_row(
             self.database
                 .update_pair(id.as_bytes(), revision, &values(draft))?,
         )
     }
+
+    pub fn remove(&mut self, id: PairId, revision: u64) -> Result<PairConfig, Error> {
+        let revision = database_revision(revision)?;
+        // Decode before deleting: corrupt domain records must not disappear silently.
+        let current = self.pair(id)?.ok_or(Error::PairNotFound)?;
+        self.database.remove_pair(id.as_bytes(), revision)?;
+        Ok(current)
+    }
+}
+
+fn database_revision(revision: u64) -> Result<i64, InvalidPair> {
+    i64::try_from(revision)
+        .ok()
+        .filter(|revision| *revision > 0)
+        .ok_or(InvalidPair::Revision)
 }
 
 fn values(draft: &PairDraft) -> PairValues {
@@ -224,6 +236,31 @@ mod tests {
         let store = PairStore::open(&location).unwrap();
         assert!(matches!(
             store.pairs(),
+            Err(Error::InvalidPair(InvalidPair::Name))
+        ));
+    }
+
+    #[test]
+    fn removal_does_not_silently_discard_a_corrupt_domain_record() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let row = database
+            .create_pair(&PairValues {
+                name: "\u{2003}".into(),
+                left_root: b"/a".to_vec(),
+                right_root: b"/b".to_vec(),
+                mode: SYNC.into(),
+            })
+            .unwrap();
+        let id = PairId::from_bytes(row.id.try_into().unwrap()).unwrap();
+        drop(database);
+        let mut store = PairStore::open(&location).unwrap();
+        assert!(matches!(
+            store.remove(id, 1),
+            Err(Error::InvalidPair(InvalidPair::Name))
+        ));
+        assert!(matches!(
+            store.pair(id),
             Err(Error::InvalidPair(InvalidPair::Name))
         ));
     }

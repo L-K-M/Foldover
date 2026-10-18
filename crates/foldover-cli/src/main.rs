@@ -31,6 +31,10 @@ enum PairCommand {
         revision: u64,
         draft: PairDraft,
     },
+    Remove {
+        id: PairId,
+        revision: u64,
+    },
 }
 
 #[tokio::main]
@@ -62,7 +66,7 @@ async fn main() -> ExitCode {
         },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right"
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right"
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -96,6 +100,14 @@ fn pair_command(args: &[OsString]) -> Option<PairCommand> {
     match args {
         [] => Some(PairCommand::List),
         [command, id] if command == "show" => Some(PairCommand::Show(id.to_str()?.parse().ok()?)),
+        [command, id, revision] if command == "remove" => Some(PairCommand::Remove {
+            id: id.to_str()?.parse().ok()?,
+            revision: revision
+                .to_str()?
+                .parse()
+                .ok()
+                .filter(|revision| (1..=i64::MAX as u64).contains(revision))?,
+        }),
         [command, name, left, right, mode] if command == "add" => {
             Some(PairCommand::Add(draft(name, left, right, mode)?))
         }
@@ -164,6 +176,9 @@ async fn pairs(
             revision,
             draft,
         } => print_pair(&foldover_client::update_pair(location, id, revision, &draft).await?),
+        PairCommand::Remove { id, revision } => {
+            print_pair(&foldover_client::remove_pair(location, id, revision).await?)
+        }
     }
 }
 

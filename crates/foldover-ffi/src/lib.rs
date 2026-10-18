@@ -212,6 +212,17 @@ pub async fn pair_update(
     .into())
 }
 
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn pair_remove(id: String, revision: u64) -> Result<LocalPairConfiguration, AgentError> {
+    let id = id.parse().map_err(invalid_configuration)?;
+    Ok(
+        foldover_client::remove_pair(&foldover_client::SocketLocation::Default, id, revision)
+            .await
+            .map_err(AgentError::from)?
+            .into(),
+    )
+}
+
 fn invalid_configuration(error: foldover_client::InvalidPair) -> AgentError {
     AgentError::Request {
         message: error.to_string(),
