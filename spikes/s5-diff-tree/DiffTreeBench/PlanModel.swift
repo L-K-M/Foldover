@@ -6,52 +6,6 @@
 
 import Foundation
 import Observation
-import QuartzCore
-
-/// What a plan row does to its target — the wireframe's four glyphs
-/// (PLAN.md §3.8). Folder rows carry the same verbs: a created folder
-/// is itself a plan operation.
-enum PlanAction: String, Codable {
-    case copyToTarget
-    case copyToMac
-    case archive
-    case conflict
-
-    /// The single-cell glyph every row leads with.
-    var glyph: String {
-        switch self {
-        case .copyToTarget: "→"
-        case .copyToMac: "←"
-        case .archive: "⌫"
-        case .conflict: "⚠"
-        }
-    }
-
-    /// The plain-language verb for the VoiceOver label.
-    var accessibilityVerb: String {
-        switch self {
-        case .copyToTarget: "copy to MyNAS"
-        case .copyToMac: "copy to this Mac"
-        case .archive: "archive on MyNAS"
-        case .conflict: "edited on both sides"
-        }
-    }
-}
-
-/// One plan row's attributes before it becomes a node — the stream's
-/// unit. `parentID` is the parent's `id`, or −1 for a top-level row;
-/// pre-order delivery guarantees the parent already landed.
-struct RowRecord {
-    var id: Int
-    var parentID: Int
-    var name: String
-    var isFolder: Bool
-    var action: PlanAction
-    var sizeBytes: Int64
-    /// Days back from a fixed base date — a `Date` per record would
-    /// double the array's cost for no extra information.
-    var daysAgo: Int
-}
 
 /// One plan row as both lists see it. A folder's `children` grows as
 /// batches land; `nil` means leaf (a file — the distinction
@@ -103,7 +57,8 @@ final class PlanNode: Identifiable {
         return names.reversed().joined(separator: "/")
     }
 
-    init(record: RowRecord, text: RowText) {
+    init(row: PreparedRow) {
+        let record = row.record
         nodeID = record.id
         name = record.name
         isFolder = record.isFolder
@@ -111,8 +66,8 @@ final class PlanNode: Identifiable {
         sizeBytes = record.sizeBytes
         daysAgo = record.daysAgo
         children = record.isFolder ? [] : nil
-        sizeText = text.size(bytes: record.sizeBytes)
-        dateText = text.date(daysAgo: record.daysAgo)
+        sizeText = row.sizeText
+        dateText = row.dateText
         accessibilityText = "\(record.action.accessibilityVerb) "
             + "\(record.name), \(sizeText), modified \(dateText)"
     }
@@ -176,15 +131,15 @@ final class PlanModel {
     /// Attach one batch of pre-order records. Contiguous children of the
     /// same parent become one journal entry; a parent's children can
     /// span batches, in which case each batch contributes its own entry.
-    func deliver(_ batch: ArraySlice<RowRecord>, text: RowText) {
+    func deliver(_ batch: [PreparedRow]) {
         var journal = BatchJournal()
         var i = batch.startIndex
         while i < batch.endIndex {
-            let parentID = batch[i].parentID
+            let parentID = batch[i].record.parentID
             var children: [PlanNode] = []
-            while i < batch.endIndex, batch[i].parentID == parentID {
-                let record = batch[i]
-                let node = PlanNode(record: record, text: text)
+            while i < batch.endIndex, batch[i].record.parentID == parentID {
+                let record = batch[i].record
+                let node = PlanNode(row: batch[i])
                 nodesByID[record.id] = node
                 if node.isFolder {
                     folders.append(node)
@@ -248,51 +203,6 @@ final class PlanModel {
             folder.stashedChildren = nil
         }
         topNodes = Array(topNodes)
-    }
-}
-
-/// The row strings, shared so both lists show identical text produced
-/// the same way. The two formatters are created once — `DateFormatter`
-/// and `ByteCountFormatter` are far too expensive per row.
-@MainActor
-final class RowText {
-    private let dateFormatter = DateFormatter()
-    private let byteFormatter = ByteCountFormatter()
-    /// A fixed base so every run renders identical strings.
-    private let baseDate = Date(timeIntervalSince1970: 1_790_985_600)
-    private(set) var sizeFormattingMilliseconds = 0.0
-    private(set) var dateFormattingMilliseconds = 0.0
-    private(set) var formattedSizes = 0
-    private(set) var formattedDates = 0
-
-    init() {
-        dateFormatter.dateFormat = "MMM d"
-        byteFormatter.countStyle = .file
-    }
-
-    func size(bytes: Int64) -> String {
-        let started = CACurrentMediaTime()
-        let value = byteFormatter.string(fromByteCount: bytes)
-        sizeFormattingMilliseconds += (CACurrentMediaTime() - started) * 1_000
-        formattedSizes += 1
-        return value
-    }
-
-    func date(daysAgo: Int) -> String {
-        let started = CACurrentMediaTime()
-        let value = dateFormatter.string(
-            from: baseDate.addingTimeInterval(-Double(daysAgo) * 86_400)
-        )
-        dateFormattingMilliseconds += (CACurrentMediaTime() - started) * 1_000
-        formattedDates += 1
-        return value
-    }
-
-    func resetProfile() {
-        sizeFormattingMilliseconds = 0
-        dateFormattingMilliseconds = 0
-        formattedSizes = 0
-        formattedDates = 0
     }
 }
 

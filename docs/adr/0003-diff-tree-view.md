@@ -61,6 +61,12 @@ Formatting timers separately record date/size formatter walls and call counts
 per batch. They apply equally to every candidate and retain the same workload
 and limits; timer overhead remains part of measured delivery/frame time.
 
+One worker actor now prepares each batch's strings before main-actor delivery.
+Only one batch is in flight. Preparation wall time includes scheduling and
+handoff; model wall time covers the remaining main-actor work. Frame sampling
+includes both, and execution on the main thread fails the run. The standalone
+row check compares ordered output against Foundation reference formatting.
+
 Run it with `spikes/s5-diff-tree/run.sh <report.json>`; it builds the
 Release app with XcodeGen and xcodebuild, launches it through
 `open -W` with `-runBench`, writes the JSON report and prints a short
@@ -154,6 +160,19 @@ Flat-table batch model p95 was 72.37 ms, versus 2.19 ms for insertion. The next
 profile separates date/size formatting from other model work before choosing
 an optimization. SwiftUI again reported zero rows/scroll and now explicitly
 fails the complete-exercise check. No 60 fps or physical-Mac gate is closed.
+
+### Formatter profile
+
+[Run 39077239646](https://github.com/L-K-M/Foldover/actions/runs/39077239646),
+commit `9f47a45`, retained the workload and environment above. Flat-table batch
+model p95 was 25.16 ms, with size formatting at 15.44 ms and date formatting at
+3.38 ms. Formatting consumed 74.6% of total model time; all 200,000 dates and
+sizes were formatted. Stream p95 was 39.33 ms, scroll p95 16.67 ms, maximum
+stall 50.17 ms and scroll memory growth 1.05%. The stream budget still failed.
+
+Outline expansion p95 remained 389.90 ms. Moving unchanged formatting off the
+main actor targets the measured flat-table bottleneck. Its performance result
+is pending; the workload, cadence, presentation and budgets remain unchanged.
 
 ## Decision
 
