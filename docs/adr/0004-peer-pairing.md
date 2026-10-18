@@ -125,6 +125,41 @@ The six-digit pairing code comes from the commit-then-reveal exchange,
 never from the exporter or the fingerprints alone. Revoking a device
 also closes its open connections. The TOFU fallback is not needed.
 
+## Driver implementation
+
+`foldover-net::peer` ports the S9 transport into the workspace. Both TLS
+roles require pinned certificates in `PeerMode::Paired`; an explicit
+`PeerMode::Pairing` accepts an unpinned Ed25519 identity for code comparison.
+Both modes require a client certificate, TLS 1.3 and ALPN
+`foldover-peer-1`. Dialing checks the expected device ID in either mode.
+
+The code uses the same commit-then-reveal construction. Its exporter and
+hash labels are `foldover-pairing-code-v1` and
+`foldover-pairing-commit-v1`. Each exchange uses a dedicated stream and
+closes the connection on failure or after a 15-second deadline. Computing
+a code never pins a device; the caller must obtain confirmation on both
+devices. The pairing window and attempt limits belong to the future
+pairing service.
+
+The shared in-memory trust store tracks weak session handles. Revocation
+removes the pin and closes that device's live channels, including clones
+and open streams. Registration rechecks the pin under the same lock, so
+a handshake finishing after revocation cannot publish a paired channel.
+Stream handles retain their session even after all connection handles
+are dropped. Other devices' channels remain open. Application frames use
+a big-endian 32-bit byte length, bounded to 16 MiB on both reads and writes.
+Buffers grow as payload arrives. Connections allow four bidirectional
+streams and no unidirectional streams, bounding per-connection buffering.
+
+Loopback tests cover code agreement, pinned reconnects, both certificate
+verifier roles, missing client certificates, non-Ed25519 identities,
+incorrect advertised IDs, false commitments, timeouts, session-specific
+exporters, frame limits and truncation, and revocation of live channels.
+
+Identities and pins are currently in memory. Keychain persistence,
+discovery, folder authorization, peer wire messages, the endpoint backend
+and pairing UI remain P5 work. The agent does not open a peer listener yet.
+
 ## Consequences
 
 - All criteria pass: PLAN.md §4.11 keeps quinn + rustls, the
