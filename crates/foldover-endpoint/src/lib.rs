@@ -12,6 +12,9 @@ mod local_pair;
 #[cfg(unix)]
 mod watch;
 
+mod share;
+pub use share::mount_share;
+
 #[cfg(unix)]
 pub use watch::RootWatcher;
 

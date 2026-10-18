@@ -20,6 +20,8 @@ const TICK: Duration = Duration::from_secs(5);
 const QUIET: Duration = Duration::from_secs(5);
 /// On-change pairs are also verified this often.
 const VERIFY: Duration = Duration::from_secs(60 * 60);
+/// A share that went away is mounted again at most this often.
+const RECONNECT: Duration = Duration::from_secs(5 * 60);
 const SECONDS_PER_MINUTE: u64 = 60;
 
 pub(crate) struct Scheduler {
@@ -30,6 +32,7 @@ pub(crate) struct Scheduler {
     watched: Mutex<Vec<PairId>>,
     /// Pairs with a folder that could not be watched, retried every tick.
     unwatchable: Mutex<HashSet<PairId>>,
+    reconnected: Mutex<HashMap<PairId, Instant>>,
 }
 
 impl Scheduler {
@@ -41,6 +44,7 @@ impl Scheduler {
             watcher: Mutex::default(),
             watched: Mutex::default(),
             unwatchable: Mutex::default(),
+            reconnected: Mutex::default(),
         }
     }
 
@@ -82,6 +86,22 @@ impl Scheduler {
                     || since >= VERIFY
             }
         }
+    }
+
+    /// Whether to try mounting the pair's share again now; records the try.
+    fn may_reconnect(&self, id: PairId, now: Instant) -> bool {
+        let mut reconnected = self
+            .reconnected
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if reconnected
+            .get(&id)
+            .is_some_and(|at| now.saturating_duration_since(*at) < RECONNECT)
+        {
+            return false;
+        }
+        reconnected.insert(id, now);
+        true
     }
 
     fn started_run(&self, id: PairId, now: Instant) {
@@ -185,9 +205,22 @@ impl Service {
             }
             // An unmounted disk or share is waited for, not reported as a
             // failure; the pair stays due and runs once the folder is back.
+            // A share is mounted again from where it last came from.
             if let Some(side) = foldover_engine::missing_side(&pair) {
-                self.jobs.wait_for(pair.id(), side);
-                continue;
+                let source = self
+                    .engine
+                    .lock()
+                    .ok()
+                    .and_then(|engine| engine.mounts(pair.id()).ok())
+                    .and_then(|mounts| mounts.side(side).map(str::to_owned));
+                let back = source.is_some_and(|source| {
+                    self.scheduler.may_reconnect(pair.id(), now)
+                        && foldover_engine::reconnect(&pair, side, &source)
+                });
+                if !back {
+                    self.jobs.wait_for(pair.id(), side);
+                    continue;
+                }
             }
             // A busy pair is not due again until its job ends.
             if self
@@ -245,5 +278,15 @@ mod tests {
         scheduler.watch(std::slice::from_ref(&pair), at(20));
         assert!(!scheduler.due(&pair, at(21)));
         assert!(scheduler.due(&pair, at(26)));
+    }
+
+    #[test]
+    fn shares_are_mounted_again_at_most_every_few_minutes() {
+        let start = Instant::now();
+        let scheduler = Scheduler::new(start);
+        let id = PairId::from_bytes([2; PairId::BYTE_LEN]).unwrap();
+        assert!(scheduler.may_reconnect(id, start));
+        assert!(!scheduler.may_reconnect(id, start + Duration::from_secs(60)));
+        assert!(scheduler.may_reconnect(id, start + RECONNECT));
     }
 }

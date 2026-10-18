@@ -508,6 +508,10 @@ dependencies = [
 [[package]]
 name = "foldover-os"
 version = "0.1.0"
+dependencies = [
+ "core-foundation",
+ "core-foundation-sys",
+]
 
 [[package]]
 name = "foldover-proto"

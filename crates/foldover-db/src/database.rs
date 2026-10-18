@@ -7,8 +7,10 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
 mod history;
+mod mounts;
 mod pause;
 pub use history::HistoryRow;
+pub use mounts::MountRow;
 pub use pause::PauseRow;
 
 const APPLICATION_ID: i64 = 0x464f4c44; // FOLD
@@ -22,9 +24,9 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 11] = [
+const MIGRATIONS: [&str; 12] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
-    SCHEMA_V9, SCHEMA_V10, SCHEMA_V11,
+    SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -124,6 +126,11 @@ CREATE TABLE automation_pause (
     id INTEGER PRIMARY KEY CHECK(id = 1),
     until_ms INTEGER CHECK(until_ms IS NULL OR until_ms >= 0)
 ) STRICT;
+";
+// Where each side's network share is mounted from, e.g. smb://nas/Photos.
+const SCHEMA_V12: &str = "
+ALTER TABLE pair ADD COLUMN left_mount TEXT CHECK(left_mount IS NULL OR length(left_mount) > 0);
+ALTER TABLE pair ADD COLUMN right_mount TEXT CHECK(right_mount IS NULL OR length(right_mount) > 0);
 ";
 
 #[derive(Debug, thiserror::Error)]
@@ -416,7 +423,7 @@ impl Database {
         }
         let changed = transaction.execute(
             // A changed root is a different endpoint; forget its identity.
-            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,schedule=?11,schedule_minutes=?12,filters=?13,size_limit=?14,left_identity=CASE WHEN left_root=?4 THEN left_identity END,right_identity=CASE WHEN right_root=?5 THEN right_identity END WHERE id=?1 AND revision=?2",
+            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,schedule=?11,schedule_minutes=?12,filters=?13,size_limit=?14,left_identity=CASE WHEN left_root=?4 THEN left_identity END,right_identity=CASE WHEN right_root=?5 THEN right_identity END,left_mount=CASE WHEN left_root=?4 THEN left_mount END,right_mount=CASE WHEN right_root=?5 THEN right_mount END WHERE id=?1 AND revision=?2",
             params![
                 id,
                 revision,

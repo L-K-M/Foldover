@@ -300,6 +300,12 @@ impl LocalEndpoint {
         at(&None, self.root.relation_to(&other.root))
     }
 
+    /// Where the root's volume is mounted from when it is a network share,
+    /// e.g. `smb://alice@nas.local/Photos`.
+    pub fn network_source(&self) -> Result<Option<String>, ScanError> {
+        at(&None, self.root.network_source())
+    }
+
     /// Read the root's first entry: macOS privacy protection and file
     /// permissions refuse listings, not opening the folder.
     pub fn probe_access(&self) -> Result<(), ScanError> {

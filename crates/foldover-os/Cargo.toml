@@ -6,5 +6,10 @@ license.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 
-[lints]
-workspace = true
+# Only audited macOS binding modules allow unsafe.
+[lints.rust]
+unsafe_code = "deny"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+core-foundation-sys = "0.8"

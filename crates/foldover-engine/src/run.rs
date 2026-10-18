@@ -19,7 +19,7 @@ use foldover_endpoint::{
     ApplyError, Expected, Filter, InvalidFilter, LocalEndpoint, LocalPair, Observation,
     ObservedEntry, PairRootError, RunScope, ScanError, access_denied,
 };
-use foldover_state::{BaseUpdate, RecordedIdentities, SnapshotEntry};
+use foldover_state::{BaseUpdate, MountSources, RecordedIdentities, SnapshotEntry};
 use foldover_types::{
     BaselineEntry, ChangeKind, ConflictKind, EndpointId, EntryDecision, EntryVersion, PairConfig,
     Resolution, ScanControl, Side, SyncPath,
@@ -411,6 +411,22 @@ impl PairRun {
 
     pub fn revision(&self) -> u64 {
         self.pair.revision()
+    }
+
+    /// Where each side's network share is mounted from, to mount it again
+    /// later. Informational: a side that cannot tell reports none.
+    pub fn mount_sources(&self) -> MountSources {
+        let source = |side| {
+            self.endpoints
+                .endpoint(side)
+                .network_source()
+                .ok()
+                .flatten()
+        };
+        MountSources {
+            left: source(Side::Left),
+            right: source(Side::Right),
+        }
     }
 
     /// This run's observation of one side, for the next run to reuse.

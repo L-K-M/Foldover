@@ -385,6 +385,22 @@ impl DirectoryEntry {
     }
 }
 
+/// A network volume's mount source as a URL: SMB and AFP report
+/// `//user@server/share`, NFS `server:/export`, WebDAV a URL already.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn source_url(filesystem: &str, from: &str) -> Option<String> {
+    match filesystem {
+        "smbfs" => Some(format!("smb:{from}")),
+        "afpfs" => Some(format!("afp:{from}")),
+        "webdav" => Some(from.to_owned()),
+        "nfs" => {
+            let (server, export) = from.split_once(':')?;
+            Some(format!("nfs://{server}{export}"))
+        }
+        _ => None,
+    }
+}
+
 impl Root {
     /// Ambient authority is used only to select the root, never for descendants.
     pub fn open(path: &Path) -> io::Result<Self> {
@@ -392,6 +408,30 @@ impl Root {
         Ok(Self {
             directory: Dir::open_ambient_dir(path, cap_std::ambient_authority())?,
         })
+    }
+
+    /// Where the held root's volume is mounted from, as a URL, when it is a
+    /// network share: `smb://alice@nas.local/Photos`. `None` for local
+    /// volumes, and on systems that do not report it.
+    pub fn network_source(&self) -> io::Result<Option<String>> {
+        #[cfg(target_os = "macos")]
+        {
+            let stat = rustix::fs::fstatfs(&self.directory)?;
+            let text = |field: &[std::ffi::c_char]| {
+                let bytes: Vec<u8> = field
+                    .iter()
+                    .take_while(|byte| **byte != 0)
+                    .map(|byte| byte.to_ne_bytes()[0])
+                    .collect();
+                String::from_utf8_lossy(&bytes).into_owned()
+            };
+            Ok(source_url(
+                &text(&stat.f_fstypename),
+                &text(&stat.f_mntfromname),
+            ))
+        }
+        #[cfg(not(target_os = "macos"))]
+        Ok(None)
     }
 
     /// Bytes an unprivileged writer can still use on the held root's volume.
@@ -584,6 +624,23 @@ mod tests {
 
     fn path(bytes: &[u8]) -> SyncPath {
         SyncPath::try_from(bytes).unwrap()
+    }
+
+    #[test]
+    fn network_volumes_report_where_they_are_mounted_from() {
+        assert_eq!(
+            source_url("smbfs", "//alice@nas.local/Photos").as_deref(),
+            Some("smb://alice@nas.local/Photos")
+        );
+        assert_eq!(
+            source_url("nfs", "nas:/export/media").as_deref(),
+            Some("nfs://nas/export/media")
+        );
+        assert_eq!(source_url("apfs", "/dev/disk3s1"), None);
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = Root::open(temporary.path()).unwrap();
+        assert_eq!(root.network_source().unwrap(), None);
     }
 
     #[test]

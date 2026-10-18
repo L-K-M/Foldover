@@ -16,7 +16,7 @@ use std::time::SystemTime;
 
 use foldover_engine::{
     Action, Approval, Commit, Completion, DeletionReview, Engine, KeepBothError, PairRun, Preview,
-    PreviewItem, RunContext, RunError, RunOutcome, RunReport,
+    PreviewItem, RunContext, RunError, RunOutcome, RunReport, missing_side, reconnect,
 };
 use foldover_proto::local::RpcError;
 use foldover_proto::local::{
@@ -280,14 +280,24 @@ fn perform(
     cancel: &AtomicBool,
 ) -> (SyncStatus, Option<Previewed>) {
     let failed = |message: String| (SyncStatus::Failed { message }, None);
-    let inputs = match engine.lock() {
-        Ok(engine) => engine.run_inputs(id),
+    let stored = match engine.lock() {
+        Ok(engine) => engine
+            .run_inputs(id)
+            .and_then(|inputs| Ok((inputs, engine.pair(id)?, engine.mounts(id)?))),
         Err(_) => return failed("The sync engine failed".into()),
     };
-    let inputs = match inputs {
-        Ok(inputs) => inputs,
+    let (inputs, pair, mounts) = match stored {
+        Ok(stored) => stored,
         Err(error) => return failed(error.to_string()),
     };
+    // Someone asked for this run: mount a share that went away. The
+    // scheduler makes its own, rate-limited attempts.
+    if !matches!(work, Work::Scheduled)
+        && let Some(side) = missing_side(&pair)
+        && let Some(source) = mounts.side(side)
+    {
+        reconnect(&pair, side, source);
+    }
     let mut control = || {
         if cancel.load(Ordering::Relaxed) {
             ScanControl::Cancel
@@ -301,6 +311,14 @@ fn perform(
         Err(RunError::Cancelled) => return (SyncStatus::Idle, None),
         Err(error) => return failed(error.to_string()),
     };
+    // Informational, like the snapshots below.
+    let sources = run.mount_sources();
+    if sources != mounts {
+        let _ = engine
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .record_mounts(id, run.revision(), &sources);
+    }
     // A cache: a failed store only means the next run rereads more data.
     for side in [Side::Left, Side::Right] {
         let snapshot = run.snapshot(side);
