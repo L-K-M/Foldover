@@ -125,6 +125,17 @@ impl StagedFile {
     }
 }
 
+/// Where a producer pushes file data, chunk by chunk.
+pub type Chunks<'a> = &'a mut dyn FnMut(&[u8]) -> io::Result<()>;
+
+/// What a copy from a system without extended attributes, such as an SFTP
+/// server, can carry besides data.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ForeignMetadata {
+    pub permissions: u32,
+    pub modified: std::time::SystemTime,
+}
+
 /// The entry an exchange moved out of its path. It holds user data and is
 /// never removed automatically; archive it.
 pub struct Displaced {
@@ -182,6 +193,49 @@ impl Root {
         }
         flush(&file, options.durability())?;
         Ok(StagedFile { staged, file, data })
+    }
+
+    /// Write a new temporary beside `path` from chunks `produce` pushes,
+    /// and give it the pair's synced part of `metadata`.
+    pub fn stage_stream(
+        &self,
+        path: &SyncPath,
+        metadata: ForeignMetadata,
+        options: &PairOptions,
+        produce: impl FnOnce(Chunks<'_>) -> io::Result<()>,
+    ) -> Result<StagedFile, WriteError> {
+        let (parent, _) = self.parent_of(path)?;
+        let mode = match options.metadata().permissions() {
+            Propagation::Sync => PRIVATE_FILE_MODE,
+            Propagation::Ignore => DEFAULT_FILE_MODE,
+        };
+        let (staged, mut file) = create_temporary_file(parent, mode)?;
+        let mut hasher = blake3::Hasher::new();
+        produce(&mut |chunk| {
+            hasher.update(chunk);
+            file.write_all(chunk)
+        })?;
+        metadata::apply_foreign(&file, metadata, options.metadata())?;
+        flush(&file, options.durability())?;
+        Ok(StagedFile {
+            staged,
+            file,
+            data: Digest::from_bytes(*hasher.finalize().as_bytes()),
+        })
+    }
+
+    /// Give an existing entry the synced part of foreign metadata.
+    pub fn update_foreign_metadata(
+        &self,
+        path: &SyncPath,
+        expected: &EntryMetadata,
+        metadata: ForeignMetadata,
+        options: &PairOptions,
+    ) -> Result<(), WriteError> {
+        let target = self.open_observed(path, expected)?;
+        metadata::apply_foreign(&target, metadata, options.metadata())?;
+        flush(&target, options.durability())?;
+        Ok(())
     }
 
     /// Create a symlink with exactly `target` beside `path`.
@@ -293,6 +347,28 @@ impl Root {
             Destination::New,
             options.metadata(),
         )?;
+        sync_directory(&parent, options.durability())?;
+        Ok(())
+    }
+
+    /// Create a folder for an entry from another system, with its mode when
+    /// modes are synced.
+    pub fn create_foreign_directory(
+        &self,
+        path: &SyncPath,
+        metadata: ForeignMetadata,
+        options: &PairOptions,
+    ) -> Result<(), WriteError> {
+        let (parent, name) = self.parent_of(path)?;
+        let mode = match options.metadata().permissions() {
+            Propagation::Sync => Mode::from_raw_mode((metadata.permissions & 0o777) as _),
+            Propagation::Ignore => DEFAULT_DIRECTORY_MODE,
+        };
+        match rustix::fs::mkdirat(&parent, &name, mode) {
+            Ok(()) => {}
+            Err(Errno::EXIST) => return Err(WriteError::Exists),
+            Err(error) => return Err(error.into()),
+        }
         sync_directory(&parent, options.durability())?;
         Ok(())
     }

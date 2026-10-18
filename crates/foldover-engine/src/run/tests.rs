@@ -17,6 +17,30 @@ struct Fixture {
     filters: Vec<String>,
     size_limit: Option<u64>,
     age_limit: Option<u32>,
+    right_kind: RightKind,
+}
+
+/// How the fixture reaches its right folder.
+#[derive(Clone, Copy, PartialEq)]
+enum RightKind {
+    Local,
+    /// Through OpenSSH's `sftp-server` on standard streams.
+    Sftp,
+}
+
+fn sftp_server() -> Option<std::path::PathBuf> {
+    std::env::var_os("FOLDOVER_SFTP_SERVER")
+        .map(std::path::PathBuf::from)
+        .into_iter()
+        .chain(
+            [
+                "/usr/libexec/sftp-server",
+                "/usr/lib/openssh/sftp-server",
+                "/usr/lib/ssh/sftp-server",
+            ]
+            .map(std::path::PathBuf::from),
+        )
+        .find(|path| path.exists())
 }
 
 fn fixture(mode: SyncMode) -> Fixture {
@@ -31,6 +55,7 @@ fn fixture(mode: SyncMode) -> Fixture {
         filters: Vec::new(),
         size_limit: None,
         age_limit: None,
+        right_kind: RightKind::Local,
     }
 }
 
@@ -75,7 +100,22 @@ impl Fixture {
             self.identities,
             self.resolutions.clone(),
         );
-        PairRun::prepare(inputs, &mut proceed)
+        if self.right_kind == RightKind::Local {
+            return PairRun::prepare(inputs, &mut proceed);
+        }
+        let server = sftp_server().expect("callers check for sftp-server");
+        let right = foldover_endpoint::SftpEndpoint::spawn(
+            &server,
+            &[std::ffi::OsStr::new("-d"), std::ffi::OsStr::new("/")],
+            self.right.path().as_os_str().as_bytes(),
+        )
+        .unwrap();
+        let left = foldover_endpoint::LocalEndpoint::open(self.left.path()).unwrap();
+        let endpoints = foldover_endpoint::EndpointPair::new(
+            foldover_endpoint::Endpoint::Local(left),
+            foldover_endpoint::Endpoint::Sftp(right),
+        );
+        PairRun::prepare_on(inputs, endpoints, &mut proceed)
     }
 
     /// Run with an in-memory base that applies commits like the state store.
@@ -661,4 +701,67 @@ fn files_old_in_both_folders_are_skipped_until_edited() {
     let report = pair.sync();
     assert_eq!((report.copied(), report.conflicts().len()), (1, 0));
     assert_eq!(fs::read(pair.right.path().join("kept")).unwrap(), b"edited");
+}
+
+#[test]
+fn sftp_folders_sync_like_local_ones() {
+    if sftp_server().is_none() {
+        eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
+        return;
+    }
+    let mut pair = fixture(SyncMode::Sync);
+    pair.right_kind = RightKind::Sftp;
+    fs::create_dir(pair.left.path().join("docs")).unwrap();
+    fs::write(pair.left.path().join("docs/a.txt"), b"a").unwrap();
+    fs::write(pair.left.path().join("top"), vec![3; 300_000]).unwrap();
+    std::os::unix::fs::symlink("top", pair.left.path().join("link")).unwrap();
+    let report = pair.sync();
+    assert_eq!(report.copied(), 4, "{:?}", report.failures());
+    assert_eq!(
+        fs::read(pair.right.path().join("docs/a.txt")).unwrap(),
+        b"a"
+    );
+    assert_eq!(
+        fs::read(pair.right.path().join("top")).unwrap(),
+        vec![3; 300_000]
+    );
+    assert!(pair.right.path().join(".foldover/id").exists());
+    assert!(pair.prepare().preview().items().is_empty());
+
+    // An edit on the server comes back; a deletion here is archived there.
+    fs::write(
+        pair.right.path().join("docs/a.txt"),
+        b"edited on the server",
+    )
+    .unwrap();
+    fs::remove_file(pair.left.path().join("top")).unwrap();
+    let report = pair.sync();
+    assert_eq!(
+        (report.copied(), report.archived()),
+        (1, 1),
+        "{:?}",
+        report.failures()
+    );
+    assert_eq!(
+        fs::read(pair.left.path().join("docs/a.txt")).unwrap(),
+        b"edited on the server"
+    );
+    assert!(!pair.right.path().join("top").exists());
+    let archived = pair
+        .right
+        .path()
+        .join(".foldover/archive")
+        .join(report.archive())
+        .join("top");
+    assert_eq!(fs::read(archived).unwrap(), vec![3; 300_000]);
+
+    // Edits on both sides are a conflict; neither is overwritten.
+    fs::write(pair.left.path().join("docs/a.txt"), b"here").unwrap();
+    fs::write(pair.right.path().join("docs/a.txt"), b"there").unwrap();
+    let report = pair.sync();
+    assert_eq!(report.conflicts().len(), 1);
+    assert_eq!(
+        fs::read(pair.right.path().join("docs/a.txt")).unwrap(),
+        b"there"
+    );
 }

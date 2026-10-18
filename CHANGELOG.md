@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- SFTP folders: either side of a pair can be `sftp://host/path`, reached
+  with your SSH keys and configuration, with the same staging, archive and
+  conflict rules as local folders.
 - NAS shares that went away are mounted again before a sync, with the
   password saved in the Keychain and no dialog.
 - Pause automatic syncs for an hour, four hours or until resumed, from the

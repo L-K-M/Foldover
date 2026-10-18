@@ -13,8 +13,8 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use super::{LocalEndpoint, ScanError, at};
 
 /// A root's own rules, honored on both sides.
-const IGNORE_FILE: &[u8] = b".foldoverignore";
-const IGNORE_FILE_LIMIT: u64 = 64 * 1024;
+pub(crate) const IGNORE_FILE: &[u8] = b".foldoverignore";
+pub(crate) const IGNORE_FILE_LIMIT: u64 = 64 * 1024;
 
 pub struct Filter {
     rules: Gitignore,
@@ -67,7 +67,7 @@ impl Filter {
         Self { cutoff, ..self }
     }
 
-    pub(super) fn is_old(&self, modified: SystemTime) -> bool {
+    pub(crate) fn is_old(&self, modified: SystemTime) -> bool {
         self.cutoff.is_some_and(|cutoff| modified < cutoff)
     }
 
@@ -80,11 +80,11 @@ impl Filter {
         }
     }
 
-    pub(super) fn too_large(&self, size: u64) -> bool {
+    pub(crate) fn too_large(&self, size: u64) -> bool {
         self.size_limit.is_some_and(|limit| size > limit)
     }
 
-    pub(super) fn excludes(&self, path: &SyncPath, directory: bool) -> bool {
+    pub(crate) fn excludes(&self, path: &SyncPath, directory: bool) -> bool {
         self.rules
             .matched(Path::new(OsStr::from_bytes(path.as_bytes())), directory)
             .is_ignore()
@@ -102,9 +102,14 @@ impl LocalEndpoint {
         else {
             return Ok(Vec::new());
         };
-        let text = String::from_utf8(content).map_err(|_| ScanError::InvalidIgnoreFile)?;
-        Ok(text.lines().map(str::to_owned).collect())
+        parse_ignore_file(content)
     }
+}
+
+/// A `.foldoverignore` file's rules, one per line.
+pub(crate) fn parse_ignore_file(content: Vec<u8>) -> Result<Vec<String>, ScanError> {
+    let text = String::from_utf8(content).map_err(|_| ScanError::InvalidIgnoreFile)?;
+    Ok(text.lines().map(str::to_owned).collect())
 }
 
 #[cfg(test)]

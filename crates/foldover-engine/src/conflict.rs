@@ -2,7 +2,7 @@
 //! the entry, then a "keep A" choice makes A's version win at the path.
 //! The next run carries both to both folders.
 
-use foldover_endpoint::{ApplyError, LocalPair, PairRootError};
+use foldover_endpoint::{ApplyError, EndpointPair, PairRootError};
 use foldover_types::{EntryVersion, PairConfig, ScanControl, Side, SyncPath};
 
 /// How the app names the right folder; saved copies carry it.
@@ -27,7 +27,7 @@ pub fn keep_both(
     control: &mut impl FnMut() -> ScanControl,
 ) -> Result<SyncPath, KeepBothError> {
     let draft = pair.draft();
-    let endpoints = LocalPair::open(draft.left(), draft.right())?;
+    let endpoints = EndpointPair::open(draft.left(), draft.right())?;
     endpoints
         .endpoint(Side::Right)
         .keep_copy(path, right, RIGHT_FOLDER, draft.options(), control)

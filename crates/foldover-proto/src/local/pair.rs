@@ -1,6 +1,6 @@
 use foldover_types::{
-    Durability, Filters, InvalidPair, LocalRoot, MetadataPolicy, PairConfig, PairDraft,
-    PairOptions, Propagation, Schedule, ScheduleInterval, Side, SyncMode,
+    Durability, Filters, InvalidPair, MetadataPolicy, PairConfig, PairDraft, PairOptions, PairRoot,
+    Propagation, Schedule, ScheduleInterval, Side, SyncMode,
 };
 use serde::{Deserialize, Serialize};
 
@@ -214,8 +214,8 @@ impl TryFrom<PairInput> for PairDraft {
     fn try_from(input: PairInput) -> Result<Self, Self::Error> {
         Ok(Self::new(
             input.name,
-            LocalRoot::from_bytes(input.left_root)?,
-            LocalRoot::from_bytes(input.right_root)?,
+            PairRoot::from_bytes(input.left_root)?,
+            PairRoot::from_bytes(input.right_root)?,
             input.mode.into(),
         )?
         .with_options(input.options.try_into()?))
@@ -289,7 +289,7 @@ pub struct PairPage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use foldover_types::{MAX_LOCAL_ROOT_BYTES, MAX_PAIR_NAME_BYTES, PairId};
+    use foldover_types::{LocalRoot, MAX_LOCAL_ROOT_BYTES, MAX_PAIR_NAME_BYTES, PairId};
     use serde_json::json;
 
     #[test]

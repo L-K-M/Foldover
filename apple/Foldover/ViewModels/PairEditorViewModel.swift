@@ -120,6 +120,24 @@ final class PairEditorViewModel: Identifiable {
         }
     }
 
+    /// Use a folder on an SFTP server, `sftp://[user@]host[:port]/path`.
+    /// The agent checks the rest and connects when the pair is saved.
+    func chooseServer(_ locator: String, side: PairFolderSide) {
+        let locator = locator.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard locator.hasPrefix(Self.sftpScheme), locator.dropFirst(Self.sftpScheme.count).contains("/") else {
+            errorMessage = String(localized: "Write the folder as sftp://host/path, for example sftp://nas.local/~/Photos.")
+            return
+        }
+        let folder = SelectedFolder(bytes: Data(locator.utf8))
+        switch side {
+        case .left: left = folder
+        case .right: right = folder
+        }
+        errorMessage = nil
+    }
+
+    private static let sftpScheme = "sftp://"
+
     func save() async -> Bool {
         guard canSave, let left, let right else { return false }
         isSaving = true

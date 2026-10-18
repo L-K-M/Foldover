@@ -2,11 +2,7 @@
 //! side keeps what runs displaced or removed under
 //! `.foldover/archive/<run>/<original path>` for 30 days.
 
-use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
-
-use foldover_endpoint::{ApplyError, LocalEndpoint, ScanError};
+use foldover_endpoint::{ApplyError, Endpoint, ScanError};
 use foldover_types::{Durability, PairConfig, Side, SyncPath};
 
 pub use foldover_endpoint::{ArchivedItem, ArchivedRun};
@@ -71,7 +67,7 @@ impl PutBackReport {
 /// One side's archive. Opening it needs only the pair's configuration, so
 /// callers browse without holding the engine.
 pub struct PairArchive {
-    endpoint: LocalEndpoint,
+    endpoint: Endpoint,
     durability: Durability,
 }
 
@@ -81,7 +77,7 @@ impl PairArchive {
             Side::Left => pair.draft().left(),
             Side::Right => pair.draft().right(),
         };
-        let endpoint = LocalEndpoint::open(Path::new(OsStr::from_bytes(root.as_bytes())))?;
+        let endpoint = Endpoint::open(root)?;
         Ok(Self {
             endpoint,
             durability: pair.draft().options().durability(),
@@ -131,8 +127,10 @@ impl PairArchive {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
     use std::fs;
     use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
 
     use foldover_endpoint::archive_name;
     use foldover_types::{LocalRoot, PairDraft, PairId, SyncMode};

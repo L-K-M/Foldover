@@ -25,6 +25,10 @@ pub struct ArchivedRun {
 }
 
 impl ArchivedRun {
+    pub(crate) fn new(name: String, started: SystemTime) -> Self {
+        Self { name, started }
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -42,6 +46,10 @@ pub struct ArchivedItem {
 }
 
 impl ArchivedItem {
+    pub(crate) fn new(path: SyncPath, size: u64) -> Self {
+        Self { path, size }
+    }
+
     pub fn path(&self) -> &SyncPath {
         &self.path
     }
@@ -51,7 +59,7 @@ impl ArchivedItem {
     }
 }
 
-pub(super) const ARCHIVE_ROOT: &[u8] = b".foldover/archive";
+pub(crate) const ARCHIVE_ROOT: &[u8] = b".foldover/archive";
 const SECONDS_PER_DAY: u64 = 86_400;
 const SECONDS_PER_HOUR: u64 = 3_600;
 const SECONDS_PER_MINUTE: u64 = 60;
@@ -77,7 +85,7 @@ pub fn archive_name(at: SystemTime) -> String {
 }
 
 /// The start time a run name encodes; `None` for any other name.
-pub(super) fn archive_time(name: &[u8]) -> Option<SystemTime> {
+pub(crate) fn archive_time(name: &[u8]) -> Option<SystemTime> {
     let text = std::str::from_utf8(name).ok()?;
     let number = |range: std::ops::Range<usize>| -> Option<u64> {
         let digits = text.get(range)?;
@@ -134,7 +142,7 @@ fn archive_root() -> SyncPath {
 
 /// The run's folder; only canonical run names, so nothing outside the
 /// archive can be addressed.
-fn run_folder(run: &str) -> Option<SyncPath> {
+pub(crate) fn run_folder(run: &str) -> Option<SyncPath> {
     archive_time(run.as_bytes())?;
     let mut bytes = ARCHIVE_ROOT.to_vec();
     bytes.push(b'/');
@@ -142,7 +150,7 @@ fn run_folder(run: &str) -> Option<SyncPath> {
     SyncPath::try_from(bytes).ok()
 }
 
-fn join(parent: &SyncPath, child: &[u8]) -> Result<SyncPath, ScanError> {
+pub(crate) fn join(parent: &SyncPath, child: &[u8]) -> Result<SyncPath, ScanError> {
     let mut bytes = parent.as_bytes().to_vec();
     bytes.push(b'/');
     bytes.extend_from_slice(child);
@@ -288,7 +296,7 @@ impl LocalEndpoint {
 }
 
 /// The UTC date of `at`, e.g. `2026-10-18`.
-pub(super) fn date_name(at: SystemTime) -> String {
+pub(crate) fn date_name(at: SystemTime) -> String {
     let seconds = at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     let (year, month, day) = civil_from_days(seconds / SECONDS_PER_DAY);
     format!("{year:04}-{month:02}-{day:02}")
@@ -298,7 +306,7 @@ pub(super) fn date_name(at: SystemTime) -> String {
 /// `a/report.txt` becomes `a/report (restored).txt` for attempt 1 and
 /// `a/report (restored 2).txt` for attempt 2. Long names lose the end of
 /// their stem, never the extension.
-pub(super) fn sibling_name(
+pub(crate) fn sibling_name(
     path: &SyncPath,
     label: &str,
     attempt: u32,

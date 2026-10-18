@@ -3,7 +3,7 @@
 
 use foldover_client::SyncStatus;
 use foldover_client::{
-    Durability, Filters, LocalRoot, MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions,
+    Durability, Filters, MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions, PairRoot,
     Propagation, Schedule, ScheduleInterval, Side, SocketLocation, SyncMode,
 };
 use foldover_proto::local::PairRecord;
@@ -63,12 +63,12 @@ enum SyncCommand {
 enum PairCommand {
     List,
     Show(PairId),
-    Add(PairDraft),
+    Add(Box<PairDraft>),
     /// Options not named on the command line keep their current values.
     Update {
         id: PairId,
         revision: u64,
-        draft: PairDraft,
+        draft: Box<PairDraft>,
         options: OptionChanges,
     },
     Remove {
@@ -173,7 +173,7 @@ async fn main() -> ExitCode {
         },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT | --keep-left PATH | --keep-right PATH | --keep-both PATH] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT | --keep-left PATH | --keep-right PATH | --keep-both PATH] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\nLEFT, RIGHT: an absolute path, or sftp://[user@]host[:port]/path\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -270,9 +270,9 @@ fn pair_command(args: &[OsString]) -> Option<PairCommand> {
         }),
         [command, name, left, right, mode, options @ ..] if command == "add" => {
             let options = option_changes(options)?.apply(PairOptions::default());
-            Some(PairCommand::Add(
+            Some(PairCommand::Add(Box::new(
                 draft(name, left, right, mode)?.with_options(options),
-            ))
+            )))
         }
         [command, id, revision, name, left, right, mode, options @ ..] if command == "update" => {
             let revision = revision
@@ -283,7 +283,7 @@ fn pair_command(args: &[OsString]) -> Option<PairCommand> {
             Some(PairCommand::Update {
                 id: id.to_str()?.parse().ok()?,
                 revision,
-                draft: draft(name, left, right, mode)?,
+                draft: Box::new(draft(name, left, right, mode)?),
                 options: option_changes(options)?,
             })
         }
@@ -415,8 +415,8 @@ fn draft(name: &OsString, left: &OsString, right: &OsString, mode: &OsString) ->
     };
     PairDraft::new(
         name.to_str()?.to_owned(),
-        LocalRoot::from_bytes(left.as_bytes().to_vec()).ok()?,
-        LocalRoot::from_bytes(right.as_bytes().to_vec()).ok()?,
+        PairRoot::from_bytes(left.as_bytes().to_vec()).ok()?,
+        PairRoot::from_bytes(right.as_bytes().to_vec()).ok()?,
         mode,
     )
     .ok()

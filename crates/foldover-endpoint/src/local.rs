@@ -1,9 +1,10 @@
 mod apply;
-mod archive;
+pub(crate) mod archive;
 mod conflict;
-mod filter;
+pub(crate) mod filter;
+mod foreign;
 mod identity;
-mod version;
+pub(crate) mod version;
 
 use std::collections::BTreeMap;
 use std::io;
@@ -24,7 +25,7 @@ pub use archive::{ArchivedItem, ArchivedRun, archive_name};
 pub use filter::{Filter, InvalidFilter};
 
 const INTERNAL_DIRECTORY: &[u8] = b".foldover";
-const TEMPORARY_PREFIX: &[u8] = b".foldover-tmp-";
+pub(crate) const TEMPORARY_PREFIX: &[u8] = b".foldover-tmp-";
 const FINDER_STATE: &[u8] = b".DS_Store";
 
 /// A held local root. Metadata inventory does not establish volume UUIDs,
@@ -69,6 +70,9 @@ pub enum ScanError {
     /// Nothing is at the root's path, e.g. its disk or share is not mounted.
     #[error("The folder is missing; connect its disk or share")]
     RootMissing,
+    /// An SFTP server could not be reached or refused the login.
+    #[error("Cannot reach the SFTP server: {0}")]
+    Unreachable(String),
 
     #[error("Extended metadata is unavailable at {path:?}: {source}")]
     Metadata {
@@ -142,7 +146,7 @@ const RACY_WINDOW: Duration = Duration::from_secs(3);
 /// The exact stat a version was derived from. An identical later stat proves
 /// the version unchanged without rereading data, outside the racy window.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Fingerprint {
+pub(crate) struct Fingerprint {
     key: Vec<u8>,
     size: u64,
     observed_at: SystemTime,
@@ -162,12 +166,26 @@ impl Fingerprint {
     }
 
     fn proves_unchanged(&self, current: &EntryMetadata) -> bool {
-        // Equal keys include equal mtimes, so `current` supplies it.
+        self.proves_unchanged_by(&current.stat_key(), current.modified())
+    }
+
+    /// For entries whose stat is another system's: `key` must hold every
+    /// field a change moves, `modified` included.
+    pub(crate) fn from_key(key: Vec<u8>, size: u64, observed_at: SystemTime) -> Self {
+        Self {
+            key,
+            size,
+            observed_at,
+        }
+    }
+
+    pub(crate) fn proves_unchanged_by(&self, key: &[u8], modified: SystemTime) -> bool {
+        // Equal keys include equal mtimes, so `modified` is the current one.
         let settled = self
             .observed_at
-            .duration_since(current.modified())
+            .duration_since(modified)
             .is_ok_and(|age| age >= RACY_WINDOW);
-        settled && current.stat_key() == self.key
+        settled && key == self.key
     }
 
     fn to_bytes(&self) -> Vec<u8> {
@@ -198,8 +216,8 @@ impl Fingerprint {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObservedEntry {
-    version: EntryVersion,
-    fingerprint: Fingerprint,
+    pub(crate) version: EntryVersion,
+    pub(crate) fingerprint: Fingerprint,
 }
 
 impl ObservedEntry {
@@ -229,10 +247,10 @@ impl ObservedEntry {
 /// A complete tree observation plus leftovers to recover before writing.
 #[derive(Debug, Default)]
 pub struct Observation {
-    entries: BTreeMap<SyncPath, ObservedEntry>,
-    leftovers: Vec<SyncPath>,
-    oversized: Vec<SyncPath>,
-    old: Vec<SyncPath>,
+    pub(crate) entries: BTreeMap<SyncPath, ObservedEntry>,
+    pub(crate) leftovers: Vec<SyncPath>,
+    pub(crate) oversized: Vec<SyncPath>,
+    pub(crate) old: Vec<SyncPath>,
 }
 
 impl Observation {
@@ -611,7 +629,7 @@ impl LocalEndpoint {
     }
 
     /// Extended metadata, or `None` where the platform cannot report it.
-    fn optional_extended_metadata(
+    pub(crate) fn optional_extended_metadata(
         &self,
         entry: &LocalEntry,
         control: &mut impl FnMut(u64) -> ScanControl,
@@ -629,7 +647,7 @@ impl LocalEndpoint {
 
     /// The entry at `path` now, under the inventory's protections; `None`
     /// when nothing is there.
-    fn entry_at(&self, path: &SyncPath) -> Result<Option<LocalEntry>, ScanError> {
+    pub(crate) fn entry_at(&self, path: &SyncPath) -> Result<Option<LocalEntry>, ScanError> {
         let at_path = Some(path.clone());
         let metadata = match self.root.metadata(path) {
             Ok(metadata) => metadata,
@@ -663,7 +681,7 @@ impl LocalEndpoint {
 }
 
 /// The fields a version depends on, from one consistent observation.
-fn observed<'a>(
+pub(crate) fn observed<'a>(
     metadata: &'a EntryMetadata,
     extended: Option<&'a ExtendedMetadata>,
 ) -> Observed<'a> {
@@ -688,7 +706,7 @@ fn observed<'a>(
     }
 }
 
-fn metadata_error(path: Option<SyncPath>, source: MetadataReadError) -> ScanError {
+pub(crate) fn metadata_error(path: Option<SyncPath>, source: MetadataReadError) -> ScanError {
     match source {
         MetadataReadError::Io(source) => ScanError::Io { path, source },
         MetadataReadError::Changed => ScanError::Changed(path),
@@ -705,7 +723,10 @@ fn reject_dataless(residency: DataResidency, path: &Option<SyncPath>) -> Result<
     Ok(())
 }
 
-fn child_path(parent: Option<&SyncPath>, name: &[u8]) -> Result<SyncPath, InvalidSyncPath> {
+pub(crate) fn child_path(
+    parent: Option<&SyncPath>,
+    name: &[u8],
+) -> Result<SyncPath, InvalidSyncPath> {
     let mut bytes = Vec::new();
     if let Some(parent) = parent {
         bytes.extend_from_slice(parent.as_bytes());
@@ -720,14 +741,14 @@ pub(crate) fn is_internal_name(name: &[u8]) -> bool {
     protected(name)
 }
 
-fn protected(name: &[u8]) -> bool {
+pub(crate) fn protected(name: &[u8]) -> bool {
     // Reserve ASCII aliases too: another endpoint may be case-insensitive.
     name.eq_ignore_ascii_case(INTERNAL_DIRECTORY)
         || name.eq_ignore_ascii_case(FINDER_STATE)
         || temporary(name)
 }
 
-fn temporary(name: &[u8]) -> bool {
+pub(crate) fn temporary(name: &[u8]) -> bool {
     name.get(..TEMPORARY_PREFIX.len())
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case(TEMPORARY_PREFIX))
 }

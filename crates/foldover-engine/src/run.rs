@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
 use foldover_endpoint::{
-    ApplyError, Expected, Filter, InvalidFilter, LocalEndpoint, LocalPair, Observation,
+    ApplyError, Endpoint, EndpointPair, Expected, Filter, InvalidFilter, Observation,
     ObservedEntry, PairRootError, RunScope, ScanError, access_denied,
 };
 use foldover_state::{BaseUpdate, MountSources, RecordedIdentities, SnapshotEntry};
@@ -315,7 +315,7 @@ impl RunInputs {
 pub struct PairRun {
     pair: PairConfig,
     identities: RecordedIdentities,
-    endpoints: LocalPair,
+    endpoints: EndpointPair,
     left: Observation,
     right: Observation,
     plan: CandidatePlan,
@@ -328,6 +328,17 @@ impl PairRun {
         inputs: RunInputs,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<Self, RunError> {
+        let draft = inputs.pair.draft();
+        let endpoints = EndpointPair::open(draft.left(), draft.right())?;
+        Self::prepare_on(inputs, endpoints, control)
+    }
+
+    /// `prepare` on endpoints opened elsewhere.
+    pub(crate) fn prepare_on(
+        inputs: RunInputs,
+        endpoints: EndpointPair,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<Self, RunError> {
         let RunInputs {
             pair,
             base,
@@ -337,7 +348,6 @@ impl PairRun {
             right_snapshot,
         } = inputs;
         let draft = pair.draft();
-        let endpoints = LocalPair::open(draft.left(), draft.right())?;
         for side in [Side::Left, Side::Right] {
             let Some(recorded) = identities.side(side) else {
                 continue;
@@ -763,7 +773,7 @@ impl Executor<'_> {
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<EntryVersion, ApplyError> {
         let endpoints = &self.run.endpoints;
-        let from: &LocalEndpoint = endpoints.endpoint(target.other());
+        let from: &Endpoint = endpoints.endpoint(target.other());
         let to = endpoints.endpoint(target);
         match (change, current) {
             (ChangeKind::UpdateMetadata, Some(current)) => {

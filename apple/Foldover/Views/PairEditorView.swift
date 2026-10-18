@@ -6,6 +6,8 @@ struct PairEditorView: View {
     @Bindable var viewModel: PairEditorViewModel
     @State private var choosingSide = PairFolderSide.left
     @State private var choosingFolder = false
+    @State private var enteringServer: PairFolderSide?
+    @State private var serverText = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -15,10 +17,12 @@ struct PairEditorView: View {
                 LabeledContent("Folder A") {
                     Text(viewModel.folderText(.left)).lineLimit(2).textSelection(.enabled)
                     Button("Choose A…") { choosingSide = .left; choosingFolder = true }
+                    Button("SFTP…") { enteringServer = .left }
                 }
                 LabeledContent("Folder B") {
                     Text(viewModel.folderText(.right)).lineLimit(2).textSelection(.enabled)
                     Button("Choose B…") { choosingSide = .right; choosingFolder = true }
+                    Button("SFTP…") { enteringServer = .right }
                 }
                 Picker("Mode", selection: $viewModel.mode) {
                     ForEach(PairMode.allCases, id: \.self) { mode in Text(mode.title).tag(mode) }
@@ -95,6 +99,17 @@ struct PairEditorView: View {
         .padding(24)
         .frame(width: 600)
         .interactiveDismissDisabled(viewModel.isSaving)
+        .alert("Folder on an SFTP Server", isPresented: Binding(
+            get: { enteringServer != nil }, set: { if !$0 { enteringServer = nil } }
+        )) {
+            TextField("sftp://user@host/path", text: $serverText)
+            Button("Use") {
+                if let side = enteringServer { viewModel.chooseServer(serverText, side: side) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Foldover connects with your SSH keys, agent and ~/.ssh/config, like the ssh command; it cannot ask for a password. Use ~ for the home folder, for example sftp://nas.local/~/Photos.")
+        }
         .fileImporter(isPresented: $choosingFolder, allowedContentTypes: [.folder], allowsMultipleSelection: false) {
             viewModel.chooseFolder($0, side: choosingSide)
         }

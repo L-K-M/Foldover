@@ -84,6 +84,11 @@ connecting user ID.
   --permissions sync --durability full
 ```
 
+A folder may also be on an SFTP server, written
+`sftp://[user@]host[:port]/path` (`/~/…` for the home folder). Foldover
+connects with your SSH keys, agent and `~/.ssh/config`, and never asks for
+a password ([ADR 0028](docs/adr/0028-sftp-endpoints.md)).
+
 Both selected folders must exist. Roots must be disjoint from each other,
 every configured pair and Foldover's state directory. Reconnect unavailable
 configured roots before adding or changing pairs, so overlap checks can finish.

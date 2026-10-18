@@ -5,11 +5,11 @@ use std::path::Path;
 use std::collections::BTreeMap;
 
 use foldover_endpoint::{
-    Filter, InvalidFilter, LocalEndpoint, LocalPair, ObservedEntry, PairRootError, RootRelation,
-    ScanError,
+    Endpoint, EndpointPair, Filter, InvalidFilter, LocalEndpoint, ObservedEntry, PairRootError,
+    RootRelation, ScanError,
 };
 use foldover_state::{HistoryEntry, MountSources, PairStore, Pause, SnapshotEntry, StateLocation};
-use foldover_types::{PairConfig, PairDraft, PairId, Resolution, Side, SyncPath};
+use foldover_types::{PairConfig, PairDraft, PairId, PairRoot, Resolution, Side, SyncPath};
 
 use crate::{Commit, RunInputs};
 
@@ -76,14 +76,16 @@ impl From<foldover_state::Error> for Error {
 /// share one serialized command, so concurrent clients cannot reserve the same roots.
 pub struct Engine {
     pairs: PairStore,
-    state_root: LocalEndpoint,
+    state_root: Endpoint,
 }
 
 impl Engine {
     pub fn open(location: &StateLocation) -> Result<Self, Error> {
         let pairs = PairStore::open(location)?;
         let root = pairs.root()?;
-        let state_root = LocalEndpoint::open(Path::new(OsStr::from_bytes(root.as_bytes())))?;
+        let state_root = Endpoint::Local(LocalEndpoint::open(Path::new(OsStr::from_bytes(
+            root.as_bytes(),
+        )))?);
         Ok(Self { pairs, state_root })
     }
 
@@ -233,7 +235,7 @@ impl Engine {
     }
 
     fn validate_roots(&self, draft: &PairDraft, replacing: Option<PairId>) -> Result<(), Error> {
-        let selected = LocalPair::open(draft.left(), draft.right())?;
+        let selected = EndpointPair::open(draft.left(), draft.right())?;
         for side in [Side::Left, Side::Right] {
             if selected.endpoint(side).relation_to(&self.state_root)? != RootRelation::Disjoint {
                 return Err(Error::StateOverlap);
@@ -252,21 +254,35 @@ impl Engine {
                 if Some(pair.id()) == replacing {
                     continue;
                 }
-                let existing = LocalPair::open(pair.draft().left(), pair.draft().right()).map_err(
-                    |source| Error::CatalogUnavailable {
-                        pair: pair.id(),
-                        source,
-                    },
-                )?;
-                for selected_side in [Side::Left, Side::Right] {
-                    for existing_side in [Side::Left, Side::Right] {
-                        if selected
-                            .endpoint(selected_side)
-                            .relation_to(existing.endpoint(existing_side))?
-                            != RootRelation::Disjoint
-                        {
-                            return Err(Error::CatalogOverlap(pair.id()));
+                // Local roots are compared on disk; SFTP roots by locator, so
+                // changing the catalog never waits on a server.
+                for existing in [pair.draft().left(), pair.draft().right()] {
+                    let overlapping = match existing {
+                        PairRoot::Local(_) => {
+                            let existing = Endpoint::open(existing).map_err(|source| {
+                                Error::CatalogUnavailable {
+                                    pair: pair.id(),
+                                    source: PairRootError::Endpoint(source),
+                                }
+                            })?;
+                            let mut overlapping = false;
+                            for side in [Side::Left, Side::Right] {
+                                overlapping |= selected.endpoint(side).relation_to(&existing)?
+                                    != RootRelation::Disjoint;
+                            }
+                            overlapping
                         }
+                        PairRoot::Sftp(existing) => {
+                            [draft.left(), draft.right()]
+                                .into_iter()
+                                .any(|selected| match selected {
+                                    PairRoot::Sftp(selected) => selected.overlaps(existing),
+                                    PairRoot::Local(_) => false,
+                                })
+                        }
+                    };
+                    if overlapping {
+                        return Err(Error::CatalogOverlap(pair.id()));
                     }
                 }
             }

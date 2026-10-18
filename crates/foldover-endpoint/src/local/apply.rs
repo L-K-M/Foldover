@@ -55,7 +55,11 @@ impl RunScope {
         &self.name
     }
 
-    fn archive_path(&self, path: &SyncPath) -> Result<SyncPath, InvalidSyncPath> {
+    pub(crate) fn options(&self) -> &PairOptions {
+        &self.options
+    }
+
+    pub(crate) fn archive_path(&self, path: &SyncPath) -> Result<SyncPath, InvalidSyncPath> {
         let mut bytes = self.archive.as_bytes().to_vec();
         bytes.push(b'/');
         bytes.extend_from_slice(path.as_bytes());
@@ -319,7 +323,7 @@ impl LocalEndpoint {
 
     /// Re-observe `path` and prove it still holds the planned entry. An
     /// unchanged fingerprint proves it without rereading data.
-    fn verified(
+    pub(crate) fn verified(
         &self,
         path: &SyncPath,
         expected: &ObservedEntry,

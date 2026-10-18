@@ -6,7 +6,7 @@ use foldover_db::{
 };
 use foldover_types::{
     BaselineEntry, Durability, EndpointId, Filters, InvalidPair, LocalRoot, MetadataPolicy,
-    PairConfig, PairDraft, PairId, PairOptions, Propagation, Resolution, Schedule,
+    PairConfig, PairDraft, PairId, PairOptions, PairRoot, Propagation, Resolution, Schedule,
     ScheduleInterval, Side, SyncMode, SyncPath,
 };
 
@@ -462,8 +462,8 @@ fn from_row(row: PairRow) -> Result<PairConfig, Error> {
     };
     let draft = PairDraft::new(
         row.values.name,
-        LocalRoot::from_bytes(row.values.left_root)?,
-        LocalRoot::from_bytes(row.values.right_root)?,
+        PairRoot::from_bytes(row.values.left_root)?,
+        PairRoot::from_bytes(row.values.right_root)?,
         mode,
     )?
     .with_options(

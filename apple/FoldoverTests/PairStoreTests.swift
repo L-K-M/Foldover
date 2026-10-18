@@ -306,3 +306,15 @@ func ageLimitsAreWholeDaysUpToACentury() {
     editor.limitsAge = false
     #expect(editor.options.ageLimit == nil)
 }
+
+@MainActor
+@Test
+func sftpFoldersAreWrittenAsLocators() {
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()))
+    editor.chooseServer("  sftp://alice@nas.local/~/Photos ", side: .right)
+    #expect(editor.folderText(.right) == "sftp://alice@nas.local/~/Photos")
+    #expect(editor.errorMessage == nil)
+    editor.chooseServer("nas.local:/Photos", side: .left)
+    #expect(editor.errorMessage != nil)
+    #expect(editor.folderText(.left) == "Choose a folder")
+}

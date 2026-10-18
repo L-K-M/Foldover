@@ -30,7 +30,7 @@ use foldover_proto::local::{
 };
 pub use foldover_types::{
     Durability, Filters, InvalidPair, LocalRoot, MetadataPolicy, PairConfig, PairDraft, PairId,
-    PairOptions, Propagation, Schedule, ScheduleInterval, Side, SyncMode,
+    PairOptions, PairRoot, Propagation, Schedule, ScheduleInterval, Side, SyncMode,
 };
 use serde_json::Value;
 use serde_json::json;

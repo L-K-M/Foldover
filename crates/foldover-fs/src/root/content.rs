@@ -78,6 +78,19 @@ impl Root {
 
     /// Stream exactly the observed size through `sink` and hash it. The file
     /// and its root-relative binding must be unchanged afterwards.
+    /// Push an observed regular file's data to `sink` and return its digest.
+    /// The file must still match `expected` throughout.
+    pub fn read_observed(
+        &self,
+        path: &SyncPath,
+        expected: &EntryMetadata,
+        control: &mut impl FnMut(u64) -> ScanControl,
+        sink: &mut impl FnMut(&[u8]) -> io::Result<()>,
+    ) -> Result<Digest, HashError> {
+        let mut file = self.open_observed_file(path, expected, control)?;
+        self.stream_observed_file(path, &mut file, expected, control, sink)
+    }
+
     pub(super) fn stream_observed_file(
         &self,
         path: &SyncPath,

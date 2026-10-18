@@ -7,7 +7,13 @@
 mod local;
 
 #[cfg(unix)]
-mod local_pair;
+mod endpoint;
+
+#[cfg(unix)]
+mod pair;
+
+#[cfg(unix)]
+mod sftp;
 
 #[cfg(unix)]
 mod watch;
@@ -28,9 +34,15 @@ pub use local::{
 #[cfg(unix)]
 pub use foldover_fs::{
     AccessControl, AttributeRole, DeclaredSupport, EntryMetadata, ExtendedAttribute,
-    ExtendedMetadata, FileIdentity, FilesystemFeature, FilesystemFeatures, MetadataReadError,
-    NodeKind, RootRelation,
+    ExtendedMetadata, FileIdentity, FilesystemFeature, FilesystemFeatures, ForeignMetadata,
+    MetadataReadError, NodeKind, RootRelation,
 };
 
 #[cfg(unix)]
-pub use local_pair::{LocalPair, PairRootError, access_denied};
+pub use endpoint::Endpoint;
+
+#[cfg(unix)]
+pub use pair::{EndpointPair, PairRootError, access_denied};
+
+#[cfg(unix)]
+pub use sftp::SftpEndpoint;

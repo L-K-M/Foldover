@@ -11,6 +11,7 @@ use foldover_types::{MetadataPolicy, Propagation};
 use rustix::fs::{Mode, Timespec, Timestamps, XattrFlags};
 
 use super::super::{AttributeRole, EntryMetadata, NodeKind};
+use super::ForeignMetadata;
 
 /// Setuid, setgid and sticky bits are never copied.
 const PERMISSION_BITS: u32 = 0o777;
@@ -64,6 +65,36 @@ pub(super) fn apply(
     if policy.modification_times() == Propagation::Sync && source_metadata.kind() == NodeKind::File
     {
         set_modified(target, source_metadata.modified())?;
+    }
+    Ok(())
+}
+
+/// Give `target` the synced part of metadata from a system without
+/// extended attributes, such as an SFTP server.
+pub(super) fn apply_foreign(
+    target: &impl AsFd,
+    metadata: ForeignMetadata,
+    policy: MetadataPolicy,
+) -> io::Result<()> {
+    let target_metadata = EntryMetadata::from_file(target)?;
+    let current = target_metadata.permissions() & PERMISSION_BITS;
+    let wanted = match policy.permissions() {
+        Propagation::Sync => metadata.permissions & PERMISSION_BITS,
+        Propagation::Ignore if target_metadata.kind() == NodeKind::File => {
+            if metadata.permissions & EXECUTE_BITS != 0 {
+                current | ((current & READ_BITS) >> READ_TO_EXECUTE_SHIFT)
+            } else {
+                current & !EXECUTE_BITS
+            }
+        }
+        Propagation::Ignore => current,
+    };
+    if wanted != current {
+        rustix::fs::fchmod(target, Mode::from_raw_mode(wanted as _))?;
+    }
+    if policy.modification_times() == Propagation::Sync && target_metadata.kind() == NodeKind::File
+    {
+        set_modified(target, metadata.modified)?;
     }
     Ok(())
 }

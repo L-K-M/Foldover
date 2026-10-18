@@ -1,7 +1,7 @@
 //! Whether a pair's folders are present, so unattended runs wait for an
 //! unmounted disk or share instead of failing.
 
-use foldover_endpoint::{LocalPair, PairRootError, mount_share};
+use foldover_endpoint::{EndpointPair, PairRootError, mount_share};
 use foldover_types::{PairConfig, Side};
 
 /// Mount `side`'s share again from `source`, its recorded mount source;
@@ -12,8 +12,9 @@ pub fn reconnect(pair: &PairConfig, side: Side, source: &str) -> bool {
 
 /// The side whose folder is missing, if either is.
 pub fn missing_side(pair: &PairConfig) -> Option<Side> {
-    match LocalPair::open(pair.draft().left(), pair.draft().right()) {
-        Err(PairRootError::Missing(side)) => Some(side),
+    match EndpointPair::open(pair.draft().left(), pair.draft().right()) {
+        // An unreachable server is waited for like an unmounted disk.
+        Err(PairRootError::Missing(side) | PairRootError::Unreachable(side, _)) => Some(side),
         _ => None,
     }
 }

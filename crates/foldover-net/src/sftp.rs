@@ -45,6 +45,9 @@ pub struct SshTarget {
     pub port: Option<u16>,
 }
 
+/// Where a producer pushes file data, chunk by chunk.
+pub type Chunks<'a> = &'a mut dyn FnMut(&[u8]) -> io::Result<()>;
+
 /// An open file or directory on the server.
 #[derive(Debug)]
 pub struct Handle(Vec<u8>);
@@ -287,34 +290,66 @@ impl Session {
         }
     }
 
-    /// Write everything `source` yields from the start of the file,
-    /// keeping several writes in flight.
+    /// Write everything `source` yields from the start of the file.
     pub fn write_all(&mut self, handle: &Handle, source: &mut dyn Read) -> io::Result<u64> {
+        self.write_chunks(handle, |sink| {
+            let mut buffer = vec![0; CHUNK];
+            loop {
+                let count = read_full(source, &mut buffer)?;
+                if count == 0 {
+                    return Ok(());
+                }
+                sink(&buffer[..count])?;
+            }
+        })
+    }
+
+    /// Write the chunks `produce` pushes from the start of the file,
+    /// keeping several writes in flight. Returns the bytes written.
+    pub fn write_chunks(
+        &mut self,
+        handle: &Handle,
+        produce: impl FnOnce(Chunks<'_>) -> io::Result<()>,
+    ) -> io::Result<u64> {
         let mut offset = 0u64;
         let mut pending = VecDeque::new();
-        let mut buffer = vec![0; CHUNK];
-        loop {
-            let count = read_full(source, &mut buffer)?;
-            if count > 0 {
-                let id = self.id();
-                self.send(
-                    Writer::new(wire::WRITE, id)
-                        .bytes(&handle.0)
-                        .u64(offset)
-                        .bytes(&buffer[..count])
-                        .finish(),
-                )?;
-                pending.push_back(id);
-                offset += count as u64;
-            }
-            if pending.len() >= WINDOW || (count == 0 && !pending.is_empty()) {
+        let mut buffer = Vec::with_capacity(CHUNK);
+        let mut flush = |session: &mut Self, data: &[u8], offset: &mut u64| -> io::Result<()> {
+            let id = session.id();
+            session.send(
+                Writer::new(wire::WRITE, id)
+                    .bytes(&handle.0)
+                    .u64(*offset)
+                    .bytes(data)
+                    .finish(),
+            )?;
+            pending.push_back(id);
+            *offset += data.len() as u64;
+            if pending.len() >= WINDOW {
                 let id = pending.pop_front().expect("a write is pending");
-                status(&self.receive_for(id)?)?;
+                status(&session.receive_for(id)?)?;
             }
-            if count == 0 && pending.is_empty() {
-                return Ok(offset);
+            Ok(())
+        };
+        produce(&mut |mut chunk: &[u8]| {
+            while !chunk.is_empty() {
+                let taken = chunk.len().min(CHUNK - buffer.len());
+                buffer.extend_from_slice(&chunk[..taken]);
+                chunk = &chunk[taken..];
+                if buffer.len() == CHUNK {
+                    flush(self, &buffer, &mut offset)?;
+                    buffer.clear();
+                }
             }
+            Ok(())
+        })?;
+        if !buffer.is_empty() {
+            flush(self, &buffer, &mut offset)?;
         }
+        while let Some(id) = pending.pop_front() {
+            status(&self.receive_for(id)?)?;
+        }
+        Ok(offset)
     }
 
     pub fn set_handle_attributes(

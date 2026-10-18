@@ -1,0 +1,952 @@
+//! A folder on an SFTP server, with the same rules as a local root:
+//! writes are staged under a temporary name, nothing is replaced or
+//! removed without moving it to `.foldover/archive`, and versions come
+//! from the data itself.
+//!
+//! What differs from local roots:
+//! - metadata is the mode and the modification time in whole seconds;
+//!   there are no extended attributes, flags or ACLs;
+//! - a replacement is two renames (current version to the archive, new
+//!   version into place), so the path is briefly empty;
+//! - an unchanged stat is size, time, mode and owner, without an inode.
+
+mod transfer;
+
+pub(crate) use transfer::{copy, update_metadata};
+
+use std::io;
+use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use foldover_net::sftp::{Attributes, FileKind, Handle, Session, SshTarget};
+use foldover_types::{
+    Digest, Durability, EndpointId, EntryKind, EntryVersion, MetadataPolicy, ScanControl, SftpRoot,
+    SyncPath,
+};
+
+use crate::local::archive::{ARCHIVE_ROOT, archive_time, date_name, sibling_name};
+use crate::local::filter::{IGNORE_FILE, IGNORE_FILE_LIMIT, parse_ignore_file};
+use crate::local::version::{Observed, Payload, entry_version, metadata_version};
+use crate::local::{Fingerprint, TEMPORARY_PREFIX, child_path, protected, temporary};
+use crate::{
+    ApplyError, ArchivedItem, ArchivedRun, Filter, NodeKind, Observation, ObservedEntry, RunScope,
+    ScanError,
+};
+
+/// Foldover's own folders and files.
+const PRIVATE_DIRECTORY: u32 = 0o700;
+const PRIVATE_FILE: u32 = 0o600;
+/// Folders and files in the synced tree when modes are not synced; the
+/// server's umask narrows them.
+const DEFAULT_DIRECTORY: u32 = 0o777;
+const DEFAULT_FILE: u32 = 0o666;
+const PERMISSION_BITS: u32 = 0o777;
+const EXECUTE_BITS: u32 = 0o111;
+const IDENTITY_FILE: &[u8] = b".foldover/id";
+const IDENTITY_FILE_LIMIT: usize = 64;
+const INTERNAL_DIRECTORY: &[u8] = b".foldover";
+/// Names tried when putting an item back beside a newer one.
+const PUT_BACK_ATTEMPTS: u32 = 100;
+const RESTORED: &str = "restored";
+const SSH_PORT: u16 = 22;
+
+pub struct SftpEndpoint {
+    session: Mutex<Session>,
+    /// `host:port`, to tell whether two roots can overlap; unknown for
+    /// sessions made elsewhere.
+    server: Option<String>,
+    /// The root's absolute path on the server, without a trailing slash
+    /// unless it is `/`.
+    root: Vec<u8>,
+}
+
+impl SftpEndpoint {
+    pub fn open(location: &SftpRoot) -> Result<Self, ScanError> {
+        let target = SshTarget {
+            host: location.host().to_owned(),
+            user: location.user().map(str::to_owned),
+            port: location.port(),
+        };
+        let session = Session::connect(&target)
+            .map_err(|source| ScanError::Unreachable(source.to_string()))?;
+        let mut endpoint = Self::with_session(session, location.path())?;
+        endpoint.server = Some(format!(
+            "{}:{}",
+            location.host(),
+            location.port().unwrap_or(SSH_PORT)
+        ));
+        Ok(endpoint)
+    }
+
+    /// How two roots on servers nest; unknown servers never overlap.
+    pub fn relation_to(&self, other: &Self) -> crate::RootRelation {
+        if self.server.is_none() || self.server != other.server {
+            return crate::RootRelation::Disjoint;
+        }
+        let below = |root: &[u8], other: &[u8]| {
+            root.strip_prefix(other)
+                .is_some_and(|rest| rest.starts_with(b"/") || other == b"/")
+        };
+        if self.root == other.root {
+            crate::RootRelation::Same
+        } else if below(&other.root, &self.root) {
+            crate::RootRelation::Contains
+        } else if below(&self.root, &other.root) {
+            crate::RootRelation::Within
+        } else {
+            crate::RootRelation::Disjoint
+        }
+    }
+
+    /// Talk to an SFTP server program on standard streams instead of over
+    /// SSH, e.g. OpenSSH's `sftp-server` in tests.
+    pub fn spawn(
+        program: &std::path::Path,
+        arguments: &[&std::ffi::OsStr],
+        path: &[u8],
+    ) -> Result<Self, ScanError> {
+        let session = Session::spawn(program, arguments).map_err(io_error)?;
+        Self::with_session(session, path)
+    }
+
+    /// Use an existing session, e.g. to a local `sftp-server` in tests.
+    /// `path` is absolute, or `~` and `~/…` below the login's home.
+    pub fn with_session(mut session: Session, path: &[u8]) -> Result<Self, ScanError> {
+        let mut root = match path.strip_prefix(b"~") {
+            Some(below) => [session.real_path(b".").map_err(io_error)?, below.to_vec()].concat(),
+            None => path.to_vec(),
+        };
+        while root.len() > 1 && root.ends_with(b"/") {
+            root.pop();
+        }
+        match session.lstat(&root) {
+            Ok(attributes) if attributes.kind() == FileKind::Directory => {}
+            Ok(_) => {
+                return Err(io_error(io::Error::new(
+                    io::ErrorKind::NotADirectory,
+                    "The SFTP path is not a folder",
+                )));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(ScanError::RootMissing);
+            }
+            Err(error) => return Err(io_error(error)),
+        }
+        Ok(Self {
+            session: Mutex::new(session),
+            server: None,
+            root,
+        })
+    }
+
+    fn session(&self) -> MutexGuard<'_, Session> {
+        self.session.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The server path of `path` below the root.
+    fn remote(&self, path: &[u8]) -> Vec<u8> {
+        if self.root == b"/" {
+            return [b"/".as_slice(), path].concat();
+        }
+        [self.root.as_slice(), b"/", path].concat()
+    }
+
+    /// Read the root's listing: permissions refuse listings, not opening.
+    pub fn probe_access(&self) -> Result<(), ScanError> {
+        self.session()
+            .read_dir(&self.root)
+            .map(|_| ())
+            .map_err(io_error)
+    }
+
+    /// The identity this root carries, or `None` before its first sync.
+    pub fn identity(&self) -> Result<Option<EndpointId>, ScanError> {
+        let Some(content) = self.read_small(IDENTITY_FILE, IDENTITY_FILE_LIMIT)? else {
+            return Ok(None);
+        };
+        let text = content.strip_suffix(b"\n").unwrap_or(&content);
+        EndpointId::from_hex(text)
+            .map(Some)
+            .ok_or(ScanError::InvalidIdentity)
+    }
+
+    /// The root's identity, writing a new one if it has none.
+    pub fn ensure_identity(&self, durability: Durability) -> Result<EndpointId, ApplyError> {
+        if let Some(identity) = self.identity()? {
+            return Ok(identity);
+        }
+        let identity = EndpointId::from_bytes(*uuid::Uuid::new_v4().as_bytes());
+        let path = SyncPath::try_from(IDENTITY_FILE).expect("the identity path is valid");
+        self.make_directories(INTERNAL_DIRECTORY, PRIVATE_DIRECTORY)
+            .map_err(|source| write_error(&path, source))?;
+        let content = format!("{identity}\n");
+        let temporary = self
+            .upload(IDENTITY_FILE, PRIVATE_FILE, durability, |sink| {
+                sink(content.as_bytes())
+            })
+            .map_err(|source| write_error(&path, source))?;
+        let placed = self
+            .session()
+            .rename(&temporary, &self.remote(IDENTITY_FILE));
+        if placed.is_err() {
+            let _ = self.session().remove_file(&temporary);
+            // Another writer was first; its identity stands.
+            return self.identity()?.ok_or(ApplyError::DestinationChanged(path));
+        }
+        Ok(identity)
+    }
+
+    pub fn ignore_rules(&self) -> Result<Vec<String>, ScanError> {
+        match self.read_small(IGNORE_FILE, IGNORE_FILE_LIMIT as usize)? {
+            Some(content) => parse_ignore_file(content),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Bytes an unprivileged writer can still use; unknown when the server
+    /// cannot tell, which skips the free-space gate.
+    pub fn available_space(&self) -> Result<u64, ScanError> {
+        match self.session().available_space(&self.root) {
+            Ok(available) => Ok(available),
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => Ok(u64::MAX),
+            Err(error) => Err(io_error(error)),
+        }
+    }
+
+    /// Every entry below the root, reusing `previous` versions whose stat
+    /// is unchanged and settled.
+    pub fn observe_from(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: &std::collections::BTreeMap<SyncPath, ObservedEntry>,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<Observation, ScanError> {
+        let mut observation = Observation::default();
+        let mut pending: Vec<Option<SyncPath>> = vec![None];
+        while let Some(directory) = pending.pop() {
+            if control() == ScanControl::Cancel {
+                return Err(ScanError::Cancelled);
+            }
+            let remote = match &directory {
+                None => self.root.clone(),
+                Some(path) => self.remote(path.as_bytes()),
+            };
+            let entries = self
+                .session()
+                .read_dir(&remote)
+                .map_err(|source| at(directory.as_ref(), source))?;
+            for (name, attributes) in entries {
+                let path = child_path(directory.as_ref(), &name)?;
+                if protected(&name) {
+                    if temporary(&name) {
+                        observation.leftovers.push(path);
+                    }
+                    continue;
+                }
+                let kind = attributes.kind();
+                if filter.excludes(&path, kind == FileKind::Directory) {
+                    continue;
+                }
+                if name.starts_with(b"._") {
+                    return Err(ScanError::UnclassifiedSidecar(path));
+                }
+                if kind == FileKind::File {
+                    if filter.too_large(attributes.size.unwrap_or(0)) {
+                        observation.oversized.push(path);
+                        continue;
+                    }
+                    if filter.is_old(modified(&attributes)) {
+                        observation.old.push(path.clone());
+                    }
+                }
+                if kind == FileKind::Directory {
+                    pending.push(Some(path.clone()));
+                }
+                let entry =
+                    self.observe_entry(&path, &attributes, policy, previous.get(&path), control)?;
+                observation.entries.insert(path, entry);
+            }
+        }
+        Ok(observation)
+    }
+
+    fn observe_entry(
+        &self,
+        path: &SyncPath,
+        attributes: &Attributes,
+        policy: MetadataPolicy,
+        previous: Option<&ObservedEntry>,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<ObservedEntry, ScanError> {
+        let key = stat_key(attributes);
+        if let Some(previous) = previous
+            && previous
+                .fingerprint
+                .proves_unchanged_by(&key, modified(attributes))
+        {
+            return Ok(previous.clone());
+        }
+        let observed_at = SystemTime::now();
+        let version = self.version(path, attributes, policy, control)?;
+        Ok(ObservedEntry {
+            version,
+            fingerprint: Fingerprint::from_key(key, attributes.size.unwrap_or(0), observed_at),
+        })
+    }
+
+    /// An entry's version from its attributes, reading its data or link.
+    fn version(
+        &self,
+        path: &SyncPath,
+        attributes: &Attributes,
+        policy: MetadataPolicy,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<EntryVersion, ScanError> {
+        let observed = observed(attributes)?;
+        let remote = self.remote(path.as_bytes());
+        match attributes.kind() {
+            FileKind::File => {
+                let digest = self.read_file(path, attributes, control, &mut |_| Ok(()))?;
+                Ok(entry_version(Payload::File(digest), &observed, policy))
+            }
+            FileKind::Directory => Ok(entry_version(Payload::Directory, &observed, policy)),
+            FileKind::Symlink => {
+                let target = self
+                    .session()
+                    .read_link(&remote)
+                    .map_err(|source| at(Some(path), source))?;
+                Ok(entry_version(Payload::Symlink(&target), &observed, policy))
+            }
+            FileKind::Other => Err(ScanError::UnsupportedEntry(path.clone())),
+        }
+    }
+
+    /// Push a file's data to `sink` and return its digest. The file must
+    /// keep `expected`'s stat throughout.
+    pub(crate) fn read_file(
+        &self,
+        path: &SyncPath,
+        expected: &Attributes,
+        control: &mut impl FnMut() -> ScanControl,
+        sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    ) -> Result<Digest, ScanError> {
+        let remote = self.remote(path.as_bytes());
+        let mut session = self.session();
+        let handle = session
+            .open_read(&remote)
+            .map_err(|source| at(Some(path), source))?;
+        let mut hasher = blake3::Hasher::new();
+        let mut cancelled = false;
+        let read = session.read_all(&handle, &mut |chunk| {
+            if control() == ScanControl::Cancel {
+                cancelled = true;
+                return Err(io::Error::other("cancelled"));
+            }
+            hasher.update(chunk);
+            sink(chunk)
+        });
+        let _ = session.close(handle);
+        if cancelled {
+            return Err(ScanError::Cancelled);
+        }
+        read.map_err(|source| at(Some(path), source))?;
+        let after = session
+            .lstat(&remote)
+            .map_err(|source| at(Some(path), source))?;
+        if stat_key(&after) != stat_key(expected) {
+            return Err(ScanError::Changed(Some(path.clone())));
+        }
+        Ok(Digest::from_bytes(*hasher.finalize().as_bytes()))
+    }
+
+    /// The current attributes at `path`, or `None` when nothing is there.
+    pub(crate) fn attributes(&self, path: &SyncPath) -> Result<Option<Attributes>, ScanError> {
+        match self.session().lstat(&self.remote(path.as_bytes())) {
+            Ok(attributes) => Ok(Some(attributes)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(at(Some(path), error)),
+        }
+    }
+
+    /// Prove `path` still holds `expected` and return its attributes.
+    pub(crate) fn verified(
+        &self,
+        path: &SyncPath,
+        expected: &ObservedEntry,
+        policy: MetadataPolicy,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<Attributes, ApplyError> {
+        let changed = || ApplyError::DestinationChanged(path.clone());
+        let attributes = self.attributes(path)?.ok_or_else(changed)?;
+        if expected
+            .fingerprint
+            .proves_unchanged_by(&stat_key(&attributes), modified(&attributes))
+        {
+            return Ok(attributes);
+        }
+        if self.version(path, &attributes, policy, control)? != expected.version {
+            return Err(changed());
+        }
+        Ok(attributes)
+    }
+
+    pub(crate) fn read_link(&self, path: &SyncPath) -> Result<Vec<u8>, ScanError> {
+        self.session()
+            .read_link(&self.remote(path.as_bytes()))
+            .map_err(|source| at(Some(path), source))
+    }
+
+    /// The version stored at `path` now, reading data only for links and
+    /// directories; files take `content` from the copy just made.
+    pub(crate) fn placed_version(
+        &self,
+        path: &SyncPath,
+        content: Option<Digest>,
+        policy: MetadataPolicy,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<EntryVersion, ApplyError> {
+        let attributes = self
+            .attributes(path)?
+            .ok_or_else(|| ApplyError::DestinationChanged(path.clone()))?;
+        Ok(match (attributes.kind(), content) {
+            (FileKind::File, Some(digest)) => {
+                entry_version(Payload::File(digest), &observed(&attributes)?, policy)
+            }
+            _ => self.version(path, &attributes, policy, control)?,
+        })
+    }
+
+    /// Upload into a new temporary beside `path` (a raw path below the
+    /// root) and return the temporary's server path.
+    pub(crate) fn upload(
+        &self,
+        path: &[u8],
+        permissions: u32,
+        durability: Durability,
+        produce: impl FnOnce(foldover_net::sftp::Chunks<'_>) -> io::Result<()>,
+    ) -> io::Result<Vec<u8>> {
+        let temporary = self.remote(&temporary_beside(path));
+        let mut session = self.session();
+        let handle = session.create_new(&temporary, permissions)?;
+        let written = session.write_chunks(&handle, produce);
+        let synced = match (&written, durability) {
+            (Ok(_), Durability::Full) => match session.sync(&handle) {
+                Err(error) if error.kind() == io::ErrorKind::Unsupported => Ok(()),
+                result => result,
+            },
+            _ => Ok(()),
+        };
+        let closed = session.close(handle);
+        if let Err(error) = written.and(synced).and(closed) {
+            let _ = session.remove_file(&temporary);
+            return Err(error);
+        }
+        Ok(temporary)
+    }
+
+    /// The version a staged file will have, from its attributes and the
+    /// digest of the data written.
+    pub(crate) fn staged_version(
+        &self,
+        remote: &[u8],
+        digest: Digest,
+        policy: MetadataPolicy,
+    ) -> io::Result<EntryVersion> {
+        let attributes = self.session().lstat(remote)?;
+        let observed =
+            observed(&attributes).map_err(|error| io::Error::other(error.to_string()))?;
+        Ok(entry_version(Payload::File(digest), &observed, policy))
+    }
+
+    /// Remove an unplaced temporary; a leftover only costs space.
+    pub(crate) fn discard(&self, remote: &[u8]) {
+        let _ = self.session().remove_file(remote);
+    }
+
+    /// Give a staged or existing entry the synced part of `metadata`.
+    pub(crate) fn set_metadata(
+        &self,
+        remote: &[u8],
+        kind: EntryKind,
+        metadata: crate::ForeignMetadata,
+        policy: MetadataPolicy,
+    ) -> io::Result<()> {
+        let mut session = self.session();
+        let current = session.lstat(remote)?;
+        let mode = current.permissions.unwrap_or(0) & PERMISSION_BITS;
+        let wanted = match policy.permissions() {
+            foldover_types::Propagation::Sync => metadata.permissions & PERMISSION_BITS,
+            foldover_types::Propagation::Ignore if kind == EntryKind::File => {
+                if metadata.permissions & EXECUTE_BITS != 0 {
+                    mode | ((mode & 0o444) >> 2)
+                } else {
+                    mode & !EXECUTE_BITS
+                }
+            }
+            foldover_types::Propagation::Ignore => mode,
+        };
+        let times = (policy.modification_times() == foldover_types::Propagation::Sync
+            && kind == EntryKind::File)
+            .then(|| {
+                let seconds = whole_seconds(metadata.modified);
+                (seconds, seconds)
+            });
+        if wanted == mode && times.is_none() {
+            return Ok(());
+        }
+        session.set_attributes(
+            remote,
+            &Attributes {
+                permissions: (wanted != mode).then_some(wanted),
+                times,
+                ..Attributes::default()
+            },
+        )
+    }
+
+    /// Create a folder at `path` with `permissions`.
+    pub(crate) fn make_directory(&self, path: &SyncPath, permissions: u32) -> io::Result<()> {
+        self.session()
+            .make_directory(&self.remote(path.as_bytes()), permissions)
+    }
+
+    /// Create a link beside `path` and return its server path.
+    pub(crate) fn stage_link(&self, path: &[u8], target: &[u8]) -> io::Result<Vec<u8>> {
+        let temporary = self.remote(&temporary_beside(path));
+        self.session().symlink(target, &temporary)?;
+        Ok(temporary)
+    }
+
+    /// Move a staged temporary to `path`. Creating never replaces; a
+    /// replacement first moves the current entry to the run's archive.
+    pub(crate) fn place(
+        &self,
+        temporary: &[u8],
+        path: &SyncPath,
+        replacing: Option<&Attributes>,
+        run: &RunScope,
+    ) -> Result<(), ApplyError> {
+        if let Some(expected) = replacing {
+            let current = self.attributes(path)?;
+            if current.as_ref().map(stat_key) != Some(stat_key(expected)) {
+                let _ = self.session().remove_file(temporary);
+                return Err(ApplyError::DestinationChanged(path.clone()));
+            }
+            if let Err(error) = self.archive(path, run) {
+                let _ = self.session().remove_file(temporary);
+                return Err(error);
+            }
+        }
+        let placed = self
+            .session()
+            .rename(temporary, &self.remote(path.as_bytes()));
+        if let Err(source) = placed {
+            let _ = self.session().remove_file(temporary);
+            return Err(match self.attributes(path) {
+                Ok(Some(_)) => ApplyError::DestinationChanged(path.clone()),
+                _ => write_error(path, source),
+            });
+        }
+        Ok(())
+    }
+
+    /// Move `path` to the run's archive, creating its folders there.
+    fn archive(&self, path: &SyncPath, run: &RunScope) -> Result<(), ApplyError> {
+        let archived = run.archive_path(path)?;
+        if let Some(parent) = archived.parent() {
+            self.make_directories(parent.as_bytes(), PRIVATE_DIRECTORY)
+                .map_err(|source| write_error(path, source))?;
+        }
+        self.session()
+            .rename(
+                &self.remote(path.as_bytes()),
+                &self.remote(archived.as_bytes()),
+            )
+            .map_err(|source| write_error(path, source))
+    }
+
+    /// Archive the entry at `path` for this run; folders are removed only
+    /// when empty.
+    pub fn remove(
+        &self,
+        path: &SyncPath,
+        current: &ObservedEntry,
+        run: &RunScope,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), ApplyError> {
+        let attributes = self
+            .verified(path, current, run.options().metadata(), control)
+            .map_err(|error| match error {
+                ApplyError::Scan(ScanError::Changed(_)) => {
+                    ApplyError::DestinationChanged(path.clone())
+                }
+                error => error,
+            })?;
+        if attributes.kind() != FileKind::Directory {
+            return self.archive(path, run);
+        }
+        let remote = self.remote(path.as_bytes());
+        let mut session = self.session();
+        match session.remove_directory(&remote) {
+            Ok(()) => Ok(()),
+            Err(source) => match session.read_dir(&remote) {
+                Ok(entries) if !entries.is_empty() => Err(ApplyError::NotEmpty(path.clone())),
+                _ => Err(write_error(path, source)),
+            },
+        }
+    }
+
+    /// Archive a temporary an interrupted write left behind.
+    pub fn recover_leftover(&self, leftover: &SyncPath, run: &RunScope) -> Result<(), ApplyError> {
+        self.archive(leftover, run)
+    }
+
+    /// Give `path` new synced metadata; the content stays.
+    pub(crate) fn update_metadata(
+        &self,
+        path: &SyncPath,
+        kind: EntryKind,
+        metadata: crate::ForeignMetadata,
+        policy: MetadataPolicy,
+    ) -> Result<(), ApplyError> {
+        self.set_metadata(&self.remote(path.as_bytes()), kind, metadata, policy)
+            .map_err(|source| write_error(path, source))
+    }
+
+    /// The metadata a copy to another system carries.
+    pub(crate) fn foreign_metadata(attributes: &Attributes) -> crate::ForeignMetadata {
+        crate::ForeignMetadata {
+            permissions: attributes.permissions.unwrap_or(0) & PERMISSION_BITS,
+            modified: modified(attributes),
+        }
+    }
+
+    /// The version of an entry whose content is unchanged, from its
+    /// current attributes.
+    pub(crate) fn metadata_version(
+        &self,
+        path: &SyncPath,
+        content: foldover_types::EntryContent,
+        policy: MetadataPolicy,
+    ) -> Result<EntryVersion, ApplyError> {
+        let attributes = self
+            .attributes(path)?
+            .ok_or_else(|| ApplyError::DestinationChanged(path.clone()))?;
+        Ok(metadata_version(content, &observed(&attributes)?, policy))
+    }
+
+    /// Permanently delete archived runs older than `retention`.
+    pub fn prune_archive(&self, retention: Duration, now: SystemTime) -> Result<u64, ApplyError> {
+        let archive = self.remote(ARCHIVE_ROOT);
+        let runs = match self.session().read_dir(&archive) {
+            Ok(runs) => runs,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(io_error(error).into()),
+        };
+        let mut pruned = 0;
+        for (name, attributes) in runs {
+            let expired = archive_time(&name).is_some_and(|started| {
+                now.duration_since(started).is_ok_and(|age| age > retention)
+            });
+            if !expired || attributes.kind() != FileKind::Directory {
+                continue;
+            }
+            self.remove_tree(&[archive.as_slice(), b"/", &name].concat())
+                .map_err(|source| ApplyError::Scan(io_error(source)))?;
+            pruned += 1;
+        }
+        Ok(pruned)
+    }
+
+    fn remove_tree(&self, remote: &[u8]) -> io::Result<()> {
+        let entries = self.session().read_dir(remote)?;
+        for (name, attributes) in entries {
+            let child = [remote, b"/", &name].concat();
+            if attributes.kind() == FileKind::Directory {
+                self.remove_tree(&child)?;
+            } else {
+                self.session().remove_file(&child)?;
+            }
+        }
+        self.session().remove_directory(remote)
+    }
+
+    /// Archived runs, newest first.
+    pub fn archived_runs(&self) -> Result<Vec<ArchivedRun>, ScanError> {
+        let entries = match self.session().read_dir(&self.remote(ARCHIVE_ROOT)) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(io_error(error)),
+        };
+        let mut runs: Vec<ArchivedRun> = entries
+            .into_iter()
+            .filter_map(|(name, _)| {
+                let started = archive_time(&name)?;
+                Some(ArchivedRun::new(String::from_utf8(name).ok()?, started))
+            })
+            .collect();
+        runs.sort_by_key(|run| std::cmp::Reverse(run.started()));
+        Ok(runs)
+    }
+
+    /// Files and links `run` archived, in path order after `after`.
+    pub fn archived_items(
+        &self,
+        run: &str,
+        after: Option<&SyncPath>,
+        limit: usize,
+    ) -> Result<(Vec<ArchivedItem>, bool), ScanError> {
+        let folder = crate::local::archive::run_folder(run).ok_or(ScanError::UnknownArchiveRun)?;
+        let mut items = Vec::new();
+        let mut pending: Vec<Option<SyncPath>> = vec![None];
+        while let Some(relative) = pending.pop() {
+            let directory = match &relative {
+                None => folder.clone(),
+                Some(relative) => crate::local::archive::join(&folder, relative.as_bytes())?,
+            };
+            let entries = self
+                .session()
+                .read_dir(&self.remote(directory.as_bytes()))
+                .map_err(|source| at(Some(&directory), source))?;
+            for (name, attributes) in entries {
+                let path = child_path(relative.as_ref(), &name)?;
+                match attributes.kind() {
+                    FileKind::Directory => pending.push(Some(path)),
+                    FileKind::File | FileKind::Symlink
+                        if after.is_none_or(|after| &path > after) =>
+                    {
+                        items.push(ArchivedItem::new(path, attributes.size.unwrap_or(0)));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        items.sort_by(|left, right| left.path().cmp(right.path()));
+        let more = items.len() > limit;
+        items.truncate(limit);
+        Ok((items, more))
+    }
+
+    /// Put an archived item back at its path, or beside it as
+    /// `name (restored).ext` when that is taken. Returns where it went.
+    pub fn put_back(&self, run: &str, path: &SyncPath) -> Result<SyncPath, ApplyError> {
+        if path.components().any(protected) {
+            return Err(ApplyError::Unsupported(path.clone()));
+        }
+        let folder = crate::local::archive::run_folder(run).ok_or(ScanError::UnknownArchiveRun)?;
+        let archived = crate::local::archive::join(&folder, path.as_bytes())?;
+        if self.attributes(&archived)?.is_none() {
+            return Err(ApplyError::NotArchived(path.clone()));
+        }
+        if let Some(parent) = path.parent() {
+            self.make_directories(parent.as_bytes(), DEFAULT_DIRECTORY)
+                .map_err(|source| write_error(path, source))?;
+        }
+        for attempt in 0..PUT_BACK_ATTEMPTS {
+            let destination = match attempt {
+                0 => path.clone(),
+                attempt => sibling_name(path, RESTORED, attempt)?,
+            };
+            if self.attributes(&destination)?.is_some() {
+                continue;
+            }
+            return self
+                .session()
+                .rename(
+                    &self.remote(archived.as_bytes()),
+                    &self.remote(destination.as_bytes()),
+                )
+                .map(|()| destination.clone())
+                .map_err(|source| write_error(&destination, source));
+        }
+        Err(ApplyError::Occupied(path.clone()))
+    }
+
+    /// Copy the file or link at `path`, still `expected`, to a free name
+    /// beside it labelled `from …`, dated by its modification day.
+    pub fn keep_copy(
+        &self,
+        path: &SyncPath,
+        expected: EntryVersion,
+        from: &str,
+        options: &foldover_types::PairOptions,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<SyncPath, ApplyError> {
+        let changed = || ApplyError::SourceChanged(path.clone());
+        let attributes = self.attributes(path)?.ok_or_else(changed)?;
+        if self.version(path, &attributes, options.metadata(), control)? != expected {
+            return Err(changed());
+        }
+        let label = format!("from {from}, {}", date_name(modified(&attributes)));
+        let mut free = None;
+        for attempt in 1..=PUT_BACK_ATTEMPTS {
+            let candidate = sibling_name(path, &label, attempt)?;
+            if self.attributes(&candidate)?.is_none() {
+                free = Some(candidate);
+                break;
+            }
+        }
+        let copy = free.ok_or_else(|| ApplyError::Occupied(path.clone()))?;
+        let temporary = match attributes.kind() {
+            FileKind::File => {
+                // Download and upload again: SFTP has no server-side copy.
+                let mut data = Vec::new();
+                self.read_file(path, &attributes, control, &mut |chunk| {
+                    data.extend_from_slice(chunk);
+                    Ok(())
+                })?;
+                let permissions = attributes.permissions.unwrap_or(DEFAULT_FILE) & PERMISSION_BITS;
+                let temporary = self
+                    .upload(copy.as_bytes(), permissions, options.durability(), |sink| {
+                        sink(&data)
+                    })
+                    .map_err(|source| write_error(&copy, source))?;
+                self.set_metadata(
+                    &temporary,
+                    EntryKind::File,
+                    Self::foreign_metadata(&attributes),
+                    options.metadata(),
+                )
+                .map_err(|source| write_error(&copy, source))?;
+                temporary
+            }
+            FileKind::Symlink => {
+                let target = self.read_link(path)?;
+                self.stage_link(copy.as_bytes(), &target)
+                    .map_err(|source| write_error(&copy, source))?
+            }
+            FileKind::Directory | FileKind::Other => {
+                return Err(ApplyError::Unsupported(path.clone()));
+            }
+        };
+        let placed = self
+            .session()
+            .rename(&temporary, &self.remote(copy.as_bytes()));
+        if let Err(source) = placed {
+            let _ = self.session().remove_file(&temporary);
+            return Err(write_error(&copy, source));
+        }
+        Ok(copy)
+    }
+
+    /// Create every missing folder of `path` (raw, below the root).
+    fn make_directories(&self, path: &[u8], permissions: u32) -> io::Result<()> {
+        let mut prefix = Vec::new();
+        for component in path.split(|byte| *byte == b'/') {
+            if !prefix.is_empty() {
+                prefix.push(b'/');
+            }
+            prefix.extend_from_slice(component);
+            let remote = self.remote(&prefix);
+            let mut session = self.session();
+            if let Err(error) = session.make_directory(&remote, permissions) {
+                // SFTP reports an existing folder as a generic failure.
+                match session.lstat(&remote) {
+                    Ok(existing) if existing.kind() == FileKind::Directory => {}
+                    _ => return Err(error),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A small file below the root, or `None` when it is missing.
+    fn read_small(&self, path: &[u8], limit: usize) -> Result<Option<Vec<u8>>, ScanError> {
+        let remote = self.remote(path);
+        let mut session = self.session();
+        let handle: Handle = match session.open_read(&remote) {
+            Ok(handle) => handle,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(io_error(error)),
+        };
+        let mut content = Vec::new();
+        let read = session.read_all(&handle, &mut |chunk| {
+            content.extend_from_slice(chunk);
+            if content.len() > limit {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "File too large"));
+            }
+            Ok(())
+        });
+        let _ = session.close(handle);
+        read.map_err(io_error)?;
+        Ok(Some(content))
+    }
+}
+
+/// `path`'s parent with a fresh temporary name, e.g. `docs/.foldover-tmp-…`.
+fn temporary_beside(path: &[u8]) -> Vec<u8> {
+    let name = [
+        TEMPORARY_PREFIX,
+        uuid::Uuid::new_v4().simple().to_string().as_bytes(),
+    ]
+    .concat();
+    match path.iter().rposition(|byte| *byte == b'/') {
+        Some(slash) => [&path[..=slash], name.as_slice()].concat(),
+        None => name,
+    }
+}
+
+/// Every stat field a change moves; there is no inode to add.
+fn stat_key(attributes: &Attributes) -> Vec<u8> {
+    let mut key = b"sftp".to_vec();
+    key.extend_from_slice(&attributes.size.unwrap_or(u64::MAX).to_le_bytes());
+    key.extend_from_slice(&attributes.modified().unwrap_or(0).to_le_bytes());
+    key.extend_from_slice(&attributes.permissions.unwrap_or(0).to_le_bytes());
+    let (user, group) = attributes.owner.unwrap_or_default();
+    key.extend_from_slice(&user.to_le_bytes());
+    key.extend_from_slice(&group.to_le_bytes());
+    key
+}
+
+fn modified(attributes: &Attributes) -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(u64::from(attributes.modified().unwrap_or(0)))
+}
+
+fn whole_seconds(time: SystemTime) -> u32 {
+    let seconds = time
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    u32::try_from(seconds).unwrap_or(u32::MAX)
+}
+
+/// The fields a version depends on. SFTP reports no extended attributes,
+/// flags or ACLs, so none are tracked.
+fn observed(attributes: &Attributes) -> Result<Observed<'static>, ScanError> {
+    let kind = match attributes.kind() {
+        FileKind::File => NodeKind::File,
+        FileKind::Directory => NodeKind::Directory,
+        FileKind::Symlink => NodeKind::Symlink,
+        FileKind::Other => NodeKind::Other,
+    };
+    Ok(Observed {
+        kind,
+        permissions: attributes.permissions.unwrap_or(0),
+        modified: modified(attributes),
+        user_flags: None,
+        attributes: Some(Vec::new()),
+        access_control: None,
+    })
+}
+
+fn io_error(source: io::Error) -> ScanError {
+    ScanError::Io { path: None, source }
+}
+
+fn at(path: Option<&SyncPath>, source: io::Error) -> ScanError {
+    ScanError::Io {
+        path: path.cloned(),
+        source,
+    }
+}
+
+fn write_error(path: &SyncPath, source: io::Error) -> ApplyError {
+    ApplyError::Write {
+        path: path.clone(),
+        source: source.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -26,32 +26,32 @@ const METADATA_CONTEXT: &str = "ch.lkmc.foldover 2026-10-18 local entry metadata
 const PERMISSION_BITS: u32 = 0o7777;
 const EXECUTE_BITS: u32 = 0o111;
 
-pub(super) enum Payload<'a> {
+pub(crate) enum Payload<'a> {
     File(Digest),
     Directory,
     Symlink(&'a [u8]),
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct Attribute<'a> {
-    pub(super) role: AttributeRole,
-    pub(super) name: &'a [u8],
-    pub(super) size: u64,
-    pub(super) digest: Digest,
+pub(crate) struct Attribute<'a> {
+    pub(crate) role: AttributeRole,
+    pub(crate) name: &'a [u8],
+    pub(crate) size: u64,
+    pub(crate) digest: Digest,
 }
 
 /// The observed fields a version depends on. `attributes` is `None` only where
 /// the platform cannot report them (Linux symlinks), never after a failed read.
-pub(super) struct Observed<'a> {
-    pub(super) kind: NodeKind,
-    pub(super) permissions: u32,
-    pub(super) modified: SystemTime,
-    pub(super) user_flags: Option<u32>,
-    pub(super) attributes: Option<Vec<Attribute<'a>>>,
-    pub(super) access_control: Option<&'a AccessControl>,
+pub(crate) struct Observed<'a> {
+    pub(crate) kind: NodeKind,
+    pub(crate) permissions: u32,
+    pub(crate) modified: SystemTime,
+    pub(crate) user_flags: Option<u32>,
+    pub(crate) attributes: Option<Vec<Attribute<'a>>>,
+    pub(crate) access_control: Option<&'a AccessControl>,
 }
 
-pub(super) fn entry_version(
+pub(crate) fn entry_version(
     payload: Payload<'_>,
     observed: &Observed<'_>,
     policy: MetadataPolicy,
@@ -76,7 +76,7 @@ pub(super) fn entry_version(
 
 /// A version whose content is already known, such as after a metadata-only
 /// update, so the data need not be read again.
-pub(super) fn metadata_version(
+pub(crate) fn metadata_version(
     content: EntryContent,
     observed: &Observed<'_>,
     policy: MetadataPolicy,

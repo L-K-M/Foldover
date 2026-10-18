@@ -1,10 +1,6 @@
-use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use foldover_types::{PairRoot, Side};
 
-use foldover_types::{LocalRoot, Side};
-
-use crate::{LocalEndpoint, RootRelation, ScanError};
+use crate::{Endpoint, RootRelation, ScanError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PairRootError {
@@ -15,6 +11,9 @@ pub enum PairRootError {
     /// Nothing is at that side's path, e.g. its disk is not mounted.
     #[error("The {0:?} folder is missing; connect its disk or share")]
     Missing(Side),
+    /// The side's SFTP server could not be reached or refused the login.
+    #[error("The {0:?} folder's server is unreachable: {1}")]
+    Unreachable(Side, String),
     #[error("{}", access_denied(*.0))]
     AccessDenied(Side),
 }
@@ -30,21 +29,17 @@ pub fn access_denied(side: Side) -> String {
 
 /// Two held roots checked for overlap at selection time. Volume identity,
 /// readiness and execution-time revalidation still precede any sync writes.
-pub struct LocalPair {
-    left: LocalEndpoint,
-    right: LocalEndpoint,
+pub struct EndpointPair {
+    left: Endpoint,
+    right: Endpoint,
 }
 
-impl LocalPair {
-    pub fn open(left: &LocalRoot, right: &LocalRoot) -> Result<Self, PairRootError> {
-        let open = |root: &LocalRoot| -> Result<LocalEndpoint, ScanError> {
-            let endpoint = LocalEndpoint::open(Path::new(OsStr::from_bytes(root.as_bytes())))?;
-            endpoint.probe_access()?;
-            Ok(endpoint)
-        };
-        let open = |root: &LocalRoot, side| {
-            open(root).map_err(|error| match error {
+impl EndpointPair {
+    pub fn open(left: &PairRoot, right: &PairRoot) -> Result<Self, PairRootError> {
+        let open = |root: &PairRoot, side| {
+            Endpoint::open(root).map_err(|error| match error {
                 ScanError::RootMissing => PairRootError::Missing(side),
+                ScanError::Unreachable(message) => PairRootError::Unreachable(side, message),
                 error if error.is_access_denied() => PairRootError::AccessDenied(side),
                 error => PairRootError::Endpoint(error),
             })
@@ -58,7 +53,13 @@ impl LocalPair {
         Ok(Self { left, right })
     }
 
-    pub fn endpoint(&self, side: Side) -> &LocalEndpoint {
+    /// Endpoints opened elsewhere, e.g. over an existing SFTP session.
+    /// Overlap is not checked.
+    pub fn new(left: Endpoint, right: Endpoint) -> Self {
+        Self { left, right }
+    }
+
+    pub fn endpoint(&self, side: Side) -> &Endpoint {
         match side {
             Side::Left => &self.left,
             Side::Right => &self.right,
@@ -70,10 +71,12 @@ impl LocalPair {
 mod tests {
     use super::*;
     use std::fs;
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::symlink;
+    use std::path::Path;
 
-    fn root(path: &Path) -> LocalRoot {
-        LocalRoot::from_bytes(path.as_os_str().as_bytes().to_vec()).unwrap()
+    fn root(path: &Path) -> PairRoot {
+        PairRoot::from_bytes(path.as_os_str().as_bytes().to_vec()).unwrap()
     }
 
     #[test]
@@ -93,7 +96,7 @@ mod tests {
             (&child, &alias, RootRelation::Within),
         ] {
             assert!(matches!(
-                LocalPair::open(&root(left), &root(right)),
+                EndpointPair::open(&root(left), &root(right)),
                 Err(PairRootError::Overlap(found)) if found == relation,
             ));
         }
@@ -107,12 +110,16 @@ mod tests {
         fs::create_dir(&left).unwrap();
         fs::create_dir(&right).unwrap();
         fs::write(left.join("file"), b"content").unwrap();
-        let pair = LocalPair::open(&root(&left), &root(&right)).unwrap();
+        let pair = EndpointPair::open(&root(&left), &root(&right)).unwrap();
         fs::rename(&left, temporary.path().join("moved")).unwrap();
         fs::create_dir(&left).unwrap();
+        let (Endpoint::Local(left), Endpoint::Local(right)) =
+            (pair.endpoint(Side::Left), pair.endpoint(Side::Right))
+        else {
+            panic!("local roots open as local endpoints");
+        };
         let mut paths = Vec::new();
-        let stats = pair
-            .endpoint(Side::Left)
+        let stats = left
             .scan_metadata(&mut |entry| {
                 paths.push(entry.path().clone());
                 crate::ScanControl::Continue
@@ -121,7 +128,7 @@ mod tests {
         assert_eq!(stats.entries(), 1);
         assert_eq!(paths[0].as_bytes(), b"file");
         assert_eq!(
-            pair.endpoint(Side::Right)
+            right
                 .scan_metadata(&mut |_| panic!("empty target"))
                 .unwrap()
                 .entries(),
@@ -137,11 +144,11 @@ mod tests {
         let missing = temporary.path().join("unmounted");
 
         assert!(matches!(
-            LocalPair::open(&root(&present), &root(&missing)),
+            EndpointPair::open(&root(&present), &root(&missing)),
             Err(PairRootError::Missing(Side::Right))
         ));
         assert!(matches!(
-            LocalPair::open(&root(&missing), &root(&present)),
+            EndpointPair::open(&root(&missing), &root(&present)),
             Err(PairRootError::Missing(Side::Left))
         ));
     }
@@ -156,7 +163,7 @@ mod tests {
         fs::create_dir(&readable).unwrap();
         fs::create_dir(&locked).unwrap();
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
-        let opened = LocalPair::open(&root(&readable), &root(&locked));
+        let opened = EndpointPair::open(&root(&readable), &root(&locked));
         // Superusers read anything; the check needs an ordinary account.
         let enforced = fs::read_dir(&locked).is_err();
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();

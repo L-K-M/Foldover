@@ -269,8 +269,8 @@ impl TryFrom<LocalPairDraft> for foldover_client::PairDraft {
     fn try_from(draft: LocalPairDraft) -> Result<Self, Self::Error> {
         Ok(Self::new(
             draft.name,
-            foldover_client::LocalRoot::from_bytes(draft.left_root)?,
-            foldover_client::LocalRoot::from_bytes(draft.right_root)?,
+            foldover_client::PairRoot::from_bytes(draft.left_root)?,
+            foldover_client::PairRoot::from_bytes(draft.right_root)?,
             draft.mode.into(),
         )?
         .with_options(draft.options.try_into()?))

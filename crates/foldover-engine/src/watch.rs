@@ -3,7 +3,7 @@
 use std::io;
 
 use foldover_endpoint::RootWatcher;
-use foldover_types::{PairConfig, PairId};
+use foldover_types::{PairConfig, PairId, PairRoot};
 
 pub struct PairWatcher {
     roots: RootWatcher<PairId>,
@@ -17,17 +17,20 @@ impl PairWatcher {
         })
     }
 
-    /// Watch both folders of exactly these pairs. Folders that cannot be
-    /// watched, such as unmounted disks, are returned with their pair.
+    /// Watch both local folders of exactly these pairs. Folders that cannot
+    /// be watched, such as unmounted disks, are returned with their pair.
+    /// SFTP folders send no notifications; their changes are found by the
+    /// periodic verification run.
     pub fn watch(&mut self, pairs: &[PairConfig]) -> Vec<(PairId, io::Error)> {
         let roots: Vec<_> = pairs
             .iter()
             .flat_map(|pair| {
                 let draft = pair.draft();
-                [
-                    (draft.left().clone(), pair.id()),
-                    (draft.right().clone(), pair.id()),
-                ]
+                [(draft.left(), pair.id()), (draft.right(), pair.id())]
+            })
+            .filter_map(|(root, id)| match root {
+                PairRoot::Local(root) => Some((root.clone(), id)),
+                PairRoot::Sftp(_) => None,
             })
             .collect();
         self.roots
