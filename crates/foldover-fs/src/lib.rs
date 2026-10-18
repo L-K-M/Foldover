@@ -8,6 +8,6 @@ mod root;
 
 #[cfg(unix)]
 pub use root::{
-    DirectoryEntry, DirectoryScope, EntryMetadata, FileIdentity, HashError, NodeKind, Root,
-    RootRelation,
+    DataResidency, DirectoryEntry, DirectoryScope, EntryMetadata, FileIdentity, HashError,
+    NodeKind, Root, RootRelation,
 };

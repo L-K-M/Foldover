@@ -349,6 +349,9 @@ Execution-time readiness remains pending.
 Observed regular-file data-fork hashing is available below the agent API;
 [ADR 0012](docs/adr/0012-local-content-hashing.md) records its bounded-read
 contract and required residency/metadata gates before exposure.
+Darwin stat observations now include dataless flags. Known placeholders stop
+inventory and hashing; enforced non-materialization and cloud-root readiness
+remain required before agent exposure.
 
 ```rust
 trait Endpoint {

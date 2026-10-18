@@ -1,18 +1,24 @@
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::io;
+use std::os::fd::AsFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use cap_fs_ext::DirExt;
 use cap_std::fs::{Dir, Metadata, MetadataExt};
 use foldover_types::SyncPath;
+use nix::fcntl::AtFlags;
+use nix::sys::stat::{FileStat, SFlag, fstat, fstatat};
 
 mod content;
 pub use content::HashError;
 
 const MAX_ROOT_ANCESTORS: usize = 4096;
+// Darwin sys/stat.h defines this synthetic, read-only flag; libc omits it.
+#[cfg(target_os = "macos")]
+const SF_DATALESS: u32 = 0x4000_0000;
 
 /// An opened root directory, independent of later changes to its ambient path.
 /// This read-only surface does not establish mount availability, volume UUIDs
@@ -41,6 +47,15 @@ pub enum NodeKind {
     Directory,
     Symlink,
     Other,
+}
+
+/// An observed dataless flag, not a guarantee against later eviction or reads
+/// that materialize data. The latter requires an enforced host I/O policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DataResidency {
+    Materialized,
+    Dataless,
+    NotReported,
 }
 
 /// Device/inode identity within this observed filesystem session, not a volume UUID.
@@ -74,6 +89,7 @@ pub struct EntryMetadata {
     modified: SystemTime,
     changed: (i64, i64),
     identity: FileIdentity,
+    residency: DataResidency,
 }
 
 impl EntryMetadata {
@@ -93,25 +109,73 @@ impl EntryMetadata {
         self.identity
     }
 
-    fn from_cap(metadata: Metadata) -> io::Result<Self> {
-        let file_type = metadata.file_type();
-        let kind = if file_type.is_symlink() {
-            NodeKind::Symlink
-        } else if file_type.is_dir() {
-            NodeKind::Directory
-        } else if file_type.is_file() {
-            NodeKind::File
-        } else {
-            NodeKind::Other
+    pub fn data_residency(&self) -> DataResidency {
+        self.residency
+    }
+
+    fn from_file(file: &impl AsFd) -> io::Result<Self> {
+        Self::from_stat(fstat(file)?)
+    }
+
+    fn at(parent: &Dir, name: &Path) -> io::Result<Self> {
+        Self::from_stat(fstatat(parent, name, AtFlags::AT_SYMLINK_NOFOLLOW)?)
+    }
+
+    fn from_stat(stat: FileStat) -> io::Result<Self> {
+        // Match std metadata's sign extension of Darwin's 32-bit dev_t.
+        #[allow(clippy::unnecessary_cast)]
+        let device = stat.st_dev as u64;
+        let kind = match SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT {
+            SFlag::S_IFLNK => NodeKind::Symlink,
+            SFlag::S_IFDIR => NodeKind::Directory,
+            SFlag::S_IFREG => NodeKind::File,
+            _ => NodeKind::Other,
         };
         Ok(Self {
             kind,
-            size: metadata.len(),
-            modified: metadata.modified()?.into_std(),
-            changed: (metadata.ctime(), metadata.ctime_nsec()),
-            identity: FileIdentity::from_cap(&metadata),
+            size: u64::try_from(stat.st_size).map_err(|_| invalid_metadata())?,
+            modified: modified_time(stat.st_mtime, stat.st_mtime_nsec)?,
+            changed: (stat.st_ctime, stat.st_ctime_nsec),
+            identity: FileIdentity {
+                device,
+                inode: stat.st_ino,
+            },
+            residency: data_residency(&stat),
         })
     }
+}
+
+fn modified_time(seconds: i64, nanoseconds: i64) -> io::Result<SystemTime> {
+    let nanoseconds = u32::try_from(nanoseconds).map_err(|_| invalid_metadata())?;
+    if u128::from(nanoseconds) >= Duration::from_secs(1).as_nanos() {
+        return Err(invalid_metadata());
+    }
+    let duration = Duration::from_secs(seconds.unsigned_abs());
+    let whole = if seconds < 0 {
+        SystemTime::UNIX_EPOCH.checked_sub(duration)
+    } else {
+        SystemTime::UNIX_EPOCH.checked_add(duration)
+    };
+    whole
+        .and_then(|time| time.checked_add(Duration::from_nanos(u64::from(nanoseconds))))
+        .ok_or_else(invalid_metadata)
+}
+
+fn invalid_metadata() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "Invalid filesystem metadata")
+}
+
+#[cfg(target_os = "macos")]
+fn data_residency(stat: &FileStat) -> DataResidency {
+    if stat.st_flags & SF_DATALESS != 0 {
+        return DataResidency::Dataless;
+    }
+    DataResidency::Materialized
+}
+
+#[cfg(not(target_os = "macos"))]
+fn data_residency(_: &FileStat) -> DataResidency {
+    DataResidency::NotReported
 }
 
 #[derive(Debug)]
@@ -139,7 +203,7 @@ impl Root {
     }
 
     pub fn root_metadata(&self) -> io::Result<EntryMetadata> {
-        EntryMetadata::from_cap(self.directory.dir_metadata()?)
+        EntryMetadata::from_file(&self.directory)
     }
 
     pub fn try_clone(&self) -> io::Result<Self> {
@@ -176,7 +240,7 @@ impl Root {
     /// including disappearing entries; callers must not turn them into empty scans.
     pub fn metadata(&self, path: &SyncPath) -> io::Result<EntryMetadata> {
         let (parent, name) = self.parent_of(path)?;
-        EntryMetadata::from_cap(parent.symlink_metadata(name)?)
+        EntryMetadata::at(&parent, &name)
     }
 
     /// Return the link's exact target bytes, including absolute/dangling targets,
@@ -196,11 +260,12 @@ impl Root {
             DirectoryScope::Root => self.directory.try_clone()?,
             DirectoryScope::At(path) => self.directory_at(path)?,
         };
-        Ok(directory.entries()?.map(|result| {
+        Ok(directory.entries()?.map(move |result| {
             let entry = result?;
+            let name = entry.file_name();
             Ok(DirectoryEntry {
-                name: entry.file_name().into_vec(),
-                metadata: EntryMetadata::from_cap(entry.metadata()?)?,
+                metadata: EntryMetadata::at(&directory, Path::new(&name))?,
+                name: name.into_vec(),
             })
         }))
     }
@@ -259,6 +324,88 @@ mod tests {
 
     fn path(bytes: &[u8]) -> SyncPath {
         SyncPath::try_from(bytes).unwrap()
+    }
+
+    #[test]
+    fn descriptor_and_relative_metadata_match_standard_observations() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let file = temporary.path().join("file");
+        fs::write(&file, b"abc").unwrap();
+        symlink("file", temporary.path().join("link")).unwrap();
+        let root = Root::open(temporary.path()).unwrap();
+        for (name, kind) in [
+            (b"file".as_slice(), NodeKind::File),
+            (b"link", NodeKind::Symlink),
+        ] {
+            let observed = root.metadata(&path(name)).unwrap();
+            let standard =
+                fs::symlink_metadata(temporary.path().join(OsStr::from_bytes(name))).unwrap();
+            assert_eq!(observed.kind(), kind);
+            assert_eq!(observed.size(), standard.len());
+            assert_eq!(observed.modified(), standard.modified().unwrap());
+            assert_eq!(observed.identity().device(), standard.dev());
+            assert_eq!(observed.identity().inode(), standard.ino());
+        }
+        let descriptor = fs::File::open(file).unwrap();
+        assert_eq!(
+            EntryMetadata::from_file(&descriptor).unwrap(),
+            root.metadata(&path(b"file")).unwrap()
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            root.root_metadata().unwrap().data_residency(),
+            DataResidency::Materialized
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            root.root_metadata().unwrap().data_residency(),
+            DataResidency::NotReported
+        );
+    }
+
+    #[test]
+    fn invalid_stat_values_fail_and_pre_epoch_times_remain_exact() {
+        let temporary = tempfile::tempfile().unwrap();
+        let stat = fstat(&temporary).unwrap();
+        let mut invalid = stat;
+        invalid.st_size = -1;
+        assert_eq!(
+            EntryMetadata::from_stat(invalid).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        let mut invalid = stat;
+        invalid.st_mtime_nsec = -1;
+        assert_eq!(
+            EntryMetadata::from_stat(invalid).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        let mut invalid = stat;
+        invalid.st_mtime_nsec = Duration::from_secs(1).as_nanos() as i64;
+        assert_eq!(
+            EntryMetadata::from_stat(invalid).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            modified_time(-1, 500_000_000).unwrap(),
+            SystemTime::UNIX_EPOCH - Duration::from_millis(500)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn dataless_flag_is_captured_in_the_same_stat_as_file_identity() {
+        let temporary = tempfile::tempfile().unwrap();
+        let mut stat = fstat(&temporary).unwrap();
+        stat.st_flags &= !SF_DATALESS;
+        let materialized = EntryMetadata::from_stat(stat).unwrap();
+        stat.st_flags |= SF_DATALESS;
+        let dataless = EntryMetadata::from_stat(stat).unwrap();
+        assert_eq!(materialized.data_residency(), DataResidency::Materialized);
+        assert_eq!(dataless.data_residency(), DataResidency::Dataless);
+        assert_eq!(materialized.identity(), dataless.identity());
+        assert_ne!(materialized, dataless);
     }
 
     #[test]
