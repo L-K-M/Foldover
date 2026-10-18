@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Peer transport driver: pinned QUIC/TLS connections, six-digit pairing
+  codes and live-connection revocation. Mac-to-Mac sync integration is pending.
 - Archive browser: list each folder's archived syncs and put items back,
   beside the current version when the original path is taken.
 - Free-space gate: a sync stops before writing when a folder's disk cannot
