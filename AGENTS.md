@@ -54,7 +54,7 @@ tests, builds the XCFramework, and runs `xcodebuild build test`.
 | `xtask/` | Task runner: `ci`, `check-layers`, `ffi`, `check-ffi` |
 | `layers.toml` | The allowed dependency graph `check-layers` enforces |
 | `apple/project.yml` | XcodeGen spec for the app and its tests |
-| `apple/Foldover/` | The SwiftUI app: `App/`, `Views/`, `ViewModels/`, `Stores/` |
+| `apple/Foldover/` | The SwiftUI app: `App/`, `Intents/`, `Views/`, `ViewModels/`, `Stores/` |
 | `apple/FoldoverCore/` | Swift package over the Rust core (generated bindings) |
 | `apple/FoldoverSystem/` | Native service-registration boundary, imported only by stores |
 | `scripts/` | Build/release orchestration, agent embedding and process smoke |

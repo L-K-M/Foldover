@@ -2,6 +2,7 @@
 // extra. This file only wires the scenes; state lives in the stores
 // and view models.
 
+import AppIntents
 import SwiftUI
 
 @main
@@ -12,6 +13,8 @@ struct FoldoverApp: App {
     init() {
         let viewModel = MainViewModel(appInfo: AppInfoStore())
         _viewModel = State(initialValue: viewModel)
+        // Shortcuts actions run in the app and share its state.
+        AppDependencyManager.shared.add(dependency: viewModel)
         // Runs for the app's lifetime, with or without an open window.
         Task { await viewModel.monitor() }
     }

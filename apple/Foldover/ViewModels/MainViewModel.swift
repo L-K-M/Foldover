@@ -5,6 +5,18 @@
 import Foundation
 import Observation
 
+/// What Shortcuts can ask of a pair.
+enum PairAction: Sendable {
+    case sync
+    case preview
+}
+
+/// A pair as Shortcuts lists it.
+struct IntentPair: Equatable, Sendable {
+    let id: String
+    let name: String
+}
+
 /// One pair in the menu bar.
 struct MenuPairRow: Identifiable, Equatable {
     let id: String
@@ -97,6 +109,30 @@ final class MainViewModel {
     func syncPair(id: String) async {
         guard let pair = pairs.first(where: { $0.id == id }) else { return }
         await sync(for: pair).sync()
+    }
+
+    /// Pairs for Shortcuts; loads them first when the app just started.
+    func intentPairs() async -> [IntentPair] {
+        if !pairStore.hasLoaded { await refreshAgent() }
+        return pairs.map { IntentPair(id: $0.id, name: $0.settings.name) }
+    }
+
+    /// Run `action` for Shortcuts, wait for it, and say what happened.
+    func perform(_ action: PairAction, onPairWithID id: String) async -> String {
+        if !pairStore.hasLoaded { await refreshAgent() }
+        guard let pair = pairs.first(where: { $0.id == id }) else {
+            return pairError ?? agentStatusText
+        }
+        let before = sync(for: pair)
+        guard before.canStart else {
+            return before.isWorking ? before.statusText : agentStatusText
+        }
+        switch action {
+        case .sync: await before.sync()
+        case .preview: await before.preview()
+        }
+        let after = sync(for: pair)
+        return after.requestError ?? after.statusText
     }
 
     func syncAll() async {

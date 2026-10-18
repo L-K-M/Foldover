@@ -8,6 +8,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Shortcuts actions: Sync Pair and Preview Pair, answered with what changed.
 - Settings window with "Open Foldover at login", so the menu bar icon and
   notifications are there after a restart.
 - Keep Both for files changed in both folders: Folder B's version is
