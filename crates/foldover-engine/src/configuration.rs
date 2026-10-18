@@ -1,10 +1,11 @@
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use foldover_endpoint::{LocalEndpoint, LocalPair, PairRootError, RootRelation, ScanError};
-use foldover_state::{PairStore, StateLocation};
-use foldover_types::{PairConfig, PairDraft, PairId, Side};
+use foldover_state::{BaseUpdate, PairStore, StateLocation};
+use foldover_types::{BaselineEntry, PairConfig, PairDraft, PairId, Side, SyncPath};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -104,6 +105,26 @@ impl Engine {
         }
         self.validate_roots(draft, Some(id))?;
         Ok(self.pairs.update(id, revision, draft)?)
+    }
+
+    /// The pair and its base, for a run that works outside the engine lock.
+    pub fn run_inputs(
+        &self,
+        id: PairId,
+    ) -> Result<(PairConfig, BTreeMap<SyncPath, BaselineEntry>), Error> {
+        let pair = self.pair(id)?;
+        let base = self.pairs.base(id)?;
+        Ok((pair, base))
+    }
+
+    /// Store a run's base updates, only while the pair keeps `revision`.
+    pub fn commit_base(
+        &mut self,
+        id: PairId,
+        revision: u64,
+        updates: &[BaseUpdate],
+    ) -> Result<(), Error> {
+        Ok(self.pairs.update_base(id, revision, updates)?)
     }
 
     pub fn remove_pair(&mut self, id: PairId, revision: u64) -> Result<PairConfig, Error> {

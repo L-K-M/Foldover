@@ -42,6 +42,14 @@ impl DeletionCounts {
         Ok(Self { paths, deletions })
     }
 
+    pub fn paths(self) -> u64 {
+        self.paths
+    }
+
+    pub fn deletions(self) -> u64 {
+        self.deletions
+    }
+
     /// PLAN.md §3.6 uses separate interactive and unattended thresholds.
     /// Confirmations must later be bound to the exact reviewed plan, not cached
     /// as a pair-level override.

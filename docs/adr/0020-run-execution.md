@@ -1,0 +1,45 @@
+# ADR 0020: Run execution
+
+Status: Engine implemented; agent API, endpoint identity gate and app pending
+
+## Decision
+
+A run prepares, then executes, without holding the engine lock:
+
+```text
+prepare: open roots ─▶ observe both sides ─▶ plan against the base
+execute: deletion gate ─▶ archive leftovers
+         ─▶ forward pass (parents first): copies, metadata, base records
+         ─▶ reverse pass (children first): archives
+         ─▶ base commits in batches of 256, each bound to the pair revision
+```
+
+- **Gate:** per target, the plan's deletions are reviewed
+  ([ADR 0013](0013-deletion-review-fuse.md)). Interactive runs above the
+  limit need an `Approval` covering at least that many deletions; unattended
+  runs above their limit always stop. A stopped run writes nothing and
+  returns the preview.
+- **Operations:** each planned change goes through the endpoint operations
+  ([ADR 0019](0019-local-write-primitives.md)), which recheck both sides.
+  A failure is reported per path and skips that path's descendants; other
+  paths continue. Conflicts and blocked branches are reported, not written.
+- **Base:** each successful change records the source's planned version and
+  the target's stored version; archives and both-absent paths are forgotten.
+  A commit fails if the pair's revision changed, which stops the run.
+
+**Recovery without a journal.** A crash loses at most one uncommitted
+batch of base updates. The next run then sees equal content on both sides
+and records it, or sees both absent and forgets it. A displaced original
+left under a temporary name is reported by the next observation and
+archived. No path is ever left without its old or new entry. This replaces
+the planned operation journal for local pairs; remote endpoints without
+atomic exchange may still need one.
+
+## Consequences
+
+- A preview and its run are separate observations. The run re-plans and
+  re-gates, so approvals are counts, not references to a stored plan.
+- Configuration changes during a run stop it at the next commit; up to one
+  batch of writes may already have used the previous configuration's roots.
+- Missing: endpoint identity checks (a different disk at the same path),
+  free-space checks, progress events and cancellation from clients.

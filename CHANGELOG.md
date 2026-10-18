@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Sync runs in the engine: observe, plan, gate deletions, copy and archive in
+  safe order, and commit the base in revision-bound batches; previews list
+  every change, conflict and blocked path.
 - Endpoint operations that execute one planned change: copy, metadata update
   and removal, each verifying both sides against the preview first and
   returning the stored version; leftover temporaries are reported and archived.

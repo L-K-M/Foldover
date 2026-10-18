@@ -74,11 +74,14 @@ impl CandidatePlan {
     }
 
     pub fn deletion_review(&self, target: Side, context: RunContext) -> DeletionReview {
+        self.deletions(target).review(context)
+    }
+
+    pub fn deletions(&self, target: Side) -> DeletionCounts {
         match target {
             Side::Left => self.left_deletions,
             Side::Right => self.right_deletions,
         }
-        .review(context)
     }
 }
 
