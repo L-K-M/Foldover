@@ -27,7 +27,8 @@ audited macOS driver module with owned ACL cleanup and `SAFETY` comments.
 The non-materializing policy in [ADR 0012](0012-local-content-hashing.md)
 applies after callbacks and before native reads.
 
-Darwin opens symlinks with `O_SYMLINK`: attributes belong to the link, not its
+Darwin opens symlinks with `O_SYMLINK` alone; combining it with `O_NOFOLLOW`
+returns `ELOOP`. Attributes belong to the link, not its
 target. Linux symlink xattrs remain unsupported because `fgetxattr` cannot
 use an `O_PATH` link descriptor. They fail explicitly instead of falling back
 to ambient paths. Linux POSIX ACLs are observed through their native xattrs;
@@ -51,6 +52,8 @@ Endpoint access preserves protected-name, AppleDouble and device checks.
 These are raw observations, not canonical cross-endpoint metadata or copy
 fidelity. Capability-selected fields, ownership mapping, compression policy,
 AppleDouble, naming, stable snapshots and mount/cloud readiness remain required.
+File versions must include resource-fork digests in content identity, so fork
+edits cannot be discarded by metadata-only conflict policy.
 No metadata or content read is exposed by the agent.
 
 Tests cover exact empty/binary values, raw-name parsing, limits, cancellation,

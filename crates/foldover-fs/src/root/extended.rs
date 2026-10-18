@@ -126,6 +126,9 @@ impl Root {
         }
         #[cfg(target_os = "macos")]
         if expected.kind() == NodeKind::Symlink {
+            // O_NOFOLLOW rejects the link even with O_SYMLINK. The latter opens
+            // the link itself; the descriptor check still rejects substitutions.
+            flags.remove(OFlag::O_NOFOLLOW);
             flags |= OFlag::from_bits_retain(libc::O_SYMLINK);
         }
         let file = openat(&parent, &name, flags, Mode::empty()).map_err(io::Error::from)?;
