@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Per-pair base storage (state schema v2) with revision-bound atomic updates;
+  root changes and pair removal discard it.
 - Canonical local entry versions: content (data plus resource fork, or link
   target) and a digest of the metadata categories a pair syncs (modification
   times, extended attributes, permissions), observed for whole trees.

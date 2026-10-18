@@ -7,7 +7,7 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
 const APPLICATION_ID: i64 = 0x464f4c44; // FOLD
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 const DIRECTORY_MODE: u32 = 0o700;
 const FILE_MODE: u32 = 0o600;
 const PERMISSION_BITS: u32 = 0o777;
@@ -15,7 +15,10 @@ const DATABASE_NAME: &str = "state.db";
 const WRITER_LOCK: &str = "writer.lock";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode";
-const SCHEMA: &str = "
+// Step N upgrades schema N-1 to N. Steps are append-only: never edit one
+// that has shipped, because existing databases already ran it.
+const MIGRATIONS: [&str; 2] = [SCHEMA_V1, SCHEMA_V2];
+const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     minimum_reader INTEGER NOT NULL CHECK(minimum_reader > 0)
@@ -30,6 +33,16 @@ CREATE TABLE pair (
     mode TEXT NOT NULL CHECK(mode IN ('sync','mirror-left','mirror-right','backup-left','backup-right')),
     CHECK(left_root != right_root)
 ) STRICT;
+";
+// Last-synced versions per pair and path; see foldover-state for encoding.
+const SCHEMA_V2: &str = "
+CREATE TABLE base_entry (
+    pair_id BLOB NOT NULL REFERENCES pair(id) ON DELETE CASCADE,
+    path BLOB NOT NULL CHECK(length(path) > 0 AND substr(path,1,1) != x'2f' AND instr(path,x'00') = 0),
+    left_version BLOB NOT NULL,
+    right_version BLOB NOT NULL,
+    PRIMARY KEY (pair_id, path)
+) STRICT, WITHOUT ROWID;
 ";
 
 #[derive(Debug, thiserror::Error)]
@@ -54,6 +67,26 @@ pub enum Error {
     PairNotFound,
     #[error("Pair configuration changed; refresh before updating it")]
     StaleRevision,
+}
+
+/// One stored base row. Version bytes are opaque to this driver.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BaseRow {
+    pub path: Vec<u8>,
+    pub left_version: Vec<u8>,
+    pub right_version: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BaseChange<'a> {
+    Put {
+        path: &'a [u8],
+        left_version: &'a [u8],
+        right_version: &'a [u8],
+    },
+    Remove {
+        path: &'a [u8],
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -168,7 +201,7 @@ impl Database {
             if matches!(shape, FileShape::Existing) {
                 backup(&connection, &directory, schema)?;
             }
-            migrate(&mut connection, SCHEMA)?;
+            migrate(&mut connection, schema, &MIGRATIONS)?;
         }
         connection.pragma_update(None, "foreign_keys", true)?;
         connection.pragma_update(None, "synchronous", "FULL")?;
@@ -238,6 +271,11 @@ impl Database {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // A base describes these exact roots; any root change invalidates it.
+        transaction.execute(
+            "DELETE FROM base_entry WHERE pair_id=?1 AND EXISTS (SELECT 1 FROM pair WHERE id=?1 AND revision=?2 AND (left_root!=?3 OR right_root!=?4))",
+            params![id, revision, values.left_root, values.right_root],
+        )?;
         let changed = transaction.execute(
             "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6 WHERE id=?1 AND revision=?2",
             params![id, revision, values.name, values.left_root, values.right_root, values.mode],
@@ -252,6 +290,68 @@ impl Database {
         )?;
         transaction.commit()?;
         Ok(row)
+    }
+
+    /// Every base row of a pair, ordered by raw path bytes.
+    pub fn base_rows(&self, pair: &[u8]) -> Result<Vec<BaseRow>, Error> {
+        let mut statement = self.connection.prepare(
+            "SELECT path,left_version,right_version FROM base_entry WHERE pair_id=?1 ORDER BY path",
+        )?;
+        let rows = statement.query_map([pair], |row| {
+            Ok(BaseRow {
+                path: row.get(0)?,
+                left_version: row.get(1)?,
+                right_version: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Apply base changes atomically, only while the pair keeps `revision`.
+    /// A stale revision means the plan was built for other roots or mode.
+    pub fn change_base(
+        &mut self,
+        pair: &[u8],
+        revision: i64,
+        changes: &[BaseChange<'_>],
+    ) -> Result<(), Error> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<i64> = transaction
+            .query_row("SELECT revision FROM pair WHERE id=?1", [pair], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        match current {
+            None => return Err(Error::PairNotFound),
+            Some(current) if current != revision => return Err(Error::StaleRevision),
+            Some(_) => {}
+        }
+        {
+            let mut put = transaction.prepare(
+                "INSERT INTO base_entry (pair_id,path,left_version,right_version) VALUES (?1,?2,?3,?4)
+                 ON CONFLICT(pair_id,path) DO UPDATE SET left_version=excluded.left_version,right_version=excluded.right_version",
+            )?;
+            let mut remove =
+                transaction.prepare("DELETE FROM base_entry WHERE pair_id=?1 AND path=?2")?;
+            for change in changes {
+                match *change {
+                    BaseChange::Put {
+                        path,
+                        left_version,
+                        right_version,
+                    } => {
+                        put.execute(params![pair, path, left_version, right_version])?;
+                    }
+                    BaseChange::Remove { path } => {
+                        remove.execute(params![pair, path])?;
+                    }
+                }
+            }
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn remove_pair(&mut self, id: &[u8], revision: i64) -> Result<(), Error> {
@@ -357,7 +457,7 @@ fn inspect(connection: &Connection, shape: FileShape) -> Result<i64, Error> {
             supported: SCHEMA_VERSION,
         });
     }
-    if schema == SCHEMA_VERSION {
+    if schema > 0 {
         if application != APPLICATION_ID {
             return Err(Error::ForeignDatabase);
         }
@@ -406,9 +506,14 @@ fn backup(connection: &Connection, directory: &Path, schema: i64) -> Result<(), 
     Ok(())
 }
 
-fn migrate(connection: &mut Connection, statements: &str) -> Result<(), Error> {
+/// Run every step after `from` in one transaction, so a failure leaves the
+/// database at its previous schema.
+fn migrate(connection: &mut Connection, from: i64, steps: &[&str]) -> Result<(), Error> {
+    let from = usize::try_from(from).map_err(|_| Error::InvalidState("Negative schema version"))?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    transaction.execute_batch(statements)?;
+    for statements in steps.get(from..).unwrap_or_default() {
+        transaction.execute_batch(statements)?;
+    }
     transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     transaction.commit()?;
@@ -618,15 +723,11 @@ mod tests {
                 > 0
         );
         backup(&database.connection, directory.path(), SCHEMA_VERSION).unwrap();
+        let prefix = format!("state-before-v{SCHEMA_VERSION}-");
         let entry = fs::read_dir(directory.path())
             .unwrap()
             .map(Result::unwrap)
-            .find(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("state-before-v1-")
-            })
+            .find(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
             .unwrap();
         let copy =
             Connection::open_with_flags(entry.path(), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
@@ -647,7 +748,14 @@ mod tests {
         connection
             .pragma_update(None, "application_id", APPLICATION_ID)
             .unwrap();
-        assert!(migrate(&mut connection, "CREATE TABLE partial(value); INVALID SQL;").is_err());
+        assert!(
+            migrate(
+                &mut connection,
+                0,
+                &[SCHEMA_V1, "CREATE TABLE partial(value); INVALID SQL;"]
+            )
+            .is_err()
+        );
         let partial: i64 = connection
             .query_row(
                 "SELECT count(*) FROM sqlite_schema WHERE name='partial'",
@@ -679,5 +787,141 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    fn put<'a>(path: &'a [u8], version: &'a [u8]) -> BaseChange<'a> {
+        BaseChange::Put {
+            path,
+            left_version: version,
+            right_version: version,
+        }
+    }
+
+    #[test]
+    fn base_changes_are_atomic_revision_bound_and_ordered() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        database
+            .change_base(&pair.id, 1, &[put(b"b", b"2"), put(b"a", b"1")])
+            .unwrap();
+        let paths: Vec<_> = database
+            .base_rows(&pair.id)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.path)
+            .collect();
+        assert_eq!(paths, [b"a".to_vec(), b"b".to_vec()]);
+
+        database
+            .change_base(
+                &pair.id,
+                1,
+                &[put(b"a", b"3"), BaseChange::Remove { path: b"b" }],
+            )
+            .unwrap();
+        assert_eq!(
+            database.base_rows(&pair.id).unwrap(),
+            [BaseRow {
+                path: b"a".to_vec(),
+                left_version: b"3".to_vec(),
+                right_version: b"3".to_vec(),
+            }]
+        );
+
+        // An invalid row rolls back the whole change.
+        assert!(
+            database
+                .change_base(&pair.id, 1, &[put(b"c", b"4"), put(b"/absolute", b"5")])
+                .is_err()
+        );
+        assert_eq!(database.base_rows(&pair.id).unwrap().len(), 1);
+
+        assert!(matches!(
+            database.change_base(&pair.id, 2, &[put(b"c", b"4")]),
+            Err(Error::StaleRevision)
+        ));
+        assert!(matches!(
+            database.change_base(&[7; 16], 1, &[put(b"c", b"4")]),
+            Err(Error::PairNotFound)
+        ));
+        assert_eq!(database.base_rows(&pair.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn root_changes_and_removal_discard_the_base_but_renames_keep_it() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        database
+            .change_base(&pair.id, 1, &[put(b"a", b"1")])
+            .unwrap();
+
+        let mut renamed = values();
+        renamed.name = "renamed".into();
+        renamed.mode = "mirror-left".into();
+        database.update_pair(&pair.id, 1, &renamed).unwrap();
+        assert_eq!(database.base_rows(&pair.id).unwrap().len(), 1);
+
+        // A stale update changes nothing, including the base.
+        let mut moved = renamed.clone();
+        moved.right_root = b"/elsewhere".to_vec();
+        assert!(matches!(
+            database.update_pair(&pair.id, 1, &moved),
+            Err(Error::StaleRevision)
+        ));
+        assert_eq!(database.base_rows(&pair.id).unwrap().len(), 1);
+
+        database.update_pair(&pair.id, 2, &moved).unwrap();
+        assert!(database.base_rows(&pair.id).unwrap().is_empty());
+
+        database
+            .change_base(&pair.id, 3, &[put(b"a", b"1")])
+            .unwrap();
+        database.remove_pair(&pair.id, 3).unwrap();
+        let orphans: i64 = database
+            .connection
+            .query_row("SELECT count(*) FROM base_entry", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(orphans, 0);
+    }
+
+    #[test]
+    fn version_one_state_migrates_with_a_backup_and_keeps_pairs() {
+        let (directory, location) = location();
+        let path = directory.path().join(DATABASE_NAME);
+        drop(private_file(&path).unwrap());
+        let mut connection = Connection::open(&path).unwrap();
+        connection
+            .pragma_update(None, "application_id", APPLICATION_ID)
+            .unwrap();
+        let transaction = connection.transaction().unwrap();
+        transaction.execute_batch(SCHEMA_V1).unwrap();
+        transaction.pragma_update(None, "user_version", 1).unwrap();
+        transaction.commit().unwrap();
+        connection
+            .execute(
+                "INSERT INTO pair (id,revision,name,left_root,right_root,mode) VALUES (?1,1,'old',x'2f6c',x'2f72','sync')",
+                [[9_u8; 16].as_slice()],
+            )
+            .unwrap();
+        drop(connection);
+
+        let mut database = Database::open(&location).unwrap();
+        assert_eq!(database.pairs().unwrap()[0].values.name, "old");
+        database
+            .change_base(&[9; 16], 1, &[put(b"a", b"1")])
+            .unwrap();
+        let backups = fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("state-before-v1-")
+            })
+            .count();
+        assert_eq!(backups, 1);
     }
 }
