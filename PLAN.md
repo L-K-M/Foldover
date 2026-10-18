@@ -452,6 +452,11 @@ Endpoint-layer rules, not filters:
 | v | — | — | drop from base |
 
 Entry classification and per-side baselines: [ADR 0007](docs/adr/0007-entry-reconciliation.md).
+Pure deletion-review thresholds: [ADR 0013](docs/adr/0013-deletion-review-fuse.md).
+Plan-bound confirmations and execution-time gates remain pending.
+Hierarchy-aware candidate generation is implemented below the agent API;
+[ADR 0014](docs/adr/0014-tree-plan-candidates.md) records tree validation,
+conflicted-branch suppression and remaining executable-plan gates.
 
 **Mode rules:**
 - Mirror makes the target match the chosen source. Backup copies new,
