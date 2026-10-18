@@ -63,6 +63,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ch.lkmc.foldover
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # Cargo resolves its own workspace inputs and writes to its target directory.
         ENABLE_USER_SCRIPT_SANDBOXING: NO
         GENERATE_INFOPLIST_FILE: YES
