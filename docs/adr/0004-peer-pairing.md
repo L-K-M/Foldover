@@ -156,9 +156,39 @@ verifier roles, missing client certificates, non-Ed25519 identities,
 incorrect advertised IDs, false commitments, timeouts, session-specific
 exporters, frame limits and truncation, and revocation of live channels.
 
-Identities and pins are currently in memory. Keychain persistence,
-discovery, folder authorization, peer wire messages, the endpoint backend
-and pairing UI remain P5 work. The agent does not open a peer listener yet.
+### Persistent local identity
+
+`foldover-endpoint::load_peer_identity` loads the local certificate and
+Ed25519 private key from a generic-password item in the user's default
+file Keychain. Its service is `ch.lkmc.foldover.peer-identity`, its account
+is `local-device`, and synchronization is disabled. The existing Keychain
+ACL and lock policy apply. Access uses per-operation authentication-UI
+failure, without changing the process's global interaction setting.
+
+The stored versioned binary record includes the original certificate DER
+and PKCS#8 key. Keeping only the key and issuing another certificate would
+change the device fingerprint. Restoration bounds the record to 16 KiB,
+requires Ed25519, and checks that the certificate and private key match.
+Temporary Rust record buffers are zeroized on drop.
+
+Only a missing item permits creation. `SecItemAdd` never replaces an
+existing item; the endpoint reads back and validates the winner before
+returning an identity. Locked, denied, malformed or unavailable storage
+fails explicitly, without generating a usable replacement. Other
+platforms report unsupported storage. Keychain calls are blocking and
+must run outside async runtime worker threads.
+
+Tests cover exact fingerprint restoration, corrupt and mismatched records,
+concurrent creators, read/write/read-back failures and pinned loopback
+reconnects after reloading both identities. Native tests use temporary
+Keychains to check reopen, exclusive creation and locked-store failure.
+Installed-agent Keychain authorization across ad-hoc app updates remains
+an integration gate.
+
+Trust pins remain in memory. Discovery, persistent trust, folder
+authorization, peer wire messages, the endpoint backend and pairing UI
+remain P5 work. The agent does not load a peer identity or open a peer
+listener yet.
 
 ## Consequences
 

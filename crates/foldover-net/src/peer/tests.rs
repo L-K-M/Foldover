@@ -58,6 +58,12 @@ fn ecdsa_identity() -> Identity {
     }
 }
 
+#[test]
+fn a_stored_identity_must_use_ed25519() {
+    let identity = ecdsa_identity();
+    assert!(Identity::from_secret_bytes(&identity.to_secret_bytes().unwrap()).is_err());
+}
+
 #[tokio::test]
 async fn pairing_refuses_non_ed25519_devices() {
     let a = node(PeerMode::Pairing);
