@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Settings window with "Open Foldover at login", so the menu bar icon and
+  notifications are there after a restart.
 - Keep Both for files changed in both folders: Folder B's version is
   saved beside the file as "name (from Folder B, date)".
 - Automatic syncs wait for a disconnected disk or share instead of failing,

@@ -7,6 +7,7 @@ import SwiftUI
 @main
 struct FoldoverApp: App {
     @State private var viewModel: MainViewModel
+    @State private var settings = SettingsStore()
 
     init() {
         let viewModel = MainViewModel(appInfo: AppInfoStore())
@@ -28,5 +29,9 @@ struct FoldoverApp: App {
             MenuBarView(viewModel: viewModel)
         }
         .menuBarExtraStyle(.window)
+
+        Settings {
+            SettingsView(viewModel: SettingsViewModel(store: settings))
+        }
     }
 }
