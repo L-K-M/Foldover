@@ -192,6 +192,13 @@ final class SyncStore {
     private let pollInterval: Duration
     private let alert: @MainActor (SyncAlert) async -> Void
     private var polling: Set<String> = []
+    /// Writes a pair has seen. A reply requested before the latest write
+    /// is stale and must not overwrite it, even if the state cycles back
+    /// to the same value.
+    private var generations: [String: Int] = [:]
+    /// Approval results the user declined; the same result stays declined
+    /// until an explicit job or a different reviewable result.
+    private var declined: [String: PreviewSummary] = [:]
     private(set) var states: [String: PairSyncState] = [:]
     private(set) var requestErrors: [String: String] = [:]
 
@@ -214,8 +221,14 @@ final class SyncStore {
     func checkAll(_ pairs: [SyncPair]) async {
         for pair in pairs where !polling.contains(pair.id) {
             let previous = states[pair.id]
-            guard let state = try? await client.status(pair.id) else { continue }
-            states[pair.id] = state
+            let generation = generations[pair.id] ?? 0
+            guard var state = try? await client.status(pair.id) else { continue }
+            // A local write while the request was in flight is newer.
+            guard (generations[pair.id] ?? 0) == generation else { continue }
+            if case .needsApproval(let preview) = state, declined[pair.id] == preview {
+                state = .previewed(preview)
+            }
+            set(pair.id, state)
             guard let previous, previous != state, let alert = Self.alert(for: pair, state: state) else {
                 continue
             }
@@ -280,15 +293,18 @@ final class SyncStore {
     }
 
     /// Keep the reviewed changes visible after declining an approval.
+    /// The decline holds for that result until an explicit job runs.
     func declineApproval(_ id: String) {
         guard case .needsApproval(let preview) = states[id] else { return }
-        states[id] = .previewed(preview)
+        declined[id] = preview
+        set(id, .previewed(preview))
     }
 
     private func perform(_ id: String, _ request: @Sendable () async throws -> PairSyncState) async {
         requestErrors[id] = nil
+        declined[id] = nil
         do {
-            states[id] = try await request()
+            set(id, try await request())
         } catch {
             requestErrors[id] = PairStore.message(for: error)
             return
@@ -296,6 +312,8 @@ final class SyncStore {
         await pollWhileWorking(id)
     }
 
+    /// The poller owns the pair until the job leaves .working, so its
+    /// replies are never stale; only checkAll checks the generation.
     private func pollWhileWorking(_ id: String) async {
         guard !polling.contains(id) else { return }
         polling.insert(id)
@@ -303,11 +321,17 @@ final class SyncStore {
         while case .working = states[id] {
             try? await Task.sleep(for: pollInterval)
             do {
-                states[id] = try await client.status(id)
+                set(id, try await client.status(id))
             } catch {
                 requestErrors[id] = PairStore.message(for: error)
                 return
             }
         }
+    }
+
+    /// Every write advances the pair's generation.
+    private func set(_ id: String, _ state: PairSyncState) {
+        generations[id, default: 0] += 1
+        states[id] = state
     }
 }

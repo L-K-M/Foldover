@@ -69,8 +69,9 @@ private actor StubSyncClient: SyncClient {
 /// request can stay in flight while a manual job starts.
 private actor DeferredSyncClient: SyncClient {
     private(set) var statusCalls = 0
+    private(set) var cancelled = false
     private var pending: [CheckedContinuation<PairSyncState, Never>] = []
-    private var waiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var waiters: [(id: UUID, count: Int, then: CheckedContinuation<Bool, Never>)] = []
     private var previewReply: PairSyncState = .idle
 
     func setPreviewReply(_ reply: PairSyncState) { previewReply = reply }
@@ -78,13 +79,16 @@ private actor DeferredSyncClient: SyncClient {
     func preview(_ id: String) async throws -> PairSyncState { previewReply }
     func status(_ id: String) async throws -> PairSyncState {
         statusCalls += 1
-        let ready = waiters.filter { statusCalls >= $0.0 }
-        waiters.removeAll { statusCalls >= $0.0 }
-        for (_, continuation) in ready { continuation.resume() }
+        let ready = waiters.filter { statusCalls >= $0.count }
+        waiters.removeAll { statusCalls >= $0.count }
+        for waiter in ready { waiter.then.resume(returning: true) }
         return await withCheckedContinuation { pending.append($0) }
     }
     func run(_ id: String, approvedA: UInt64, approvedB: UInt64) async throws -> PairSyncState { .idle }
-    func cancel(_ id: String) async throws -> PairSyncState { .idle }
+    func cancel(_ id: String) async throws -> PairSyncState {
+        cancelled = true
+        return .idle
+    }
     func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState { .idle }
 
     /// Resumes the oldest unanswered status request.
@@ -92,12 +96,36 @@ private actor DeferredSyncClient: SyncClient {
         pending.removeFirst().resume(returning: state)
     }
 
+    /// Resumes the newest unanswered status request.
+    func replyLatest(_ state: PairSyncState) {
+        pending.removeLast().resume(returning: state)
+    }
+
     var pendingStatusCalls: Int { pending.count }
 
     /// Suspends until at least `count` status requests are in flight.
     func waitForStatusCalls(_ count: Int) async {
-        if statusCalls >= count { return }
-        await withCheckedContinuation { waiters.append((count, $0)) }
+        _ = await waitForStatusCalls(count, timeout: .seconds(30))
+    }
+
+    /// Bounded variant: a request a bug suppresses fails instead of
+    /// hanging the test.
+    @discardableResult
+    func waitForStatusCalls(_ count: Int, timeout: Duration) async -> Bool {
+        if statusCalls >= count { return true }
+        let id = UUID()
+        return await withCheckedContinuation { continuation in
+            waiters.append((id, count, continuation))
+            Task {
+                try? await Task.sleep(for: timeout)
+                self.expire(id)
+            }
+        }
+    }
+
+    private func expire(_ id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        waiters.remove(at: index).then.resume(returning: false)
     }
 }
 
@@ -343,4 +371,125 @@ func staleCheckAllRepliesCannotOverwriteManuallyStartedJobs() async {
     }
     await manual.value
     #expect(store.state(for: pair.id) == .previewed(summary))
+}
+
+/// Polls a MainActor condition with a deadline, so an effect a bug
+/// suppresses fails the test instead of hanging it.
+@MainActor
+private func eventually(_ condition: @MainActor () -> Bool,
+                        timeout: Duration = .seconds(3)) async -> Bool {
+    let deadline = ContinuousClock.now + timeout
+    while !condition() {
+        if ContinuousClock.now >= deadline { return false }
+        try? await Task.sleep(for: .milliseconds(1))
+    }
+    return true
+}
+
+// The stale-reply guard counts writes, not state values: a pair can
+// leave .idle and cycle back to it while a checkAll request is in
+// flight, and that reply is still stale (ABA).
+@MainActor
+@Test
+func staleCheckAllRepliesStayDroppedWhenTheStateCyclesBack() async {
+    let summary = preview(archivesInA: 60, needsApproval: true)
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.working(.preview, cancelling: false))
+    let recorder = AlertRecorder()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1)) { alert in
+        await recorder.record(alert)
+    }
+    let pair = pair()
+
+    let check = Task { await store.checkAll([pair]) }
+    await client.waitForStatusCalls(1)
+
+    // A manual job cycles the pair .idle → .working → .idle.
+    let manual = Task { await store.preview(pair.id) }
+    await client.waitForStatusCalls(2)
+    await client.replyLatest(.idle)
+    await manual.value
+    #expect(store.state(for: pair.id) == .idle)
+
+    // The parked checkAll reply must not resurrect the approval even
+    // though the pair is .idle again, the value its request started on.
+    await client.reply(.needsApproval(summary))
+    await check.value
+    #expect(store.state(for: pair.id) == .idle)
+    #expect(await recorder.alerts.isEmpty)
+}
+
+// Regression for PR57 follow-up: the live poller wrote each status reply
+// unconditionally. A reply requested before a cancel-and-restart was
+// stale, could overwrite the new job's .working with a terminal result,
+// and then retired the only poller — the new job never updated again.
+@MainActor
+@Test
+func staleLivePollRepliesCannotRetireANewerJob() async {
+    let stale = preview(archivesInA: 3, needsApproval: false)
+    let done = preview(archivesInA: 0, needsApproval: false)
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.working(.preview, cancelling: false))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+
+    // A working job is being polled; its status request is in flight.
+    let first = Task { await store.preview(pair.id) }
+    await client.waitForStatusCalls(1)
+
+    // An explicit cancel lands .idle, then a new job starts .working
+    // while the old poller is still suspended on its status request.
+    await store.cancel(pair.id)
+    #expect(store.state(for: pair.id) == .idle)
+    let second = Task { await store.preview(pair.id) }
+    #expect(await eventually {
+        store.state(for: pair.id) == .working(.preview, cancelling: false)
+    })
+
+    // The stale poll reply must not overwrite the new job's state, and
+    // a poller must keep asking until the job really finishes.
+    await client.reply(.previewed(stale))
+    let keptPolling = await client.waitForStatusCalls(2, timeout: .seconds(3))
+    #expect(store.state(for: pair.id) == .working(.preview, cancelling: false))
+    #expect(keptPolling)
+
+    // Drain every outstanding request so buggy and fixed paths finish.
+    while await client.pendingStatusCalls > 0 {
+        await client.reply(.previewed(done))
+    }
+    await first.value
+    await second.value
+    #expect(store.state(for: pair.id) == .previewed(done))
+}
+
+// Regression for PR57 follow-up: the poller swallowed Task.sleep's
+// CancellationError, so a caller Task that was cancelled kept issuing
+// status requests with no delay while the job stayed .working. The
+// caller's cancellation must stop polling without cancelling the job.
+@MainActor
+@Test
+func cancellingTheCallerStopsPollingWithoutCancellingTheJob() async {
+    let done = preview(archivesInA: 0, needsApproval: false)
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.working(.preview, cancelling: false))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+
+    let job = Task { await store.preview(pair.id) }
+    await client.waitForStatusCalls(1)
+    job.cancel()
+
+    // The in-flight reply still applies; then polling must stop instead
+    // of firing the next status request from a cancelled task.
+    await client.reply(.working(.preview, cancelling: false))
+    let polledAgain = await client.waitForStatusCalls(2, timeout: .seconds(3))
+    #expect(!polledAgain)
+    #expect(await client.cancelled == false)
+    #expect(store.state(for: pair.id) == .working(.preview, cancelling: false))
+
+    // A terminal reply ends any poller the buggy path left running.
+    while await client.pendingStatusCalls > 0 {
+        await client.reply(.previewed(done))
+    }
+    await job.value
 }

@@ -105,15 +105,20 @@ final class MainViewModel {
         }
     }
 
-    /// Keep every pair's status current while the app runs, so automatic
-    /// syncs show up and their problems become notifications.
+    /// Keep the agent, the catalog and every pair's status current while
+    /// the app runs, so automatic syncs, restarts and outside changes
+    /// show up and their problems become notifications.
     func monitor(every interval: Duration = .seconds(15)) async {
         while !Task.isCancelled {
-            if !pairStore.hasLoaded {
-                await refreshAgent()
-            }
-            if case .connected = agent.connection, pairStore.hasLoaded {
-                await syncStore.checkAll(pairStore.pairs)
+            // Inline instead of refreshAgent: a tick must not clear a
+            // user-facing operationError, and PairStore.refresh skips the
+            // reload while settings are saving.
+            await agent.refresh()
+            if case .connected = agent.connection {
+                await pairStore.refresh()
+                if pairStore.hasLoaded {
+                    await syncStore.checkAll(pairStore.pairs)
+                }
             }
             try? await Task.sleep(for: interval)
         }
