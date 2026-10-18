@@ -126,7 +126,7 @@ impl Engine {
 
     /// What a run reads from state, for work outside the engine lock.
     pub fn run_inputs(&self, id: PairId) -> Result<RunInputs, Error> {
-        // A malformed stored fingerprint only costs a reread of that entry.
+        // Malformed cached fingerprints or versions only cost a reread.
         let snapshot = |side| -> Result<BTreeMap<_, _>, Error> {
             Ok(self
                 .pairs
@@ -193,7 +193,7 @@ impl Engine {
     }
 
     pub fn remove_pair(&mut self, id: PairId, revision: u64) -> Result<PairConfig, Error> {
-        // shortcut: no run state exists yet; require idle/recovery guards when execution lands.
+        // The caller reserves this pair against active or starting jobs.
         Ok(self.pairs.remove(id, revision)?)
     }
 

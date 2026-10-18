@@ -80,9 +80,22 @@ impl Service {
             .await
             .map_err(|_| RpcError::new(INTERNAL_ERROR, "Configuration worker is unavailable"))?;
         let engine = Arc::clone(&self.engine);
+        let jobs = Arc::clone(&self.jobs);
         tokio::task::spawn_blocking(move || {
             // Retain ownership even if a client disconnects while its command commits.
             let _permit = permit;
+            // The reservation and the busy check are one lock acquisition,
+            // so a job cannot start in between; the guard outlives the
+            // delete below. The jobs lock itself is never held across the
+            // engine lock, keeping the two lock orders disjoint.
+            let _removal = if let Command::Remove { id, .. } = &command {
+                let removal = jobs.removal(*id)?;
+                #[cfg(test)]
+                jobs.wait_remove_gate();
+                Some(removal)
+            } else {
+                None
+            };
             let mut engine = engine
                 .lock()
                 .map_err(|_| RpcError::new(INTERNAL_ERROR, "Configuration worker failed"))?;
@@ -312,6 +325,10 @@ async fn health(request: Request) -> Result<Value, RpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use foldover_engine::Completion;
+    use foldover_proto::local::{
+        SyncCounts, SyncDeletions, SyncJob, SyncPreview, SyncResult, SyncStatus,
+    };
     use serde_json::json;
     use std::{fs, os::unix::ffi::OsStrExt, path::Path};
 
@@ -922,5 +939,231 @@ mod tests {
             .unwrap();
         assert_eq!(settled(&service, &key).await["result"]["copied"], 1);
         assert_eq!(fs::read(left.join("file")).unwrap(), b"data");
+    }
+
+    fn sync_preview() -> SyncPreview {
+        let deletions = || SyncDeletions {
+            deletions: 0,
+            paths: 0,
+            needs_approval: false,
+        };
+        SyncPreview {
+            items: Vec::new(),
+            counts: SyncCounts::default(),
+            left: deletions(),
+            right: deletions(),
+        }
+    }
+
+    fn sync_finished(completion: Completion) -> SyncStatus {
+        SyncStatus::Finished {
+            result: SyncResult {
+                cancelled: completion == Completion::Cancelled,
+                copied: 0,
+                updated: 0,
+                archived: 0,
+                recovered: 0,
+                conflicts: 0,
+                failures: Vec::new(),
+                failure_count: 0,
+                archive: String::new(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn unattended_runs_skip_pairs_whose_result_waits_for_review() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Docs");
+        input["options"]["schedule"] = json!({"kind": "every", "minutes": 1});
+        fs::write(directory.path().join("Docs-left/file"), b"data").unwrap();
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        let key = json!({"id": created["id"]});
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        settled(&service, &key).await;
+        let start = service.scheduler.started();
+        let at = |seconds| start + std::time::Duration::from_secs(seconds);
+
+        // States a person must see are never replaced by the scheduler.
+        for status in [
+            SyncStatus::Previewed {
+                preview: sync_preview(),
+            },
+            SyncStatus::NeedsApproval {
+                preview: sync_preview(),
+            },
+            SyncStatus::Failed {
+                message: "read error".into(),
+            },
+            SyncStatus::Working {
+                job: SyncJob::Run,
+                cancelling: false,
+            },
+        ] {
+            service.jobs.force_status(id, status.clone());
+            assert!(service.run_due(at(120)).is_empty(), "{status:?}");
+            assert_eq!(service.jobs.status(id), status);
+        }
+
+        // Finished runs, cancelled or not, keep the schedule recurring.
+        for (completion, later) in [(Completion::Finished, 120), (Completion::Cancelled, 240)] {
+            service.jobs.force_status(id, sync_finished(completion));
+            assert_eq!(service.run_due(at(later)), [id], "{completion:?}");
+            settled(&service, &key).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stopped_unattended_run_stays_until_a_person_syncs() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Notes");
+        input["options"]["schedule"] = json!({"kind": "every", "minutes": 1});
+        let left = directory.path().join("Notes-left");
+        fs::write(left.join("file"), b"data").unwrap();
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        let key = json!({"id": created["id"]});
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        settled(&service, &key).await;
+        fs::remove_file(left.join("file")).unwrap();
+        let start = service.scheduler.started();
+        let at = |seconds| start + std::time::Duration::from_secs(seconds);
+
+        // Deleting one entry out of one exceeds the unattended fuse (ADR 0013).
+        assert_eq!(service.run_due(at(61)), [id]);
+        let stopped = settled(&service, &key).await;
+        assert_eq!(stopped["state"], "needsApproval", "{stopped}");
+
+        // ADR 0022: the stop waits for a person; it is not retried or replaced.
+        for later in [122, 600] {
+            assert!(service.run_due(at(later)).is_empty());
+            assert!(matches!(
+                service.jobs.status(id),
+                SyncStatus::NeedsApproval { .. }
+            ));
+        }
+
+        // A person's run releases the latch and the schedule resumes.
+        let approved = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 10});
+        service
+            .handle(Request::call(3, SYNC_RUN, Some(approved)))
+            .await
+            .unwrap();
+        assert_eq!(settled(&service, &key).await["state"], "finished");
+        assert_eq!(service.run_due(at(661)), [id]);
+        settled(&service, &key).await;
+    }
+
+    #[tokio::test]
+    async fn a_pair_with_a_running_job_cannot_be_removed() {
+        let (directory, service) = fixture();
+        let pair = service
+            .handle(Request::call(
+                1,
+                PAIR_CREATE,
+                Some(input(directory.path(), "Docs")),
+            ))
+            .await
+            .unwrap();
+        let id: PairId = pair["id"].as_str().unwrap().parse().unwrap();
+        let remove = || {
+            Request::call(
+                2,
+                PAIR_REMOVE,
+                Some(json!({"id": pair["id"], "revision": 1})),
+            )
+        };
+
+        service.jobs.force_status(
+            id,
+            SyncStatus::Working {
+                job: SyncJob::Run,
+                cancelling: false,
+            },
+        );
+        assert_eq!(
+            service.handle(remove()).await.unwrap_err().code(),
+            foldover_proto::local::SYNC_BUSY
+        );
+        service
+            .handle(Request::call(3, PAIR_GET, Some(json!({"id": pair["id"]}))))
+            .await
+            .unwrap();
+
+        service.jobs.force_status(
+            id,
+            SyncStatus::Failed {
+                message: "read error".into(),
+            },
+        );
+        service.handle(remove()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_removal_in_progress_rejects_new_job_claims() {
+        let (directory, service) = fixture();
+        let pair = service
+            .handle(Request::call(
+                1,
+                PAIR_CREATE,
+                Some(input(directory.path(), "Docs")),
+            ))
+            .await
+            .unwrap();
+        fs::write(directory.path().join("Docs-left/file"), b"data").unwrap();
+        let (reached, release) = service.jobs.gate_removal();
+        let removing = service.clone();
+        let id = pair["id"].clone();
+        let remover = tokio::spawn(async move {
+            removing
+                .handle(Request::call(
+                    2,
+                    PAIR_REMOVE,
+                    Some(json!({"id": id, "revision": 1})),
+                ))
+                .await
+        });
+        // The removal passed its busy check and waits before the delete.
+        tokio::task::spawn_blocking(move || reached.recv().unwrap())
+            .await
+            .unwrap();
+        // A claim landing in that window must not win.
+        let attempt = service
+            .handle(Request::call(
+                3,
+                SYNC_PREVIEW,
+                Some(json!({"id": pair["id"]})),
+            ))
+            .await;
+        release.send(()).unwrap();
+        let removed = remover.await.unwrap();
+        assert_eq!(
+            attempt.unwrap_err().code(),
+            foldover_proto::local::SYNC_BUSY
+        );
+        removed.unwrap();
+        assert_eq!(
+            service
+                .handle(Request::call(4, PAIR_GET, Some(json!({"id": pair["id"]}))))
+                .await
+                .unwrap_err()
+                .code(),
+            PAIR_NOT_FOUND
+        );
     }
 }

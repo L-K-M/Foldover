@@ -9,8 +9,11 @@
 //! Jobs hold the engine lock only to read inputs and commit progress, so
 //! configuration requests stay responsive during long runs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 
@@ -71,14 +74,24 @@ struct Job {
 }
 
 #[derive(Default)]
+struct State {
+    jobs: HashMap<PairId, Job>,
+    /// Pairs whose configuration is being deleted refuse new job claims.
+    removing: HashSet<PairId>,
+}
+
+#[derive(Default)]
 pub(crate) struct Jobs {
-    jobs: Mutex<HashMap<PairId, Job>>,
+    state: Mutex<State>,
+    /// Test-only rendezvous inside a pair removal.
+    #[cfg(test)]
+    remove_gate: Mutex<Option<(Sender<()>, Receiver<()>)>>,
 }
 
 impl Jobs {
     pub(crate) fn status(&self, id: PairId) -> SyncStatus {
-        let jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(job) = jobs.get(&id) else {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(job) = state.jobs.get(&id) else {
             return SyncStatus::Idle;
         };
         match &job.status {
@@ -105,8 +118,8 @@ impl Jobs {
             )
         };
         let (revision, (left, right)) = {
-            let jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
-            let job = jobs.get(&id).ok_or_else(stale)?;
+            let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let job = state.jobs.get(&id).ok_or_else(stale)?;
             if matches!(job.status, SyncStatus::Working { .. }) {
                 return Err(RpcError::new(
                     SYNC_BUSY,
@@ -125,8 +138,8 @@ impl Jobs {
     }
 
     pub(crate) fn cancel(&self, id: PairId) {
-        let jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(job) = jobs.get(&id) {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(job) = state.jobs.get(&id) {
             job.cancel.store(true, Ordering::Relaxed);
         }
     }
@@ -139,40 +152,175 @@ impl Jobs {
         work: Work,
     ) -> Result<SyncStatus, RpcError> {
         let cancel = Arc::new(AtomicBool::new(false));
-        {
-            let mut jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
-            if matches!(
-                jobs.get(&id).map(|job| &job.status),
-                Some(SyncStatus::Working { .. })
-            ) {
-                return Err(RpcError::new(
-                    SYNC_BUSY,
-                    "This pair already has a preview or sync in progress",
-                ));
-            }
-            jobs.insert(
+        self.claim(id, work, &cancel)?;
+        let engine = Arc::clone(engine);
+        self.spawn(id, move || perform(&engine, id, work, &cancel));
+        Ok(self.status(id))
+    }
+
+    /// Start a test-provided job through the same claim and publish path.
+    #[cfg(test)]
+    fn start_with(
+        self: &Arc<Self>,
+        id: PairId,
+        work: Work,
+        run: impl FnOnce() -> (SyncStatus, Option<Conflicts>) + Send + 'static,
+    ) -> Result<SyncStatus, RpcError> {
+        self.claim(id, work, &Arc::new(AtomicBool::new(false)))?;
+        self.spawn(id, run);
+        Ok(self.status(id))
+    }
+
+    /// Overwrite the pair's recorded status, for job state machine tests.
+    #[cfg(test)]
+    pub(crate) fn force_status(&self, id: PairId, status: SyncStatus) {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .jobs
+            .insert(
                 id,
                 Job {
-                    status: SyncStatus::Working {
-                        job: work.job(),
-                        cancelling: false,
-                    },
-                    cancel: Arc::clone(&cancel),
+                    status,
+                    cancel: Arc::new(AtomicBool::new(false)),
                     conflicts: None,
                 },
             );
+    }
+
+    /// Park the next pair removal between its busy check and the delete.
+    /// Returns a reached receiver and a release sender for the test.
+    #[cfg(test)]
+    pub(crate) fn gate_removal(&self) -> (Receiver<()>, Sender<()>) {
+        let (reached, reached_rx) = std::sync::mpsc::channel();
+        let (release_tx, release) = std::sync::mpsc::channel();
+        *self
+            .remove_gate
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some((reached, release));
+        (reached_rx, release_tx)
+    }
+
+    /// Wait on the rendezvous armed by `gate_removal`, if any.
+    #[cfg(test)]
+    pub(crate) fn wait_remove_gate(&self) {
+        let gate = self
+            .remove_gate
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some((reached, release)) = gate {
+            let _ = reached.send(());
+            let _ = release.recv();
         }
+    }
+
+    /// Reserve the pair for configuration removal while no job runs. New
+    /// claims are refused until the returned guard drops; the reservation
+    /// is made under the same lock as `claim`, so a job cannot start
+    /// between the busy check and the delete that follows it.
+    pub(crate) fn removal(self: &Arc<Self>, id: PairId) -> Result<Removal, RpcError> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.removing.contains(&id)
+            || matches!(
+                state.jobs.get(&id).map(|job| &job.status),
+                Some(SyncStatus::Working { .. })
+            )
+        {
+            return Err(RpcError::new(
+                SYNC_BUSY,
+                "Wait for the current preview or sync to finish",
+            ));
+        }
+        state.removing.insert(id);
+        Ok(Removal {
+            jobs: Arc::clone(self),
+            id,
+        })
+    }
+
+    /// Reserve the pair for `work` while a job runs. Unattended work never
+    /// replaces a result waiting for a person (ADR 0022): a stopped run
+    /// stays stopped until a manual preview or sync releases the pair.
+    fn claim(&self, id: PairId, work: Work, cancel: &Arc<AtomicBool>) -> Result<(), RpcError> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let blocked = if state.removing.contains(&id) {
+            Some("The pair is being removed")
+        } else {
+            match state.jobs.get(&id).map(|job| &job.status) {
+                Some(SyncStatus::Working { .. }) => {
+                    Some("This pair already has a preview or sync in progress")
+                }
+                Some(
+                    SyncStatus::Previewed { .. }
+                    | SyncStatus::NeedsApproval { .. }
+                    | SyncStatus::Failed { .. },
+                ) if matches!(work, Work::Scheduled) => {
+                    Some("The pair is waiting for review; sync it manually")
+                }
+                _ => None,
+            }
+        };
+        if let Some(message) = blocked {
+            return Err(RpcError::new(SYNC_BUSY, message));
+        }
+        state.jobs.insert(
+            id,
+            Job {
+                status: SyncStatus::Working {
+                    job: work.job(),
+                    cancelling: false,
+                },
+                cancel: Arc::clone(cancel),
+                conflicts: None,
+            },
+        );
+        Ok(())
+    }
+
+    /// Run `run` on the blocking pool and publish its result. A panic
+    /// publishes an explicit failure, never success and never a job that
+    /// stays Working, so the pair can take a later job.
+    fn spawn(
+        self: &Arc<Self>,
+        id: PairId,
+        run: impl FnOnce() -> (SyncStatus, Option<Conflicts>) + Send + 'static,
+    ) {
         let jobs = Arc::clone(self);
-        let engine = Arc::clone(engine);
         tokio::task::spawn_blocking(move || {
-            let (status, conflicts) = perform(&engine, id, work, &cancel);
-            let mut jobs = jobs.jobs.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(job) = jobs.get_mut(&id) {
+            let crashed = || {
+                (
+                    SyncStatus::Failed {
+                        message: "The job crashed; see the agent log".into(),
+                    },
+                    None,
+                )
+            };
+            let (status, conflicts) =
+                catch_unwind(AssertUnwindSafe(run)).unwrap_or_else(|_| crashed());
+            let mut state = jobs.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(job) = state.jobs.get_mut(&id) {
                 job.status = status;
                 job.conflicts = conflicts;
             }
         });
-        Ok(self.status(id))
+    }
+}
+
+/// Holds a pair's removal reservation; dropping allows job claims again.
+pub(crate) struct Removal {
+    jobs: Arc<Jobs>,
+    id: PairId,
+}
+
+impl Drop for Removal {
+    fn drop(&mut self) {
+        self.jobs
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .removing
+            .remove(&self.id);
     }
 }
 
@@ -349,7 +497,7 @@ mod tests {
         let jobs = Arc::new(Jobs::default());
         let id: PairId = "01010101010101010101010101010101".parse().unwrap();
         let cancel = Arc::new(AtomicBool::new(false));
-        jobs.jobs.lock().unwrap().insert(
+        jobs.state.lock().unwrap().jobs.insert(
             id,
             Job {
                 status: SyncStatus::Working {
@@ -370,6 +518,74 @@ mod tests {
             SyncStatus::Working {
                 job: SyncJob::Run,
                 cancelling: true
+            }
+        );
+    }
+
+    async fn settled(jobs: &Jobs, id: PairId) -> SyncStatus {
+        for _ in 0..300 {
+            let status = jobs.status(id);
+            if !matches!(status, SyncStatus::Working { .. }) {
+                return status;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("The sync job did not finish")
+    }
+
+    fn fixture() -> (tempfile::TempDir, Arc<Mutex<Engine>>, Arc<Jobs>) {
+        let directory = tempfile::tempdir().unwrap();
+        let engine =
+            Engine::open(&StateLocation::Directory(directory.path().join("state"))).unwrap();
+        (
+            directory,
+            Arc::new(Mutex::new(engine)),
+            Arc::new(Jobs::default()),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_panicking_job_fails_and_the_pair_accepts_later_jobs() {
+        let (_directory, engine, jobs) = fixture();
+        let id: PairId = "01010101010101010101010101010101".parse().unwrap();
+
+        jobs.start_with(id, Work::Preview, || panic!("injected failure"))
+            .unwrap();
+        let status = settled(&jobs, id).await;
+        assert!(
+            matches!(status, SyncStatus::Failed { .. }),
+            "a crash must end Failed, not Working: {status:?}"
+        );
+
+        // The panic never touched the engine lock, so the next job runs.
+        jobs.start(&engine, id, Work::Preview).unwrap();
+        let SyncStatus::Failed { message } = settled(&jobs, id).await else {
+            panic!("The follow-up job must reach a terminal state")
+        };
+        assert_ne!(message, "The sync engine failed");
+    }
+
+    #[tokio::test]
+    async fn a_panic_holding_the_engine_lock_fails_later_jobs_instead_of_hanging() {
+        let (_directory, engine, jobs) = fixture();
+        let id: PairId = "01010101010101010101010101010101".parse().unwrap();
+
+        let poisoned = Arc::clone(&engine);
+        jobs.start_with(id, Work::Preview, move || {
+            let _guard = poisoned.lock().unwrap();
+            panic!("injected failure")
+        })
+        .unwrap();
+        let status = settled(&jobs, id).await;
+        assert!(matches!(status, SyncStatus::Failed { .. }), "{status:?}");
+
+        // The writable engine may be inconsistent, so its poisoned lock is
+        // kept: later jobs fail explicitly rather than reuse it or hang.
+        jobs.start(&engine, id, Work::Preview).unwrap();
+        assert_eq!(
+            settled(&jobs, id).await,
+            SyncStatus::Failed {
+                message: "The sync engine failed".into()
             }
         );
     }
