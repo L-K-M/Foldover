@@ -58,6 +58,8 @@ struct BenchRootView: View {
         switch implementation {
         case .appkit:
             OutlineTreeRepresentable(model: model, refs: appkitRefs)
+        case .flatTable:
+            FlatTableRepresentable(model: model, refs: appkitRefs)
         case .swiftui:
             SwiftUITreeRoot(model: model, seam: swiftUISeam)
         }
@@ -65,8 +67,9 @@ struct BenchRootView: View {
 }
 
 /// Which tree a run measures.
-enum Implementation: String, Codable {
+enum Implementation: String, Codable, CaseIterable {
     case appkit
+    case flatTable
     case swiftui
 }
 

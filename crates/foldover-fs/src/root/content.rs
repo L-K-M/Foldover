@@ -1,10 +1,12 @@
 use std::io::{self, Read};
 
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
-use cap_std::fs::{Metadata, OpenOptions, OpenOptionsExt};
+use cap_std::fs::{OpenOptions, OpenOptionsExt};
 use foldover_types::{Digest, ScanControl, SyncPath};
 
-use super::{EntryMetadata, NodeKind, Root};
+use crate::prevent_materialization;
+
+use super::{DataResidency, EntryMetadata, NodeKind, Root};
 
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
 
@@ -14,6 +16,8 @@ pub enum HashError {
     Io(#[from] io::Error),
     #[error("Content hashing requires a regular file")]
     NotRegular,
+    #[error("Dataless file requires an explicit materialization policy")]
+    Dataless,
     #[error("File changed since its metadata was observed")]
     Changed,
     #[error("Content hashing cancelled; no digest was returned")]
@@ -22,8 +26,8 @@ pub enum HashError {
 
 impl Root {
     /// Hash a regular file's data fork with bounded memory and work limited to
-    /// its observed size. Residency/volume policy must precede caller exposure;
-    /// this primitive alone does not prevent File Provider materialization.
+    /// its observed size. macOS reads enforce non-materialization on the calling
+    /// thread; provider, metadata and volume gates still precede API exposure.
     pub fn hash_file(
         &self,
         path: &SyncPath,
@@ -34,10 +38,16 @@ impl Root {
         if expected.kind() != NodeKind::File {
             return Err(HashError::NotRegular);
         }
+        if expected.data_residency() == DataResidency::Dataless {
+            return Err(HashError::Dataless);
+        }
         let (parent, name) = self.parent_of(path)?;
-        let before = EntryMetadata::from_cap(parent.symlink_metadata(&name)?)?;
+        let before = EntryMetadata::at(&parent, &name)?;
         if before.kind() != NodeKind::File {
             return Err(HashError::NotRegular);
+        }
+        if before.data_residency() == DataResidency::Dataless {
+            return Err(HashError::Dataless);
         }
         if &before != expected {
             return Err(HashError::Changed);
@@ -47,7 +57,7 @@ impl Root {
         // A file swapped to a FIFO between stat/open must not block the worker.
         options.custom_flags(libc::O_NONBLOCK);
         let mut file = parent.open_with(&name, &options)?.into_std();
-        if EntryMetadata::from_cap(Metadata::from_just_metadata(file.metadata()?))? != before {
+        if EntryMetadata::from_file(&file)? != before {
             return Err(HashError::Changed);
         }
         let mut hasher = blake3::Hasher::new();
@@ -55,6 +65,7 @@ impl Root {
         let mut total = 0;
         while total < before.size() {
             check_control(control, total)?;
+            prevent_materialization()?;
             let remaining = usize::try_from(before.size() - total).unwrap_or(usize::MAX);
             let requested = remaining.min(buffer.len());
             let count = match file.read(&mut buffer[..requested]) {
@@ -67,9 +78,10 @@ impl Root {
             total += count as u64;
         }
         check_control(control, total)?;
+        prevent_materialization()?;
         let mut extra = [0];
         if file.read(&mut extra)? != 0
-            || EntryMetadata::from_cap(Metadata::from_just_metadata(file.metadata()?))? != before
+            || EntryMetadata::from_file(&file)? != before
             || self.metadata(path)? != before
         {
             return Err(HashError::Changed);
@@ -170,6 +182,22 @@ mod tests {
             }),
             Err(HashError::Cancelled)
         ));
+    }
+
+    #[test]
+    fn known_dataless_metadata_is_refused_before_opening_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("file");
+        fs::write(&file, b"abc").unwrap();
+        let root = Root::open(directory.path()).unwrap();
+        let mut metadata = root.metadata(&path()).unwrap();
+        metadata.residency = DataResidency::Dataless;
+        fs::remove_file(file).unwrap();
+        let result = root.hash_file(&path(), &metadata, &mut |bytes| {
+            assert_eq!(bytes, 0, "Dataless files must never reach a content read");
+            ScanControl::Continue
+        });
+        assert!(matches!(result, Err(HashError::Dataless)));
     }
 
     #[test]

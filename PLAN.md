@@ -349,6 +349,9 @@ Execution-time readiness remains pending.
 Observed regular-file data-fork hashing is available below the agent API;
 [ADR 0012](docs/adr/0012-local-content-hashing.md) records its bounded-read
 contract and required residency/metadata gates before exposure.
+Darwin stat observations include dataless flags. Known placeholders stop
+inventory and hashing; macOS reads enforce a non-materializing thread policy.
+Provider verification and cloud-root readiness remain required before agent exposure.
 
 ```rust
 trait Endpoint {
@@ -720,4 +723,6 @@ Resolved by the owner, 2026-10-17:
 4. **Archive location:** `.foldover/archive/` at each endpoint root, with
    30-day retention.
 5. **Distribution:** ad-hoc-signed builds activated with `xattr`; no
-   Developer ID or notarization.
+    Developer ID or notarization.
+6. **Unsafe OS bindings:** small audited macOS driver modules are permitted,
+   behind safe interfaces and native tests. Other layers retain the prohibition.

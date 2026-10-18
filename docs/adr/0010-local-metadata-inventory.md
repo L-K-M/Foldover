@@ -49,6 +49,12 @@ Special file types and entries on a different observed device stop the scan.
 An ancestor identity check also rejects directory cycles. Device/inode values
 are session observations, not volume UUIDs or proof of mount availability.
 
+On Darwin, the same no-follow stat observation includes `SF_DATALESS`.
+A known dataless root or entry stops the inventory before enumeration or
+publication. Until snapshots represent unavailable entries explicitly, silently
+skipping placeholders could misclassify them as deletions. This flag check does
+not replace an enforced non-materializing I/O policy or cloud-root readiness.
+
 Until native-xattr/AppleDouble capability classification exists, `._` names
 stop the scan with an explicit sidecar-classification error. They are neither
 silently omitted nor treated as ordinary content. The need for separate
@@ -80,7 +86,7 @@ Root-selection tests cover equal/nested roots, selected symlink aliases,
 filesystem-dependent case aliases, prefix-only siblings, held-root moves,
 unavailable selections and scanning through a checked disjoint pair.
 
-Content hashing, full metadata capture, dataless-file policy, naming and
+Full metadata capture, enforced dataless-file policy, naming and
 capability probes, pair-catalog overlap validation, volume UUIDs, stable snapshots,
-readiness gates and performance calibration remain required. The agent still
-exposes only health methods.
+readiness gates and performance calibration remain required. Inventory and
+[data-fork hashing](0012-local-content-hashing.md) remain below the agent API.

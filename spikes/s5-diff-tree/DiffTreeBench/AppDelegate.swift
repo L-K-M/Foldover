@@ -1,6 +1,6 @@
 // The app shell (ADR docs/adr/0003-diff-tree-view.md): launched with
 // `-runBench <report.json>` — a launch argument `open --args` lands in
-// the argument domain — the app runs both tree implementations through
+// the argument domain — the app runs each implementation through
 // `BenchRunner`, writes the JSON report, prints the summary to stdout
 // and quits. Without it the app shows a status window only.
 //
@@ -14,10 +14,12 @@ import SwiftUI
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    /// Absolute ceiling on the whole benchmark: two runs of at most
-    /// five minutes each, plus settle and foreground waits. Past it,
-    /// whatever blocked the app is the measurement.
-    private static let watchdogSeconds: TimeInterval = 780
+    /// Each five-minute run gets a minute for bounded waits; reporting gets
+    /// another minute. Adding a candidate must not truncate later runs.
+    private static let runAndWaitSeconds: TimeInterval = 360
+    private static let reportGraceSeconds: TimeInterval = 60
+    private static let watchdogSeconds = TimeInterval(Implementation.allCases.count)
+        * runAndWaitSeconds + reportGraceSeconds
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let reportPath = UserDefaults.standard.string(forKey: "runBench")

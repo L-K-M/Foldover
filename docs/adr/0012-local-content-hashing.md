@@ -25,7 +25,7 @@ The agent and app do not expose content reads or sync execution yet.
 - Check cancellation between chunks. Cancellation, early EOF, I/O errors and
   changed entries yield errors, never partial digests.
 - After reading, recheck the open descriptor and root-relative named binding.
-  Kind, size, mtime, device/inode and ctime are compared. Atime is excluded
+  Kind, size, mtime, device/inode, ctime and observed residency are compared. Atime is excluded
   because reading may update it.
 
 Before/after checks are observations, not a filesystem snapshot. Watchers,
@@ -35,25 +35,35 @@ attributes need capability-specific policy.
 
 ## Residency boundary
 
-Opening file data can materialize cloud placeholders. This primitive does not
-claim to prevent that. Content reads must remain inaccessible through the
-agent until the host enforces a tested non-materializing policy and cloud-root
-readiness is implemented.
+Darwin metadata captures `SF_DATALESS` in the same no-follow `fstatat` or
+descriptor `fstat` observation as the entry identity. Known dataless files
+are refused before content open. Other platforms report `NotReported`, never
+inventing a materialized observation. Sparse allocation is not a residency test.
 
 Apple documents process/thread materialization policy in
 [`getiopolicy_np`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man3/getiopolicy_np.3).
-Launchd also exposes `MaterializeDatalessFiles`. A managed-launch policy and
-live process-context verification are candidates; neither is established by
-this read primitive. A hand-written unsafe wrapper is not permitted by the
-repository's Rust rules. Account-backed File Provider verification remains open.
+The filesystem driver now enforces and reads back `OFF` on the calling thread
+before namespace I/O and every content read. Iteration checks the consuming
+thread, including after an iterator moves between threads. Hash callbacks
+cannot leave materialization enabled for a subsequent read. The driver leaves
+the thread policy disabled; it does not restore an inherited permissive policy.
+Policy setup/query failures are I/O errors, never complete scans or digests.
 
-The packaged LaunchAgent now explicitly sets `MaterializeDatalessFiles=false`.
+The owner approved a narrow unsafe exception for audited macOS driver bindings
+on 2026-10-17. The binding accepts only C integers, has safe internal interfaces
+and `SAFETY` comments, and is isolated from filesystem traversal, which still
+forbids unsafe. Other layers retain the workspace prohibition. Native tests
+compare constants against the installed Darwin SDK and exercise policy changes
+on real worker threads and across callbacks.
+
+The packaged LaunchAgent also sets `MaterializeDatalessFiles=false` as defense
+in depth.
 CI checks the template and runs isolated launchd jobs with disabled/enabled
 policies, inspecting the main thread, worker threads and a child through native
 `getiopolicy_np`. This verifies managed-launch policy inheritance without
-reading cloud data. It does not verify that a manually started agent has that
-policy, or close the account-backed File Provider gate. A production runtime
-context check is still required before exposing content methods.
+reading cloud data. Manual callers use the driver's per-thread enforcement.
+Account-backed File Provider verification, cloud-root readiness and full
+metadata/volume gates remain open. Content reads remain below the agent API.
 
 ## Verification
 
@@ -63,3 +73,7 @@ link, FIFO refusal, held roots after ambient replacement, and independent
 endpoint protection of internal/AppleDouble names. Native checks run in macOS CI.
 These tests do not establish cloud residency, full metadata fidelity or any
 execution/recovery gate.
+Additional tests cover descriptor/name metadata agreement, invalid stat values,
+pre-epoch timestamps, dataless refusal before content open and Darwin flag
+classification. The synthetic flag is tested through a stat-record fixture;
+account-backed File Provider behavior still needs a real provider fixture.
