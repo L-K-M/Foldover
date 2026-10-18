@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Conflict resolution: keep A or keep B for a previewed file conflict; the
+  other version is archived, and choices expire if either side changes again.
 - Automatic sync on an interval, set per pair in the app or with
   `--schedule`; it starts after the first manual sync and stops instead of
   asking when deletions need approval.

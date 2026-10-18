@@ -2334,6 +2334,23 @@ public func syncPreview(id: String)async throws  -> SyncJobState  {
             errorHandler: FfiConverterTypeAgentError_lift
         )
 }
+/**
+ * Keep one side's version of a conflict from the pair's latest preview.
+ */
+public func syncResolve(id: String, path: Data, keep: SyncSide)async throws  -> SyncJobState  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_sync_resolve(FfiConverterString.lower(id),FfiConverterData.lower(path),FfiConverterTypeSyncSide_lower(keep)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeSyncJobState_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
 public func syncRun(id: String, approvedLeftDeletions: UInt64, approvedRightDeletions: UInt64)async throws  -> SyncJobState  {
     return
         try  await uniffiRustCallAsync(
@@ -2403,6 +2420,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_sync_preview() != 51120) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_sync_resolve() != 3994) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_sync_run() != 11862) {

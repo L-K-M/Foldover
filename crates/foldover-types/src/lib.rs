@@ -20,7 +20,7 @@ pub use options::{Durability, PairOptions, Schedule, ScheduleInterval};
 
 pub use reconcile::{
     BaselineEntry, BaselineMismatch, ChangeKind, ConflictKind, Digest, EntryContent, EntryDecision,
-    EntryKind, EntryVersion, Side, SyncMode,
+    EntryKind, EntryVersion, Resolution, Side, SyncMode,
 };
 pub use sync_path::{InvalidSyncPath, SyncPath};
 

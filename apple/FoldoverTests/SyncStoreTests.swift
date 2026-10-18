@@ -9,6 +9,7 @@ private actor ScriptedSyncClient: SyncClient {
     private var replies: [PairSyncState]
     private(set) var approvals: [(UInt64, UInt64)] = []
     private(set) var cancelled = false
+    private(set) var kept: [FolderSide] = []
 
     init(_ replies: [PairSyncState]) {
         self.replies = replies
@@ -27,6 +28,11 @@ private actor ScriptedSyncClient: SyncClient {
         return next()
     }
 
+    func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState {
+        kept.append(keep)
+        return next()
+    }
+
     private func next() -> PairSyncState {
         replies.isEmpty ? .idle : replies.removeFirst()
     }
@@ -39,6 +45,9 @@ private struct UnreachableSyncClient: SyncClient {
     }
     func status(_ id: String) async throws -> PairSyncState { throw SyncFixtureError.unreachable }
     func cancel(_ id: String) async throws -> PairSyncState { throw SyncFixtureError.unreachable }
+    func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState {
+        throw SyncFixtureError.unreachable
+    }
 }
 
 private func preview(archivesInA: UInt64, needsApproval: Bool) -> PreviewSummary {
@@ -131,4 +140,28 @@ func unreachableAgentsReportErrorsWithoutChangingState() async {
     await viewModel.preview()
     #expect(viewModel.requestError != nil)
     #expect(store.state(for: pair().id) == .idle)
+}
+
+@MainActor
+@Test
+func keepingASideResolvesThenPreviewsAgain() async throws {
+    let conflicted = PreviewSummary(
+        changes: [PlannedChange(path: Data("notes.txt".utf8), action: .conflict(.bothChanged)),
+                  PlannedChange(path: Data("folder".utf8), action: .conflict(.typeMismatch))],
+        copies: 0, updates: 0, archives: 0, conflicts: 2, blocked: 0, kept: 0,
+        a: DeletionCheck(deletions: 0, paths: 2, needsApproval: false),
+        b: DeletionCheck(deletions: 0, paths: 2, needsApproval: false)
+    )
+    let resolved = preview(archivesInA: 0, needsApproval: false)
+    let client = ScriptedSyncClient([.previewed(conflicted), .previewed(conflicted), .previewed(resolved)])
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, agentConnected: true)
+    await viewModel.preview()
+    let rows = viewModel.rows
+    #expect(rows[0].resolvable == Data("notes.txt".utf8))
+    #expect(rows[1].resolvable == nil)
+
+    await viewModel.keep(.b, for: rows[0])
+    #expect(await client.kept == [.b])
+    #expect(store.state(for: pair().id) == .previewed(resolved))
 }

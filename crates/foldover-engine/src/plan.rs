@@ -1,11 +1,26 @@
 use std::collections::BTreeMap;
 
 use foldover_types::{
-    BaselineEntry, ConflictKind, EntryDecision, EntryKind, EntryVersion, ScanControl, Side,
-    SyncMode, SyncPath,
+    BaselineEntry, ConflictKind, EntryDecision, EntryKind, EntryVersion, Resolution, ScanControl,
+    Side, SyncMode, SyncPath,
 };
 
+use crate::reconcile::resolve;
 use crate::{DeletionCounts, DeletionReview, InvalidDeletionCounts, RunContext, reconcile_entry};
+
+fn decide(
+    decision: EntryDecision,
+    resolution: Option<&Resolution>,
+    left: Option<EntryVersion>,
+    right: Option<EntryVersion>,
+) -> EntryDecision {
+    match (decision, resolution) {
+        (EntryDecision::Conflict(_), Some(resolution)) => {
+            resolve(*resolution, left, right).unwrap_or(decision)
+        }
+        _ => decision,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TreeRole {
@@ -96,6 +111,19 @@ pub fn plan_candidates(
     right: &BTreeMap<SyncPath, EntryVersion>,
     control: &mut impl FnMut() -> ScanControl,
 ) -> Result<CandidatePlan, PlanError> {
+    plan_resolved(mode, base, left, right, &BTreeMap::new(), control)
+}
+
+/// `plan_candidates`, with conflicts a person resolved turned into the
+/// chosen change while both sides still match what they saw.
+pub fn plan_resolved(
+    mode: SyncMode,
+    base: &BTreeMap<SyncPath, BaselineEntry>,
+    left: &BTreeMap<SyncPath, EntryVersion>,
+    right: &BTreeMap<SyncPath, EntryVersion>,
+    resolutions: &BTreeMap<SyncPath, Resolution>,
+    control: &mut impl FnMut() -> ScanControl,
+) -> Result<CandidatePlan, PlanError> {
     validate_tree(base, TreeRole::Base, |entry| entry.left().kind(), control)?;
     validate_tree(left, TreeRole::Left, |entry| entry.kind(), control)?;
     validate_tree(right, TreeRole::Right, |entry| entry.kind(), control)?;
@@ -136,7 +164,12 @@ pub fn plan_candidates(
         }
         rows.push(PlanRow {
             path: path.clone(),
-            decision: CandidateDecision::Entry(reconcile_entry(mode, baseline, left, right)),
+            decision: CandidateDecision::Entry(decide(
+                reconcile_entry(mode, baseline, left, right),
+                resolutions.get(&path),
+                left,
+                right,
+            )),
         });
 
         if mode != SyncMode::Sync {

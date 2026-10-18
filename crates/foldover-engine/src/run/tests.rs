@@ -13,6 +13,7 @@ struct Fixture {
     revision: u64,
     base: BTreeMap<SyncPath, BaselineEntry>,
     identities: RecordedIdentities,
+    resolutions: BTreeMap<SyncPath, foldover_types::Resolution>,
 }
 
 fn fixture(mode: SyncMode) -> Fixture {
@@ -23,6 +24,7 @@ fn fixture(mode: SyncMode) -> Fixture {
         revision: 1,
         base: BTreeMap::new(),
         identities: RecordedIdentities::default(),
+        resolutions: BTreeMap::new(),
     }
 }
 
@@ -56,7 +58,13 @@ impl Fixture {
         let pair =
             PairConfig::from_stored(PairId::from_bytes([1; 16]).unwrap(), self.revision, draft)
                 .unwrap();
-        PairRun::prepare(pair, &self.base, self.identities, &mut proceed)
+        let inputs = RunInputs::new(
+            pair,
+            self.base.clone(),
+            self.identities,
+            self.resolutions.clone(),
+        );
+        PairRun::prepare(inputs, &mut proceed)
     }
 
     /// Run with an in-memory base that applies commits like the state store.
@@ -401,5 +409,57 @@ fn completed_runs_name_their_archive_and_prune_expired_runs() {
                 std::time::UNIX_EPOCH + day * 11
             ))
             .exists()
+    );
+}
+
+#[test]
+fn resolved_conflicts_keep_the_chosen_side_until_either_side_changes() {
+    let mut pair = fixture(SyncMode::Sync);
+    fs::write(pair.left.path().join("file"), b"base").unwrap();
+    fs::write(pair.left.path().join("gone"), b"base").unwrap();
+    pair.sync();
+    fs::write(pair.left.path().join("file"), b"left").unwrap();
+    fs::write(pair.right.path().join("file"), b"right").unwrap();
+    fs::remove_file(pair.left.path().join("gone")).unwrap();
+    fs::write(pair.right.path().join("gone"), b"edited").unwrap();
+
+    let preview = pair.prepare().preview();
+    let versions = |name: &[u8]| {
+        preview
+            .items()
+            .iter()
+            .find(|item| item.path() == &path(name))
+            .unwrap()
+            .versions()
+    };
+    let (left, right) = versions(b"file");
+    pair.resolutions.insert(
+        path(b"file"),
+        foldover_types::Resolution::new(Side::Right, left, right),
+    );
+    let (left, right) = versions(b"gone");
+    pair.resolutions.insert(
+        path(b"gone"),
+        foldover_types::Resolution::new(Side::Left, left, right),
+    );
+
+    let report = pair.sync();
+    assert!(report.conflicts().is_empty(), "{:?}", report.conflicts());
+    assert_eq!((report.copied(), report.archived()), (1, 1));
+    assert_eq!(fs::read(pair.left.path().join("file")).unwrap(), b"right");
+    let archive = pair
+        .left
+        .path()
+        .join(".foldover/archive/1970-01-01T00-00-00.000Z");
+    assert_eq!(fs::read(archive.join("file")).unwrap(), b"left");
+    assert!(!pair.right.path().join("gone").exists());
+
+    // A choice made for other versions no longer applies.
+    fs::write(pair.left.path().join("file"), b"left again").unwrap();
+    fs::write(pair.right.path().join("file"), b"right again").unwrap();
+    let report = pair.sync();
+    assert_eq!(
+        report.conflicts(),
+        [(path(b"file"), ConflictKind::BothChanged)]
     );
 }

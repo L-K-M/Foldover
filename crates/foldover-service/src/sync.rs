@@ -20,10 +20,12 @@ use foldover_engine::{
 };
 use foldover_proto::local::RpcError;
 use foldover_proto::local::{
-    SYNC_BUSY, SYNC_ITEM_LIMIT, SyncAction, SyncConflict, SyncCounts, SyncDeletions, SyncFailure,
-    SyncItem, SyncJob, SyncPreview, SyncResult, SyncStatus,
+    INTERNAL_ERROR, PREVIEW_REQUIRED, SYNC_BUSY, SYNC_ITEM_LIMIT, SyncAction, SyncConflict,
+    SyncCounts, SyncDeletions, SyncFailure, SyncItem, SyncJob, SyncPreview, SyncResult, SyncStatus,
 };
-use foldover_types::{ChangeKind, ConflictKind, PairId, ScanControl, Side};
+use foldover_types::{
+    ChangeKind, ConflictKind, EntryVersion, PairId, Resolution, ScanControl, Side, SyncPath,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Work {
@@ -42,9 +44,30 @@ impl Work {
     }
 }
 
+/// Conflict versions from a pair's latest preview; choices bind to them.
+struct Conflicts {
+    revision: u64,
+    versions: HashMap<SyncPath, (Option<EntryVersion>, Option<EntryVersion>)>,
+}
+
+impl Conflicts {
+    fn from(preview: &Preview) -> Self {
+        Self {
+            revision: preview.revision(),
+            versions: preview
+                .items()
+                .iter()
+                .filter(|item| matches!(item.action(), Action::Conflict(_)))
+                .map(|item| (item.path().clone(), item.versions()))
+                .collect(),
+        }
+    }
+}
+
 struct Job {
     status: SyncStatus,
     cancel: Arc<AtomicBool>,
+    conflicts: Option<Conflicts>,
 }
 
 #[derive(Default)]
@@ -65,6 +88,40 @@ impl Jobs {
             },
             status => status.clone(),
         }
+    }
+
+    /// Record a choice for a conflict in the pair's latest preview.
+    pub(crate) fn resolve(
+        &self,
+        engine: &Mutex<Engine>,
+        id: PairId,
+        path: &SyncPath,
+        keep: Side,
+    ) -> Result<(), RpcError> {
+        let stale = || {
+            RpcError::new(
+                PREVIEW_REQUIRED,
+                "This conflict is not in the pair's latest preview; preview again",
+            )
+        };
+        let (revision, (left, right)) = {
+            let jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
+            let job = jobs.get(&id).ok_or_else(stale)?;
+            if matches!(job.status, SyncStatus::Working { .. }) {
+                return Err(RpcError::new(
+                    SYNC_BUSY,
+                    "Wait for the current preview or sync to finish",
+                ));
+            }
+            let conflicts = job.conflicts.as_ref().ok_or_else(stale)?;
+            let versions = *conflicts.versions.get(path).ok_or_else(stale)?;
+            (conflicts.revision, versions)
+        };
+        engine
+            .lock()
+            .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?
+            .record_resolution(id, revision, path, Resolution::new(keep, left, right))
+            .map_err(crate::engine_error)
     }
 
     pub(crate) fn cancel(&self, id: PairId) {
@@ -101,29 +158,36 @@ impl Jobs {
                         cancelling: false,
                     },
                     cancel: Arc::clone(&cancel),
+                    conflicts: None,
                 },
             );
         }
         let jobs = Arc::clone(self);
         let engine = Arc::clone(engine);
         tokio::task::spawn_blocking(move || {
-            let status = perform(&engine, id, work, &cancel);
+            let (status, conflicts) = perform(&engine, id, work, &cancel);
             let mut jobs = jobs.jobs.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(job) = jobs.get_mut(&id) {
                 job.status = status;
+                job.conflicts = conflicts;
             }
         });
         Ok(self.status(id))
     }
 }
 
-fn perform(engine: &Mutex<Engine>, id: PairId, work: Work, cancel: &AtomicBool) -> SyncStatus {
-    let failed = |message: String| SyncStatus::Failed { message };
+fn perform(
+    engine: &Mutex<Engine>,
+    id: PairId,
+    work: Work,
+    cancel: &AtomicBool,
+) -> (SyncStatus, Option<Conflicts>) {
+    let failed = |message: String| (SyncStatus::Failed { message }, None);
     let inputs = match engine.lock() {
         Ok(engine) => engine.run_inputs(id),
         Err(_) => return failed("The sync engine failed".into()),
     };
-    let (pair, base, identities) = match inputs {
+    let inputs = match inputs {
         Ok(inputs) => inputs,
         Err(error) => return failed(error.to_string()),
     };
@@ -134,17 +198,19 @@ fn perform(engine: &Mutex<Engine>, id: PairId, work: Work, cancel: &AtomicBool) 
             ScanControl::Continue
         }
     };
-    let run = match PairRun::prepare(pair, &base, identities, &mut control) {
+    let run = match PairRun::prepare(inputs, &mut control) {
         Ok(run) => run,
         // Nothing was written yet.
-        Err(RunError::Cancelled) => return SyncStatus::Idle,
+        Err(RunError::Cancelled) => return (SyncStatus::Idle, None),
         Err(error) => return failed(error.to_string()),
     };
     let (approval, context) = match work {
         Work::Preview => {
-            return SyncStatus::Previewed {
-                preview: preview(&run.preview()),
+            let planned = run.preview();
+            let status = SyncStatus::Previewed {
+                preview: preview(&planned),
             };
+            return (status, Some(Conflicts::from(&planned)));
         }
         Work::Run(approval) => (approval, RunContext::Interactive),
         Work::Scheduled => (Approval::default(), RunContext::Unattended),
@@ -164,12 +230,18 @@ fn perform(engine: &Mutex<Engine>, id: PairId, work: Work, cancel: &AtomicBool) 
         &mut commit,
         &mut control,
     ) {
-        Ok(RunOutcome::Ran(report)) => SyncStatus::Finished {
-            result: result(&report),
-        },
-        Ok(RunOutcome::NeedsApproval(preview_data)) => SyncStatus::NeedsApproval {
-            preview: preview(&preview_data),
-        },
+        Ok(RunOutcome::Ran(report)) => (
+            SyncStatus::Finished {
+                result: result(&report),
+            },
+            None,
+        ),
+        Ok(RunOutcome::NeedsApproval(planned)) => (
+            SyncStatus::NeedsApproval {
+                preview: preview(&planned),
+            },
+            Some(Conflicts::from(&planned)),
+        ),
         Err(error) => failed(error.to_string()),
     }
 }
@@ -277,6 +349,7 @@ mod tests {
                     cancelling: false,
                 },
                 cancel,
+                conflicts: None,
             },
         );
         assert_eq!(

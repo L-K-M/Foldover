@@ -14,7 +14,9 @@ use foldover_proto::local::{
     PairRecord, PairUpdate,
 };
 use foldover_proto::local::{PAIR_REMOVE, PairRevision};
-use foldover_proto::local::{SYNC_CANCEL, SYNC_PREVIEW, SYNC_RUN, SYNC_STATUS, SyncKey, SyncRun};
+use foldover_proto::local::{
+    SYNC_CANCEL, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS, SyncKey, SyncResolve, SyncRun,
+};
 pub use foldover_types::{
     Durability, InvalidPair, LocalRoot, MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions,
     Propagation, Schedule, ScheduleInterval, Side, SyncMode,
@@ -58,6 +60,23 @@ pub async fn start_run(
 
 pub async fn sync_status(location: &SocketLocation, id: PairId) -> Result<SyncStatus, Error> {
     sync_call(location, SYNC_STATUS, id).await
+}
+
+/// Keep one side's version of a conflict in the pair's latest preview.
+pub async fn resolve_conflict(
+    location: &SocketLocation,
+    id: PairId,
+    path: &[u8],
+    keep: Side,
+) -> Result<SyncStatus, Error> {
+    let params = SyncResolve {
+        id: id.to_string(),
+        path: path.to_vec(),
+        keep: keep.into(),
+    };
+    Ok(serde_json::from_value(
+        call(location, SYNC_RESOLVE, Some(serde_json::to_value(params)?)).await?,
+    )?)
 }
 
 pub async fn cancel_sync(location: &SocketLocation, id: PairId) -> Result<SyncStatus, Error> {

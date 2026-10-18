@@ -17,7 +17,9 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule_minutes";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 5] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5];
+const MIGRATIONS: [&str; 6] = [
+    SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6,
+];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -60,6 +62,17 @@ ALTER TABLE pair ADD COLUMN right_identity BLOB CHECK(right_identity IS NULL OR 
 const SCHEMA_V5: &str = "
 ALTER TABLE pair ADD COLUMN schedule_minutes INTEGER CHECK(schedule_minutes IS NULL OR schedule_minutes BETWEEN 1 AND 10080);
 ";
+// Conflict choices bound to the versions a person saw; NULL means absent.
+const SCHEMA_V6: &str = "
+CREATE TABLE resolution (
+    pair_id BLOB NOT NULL REFERENCES pair(id) ON DELETE CASCADE,
+    path BLOB NOT NULL CHECK(length(path) > 0 AND substr(path,1,1) != x'2f' AND instr(path,x'00') = 0),
+    keep TEXT NOT NULL CHECK(keep IN ('left','right')),
+    left_version BLOB,
+    right_version BLOB,
+    PRIMARY KEY (pair_id, path)
+) STRICT, WITHOUT ROWID;
+";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -90,6 +103,15 @@ pub enum Error {
 pub struct IdentityRow {
     pub left: Option<Vec<u8>>,
     pub right: Option<Vec<u8>>,
+}
+
+/// One stored conflict choice. Version bytes are opaque to this driver.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolutionRow {
+    pub path: Vec<u8>,
+    pub keep: String,
+    pub left_version: Option<Vec<u8>>,
+    pub right_version: Option<Vec<u8>>,
 }
 
 /// One stored base row. Version bytes are opaque to this driver.
@@ -310,20 +332,22 @@ impl Database {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // A base holds versions of these roots under these metadata
-        // categories; changing either invalidates it.
-        transaction.execute(
-            "DELETE FROM base_entry WHERE pair_id=?1 AND EXISTS (SELECT 1 FROM pair WHERE id=?1 AND revision=?2 AND (left_root!=?3 OR right_root!=?4 OR modification_times!=?5 OR extended_attributes!=?6 OR permissions!=?7))",
-            params![
-                id,
-                revision,
-                values.left_root,
-                values.right_root,
-                values.modification_times,
-                values.extended_attributes,
-                values.permissions
-            ],
-        )?;
+        // A base and conflict choices hold versions of these roots under
+        // these metadata categories; changing either invalidates them.
+        for table in ["base_entry", "resolution"] {
+            transaction.execute(
+                &format!("DELETE FROM {table} WHERE pair_id=?1 AND EXISTS (SELECT 1 FROM pair WHERE id=?1 AND revision=?2 AND (left_root!=?3 OR right_root!=?4 OR modification_times!=?5 OR extended_attributes!=?6 OR permissions!=?7))"),
+                params![
+                    id,
+                    revision,
+                    values.left_root,
+                    values.right_root,
+                    values.modification_times,
+                    values.extended_attributes,
+                    values.permissions
+                ],
+            )?;
+        }
         let changed = transaction.execute(
             // A changed root is a different endpoint; forget its identity.
             "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,schedule_minutes=?11,left_identity=CASE WHEN left_root=?4 THEN left_identity END,right_identity=CASE WHEN right_root=?5 THEN right_identity END WHERE id=?1 AND revision=?2",
@@ -392,6 +416,50 @@ impl Database {
         Ok(())
     }
 
+    pub fn resolutions(&self, pair: &[u8]) -> Result<Vec<ResolutionRow>, Error> {
+        let mut statement = self.connection.prepare(
+            "SELECT path,keep,left_version,right_version FROM resolution WHERE pair_id=?1 ORDER BY path",
+        )?;
+        let rows = statement.query_map([pair], |row| {
+            Ok(ResolutionRow {
+                path: row.get(0)?,
+                keep: row.get(1)?,
+                left_version: row.get(2)?,
+                right_version: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Store or replace a conflict choice, only while the pair keeps `revision`.
+    pub fn record_resolution(
+        &mut self,
+        pair: &[u8],
+        revision: i64,
+        row: &ResolutionRow,
+    ) -> Result<(), Error> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<i64> = transaction
+            .query_row("SELECT revision FROM pair WHERE id=?1", [pair], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        match current {
+            None => return Err(Error::PairNotFound),
+            Some(current) if current != revision => return Err(Error::StaleRevision),
+            Some(_) => {}
+        }
+        transaction.execute(
+            "INSERT INTO resolution (pair_id,path,keep,left_version,right_version) VALUES (?1,?2,?3,?4,?5)
+             ON CONFLICT(pair_id,path) DO UPDATE SET keep=excluded.keep,left_version=excluded.left_version,right_version=excluded.right_version",
+            params![pair, row.path, row.keep, row.left_version, row.right_version],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Every base row of a pair, ordered by raw path bytes.
     pub fn base_rows(&self, pair: &[u8]) -> Result<Vec<BaseRow>, Error> {
         let mut statement = self.connection.prepare(
@@ -435,6 +503,9 @@ impl Database {
             )?;
             let mut remove =
                 transaction.prepare("DELETE FROM base_entry WHERE pair_id=?1 AND path=?2")?;
+            // A synced path's conflict choice is spent.
+            let mut resolved =
+                transaction.prepare("DELETE FROM resolution WHERE pair_id=?1 AND path=?2")?;
             for change in changes {
                 match *change {
                     BaseChange::Put {
@@ -443,9 +514,11 @@ impl Database {
                         right_version,
                     } => {
                         put.execute(params![pair, path, left_version, right_version])?;
+                        resolved.execute(params![pair, path])?;
                     }
                     BaseChange::Remove { path } => {
                         remove.execute(params![pair, path])?;
+                        resolved.execute(params![pair, path])?;
                     }
                 }
             }
@@ -1081,5 +1154,38 @@ mod tests {
             database.identities(&[9; 16]),
             Err(Error::PairNotFound)
         ));
+    }
+
+    #[test]
+    fn resolutions_are_revision_bound_and_spent_by_base_changes() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        let row = |path: &[u8]| ResolutionRow {
+            path: path.to_vec(),
+            keep: "left".into(),
+            left_version: Some(b"l".to_vec()),
+            right_version: None,
+        };
+        assert!(matches!(
+            database.record_resolution(&pair.id, 2, &row(b"a")),
+            Err(Error::StaleRevision)
+        ));
+        database.record_resolution(&pair.id, 1, &row(b"a")).unwrap();
+        database.record_resolution(&pair.id, 1, &row(b"b")).unwrap();
+        assert_eq!(
+            database.resolutions(&pair.id).unwrap(),
+            [row(b"a"), row(b"b")]
+        );
+
+        database
+            .change_base(&pair.id, 1, &[put(b"a", b"1")])
+            .unwrap();
+        assert_eq!(database.resolutions(&pair.id).unwrap(), [row(b"b")]);
+
+        let mut moved = values();
+        moved.left_root = b"/moved".to_vec();
+        database.update_pair(&pair.id, 1, &moved).unwrap();
+        assert!(database.resolutions(&pair.id).unwrap().is_empty());
     }
 }

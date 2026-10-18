@@ -86,6 +86,7 @@ protocol SyncClient: Sendable {
     func run(_ id: String, approvedA: UInt64, approvedB: UInt64) async throws -> PairSyncState
     func status(_ id: String) async throws -> PairSyncState
     func cancel(_ id: String) async throws -> PairSyncState
+    func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState
 }
 
 // Keep generated async values inside one actor; only native Sendable records leave it.
@@ -106,6 +107,10 @@ private actor CoreSyncClient: SyncClient {
 
     func cancel(_ id: String) async throws -> PairSyncState {
         state(try await FoldoverCore.syncCancel(id: id))
+    }
+
+    func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState {
+        state(try await FoldoverCore.syncResolve(id: id, path: path, keep: keep == .a ? .left : .right))
     }
 
     private func state(_ state: SyncJobState) -> PairSyncState {
@@ -208,6 +213,20 @@ final class SyncStore {
     func cancel(_ id: String) async {
         let client = client
         await perform(id) { try await client.cancel(id) }
+    }
+
+    /// Keep one folder's version of a previewed conflict, then preview again
+    /// so the list shows what the choice will do.
+    func resolve(_ id: String, path: Data, keep: FolderSide) async {
+        let client = client
+        requestErrors[id] = nil
+        do {
+            _ = try await client.resolve(id, path: path, keep: keep)
+        } catch {
+            requestErrors[id] = PairStore.message(for: error)
+            return
+        }
+        await preview(id)
     }
 
     /// Keep the reviewed changes visible after declining an approval.

@@ -16,9 +16,11 @@ pub use configuration::{Engine, Error, ErrorKind};
 pub use foldover_state::RecordedIdentities;
 pub use foldover_state::StateLocation;
 pub use gates::{DeletionCounts, DeletionReview, InvalidDeletionCounts, RunContext};
-pub use plan::{CandidateDecision, CandidatePlan, PlanError, PlanRow, TreeRole, plan_candidates};
+pub use plan::{
+    CandidateDecision, CandidatePlan, PlanError, PlanRow, TreeRole, plan_candidates, plan_resolved,
+};
 pub use reconcile::reconcile_entry;
 pub use run::{
     Action, Approval, Commit, Completion, Failure, PairRun, Preview, PreviewItem, RunError,
-    RunOutcome, RunReport,
+    RunInputs, RunOutcome, RunReport,
 };

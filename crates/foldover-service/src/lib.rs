@@ -16,7 +16,9 @@ use foldover_proto::local::{
     VERSION_MISMATCH,
 };
 use foldover_proto::local::{PAIR_REMOVE, PairRevision};
-use foldover_proto::local::{SYNC_CANCEL, SYNC_PREVIEW, SYNC_RUN, SYNC_STATUS, SyncKey, SyncRun};
+use foldover_proto::local::{
+    SYNC_CANCEL, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS, SyncKey, SyncResolve, SyncRun,
+};
 use foldover_types::{PairDraft, PairId};
 use schedule::Scheduler;
 use serde::{Serialize, de::DeserializeOwned};
@@ -59,7 +61,7 @@ impl Service {
         }
         if matches!(
             request.method(),
-            SYNC_PREVIEW | SYNC_RUN | SYNC_STATUS | SYNC_CANCEL
+            SYNC_PREVIEW | SYNC_RUN | SYNC_STATUS | SYNC_CANCEL | SYNC_RESOLVE
         ) {
             return self.sync(&request);
         }
@@ -91,6 +93,15 @@ impl Service {
                 .map_err(|error| RpcError::new(INVALID_PARAMS, error.to_string()))
         };
         let status = match request.method() {
+            SYNC_RESOLVE => {
+                let params: SyncResolve = parameters(request)?;
+                let id = pair(&params.id)?;
+                let path = foldover_types::SyncPath::try_from(params.path)
+                    .map_err(|error| RpcError::new(INVALID_PARAMS, error.to_string()))?;
+                self.jobs
+                    .resolve(&self.engine, id, &path, params.keep.into())?;
+                self.jobs.status(id)
+            }
             SYNC_RUN => {
                 let params: SyncRun = parameters(request)?;
                 let approval = Approval::new(
@@ -234,7 +245,7 @@ fn encode(value: impl Serialize) -> Result<Value, RpcError> {
     serde_json::to_value(value).map_err(|_| RpcError::new(INTERNAL_ERROR, "Cannot encode response"))
 }
 
-fn engine_error(error: foldover_engine::Error) -> RpcError {
+pub(crate) fn engine_error(error: foldover_engine::Error) -> RpcError {
     let code = match error.kind() {
         ErrorKind::Storage => INTERNAL_ERROR,
         ErrorKind::NotFound => PAIR_NOT_FOUND,
@@ -717,5 +728,68 @@ mod tests {
         assert!(service.run_due(at(90)).is_empty());
         assert_eq!(service.run_due(at(122)).len(), 1);
         settled(&service, &key).await;
+    }
+
+    #[tokio::test]
+    async fn conflicts_are_resolved_from_the_latest_preview() {
+        let (directory, service) = fixture();
+        let input = input(directory.path(), "Draft");
+        let (left, right) = (
+            directory.path().join("Draft-left"),
+            directory.path().join("Draft-right"),
+        );
+        fs::write(left.join("text"), b"base").unwrap();
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run.clone())))
+            .await
+            .unwrap();
+        settled(&service, &key).await;
+        fs::write(left.join("text"), b"left").unwrap();
+        fs::write(right.join("text"), b"right").unwrap();
+
+        let resolve = json!({"id": created["id"], "path": b"text", "keep": "right"});
+        assert_eq!(
+            service
+                .handle(Request::call(3, SYNC_RESOLVE, Some(resolve.clone())))
+                .await
+                .unwrap_err()
+                .code(),
+            foldover_proto::local::PREVIEW_REQUIRED
+        );
+        service
+            .handle(Request::call(4, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        assert_eq!(
+            settled(&service, &key).await["preview"]["counts"]["conflicts"],
+            1
+        );
+        service
+            .handle(Request::call(5, SYNC_RESOLVE, Some(resolve)))
+            .await
+            .unwrap();
+
+        service
+            .handle(Request::call(6, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        let previewed = settled(&service, &key).await;
+        assert_eq!(
+            previewed["preview"]["counts"]["conflicts"], 0,
+            "{previewed}"
+        );
+        assert_eq!(previewed["preview"]["counts"]["copies"], 1);
+        service
+            .handle(Request::call(7, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        assert_eq!(settled(&service, &key).await["result"]["copied"], 1);
+        assert_eq!(fs::read(left.join("text")).unwrap(), b"right");
     }
 }

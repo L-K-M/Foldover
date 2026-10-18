@@ -22,12 +22,12 @@ use foldover_endpoint::{
 use foldover_state::{BaseUpdate, RecordedIdentities};
 use foldover_types::{
     BaselineEntry, ChangeKind, ConflictKind, EndpointId, EntryDecision, EntryVersion, PairConfig,
-    ScanControl, Side, SyncPath,
+    Resolution, ScanControl, Side, SyncPath,
 };
 
 use crate::{
     CandidateDecision, CandidatePlan, DeletionCounts, DeletionReview, PlanError, RunContext,
-    plan_candidates,
+    plan_resolved,
 };
 
 /// Base updates per commit: bounds the work a crash can make the next run redo.
@@ -119,6 +119,8 @@ pub enum Action {
 pub struct PreviewItem {
     path: SyncPath,
     action: Action,
+    left: Option<EntryVersion>,
+    right: Option<EntryVersion>,
 }
 
 impl PreviewItem {
@@ -129,16 +131,27 @@ impl PreviewItem {
     pub fn action(&self) -> Action {
         self.action
     }
+
+    /// What each side held when previewed; a resolution is bound to these.
+    pub fn versions(&self) -> (Option<EntryVersion>, Option<EntryVersion>) {
+        (self.left, self.right)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Preview {
+    revision: u64,
     items: Vec<PreviewItem>,
     left_deletions: DeletionCounts,
     right_deletions: DeletionCounts,
 }
 
 impl Preview {
+    /// The pair revision this preview was planned for.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// Every path with a visible change, conflict or block, in path order.
     pub fn items(&self) -> &[PreviewItem] {
         &self.items
@@ -229,6 +242,30 @@ pub enum RunOutcome {
     NeedsApproval(Preview),
 }
 
+/// Everything a run reads from the state store, taken under the engine lock.
+pub struct RunInputs {
+    pair: PairConfig,
+    base: BTreeMap<SyncPath, BaselineEntry>,
+    identities: RecordedIdentities,
+    resolutions: BTreeMap<SyncPath, Resolution>,
+}
+
+impl RunInputs {
+    pub fn new(
+        pair: PairConfig,
+        base: BTreeMap<SyncPath, BaselineEntry>,
+        identities: RecordedIdentities,
+        resolutions: BTreeMap<SyncPath, Resolution>,
+    ) -> Self {
+        Self {
+            pair,
+            base,
+            identities,
+            resolutions,
+        }
+    }
+}
+
 /// Both sides observed and planned, ready to preview or execute.
 pub struct PairRun {
     pair: PairConfig,
@@ -243,11 +280,15 @@ impl PairRun {
     /// Recorded identities must match the roots' identity files; until the
     /// first run records them, any folder is accepted.
     pub fn prepare(
-        pair: PairConfig,
-        base: &BTreeMap<SyncPath, BaselineEntry>,
-        identities: RecordedIdentities,
+        inputs: RunInputs,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<Self, RunError> {
+        let RunInputs {
+            pair,
+            base,
+            identities,
+            resolutions,
+        } = inputs;
         let draft = pair.draft();
         let endpoints = LocalPair::open(draft.left(), draft.right())?;
         for side in [Side::Left, Side::Right] {
@@ -274,11 +315,12 @@ impl PairRun {
         };
         let left = observe(Side::Left, control)?;
         let right = observe(Side::Right, control)?;
-        let plan = plan_candidates(
+        let plan = plan_resolved(
             draft.mode(),
-            base,
+            &base,
             &left.versions(),
             &right.versions(),
+            &resolutions,
             control,
         )
         .map_err(|error| match error {
@@ -316,13 +358,22 @@ impl PairRun {
                         EntryDecision::Conflict(kind) => Action::Conflict(kind),
                     },
                 };
+                let version = |side: Side| {
+                    self.observation(side)
+                        .entries()
+                        .get(row.path())
+                        .map(ObservedEntry::version)
+                };
                 Some(PreviewItem {
                     path: row.path().clone(),
                     action,
+                    left: version(Side::Left),
+                    right: version(Side::Right),
                 })
             })
             .collect();
         Preview {
+            revision: self.pair.revision(),
             items,
             left_deletions: self.plan.deletions(Side::Left),
             right_deletions: self.plan.deletions(Side::Right),

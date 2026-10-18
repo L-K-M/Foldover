@@ -7,6 +7,7 @@ pub const SYNC_PREVIEW: &str = "sync.preview";
 pub const SYNC_RUN: &str = "sync.run";
 pub const SYNC_STATUS: &str = "sync.status";
 pub const SYNC_CANCEL: &str = "sync.cancel";
+pub const SYNC_RESOLVE: &str = "sync.resolve";
 /// Items per response. Even maximum-length paths, as byte arrays, keep a
 /// status below the 1 MiB IPC frame limit.
 pub const SYNC_ITEM_LIMIT: usize = 100;
@@ -24,6 +25,16 @@ pub struct SyncRun {
     pub id: String,
     pub approved_left_deletions: u64,
     pub approved_right_deletions: u64,
+}
+
+/// Keep one side's version of a conflict from the latest preview; the
+/// other is archived by the next run.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncResolve {
+    pub id: String,
+    pub path: Vec<u8>,
+    pub keep: super::PairSide,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

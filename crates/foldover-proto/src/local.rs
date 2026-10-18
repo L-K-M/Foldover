@@ -3,9 +3,9 @@ use serde_json::{Value, json};
 
 mod sync;
 pub use sync::{
-    SYNC_CANCEL, SYNC_ITEM_LIMIT, SYNC_PREVIEW, SYNC_RUN, SYNC_STATUS, SyncAction, SyncConflict,
-    SyncCounts, SyncDeletions, SyncFailure, SyncItem, SyncJob, SyncKey, SyncPreview, SyncResult,
-    SyncRun, SyncStatus,
+    SYNC_CANCEL, SYNC_ITEM_LIMIT, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS, SyncAction,
+    SyncConflict, SyncCounts, SyncDeletions, SyncFailure, SyncItem, SyncJob, SyncKey, SyncPreview,
+    SyncResolve, SyncResult, SyncRun, SyncStatus,
 };
 
 mod pair;
@@ -31,6 +31,8 @@ pub const ROOT_UNAVAILABLE: i32 = -32005;
 pub const ROOT_OVERLAP: i32 = -32006;
 /// The pair already has a preview or run in progress.
 pub const SYNC_BUSY: i32 = -32007;
+/// A conflict choice needs a current preview that contains the conflict.
+pub const PREVIEW_REQUIRED: i32 = -32008;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Hello {

@@ -1,13 +1,12 @@
-use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use foldover_endpoint::{LocalEndpoint, LocalPair, PairRootError, RootRelation, ScanError};
-use foldover_state::{PairStore, RecordedIdentities, StateLocation};
-use foldover_types::{BaselineEntry, PairConfig, PairDraft, PairId, Side, SyncPath};
+use foldover_state::{PairStore, StateLocation};
+use foldover_types::{PairConfig, PairDraft, PairId, Resolution, Side, SyncPath};
 
-use crate::Commit;
+use crate::{Commit, RunInputs};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -114,23 +113,27 @@ impl Engine {
         Ok(self.pairs.update(id, revision, draft)?)
     }
 
-    /// The pair, its base and recorded identities, for a run that works
-    /// outside the engine lock.
-    pub fn run_inputs(
-        &self,
+    /// What a run reads from state, for work outside the engine lock.
+    pub fn run_inputs(&self, id: PairId) -> Result<RunInputs, Error> {
+        Ok(RunInputs::new(
+            self.pair(id)?,
+            self.pairs.base(id)?,
+            self.pairs.identities(id)?,
+            self.pairs.resolutions(id)?,
+        ))
+    }
+
+    /// Store a person's conflict choice for the pair revision they previewed.
+    pub fn record_resolution(
+        &mut self,
         id: PairId,
-    ) -> Result<
-        (
-            PairConfig,
-            BTreeMap<SyncPath, BaselineEntry>,
-            RecordedIdentities,
-        ),
-        Error,
-    > {
-        let pair = self.pair(id)?;
-        let base = self.pairs.base(id)?;
-        let identities = self.pairs.identities(id)?;
-        Ok((pair, base, identities))
+        revision: u64,
+        path: &SyncPath,
+        resolution: Resolution,
+    ) -> Result<(), Error> {
+        Ok(self
+            .pairs
+            .record_resolution(id, revision, path, resolution)?)
     }
 
     /// Whether the pair has completed a first sync, which records identities.

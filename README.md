@@ -103,6 +103,7 @@ client does not cancel a committing configuration change.
 foldover sync ID --preview       # list changes; writes nothing
 foldover sync ID                 # run
 foldover sync ID --approve 60 0  # accept up to 60 deletions in A, 0 in B
+foldover sync ID --keep-right PATH  # resolve a previewed conflict with B's version
 ```
 
 Each command waits for its job and prints the final status as JSON. A run

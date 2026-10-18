@@ -1,15 +1,15 @@
 use std::collections::BTreeMap;
 use std::os::unix::ffi::OsStrExt;
 
-use foldover_db::{BaseChange, Database, PairRow, PairValues, StateLocation};
+use foldover_db::{BaseChange, Database, PairRow, PairValues, ResolutionRow, StateLocation};
 use foldover_types::{
     BaselineEntry, Durability, EndpointId, InvalidPair, LocalRoot, MetadataPolicy, PairConfig,
-    PairDraft, PairId, PairOptions, Propagation, Schedule, ScheduleInterval, Side, SyncMode,
-    SyncPath,
+    PairDraft, PairId, PairOptions, Propagation, Resolution, Schedule, ScheduleInterval, Side,
+    SyncMode, SyncPath,
 };
 
 use crate::BaseUpdate;
-use crate::base::{decode_entry, encode};
+use crate::base::{decode, decode_entry, encode};
 
 const SYNC: &str = "sync";
 const MIRROR_LEFT: &str = "mirror-left";
@@ -162,6 +162,62 @@ impl PairStore {
             left.as_bytes(),
             right.as_bytes(),
         )?)
+    }
+}
+
+const KEEP_LEFT: &str = "left";
+const KEEP_RIGHT: &str = "right";
+
+impl PairStore {
+    /// Conflict choices not yet applied, keyed by path.
+    pub fn resolutions(&self, id: PairId) -> Result<BTreeMap<SyncPath, Resolution>, Error> {
+        self.database
+            .resolutions(id.as_bytes())?
+            .into_iter()
+            .map(|row| {
+                let path = SyncPath::try_from(row.path)
+                    .map_err(|_| Error::InvalidStored("resolution path"))?;
+                let keep = match row.keep.as_str() {
+                    KEEP_LEFT => Side::Left,
+                    KEEP_RIGHT => Side::Right,
+                    _ => return Err(Error::InvalidStored("resolution side")),
+                };
+                let version = |bytes: Option<Vec<u8>>| bytes.as_deref().map(decode).transpose();
+                let resolution = Resolution::new(
+                    keep,
+                    version(row.left_version)?,
+                    version(row.right_version)?,
+                );
+                Ok((path, resolution))
+            })
+            .collect()
+    }
+
+    /// Store a conflict choice, only while the pair keeps `revision`.
+    pub fn record_resolution(
+        &mut self,
+        id: PairId,
+        revision: u64,
+        path: &SyncPath,
+        resolution: Resolution,
+    ) -> Result<(), Error> {
+        let revision = database_revision(revision)?;
+        let version = |version: Option<foldover_types::EntryVersion>| {
+            version.map(|version| encode(version).to_vec())
+        };
+        let row = ResolutionRow {
+            path: path.as_bytes().to_vec(),
+            keep: match resolution.keep() {
+                Side::Left => KEEP_LEFT,
+                Side::Right => KEEP_RIGHT,
+            }
+            .to_owned(),
+            left_version: version(resolution.left()),
+            right_version: version(resolution.right()),
+        };
+        Ok(self
+            .database
+            .record_resolution(id.as_bytes(), revision, &row)?)
     }
 }
 
@@ -559,5 +615,31 @@ mod tests {
         let updated = store.update(pair.id(), 2, &defaults).unwrap();
         assert_eq!(updated.draft().options(), PairOptions::default());
         assert!(store.base(pair.id()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn resolutions_round_trip_with_absent_sides() {
+        use foldover_types::{Digest, EntryContent, EntryVersion};
+
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        let pair = store.create(&draft(SyncMode::Sync)).unwrap();
+        let version = EntryVersion::new(
+            EntryContent::File(Digest::from_bytes([3; Digest::BYTE_LEN])),
+            Digest::from_bytes([4; Digest::BYTE_LEN]),
+        );
+        let path = SyncPath::try_from(b"notes.txt".as_slice()).unwrap();
+        let resolution = Resolution::new(Side::Right, None, Some(version));
+        store
+            .record_resolution(pair.id(), pair.revision(), &path, resolution)
+            .unwrap();
+        assert_eq!(
+            store
+                .resolutions(pair.id())
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [(path, resolution)]
+        );
     }
 }

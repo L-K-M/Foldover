@@ -26,11 +26,20 @@ struct PairSyncView: View {
             }
             if !viewModel.rows.isEmpty {
                 List(viewModel.rows) { row in
-                    VStack(alignment: .leading) {
-                        Text(row.path).lineLimit(1).truncationMode(.middle)
-                        Text(row.description).font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text(row.path).lineLimit(1).truncationMode(.middle)
+                            Text(row.description).font(.caption).foregroundStyle(.secondary)
+                        }
+                        .accessibilityElement(children: .combine)
+                        if row.resolvable != nil {
+                            Spacer()
+                            Button("Keep A") { Task { await viewModel.keep(.a, for: row) } }
+                                .disabled(!viewModel.canStart)
+                            Button("Keep B") { Task { await viewModel.keep(.b, for: row) } }
+                                .disabled(!viewModel.canStart)
+                        }
                     }
-                    .accessibilityElement(children: .combine)
                 }
                 .frame(minHeight: 160)
                 if let hidden = viewModel.hiddenRowsText {

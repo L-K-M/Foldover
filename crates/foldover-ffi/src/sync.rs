@@ -135,6 +135,21 @@ pub async fn sync_status(id: String) -> Result<SyncJobState, AgentError> {
     state(foldover_client::sync_status(&SocketLocation::Default, id).await)
 }
 
+/// Keep one side's version of a conflict from the pair's latest preview.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn sync_resolve(
+    id: String,
+    path: Vec<u8>,
+    keep: SyncSide,
+) -> Result<SyncJobState, AgentError> {
+    let id = id.parse().map_err(invalid_configuration)?;
+    let keep = match keep {
+        SyncSide::Left => foldover_client::Side::Left,
+        SyncSide::Right => foldover_client::Side::Right,
+    };
+    state(foldover_client::resolve_conflict(&SocketLocation::Default, id, &path, keep).await)
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn sync_cancel(id: String) -> Result<SyncJobState, AgentError> {
     let id = id.parse().map_err(invalid_configuration)?;

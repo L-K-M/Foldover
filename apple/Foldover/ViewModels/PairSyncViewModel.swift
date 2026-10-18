@@ -5,6 +5,8 @@ struct ChangeRow: Identifiable, Equatable {
     let id: Int
     let path: String
     let description: String
+    /// Raw path bytes of a conflict a person can resolve by keeping a side.
+    let resolvable: Data?
 }
 
 /// Deletion counts the user accepted for each folder.
@@ -74,11 +76,14 @@ struct PairSyncViewModel {
         switch state {
         case .previewed(let preview), .needsApproval(let preview):
             preview.changes.enumerated().map { index, change in
-                ChangeRow(id: index, path: Self.pathText(change.path), description: Self.description(change.action))
+                ChangeRow(id: index, path: Self.pathText(change.path),
+                          description: Self.description(change.action),
+                          resolvable: Self.resolvable(change.action) ? change.path : nil)
             }
         case .finished(let result):
             result.failures.enumerated().map { index, failure in
-                ChangeRow(id: index, path: Self.pathText(failure.path), description: failure.message)
+                ChangeRow(id: index, path: Self.pathText(failure.path), description: failure.message,
+                          resolvable: nil)
             }
         default:
             []
@@ -110,6 +115,20 @@ struct PairSyncViewModel {
     }
 
     func declineApproval() { store.declineApproval(pair.id) }
+
+    /// Keep this folder's version; the other is archived by the next sync.
+    func keep(_ side: FolderSide, for row: ChangeRow) async {
+        guard let path = row.resolvable else { return }
+        await store.resolve(pair.id, path: path, keep: side)
+    }
+
+    /// A file or link conflict; a file-versus-folder clash needs manual repair.
+    static func resolvable(_ action: ChangeAction) -> Bool {
+        switch action {
+        case .conflict(.bothChanged), .conflict(.deletedVersusEdited), .conflict(.metadataOnly): true
+        default: false
+        }
+    }
 
     static func summary(_ preview: PreviewSummary) -> String {
         var parts = [String]()
