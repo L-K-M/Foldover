@@ -1,3 +1,6 @@
+mod version;
+
+use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 
@@ -6,7 +9,9 @@ use foldover_fs::{
     FilesystemFeatures, HashError, MetadataReadError, NodeKind, Root, RootRelation,
 };
 pub use foldover_types::ScanControl;
-use foldover_types::{Digest, InvalidSyncPath, SyncPath};
+use foldover_types::{Digest, EntryVersion, InvalidSyncPath, SyncPath};
+
+use version::{Attribute, Observed, Payload, entry_version};
 
 const INTERNAL_DIRECTORY: &[u8] = b".foldover";
 const TEMPORARY_PREFIX: &[u8] = b".foldover-tmp-";
@@ -292,6 +297,81 @@ impl LocalEndpoint {
             directories.push(child);
         }
         Ok(stats)
+    }
+
+    /// Versions for every entry below the root, ordered by path. A read
+    /// error, a change since the scan or cancellation fails the whole
+    /// observation; the planner never receives a partial tree.
+    pub fn observe(
+        &self,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<BTreeMap<SyncPath, EntryVersion>, ScanError> {
+        let mut entries = Vec::new();
+        self.scan_metadata(&mut |entry| {
+            entries.push(entry);
+            control()
+        })?;
+
+        let mut versions = BTreeMap::new();
+        for entry in entries {
+            if control() == ScanControl::Cancel {
+                return Err(ScanError::Cancelled);
+            }
+            let version = self.entry_version(&entry, control)?;
+            versions.insert(entry.path, version);
+        }
+        Ok(versions)
+    }
+
+    /// One entry's content and tracked metadata. Every read is checked
+    /// against the entry's scan observation.
+    pub fn entry_version(
+        &self,
+        entry: &LocalEntry,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<EntryVersion, ScanError> {
+        let mut checkpoint = |_| control();
+        let kind = entry.metadata.kind();
+        let extended = match self.read_extended_metadata(entry, &mut checkpoint) {
+            Ok(extended) => Some(extended),
+            // Linux cannot read link xattrs through a held descriptor (ADR 0016).
+            Err(ScanError::Metadata {
+                source: MetadataReadError::UnsupportedEntry,
+                ..
+            }) if kind == NodeKind::Symlink => None,
+            Err(error) => return Err(error),
+        };
+        let payload = match kind {
+            NodeKind::File => Payload::File(self.hash_file(entry, &mut checkpoint)?),
+            NodeKind::Directory => Payload::Directory,
+            NodeKind::Symlink => Payload::Symlink(
+                entry
+                    .link_target()
+                    .ok_or_else(|| ScanError::UnsupportedEntry(entry.path.clone()))?,
+            ),
+            NodeKind::Other => return Err(ScanError::UnsupportedEntry(entry.path.clone())),
+        };
+
+        let observed = Observed {
+            kind,
+            permissions: entry.metadata.permissions(),
+            modified: entry.metadata.modified(),
+            user_flags: entry.metadata.user_flags(),
+            compressed: entry.metadata.is_compressed(),
+            attributes: extended.as_ref().map(|extended| {
+                extended
+                    .attributes()
+                    .iter()
+                    .map(|attribute| Attribute {
+                        name: attribute.name(),
+                        size: attribute.size(),
+                        digest: attribute.digest(),
+                    })
+                    .collect()
+            }),
+            access_control: extended.as_ref().map(ExtendedMetadata::access_control),
+        };
+        Ok(entry_version(payload, &observed))
     }
 }
 
@@ -675,5 +755,119 @@ mod tests {
         entries.sort_unstable_by(|left, right| left.path.cmp(&right.path));
         assert_eq!(entries[0].link_target(), Some(b"../\xfe".as_slice()));
         assert_eq!(entries[1].path().as_bytes(), b"\xff");
+    }
+
+    #[cfg(target_os = "linux")]
+    const TEST_ATTRIBUTE: &str = "user.ch.lkmc.foldover.test";
+    #[cfg(not(target_os = "linux"))]
+    const TEST_ATTRIBUTE: &str = "ch.lkmc.foldover.test";
+
+    #[test]
+    fn observations_version_content_and_tracked_metadata_independently() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir(root.join("folder")).unwrap();
+        fs::write(root.join("folder/file"), b"data").unwrap();
+        symlink("folder/file", root.join("link")).unwrap();
+        fs::create_dir(root.join(".foldover")).unwrap();
+        fs::write(root.join(".foldover/private"), b"private").unwrap();
+        let path = |bytes: &[u8]| SyncPath::try_from(bytes).unwrap();
+        let (folder, file, link) = (path(b"folder"), path(b"folder/file"), path(b"link"));
+
+        let endpoint = LocalEndpoint::open(root).unwrap();
+        let observe = || endpoint.observe(&mut || ScanControl::Continue).unwrap();
+        let first = observe();
+        assert_eq!(
+            first.keys().cloned().collect::<Vec<_>>(),
+            [folder.clone(), file.clone(), link.clone()]
+        );
+        assert_eq!(
+            first[&folder].content(),
+            foldover_types::EntryContent::Directory
+        );
+        assert!(matches!(
+            first[&link].content(),
+            foldover_types::EntryContent::Symlink(_)
+        ));
+        assert_eq!(observe(), first);
+
+        let handle = fs::File::open(root.join("folder/file")).unwrap();
+        rustix::fs::fsetxattr(
+            &handle,
+            TEST_ATTRIBUTE,
+            b"tag",
+            rustix::fs::XattrFlags::empty(),
+        )
+        .unwrap();
+        let tagged = observe();
+        assert_eq!(tagged[&file].content(), first[&file].content());
+        assert_ne!(tagged[&file].metadata(), first[&file].metadata());
+
+        fs::set_permissions(root.join("folder/file"), fs::Permissions::from_mode(0o600)).unwrap();
+        let restricted = observe();
+        assert_eq!(restricted[&file].content(), first[&file].content());
+        assert_ne!(restricted[&file].metadata(), tagged[&file].metadata());
+
+        // A new child moves the directory mtime, which versions ignore.
+        fs::write(root.join("folder/other"), b"").unwrap();
+        assert_eq!(observe()[&folder], first[&folder]);
+
+        fs::write(root.join("folder/file"), b"edited").unwrap();
+        assert_ne!(observe()[&file].content(), first[&file].content());
+
+        let elsewhere = tempfile::tempdir().unwrap();
+        fs::write(elsewhere.path().join("file"), b"edited").unwrap();
+        let other = LocalEndpoint::open(elsewhere.path())
+            .unwrap()
+            .observe(&mut || ScanControl::Continue)
+            .unwrap();
+        assert_eq!(other[&path(b"file")].content(), observe()[&file].content());
+    }
+
+    #[test]
+    fn cancelled_observations_return_no_versions() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("file"), b"data").unwrap();
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        let mut calls = 0;
+        let result = endpoint.observe(&mut || {
+            calls += 1;
+            if calls > 1 {
+                ScanControl::Cancel
+            } else {
+                ScanControl::Continue
+            }
+        });
+        assert!(matches!(result, Err(ScanError::Cancelled)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_resource_forks_change_content_and_tags_change_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let file_path = directory.path().join("file");
+        fs::write(&file_path, b"data").unwrap();
+        let path = SyncPath::try_from(b"file".as_slice()).unwrap();
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        let observe = || endpoint.observe(&mut || ScanControl::Continue).unwrap()[&path];
+        let plain = observe();
+        let set = |name: &str, value: &[u8]| {
+            let handle = fs::File::open(&file_path).unwrap();
+            rustix::fs::fsetxattr(&handle, name, value, rustix::fs::XattrFlags::empty()).unwrap();
+        };
+
+        set("com.apple.ResourceFork", b"fork");
+        let forked = observe();
+        assert_ne!(forked.content(), plain.content());
+        assert_eq!(forked.metadata(), plain.metadata());
+
+        set("com.apple.ResourceFork", b"edited fork");
+        assert_ne!(observe().content(), forked.content());
+
+        set("com.apple.metadata:_kMDItemUserTags", b"tags");
+        let tagged = observe();
+        assert_ne!(tagged.metadata(), plain.metadata());
     }
 }

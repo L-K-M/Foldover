@@ -379,11 +379,13 @@ dependencies = [
 name = "foldover-endpoint"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "foldover-fs",
  "foldover-net",
  "foldover-os",
  "foldover-types",
  "foldover-watch",
+ "rustix",
  "tempfile",
  "thiserror",
 ]

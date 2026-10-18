@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Canonical local entry versions: content (data plus resource fork, or link
+  target) and a tracked-metadata digest, observed for whole trees.
 - Held-volume filesystem feature declarations, with explicit supported,
   unsupported and unreported states; operation fidelity remains separately gated.
 - Bounded held-root xattr/resource-fork digests, native ACL observations and

@@ -24,6 +24,11 @@ const MAX_ROOT_ANCESTORS: usize = 4096;
 // Darwin sys/stat.h defines this synthetic, read-only flag; libc omits it.
 #[cfg(target_os = "macos")]
 const SF_DATALESS: u32 = 0x4000_0000;
+// Owner-settable flags that describe the entry itself, not its storage:
+// compression, document tracking and data-vault state stay out.
+#[cfg(target_os = "macos")]
+const USER_FLAGS: u32 =
+    libc::UF_NODUMP | libc::UF_IMMUTABLE | libc::UF_APPEND | libc::UF_OPAQUE | libc::UF_HIDDEN;
 
 /// An opened root directory, independent of later changes to its ambient path.
 /// This read-only surface does not establish mount availability, volume UUIDs
@@ -149,6 +154,16 @@ impl EntryMetadata {
         self.created
     }
 
+    /// Flags an owner sets on the entry itself; `None` when flags are unreported.
+    pub fn user_flags(&self) -> Option<u32> {
+        self.flags.map(user_flags)
+    }
+
+    /// Transparently compressed: compression xattrs then hold storage, not data.
+    pub fn is_compressed(&self) -> bool {
+        self.flags.is_some_and(compressed)
+    }
+
     fn from_file(file: &impl AsFd) -> io::Result<Self> {
         Self::from_stat(fstat(file)?)
     }
@@ -219,6 +234,27 @@ fn file_flags(stat: &FileStat) -> Option<u32> {
 #[cfg(not(target_os = "macos"))]
 fn file_flags(_: &FileStat) -> Option<u32> {
     None
+}
+
+#[cfg(target_os = "macos")]
+fn user_flags(flags: u32) -> u32 {
+    flags & USER_FLAGS
+}
+
+// Only Darwin reports flags, so these are unreachable elsewhere.
+#[cfg(not(target_os = "macos"))]
+fn user_flags(flags: u32) -> u32 {
+    flags
+}
+
+#[cfg(target_os = "macos")]
+fn compressed(flags: u32) -> bool {
+    flags & libc::UF_COMPRESSED != 0
+}
+
+#[cfg(not(target_os = "macos"))]
+fn compressed(_: u32) -> bool {
+    false
 }
 
 #[cfg(target_os = "macos")]
