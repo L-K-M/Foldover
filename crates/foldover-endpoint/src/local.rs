@@ -69,12 +69,21 @@ pub enum ScanError {
     /// Nothing is at the root's path, e.g. its disk or share is not mounted.
     #[error("The folder is missing; connect its disk or share")]
     RootMissing,
+
     #[error("Extended metadata is unavailable at {path:?}: {source}")]
     Metadata {
         path: Option<SyncPath>,
         #[source]
         source: MetadataReadError,
     },
+}
+
+impl ScanError {
+    /// The system refused access, e.g. macOS privacy protection for
+    /// Documents or an external volume, or file permissions.
+    pub fn is_access_denied(&self) -> bool {
+        matches!(self, Self::Io { source, .. } if source.kind() == io::ErrorKind::PermissionDenied)
+    }
 }
 
 /// Exact path and observed attributes. A link target is data, never a scan root.
@@ -275,6 +284,16 @@ impl LocalEndpoint {
 
     pub fn relation_to(&self, other: &Self) -> Result<RootRelation, ScanError> {
         at(&None, self.root.relation_to(&other.root))
+    }
+
+    /// Read the root's first entry: macOS privacy protection and file
+    /// permissions refuse listings, not opening the folder.
+    pub fn probe_access(&self) -> Result<(), ScanError> {
+        let mut entries = at(&None, self.root.entries(DirectoryScope::Root))?;
+        match entries.next() {
+            Some(Err(source)) => Err(ScanError::Io { path: None, source }),
+            Some(Ok(_)) | None => Ok(()),
+        }
     }
 
     /// Bytes an unprivileged writer can still use on the root's volume.

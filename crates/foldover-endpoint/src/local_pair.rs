@@ -15,6 +15,17 @@ pub enum PairRootError {
     /// Nothing is at that side's path, e.g. its disk is not mounted.
     #[error("The {0:?} folder is missing; connect its disk or share")]
     Missing(Side),
+    #[error("{}", access_denied(*.0))]
+    AccessDenied(Side),
+}
+
+/// What to do when macOS or file permissions refuse a folder.
+pub fn access_denied(side: Side) -> String {
+    format!(
+        "Foldover may not read the {side:?} folder. If it is in Desktop, Documents or Downloads, \
+         in iCloud Drive, or on an external or network volume, allow Foldover in System Settings \
+         › Privacy & Security › Full Disk Access, then try again."
+    )
 }
 
 /// Two held roots checked for overlap at selection time. Volume identity,
@@ -26,12 +37,16 @@ pub struct LocalPair {
 
 impl LocalPair {
     pub fn open(left: &LocalRoot, right: &LocalRoot) -> Result<Self, PairRootError> {
+        let open = |root: &LocalRoot| -> Result<LocalEndpoint, ScanError> {
+            let endpoint = LocalEndpoint::open(Path::new(OsStr::from_bytes(root.as_bytes())))?;
+            endpoint.probe_access()?;
+            Ok(endpoint)
+        };
         let open = |root: &LocalRoot, side| {
-            LocalEndpoint::open(Path::new(OsStr::from_bytes(root.as_bytes()))).map_err(|error| {
-                match error {
-                    ScanError::RootMissing => PairRootError::Missing(side),
-                    error => PairRootError::Endpoint(error),
-                }
+            open(root).map_err(|error| match error {
+                ScanError::RootMissing => PairRootError::Missing(side),
+                error if error.is_access_denied() => PairRootError::AccessDenied(side),
+                error => PairRootError::Endpoint(error),
             })
         };
         let left = open(left, Side::Left)?;
@@ -129,5 +144,33 @@ mod tests {
             LocalPair::open(&root(&missing), &root(&present)),
             Err(PairRootError::Missing(Side::Left))
         ));
+    }
+
+    #[test]
+    fn an_unreadable_folder_says_how_to_grant_access() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let readable = temporary.path().join("readable");
+        let locked = temporary.path().join("locked");
+        fs::create_dir(&readable).unwrap();
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let opened = LocalPair::open(&root(&readable), &root(&locked));
+        // Superusers read anything; the check needs an ordinary account.
+        let enforced = fs::read_dir(&locked).is_err();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        if !enforced {
+            return;
+        }
+
+        let Err(error) = opened else {
+            panic!("an unreadable folder opened");
+        };
+        assert!(
+            matches!(error, PairRootError::AccessDenied(Side::Right)),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("Full Disk Access"));
     }
 }

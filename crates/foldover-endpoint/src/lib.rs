@@ -30,4 +30,4 @@ pub use foldover_fs::{
 };
 
 #[cfg(unix)]
-pub use local_pair::{LocalPair, PairRootError};
+pub use local_pair::{LocalPair, PairRootError, access_denied};

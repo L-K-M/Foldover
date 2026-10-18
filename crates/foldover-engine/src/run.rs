@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime};
 
 use foldover_endpoint::{
     ApplyError, Expected, Filter, InvalidFilter, LocalEndpoint, LocalPair, Observation,
-    ObservedEntry, PairRootError, RunScope, ScanError,
+    ObservedEntry, PairRootError, RunScope, ScanError, access_denied,
 };
 use foldover_state::{BaseUpdate, RecordedIdentities, SnapshotEntry};
 use foldover_types::{
@@ -44,6 +44,12 @@ pub enum RunError {
     Roots(#[from] PairRootError),
     #[error("Reading the {side:?} folder failed: {source}")]
     Observe {
+        side: Side,
+        #[source]
+        source: ScanError,
+    },
+    #[error("{} ({source})", access_denied(*side))]
+    AccessDenied {
         side: Side,
         #[source]
         source: ScanError,
@@ -338,7 +344,7 @@ impl PairRun {
             let observed = endpoints
                 .endpoint(side)
                 .identity()
-                .map_err(|source| RunError::Observe { side, source })?;
+                .map_err(|source| observe_error(side, source))?;
             if observed != Some(recorded) {
                 return Err(RunError::IdentityChanged { side });
             }
@@ -351,7 +357,7 @@ impl PairRun {
                 endpoints
                     .endpoint(side)
                     .ignore_rules()
-                    .map_err(|source| RunError::Observe { side, source })?,
+                    .map_err(|source| observe_error(side, source))?,
             );
         }
         let filter = Filter::new(rules.iter().map(String::as_str))?;
@@ -365,7 +371,7 @@ impl PairRun {
                 .observe_from(policy, &filter, previous, &mut || control())
                 .map_err(|source| match source {
                     ScanError::Cancelled => RunError::Cancelled,
-                    source => RunError::Observe { side, source },
+                    source => observe_error(side, source),
                 })
         };
         let left = observe(Side::Left, control)?;
@@ -486,7 +492,7 @@ impl PairRun {
                 .endpoints
                 .endpoint(side)
                 .available_space()
-                .map_err(|source| RunError::Observe { side, source })?;
+                .map_err(|source| observe_error(side, source))?;
             require_space(side, needed, available)?;
         }
 
@@ -600,6 +606,14 @@ impl PairRun {
             Side::Right => &self.right,
         }
     }
+}
+
+/// A failed read of one side, with guidance when access was refused.
+fn observe_error(side: Side, source: ScanError) -> RunError {
+    if source.is_access_denied() {
+        return RunError::AccessDenied { side, source };
+    }
+    RunError::Observe { side, source }
 }
 
 fn require_space(side: Side, needed: u64, available: u64) -> Result<(), RunError> {

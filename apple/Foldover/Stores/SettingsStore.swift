@@ -43,12 +43,20 @@ private final class SystemLoginItem: LoginItemControl {
 @MainActor
 final class SettingsStore {
     private let loginItem: any LoginItemControl
+    private let showFullDiskAccess: @MainActor () -> Void
     private(set) var loginStatus: LoginStatus
     private(set) var error: String?
 
-    init(loginItem: any LoginItemControl = SystemLoginItem()) {
+    init(loginItem: any LoginItemControl = SystemLoginItem(),
+         showFullDiskAccess: @escaping @MainActor () -> Void = { PrivacySettings.openFullDiskAccess() }) {
         self.loginItem = loginItem
+        self.showFullDiskAccess = showFullDiskAccess
         loginStatus = loginItem.status
+    }
+
+    /// System Settings' Full Disk Access list, for folders macOS protects.
+    func openFullDiskAccess() {
+        showFullDiskAccess()
     }
 
     func setLoginLaunch(_ launch: LoginLaunch) {

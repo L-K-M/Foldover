@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- A folder macOS refuses to share (Documents, external volumes) now says
+  to allow Foldover in Full Disk Access; Settings opens that list.
 - Always Skip on a preview row adds a filter rule for exactly that path.
 - Previews show how much data a sync copies, in total and per file.
 - Shortcuts actions: Sync Pair and Preview Pair, answered with what changed.

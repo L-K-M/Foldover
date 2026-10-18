@@ -14,6 +14,10 @@ struct SettingsView: View {
             if let error = viewModel.error {
                 Text(error).foregroundStyle(.red).textSelection(.enabled)
             }
+            Section("Folder Access") {
+                Text(viewModel.accessNote).font(.callout).foregroundStyle(.secondary)
+                Button("Open Full Disk Access Settings") { viewModel.openFullDiskAccess() }
+            }
         }
         .formStyle(.grouped)
         .frame(width: 420)

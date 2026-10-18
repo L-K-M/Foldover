@@ -18,6 +18,12 @@ struct SettingsViewModel {
 
     var error: String? { store.error }
 
+    var accessNote: String {
+        String(localized: "If a sync says Foldover may not read a folder, for example in Documents, Desktop, iCloud Drive or on an external or network volume, add Foldover to Full Disk Access.")
+    }
+
+    func openFullDiskAccess() { store.openFullDiskAccess() }
+
     func setLoginLaunch(_ launch: LoginLaunch) {
         store.setLoginLaunch(launch)
     }

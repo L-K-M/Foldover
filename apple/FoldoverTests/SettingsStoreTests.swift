@@ -20,7 +20,8 @@ private final class LoginItemFixture: LoginItemControl {
 @Test
 func openAtLoginFollowsTheSystemAndReportsRefusals() {
     let loginItem = LoginItemFixture()
-    let store = SettingsStore(loginItem: loginItem)
+    var opened = 0
+    let store = SettingsStore(loginItem: loginItem, showFullDiskAccess: { opened += 1 })
     let viewModel = SettingsViewModel(store: store)
     #expect(!viewModel.opensAtLogin)
 
@@ -37,4 +38,7 @@ func openAtLoginFollowsTheSystemAndReportsRefusals() {
     viewModel.setLoginLaunch(.open)
     #expect(!viewModel.opensAtLogin)
     #expect(viewModel.error != nil)
+
+    viewModel.openFullDiskAccess()
+    #expect(opened == 1)
 }
