@@ -46,6 +46,16 @@ These stage timers help locate stream stalls; deferred layout and rendering
 remain visible only in the frame/stall measurements. Row shape, batch cadence
 and performance criteria are unchanged by this instrumentation.
 
+The harness also measures the documented flat-table fallback: an `NSTableView`
+with full relative paths and the same generated rows, model, cell presentation,
+batch cadence and scroll sweep. Both AppKit candidates retain the original
+budgets. A complete-exercise check requires all 200,000 rows, positive scroll
+distance and reaching the last row; missing frame samples cannot pass a frame-time check. Flat tables have
+no disclosure operation, so their reports omit collapse/expand phases rather
+than recording successful no-ops. The overall verdict still requires both
+AppKit candidates to pass; inspect each candidate's checks before choosing it.
+Native measurement and physical-Mac calibration remain pending.
+
 Run it with `spikes/s5-diff-tree/run.sh <report.json>`; it builds the
 Release app with XcodeGen and xcodebuild, launches it through
 `open -W` with `-runBench`, writes the JSON report and prints a short

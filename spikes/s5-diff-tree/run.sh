@@ -6,7 +6,7 @@
 #
 # Builds the DiffTreeBench app with XcodeGen and xcodebuild (Release,
 # ad-hoc signed), launches it with `-runBench <report.json>` through
-# `open -W` (both tree implementations measured in fresh windows),
+# `open -W` (all implementations measured in fresh windows),
 # writes the machine-readable report to <report.json> and prints a
 # short summary to stdout. Requires macOS 27, Xcode 27 and xcodegen on
 # PATH (CI installs the pinned release). A measured miss is data for
