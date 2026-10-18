@@ -389,7 +389,7 @@ impl Root {
     /// links. Only archive retention may call this.
     pub fn remove_tree(&self, path: &SyncPath) -> Result<(), WriteError> {
         let (parent, name) = self.parent_of(path)?;
-        remove_entry(&parent, &name, 0)?;
+        remove_entry(&parent, &name)?;
         Ok(())
     }
 
@@ -511,23 +511,54 @@ enum Parents {
     Default,
 }
 
-/// Deeper trees fail rather than holding one descriptor per level.
-const MAX_REMOVAL_DEPTH: usize = 128;
+/// Open the directory at `path` below `parent`, one no-follow step per
+/// component. Depth costs iterations, not simultaneous descriptors.
+fn open_below(parent: &Dir, path: &Path) -> io::Result<Dir> {
+    let mut directory = parent.try_clone()?;
+    for component in path.components() {
+        directory = directory.open_dir_nofollow(component.as_os_str())?;
+    }
+    Ok(directory)
+}
 
-fn remove_entry(parent: &Dir, name: &Path, depth: usize) -> io::Result<()> {
+/// Permanently delete `name` below `parent`, never following links. Each
+/// directory's root-relative path is collected breadth-first — one allocation
+/// per directory, reopened component by component — then removed deepest
+/// first, so nesting depth is bounded by memory rather than descriptors or a
+/// fixed cap.
+fn remove_entry(parent: &Dir, name: &Path) -> io::Result<()> {
     if EntryMetadata::at(parent, name)?.kind() != NodeKind::Directory {
         rustix::fs::unlinkat(parent, name, AtFlags::empty())?;
         return Ok(());
     }
-    if depth >= MAX_REMOVAL_DEPTH {
-        return Err(io::Error::other("Folder nesting exceeds the removal limit"));
+    let mut directories: Vec<PathBuf> = vec![name.to_path_buf()];
+    let mut next = 0;
+    while next < directories.len() {
+        let directory = open_below(parent, &directories[next])?;
+        let mut children = Vec::new();
+        for entry in directory.entries()? {
+            let child = PathBuf::from(entry?.file_name());
+            if EntryMetadata::at(&directory, &child)?.kind() == NodeKind::Directory {
+                children.push(child);
+            } else {
+                rustix::fs::unlinkat(&directory, &child, AtFlags::empty())?;
+            }
+        }
+        for child in children {
+            let mut deeper = directories[next].clone();
+            deeper.push(child);
+            directories.push(deeper);
+        }
+        next += 1;
     }
-    let directory = parent.open_dir_nofollow(name)?;
-    for entry in directory.entries()? {
-        let child = PathBuf::from(entry?.file_name());
-        remove_entry(&directory, &child, depth + 1)?;
+    // Every directory follows its parent in `directories`, so reversed order
+    // leaves each parent empty when it is removed.
+    for path in directories.iter().rev() {
+        let ancestors = path.parent().unwrap_or_else(|| Path::new(""));
+        let directory = open_below(parent, ancestors)?;
+        let leaf = Path::new(path.file_name().expect("a collected path has a name"));
+        rustix::fs::unlinkat(&directory, leaf, AtFlags::REMOVEDIR)?;
     }
-    rustix::fs::unlinkat(parent, name, AtFlags::REMOVEDIR)?;
     Ok(())
 }
 

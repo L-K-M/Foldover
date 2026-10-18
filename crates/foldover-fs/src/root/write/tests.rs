@@ -551,6 +551,25 @@ fn trees_are_removed_without_following_links() {
 }
 
 #[test]
+fn deep_trees_are_removed_without_hitting_a_descriptor_cap() {
+    let roots = roots();
+    let target = roots.target_directory.path();
+    let mut deep = PathBuf::from("old");
+    for _ in 0..140 {
+        deep.push("d");
+    }
+    fs::create_dir_all(target.join(&deep)).unwrap();
+    fs::write(target.join(&deep).join("file"), b"x").unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("keep"), b"keep").unwrap();
+    symlink(outside.path(), target.join("old/d/link")).unwrap();
+
+    roots.target.remove_tree(&path(b"old")).unwrap();
+    assert!(names(target).is_empty());
+    assert_eq!(fs::read(outside.path().join("keep")).unwrap(), b"keep");
+}
+
+#[test]
 fn archived_entries_are_restored_without_replacing_anything() {
     let roots = roots();
     let target = roots.target_directory.path();

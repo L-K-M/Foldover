@@ -160,6 +160,11 @@ impl LocalEndpoint {
         let mut runs = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|source| scan_error(&archive, source))?;
+            // Only a real folder holds archived items; a stray timestamp-named
+            // file or link is not a run.
+            if entry.metadata().kind() != NodeKind::Directory {
+                continue;
+            }
             let Some(started) = archive_time(entry.name()) else {
                 continue;
             };
@@ -466,6 +471,23 @@ mod tests {
             endpoint
                 .put_back(&older, &internal, Durability::Standard)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn run_listing_skips_timestamp_named_files_and_links() {
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join(".foldover/archive");
+        let real = archive_name(at(3_000));
+        fs::create_dir_all(archive.join(&real)).unwrap();
+        fs::write(archive.join(archive_name(at(2_000))), b"file").unwrap();
+        std::os::unix::fs::symlink(&real, archive.join(archive_name(at(1_000)))).unwrap();
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+
+        let runs = endpoint.archived_runs().unwrap();
+        assert_eq!(
+            runs.iter().map(ArchivedRun::name).collect::<Vec<_>>(),
+            [real.as_str()]
         );
     }
 
