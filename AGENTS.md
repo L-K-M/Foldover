@@ -37,7 +37,8 @@ The roadmap is PLAN.md §7.
 | Dependency licenses and advisories | `cargo deny check` |
 | Generate the Xcode project | `xcodegen generate --spec apple/project.yml` |
 | Build everything this host can → `dist/` | `scripts/build.sh [core] [app] [--debug] [--clean] [--check]` |
-| Release (macOS, X.Y.Z only; publishing arrives with S6) | `scripts/release.sh X.Y.Z [--push]` |
+| Release (macOS, X.Y.Z only; the pushed tag publishes the app zip) | `scripts/release.sh X.Y.Z [--push]` |
+| Package the ad-hoc-signed app zip (macOS) | `bash scripts/package-app.sh OUT.zip DERIVED_DATA` |
 | Doc links, anchors, fences, tables | `python3 tools/doccheck/checkdocs.py .` |
 | Mermaid diagrams | `npm --prefix tools/doccheck install --no-save mermaid@11 jsdom@25` once, then `node tools/doccheck/mmdcheck.mjs .` |
 

@@ -19,7 +19,7 @@ export RELEASE_XCODE_PROJECT="apple/Foldover.xcodeproj"
 export RELEASE_XCODE_SCHEME="Foldover"
 export RELEASE_XCODEGEN_YML="apple/project.yml"
 export RELEASE_INVOKED_AS="scripts/release.sh"
-export RELEASE_CI_NOTE="The tag-triggered release workflow arrives with spike S6 (PLAN.md section 8); <tag> publishes nothing yet."
+export RELEASE_CI_NOTE="Pushing <tag> runs .github/workflows/release.yml, which publishes the ad-hoc-signed app zip as a GitHub release."
 export RELEASE_POST_BUMP="scripts/sync-cargo-version.sh"
 # Cargo needs all three components, so X.Y (which the xcode kind would
 # accept) is rejected up front instead of failing inside cargo.

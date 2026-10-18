@@ -31,6 +31,14 @@ The macOS app requires macOS 27 and Apple silicon.
 - **Native and fast.** A SwiftUI app over a portable Rust engine that keeps
   syncing with the window closed. A Linux app follows.
 
+## Install
+
+Download the latest `Foldover-X.Y.Z.zip` from
+[Releases](https://github.com/L-K-M/Foldover/releases) (macOS 27, Apple
+silicon). The app is signed ad hoc, not notarized: after moving it to
+`/Applications`, run `xattr -dr com.apple.quarantine /Applications/Foldover.app`
+once, then open it.
+
 ## Building
 
 ```
@@ -46,9 +54,11 @@ Toolchain details and every other command: [`AGENTS.md`](AGENTS.md).
 
 The app embeds the Rust agent and CLI. Choose **Enable Background Agent**;
 if macOS requests approval, open Login Items and allow Foldover, then refresh.
-The agent exposes health checks and local pair configuration. It cannot sync files.
-Choose **New Pair**, select both folders and a mode, then save. Select a pair
-to review or edit its settings. Saves do not start a sync.
+The agent configures and syncs pairs, and keeps syncing with the window closed.
+Choose **New Pair**, select both folders and a mode, then save. Select the pair
+and choose **Preview** to see every change, then **Sync Now**. Saving never
+starts a sync; set a schedule to sync automatically after the first one. The
+menu bar shows each pair's status.
 
 For development, run these in separate terminals:
 

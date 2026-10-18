@@ -184,32 +184,7 @@ jobs:
       # zipped the way Finder would make it. The spec restricts both the
       # app and its XCFramework to Apple silicon.
       - name: Release build and zip the app
-        run: |
-          xcodebuild -project apple/Foldover.xcodeproj \
-            -scheme Foldover \
-            -destination 'generic/platform=macOS' \
-            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
-            -configuration Release \
-            CODE_SIGN_IDENTITY=- \
-            build
-          app="$RUNNER_TEMP/DerivedData/Build/Products/Release/Foldover.app"
-          test "$(lipo -archs "$app/Contents/MacOS/Foldover")" = arm64
-          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")" = 27.0
-          codesign --verify --deep --strict --verbose=2 "$app"
-          codesign -d --verbose=4 "$app" 2>&1 | grep -Fx 'Signature=adhoc'
-          for executable in foldoverd foldover; do
-            helper="$app/Contents/Library/LaunchServices/$executable"
-            test "$(lipo -archs "$helper")" = arm64
-            codesign --verify --strict "$helper"
-            codesign -d --verbose=4 "$helper" 2>&1 | grep -E 'flags=.*runtime'
-          done
-          plutil -lint "$app/Contents/Library/LaunchAgents/ch.lkmc.foldover.agent.plist"
-          python3 scripts/test-agent.py \
-            "$app/Contents/Library/LaunchServices/foldoverd" \
-            "$app/Contents/Library/LaunchServices/foldover"
-          ditto -c -k --sequesterRsrc --keepParent \
-            "$app" \
-            "$RUNNER_TEMP/Foldover.zip"
+        run: bash scripts/package-app.sh "$RUNNER_TEMP/Foldover.zip" "$RUNNER_TEMP/DerivedData"
 
       - name: Upload the app
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
