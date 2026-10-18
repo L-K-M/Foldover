@@ -21,6 +21,9 @@ const BACKUP_RIGHT: &str = "backup-right";
 const SYNC_CATEGORY: &str = "sync";
 const IGNORE_CATEGORY: &str = "ignore";
 const STANDARD_DURABILITY: &str = "standard";
+const MANUAL_SCHEDULE: &str = "manual";
+const INTERVAL_SCHEDULE: &str = "every";
+const CHANGE_SCHEDULE: &str = "changes";
 const FULL_DURABILITY: &str = "full";
 
 #[derive(Debug, thiserror::Error)]
@@ -363,9 +366,15 @@ fn values(draft: &PairDraft) -> PairValues {
             Durability::Full => FULL_DURABILITY,
         }
         .to_owned(),
+        schedule: match options.schedule() {
+            Schedule::Manual => MANUAL_SCHEDULE,
+            Schedule::Every(_) => INTERVAL_SCHEDULE,
+            Schedule::OnChange => CHANGE_SCHEDULE,
+        }
+        .to_owned(),
         schedule_minutes: match options.schedule() {
-            Schedule::Manual => None,
             Schedule::Every(interval) => Some(i64::from(interval.minutes())),
+            Schedule::Manual | Schedule::OnChange => None,
         },
     }
 }
@@ -408,11 +417,13 @@ fn from_row(row: PairRow) -> Result<PairConfig, Error> {
         stored_propagation(&row.values.extended_attributes)?,
         stored_propagation(&row.values.permissions)?,
     );
-    let schedule = match row.values.schedule_minutes {
-        None => Schedule::Manual,
-        Some(minutes) => Schedule::Every(ScheduleInterval::from_minutes(
+    let schedule = match (row.values.schedule.as_str(), row.values.schedule_minutes) {
+        (MANUAL_SCHEDULE, None) => Schedule::Manual,
+        (CHANGE_SCHEDULE, None) => Schedule::OnChange,
+        (INTERVAL_SCHEDULE, Some(minutes)) => Schedule::Every(ScheduleInterval::from_minutes(
             u32::try_from(minutes).map_err(|_| Error::InvalidStored("schedule"))?,
         )?),
+        _ => return Err(Error::InvalidStored("schedule")),
     };
     let durability = match row.values.durability.as_str() {
         STANDARD_DURABILITY => Durability::Standard,
@@ -514,6 +525,7 @@ mod tests {
                 extended_attributes: SYNC_CATEGORY.into(),
                 permissions: IGNORE_CATEGORY.into(),
                 durability: STANDARD_DURABILITY.into(),
+                schedule: MANUAL_SCHEDULE.into(),
                 schedule_minutes: None,
             })
             .unwrap();
@@ -539,6 +551,7 @@ mod tests {
                 extended_attributes: SYNC_CATEGORY.into(),
                 permissions: IGNORE_CATEGORY.into(),
                 durability: STANDARD_DURABILITY.into(),
+                schedule: MANUAL_SCHEDULE.into(),
                 schedule_minutes: None,
             })
             .unwrap();

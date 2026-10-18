@@ -8,6 +8,7 @@ mod gates;
 mod plan;
 mod reconcile;
 mod run;
+mod watch;
 
 #[cfg(test)]
 mod plan_properties;
@@ -24,3 +25,4 @@ pub use run::{
     Action, Approval, Commit, Completion, Failure, PairRun, Preview, PreviewItem, RunError,
     RunInputs, RunOutcome, RunReport,
 };
+pub use watch::PairWatcher;

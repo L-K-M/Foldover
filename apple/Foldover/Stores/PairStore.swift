@@ -15,6 +15,14 @@ struct SelectedFolder: Equatable, Sendable {
     let bytes: Data
 }
 
+/// When the agent syncs without being asked, after the first manual sync.
+enum SyncSchedule: Hashable, Sendable {
+    case manual
+    case every(minutes: UInt32)
+    /// After files change, and hourly.
+    case onChange
+}
+
 enum PairDurability: CaseIterable, Hashable, Sendable {
     case standard
     case full
@@ -26,8 +34,7 @@ struct PairOptions: Equatable, Sendable {
     var syncExtendedAttributes: Bool
     var syncPermissions: Bool
     var durability: PairDurability
-    /// Minutes between unattended syncs; nil syncs only when asked.
-    var scheduleMinutes: UInt32?
+    var schedule: SyncSchedule
 
     /// The engine's defaults, so the app never restates them.
     static var defaults: PairOptions { pairOptions(FoldoverCore.defaultPairOptions()) }
@@ -141,8 +148,24 @@ private func pairOptions(_ options: LocalPairOptions) -> PairOptions {
         syncExtendedAttributes: options.extendedAttributes == .sync,
         syncPermissions: options.permissions == .sync,
         durability: durability,
-        scheduleMinutes: options.scheduleMinutes
+        schedule: syncSchedule(options.schedule)
     )
+}
+
+private func syncSchedule(_ schedule: FoldoverCore.PairSchedule) -> SyncSchedule {
+    switch schedule {
+    case .manual: .manual
+    case .every(let minutes): .every(minutes: minutes)
+    case .onChange: .onChange
+    }
+}
+
+private func coreSchedule(_ schedule: SyncSchedule) -> FoldoverCore.PairSchedule {
+    switch schedule {
+    case .manual: .manual
+    case .every(let minutes): .every(minutes: minutes)
+    case .onChange: .onChange
+    }
 }
 
 private func corePairOptions(_ options: PairOptions) -> LocalPairOptions {
@@ -156,7 +179,7 @@ private func corePairOptions(_ options: PairOptions) -> LocalPairOptions {
         extendedAttributes: metadata(options.syncExtendedAttributes),
         permissions: metadata(options.syncPermissions),
         durability: durability,
-        scheduleMinutes: options.scheduleMinutes
+        schedule: coreSchedule(options.schedule)
     )
 }
 

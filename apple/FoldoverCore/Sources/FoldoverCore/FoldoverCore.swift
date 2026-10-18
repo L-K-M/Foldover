@@ -766,22 +766,16 @@ public struct LocalPairOptions: Equatable, Hashable {
     public var extendedAttributes: MetadataSync
     public var permissions: MetadataSync
     public var durability: WriteDurability
-    /**
-     * Unattended sync interval; `None` syncs only when asked.
-     */
-    public var scheduleMinutes: UInt32?
+    public var schedule: PairSchedule
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(modificationTimes: MetadataSync, extendedAttributes: MetadataSync, permissions: MetadataSync, durability: WriteDurability, 
-        /**
-         * Unattended sync interval; `None` syncs only when asked.
-         */scheduleMinutes: UInt32?) {
+    public init(modificationTimes: MetadataSync, extendedAttributes: MetadataSync, permissions: MetadataSync, durability: WriteDurability, schedule: PairSchedule) {
         self.modificationTimes = modificationTimes
         self.extendedAttributes = extendedAttributes
         self.permissions = permissions
         self.durability = durability
-        self.scheduleMinutes = scheduleMinutes
+        self.schedule = schedule
     }
 
     
@@ -804,7 +798,7 @@ public struct FfiConverterTypeLocalPairOptions: FfiConverterRustBuffer {
                 extendedAttributes: FfiConverterTypeMetadataSync.read(from: &buf), 
                 permissions: FfiConverterTypeMetadataSync.read(from: &buf), 
                 durability: FfiConverterTypeWriteDurability.read(from: &buf), 
-                scheduleMinutes: FfiConverterOptionUInt32.read(from: &buf)
+                schedule: FfiConverterTypePairSchedule.read(from: &buf)
         )
     }
 
@@ -813,7 +807,7 @@ public struct FfiConverterTypeLocalPairOptions: FfiConverterRustBuffer {
         FfiConverterTypeMetadataSync.write(value.extendedAttributes, into: &buf)
         FfiConverterTypeMetadataSync.write(value.permissions, into: &buf)
         FfiConverterTypeWriteDurability.write(value.durability, into: &buf)
-        FfiConverterOptionUInt32.write(value.scheduleMinutes, into: &buf)
+        FfiConverterTypePairSchedule.write(value.schedule, into: &buf)
     }
 }
 
@@ -1545,6 +1539,88 @@ public func FfiConverterTypePairMode_lower(_ value: PairMode) -> RustBuffer {
 
 
 
+public enum PairSchedule: Equatable, Hashable {
+    
+    case manual
+    /**
+     * Unattended syncs at this interval, after the first manual sync.
+     */
+    case every(minutes: UInt32
+    )
+    /**
+     * Unattended syncs after files change, and hourly.
+     */
+    case onChange
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PairSchedule: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePairSchedule: FfiConverterRustBuffer {
+    typealias SwiftType = PairSchedule
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PairSchedule {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .manual
+        
+        case 2: return .every(minutes: try FfiConverterUInt32.read(from: &buf)
+        )
+        
+        case 3: return .onChange
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PairSchedule, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .manual:
+            writeInt(&buf, Int32(1))
+        
+        
+        case let .every(minutes):
+            writeInt(&buf, Int32(2))
+            FfiConverterUInt32.write(minutes, into: &buf)
+            
+        
+        case .onChange:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePairSchedule_lift(_ buf: RustBuffer) throws -> PairSchedule {
+    return try FfiConverterTypePairSchedule.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePairSchedule_lower(_ value: PairSchedule) -> RustBuffer {
+    return FfiConverterTypePairSchedule.lower(value)
+}
+
+
+
+
 public enum SyncChangeKind: Equatable, Hashable {
     
     case copy(to: SyncSide
@@ -2045,30 +2121,6 @@ public func FfiConverterTypeWriteDurability_lower(_ value: WriteDurability) -> R
     return FfiConverterTypeWriteDurability.lower(value)
 }
 
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
-    typealias SwiftType = UInt32?
-
-    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterUInt32.write(value, into: &buf)
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterUInt32.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
 
 #if swift(>=5.8)
 @_documentation(visibility: private)

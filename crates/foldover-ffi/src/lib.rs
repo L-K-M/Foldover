@@ -135,8 +135,18 @@ pub struct LocalPairOptions {
     pub extended_attributes: MetadataSync,
     pub permissions: MetadataSync,
     pub durability: WriteDurability,
-    /// Unattended sync interval; `None` syncs only when asked.
-    pub schedule_minutes: Option<u32>,
+    pub schedule: PairSchedule,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum PairSchedule {
+    Manual,
+    /// Unattended syncs at this interval, after the first manual sync.
+    Every {
+        minutes: u32,
+    },
+    /// Unattended syncs after files change, and hourly.
+    OnChange,
 }
 
 impl From<foldover_client::Propagation> for MetadataSync {
@@ -168,9 +178,12 @@ impl From<foldover_client::PairOptions> for LocalPairOptions {
                 foldover_client::Durability::Standard => WriteDurability::Standard,
                 foldover_client::Durability::Full => WriteDurability::Full,
             },
-            schedule_minutes: match options.schedule() {
-                foldover_client::Schedule::Manual => None,
-                foldover_client::Schedule::Every(interval) => Some(interval.minutes()),
+            schedule: match options.schedule() {
+                foldover_client::Schedule::Manual => PairSchedule::Manual,
+                foldover_client::Schedule::Every(interval) => PairSchedule::Every {
+                    minutes: interval.minutes(),
+                },
+                foldover_client::Schedule::OnChange => PairSchedule::OnChange,
             },
         }
     }
@@ -180,11 +193,12 @@ impl TryFrom<LocalPairOptions> for foldover_client::PairOptions {
     type Error = foldover_client::InvalidPair;
 
     fn try_from(options: LocalPairOptions) -> Result<Self, Self::Error> {
-        let schedule = match options.schedule_minutes {
-            None => foldover_client::Schedule::Manual,
-            Some(minutes) => foldover_client::Schedule::Every(
+        let schedule = match options.schedule {
+            PairSchedule::Manual => foldover_client::Schedule::Manual,
+            PairSchedule::Every { minutes } => foldover_client::Schedule::Every(
                 foldover_client::ScheduleInterval::from_minutes(minutes)?,
             ),
+            PairSchedule::OnChange => foldover_client::Schedule::OnChange,
         };
         Ok(Self::new(
             foldover_client::MetadataPolicy::new(
@@ -354,7 +368,7 @@ mod tests {
                     extended_attributes: MetadataSync::Sync,
                     permissions: MetadataSync::Sync,
                     durability: WriteDurability::Full,
-                    schedule_minutes: Some(60),
+                    schedule: PairSchedule::OnChange,
                 },
             };
             let domain = foldover_client::PairDraft::try_from(draft.clone()).unwrap();

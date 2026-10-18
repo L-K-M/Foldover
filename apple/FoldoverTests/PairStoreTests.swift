@@ -232,7 +232,7 @@ func pairOptionDefaultsComeFromTheEngine() {
     #expect(defaults.syncExtendedAttributes)
     #expect(!defaults.syncPermissions)
     #expect(defaults.durability == .standard)
-    #expect(defaults.scheduleMinutes == nil)
+    #expect(defaults.schedule == .manual)
 }
 
 @MainActor
@@ -240,11 +240,12 @@ func pairOptionDefaultsComeFromTheEngine() {
 func scheduleChoicesKeepAnIntervalSetElsewhere() {
     let store = PairStore(client: PairFixtureClient())
     let editor = PairEditorViewModel(store: store)
-    #expect(editor.scheduleChoices.count == 5)
-    editor.options.scheduleMinutes = 30
-    #expect(editor.scheduleChoices.last == 30)
-    #expect(PairEditorViewModel.scheduleTitle(nil) == "Only when I click Sync Now")
-    #expect(PairEditorViewModel.scheduleTitle(30) == "Every 30 minutes")
+    #expect(editor.scheduleChoices.count == 6)
+    editor.options.schedule = .every(minutes: 30)
+    #expect(editor.scheduleChoices.last == .every(minutes: 30))
+    #expect(PairEditorViewModel.scheduleTitle(.manual) == "Only when I click Sync Now")
+    #expect(PairEditorViewModel.scheduleTitle(.onChange) == "When files change")
+    #expect(PairEditorViewModel.scheduleTitle(.every(minutes: 30)) == "Every 30 minutes")
 }
 
 @MainActor

@@ -10,6 +10,12 @@ mod local;
 mod local_pair;
 
 #[cfg(unix)]
+mod watch;
+
+#[cfg(unix)]
+pub use watch::RootWatcher;
+
+#[cfg(unix)]
 pub use local::{
     ApplyError, Expected, LocalEndpoint, LocalEntry, Observation, ObservedEntry, RunScope,
     ScanControl, ScanError, ScanStats, archive_name,

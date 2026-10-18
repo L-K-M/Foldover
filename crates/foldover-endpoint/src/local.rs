@@ -610,6 +610,11 @@ fn child_path(parent: Option<&SyncPath>, name: &[u8]) -> Result<SyncPath, Invali
     SyncPath::try_from(bytes)
 }
 
+/// Foldover's own names, which never sync and never count as changes.
+pub(crate) fn is_internal_name(name: &[u8]) -> bool {
+    protected(name)
+}
+
 fn protected(name: &[u8]) -> bool {
     // Reserve ASCII aliases too: another endpoint may be case-insensitive.
     name.eq_ignore_ascii_case(INTERNAL_DIRECTORY)

@@ -37,9 +37,9 @@ struct PairEditorView: View {
                     }
                 }
                 Section("Schedule") {
-                    Picker("Sync automatically", selection: $viewModel.options.scheduleMinutes) {
-                        ForEach(viewModel.scheduleChoices, id: \.self) { minutes in
-                            Text(PairEditorViewModel.scheduleTitle(minutes)).tag(minutes)
+                    Picker("Sync automatically", selection: $viewModel.options.schedule) {
+                        ForEach(viewModel.scheduleChoices, id: \.self) { schedule in
+                            Text(PairEditorViewModel.scheduleTitle(schedule)).tag(schedule)
                         }
                     }
                     Text("Automatic syncs start after the first sync you run yourself. They stop instead of asking when they would archive many items.")

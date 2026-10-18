@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Sync when files change: pairs set to "When files change" watch both
+  folders and sync after 5 seconds of quiet, plus hourly.
 - Faster repeat syncs: files whose complete stat is unchanged since the last
   observation are not reread.
 - Conflict resolution: keep A or keep B for a previewed file conflict; the

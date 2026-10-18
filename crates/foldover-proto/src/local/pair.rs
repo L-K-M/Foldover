@@ -94,8 +94,15 @@ pub struct PairSettings {
     pub extended_attributes: PairPropagation,
     pub permissions: PairPropagation,
     pub durability: PairDurability,
-    /// Unattended sync interval; `None` syncs only when asked.
-    pub schedule_minutes: Option<u32>,
+    pub schedule: PairSchedule,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum PairSchedule {
+    Manual,
+    Every { minutes: u32 },
+    OnChange,
 }
 
 impl From<Propagation> for PairPropagation {
@@ -127,9 +134,12 @@ impl From<PairOptions> for PairSettings {
                 Durability::Standard => PairDurability::Standard,
                 Durability::Full => PairDurability::Full,
             },
-            schedule_minutes: match options.schedule() {
-                Schedule::Manual => None,
-                Schedule::Every(interval) => Some(interval.minutes()),
+            schedule: match options.schedule() {
+                Schedule::Manual => PairSchedule::Manual,
+                Schedule::Every(interval) => PairSchedule::Every {
+                    minutes: interval.minutes(),
+                },
+                Schedule::OnChange => PairSchedule::OnChange,
             },
         }
     }
@@ -139,9 +149,12 @@ impl TryFrom<PairSettings> for PairOptions {
     type Error = InvalidPair;
 
     fn try_from(settings: PairSettings) -> Result<Self, Self::Error> {
-        let schedule = match settings.schedule_minutes {
-            None => Schedule::Manual,
-            Some(minutes) => Schedule::Every(ScheduleInterval::from_minutes(minutes)?),
+        let schedule = match settings.schedule {
+            PairSchedule::Manual => Schedule::Manual,
+            PairSchedule::Every { minutes } => {
+                Schedule::Every(ScheduleInterval::from_minutes(minutes)?)
+            }
+            PairSchedule::OnChange => Schedule::OnChange,
         };
         Ok(Self::new(
             MetadataPolicy::new(

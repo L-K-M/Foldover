@@ -35,18 +35,20 @@ final class PairEditorViewModel: Identifiable {
     var canSave: Bool { !isSaving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && left != nil && right != nil }
 
     /// Fixed choices, plus a stored interval set elsewhere (e.g. the CLI).
-    var scheduleChoices: [UInt32?] {
-        var choices: [UInt32?] = [nil, 5, 15, 60, 24 * 60]
-        if let current = options.scheduleMinutes, !choices.contains(current) { choices.append(current) }
+    var scheduleChoices: [SyncSchedule] {
+        var choices: [SyncSchedule] = [.manual, .onChange, .every(minutes: 5), .every(minutes: 15),
+                                       .every(minutes: 60), .every(minutes: 24 * 60)]
+        if !choices.contains(options.schedule) { choices.append(options.schedule) }
         return choices
     }
 
-    static func scheduleTitle(_ minutes: UInt32?) -> String {
-        switch minutes {
-        case nil: String(localized: "Only when I click Sync Now")
-        case 60: String(localized: "Every hour")
-        case 1440: String(localized: "Every day")
-        case let minutes?: String(localized: "Every \(minutes) minutes")
+    static func scheduleTitle(_ schedule: SyncSchedule) -> String {
+        switch schedule {
+        case .manual: String(localized: "Only when I click Sync Now")
+        case .onChange: String(localized: "When files change")
+        case .every(60): String(localized: "Every hour")
+        case .every(1440): String(localized: "Every day")
+        case .every(let minutes): String(localized: "Every \(minutes) minutes")
         }
     }
 

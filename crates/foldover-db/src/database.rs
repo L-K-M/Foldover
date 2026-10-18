@@ -14,7 +14,7 @@ const PERMISSION_BITS: u32 = 0o777;
 const DATABASE_NAME: &str = "state.db";
 const WRITER_LOCK: &str = "writer.lock";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule_minutes";
+const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
 const MIGRATIONS: [&str; 7] = [
@@ -60,6 +60,7 @@ ALTER TABLE pair ADD COLUMN right_identity BLOB CHECK(right_identity IS NULL OR 
 ";
 // Unattended sync interval in minutes; NULL syncs only when asked.
 const SCHEMA_V5: &str = "
+ALTER TABLE pair ADD COLUMN schedule TEXT NOT NULL DEFAULT 'manual' CHECK(schedule IN ('manual','every','changes'));
 ALTER TABLE pair ADD COLUMN schedule_minutes INTEGER CHECK(schedule_minutes IS NULL OR schedule_minutes BETWEEN 1 AND 10080);
 ";
 // Conflict choices bound to the versions a person saw; NULL means absent.
@@ -198,6 +199,7 @@ pub struct PairValues {
     pub extended_attributes: String,
     pub permissions: String,
     pub durability: String,
+    pub schedule: String,
     pub schedule_minutes: Option<i64>,
 }
 
@@ -293,7 +295,7 @@ impl Database {
     pub fn create_pair(&mut self, values: &PairValues) -> Result<PairRow, Error> {
         let id = uuid::Uuid::new_v4().into_bytes();
         self.connection.execute(
-            "INSERT INTO pair (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,schedule_minutes) VALUES (?1,1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            "INSERT INTO pair (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,schedule,schedule_minutes) VALUES (?1,1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![
                 id.as_slice(),
                 values.name,
@@ -304,6 +306,7 @@ impl Database {
                 values.extended_attributes,
                 values.permissions,
                 values.durability,
+                values.schedule,
                 values.schedule_minutes
             ],
         )?;
@@ -369,7 +372,7 @@ impl Database {
         }
         let changed = transaction.execute(
             // A changed root is a different endpoint; forget its identity.
-            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,schedule_minutes=?11,left_identity=CASE WHEN left_root=?4 THEN left_identity END,right_identity=CASE WHEN right_root=?5 THEN right_identity END WHERE id=?1 AND revision=?2",
+            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,schedule=?11,schedule_minutes=?12,left_identity=CASE WHEN left_root=?4 THEN left_identity END,right_identity=CASE WHEN right_root=?5 THEN right_identity END WHERE id=?1 AND revision=?2",
             params![
                 id,
                 revision,
@@ -381,6 +384,7 @@ impl Database {
                 values.extended_attributes,
                 values.permissions,
                 values.durability,
+                values.schedule,
                 values.schedule_minutes
             ],
         )?;
@@ -777,7 +781,8 @@ fn pair_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairRow> {
             extended_attributes: row.get(7)?,
             permissions: row.get(8)?,
             durability: row.get(9)?,
-            schedule_minutes: row.get(10)?,
+            schedule: row.get(10)?,
+            schedule_minutes: row.get(11)?,
         },
     })
 }
@@ -806,6 +811,7 @@ mod tests {
             extended_attributes: "sync".into(),
             permissions: "ignore".into(),
             durability: "standard".into(),
+            schedule: "manual".into(),
             schedule_minutes: None,
         }
     }

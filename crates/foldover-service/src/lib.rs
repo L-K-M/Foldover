@@ -317,7 +317,7 @@ mod tests {
         let right = directory.join(format!("{name}-right"));
         fs::create_dir(&left).unwrap();
         fs::create_dir(&right).unwrap();
-        json!({"name":name, "left_root":left.as_os_str().as_bytes(), "right_root":right.as_os_str().as_bytes(), "mode":{"kind":"sync"}, "options":{"modification_times":"sync","extended_attributes":"sync","permissions":"ignore","durability":"standard","schedule_minutes":null}})
+        json!({"name":name, "left_root":left.as_os_str().as_bytes(), "right_root":right.as_os_str().as_bytes(), "mode":{"kind":"sync"}, "options":{"modification_times":"sync","extended_attributes":"sync","permissions":"ignore","durability":"standard","schedule":{"kind":"manual"}}})
     }
 
     #[tokio::test]
@@ -699,14 +699,17 @@ mod tests {
     async fn scheduled_pairs_run_unattended_once_due_after_a_first_sync() {
         let (directory, service) = fixture();
         let mut input = input(directory.path(), "Notes");
-        input["options"]["schedule_minutes"] = json!(1);
+        input["options"]["schedule"] = json!({"kind": "every", "minutes": 1});
         let left = directory.path().join("Notes-left");
         fs::write(left.join("a"), b"a").unwrap();
         let created = service
             .handle(Request::call(1, PAIR_CREATE, Some(input)))
             .await
             .unwrap();
-        assert_eq!(created["configuration"]["options"]["schedule_minutes"], 1);
+        assert_eq!(
+            created["configuration"]["options"]["schedule"]["minutes"],
+            1
+        );
         let key = json!({"id": created["id"]});
         let start = service.scheduler.started();
         let at = |seconds| start + std::time::Duration::from_secs(seconds);
@@ -791,5 +794,36 @@ mod tests {
             .unwrap();
         assert_eq!(settled(&service, &key).await["result"]["copied"], 1);
         assert_eq!(fs::read(left.join("text")).unwrap(), b"right");
+    }
+
+    #[tokio::test]
+    async fn changed_pairs_run_once_quiet_and_hourly_without_changes() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Live");
+        input["options"]["schedule"] = json!({"kind": "onChange"});
+        fs::write(directory.path().join("Live-left/a"), b"a").unwrap();
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        let key = json!({"id": created["id"]});
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        settled(&service, &key).await;
+        let start = service.scheduler.started();
+        let at = |seconds| start + std::time::Duration::from_secs(seconds);
+
+        assert!(service.run_due(at(10)).is_empty());
+        service.mark_changed(id, at(20));
+        assert!(service.run_due(at(22)).is_empty());
+        assert_eq!(service.run_due(at(26)), [id]);
+        settled(&service, &key).await;
+        assert!(service.run_due(at(40)).is_empty());
+        assert_eq!(service.run_due(at(26 + 3_600)), [id]);
+        settled(&service, &key).await;
     }
 }

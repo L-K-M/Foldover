@@ -7,6 +7,9 @@ pub enum Schedule {
     Manual,
     /// Unattended runs at this interval, after the pair's first manual sync.
     Every(ScheduleInterval),
+    /// Unattended runs once changed files have been quiet briefly, and
+    /// hourly, because change notifications can be missed.
+    OnChange,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
