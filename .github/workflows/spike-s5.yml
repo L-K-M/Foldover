@@ -39,6 +39,14 @@ jobs:
       - name: shellcheck run.sh
         run: shellcheck spikes/s5-diff-tree/run.sh
 
+      - name: Check row formatting worker
+        run: |
+          swiftc -parse-as-library -swift-version 6 -warnings-as-errors \
+            spikes/s5-diff-tree/DiffTreeBench/RowText.swift \
+            spikes/s5-diff-tree/Tests/RowTextCheck.swift \
+            -o "$RUNNER_TEMP/s5-row-text-check"
+          "$RUNNER_TEMP/s5-row-text-check"
+
       # XcodeGen writes the .xcodeproj (gitignored) the build runs
       # from. Pinned and SHA-256-verified before unzipping, same as
       # the root macOS job.

@@ -135,9 +135,12 @@ final class BenchRunner {
         var batchProfiles: [BenchBatchProfile] = []
         while delivered < records.count, !overBudget() {
             let end = min(delivered + Self.batchSize, records.count)
-            text.resetProfile()
+            // Await one bounded batch, leaving the main actor free for display ticks.
+            let preparationStarted = CACurrentMediaTime()
+            let prepared = await text.prepare(records[delivered ..< end])
+            let preparation = (CACurrentMediaTime() - preparationStarted) * 1_000
             let before = CACurrentMediaTime()
-            model.deliver(records[delivered ..< end], text: text)
+            model.deliver(prepared.rows)
             let delivery = (CACurrentMediaTime() - before) * 1_000
             let outline = appkitRefs.lastBatchProfile
             batchProfiles.append(BenchBatchProfile(
@@ -150,10 +153,12 @@ final class BenchRunner {
                 parentGroups: outline?.parentGroups,
                 newFolders: outline?.newFolders,
                 visibleRows: outline?.visibleRows,
-                dateFormattingMilliseconds: text.dateFormattingMilliseconds,
-                sizeFormattingMilliseconds: text.sizeFormattingMilliseconds,
-                formattedDates: text.formattedDates,
-                formattedSizes: text.formattedSizes
+                dateFormattingMilliseconds: prepared.dateFormattingMilliseconds,
+                sizeFormattingMilliseconds: prepared.sizeFormattingMilliseconds,
+                formattedDates: prepared.formattedDates,
+                formattedSizes: prepared.formattedSizes,
+                preparationMilliseconds: preparation,
+                preparationOnMainThread: prepared.preparedOnMainThread
             ))
             delivered = end
             try? await Task.sleep(for: Self.batchInterval)
@@ -163,6 +168,9 @@ final class BenchRunner {
             failures.append(
                 "the stream overran its budget after \(delivered) rows"
             )
+        }
+        if batchProfiles.contains(where: \.preparationOnMainThread) {
+            failures.append("row formatting ran on the main thread")
         }
         await waitForTicks(2, sampler: sampler)
         let afterLoad = SystemProbes.physicalFootprint()
