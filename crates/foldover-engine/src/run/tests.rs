@@ -346,3 +346,11 @@ fn a_replaced_folder_at_the_same_path_stops_before_any_change() {
     fs::rename(&original, pair.right.path()).unwrap();
     assert!(pair.prepare().preview().items().is_empty());
 }
+
+#[test]
+fn run_names_are_utc_timestamps() {
+    let at = |millis| run_name(std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis));
+    assert_eq!(at(0), "1970-01-01T00-00-00.000Z");
+    assert_eq!(at(951_868_799_999), "2000-02-29T23-59-59.999Z");
+    assert_eq!(at(1_792_315_800_123), "2026-10-18T09-30-00.123Z");
+}

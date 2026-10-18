@@ -2,9 +2,11 @@
 //! `handle` request dispatch, validation and the event bus. Depends on
 //! foldover-engine. See PLAN.md §4.4.
 
+mod sync;
+
 use std::sync::{Arc, Mutex};
 
-use foldover_engine::{Engine, ErrorKind, StateLocation};
+use foldover_engine::{Approval, Engine, ErrorKind, StateLocation};
 use foldover_proto::local::{
     AgentCapability, DAEMON_STATUS, DaemonStatus, Hello, INTERNAL_ERROR, INVALID_PARAMS,
     METHOD_NOT_FOUND, PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_NOT_FOUND, PAIR_PAGE_SIZE,
@@ -13,9 +15,11 @@ use foldover_proto::local::{
     VERSION_MISMATCH,
 };
 use foldover_proto::local::{PAIR_REMOVE, PairRevision};
+use foldover_proto::local::{SYNC_CANCEL, SYNC_PREVIEW, SYNC_RUN, SYNC_STATUS, SyncKey, SyncRun};
 use foldover_types::{PairDraft, PairId};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
+use sync::{Jobs, Work};
 use tokio::sync::Semaphore;
 
 /// The workspace version reported by health methods and `foldoverd --version`.
@@ -29,6 +33,7 @@ pub fn version() -> &'static str {
 pub struct Service {
     engine: Arc<Mutex<Engine>>,
     commands: Arc<Semaphore>,
+    jobs: Arc<Jobs>,
 }
 
 impl Service {
@@ -40,12 +45,19 @@ impl Service {
         Self {
             engine: Arc::new(Mutex::new(engine)),
             commands: Arc::new(Semaphore::new(1)),
+            jobs: Arc::new(Jobs::default()),
         }
     }
 
     pub async fn handle(&self, request: Request) -> Result<Value, RpcError> {
         if matches!(request.method(), SESSION_HELLO | DAEMON_STATUS) {
             return health(request).await;
+        }
+        if matches!(
+            request.method(),
+            SYNC_PREVIEW | SYNC_RUN | SYNC_STATUS | SYNC_CANCEL
+        ) {
+            return self.sync(&request);
         }
         let command = Command::parse(&request)?;
         let permit = Arc::clone(&self.commands)
@@ -63,6 +75,40 @@ impl Service {
         })
         .await
         .map_err(|_| RpcError::new(INTERNAL_ERROR, "Configuration worker failed"))?
+    }
+}
+
+impl Service {
+    /// Sync jobs bypass the configuration queue: they hold the engine only to
+    /// read inputs and commit progress.
+    fn sync(&self, request: &Request) -> Result<Value, RpcError> {
+        let pair = |id: &str| {
+            id.parse::<PairId>()
+                .map_err(|error| RpcError::new(INVALID_PARAMS, error.to_string()))
+        };
+        let status = match request.method() {
+            SYNC_RUN => {
+                let params: SyncRun = parameters(request)?;
+                let approval = Approval::new(
+                    params.approved_left_deletions,
+                    params.approved_right_deletions,
+                );
+                self.jobs
+                    .start(&self.engine, pair(&params.id)?, Work::Run(approval))?
+            }
+            method => {
+                let id = pair(&parameters::<SyncKey>(request)?.id)?;
+                match method {
+                    SYNC_PREVIEW => self.jobs.start(&self.engine, id, Work::Preview)?,
+                    SYNC_CANCEL => {
+                        self.jobs.cancel(id);
+                        self.jobs.status(id)
+                    }
+                    _ => self.jobs.status(id),
+                }
+            }
+        };
+        encode(status)
     }
 }
 
@@ -230,7 +276,7 @@ async fn health(request: Request) -> Result<Value, RpcError> {
             }
             serde_json::to_value(DaemonStatus {
                 core_version: version().to_owned(),
-                capability: AgentCapability::PairConfiguration,
+                capability: AgentCapability::Sync,
             })
             .map_err(|_| RpcError::new(INTERNAL_ERROR, "Cannot encode status"))
         }
@@ -485,7 +531,7 @@ mod tests {
     async fn health_dispatch_validates_parameters_and_has_no_private_state() {
         let status = health(Request::call(1, DAEMON_STATUS, None)).await.unwrap();
         let status: DaemonStatus = serde_json::from_value(status).unwrap();
-        assert_eq!(status.capability, AgentCapability::PairConfiguration);
+        assert_eq!(status.capability, AgentCapability::Sync);
         assert_eq!(status.core_version, version());
         assert_eq!(
             health(Request::call(1, "pair.list", None))
@@ -537,5 +583,100 @@ mod tests {
     fn version_is_the_package_version() {
         assert_eq!(super::version(), env!("CARGO_PKG_VERSION"));
         assert!(!super::version().is_empty());
+    }
+
+    async fn settled(service: &Service, key: &Value) -> Value {
+        for _ in 0..1_000 {
+            let status = service
+                .handle(Request::call(9, SYNC_STATUS, Some(key.clone())))
+                .await
+                .unwrap();
+            if status["state"] != "working" {
+                return status;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("The sync job did not finish");
+    }
+
+    #[tokio::test]
+    async fn previews_and_runs_execute_as_background_jobs() {
+        let (directory, service) = fixture();
+        let input = input(directory.path(), "Docs");
+        let left = directory.path().join("Docs-left");
+        let right = directory.path().join("Docs-right");
+        fs::write(left.join("file"), b"data").unwrap();
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        assert_eq!(
+            service
+                .handle(Request::call(2, SYNC_STATUS, Some(key.clone())))
+                .await
+                .unwrap()["state"],
+            "idle"
+        );
+
+        let started = service
+            .handle(Request::call(3, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        assert_eq!(started["state"], "working");
+        assert_eq!(started["job"], "preview");
+        let previewed = settled(&service, &key).await;
+        assert_eq!(previewed["state"], "previewed", "{previewed}");
+        assert_eq!(previewed["preview"]["counts"]["copies"], 1);
+        assert_eq!(
+            previewed["preview"]["items"][0]["action"],
+            json!({"kind": "copy", "to": "right"})
+        );
+        assert!(!right.join("file").exists());
+
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        service
+            .handle(Request::call(4, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        let finished = settled(&service, &key).await;
+        assert_eq!(finished["state"], "finished", "{finished}");
+        assert_eq!(finished["result"]["copied"], 1);
+        assert_eq!(finished["result"]["failure_count"], 0);
+        assert_eq!(fs::read(right.join("file")).unwrap(), b"data");
+        assert!(right.join(".foldover/id").exists());
+
+        // Configuration requests stay available, and the capability says so.
+        let status = service
+            .handle(Request::call(5, DAEMON_STATUS, None))
+            .await
+            .unwrap();
+        assert_eq!(status["capability"], "sync");
+    }
+
+    #[tokio::test]
+    async fn sync_requests_validate_their_parameters() {
+        let (_directory, service) = fixture();
+        for (method, params) in [
+            (SYNC_PREVIEW, json!({"id": "bad"})),
+            (SYNC_STATUS, json!({})),
+            (SYNC_RUN, json!({"id": "01010101010101010101010101010101"})),
+        ] {
+            assert_eq!(
+                service
+                    .handle(Request::call(1, method, Some(params)))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                INVALID_PARAMS
+            );
+        }
+        let missing = json!({"id": "01010101010101010101010101010101"});
+        service
+            .handle(Request::call(2, SYNC_PREVIEW, Some(missing.clone())))
+            .await
+            .unwrap();
+        let failed = settled(&service, &missing).await;
+        assert_eq!(failed["state"], "failed");
     }
 }

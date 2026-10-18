@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Sync from the command line: `foldover sync ID` previews and runs as agent
+  background jobs, with deletion approval and cancellation.
 - Folder identity check: the first sync writes `.foldover/id` into both
   folders, and later runs stop if either is missing or different, such as an
   empty folder left at the path of an unmounted disk.

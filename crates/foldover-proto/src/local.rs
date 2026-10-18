@@ -1,6 +1,13 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+mod sync;
+pub use sync::{
+    SYNC_CANCEL, SYNC_ITEM_LIMIT, SYNC_PREVIEW, SYNC_RUN, SYNC_STATUS, SyncAction, SyncConflict,
+    SyncCounts, SyncDeletions, SyncFailure, SyncItem, SyncJob, SyncKey, SyncPreview, SyncResult,
+    SyncRun, SyncStatus,
+};
+
 mod pair;
 pub use pair::{
     PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_REMOVE, PAIR_UPDATE, PairInput, PairKey,
@@ -22,6 +29,8 @@ pub const PAIR_NOT_FOUND: i32 = -32003;
 pub const STALE_REVISION: i32 = -32004;
 pub const ROOT_UNAVAILABLE: i32 = -32005;
 pub const ROOT_OVERLAP: i32 = -32006;
+/// The pair already has a preview or run in progress.
+pub const SYNC_BUSY: i32 = -32007;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Hello {
@@ -34,6 +43,8 @@ pub struct Hello {
 pub enum AgentCapability {
     HealthOnly,
     PairConfiguration,
+    /// Pair configuration plus previews and runs.
+    Sync,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

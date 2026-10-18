@@ -4,13 +4,17 @@
 //! foldover-ipc. See PLAN.md §4.4.
 
 pub use foldover_ipc::{Error, SocketLocation};
-pub use foldover_proto::local::{AgentCapability, DaemonStatus};
+pub use foldover_proto::local::{
+    AgentCapability, DaemonStatus, SyncAction, SyncConflict, SyncCounts, SyncDeletions,
+    SyncFailure, SyncItem, SyncJob, SyncPreview, SyncResult, SyncStatus,
+};
 use foldover_proto::local::{DAEMON_STATUS, Hello, PROTOCOL_VERSION, Request, SESSION_HELLO};
 use foldover_proto::local::{
     PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_UPDATE, PairInput, PairKey, PairList,
     PairRecord, PairUpdate,
 };
 use foldover_proto::local::{PAIR_REMOVE, PairRevision};
+use foldover_proto::local::{SYNC_CANCEL, SYNC_PREVIEW, SYNC_RUN, SYNC_STATUS, SyncKey, SyncRun};
 pub use foldover_types::{
     Durability, InvalidPair, LocalRoot, MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions,
     Propagation, Side, SyncMode,
@@ -26,6 +30,48 @@ pub fn version() -> &'static str {
 pub async fn agent_status(location: &SocketLocation) -> Result<DaemonStatus, Error> {
     Ok(serde_json::from_value(
         call(location, DAEMON_STATUS, None).await?,
+    )?)
+}
+
+/// Start a background preview; poll `sync_status` for its result.
+pub async fn start_preview(location: &SocketLocation, id: PairId) -> Result<SyncStatus, Error> {
+    sync_call(location, SYNC_PREVIEW, id).await
+}
+
+/// Start a background run that may make at most the approved deletions on
+/// each side beyond the automatic limits.
+pub async fn start_run(
+    location: &SocketLocation,
+    id: PairId,
+    approved_left_deletions: u64,
+    approved_right_deletions: u64,
+) -> Result<SyncStatus, Error> {
+    let params = SyncRun {
+        id: id.to_string(),
+        approved_left_deletions,
+        approved_right_deletions,
+    };
+    Ok(serde_json::from_value(
+        call(location, SYNC_RUN, Some(serde_json::to_value(params)?)).await?,
+    )?)
+}
+
+pub async fn sync_status(location: &SocketLocation, id: PairId) -> Result<SyncStatus, Error> {
+    sync_call(location, SYNC_STATUS, id).await
+}
+
+pub async fn cancel_sync(location: &SocketLocation, id: PairId) -> Result<SyncStatus, Error> {
+    sync_call(location, SYNC_CANCEL, id).await
+}
+
+async fn sync_call(
+    location: &SocketLocation,
+    method: &str,
+    id: PairId,
+) -> Result<SyncStatus, Error> {
+    let params = serde_json::to_value(SyncKey { id: id.to_string() })?;
+    Ok(serde_json::from_value(
+        call(location, method, Some(params)).await?,
     )?)
 }
 

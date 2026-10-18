@@ -842,6 +842,7 @@ public enum AgentCapability: Equatable, Hashable {
     
     case healthOnly
     case pairConfiguration
+    case sync
 
 
 
@@ -867,6 +868,8 @@ public struct FfiConverterTypeAgentCapability: FfiConverterRustBuffer {
         
         case 2: return .pairConfiguration
         
+        case 3: return .sync
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -881,6 +884,10 @@ public struct FfiConverterTypeAgentCapability: FfiConverterRustBuffer {
         
         case .pairConfiguration:
             writeInt(&buf, Int32(2))
+        
+        
+        case .sync:
+            writeInt(&buf, Int32(3))
         
         }
     }

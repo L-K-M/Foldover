@@ -18,6 +18,7 @@ pub fn core_version() -> String {
 pub enum AgentCapability {
     HealthOnly,
     PairConfiguration,
+    Sync,
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -63,6 +64,7 @@ pub async fn agent_status() -> Result<AgentHealth, AgentError> {
             foldover_client::AgentCapability::PairConfiguration => {
                 AgentCapability::PairConfiguration
             }
+            foldover_client::AgentCapability::Sync => AgentCapability::Sync,
         },
     })
 }

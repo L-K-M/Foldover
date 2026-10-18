@@ -6,9 +6,9 @@ runs in a background agent; each platform gets a native UI (SwiftUI now,
 GTK4 later). [`PLAN.md`](PLAN.md) is the source of truth for scope and
 design; [`docs/research`](docs/research/README.md) holds the evidence.
 
-**Status:** P1/P2/P3 foundations. Native spikes, reconciliation, held-root
-metadata access and an authenticated pair-configuration agent/client path exist;
-nothing syncs yet.
+**Status:** P2/P3. Local pairs sync from the CLI through the agent: previews,
+gated runs, archives and folder identity checks. The app configures pairs;
+its preview and run UI, watchers, schedules and remote endpoints are pending.
 Measurements and limits live in `docs/adr/`.
 The roadmap is PLAN.md §7.
 

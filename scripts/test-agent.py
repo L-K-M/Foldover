@@ -53,7 +53,7 @@ def start(agent, cli, endpoint, environment):
         while time.monotonic() < deadline:
             status = invoke(cli, endpoint)
             if status.returncode == 0:
-                if "pair configuration available (sync unavailable)" not in status.stdout:
+                if "sync available" not in status.stdout:
                     raise RuntimeError(f"Unexpected CLI status: {status.stdout}")
                 return child
             if child.poll() is not None:
@@ -127,6 +127,31 @@ def configuration(cli, endpoint, directory, policy):
     if stale.returncode == 0 or str(STALE_REVISION) not in stale.stderr:
         raise RuntimeError(f"Stale update was not rejected: {stale}")
     return json.loads(saved.stdout)
+
+
+def synchronization(cli, endpoint, directory):
+    left, right = directory / "docs-left", directory / "docs-right"
+    left.mkdir()
+    right.mkdir()
+    (left / "note.txt").write_bytes(b"synced")
+    created = invoke(cli, endpoint, ("pairs", "add", "Docs", str(left), str(right), "sync"))
+    if created.returncode != 0:
+        raise RuntimeError(f"Sync pair creation failed: {created.stderr}")
+    pair = json.loads(created.stdout)["id"]
+
+    preview = invoke(cli, endpoint, ("sync", pair, "--preview"))
+    status = json.loads(preview.stdout) if preview.returncode == 0 else {}
+    if status.get("state") != "previewed" or status["preview"]["counts"]["copies"] != 1:
+        raise RuntimeError(f"Preview failed: {preview}")
+    if (right / "note.txt").exists():
+        raise RuntimeError("Preview wrote to an endpoint")
+    for expected in (1, 0):
+        run = invoke(cli, endpoint, ("sync", pair))
+        status = json.loads(run.stdout) if run.returncode == 0 else {}
+        if status.get("state") != "finished" or status["result"]["copied"] != expected:
+            raise RuntimeError(f"Sync run failed: {run}")
+    if (right / "note.txt").read_bytes() != b"synced":
+        raise RuntimeError("Sync did not copy the file")
 
 
 def verify_release_entitlements(agent, cli):
@@ -206,6 +231,8 @@ def main():
             if unnegotiated.get("error", {}).get("code") != expected:
                 raise RuntimeError(f"Private route accepted an unnegotiated session: {unnegotiated}")
             pair = configuration(cli, endpoint, home, arguments.configuration)
+            if pair is not None:
+                synchronization(cli, endpoint, home)
             # Clients can close before the agent reads their kernel credentials.
             for _ in range(DISCONNECTED_CLIENTS):
                 with socket.socket(socket.AF_UNIX) as connection:

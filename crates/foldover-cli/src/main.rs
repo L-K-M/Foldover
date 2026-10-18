@@ -1,8 +1,7 @@
-//! `foldover-cli` — client layer. The `foldover` CLI (`pairs`,
-//! `preview`, `sync`, `conflicts`, `status`). Configuration and health
-//! are implemented; sync commands follow. Depends on foldover-client.
-//! See PLAN.md §4.4.
+//! `foldover-cli` — client layer. The `foldover` CLI (`pairs`, `sync`,
+//! `status`). Depends on foldover-client. See PLAN.md §4.4.
 
+use foldover_client::SyncStatus;
 use foldover_client::{
     Durability, LocalRoot, MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions, Propagation,
     Side, SocketLocation, SyncMode,
@@ -13,16 +12,31 @@ use std::ffi::OsString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 /// How a usage failure exits.
 const USAGE_EXIT: u8 = 2;
+/// A run stopped for deletion approval; nothing was written.
+const APPROVAL_EXIT: u8 = 3;
+const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 enum Request {
     /// `--version`: print `foldover <version>` and exit 0.
     Version,
     Status(foldover_client::SocketLocation),
     Pairs(SocketLocation, PairCommand),
+    Sync(SocketLocation, PairId, SyncCommand),
     Usage,
+}
+
+enum SyncCommand {
+    Preview,
+    /// Deletions approved per side beyond the automatic limits.
+    Run {
+        left: u64,
+        right: u64,
+    },
+    Cancel,
 }
 
 enum PairCommand {
@@ -76,10 +90,7 @@ async fn main() -> ExitCode {
         }
         Request::Status(location) => match foldover_client::agent_status(&location).await {
             Ok(status) => {
-                println!(
-                    "Agent {} connected; pair configuration available (sync unavailable)",
-                    status.core_version
-                );
+                println!("Agent {} connected; sync available", status.core_version);
                 ExitCode::SUCCESS
             }
             Err(error) => {
@@ -94,9 +105,16 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Request::Sync(location, id, command) => match sync(&location, id, command).await {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("foldover: {error}");
+                ExitCode::FAILURE
+            }
+        },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT] [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -122,6 +140,15 @@ fn request(args: impl Iterator<Item = OsString>) -> Request {
             Some(command) => Request::Pairs(location, command),
             None => Request::Usage,
         },
+        [command, id, rest @ ..] if command == "sync" => {
+            match (
+                id.to_str().and_then(|id| id.parse().ok()),
+                sync_command(rest),
+            ) {
+                (Some(id), Some(command)) => Request::Sync(location, id, command),
+                _ => Request::Usage,
+            }
+        }
         _ => Request::Usage,
     }
 }
@@ -157,6 +184,20 @@ fn pair_command(args: &[OsString]) -> Option<PairCommand> {
                 options: option_changes(options)?,
             })
         }
+        _ => None,
+    }
+}
+
+fn sync_command(args: &[OsString]) -> Option<SyncCommand> {
+    let count = |value: &OsString| value.to_str()?.parse().ok();
+    match args {
+        [] => Some(SyncCommand::Run { left: 0, right: 0 }),
+        [flag] if flag == "--preview" => Some(SyncCommand::Preview),
+        [flag] if flag == "--cancel" => Some(SyncCommand::Cancel),
+        [flag, left, right] if flag == "--approve" => Some(SyncCommand::Run {
+            left: count(left)?,
+            right: count(right)?,
+        }),
         _ => None,
     }
 }
@@ -259,6 +300,40 @@ async fn pairs(
     }
 }
 
+/// Start the job, wait for it and print its final status as one JSON line.
+async fn sync(
+    location: &SocketLocation,
+    id: PairId,
+    command: SyncCommand,
+) -> Result<ExitCode, foldover_client::Error> {
+    let mut status = match command {
+        SyncCommand::Preview => foldover_client::start_preview(location, id).await?,
+        SyncCommand::Run { left, right } => {
+            foldover_client::start_run(location, id, left, right).await?
+        }
+        SyncCommand::Cancel => foldover_client::cancel_sync(location, id).await?,
+    };
+    while matches!(status, SyncStatus::Working { .. }) {
+        tokio::time::sleep(POLL_INTERVAL).await;
+        status = foldover_client::sync_status(location, id).await?;
+    }
+    println!("{}", serde_json::to_string(&status)?);
+    Ok(match &status {
+        SyncStatus::Idle | SyncStatus::Previewed { .. } => ExitCode::SUCCESS,
+        SyncStatus::Finished { result } if result.failure_count == 0 && !result.cancelled => {
+            ExitCode::SUCCESS
+        }
+        SyncStatus::NeedsApproval { preview } => {
+            eprintln!(
+                "foldover: too many deletions to proceed without approval; rerun with --approve {} {}",
+                preview.left.deletions, preview.right.deletions
+            );
+            ExitCode::from(APPROVAL_EXIT)
+        }
+        _ => ExitCode::FAILURE,
+    })
+}
+
 fn print_pair(pair: &PairConfig) -> Result<(), foldover_client::Error> {
     // JSON lines preserve raw path bytes and escape terminal control characters.
     println!("{}", serde_json::to_string(&PairRecord::from(pair))?);
@@ -340,6 +415,36 @@ mod tests {
                 "pairs", "add", "Photos", "/a", "/b", "sync", "--times", "sync", "--times",
                 "ignore",
             ],
+        ] {
+            assert!(matches!(req(&args), Request::Usage), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn sync_commands_select_preview_run_cancel_or_approval() {
+        let id = "01010101010101010101010101010101";
+        assert!(matches!(
+            req(&["sync", id]),
+            Request::Sync(_, _, SyncCommand::Run { left: 0, right: 0 })
+        ));
+        assert!(matches!(
+            req(&["sync", id, "--preview", "--socket", "/tmp/s"]),
+            Request::Sync(_, _, SyncCommand::Preview)
+        ));
+        assert!(matches!(
+            req(&["sync", id, "--cancel"]),
+            Request::Sync(_, _, SyncCommand::Cancel)
+        ));
+        assert!(matches!(
+            req(&["sync", id, "--approve", "60", "0"]),
+            Request::Sync(_, _, SyncCommand::Run { left: 60, right: 0 })
+        ));
+        for args in [
+            vec!["sync"],
+            vec!["sync", "bad"],
+            vec!["sync", id, "--approve", "60"],
+            vec!["sync", id, "--approve", "-1", "0"],
+            vec!["sync", id, "--preview", "--cancel"],
         ] {
             assert!(matches!(req(&args), Request::Usage), "{args:?}");
         }

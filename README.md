@@ -15,7 +15,8 @@ Free and open-source under the Unlicense. No sponsorships or paid features.
 The macOS app requires macOS 27 and Apple silicon.
 
 > [!NOTE]
-> **Status: engine and agent foundations.** Nothing syncs yet. [`PLAN.md`](PLAN.md) is the
+> **Status: early development.** Local folders sync from the command line; the
+> app's sync controls are next. Do not trust it with data you have not backed up. [`PLAN.md`](PLAN.md) is the
 > source of truth for scope and design; the research behind it lives in
 > [`docs/research`](docs/research/README.md).
 
@@ -93,6 +94,21 @@ Commands output JSON lines with exact root-byte arrays. Lists are paged by
 identity and are not an atomic catalog snapshot. Refresh after concurrent edits.
 If a command times out, inspect the catalog before retrying: a disconnected
 client does not cancel a committing configuration change.
+
+### Sync
+
+```sh
+foldover sync ID --preview       # list changes; writes nothing
+foldover sync ID                 # run
+foldover sync ID --approve 60 0  # accept up to 60 deletions in A, 0 in B
+```
+
+Each command waits for its job and prints the final status as JSON. A run
+stops before writing when it would delete more than the automatic limits
+allow and exits with status 3; rerun with `--approve`. Replaced and removed
+files go to `.foldover/archive/<run>/` inside the folder where they were.
+The first sync writes `.foldover/id` into both folders; later runs stop if
+either is missing or different, for example when a disk is not mounted.
 
 The API contract and remaining gates are in
 [ADR 0011](docs/adr/0011-pair-configuration-api.md).

@@ -20,5 +20,5 @@ pub use plan::{CandidateDecision, CandidatePlan, PlanError, PlanRow, TreeRole, p
 pub use reconcile::reconcile_entry;
 pub use run::{
     Action, Approval, Commit, Completion, Failure, PairRun, Preview, PreviewItem, RunError,
-    RunOutcome, RunReport,
+    RunOutcome, RunReport, run_name,
 };
