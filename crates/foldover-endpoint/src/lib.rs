@@ -9,6 +9,11 @@ mod local;
 #[cfg(unix)]
 mod local_pair;
 
+mod peer_identity;
+
+pub use foldover_net::peer::Identity as PeerIdentity;
+pub use peer_identity::{PeerIdentityError, load_peer_identity};
+
 #[cfg(unix)]
 pub use local::{LocalEndpoint, LocalEntry, ScanControl, ScanError, ScanStats};
 

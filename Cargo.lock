@@ -506,6 +506,8 @@ dependencies = [
  "foldover-watch",
  "tempfile",
  "thiserror",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -580,11 +582,20 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
 name = "foldover-os"
 version = "0.1.0"
+dependencies = [
+ "core-foundation",
+ "security-framework",
+ "security-framework-sys",
+ "tempfile",
+ "thiserror",
+ "zeroize",
+]
 
 [[package]]
 name = "foldover-proto"
