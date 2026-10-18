@@ -10,6 +10,8 @@ All notable changes to this project are documented here. The format follows
 
 - Held-root macOS volume UUID observations, with physical-device ancestry and
   validated attribute replies; mount-continuity/readiness integration remains pending.
+- Explicit non-materializing LaunchAgent policy, with native process/thread/child
+  inheritance fixtures; account-backed File Provider verification remains pending.
 - Enforced macOS non-materializing thread policy around filesystem traversal
   and hashing, isolated behind audited driver bindings and native tests.
 - Darwin dataless-file observations, with explicit scan/hash refusal for known

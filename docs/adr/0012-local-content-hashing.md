@@ -56,9 +56,14 @@ forbids unsafe. Other layers retain the workspace prohibition. Native tests
 compare constants against the installed Darwin SDK and exercise policy changes
 on real worker threads and across callbacks.
 
-Launchd's `MaterializeDatalessFiles=false` is an additional managed-launch
-defense. Account-backed File Provider verification, cloud-root readiness and
-full metadata/volume gates remain open. Content reads remain below the agent API.
+The packaged LaunchAgent also sets `MaterializeDatalessFiles=false` as defense
+in depth.
+CI checks the template and runs isolated launchd jobs with disabled/enabled
+policies, inspecting the main thread, worker threads and a child through native
+`getiopolicy_np`. This verifies managed-launch policy inheritance without
+reading cloud data. Manual callers use the driver's per-thread enforcement.
+Account-backed File Provider verification, cloud-root readiness and full
+metadata/volume gates remain open. Content reads remain below the agent API.
 
 ## Verification
 
