@@ -29,13 +29,15 @@ use foldover_types::{ChangeKind, ConflictKind, PairId, ScanControl, Side};
 pub(crate) enum Work {
     Preview,
     Run(Approval),
+    /// Unattended: stops instead of asking when deletions need approval.
+    Scheduled,
 }
 
 impl Work {
     fn job(self) -> SyncJob {
         match self {
             Self::Preview => SyncJob::Preview,
-            Self::Run(_) => SyncJob::Run,
+            Self::Run(_) | Self::Scheduled => SyncJob::Run,
         }
     }
 }
@@ -138,13 +140,14 @@ fn perform(engine: &Mutex<Engine>, id: PairId, work: Work, cancel: &AtomicBool) 
         Err(RunError::Cancelled) => return SyncStatus::Idle,
         Err(error) => return failed(error.to_string()),
     };
-    let approval = match work {
+    let (approval, context) = match work {
         Work::Preview => {
             return SyncStatus::Previewed {
                 preview: preview(&run.preview()),
             };
         }
-        Work::Run(approval) => approval,
+        Work::Run(approval) => (approval, RunContext::Interactive),
+        Work::Scheduled => (Approval::default(), RunContext::Unattended),
     };
     // A panic elsewhere cannot leave a half-applied transaction, so a
     // poisoned lock still guards a consistent store.
@@ -156,7 +159,7 @@ fn perform(engine: &Mutex<Engine>, id: PairId, work: Work, cancel: &AtomicBool) 
     };
     match run.execute(
         approval,
-        RunContext::Interactive,
+        context,
         SystemTime::now(),
         &mut commit,
         &mut control,

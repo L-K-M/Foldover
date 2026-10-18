@@ -87,6 +87,11 @@ impl Engine {
         Ok(self.pairs.pairs_after(after, limit)?)
     }
 
+    /// The whole catalog, for agent-internal work such as scheduling.
+    pub fn pairs(&self) -> Result<Vec<PairConfig>, Error> {
+        Ok(self.pairs.pairs()?)
+    }
+
     pub fn pair(&self, id: PairId) -> Result<PairConfig, Error> {
         self.pairs.pair(id)?.ok_or(Error::PairNotFound)
     }
@@ -126,6 +131,12 @@ impl Engine {
         let base = self.pairs.base(id)?;
         let identities = self.pairs.identities(id)?;
         Ok((pair, base, identities))
+    }
+
+    /// Whether the pair has completed a first sync, which records identities.
+    pub fn first_synced(&self, id: PairId) -> Result<bool, Error> {
+        let identities = self.pairs.identities(id)?;
+        Ok(identities.side(Side::Left).is_some() && identities.side(Side::Right).is_some())
     }
 
     /// Store a run's progress, only while the pair keeps `revision`.

@@ -4,7 +4,8 @@ use std::os::unix::ffi::OsStrExt;
 use foldover_db::{BaseChange, Database, PairRow, PairValues, StateLocation};
 use foldover_types::{
     BaselineEntry, Durability, EndpointId, InvalidPair, LocalRoot, MetadataPolicy, PairConfig,
-    PairDraft, PairId, PairOptions, Propagation, Side, SyncMode, SyncPath,
+    PairDraft, PairId, PairOptions, Propagation, Schedule, ScheduleInterval, Side, SyncMode,
+    SyncPath,
 };
 
 use crate::BaseUpdate;
@@ -249,6 +250,10 @@ fn values(draft: &PairDraft) -> PairValues {
             Durability::Full => FULL_DURABILITY,
         }
         .to_owned(),
+        schedule_minutes: match options.schedule() {
+            Schedule::Manual => None,
+            Schedule::Every(interval) => Some(i64::from(interval.minutes())),
+        },
     }
 }
 
@@ -290,6 +295,12 @@ fn from_row(row: PairRow) -> Result<PairConfig, Error> {
         stored_propagation(&row.values.extended_attributes)?,
         stored_propagation(&row.values.permissions)?,
     );
+    let schedule = match row.values.schedule_minutes {
+        None => Schedule::Manual,
+        Some(minutes) => Schedule::Every(ScheduleInterval::from_minutes(
+            u32::try_from(minutes).map_err(|_| Error::InvalidStored("schedule"))?,
+        )?),
+    };
     let durability = match row.values.durability.as_str() {
         STANDARD_DURABILITY => Durability::Standard,
         FULL_DURABILITY => Durability::Full,
@@ -301,7 +312,7 @@ fn from_row(row: PairRow) -> Result<PairConfig, Error> {
         LocalRoot::from_bytes(row.values.right_root)?,
         mode,
     )?
-    .with_options(PairOptions::new(metadata, durability));
+    .with_options(PairOptions::new(metadata, durability).with_schedule(schedule));
     let revision = u64::try_from(row.revision).map_err(|_| Error::InvalidStored("revision"))?;
     Ok(PairConfig::from_stored(id, revision, draft)?)
 }
@@ -390,6 +401,7 @@ mod tests {
                 extended_attributes: SYNC_CATEGORY.into(),
                 permissions: IGNORE_CATEGORY.into(),
                 durability: STANDARD_DURABILITY.into(),
+                schedule_minutes: None,
             })
             .unwrap();
         drop(database);
@@ -414,6 +426,7 @@ mod tests {
                 extended_attributes: SYNC_CATEGORY.into(),
                 permissions: IGNORE_CATEGORY.into(),
                 durability: STANDARD_DURABILITY.into(),
+                schedule_minutes: None,
             })
             .unwrap();
         let id = PairId::from_bytes(row.id.try_into().unwrap()).unwrap();
@@ -500,7 +513,8 @@ mod tests {
         let options = PairOptions::new(
             MetadataPolicy::new(Propagation::Ignore, Propagation::Sync, Propagation::Sync),
             Durability::Full,
-        );
+        )
+        .with_schedule(Schedule::Every(ScheduleInterval::from_minutes(15).unwrap()));
         let pair = store
             .create(&draft(SyncMode::Sync).with_options(options))
             .unwrap();

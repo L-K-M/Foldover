@@ -14,10 +14,10 @@ const PERMISSION_BITS: u32 = 0o777;
 const DATABASE_NAME: &str = "state.db";
 const WRITER_LOCK: &str = "writer.lock";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability";
+const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule_minutes";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 4] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4];
+const MIGRATIONS: [&str; 5] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -55,6 +55,10 @@ ALTER TABLE pair ADD COLUMN durability TEXT NOT NULL DEFAULT 'standard' CHECK(du
 const SCHEMA_V4: &str = "
 ALTER TABLE pair ADD COLUMN left_identity BLOB CHECK(left_identity IS NULL OR length(left_identity) = 16);
 ALTER TABLE pair ADD COLUMN right_identity BLOB CHECK(right_identity IS NULL OR length(right_identity) = 16);
+";
+// Unattended sync interval in minutes; NULL syncs only when asked.
+const SCHEMA_V5: &str = "
+ALTER TABLE pair ADD COLUMN schedule_minutes INTEGER CHECK(schedule_minutes IS NULL OR schedule_minutes BETWEEN 1 AND 10080);
 ";
 
 #[derive(Debug, thiserror::Error)]
@@ -153,6 +157,7 @@ pub struct PairValues {
     pub extended_attributes: String,
     pub permissions: String,
     pub durability: String,
+    pub schedule_minutes: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -247,7 +252,7 @@ impl Database {
     pub fn create_pair(&mut self, values: &PairValues) -> Result<PairRow, Error> {
         let id = uuid::Uuid::new_v4().into_bytes();
         self.connection.execute(
-            "INSERT INTO pair (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability) VALUES (?1,1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            "INSERT INTO pair (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,schedule_minutes) VALUES (?1,1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             params![
                 id.as_slice(),
                 values.name,
@@ -257,7 +262,8 @@ impl Database {
                 values.modification_times,
                 values.extended_attributes,
                 values.permissions,
-                values.durability
+                values.durability,
+                values.schedule_minutes
             ],
         )?;
         self.pair(&id)?
@@ -320,7 +326,7 @@ impl Database {
         )?;
         let changed = transaction.execute(
             // A changed root is a different endpoint; forget its identity.
-            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,left_identity=CASE WHEN left_root=?4 THEN left_identity END,right_identity=CASE WHEN right_root=?5 THEN right_identity END WHERE id=?1 AND revision=?2",
+            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,schedule_minutes=?11,left_identity=CASE WHEN left_root=?4 THEN left_identity END,right_identity=CASE WHEN right_root=?5 THEN right_identity END WHERE id=?1 AND revision=?2",
             params![
                 id,
                 revision,
@@ -331,7 +337,8 @@ impl Database {
                 values.modification_times,
                 values.extended_attributes,
                 values.permissions,
-                values.durability
+                values.durability,
+                values.schedule_minutes
             ],
         )?;
         if changed == 0 {
@@ -626,6 +633,7 @@ fn pair_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairRow> {
             extended_attributes: row.get(7)?,
             permissions: row.get(8)?,
             durability: row.get(9)?,
+            schedule_minutes: row.get(10)?,
         },
     })
 }
@@ -654,6 +662,7 @@ mod tests {
             extended_attributes: "sync".into(),
             permissions: "ignore".into(),
             durability: "standard".into(),
+            schedule_minutes: None,
         }
     }
 

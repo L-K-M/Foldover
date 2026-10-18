@@ -2,6 +2,7 @@
 //! `handle` request dispatch, validation and the event bus. Depends on
 //! foldover-engine. See PLAN.md §4.4.
 
+mod schedule;
 mod sync;
 
 use std::sync::{Arc, Mutex};
@@ -17,6 +18,7 @@ use foldover_proto::local::{
 use foldover_proto::local::{PAIR_REMOVE, PairRevision};
 use foldover_proto::local::{SYNC_CANCEL, SYNC_PREVIEW, SYNC_RUN, SYNC_STATUS, SyncKey, SyncRun};
 use foldover_types::{PairDraft, PairId};
+use schedule::Scheduler;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use sync::{Jobs, Work};
@@ -34,6 +36,7 @@ pub struct Service {
     engine: Arc<Mutex<Engine>>,
     commands: Arc<Semaphore>,
     jobs: Arc<Jobs>,
+    scheduler: Arc<Scheduler>,
 }
 
 impl Service {
@@ -46,6 +49,7 @@ impl Service {
             engine: Arc::new(Mutex::new(engine)),
             commands: Arc::new(Semaphore::new(1)),
             jobs: Arc::new(Jobs::default()),
+            scheduler: Arc::new(Scheduler::new(std::time::Instant::now())),
         }
     }
 
@@ -302,7 +306,7 @@ mod tests {
         let right = directory.join(format!("{name}-right"));
         fs::create_dir(&left).unwrap();
         fs::create_dir(&right).unwrap();
-        json!({"name":name, "left_root":left.as_os_str().as_bytes(), "right_root":right.as_os_str().as_bytes(), "mode":{"kind":"sync"}, "options":{"modification_times":"sync","extended_attributes":"sync","permissions":"ignore","durability":"standard"}})
+        json!({"name":name, "left_root":left.as_os_str().as_bytes(), "right_root":right.as_os_str().as_bytes(), "mode":{"kind":"sync"}, "options":{"modification_times":"sync","extended_attributes":"sync","permissions":"ignore","durability":"standard","schedule_minutes":null}})
     }
 
     #[tokio::test]
@@ -678,5 +682,40 @@ mod tests {
             .unwrap();
         let failed = settled(&service, &missing).await;
         assert_eq!(failed["state"], "failed");
+    }
+
+    #[tokio::test]
+    async fn scheduled_pairs_run_unattended_once_due_after_a_first_sync() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Notes");
+        input["options"]["schedule_minutes"] = json!(1);
+        let left = directory.path().join("Notes-left");
+        fs::write(left.join("a"), b"a").unwrap();
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        assert_eq!(created["configuration"]["options"]["schedule_minutes"], 1);
+        let key = json!({"id": created["id"]});
+        let start = service.scheduler.started();
+        let at = |seconds| start + std::time::Duration::from_secs(seconds);
+
+        // A first run is always reviewed by a person.
+        assert!(service.run_due(at(120)).is_empty());
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        assert_eq!(settled(&service, &key).await["result"]["copied"], 1);
+
+        fs::write(left.join("b"), b"b").unwrap();
+        assert!(service.run_due(at(30)).is_empty());
+        assert_eq!(service.run_due(at(61)).len(), 1);
+        let finished = settled(&service, &key).await;
+        assert_eq!(finished["result"]["copied"], 1, "{finished}");
+        assert!(service.run_due(at(90)).is_empty());
+        assert_eq!(service.run_due(at(122)).len(), 1);
+        settled(&service, &key).await;
     }
 }

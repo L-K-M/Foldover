@@ -34,6 +34,22 @@ final class PairEditorViewModel: Identifiable {
     var title: String { editing == nil ? String(localized: "New Pair") : String(localized: "Edit Pair") }
     var canSave: Bool { !isSaving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && left != nil && right != nil }
 
+    /// Fixed choices, plus a stored interval set elsewhere (e.g. the CLI).
+    var scheduleChoices: [UInt32?] {
+        var choices: [UInt32?] = [nil, 5, 15, 60, 24 * 60]
+        if let current = options.scheduleMinutes, !choices.contains(current) { choices.append(current) }
+        return choices
+    }
+
+    static func scheduleTitle(_ minutes: UInt32?) -> String {
+        switch minutes {
+        case nil: String(localized: "Only when I click Sync Now")
+        case 60: String(localized: "Every hour")
+        case 1440: String(localized: "Every day")
+        case let minutes?: String(localized: "Every \(minutes) minutes")
+        }
+    }
+
     /// Versions depend on synced metadata, so changing it resets sync history.
     var resetsSyncHistory: Bool {
         guard let editing else { return false }

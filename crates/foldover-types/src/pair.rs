@@ -164,6 +164,7 @@ pub enum InvalidPair {
     Root,
     IdenticalRoots,
     Revision,
+    Schedule,
 }
 
 impl fmt::Display for InvalidPair {
@@ -174,6 +175,7 @@ impl fmt::Display for InvalidPair {
             Self::Root => "Local root must be absolute, without NUL bytes, and at most 4096 bytes",
             Self::IdenticalRoots => "A pair needs two different selected roots",
             Self::Revision => "Pair revision is outside the supported range",
+            Self::Schedule => "A sync interval must be from 1 minute to 1 week",
         })
     }
 }

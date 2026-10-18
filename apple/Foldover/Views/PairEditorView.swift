@@ -36,6 +36,15 @@ struct PairEditorView: View {
                             .font(.callout).foregroundStyle(.orange)
                     }
                 }
+                Section("Schedule") {
+                    Picker("Sync automatically", selection: $viewModel.options.scheduleMinutes) {
+                        ForEach(viewModel.scheduleChoices, id: \.self) { minutes in
+                            Text(PairEditorViewModel.scheduleTitle(minutes)).tag(minutes)
+                        }
+                    }
+                    Text("Automatic syncs start after the first sync you run yourself. They stop instead of asking when they would archive many items.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
                 Section("Durability") {
                     Picker("Write safety", selection: $viewModel.options.durability) {
                         ForEach(PairDurability.allCases, id: \.self) { durability in

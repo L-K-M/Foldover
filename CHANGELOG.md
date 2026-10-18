@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Automatic sync on an interval, set per pair in the app or with
+  `--schedule`; it starts after the first manual sync and stops instead of
+  asking when deletions need approval.
 - 30-day archive retention: archive folders are named by run start time,
   and runs older than 30 days are deleted after each completed sync.
 - Preview and Sync Now in the app, with the change list, results, cancellation

@@ -135,6 +135,8 @@ pub struct LocalPairOptions {
     pub extended_attributes: MetadataSync,
     pub permissions: MetadataSync,
     pub durability: WriteDurability,
+    /// Unattended sync interval; `None` syncs only when asked.
+    pub schedule_minutes: Option<u32>,
 }
 
 impl From<foldover_client::Propagation> for MetadataSync {
@@ -166,13 +168,25 @@ impl From<foldover_client::PairOptions> for LocalPairOptions {
                 foldover_client::Durability::Standard => WriteDurability::Standard,
                 foldover_client::Durability::Full => WriteDurability::Full,
             },
+            schedule_minutes: match options.schedule() {
+                foldover_client::Schedule::Manual => None,
+                foldover_client::Schedule::Every(interval) => Some(interval.minutes()),
+            },
         }
     }
 }
 
-impl From<LocalPairOptions> for foldover_client::PairOptions {
-    fn from(options: LocalPairOptions) -> Self {
-        Self::new(
+impl TryFrom<LocalPairOptions> for foldover_client::PairOptions {
+    type Error = foldover_client::InvalidPair;
+
+    fn try_from(options: LocalPairOptions) -> Result<Self, Self::Error> {
+        let schedule = match options.schedule_minutes {
+            None => foldover_client::Schedule::Manual,
+            Some(minutes) => foldover_client::Schedule::Every(
+                foldover_client::ScheduleInterval::from_minutes(minutes)?,
+            ),
+        };
+        Ok(Self::new(
             foldover_client::MetadataPolicy::new(
                 options.modification_times.into(),
                 options.extended_attributes.into(),
@@ -183,6 +197,7 @@ impl From<LocalPairOptions> for foldover_client::PairOptions {
                 WriteDurability::Full => foldover_client::Durability::Full,
             },
         )
+        .with_schedule(schedule))
     }
 }
 
@@ -223,7 +238,7 @@ impl TryFrom<LocalPairDraft> for foldover_client::PairDraft {
             foldover_client::LocalRoot::from_bytes(draft.right_root)?,
             draft.mode.into(),
         )?
-        .with_options(draft.options.into()))
+        .with_options(draft.options.try_into()?))
     }
 }
 
@@ -339,6 +354,7 @@ mod tests {
                     extended_attributes: MetadataSync::Sync,
                     permissions: MetadataSync::Sync,
                     durability: WriteDurability::Full,
+                    schedule_minutes: Some(60),
                 },
             };
             let domain = foldover_client::PairDraft::try_from(draft.clone()).unwrap();

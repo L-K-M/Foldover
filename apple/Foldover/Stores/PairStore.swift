@@ -26,6 +26,8 @@ struct PairOptions: Equatable, Sendable {
     var syncExtendedAttributes: Bool
     var syncPermissions: Bool
     var durability: PairDurability
+    /// Minutes between unattended syncs; nil syncs only when asked.
+    var scheduleMinutes: UInt32?
 
     /// The engine's defaults, so the app never restates them.
     static var defaults: PairOptions { pairOptions(FoldoverCore.defaultPairOptions()) }
@@ -130,27 +132,31 @@ private actor CorePairClient: PairClient {
 }
 
 private func pairOptions(_ options: LocalPairOptions) -> PairOptions {
-    PairOptions(
+    let durability: PairDurability = switch options.durability {
+    case .standard: .standard
+    case .full: .full
+    }
+    return PairOptions(
         syncModificationTimes: options.modificationTimes == .sync,
         syncExtendedAttributes: options.extendedAttributes == .sync,
         syncPermissions: options.permissions == .sync,
-        durability: switch options.durability {
-        case .standard: .standard
-        case .full: .full
-        }
+        durability: durability,
+        scheduleMinutes: options.scheduleMinutes
     )
 }
 
 private func corePairOptions(_ options: PairOptions) -> LocalPairOptions {
     func metadata(_ syncs: Bool) -> MetadataSync { syncs ? .sync : .ignore }
+    let durability: WriteDurability = switch options.durability {
+    case .standard: .standard
+    case .full: .full
+    }
     return LocalPairOptions(
         modificationTimes: metadata(options.syncModificationTimes),
         extendedAttributes: metadata(options.syncExtendedAttributes),
         permissions: metadata(options.syncPermissions),
-        durability: switch options.durability {
-        case .standard: .standard
-        case .full: .full
-        }
+        durability: durability,
+        scheduleMinutes: options.scheduleMinutes
     )
 }
 

@@ -1,6 +1,6 @@
 use foldover_types::{
     Durability, InvalidPair, LocalRoot, MetadataPolicy, PairConfig, PairDraft, PairOptions,
-    Propagation, Side, SyncMode,
+    Propagation, Schedule, ScheduleInterval, Side, SyncMode,
 };
 use serde::{Deserialize, Serialize};
 
@@ -94,6 +94,8 @@ pub struct PairSettings {
     pub extended_attributes: PairPropagation,
     pub permissions: PairPropagation,
     pub durability: PairDurability,
+    /// Unattended sync interval; `None` syncs only when asked.
+    pub schedule_minutes: Option<u32>,
 }
 
 impl From<Propagation> for PairPropagation {
@@ -125,13 +127,23 @@ impl From<PairOptions> for PairSettings {
                 Durability::Standard => PairDurability::Standard,
                 Durability::Full => PairDurability::Full,
             },
+            schedule_minutes: match options.schedule() {
+                Schedule::Manual => None,
+                Schedule::Every(interval) => Some(interval.minutes()),
+            },
         }
     }
 }
 
-impl From<PairSettings> for PairOptions {
-    fn from(settings: PairSettings) -> Self {
-        Self::new(
+impl TryFrom<PairSettings> for PairOptions {
+    type Error = InvalidPair;
+
+    fn try_from(settings: PairSettings) -> Result<Self, Self::Error> {
+        let schedule = match settings.schedule_minutes {
+            None => Schedule::Manual,
+            Some(minutes) => Schedule::Every(ScheduleInterval::from_minutes(minutes)?),
+        };
+        Ok(Self::new(
             MetadataPolicy::new(
                 settings.modification_times.into(),
                 settings.extended_attributes.into(),
@@ -142,6 +154,7 @@ impl From<PairSettings> for PairOptions {
                 PairDurability::Full => Durability::Full,
             },
         )
+        .with_schedule(schedule))
     }
 }
 
@@ -177,7 +190,7 @@ impl TryFrom<PairInput> for PairDraft {
             LocalRoot::from_bytes(input.right_root)?,
             input.mode.into(),
         )?
-        .with_options(input.options.into()))
+        .with_options(input.options.try_into()?))
     }
 }
 
@@ -267,7 +280,8 @@ mod tests {
             let options = PairOptions::new(
                 MetadataPolicy::new(Propagation::Ignore, Propagation::Sync, Propagation::Sync),
                 Durability::Full,
-            );
+            )
+            .with_schedule(Schedule::Every(ScheduleInterval::from_minutes(30).unwrap()));
             let draft = PairDraft::new(
                 "Photos".into(),
                 LocalRoot::from_bytes(b"/a/\xff".to_vec()).unwrap(),

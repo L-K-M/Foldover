@@ -4,7 +4,7 @@
 use foldover_client::SyncStatus;
 use foldover_client::{
     Durability, LocalRoot, MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions, Propagation,
-    Side, SocketLocation, SyncMode,
+    Schedule, ScheduleInterval, Side, SocketLocation, SyncMode,
 };
 use foldover_proto::local::PairRecord;
 use std::env;
@@ -63,6 +63,7 @@ struct OptionChanges {
     extended_attributes: Option<Propagation>,
     permissions: Option<Propagation>,
     durability: Option<Durability>,
+    schedule: Option<Schedule>,
 }
 
 impl OptionChanges {
@@ -78,6 +79,7 @@ impl OptionChanges {
             ),
             self.durability.unwrap_or(base.durability()),
         )
+        .with_schedule(self.schedule.unwrap_or(base.schedule()))
     }
 }
 
@@ -114,7 +116,7 @@ async fn main() -> ExitCode {
         },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT] [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT] [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | MINUTES)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -228,6 +230,15 @@ fn option_changes(args: &[OsString]) -> Option<OptionChanges> {
                     "standard" => Durability::Standard,
                     "full" => Durability::Full,
                     _ => return None,
+                })
+                .is_some(),
+            "--schedule" => changes
+                .schedule
+                .replace(match value {
+                    "manual" => Schedule::Manual,
+                    minutes => {
+                        Schedule::Every(ScheduleInterval::from_minutes(minutes.parse().ok()?).ok()?)
+                    }
                 })
                 .is_some(),
             _ => return None,
@@ -412,6 +423,26 @@ mod tests {
                 "pairs", "add", "Photos", "/a", "/b", "sync", "--owner", "sync",
             ],
             vec![
+                "pairs",
+                "add",
+                "Photos",
+                "/a",
+                "/b",
+                "sync",
+                "--schedule",
+                "0",
+            ],
+            vec![
+                "pairs",
+                "add",
+                "Photos",
+                "/a",
+                "/b",
+                "sync",
+                "--schedule",
+                "often",
+            ],
+            vec![
                 "pairs", "add", "Photos", "/a", "/b", "sync", "--times", "sync", "--times",
                 "ignore",
             ],
@@ -463,6 +494,8 @@ mod tests {
             "sync",
             "--durability",
             "full",
+            "--schedule",
+            "15",
             "--socket",
             "/tmp/s",
         ]) else {
@@ -470,6 +503,10 @@ mod tests {
         };
         let defaults = PairOptions::default();
         assert_eq!(draft.options().durability(), Durability::Full);
+        assert_eq!(
+            draft.options().schedule(),
+            Schedule::Every(ScheduleInterval::from_minutes(15).unwrap())
+        );
         assert_eq!(draft.options().metadata().permissions(), Propagation::Sync);
         assert_eq!(
             draft.options().metadata().modification_times(),

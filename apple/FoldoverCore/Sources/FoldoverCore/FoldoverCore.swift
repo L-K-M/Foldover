@@ -465,6 +465,22 @@ fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
+    typealias FfiType = UInt32
+    typealias SwiftType = UInt32
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt32 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
     typealias FfiType = UInt64
     typealias SwiftType = UInt64
@@ -750,14 +766,22 @@ public struct LocalPairOptions: Equatable, Hashable {
     public var extendedAttributes: MetadataSync
     public var permissions: MetadataSync
     public var durability: WriteDurability
+    /**
+     * Unattended sync interval; `None` syncs only when asked.
+     */
+    public var scheduleMinutes: UInt32?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(modificationTimes: MetadataSync, extendedAttributes: MetadataSync, permissions: MetadataSync, durability: WriteDurability) {
+    public init(modificationTimes: MetadataSync, extendedAttributes: MetadataSync, permissions: MetadataSync, durability: WriteDurability, 
+        /**
+         * Unattended sync interval; `None` syncs only when asked.
+         */scheduleMinutes: UInt32?) {
         self.modificationTimes = modificationTimes
         self.extendedAttributes = extendedAttributes
         self.permissions = permissions
         self.durability = durability
+        self.scheduleMinutes = scheduleMinutes
     }
 
     
@@ -779,7 +803,8 @@ public struct FfiConverterTypeLocalPairOptions: FfiConverterRustBuffer {
                 modificationTimes: FfiConverterTypeMetadataSync.read(from: &buf), 
                 extendedAttributes: FfiConverterTypeMetadataSync.read(from: &buf), 
                 permissions: FfiConverterTypeMetadataSync.read(from: &buf), 
-                durability: FfiConverterTypeWriteDurability.read(from: &buf)
+                durability: FfiConverterTypeWriteDurability.read(from: &buf), 
+                scheduleMinutes: FfiConverterOptionUInt32.read(from: &buf)
         )
     }
 
@@ -788,6 +813,7 @@ public struct FfiConverterTypeLocalPairOptions: FfiConverterRustBuffer {
         FfiConverterTypeMetadataSync.write(value.extendedAttributes, into: &buf)
         FfiConverterTypeMetadataSync.write(value.permissions, into: &buf)
         FfiConverterTypeWriteDurability.write(value.durability, into: &buf)
+        FfiConverterOptionUInt32.write(value.scheduleMinutes, into: &buf)
     }
 }
 
@@ -2019,6 +2045,30 @@ public func FfiConverterTypeWriteDurability_lower(_ value: WriteDurability) -> R
     return FfiConverterTypeWriteDurability.lower(value)
 }
 
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = UInt32?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt32.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt32.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
