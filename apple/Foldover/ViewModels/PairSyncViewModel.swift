@@ -104,10 +104,46 @@ struct PairSyncViewModel {
         return String(localized: "Archive \(preview.a.deletions) items in \(Self.folderName(.a)) and \(preview.b.deletions) in \(Self.folderName(.b))? Archived items stay in .foldover/archive for 30 days.")
     }
 
+    /// The kind of changes listed; nil lists all.
+    var changeFilter: ChangeFilter? { store.listing(for: pair.id)?.filter }
+    var showsChangeFilter: Bool {
+        switch state {
+        case .previewed(let preview), .needsApproval(let preview): preview.total > 0
+        default: false
+        }
+    }
+    var canLoadMoreChanges: Bool { store.listing(for: pair.id)?.more ?? (hiddenRowsText != nil && isPreview) }
+
+    private var isPreview: Bool {
+        switch state {
+        case .previewed, .needsApproval: true
+        default: false
+        }
+    }
+
+    func showChanges(_ filter: ChangeFilter?) async { await store.showChanges(pair.id, filter: filter) }
+
+    func loadMoreChanges() async {
+        if store.listing(for: pair.id) == nil {
+            await store.showChanges(pair.id, filter: nil)
+        }
+        await store.loadMoreChanges(pair.id)
+    }
+
+    static func title(_ filter: ChangeFilter?) -> String {
+        switch filter {
+        case nil: String(localized: "All")
+        case .copies: String(localized: "Copies")
+        case .updates: String(localized: "Updates")
+        case .archives: String(localized: "Archives")
+        case .conflicts: String(localized: "Conflicts")
+        }
+    }
+
     var rows: [ChangeRow] {
         switch state {
         case .previewed(let preview), .needsApproval(let preview):
-            preview.changes.enumerated().map { index, change in
+            (store.listing(for: pair.id)?.changes ?? preview.changes).enumerated().map { index, change in
                 ChangeRow(id: index, path: Self.pathText(change.path),
                           description: Self.description(change),
                           resolvable: Self.resolvable(change.action) ? change.path : nil,
@@ -126,6 +162,9 @@ struct PairSyncViewModel {
 
     /// Rows not shown because responses carry only the first changes.
     var hiddenRowsText: String? {
+        if let listing = store.listing(for: pair.id) {
+            return listing.more ? String(localized: "More changes follow") : nil
+        }
         let hidden: UInt64 = switch state {
         case .previewed(let preview), .needsApproval(let preview): preview.total - UInt64(preview.changes.count)
         case .finished(let result): result.failureCount - UInt64(result.failures.count)

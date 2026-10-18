@@ -8,6 +8,7 @@ pub const SYNC_RUN: &str = "sync.run";
 pub const SYNC_STATUS: &str = "sync.status";
 pub const SYNC_CANCEL: &str = "sync.cancel";
 pub const SYNC_RESOLVE: &str = "sync.resolve";
+pub const SYNC_ITEMS: &str = "sync.items";
 /// Items per response. Even maximum-length paths, as byte arrays, keep a
 /// status below the 1 MiB IPC frame limit.
 pub const SYNC_ITEM_LIMIT: usize = 100;
@@ -95,6 +96,47 @@ pub struct SyncItem {
     pub action: SyncAction,
     /// File data the item copies; 0 for everything else.
     pub bytes: u64,
+}
+
+/// What an item does, for listing one kind at a time.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SyncItemKind {
+    Copy,
+    Update,
+    Archive,
+    Conflict,
+    Blocked,
+    Keep,
+}
+
+impl SyncItemKind {
+    pub fn of(action: &SyncAction) -> Self {
+        match action {
+            SyncAction::Copy { .. } => Self::Copy,
+            SyncAction::Update { .. } => Self::Update,
+            SyncAction::Archive { .. } => Self::Archive,
+            SyncAction::Conflict { .. } => Self::Conflict,
+            SyncAction::Blocked => Self::Blocked,
+            SyncAction::Keep => Self::Keep,
+        }
+    }
+}
+
+/// A page of the latest preview's items, in path order after `after`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncItemQuery {
+    pub id: String,
+    pub after: Option<Vec<u8>>,
+    pub kind: Option<SyncItemKind>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncItemPage {
+    pub items: Vec<SyncItem>,
+    pub more: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

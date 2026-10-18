@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Every previewed change can be listed, 100 at a time, and filtered to
+  copies, updates, archives or conflicts.
 - Skip large files: a size limit per pair, in the editor and as
   `--max-size MEGABYTES`; a file over it in either folder is skipped in both.
 - First-run guide: turn on the agent, create a pair, preview and sync.

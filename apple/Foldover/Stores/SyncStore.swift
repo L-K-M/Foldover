@@ -71,6 +71,28 @@ struct RunSummary: Equatable, Sendable {
     let archive: String
 }
 
+/// Which planned changes to list.
+enum ChangeFilter: CaseIterable, Hashable, Sendable {
+    case copies
+    case updates
+    case archives
+    case conflicts
+}
+
+struct ChangePage: Equatable, Sendable {
+    /// In path order.
+    let changes: [PlannedChange]
+    let more: Bool
+}
+
+/// The changes listed for a pair's latest preview, beyond the first page
+/// its status carries.
+struct ChangeListing: Equatable, Sendable {
+    let filter: ChangeFilter?
+    var changes: [PlannedChange]
+    var more: Bool
+}
+
 enum RunTrigger: Sendable {
     case manual
     case scheduled
@@ -125,6 +147,8 @@ protocol SyncClient: Sendable {
     func keepBoth(_ id: String, path: Data) async throws -> PairSyncState
     /// Finished runs, newest first.
     func history(_ id: String) async throws -> [RunRecord]
+    /// A page of the latest preview's changes after `after`.
+    func changes(_ id: String, after: Data?, filter: ChangeFilter?) async throws -> ChangePage
 }
 
 // Keep generated async values inside one actor; only native Sendable records leave it.
@@ -153,6 +177,21 @@ private actor CoreSyncClient: SyncClient {
 
     func keepBoth(_ id: String, path: Data) async throws -> PairSyncState {
         state(try await FoldoverCore.syncKeepBoth(id: id, path: path))
+    }
+
+    func changes(_ id: String, after: Data?, filter: ChangeFilter?) async throws -> ChangePage {
+        let core: SyncChangeFilter? = switch filter {
+        case .copies: .copy
+        case .updates: .update
+        case .archives: .archive
+        case .conflicts: .conflict
+        case nil: nil
+        }
+        let page = try await FoldoverCore.syncChanges(id: id, after: after, filter: core)
+        return ChangePage(
+            changes: page.changes.map { PlannedChange(path: $0.path, action: action($0.kind), bytes: $0.bytes) },
+            more: page.more
+        )
     }
 
     func history(_ id: String) async throws -> [RunRecord] {
@@ -263,6 +302,7 @@ final class SyncStore {
     private(set) var states: [String: PairSyncState] = [:]
     private(set) var requestErrors: [String: String] = [:]
     private(set) var histories: [String: [RunRecord]] = [:]
+    private(set) var listings: [String: ChangeListing] = [:]
 
     init(client: any SyncClient = CoreSyncClient(), pollInterval: Duration = .milliseconds(500),
          alert: @escaping @MainActor (SyncAlert) async -> Void = SyncStore.postAlert) {
@@ -284,7 +324,7 @@ final class SyncStore {
         for pair in pairs where !polling.contains(pair.id) {
             let previous = states[pair.id]
             guard let state = try? await client.status(pair.id) else { continue }
-            states[pair.id] = state
+            update(pair.id, to: state)
             if previous != state { await refreshHistory(pair.id) }
             guard let previous, previous != state, let alert = Self.alert(for: pair, state: state) else {
                 continue
@@ -312,6 +352,39 @@ final class SyncStore {
     }
 
     func state(for id: String) -> PairSyncState { states[id] ?? .idle }
+    func listing(for id: String) -> ChangeListing? { listings[id] }
+
+    /// List the latest preview's changes of one kind, or all of them.
+    func showChanges(_ id: String, filter: ChangeFilter?) async {
+        await loadChanges(id, after: nil, filter: filter)
+    }
+
+    func loadMoreChanges(_ id: String) async {
+        guard let listing = listings[id], listing.more, let last = listing.changes.last else { return }
+        await loadChanges(id, after: last.path, filter: listing.filter)
+    }
+
+    private func loadChanges(_ id: String, after: Data?, filter: ChangeFilter?) async {
+        let state = states[id]
+        requestErrors[id] = nil
+        do {
+            let page = try await client.changes(id, after: after, filter: filter)
+            // A newer preview replaced the one this page belongs to.
+            guard states[id] == state else { return }
+            var listing = after == nil ? ChangeListing(filter: filter, changes: [], more: false) : listings[id]
+            listing?.changes += page.changes
+            listing?.more = page.more
+            listings[id] = listing
+        } catch {
+            requestErrors[id] = PairStore.message(for: error)
+        }
+    }
+
+    /// A new state starts a new change list.
+    private func update(_ id: String, to state: PairSyncState) {
+        if states[id] != state { listings[id] = nil }
+        states[id] = state
+    }
     func history(for id: String) -> [RunRecord] { histories[id] ?? [] }
     func requestError(for id: String) -> String? { requestErrors[id] }
 
@@ -376,13 +449,13 @@ final class SyncStore {
     /// Keep the reviewed changes visible after declining an approval.
     func declineApproval(_ id: String) {
         guard case .needsApproval(let preview) = states[id] else { return }
-        states[id] = .previewed(preview)
+        update(id, to: .previewed(preview))
     }
 
     private func perform(_ id: String, _ request: @Sendable () async throws -> PairSyncState) async {
         requestErrors[id] = nil
         do {
-            states[id] = try await request()
+            update(id, to: try await request())
         } catch {
             requestErrors[id] = PairStore.message(for: error)
             return
@@ -398,7 +471,7 @@ final class SyncStore {
         while case .working = states[id] {
             try? await Task.sleep(for: pollInterval)
             do {
-                states[id] = try await client.status(id)
+                update(id, to: try await client.status(id))
             } catch {
                 requestErrors[id] = PairStore.message(for: error)
                 return

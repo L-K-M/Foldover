@@ -16,13 +16,13 @@ use std::time::SystemTime;
 
 use foldover_engine::{
     Action, Approval, Commit, Completion, DeletionReview, Engine, KeepBothError, PairRun, Preview,
-    RunContext, RunError, RunOutcome, RunReport,
+    PreviewItem, RunContext, RunError, RunOutcome, RunReport,
 };
 use foldover_proto::local::RpcError;
 use foldover_proto::local::{
     INTERNAL_ERROR, INVALID_PARAMS, PREVIEW_REQUIRED, ROOT_UNAVAILABLE, SYNC_BUSY, SYNC_ITEM_LIMIT,
-    SyncAction, SyncConflict, SyncCounts, SyncDeletions, SyncFailure, SyncItem, SyncJob,
-    SyncPreview, SyncResult, SyncStatus,
+    SyncAction, SyncConflict, SyncCounts, SyncDeletions, SyncFailure, SyncItem, SyncItemKind,
+    SyncItemPage, SyncJob, SyncPreview, SyncResult, SyncStatus,
 };
 use foldover_types::{
     ChangeKind, ConflictKind, EntryVersion, PairId, Resolution, ScanControl, Side, SyncPath,
@@ -48,13 +48,15 @@ impl Work {
 /// Each side's version of a conflicted path; `None` when absent.
 type ConflictVersions = (Option<EntryVersion>, Option<EntryVersion>);
 
-/// Conflict versions from a pair's latest preview; choices bind to them.
-struct Conflicts {
+/// A pair's latest preview: every item, for paging, and the conflict
+/// versions that choices bind to.
+struct Previewed {
     revision: u64,
     versions: HashMap<SyncPath, (ConflictKind, ConflictVersions)>,
+    items: Vec<SyncItem>,
 }
 
-impl Conflicts {
+impl Previewed {
     fn from(preview: &Preview) -> Self {
         Self {
             revision: preview.revision(),
@@ -66,6 +68,7 @@ impl Conflicts {
                     _ => None,
                 })
                 .collect(),
+            items: preview.items().iter().map(wire_item).collect(),
         }
     }
 }
@@ -73,7 +76,7 @@ impl Conflicts {
 struct Job {
     status: SyncStatus,
     cancel: Arc<AtomicBool>,
-    conflicts: Option<Conflicts>,
+    previewed: Option<Previewed>,
 }
 
 #[derive(Default)]
@@ -161,9 +164,38 @@ impl Jobs {
                 "Wait for the current preview or sync to finish",
             ));
         }
-        let conflicts = job.conflicts.as_ref().ok_or_else(stale)?;
-        let (kind, versions) = *conflicts.versions.get(path).ok_or_else(stale)?;
-        Ok((conflicts.revision, kind, versions))
+        let previewed = job.previewed.as_ref().ok_or_else(stale)?;
+        let (kind, versions) = *previewed.versions.get(path).ok_or_else(stale)?;
+        Ok((previewed.revision, kind, versions))
+    }
+
+    /// A page of the latest preview's items after `after`, optionally of
+    /// one kind.
+    pub(crate) fn items(
+        &self,
+        id: PairId,
+        after: Option<&[u8]>,
+        kind: Option<SyncItemKind>,
+    ) -> Result<SyncItemPage, RpcError> {
+        let jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
+        let previewed = jobs
+            .get(&id)
+            .and_then(|job| job.previewed.as_ref())
+            .ok_or_else(|| RpcError::new(PREVIEW_REQUIRED, "Preview the pair first"))?;
+        // Items are in path order, so the cursor is a binary search.
+        let start = after.map_or(0, |after| {
+            previewed
+                .items
+                .partition_point(|item| item.path.as_slice() <= after)
+        });
+        let mut matching = previewed.items[start..]
+            .iter()
+            .filter(|item| kind.is_none_or(|kind| kind == SyncItemKind::of(&item.action)));
+        let items: Vec<_> = matching.by_ref().take(SYNC_ITEM_LIMIT).cloned().collect();
+        Ok(SyncItemPage {
+            items,
+            more: matching.next().is_some(),
+        })
     }
 
     /// Show that an unattended run waits for a missing folder. A working
@@ -180,7 +212,7 @@ impl Jobs {
                     Job {
                         status: waiting,
                         cancel: Arc::new(AtomicBool::new(false)),
-                        conflicts: None,
+                        previewed: None,
                     },
                 );
             }
@@ -221,7 +253,7 @@ impl Jobs {
                         cancelling: false,
                     },
                     cancel: Arc::clone(&cancel),
-                    conflicts: None,
+                    previewed: None,
                 },
             );
         }
@@ -229,12 +261,12 @@ impl Jobs {
         let engine = Arc::clone(engine);
         tokio::task::spawn_blocking(move || {
             let started = SystemTime::now();
-            let (status, conflicts) = perform(&engine, id, work, &cancel);
+            let (status, previewed) = perform(&engine, id, work, &cancel);
             crate::history::record(&engine, id, work, started, &status);
             let mut jobs = jobs.jobs.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(job) = jobs.get_mut(&id) {
                 job.status = status;
-                job.conflicts = conflicts;
+                job.previewed = previewed;
             }
         });
         Ok(self.status(id))
@@ -246,7 +278,7 @@ fn perform(
     id: PairId,
     work: Work,
     cancel: &AtomicBool,
-) -> (SyncStatus, Option<Conflicts>) {
+) -> (SyncStatus, Option<Previewed>) {
     let failed = |message: String| (SyncStatus::Failed { message }, None);
     let inputs = match engine.lock() {
         Ok(engine) => engine.run_inputs(id),
@@ -283,7 +315,7 @@ fn perform(
             let status = SyncStatus::Previewed {
                 preview: preview(&planned),
             };
-            return (status, Some(Conflicts::from(&planned)));
+            return (status, Some(Previewed::from(&planned)));
         }
         Work::Run(approval) => (approval, RunContext::Interactive),
         Work::Scheduled => (Approval::default(), RunContext::Unattended),
@@ -313,7 +345,7 @@ fn perform(
             SyncStatus::NeedsApproval {
                 preview: preview(&planned),
             },
-            Some(Conflicts::from(&planned)),
+            Some(Previewed::from(&planned)),
         ),
         Err(error) => failed(error.to_string()),
     }
@@ -334,11 +366,7 @@ fn preview(preview: &Preview) -> SyncPreview {
             SyncAction::Keep => counts.kept += 1,
         }
         if items.len() < SYNC_ITEM_LIMIT {
-            items.push(SyncItem {
-                path: item.path().as_bytes().to_vec(),
-                action,
-                bytes: item.bytes(),
-            });
+            items.push(wire_item(item));
         }
     }
     let deletions = |side: Side| {
@@ -355,6 +383,14 @@ fn preview(preview: &Preview) -> SyncPreview {
         counts,
         left: deletions(Side::Left),
         right: deletions(Side::Right),
+    }
+}
+
+fn wire_item(item: &PreviewItem) -> SyncItem {
+    SyncItem {
+        path: item.path().as_bytes().to_vec(),
+        action: action(item.action()),
+        bytes: item.bytes(),
     }
 }
 
@@ -424,7 +460,7 @@ mod tests {
                     cancelling: false,
                 },
                 cancel,
-                conflicts: None,
+                previewed: None,
             },
         );
         assert_eq!(

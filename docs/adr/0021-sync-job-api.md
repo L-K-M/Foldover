@@ -23,12 +23,16 @@ Idle ─start─▶ Working ─▶ Previewed | NeedsApproval | Finished | Failed
 | `sync.run` | `id`, approved deletions per side | Start an interactive run |
 | `sync.status` | `id` | Current status; `idle` if none |
 | `sync.cancel` | `id` | Ask the job to stop at the next check |
+| `sync.items` | `id`, `after` path, optional `kind` | The next 100 items of the latest preview, in path order |
 
 - Starting a job while one is working fails with `SYNC_BUSY` (-32007).
 - Jobs bypass the configuration queue. They lock the engine only to read
   inputs and commit progress, so other requests stay responsive.
 - A status carries at most 100 items or failures, plus counts for all of
   them, so maximum-length paths stay below the 1 MiB frame limit.
+  `sync.items` pages through all of a preview's items, optionally of one
+  kind (`copy`, `update`, `archive`, `conflict`, `blocked`, `keep`); it
+  fails with `PREVIEW_REQUIRED` when the pair has no preview.
 - Results stay in agent memory until the pair's next job; an agent restart
   forgets them.
 - `daemon.status` reports the `sync` capability.

@@ -48,6 +48,9 @@ private struct FinishingSyncClient: SyncClient {
     func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState { .idle }
     func keepBoth(_ id: String, path: Data) async throws -> PairSyncState { .idle }
     func history(_ id: String) async throws -> [RunRecord] { [] }
+    func changes(_ id: String, after: Data?, filter: ChangeFilter?) async throws -> ChangePage {
+        ChangePage(changes: [], more: false)
+    }
 }
 
 @MainActor

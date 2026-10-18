@@ -24,6 +24,18 @@ struct PairSyncView: View {
             if let error = viewModel.requestError {
                 Text(error).foregroundStyle(.red)
             }
+            if viewModel.showsChangeFilter {
+                Picker("Show", selection: Binding(
+                    get: { viewModel.changeFilter }, set: { filter in Task { await viewModel.showChanges(filter) } }
+                )) {
+                    Text(PairSyncViewModel.title(nil)).tag(ChangeFilter?.none)
+                    ForEach(ChangeFilter.allCases, id: \.self) { filter in
+                        Text(PairSyncViewModel.title(filter)).tag(ChangeFilter?.some(filter))
+                    }
+                }
+                .pickerStyle(.segmented)
+                .fixedSize()
+            }
             if !viewModel.rows.isEmpty {
                 List(viewModel.rows) { row in
                     HStack {
@@ -54,7 +66,12 @@ struct PairSyncView: View {
                 }
                 .frame(minHeight: 160)
                 if let hidden = viewModel.hiddenRowsText {
-                    Text(hidden).font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        Text(hidden).font(.caption).foregroundStyle(.secondary)
+                        if viewModel.canLoadMoreChanges {
+                            Button("Show More") { Task { await viewModel.loadMoreChanges() } }
+                        }
+                    }
                 }
             }
             if let note = viewModel.archiveNote {

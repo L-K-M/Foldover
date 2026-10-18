@@ -1317,6 +1317,66 @@ public func FfiConverterTypeSyncChange_lower(_ value: SyncChange) -> RustBuffer 
 }
 
 
+public struct SyncChangePage: Equatable, Hashable {
+    /**
+     * In path order.
+     */
+    public var changes: [SyncChange]
+    public var more: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * In path order.
+         */changes: [SyncChange], more: Bool) {
+        self.changes = changes
+        self.more = more
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SyncChangePage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSyncChangePage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SyncChangePage {
+        return
+            try SyncChangePage(
+                changes: FfiConverterSequenceTypeSyncChange.read(from: &buf), 
+                more: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SyncChangePage, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeSyncChange.write(value.changes, into: &buf)
+        FfiConverterBool.write(value.more, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncChangePage_lift(_ buf: RustBuffer) throws -> SyncChangePage {
+    return try FfiConverterTypeSyncChangePage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncChangePage_lower(_ value: SyncChangePage) -> RustBuffer {
+    return FfiConverterTypeSyncChangePage.lower(value)
+}
+
+
 public struct SyncFailureItem: Equatable, Hashable {
     public var path: Data
     public var message: String
@@ -2161,6 +2221,103 @@ public func FfiConverterTypeRunTriggerKind_lower(_ value: RunTriggerKind) -> Rus
 
 
 
+/**
+ * What a change does, for listing one kind at a time.
+ */
+
+public enum SyncChangeFilter: Equatable, Hashable {
+    
+    case copy
+    case update
+    case archive
+    case conflict
+    case blocked
+    case keep
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SyncChangeFilter: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSyncChangeFilter: FfiConverterRustBuffer {
+    typealias SwiftType = SyncChangeFilter
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SyncChangeFilter {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .copy
+        
+        case 2: return .update
+        
+        case 3: return .archive
+        
+        case 4: return .conflict
+        
+        case 5: return .blocked
+        
+        case 6: return .keep
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SyncChangeFilter, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .copy:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .update:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .archive:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .conflict:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .blocked:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .keep:
+            writeInt(&buf, Int32(6))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncChangeFilter_lift(_ buf: RustBuffer) throws -> SyncChangeFilter {
+    return try FfiConverterTypeSyncChangeFilter.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncChangeFilter_lower(_ value: SyncChangeFilter) -> RustBuffer {
+    return FfiConverterTypeSyncChangeFilter.lower(value)
+}
+
+
+
 
 public enum SyncChangeKind: Equatable, Hashable {
     
@@ -2751,6 +2908,30 @@ fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeSyncChangeFilter: FfiConverterRustBuffer {
+    typealias SwiftType = SyncChangeFilter?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeSyncChangeFilter.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeSyncChangeFilter.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -3138,6 +3319,24 @@ public func syncCancel(id: String)async throws  -> SyncJobState  {
         )
 }
 /**
+ * A page of the latest preview's changes after `after`, the last path of
+ * the previous page; `filter` keeps one kind.
+ */
+public func syncChanges(id: String, after: Data?, filter: SyncChangeFilter?)async throws  -> SyncChangePage  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_sync_changes(FfiConverterString.lower(id),FfiConverterOptionData.lower(after),FfiConverterOptionTypeSyncChangeFilter.lower(filter)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeSyncChangePage_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+/**
  * Keep both versions of a both-changed conflict: Folder B's is saved
  * beside the entry and Folder A's wins at its path.
  */
@@ -3264,6 +3463,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_sync_cancel() != 20891) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_sync_changes() != 48334) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_sync_keep_both() != 39119) {

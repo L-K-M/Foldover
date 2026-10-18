@@ -20,6 +20,14 @@ private actor ScriptedSyncClient: SyncClient {
 
     func history(_ id: String) async throws -> [RunRecord] { runs }
 
+    /// Two pages of copies after the status's first page.
+    func changes(_ id: String, after: Data?, filter: ChangeFilter?) async throws -> ChangePage {
+        let all = (0..<4).map { PlannedChange(path: Data("p\($0)".utf8), action: .copy(to: .b)) }
+        let rest = all.filter { change in after.map { $0.lexicographicallyPrecedes(change.path) } ?? true }
+        let kept = filter == .archives ? [] : rest
+        return ChangePage(changes: Array(kept.prefix(2)), more: kept.count > 2)
+    }
+
     func keepBoth(_ id: String, path: Data) async throws -> PairSyncState {
         keptBoth.append(path)
         return next()
@@ -59,6 +67,9 @@ private struct UnreachableSyncClient: SyncClient {
         throw SyncFixtureError.unreachable
     }
     func history(_ id: String) async throws -> [RunRecord] { throw SyncFixtureError.unreachable }
+    func changes(_ id: String, after: Data?, filter: ChangeFilter?) async throws -> ChangePage {
+        throw SyncFixtureError.unreachable
+    }
     func keepBoth(_ id: String, path: Data) async throws -> PairSyncState {
         throw SyncFixtureError.unreachable
     }
@@ -325,4 +336,28 @@ func alwaysSkipAddsAFilterRuleThenPreviewsAgain() async throws {
     await viewModel.skipAlways(row)
     #expect(await pairs.saved.map(\.options.filters) == [["/photos/a.jpg"]])
     #expect(viewModel.requestError == nil)
+}
+
+@MainActor
+@Test
+func previewsListMoreChangesByKindAndResetOnTheNextPreview() async {
+    let summary = preview(archivesInA: 3, needsApproval: false)
+    let client = ScriptedSyncClient([.previewed(summary), .idle])
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
+    await viewModel.preview()
+    #expect(viewModel.showsChangeFilter)
+    #expect(viewModel.canLoadMoreChanges)
+
+    await viewModel.loadMoreChanges()
+    #expect(viewModel.rows.map(\.path) == ["p0", "p1", "p2", "p3"])
+    #expect(!viewModel.canLoadMoreChanges)
+    #expect(viewModel.hiddenRowsText == nil)
+
+    await viewModel.showChanges(.archives)
+    #expect(viewModel.changeFilter == .archives)
+    #expect(viewModel.rows.isEmpty)
+
+    await viewModel.refresh()
+    #expect(store.listing(for: pair().id) == nil)
 }

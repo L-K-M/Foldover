@@ -1,8 +1,8 @@
 //! Sync jobs for Swift: start a preview or run, then poll its state.
 
 use foldover_client::{
-    PairSide, SocketLocation, SyncAction, SyncConflict, SyncDeletions, SyncJob, SyncPreview,
-    SyncResult, SyncStatus,
+    PairSide, SocketLocation, SyncAction, SyncConflict, SyncDeletions, SyncItemKind, SyncItemPage,
+    SyncJob, SyncPreview, SyncResult, SyncStatus,
 };
 
 use crate::{AgentError, invalid_configuration};
@@ -152,6 +152,64 @@ pub async fn sync_resolve(
 ) -> Result<SyncJobState, AgentError> {
     let id = id.parse().map_err(invalid_configuration)?;
     state(foldover_client::resolve_conflict(&SocketLocation::Default, id, &path, keep.into()).await)
+}
+
+/// What a change does, for listing one kind at a time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum SyncChangeFilter {
+    Copy,
+    Update,
+    Archive,
+    Conflict,
+    Blocked,
+    Keep,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct SyncChangePage {
+    /// In path order.
+    pub changes: Vec<SyncChange>,
+    pub more: bool,
+}
+
+/// A page of the latest preview's changes after `after`, the last path of
+/// the previous page; `filter` keeps one kind.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn sync_changes(
+    id: String,
+    after: Option<Vec<u8>>,
+    filter: Option<SyncChangeFilter>,
+) -> Result<SyncChangePage, AgentError> {
+    let id = id.parse().map_err(invalid_configuration)?;
+    let kind = filter.map(|filter| match filter {
+        SyncChangeFilter::Copy => SyncItemKind::Copy,
+        SyncChangeFilter::Update => SyncItemKind::Update,
+        SyncChangeFilter::Archive => SyncItemKind::Archive,
+        SyncChangeFilter::Conflict => SyncItemKind::Conflict,
+        SyncChangeFilter::Blocked => SyncItemKind::Blocked,
+        SyncChangeFilter::Keep => SyncItemKind::Keep,
+    });
+    let page = foldover_client::sync_items(&SocketLocation::Default, id, after.as_deref(), kind)
+        .await
+        .map_err(AgentError::from)?;
+    Ok(page.into())
+}
+
+impl From<SyncItemPage> for SyncChangePage {
+    fn from(page: SyncItemPage) -> Self {
+        Self {
+            changes: page
+                .items
+                .into_iter()
+                .map(|item| SyncChange {
+                    path: item.path,
+                    kind: item.action.into(),
+                    bytes: item.bytes,
+                })
+                .collect(),
+            more: page.more,
+        }
+    }
 }
 
 /// Keep both versions of a both-changed conflict: Folder B's is saved

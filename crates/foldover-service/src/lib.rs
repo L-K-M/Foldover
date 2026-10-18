@@ -21,8 +21,8 @@ use foldover_proto::local::{
     VERSION_MISMATCH,
 };
 use foldover_proto::local::{
-    ConflictKeep, SYNC_CANCEL, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS, SyncKey,
-    SyncResolve, SyncRun,
+    ConflictKeep, SYNC_CANCEL, SYNC_ITEMS, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS,
+    SyncItemQuery, SyncKey, SyncResolve, SyncRun,
 };
 use foldover_types::{PairDraft, PairId, Side};
 use schedule::Scheduler;
@@ -69,6 +69,14 @@ impl Service {
             SYNC_PREVIEW | SYNC_RUN | SYNC_STATUS | SYNC_CANCEL | SYNC_RESOLVE
         ) {
             return self.sync(&request).await;
+        }
+        if request.method() == SYNC_ITEMS {
+            let params: SyncItemQuery = parameters(&request)?;
+            let id = params
+                .id
+                .parse::<PairId>()
+                .map_err(|error| RpcError::new(INVALID_PARAMS, error.to_string()))?;
+            return encode(self.jobs.items(id, params.after.as_deref(), params.kind)?);
         }
         if matches!(
             request.method(),
@@ -1073,5 +1081,70 @@ mod tests {
             assert_eq!(copies.len(), 1, "{copies:?}");
             assert_eq!(fs::read(folder.join(&copies[0])).unwrap(), b"right");
         }
+    }
+
+    #[tokio::test]
+    async fn every_previewed_item_can_be_paged_by_kind() {
+        let (directory, service) = fixture();
+        let created = service
+            .handle(Request::call(
+                1,
+                PAIR_CREATE,
+                Some(input(directory.path(), "Many")),
+            ))
+            .await
+            .unwrap();
+        let left = directory.path().join("Many-left");
+        for index in 0..150 {
+            fs::write(left.join(format!("file{index:03}")), b"x").unwrap();
+        }
+        let key = json!({"id": created["id"]});
+        let query =
+            |after: Value, kind: Value| json!({"id": created["id"], "after": after, "kind": kind});
+        assert_eq!(
+            service
+                .handle(Request::call(
+                    2,
+                    SYNC_ITEMS,
+                    Some(query(Value::Null, Value::Null))
+                ))
+                .await
+                .unwrap_err()
+                .code(),
+            foldover_proto::local::PREVIEW_REQUIRED
+        );
+        service
+            .handle(Request::call(3, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        settled(&service, &key).await;
+
+        let first = service
+            .handle(Request::call(
+                4,
+                SYNC_ITEMS,
+                Some(query(Value::Null, json!("copy"))),
+            ))
+            .await
+            .unwrap();
+        let items = first["items"].as_array().unwrap();
+        assert_eq!((items.len(), first["more"].clone()), (100, json!(true)));
+        let last = items[99]["path"].clone();
+        let rest = service
+            .handle(Request::call(5, SYNC_ITEMS, Some(query(last, Value::Null))))
+            .await
+            .unwrap();
+        assert_eq!(rest["items"].as_array().unwrap().len(), 50);
+        assert_eq!(rest["more"], false);
+        assert_eq!(rest["items"][49]["path"], json!(b"file149"));
+        let archives = service
+            .handle(Request::call(
+                6,
+                SYNC_ITEMS,
+                Some(query(Value::Null, json!("archive"))),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(archives, json!({"items": [], "more": false}));
     }
 }

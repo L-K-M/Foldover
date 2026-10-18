@@ -14,8 +14,8 @@ pub use foldover_proto::local::{
     SyncDeletions, SyncFailure, SyncItem, SyncJob, SyncPreview, SyncResult, SyncStatus,
 };
 use foldover_proto::local::{
-    ConflictKeep, SYNC_CANCEL, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS, SyncKey,
-    SyncResolve, SyncRun,
+    ConflictKeep, SYNC_CANCEL, SYNC_ITEMS, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS,
+    SyncItemQuery, SyncKey, SyncResolve, SyncRun,
 };
 use foldover_proto::local::{DAEMON_STATUS, Hello, PROTOCOL_VERSION, Request, SESSION_HELLO};
 use foldover_proto::local::{HISTORY_LIST, PAIR_REMOVE, PairRevision};
@@ -23,6 +23,7 @@ use foldover_proto::local::{
     PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_UPDATE, PairInput, PairKey, PairList,
     PairRecord, PairUpdate,
 };
+pub use foldover_proto::local::{SyncItemKind, SyncItemPage};
 pub use foldover_types::{
     Durability, Filters, InvalidPair, LocalRoot, MetadataPolicy, PairConfig, PairDraft, PairId,
     PairOptions, Propagation, Schedule, ScheduleInterval, Side, SyncMode,
@@ -82,6 +83,24 @@ pub async fn resolve_conflict(
     };
     Ok(serde_json::from_value(
         call(location, SYNC_RESOLVE, Some(serde_json::to_value(params)?)).await?,
+    )?)
+}
+
+/// A page of the latest preview's items after `after`, optionally of one
+/// kind.
+pub async fn sync_items(
+    location: &SocketLocation,
+    id: PairId,
+    after: Option<&[u8]>,
+    kind: Option<SyncItemKind>,
+) -> Result<SyncItemPage, Error> {
+    let params = SyncItemQuery {
+        id: id.to_string(),
+        after: after.map(<[u8]>::to_vec),
+        kind,
+    };
+    Ok(serde_json::from_value(
+        call(location, SYNC_ITEMS, Some(serde_json::to_value(params)?)).await?,
     )?)
 }
 
