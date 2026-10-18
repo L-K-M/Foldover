@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Native app icon from the supplied artwork, at every macOS asset size.
+- Keychain-backed peer identity loading, with stable certificate fingerprints,
+  exclusive creation and explicit storage failures; agent integration is pending.
+- Peer transport driver: pinned QUIC/TLS connections, six-digit pairing
+  codes and live-connection revocation. Mac-to-Mac sync integration is pending.
 - SFTP folders: either side of a pair can be `sftp://host/path`, reached
   with your SSH keys and configuration, with the same staging, archive and
   conflict rules as local folders.

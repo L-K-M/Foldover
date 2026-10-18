@@ -125,6 +125,76 @@ The six-digit pairing code comes from the commit-then-reveal exchange,
 never from the exporter or the fingerprints alone. Revoking a device
 also closes its open connections. The TOFU fallback is not needed.
 
+## Driver implementation
+
+`foldover-net::peer` ports the S9 transport into the workspace. Both TLS
+roles require pinned certificates in `PeerMode::Paired`; an explicit
+`PeerMode::Pairing` accepts an unpinned Ed25519 identity for code comparison.
+Both modes require a client certificate, TLS 1.3 and ALPN
+`foldover-peer-1`. Dialing checks the expected device ID in either mode.
+
+The code uses the same commit-then-reveal construction. Its exporter and
+hash labels are `foldover-pairing-code-v1` and
+`foldover-pairing-commit-v1`. Each exchange uses a dedicated stream and
+closes the connection on failure or after a 15-second deadline. Computing
+a code never pins a device; the caller must obtain confirmation on both
+devices. The pairing window and attempt limits belong to the future
+pairing service.
+
+The shared in-memory trust store tracks weak session handles. Revocation
+removes the pin and closes that device's live channels, including clones
+and open streams. Registration rechecks the pin under the same lock, so
+a handshake finishing after revocation cannot publish a paired channel.
+Stream handles retain their session even after all connection handles
+are dropped. Other devices' channels remain open. Application frames use
+a big-endian 32-bit byte length, bounded to 16 MiB on both reads and writes.
+Buffers grow as payload arrives. Connections allow four bidirectional
+streams and no unidirectional streams, bounding per-connection buffering.
+
+Loopback tests cover code agreement, pinned reconnects, both certificate
+verifier roles, missing client certificates, non-Ed25519 identities,
+incorrect advertised IDs, false commitments, timeouts, session-specific
+exporters, frame limits and truncation, and revocation of live channels.
+
+### Persistent local identity
+
+`foldover-endpoint::load_peer_identity` loads the local certificate and
+Ed25519 private key from a generic-password item in the user's default
+file Keychain. Its service is `ch.lkmc.foldover.peer-identity`, its account
+is `local-device`, and synchronization is disabled. The existing Keychain
+ACL and lock policy apply. File Keychains ignore per-query authentication-UI
+flags, which the first native locked-store test exposed by hanging. The OS
+driver serializes credential operations, temporarily disables Keychain UI
+for its process, and restores the previous setting on completion or unwind.
+Normal returns report restoration failures. Other Keychain access in this
+process must use the same driver boundary.
+
+The stored versioned binary record includes the original certificate DER
+and PKCS#8 key. Keeping only the key and issuing another certificate would
+change the device fingerprint. Restoration bounds the record to 16 KiB,
+requires Ed25519, and checks that the certificate and private key match.
+Temporary Rust record buffers are zeroized on drop.
+
+Only a missing item permits creation. `SecItemAdd` never replaces an
+existing item; the endpoint reads back and validates the winner before
+returning an identity. Locked, denied, malformed or unavailable storage
+fails explicitly, without generating a usable replacement. Other
+platforms report unsupported storage. Keychain calls are blocking and
+must run outside async runtime worker threads.
+
+Tests cover exact fingerprint restoration, corrupt and mismatched records,
+concurrent creators, read/write/read-back failures and pinned loopback
+reconnects after reloading both identities. Native tests use temporary
+Keychains to check reopen, exclusive creation, prompt-free locked-store
+failure and preservation of an already-disabled interaction policy.
+Installed-agent Keychain authorization across ad-hoc app updates remains
+an integration gate.
+
+Trust pins remain in memory. Discovery, persistent trust, folder
+authorization, peer wire messages, the endpoint backend and pairing UI
+remain P5 work. The agent does not load a peer identity or open a peer
+listener yet.
+
 ## Consequences
 
 - All criteria pass: PLAN.md §4.11 keeps quinn + rustls, the
