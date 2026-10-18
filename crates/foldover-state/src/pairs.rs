@@ -3,7 +3,8 @@ use std::os::unix::ffi::OsStrExt;
 
 use foldover_db::{BaseChange, Database, PairRow, PairValues, StateLocation};
 use foldover_types::{
-    BaselineEntry, InvalidPair, LocalRoot, PairConfig, PairDraft, PairId, Side, SyncMode, SyncPath,
+    BaselineEntry, Durability, InvalidPair, LocalRoot, MetadataPolicy, PairConfig, PairDraft,
+    PairId, PairOptions, Propagation, Side, SyncMode, SyncPath,
 };
 
 use crate::BaseUpdate;
@@ -14,6 +15,10 @@ const MIRROR_LEFT: &str = "mirror-left";
 const MIRROR_RIGHT: &str = "mirror-right";
 const BACKUP_LEFT: &str = "backup-left";
 const BACKUP_RIGHT: &str = "backup-right";
+const SYNC_CATEGORY: &str = "sync";
+const IGNORE_CATEGORY: &str = "ignore";
+const STANDARD_DURABILITY: &str = "standard";
+const FULL_DURABILITY: &str = "full";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -172,11 +177,36 @@ fn values(draft: &PairDraft) -> PairValues {
             source: Side::Right,
         } => BACKUP_RIGHT,
     };
+    let options = draft.options();
+    let metadata = options.metadata();
     PairValues {
         name: draft.name().to_owned(),
         left_root: draft.left().as_bytes().to_vec(),
         right_root: draft.right().as_bytes().to_vec(),
         mode: mode.to_owned(),
+        modification_times: propagation(metadata.modification_times()).to_owned(),
+        extended_attributes: propagation(metadata.extended_attributes()).to_owned(),
+        permissions: propagation(metadata.permissions()).to_owned(),
+        durability: match options.durability() {
+            Durability::Standard => STANDARD_DURABILITY,
+            Durability::Full => FULL_DURABILITY,
+        }
+        .to_owned(),
+    }
+}
+
+fn propagation(value: Propagation) -> &'static str {
+    match value {
+        Propagation::Sync => SYNC_CATEGORY,
+        Propagation::Ignore => IGNORE_CATEGORY,
+    }
+}
+
+fn stored_propagation(value: &str) -> Result<Propagation, Error> {
+    match value {
+        SYNC_CATEGORY => Ok(Propagation::Sync),
+        IGNORE_CATEGORY => Ok(Propagation::Ignore),
+        _ => Err(Error::InvalidStored("metadata category")),
     }
 }
 
@@ -198,12 +228,23 @@ fn from_row(row: PairRow) -> Result<PairConfig, Error> {
         },
         _ => return Err(Error::InvalidStored("mode")),
     };
+    let metadata = MetadataPolicy::new(
+        stored_propagation(&row.values.modification_times)?,
+        stored_propagation(&row.values.extended_attributes)?,
+        stored_propagation(&row.values.permissions)?,
+    );
+    let durability = match row.values.durability.as_str() {
+        STANDARD_DURABILITY => Durability::Standard,
+        FULL_DURABILITY => Durability::Full,
+        _ => return Err(Error::InvalidStored("durability")),
+    };
     let draft = PairDraft::new(
         row.values.name,
         LocalRoot::from_bytes(row.values.left_root)?,
         LocalRoot::from_bytes(row.values.right_root)?,
         mode,
-    )?;
+    )?
+    .with_options(PairOptions::new(metadata, durability));
     let revision = u64::try_from(row.revision).map_err(|_| Error::InvalidStored("revision"))?;
     Ok(PairConfig::from_stored(id, revision, draft)?)
 }
@@ -288,6 +329,10 @@ mod tests {
                 left_root: b"/left".to_vec(),
                 right_root: b"/right".to_vec(),
                 mode: SYNC.into(),
+                modification_times: SYNC_CATEGORY.into(),
+                extended_attributes: SYNC_CATEGORY.into(),
+                permissions: IGNORE_CATEGORY.into(),
+                durability: STANDARD_DURABILITY.into(),
             })
             .unwrap();
         drop(database);
@@ -308,6 +353,10 @@ mod tests {
                 left_root: b"/a".to_vec(),
                 right_root: b"/b".to_vec(),
                 mode: SYNC.into(),
+                modification_times: SYNC_CATEGORY.into(),
+                extended_attributes: SYNC_CATEGORY.into(),
+                permissions: IGNORE_CATEGORY.into(),
+                durability: STANDARD_DURABILITY.into(),
             })
             .unwrap();
         let id = PairId::from_bytes(row.id.try_into().unwrap()).unwrap();
@@ -383,5 +432,61 @@ mod tests {
             Err(Error::StaleRevision)
         ));
         assert!(store.base(updated.id()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn options_round_trip_and_metadata_changes_discard_the_base() {
+        use foldover_types::{Digest, EntryContent, EntryVersion};
+
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        let options = PairOptions::new(
+            MetadataPolicy::new(Propagation::Ignore, Propagation::Sync, Propagation::Sync),
+            Durability::Full,
+        );
+        let pair = store
+            .create(&draft(SyncMode::Sync).with_options(options))
+            .unwrap();
+        assert_eq!(
+            store.pair(pair.id()).unwrap().unwrap().draft().options(),
+            options
+        );
+        assert_eq!(
+            store
+                .create(&draft(SyncMode::Sync))
+                .unwrap()
+                .draft()
+                .options(),
+            PairOptions::default()
+        );
+
+        let version = EntryVersion::new(
+            EntryContent::Directory,
+            Digest::from_bytes([1; Digest::BYTE_LEN]),
+        );
+        let entry = BaselineEntry::new(version, version).unwrap();
+        let path = SyncPath::try_from(b"folder".as_slice()).unwrap();
+        let record = |store: &mut PairStore, revision| {
+            store
+                .update_base(
+                    pair.id(),
+                    revision,
+                    &[BaseUpdate::Record(path.clone(), entry)],
+                )
+                .unwrap();
+        };
+        record(&mut store, 1);
+
+        // Durability does not affect stored versions; the base stays.
+        let standard = PairOptions::new(options.metadata(), Durability::Standard);
+        store
+            .update(pair.id(), 1, &draft(SyncMode::Sync).with_options(standard))
+            .unwrap();
+        assert_eq!(store.base(pair.id()).unwrap().len(), 1);
+
+        let defaults = draft(SyncMode::Sync);
+        let updated = store.update(pair.id(), 2, &defaults).unwrap();
+        assert_eq!(updated.draft().options(), PairOptions::default());
+        assert!(store.base(pair.id()).unwrap().is_empty());
     }
 }

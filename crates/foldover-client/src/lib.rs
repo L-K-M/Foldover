@@ -11,7 +11,10 @@ use foldover_proto::local::{
     PairRecord, PairUpdate,
 };
 use foldover_proto::local::{PAIR_REMOVE, PairRevision};
-pub use foldover_types::{InvalidPair, LocalRoot, PairConfig, PairDraft, PairId, Side, SyncMode};
+pub use foldover_types::{
+    Durability, InvalidPair, LocalRoot, MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions,
+    Propagation, Side, SyncMode,
+};
 use serde_json::Value;
 use serde_json::json;
 

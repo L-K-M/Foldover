@@ -256,7 +256,7 @@ mod tests {
         let right = directory.join(format!("{name}-right"));
         fs::create_dir(&left).unwrap();
         fs::create_dir(&right).unwrap();
-        json!({"name":name, "left_root":left.as_os_str().as_bytes(), "right_root":right.as_os_str().as_bytes(), "mode":{"kind":"sync"}})
+        json!({"name":name, "left_root":left.as_os_str().as_bytes(), "right_root":right.as_os_str().as_bytes(), "mode":{"kind":"sync"}, "options":{"modification_times":"sync","extended_attributes":"sync","permissions":"ignore","durability":"standard"}})
     }
 
     #[tokio::test]

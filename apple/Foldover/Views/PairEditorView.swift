@@ -24,6 +24,26 @@ struct PairEditorView: View {
                     ForEach(PairMode.allCases, id: \.self) { mode in Text(mode.title).tag(mode) }
                 }
                 Text(viewModel.mode.explanation).foregroundStyle(.secondary)
+                Section("Metadata") {
+                    Toggle("Modification dates", isOn: $viewModel.options.syncModificationTimes)
+                    Toggle("Tags, Finder info and other extended attributes",
+                           isOn: $viewModel.options.syncExtendedAttributes)
+                    Toggle("Permissions and access lists", isOn: $viewModel.options.syncPermissions)
+                    Text("Resource forks always sync. Without permissions, a file's executable bit still syncs.")
+                        .font(.callout).foregroundStyle(.secondary)
+                    if viewModel.resetsSyncHistory {
+                        Text("Changing metadata settings resets this pair's sync history. The next preview compares both folders from scratch.")
+                            .font(.callout).foregroundStyle(.orange)
+                    }
+                }
+                Section("Durability") {
+                    Picker("Write safety", selection: $viewModel.options.durability) {
+                        ForEach(PairDurability.allCases, id: \.self) { durability in
+                            Text(durability.title).tag(durability)
+                        }
+                    }
+                    Text(viewModel.options.durability.explanation).foregroundStyle(.secondary)
+                }
             }
             .disabled(viewModel.isSaving)
             Text("Saving configures the pair. Preview and sync are not available yet.")

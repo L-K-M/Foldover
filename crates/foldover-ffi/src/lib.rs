@@ -110,12 +110,90 @@ impl From<foldover_client::SyncMode> for PairMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum MetadataSync {
+    Sync,
+    Ignore,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum WriteDurability {
+    /// Survives app and system crashes.
+    Standard,
+    /// Also survives power loss; slower per file.
+    Full,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct LocalPairOptions {
+    pub modification_times: MetadataSync,
+    pub extended_attributes: MetadataSync,
+    pub permissions: MetadataSync,
+    pub durability: WriteDurability,
+}
+
+impl From<foldover_client::Propagation> for MetadataSync {
+    fn from(value: foldover_client::Propagation) -> Self {
+        match value {
+            foldover_client::Propagation::Sync => Self::Sync,
+            foldover_client::Propagation::Ignore => Self::Ignore,
+        }
+    }
+}
+
+impl From<MetadataSync> for foldover_client::Propagation {
+    fn from(value: MetadataSync) -> Self {
+        match value {
+            MetadataSync::Sync => Self::Sync,
+            MetadataSync::Ignore => Self::Ignore,
+        }
+    }
+}
+
+impl From<foldover_client::PairOptions> for LocalPairOptions {
+    fn from(options: foldover_client::PairOptions) -> Self {
+        let metadata = options.metadata();
+        Self {
+            modification_times: metadata.modification_times().into(),
+            extended_attributes: metadata.extended_attributes().into(),
+            permissions: metadata.permissions().into(),
+            durability: match options.durability() {
+                foldover_client::Durability::Standard => WriteDurability::Standard,
+                foldover_client::Durability::Full => WriteDurability::Full,
+            },
+        }
+    }
+}
+
+impl From<LocalPairOptions> for foldover_client::PairOptions {
+    fn from(options: LocalPairOptions) -> Self {
+        Self::new(
+            foldover_client::MetadataPolicy::new(
+                options.modification_times.into(),
+                options.extended_attributes.into(),
+                options.permissions.into(),
+            ),
+            match options.durability {
+                WriteDurability::Standard => foldover_client::Durability::Standard,
+                WriteDurability::Full => foldover_client::Durability::Full,
+            },
+        )
+    }
+}
+
+/// The engine's defaults, so the app never restates them.
+#[uniffi::export]
+pub fn default_pair_options() -> LocalPairOptions {
+    foldover_client::PairOptions::default().into()
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct LocalPairDraft {
     pub name: String,
     pub left_root: Vec<u8>,
     pub right_root: Vec<u8>,
     pub mode: PairMode,
+    pub options: LocalPairOptions,
 }
 
 impl From<&foldover_client::PairDraft> for LocalPairDraft {
@@ -125,6 +203,7 @@ impl From<&foldover_client::PairDraft> for LocalPairDraft {
             left_root: draft.left().as_bytes().to_vec(),
             right_root: draft.right().as_bytes().to_vec(),
             mode: draft.mode().into(),
+            options: draft.options().into(),
         }
     }
 }
@@ -133,12 +212,13 @@ impl TryFrom<LocalPairDraft> for foldover_client::PairDraft {
     type Error = foldover_client::InvalidPair;
 
     fn try_from(draft: LocalPairDraft) -> Result<Self, Self::Error> {
-        Self::new(
+        Ok(Self::new(
             draft.name,
             foldover_client::LocalRoot::from_bytes(draft.left_root)?,
             foldover_client::LocalRoot::from_bytes(draft.right_root)?,
             draft.mode.into(),
-        )
+        )?
+        .with_options(draft.options.into()))
     }
 }
 
@@ -249,6 +329,12 @@ mod tests {
                 left_root: b"/a/\xff".to_vec(),
                 right_root: b"/b".to_vec(),
                 mode,
+                options: LocalPairOptions {
+                    modification_times: MetadataSync::Ignore,
+                    extended_attributes: MetadataSync::Sync,
+                    permissions: MetadataSync::Sync,
+                    durability: WriteDurability::Full,
+                },
             };
             let domain = foldover_client::PairDraft::try_from(draft.clone()).unwrap();
             assert_eq!(LocalPairDraft::from(&domain), draft);
@@ -258,6 +344,7 @@ mod tests {
             left_root: b"relative".to_vec(),
             right_root: b"/b".to_vec(),
             mode: PairMode::Sync,
+            options: default_pair_options(),
         };
         assert!(foldover_client::PairDraft::try_from(invalid).is_err());
     }

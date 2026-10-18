@@ -660,14 +660,16 @@ public struct LocalPairDraft: Equatable, Hashable {
     public var leftRoot: Data
     public var rightRoot: Data
     public var mode: PairMode
+    public var options: LocalPairOptions
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(name: String, leftRoot: Data, rightRoot: Data, mode: PairMode) {
+    public init(name: String, leftRoot: Data, rightRoot: Data, mode: PairMode, options: LocalPairOptions) {
         self.name = name
         self.leftRoot = leftRoot
         self.rightRoot = rightRoot
         self.mode = mode
+        self.options = options
     }
 
     
@@ -689,7 +691,8 @@ public struct FfiConverterTypeLocalPairDraft: FfiConverterRustBuffer {
                 name: FfiConverterString.read(from: &buf), 
                 leftRoot: FfiConverterData.read(from: &buf), 
                 rightRoot: FfiConverterData.read(from: &buf), 
-                mode: FfiConverterTypePairMode.read(from: &buf)
+                mode: FfiConverterTypePairMode.read(from: &buf), 
+                options: FfiConverterTypeLocalPairOptions.read(from: &buf)
         )
     }
 
@@ -698,6 +701,7 @@ public struct FfiConverterTypeLocalPairDraft: FfiConverterRustBuffer {
         FfiConverterData.write(value.leftRoot, into: &buf)
         FfiConverterData.write(value.rightRoot, into: &buf)
         FfiConverterTypePairMode.write(value.mode, into: &buf)
+        FfiConverterTypeLocalPairOptions.write(value.options, into: &buf)
     }
 }
 
@@ -714,6 +718,68 @@ public func FfiConverterTypeLocalPairDraft_lift(_ buf: RustBuffer) throws -> Loc
 #endif
 public func FfiConverterTypeLocalPairDraft_lower(_ value: LocalPairDraft) -> RustBuffer {
     return FfiConverterTypeLocalPairDraft.lower(value)
+}
+
+
+public struct LocalPairOptions: Equatable, Hashable {
+    public var modificationTimes: MetadataSync
+    public var extendedAttributes: MetadataSync
+    public var permissions: MetadataSync
+    public var durability: WriteDurability
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(modificationTimes: MetadataSync, extendedAttributes: MetadataSync, permissions: MetadataSync, durability: WriteDurability) {
+        self.modificationTimes = modificationTimes
+        self.extendedAttributes = extendedAttributes
+        self.permissions = permissions
+        self.durability = durability
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension LocalPairOptions: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLocalPairOptions: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LocalPairOptions {
+        return
+            try LocalPairOptions(
+                modificationTimes: FfiConverterTypeMetadataSync.read(from: &buf), 
+                extendedAttributes: FfiConverterTypeMetadataSync.read(from: &buf), 
+                permissions: FfiConverterTypeMetadataSync.read(from: &buf), 
+                durability: FfiConverterTypeWriteDurability.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: LocalPairOptions, into buf: inout [UInt8]) {
+        FfiConverterTypeMetadataSync.write(value.modificationTimes, into: &buf)
+        FfiConverterTypeMetadataSync.write(value.extendedAttributes, into: &buf)
+        FfiConverterTypeMetadataSync.write(value.permissions, into: &buf)
+        FfiConverterTypeWriteDurability.write(value.durability, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLocalPairOptions_lift(_ buf: RustBuffer) throws -> LocalPairOptions {
+    return try FfiConverterTypeLocalPairOptions.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLocalPairOptions_lower(_ value: LocalPairOptions) -> RustBuffer {
+    return FfiConverterTypeLocalPairOptions.lower(value)
 }
 
 
@@ -933,6 +999,72 @@ public func FfiConverterTypeAgentError_lower(_ value: AgentError) -> RustBuffer 
 
 
 
+public enum MetadataSync: Equatable, Hashable {
+    
+    case sync
+    case ignore
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MetadataSync: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMetadataSync: FfiConverterRustBuffer {
+    typealias SwiftType = MetadataSync
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MetadataSync {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .sync
+        
+        case 2: return .ignore
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: MetadataSync, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .sync:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .ignore:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMetadataSync_lift(_ buf: RustBuffer) throws -> MetadataSync {
+    return try FfiConverterTypeMetadataSync.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMetadataSync_lower(_ value: MetadataSync) -> RustBuffer {
+    return FfiConverterTypeMetadataSync.lower(value)
+}
+
+
+
+
 public enum PairMode: Equatable, Hashable {
     
     case sync
@@ -1015,6 +1147,78 @@ public func FfiConverterTypePairMode_lift(_ buf: RustBuffer) throws -> PairMode 
 #endif
 public func FfiConverterTypePairMode_lower(_ value: PairMode) -> RustBuffer {
     return FfiConverterTypePairMode.lower(value)
+}
+
+
+
+
+public enum WriteDurability: Equatable, Hashable {
+    
+    /**
+     * Survives app and system crashes.
+     */
+    case standard
+    /**
+     * Also survives power loss; slower per file.
+     */
+    case full
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WriteDurability: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWriteDurability: FfiConverterRustBuffer {
+    typealias SwiftType = WriteDurability
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WriteDurability {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .standard
+        
+        case 2: return .full
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WriteDurability, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .standard:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .full:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWriteDurability_lift(_ buf: RustBuffer) throws -> WriteDurability {
+    return try FfiConverterTypeWriteDurability.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWriteDurability_lower(_ value: WriteDurability) -> RustBuffer {
+    return FfiConverterTypeWriteDurability.lower(value)
 }
 
 
@@ -1138,6 +1342,16 @@ public func coreVersion() -> String  {
     )
 })
 }
+/**
+ * The engine's defaults, so the app never restates them.
+ */
+public func defaultPairOptions() -> LocalPairOptions  {
+    return try!  FfiConverterTypeLocalPairOptions_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_foldover_ffi_fn_func_default_pair_options(uniffiCallStatus
+    )
+})
+}
 public func pairCreate(configuration: LocalPairDraft)async throws  -> LocalPairConfiguration  {
     return
         try  await uniffiRustCallAsync(
@@ -1214,6 +1428,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_core_version() != 27554) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_default_pair_options() != 6735) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_pair_create() != 28129) {

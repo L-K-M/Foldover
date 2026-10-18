@@ -1,4 +1,7 @@
-use foldover_types::{InvalidPair, LocalRoot, PairConfig, PairDraft, Side, SyncMode};
+use foldover_types::{
+    Durability, InvalidPair, LocalRoot, MetadataPolicy, PairConfig, PairDraft, PairOptions,
+    Propagation, Side, SyncMode,
+};
 use serde::{Deserialize, Serialize};
 
 pub const PAIR_LIST: &str = "pair.list";
@@ -70,6 +73,78 @@ impl From<PairMode> for SyncMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PairPropagation {
+    Sync,
+    Ignore,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PairDurability {
+    Standard,
+    Full,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PairSettings {
+    pub modification_times: PairPropagation,
+    pub extended_attributes: PairPropagation,
+    pub permissions: PairPropagation,
+    pub durability: PairDurability,
+}
+
+impl From<Propagation> for PairPropagation {
+    fn from(value: Propagation) -> Self {
+        match value {
+            Propagation::Sync => Self::Sync,
+            Propagation::Ignore => Self::Ignore,
+        }
+    }
+}
+
+impl From<PairPropagation> for Propagation {
+    fn from(value: PairPropagation) -> Self {
+        match value {
+            PairPropagation::Sync => Self::Sync,
+            PairPropagation::Ignore => Self::Ignore,
+        }
+    }
+}
+
+impl From<PairOptions> for PairSettings {
+    fn from(options: PairOptions) -> Self {
+        let metadata = options.metadata();
+        Self {
+            modification_times: metadata.modification_times().into(),
+            extended_attributes: metadata.extended_attributes().into(),
+            permissions: metadata.permissions().into(),
+            durability: match options.durability() {
+                Durability::Standard => PairDurability::Standard,
+                Durability::Full => PairDurability::Full,
+            },
+        }
+    }
+}
+
+impl From<PairSettings> for PairOptions {
+    fn from(settings: PairSettings) -> Self {
+        Self::new(
+            MetadataPolicy::new(
+                settings.modification_times.into(),
+                settings.extended_attributes.into(),
+                settings.permissions.into(),
+            ),
+            match settings.durability {
+                PairDurability::Standard => Durability::Standard,
+                PairDurability::Full => Durability::Full,
+            },
+        )
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairInput {
@@ -77,6 +152,7 @@ pub struct PairInput {
     pub left_root: Vec<u8>,
     pub right_root: Vec<u8>,
     pub mode: PairMode,
+    pub options: PairSettings,
 }
 
 impl From<&PairDraft> for PairInput {
@@ -86,6 +162,7 @@ impl From<&PairDraft> for PairInput {
             left_root: draft.left().as_bytes().to_vec(),
             right_root: draft.right().as_bytes().to_vec(),
             mode: draft.mode().into(),
+            options: draft.options().into(),
         }
     }
 }
@@ -94,12 +171,13 @@ impl TryFrom<PairInput> for PairDraft {
     type Error = InvalidPair;
 
     fn try_from(input: PairInput) -> Result<Self, Self::Error> {
-        Self::new(
+        Ok(Self::new(
             input.name,
             LocalRoot::from_bytes(input.left_root)?,
             LocalRoot::from_bytes(input.right_root)?,
             input.mode.into(),
-        )
+        )?
+        .with_options(input.options.into()))
     }
 }
 
@@ -186,13 +264,18 @@ mod tests {
                 source: Side::Right,
             },
         ] {
+            let options = PairOptions::new(
+                MetadataPolicy::new(Propagation::Ignore, Propagation::Sync, Propagation::Sync),
+                Durability::Full,
+            );
             let draft = PairDraft::new(
                 "Photos".into(),
                 LocalRoot::from_bytes(b"/a/\xff".to_vec()).unwrap(),
                 LocalRoot::from_bytes(b"/b".to_vec()).unwrap(),
                 mode,
             )
-            .unwrap();
+            .unwrap()
+            .with_options(options);
             let pair =
                 PairConfig::from_stored(PairId::from_bytes([1; 16]).unwrap(), 1, draft).unwrap();
             let json = serde_json::to_value(PairRecord::from(&pair)).unwrap();

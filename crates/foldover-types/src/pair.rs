@@ -1,6 +1,6 @@
 use std::{fmt, str::FromStr};
 
-use crate::SyncMode;
+use crate::{PairOptions, SyncMode};
 
 pub const MAX_PAIR_NAME_BYTES: usize = 1024;
 pub const MAX_LOCAL_ROOT_BYTES: usize = 4096;
@@ -81,6 +81,7 @@ pub struct PairDraft {
     left: LocalRoot,
     right: LocalRoot,
     mode: SyncMode,
+    options: PairOptions,
 }
 
 impl PairDraft {
@@ -101,7 +102,12 @@ impl PairDraft {
             left,
             right,
             mode,
+            options: PairOptions::default(),
         })
+    }
+
+    pub fn with_options(self, options: PairOptions) -> Self {
+        Self { options, ..self }
     }
 
     pub fn name(&self) -> &str {
@@ -115,6 +121,9 @@ impl PairDraft {
     }
     pub fn mode(&self) -> SyncMode {
         self.mode
+    }
+    pub fn options(&self) -> PairOptions {
+        self.options
     }
 }
 

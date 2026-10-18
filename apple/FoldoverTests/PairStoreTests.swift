@@ -224,3 +224,29 @@ func rejectedRemovalKeepsTheCachedPair() async {
         #expect(!store.isSaving)
     }
 }
+
+@Test
+func pairOptionDefaultsComeFromTheEngine() {
+    let defaults = PairOptions.defaults
+    #expect(defaults.syncModificationTimes)
+    #expect(defaults.syncExtendedAttributes)
+    #expect(!defaults.syncPermissions)
+    #expect(defaults.durability == .standard)
+}
+
+@MainActor
+@Test
+func editedOptionsAreSavedAndOnlyMetadataChangesResetHistory() async {
+    let original = pairFixture()
+    let client = PairFixtureClient(catalog: [original])
+    let store = PairStore(client: client)
+    await store.refresh()
+    let editor = PairEditorViewModel(store: store, editing: original)
+    #expect(!editor.resetsSyncHistory)
+    editor.options.durability = .full
+    #expect(!editor.resetsSyncHistory)
+    editor.options.syncPermissions.toggle()
+    #expect(editor.resetsSyncHistory)
+    #expect(await editor.save())
+    #expect(await client.savedSettings?.options == editor.options)
+}

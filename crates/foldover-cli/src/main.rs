@@ -3,7 +3,10 @@
 //! are implemented; sync commands follow. Depends on foldover-client.
 //! See PLAN.md §4.4.
 
-use foldover_client::{LocalRoot, PairConfig, PairDraft, PairId, Side, SocketLocation, SyncMode};
+use foldover_client::{
+    Durability, LocalRoot, MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions, Propagation,
+    Side, SocketLocation, SyncMode,
+};
 use foldover_proto::local::PairRecord;
 use std::env;
 use std::ffi::OsString;
@@ -26,15 +29,42 @@ enum PairCommand {
     List,
     Show(PairId),
     Add(PairDraft),
+    /// Options not named on the command line keep their current values.
     Update {
         id: PairId,
         revision: u64,
         draft: PairDraft,
+        options: OptionChanges,
     },
     Remove {
         id: PairId,
         revision: u64,
     },
+}
+
+/// Pair options named on the command line; the rest keep a base value.
+#[derive(Clone, Copy, Default)]
+struct OptionChanges {
+    modification_times: Option<Propagation>,
+    extended_attributes: Option<Propagation>,
+    permissions: Option<Propagation>,
+    durability: Option<Durability>,
+}
+
+impl OptionChanges {
+    fn apply(self, base: PairOptions) -> PairOptions {
+        let metadata = base.metadata();
+        PairOptions::new(
+            MetadataPolicy::new(
+                self.modification_times
+                    .unwrap_or(metadata.modification_times()),
+                self.extended_attributes
+                    .unwrap_or(metadata.extended_attributes()),
+                self.permissions.unwrap_or(metadata.permissions()),
+            ),
+            self.durability.unwrap_or(base.durability()),
+        )
+    }
 }
 
 #[tokio::main]
@@ -66,7 +96,7 @@ async fn main() -> ExitCode {
         },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right"
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -108,10 +138,13 @@ fn pair_command(args: &[OsString]) -> Option<PairCommand> {
                 .ok()
                 .filter(|revision| (1..=i64::MAX as u64).contains(revision))?,
         }),
-        [command, name, left, right, mode] if command == "add" => {
-            Some(PairCommand::Add(draft(name, left, right, mode)?))
+        [command, name, left, right, mode, options @ ..] if command == "add" => {
+            let options = option_changes(options)?.apply(PairOptions::default());
+            Some(PairCommand::Add(
+                draft(name, left, right, mode)?.with_options(options),
+            ))
         }
-        [command, id, revision, name, left, right, mode] if command == "update" => {
+        [command, id, revision, name, left, right, mode, options @ ..] if command == "update" => {
             let revision = revision
                 .to_str()?
                 .parse()
@@ -121,10 +154,48 @@ fn pair_command(args: &[OsString]) -> Option<PairCommand> {
                 id: id.to_str()?.parse().ok()?,
                 revision,
                 draft: draft(name, left, right, mode)?,
+                options: option_changes(options)?,
             })
         }
         _ => None,
     }
+}
+
+fn option_changes(args: &[OsString]) -> Option<OptionChanges> {
+    let mut changes = OptionChanges::default();
+    for pair in args.chunks(2) {
+        let [option, value] = pair else {
+            return None;
+        };
+        let value = value.to_str()?;
+        let propagation = || match value {
+            "sync" => Some(Propagation::Sync),
+            "ignore" => Some(Propagation::Ignore),
+            _ => None,
+        };
+        // Each option may appear once.
+        let replaced = match option.to_str()? {
+            "--times" => changes.modification_times.replace(propagation()?).is_some(),
+            "--attributes" => changes
+                .extended_attributes
+                .replace(propagation()?)
+                .is_some(),
+            "--permissions" => changes.permissions.replace(propagation()?).is_some(),
+            "--durability" => changes
+                .durability
+                .replace(match value {
+                    "standard" => Durability::Standard,
+                    "full" => Durability::Full,
+                    _ => return None,
+                })
+                .is_some(),
+            _ => return None,
+        };
+        if replaced {
+            return None;
+        }
+    }
+    Some(changes)
 }
 
 fn draft(name: &OsString, left: &OsString, right: &OsString, mode: &OsString) -> Option<PairDraft> {
@@ -175,7 +246,13 @@ async fn pairs(
             id,
             revision,
             draft,
-        } => print_pair(&foldover_client::update_pair(location, id, revision, &draft).await?),
+            options,
+        } => {
+            // A stale read is harmless: the revision check rejects the update.
+            let current = foldover_client::pair(location, id).await?;
+            let draft = draft.with_options(options.apply(current.draft().options()));
+            print_pair(&foldover_client::update_pair(location, id, revision, &draft).await?)
+        }
         PairCommand::Remove { id, revision } => {
             print_pair(&foldover_client::remove_pair(location, id, revision).await?)
         }
@@ -252,9 +329,65 @@ mod tests {
             vec!["pairs", "add", "Photos", "relative", "/b", "sync"],
             vec!["pairs", "update", id, "0", "Photos", "/a", "/b", "sync"],
             vec!["pairs", "add", "Photos", "/a", "/b", "unknown"],
+            vec!["pairs", "add", "Photos", "/a", "/b", "sync", "--times"],
+            vec![
+                "pairs", "add", "Photos", "/a", "/b", "sync", "--times", "maybe",
+            ],
+            vec![
+                "pairs", "add", "Photos", "/a", "/b", "sync", "--owner", "sync",
+            ],
+            vec![
+                "pairs", "add", "Photos", "/a", "/b", "sync", "--times", "sync", "--times",
+                "ignore",
+            ],
         ] {
-            assert!(matches!(req(&args), Request::Usage));
+            assert!(matches!(req(&args), Request::Usage), "{args:?}");
         }
+    }
+
+    #[test]
+    fn named_options_change_only_themselves() {
+        let Request::Pairs(_, PairCommand::Add(draft)) = req(&[
+            "pairs",
+            "add",
+            "Photos",
+            "/a",
+            "/b",
+            "sync",
+            "--permissions",
+            "sync",
+            "--durability",
+            "full",
+            "--socket",
+            "/tmp/s",
+        ]) else {
+            panic!("expected an add command");
+        };
+        let defaults = PairOptions::default();
+        assert_eq!(draft.options().durability(), Durability::Full);
+        assert_eq!(draft.options().metadata().permissions(), Propagation::Sync);
+        assert_eq!(
+            draft.options().metadata().modification_times(),
+            defaults.metadata().modification_times()
+        );
+
+        let id = "01010101010101010101010101010101";
+        let Request::Pairs(_, PairCommand::Update { options, .. }) = req(&[
+            "pairs", "update", id, "1", "Photos", "/a", "/b", "sync", "--times", "ignore",
+        ]) else {
+            panic!("expected an update command");
+        };
+        let current = PairOptions::new(
+            MetadataPolicy::new(Propagation::Sync, Propagation::Ignore, Propagation::Sync),
+            Durability::Full,
+        );
+        assert_eq!(
+            options.apply(current),
+            PairOptions::new(
+                MetadataPolicy::new(Propagation::Ignore, Propagation::Ignore, Propagation::Sync),
+                Durability::Full,
+            )
+        );
     }
 
     #[test]

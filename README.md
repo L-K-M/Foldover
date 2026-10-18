@@ -69,7 +69,8 @@ connecting user ID.
 ```sh
 "/Applications/Foldover.app/Contents/Library/LaunchServices/foldover" pairs
 "/Applications/Foldover.app/Contents/Library/LaunchServices/foldover" pairs add \
-  "Photos backup" "/Users/you/Pictures" "/Volumes/Backup/Photos" backup-left
+  "Photos backup" "/Users/you/Pictures" "/Volumes/Backup/Photos" backup-left \
+  --permissions sync --durability full
 ```
 
 Both selected folders must exist. Roots must be disjoint from each other,
@@ -78,8 +79,14 @@ configured roots before adding or changing pairs, so overlap checks can finish.
 Configuration does not scan contents or authorize sync execution.
 
 Modes: `sync`, `mirror-left`, `mirror-right`, `backup-left`, `backup-right`.
-The suffix selects the source. `pairs show ID` reads one pair;
-`pairs update ID REVISION NAME LEFT RIGHT MODE` requires its current revision.
+The suffix selects the source. Options follow the mode:
+`--times`, `--attributes` and `--permissions` take `sync` or `ignore`
+(defaults: sync, sync, ignore); `--durability` takes `standard` (default) or
+`full`, which also survives power loss but is slower. Resource forks always
+sync. Changing roots or metadata options resets the pair's sync history.
+`pairs show ID` reads one pair;
+`pairs update ID REVISION NAME LEFT RIGHT MODE [OPTIONS]` requires its current
+revision and keeps options you do not name.
 `pairs remove ID REVISION` removes settings, including for an offline pair;
 your folders stay in place. The app offers the same **Remove Pair** action.
 Commands output JSON lines with exact root-byte arrays. Lists are paged by

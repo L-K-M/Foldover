@@ -14,6 +14,7 @@ final class PairEditorViewModel: Identifiable {
     private let editing: SyncPair?
     var name: String
     var mode: PairMode
+    var options: PairOptions
     private(set) var left: SelectedFolder?
     private(set) var right: SelectedFolder?
     private(set) var isSaving = false
@@ -25,12 +26,19 @@ final class PairEditorViewModel: Identifiable {
         self.editing = editing
         name = editing?.settings.name ?? ""
         mode = editing?.settings.mode ?? .sync
+        options = editing?.settings.options ?? .defaults
         left = editing?.settings.left
         right = editing?.settings.right
     }
 
     var title: String { editing == nil ? String(localized: "New Pair") : String(localized: "Edit Pair") }
     var canSave: Bool { !isSaving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && left != nil && right != nil }
+
+    /// Versions depend on synced metadata, so changing it resets sync history.
+    var resetsSyncHistory: Bool {
+        guard let editing else { return false }
+        return !options.syncsSameMetadata(as: editing.settings.options)
+    }
 
     func folderText(_ side: PairFolderSide) -> String {
         let folder = side == .left ? left : right
@@ -57,7 +65,9 @@ final class PairEditorViewModel: Identifiable {
         errorMessage = nil
         defer { isSaving = false }
         do {
-            let saved = try await store.save(PairSettings(name: name, left: left, right: right, mode: mode), editing: editing)
+            let saved = try await store.save(PairSettings(
+                name: name, left: left, right: right, mode: mode, options: options
+            ), editing: editing)
             savedPairID = saved.id
             return true
         } catch {
@@ -89,6 +99,22 @@ extension PairMode {
         case .mirrorRight: String(localized: "Folder A is made identical to B. Replaced and removed files are archived for 30 days.")
         case .backupLeft: String(localized: "New and changed files are copied from A to B. Nothing in B is deleted.")
         case .backupRight: String(localized: "New and changed files are copied from B to A. Nothing in A is deleted.")
+        }
+    }
+}
+
+extension PairDurability {
+    var title: String {
+        switch self {
+        case .standard: String(localized: "Standard")
+        case .full: String(localized: "Survive power loss")
+        }
+    }
+
+    var explanation: String {
+        switch self {
+        case .standard: String(localized: "Written files survive app and system crashes.")
+        case .full: String(localized: "Also flushes the drive's cache. Slower: about 10–30 ms more per file.")
         }
     }
 }

@@ -14,10 +14,10 @@ const PERMISSION_BITS: u32 = 0o777;
 const DATABASE_NAME: &str = "state.db";
 const WRITER_LOCK: &str = "writer.lock";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode";
+const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 2] = [SCHEMA_V1, SCHEMA_V2];
+const MIGRATIONS: [&str; 3] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -43,6 +43,13 @@ CREATE TABLE base_entry (
     right_version BLOB NOT NULL,
     PRIMARY KEY (pair_id, path)
 ) STRICT, WITHOUT ROWID;
+";
+// Per-pair options; existing pairs get the defaults.
+const SCHEMA_V3: &str = "
+ALTER TABLE pair ADD COLUMN modification_times TEXT NOT NULL DEFAULT 'sync' CHECK(modification_times IN ('sync','ignore'));
+ALTER TABLE pair ADD COLUMN extended_attributes TEXT NOT NULL DEFAULT 'sync' CHECK(extended_attributes IN ('sync','ignore'));
+ALTER TABLE pair ADD COLUMN permissions TEXT NOT NULL DEFAULT 'ignore' CHECK(permissions IN ('sync','ignore'));
+ALTER TABLE pair ADD COLUMN durability TEXT NOT NULL DEFAULT 'standard' CHECK(durability IN ('standard','full'));
 ";
 
 #[derive(Debug, thiserror::Error)]
@@ -130,6 +137,10 @@ pub struct PairValues {
     pub left_root: Vec<u8>,
     pub right_root: Vec<u8>,
     pub mode: String,
+    pub modification_times: String,
+    pub extended_attributes: String,
+    pub permissions: String,
+    pub durability: String,
 }
 
 #[derive(Clone, Debug)]
@@ -224,8 +235,18 @@ impl Database {
     pub fn create_pair(&mut self, values: &PairValues) -> Result<PairRow, Error> {
         let id = uuid::Uuid::new_v4().into_bytes();
         self.connection.execute(
-            "INSERT INTO pair (id,revision,name,left_root,right_root,mode) VALUES (?1,1,?2,?3,?4,?5)",
-            params![id.as_slice(), values.name, values.left_root, values.right_root, values.mode],
+            "INSERT INTO pair (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability) VALUES (?1,1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![
+                id.as_slice(),
+                values.name,
+                values.left_root,
+                values.right_root,
+                values.mode,
+                values.modification_times,
+                values.extended_attributes,
+                values.permissions,
+                values.durability
+            ],
         )?;
         self.pair(&id)?
             .ok_or(Error::InvalidState("Inserted pair disappeared"))
@@ -271,14 +292,34 @@ impl Database {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // A base describes these exact roots; any root change invalidates it.
+        // A base holds versions of these roots under these metadata
+        // categories; changing either invalidates it.
         transaction.execute(
-            "DELETE FROM base_entry WHERE pair_id=?1 AND EXISTS (SELECT 1 FROM pair WHERE id=?1 AND revision=?2 AND (left_root!=?3 OR right_root!=?4))",
-            params![id, revision, values.left_root, values.right_root],
+            "DELETE FROM base_entry WHERE pair_id=?1 AND EXISTS (SELECT 1 FROM pair WHERE id=?1 AND revision=?2 AND (left_root!=?3 OR right_root!=?4 OR modification_times!=?5 OR extended_attributes!=?6 OR permissions!=?7))",
+            params![
+                id,
+                revision,
+                values.left_root,
+                values.right_root,
+                values.modification_times,
+                values.extended_attributes,
+                values.permissions
+            ],
         )?;
         let changed = transaction.execute(
-            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6 WHERE id=?1 AND revision=?2",
-            params![id, revision, values.name, values.left_root, values.right_root, values.mode],
+            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10 WHERE id=?1 AND revision=?2",
+            params![
+                id,
+                revision,
+                values.name,
+                values.left_root,
+                values.right_root,
+                values.mode,
+                values.modification_times,
+                values.extended_attributes,
+                values.permissions,
+                values.durability
+            ],
         )?;
         if changed == 0 {
             return Err(revision_error(&transaction, id)?);
@@ -529,6 +570,10 @@ fn pair_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairRow> {
             left_root: row.get(3)?,
             right_root: row.get(4)?,
             mode: row.get(5)?,
+            modification_times: row.get(6)?,
+            extended_attributes: row.get(7)?,
+            permissions: row.get(8)?,
+            durability: row.get(9)?,
         },
     })
 }
@@ -553,6 +598,10 @@ mod tests {
             left_root: b"/left".to_vec(),
             right_root: b"/right".to_vec(),
             mode: "sync".into(),
+            modification_times: "sync".into(),
+            extended_attributes: "sync".into(),
+            permissions: "ignore".into(),
+            durability: "standard".into(),
         }
     }
 

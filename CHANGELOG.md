@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Per-pair options in the app, CLI and agent API: sync modification times,
+  extended attributes and permissions independently, and choose standard or
+  power-loss-safe durability. IPC protocol version 3.
 - Per-pair base storage (state schema v2) with revision-bound atomic updates;
   root changes and pair removal discard it.
 - Canonical local entry versions: content (data plus resource fork, or link

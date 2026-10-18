@@ -6,7 +6,9 @@ Status: Implemented initial store and agent ownership
 
 Version 1 stores local pair configuration: opaque identity, revision,
 name, selected root bytes, mode and source direction. Version 2 adds the
-per-path base. Snapshots, journal entries and secrets are not stored yet.
+per-path base. Version 3 adds per-pair options: three metadata categories
+and durability; existing pairs get the defaults. Snapshots, journal entries
+and secrets are not stored yet.
 Configuration does not establish endpoint identity, overlap safety,
 permissions or readiness to sync.
 
@@ -57,8 +59,9 @@ endpoint data in place; its API scope is in [ADR 0011](0011-pair-configuration-a
 
 `base_entry` holds one row per pair and path: raw path bytes and each
 side's 65-byte version (kind, content digest, metadata digest). Removing a
-pair cascades to its base. Changing either root deletes the base in the
-same transaction; renames and mode changes keep it. Base updates are
+pair cascades to its base. Changing either root or any metadata category
+deletes the base in the same transaction; renames, mode and durability
+changes keep it. Base updates are
 atomic and require the pair's current revision, so a run planned for other
 roots or another mode cannot commit. Stored rows whose sides disagree on
 content, or whose kind or length is invalid, are errors.

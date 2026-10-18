@@ -3,6 +3,7 @@
 //! used anywhere and depends on no other Foldover crate. See PLAN.md §4.4.
 
 mod metadata_policy;
+mod options;
 mod pair;
 mod reconcile;
 mod sync_path;
@@ -13,6 +14,7 @@ pub use pair::{
 };
 
 pub use metadata_policy::{MetadataPolicy, Propagation};
+pub use options::{Durability, PairOptions};
 
 pub use reconcile::{
     BaselineEntry, BaselineMismatch, ChangeKind, ConflictKind, Digest, EntryContent, EntryDecision,
