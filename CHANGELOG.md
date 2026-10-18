@@ -10,6 +10,8 @@ All notable changes to this project are documented here. The format follows
 
 - Exact interactive/unattended deletion-review thresholds, with validated
   counts and finite-model boundary checks; execution integration remains pending.
+- Darwin dataless-file observations, with explicit scan/hash refusal for known
+  placeholders and no inferred residency on other platforms.
 - Native pair sidebar, folder selection and revision-checked settings editor,
   with paged loading through UniFFI and preserved drafts on save failures.
 - Authenticated local pair create/read/update APIs, paged lists and CLI commands,

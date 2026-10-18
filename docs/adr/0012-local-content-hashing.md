@@ -25,7 +25,7 @@ The agent and app do not expose content reads or sync execution yet.
 - Check cancellation between chunks. Cancellation, early EOF, I/O errors and
   changed entries yield errors, never partial digests.
 - After reading, recheck the open descriptor and root-relative named binding.
-  Kind, size, mtime, device/inode and ctime are compared. Atime is excluded
+  Kind, size, mtime, device/inode, ctime and observed residency are compared. Atime is excluded
   because reading may update it.
 
 Before/after checks are observations, not a filesystem snapshot. Watchers,
@@ -35,8 +35,14 @@ attributes need capability-specific policy.
 
 ## Residency boundary
 
-Opening file data can materialize cloud placeholders. This primitive does not
-claim to prevent that. Content reads must remain inaccessible through the
+Darwin metadata captures `SF_DATALESS` in the same no-follow `fstatat` or
+descriptor `fstat` observation as the entry identity. Known dataless files
+are refused before content open. Other platforms report `NotReported`, never
+inventing a materialized observation. Sparse allocation is not a residency test.
+
+This observation does not close the eviction race between stat and open.
+Opening file data can still materialize a newly evicted cloud placeholder.
+Content reads must remain inaccessible through the
 agent until the host enforces a tested non-materializing policy and cloud-root
 readiness is implemented.
 
@@ -55,3 +61,7 @@ link, FIFO refusal, held roots after ambient replacement, and independent
 endpoint protection of internal/AppleDouble names. Native checks run in macOS CI.
 These tests do not establish cloud residency, full metadata fidelity or any
 execution/recovery gate.
+Additional tests cover descriptor/name metadata agreement, invalid stat values,
+pre-epoch timestamps, dataless refusal before content open and Darwin flag
+classification. The synthetic flag is tested through a stat-record fixture;
+account-backed File Provider behavior still needs a real provider fixture.
