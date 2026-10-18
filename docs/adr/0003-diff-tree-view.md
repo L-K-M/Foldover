@@ -54,7 +54,12 @@ distance and reaching the last row; missing frame samples cannot pass a frame-ti
 no disclosure operation, so their reports omit collapse/expand phases rather
 than recording successful no-ops. The overall verdict still requires both
 AppKit candidates to pass; inspect each candidate's checks before choosing it.
-Native measurement and physical-Mac calibration remain pending.
+The flat-table result below is a virtual-Mac measurement. Physical-Mac
+calibration remains pending.
+
+Formatting timers separately record date/size formatter walls and call counts
+per batch. They apply equally to every candidate and retain the same workload
+and limits; timer overhead remains part of measured delivery/frame time.
 
 Run it with `spikes/s5-diff-tree/run.sh <report.json>`; it builds the
 Release app with XcodeGen and xcodebuild, launches it through
@@ -129,6 +134,26 @@ Verdict: fail.
 AppKit still fails the frame-time and stall gates. SwiftUI again reported
 zero rows and zero scroll distance; its apparent scroll result cannot
 support a performance decision. The provisional choice and follow-ups stand.
+
+### Flat-table follow-up
+
+[Run 39073881183](https://github.com/L-K-M/Foldover/actions/runs/39073881183),
+commit `fc87465`, used the same virtual M1/macOS 27.0.1/Xcode 27 environment.
+Both AppKit candidates exposed all 200,000 rows and reached the last row.
+The flat table improves latency but still fails the original budgets.
+
+| Metric | Outline | Flat table |
+|---|---|---|
+| First rows (ms) | 419.58 | 105.27 |
+| Stream frame p95 (ms) | 673.45 | 83.33 |
+| Scroll frame p95 (ms) | 48.13 | 33.68 |
+| Maximum stall (ms) | 1066.74 | 100.02 |
+| Scroll memory growth (%) | 1.253 | 1.043 |
+
+Flat-table batch model p95 was 72.37 ms, versus 2.19 ms for insertion. The next
+profile separates date/size formatting from other model work before choosing
+an optimization. SwiftUI again reported zero rows/scroll and now explicitly
+fails the complete-exercise check. No 60 fps or physical-Mac gate is closed.
 
 ## Decision
 
