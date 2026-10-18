@@ -91,6 +91,17 @@ final class PlanNode: Identifiable {
     @ObservationIgnored
     weak var parent: PlanNode?
 
+    /// Full paths keep same-named files distinguishable in the flat fallback.
+    var relativePath: String {
+        var names = [name]
+        var ancestor = parent
+        while let node = ancestor {
+            names.append(node.name)
+            ancestor = node.parent
+        }
+        return names.reversed().joined(separator: "/")
+    }
+
     init(record: RowRecord, text: RowText) {
         nodeID = record.id
         name = record.name

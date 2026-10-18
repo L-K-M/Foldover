@@ -21,7 +21,7 @@ struct DiffTreeBenchReport: Codable {
     var environment: BenchEnvironment
     var runs: [BenchRun]
     /// The pass criteria evaluated; `gate` marks the ones the
-    /// AppKit implementation must pass (PLAN.md §8 S5). SwiftUI's
+    /// AppKit candidates must pass (PLAN.md §8 S5). SwiftUI's
     /// identical numbers are recorded, not gated.
     var checks: [BenchCheck]
     /// `pass` = every gate check passed; `fail`, `incomplete` or
@@ -130,6 +130,7 @@ struct BenchRun: Codable {
     /// content — proof the scroll moved.
     var scrollReachedPoints: Double
     var batches: [BenchBatchProfile] = []
+    var lastRowReached = false
 }
 
 /// Synchronous stage walls. Deferred layout/render work remains in frame/stall
@@ -171,7 +172,7 @@ struct BenchCheck: Codable {
     var detail: String
     var value: Double?
     var limit: Double?
-    /// Whether the check counts toward the verdict — AppKit's checks
+    /// Whether the check counts toward the verdict — both AppKit candidates
     /// gate; SwiftUI's are recorded for comparison.
     var gate: Bool
 }
