@@ -64,6 +64,7 @@ struct DiffTreeBenchReport: Codable {
                     + " expansion=\(format(BenchStatistics.percentile(run.batches.compactMap(\.expansionMilliseconds), p: 95)))ms")
                 lines.append("    formatting p95: dates=\(format(BenchStatistics.percentile(run.batches.map(\.dateFormattingMilliseconds), p: 95)))ms"
                     + " sizes=\(format(BenchStatistics.percentile(run.batches.map(\.sizeFormattingMilliseconds), p: 95)))ms")
+                lines.append("    worker preparation p95: \(format(BenchStatistics.percentile(run.batches.map(\.preparationMilliseconds), p: 95)))ms")
             }
             for failure in run.failures {
                 lines.append("    failed: \(failure)")
@@ -150,6 +151,9 @@ struct BenchBatchProfile: Codable {
     let sizeFormattingMilliseconds: Double
     let formattedDates: Int
     let formattedSizes: Int
+    /// Includes worker scheduling and handoff; model time covers main-actor work only.
+    let preparationMilliseconds: Double
+    let preparationOnMainThread: Bool
 }
 
 /// One phase's reduced numbers: frame intervals between the phase's

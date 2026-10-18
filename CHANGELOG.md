@@ -10,6 +10,12 @@ All notable changes to this project are documented here. The format follows
 
 - Revision-checked pair removal in the app and CLI, including offline pairs,
   while preserving endpoint folders and files.
+- Held-root macOS volume UUID observations, with physical-device ancestry and
+  validated attribute replies; mount-continuity/readiness integration remains pending.
+- Explicit non-materializing LaunchAgent policy, with native process/thread/child
+  inheritance fixtures; account-backed File Provider verification remains pending.
+- Enforced macOS non-materializing thread policy around filesystem traversal
+  and hashing, isolated behind audited driver bindings and native tests.
 - Shrinking property tests for hierarchy-aware planning over independently
   edited raw-byte trees, with persisted failure seeds.
 - Deterministic tree-plan candidates, with hierarchy validation, conflicted-branch

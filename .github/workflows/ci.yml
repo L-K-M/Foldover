@@ -41,6 +41,9 @@ jobs:
       - name: cargo xtask ci
         run: cargo xtask ci
 
+      - name: Agent materialization policy template
+        run: python3 scripts/test-materialization-policy.py --check-template
+
   deny:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -131,6 +134,9 @@ jobs:
 
       - name: Installed-code IPC authentication
         run: python3 scripts/test-installed-identity.py
+
+      - name: Launchd materialization policy
+        run: python3 scripts/test-materialization-policy.py
 
       # Builds the arm64 FoldoverCoreFFI.xcframework plus the Swift
       # bindings; the app links it below.

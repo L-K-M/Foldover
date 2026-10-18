@@ -7,10 +7,12 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use cap_fs_ext::DirExt;
-use cap_std::fs::{Dir, Metadata, MetadataExt};
+use cap_std::fs::{Dir, Metadata, MetadataExt, ReadDir};
 use foldover_types::SyncPath;
 use nix::fcntl::AtFlags;
 use nix::sys::stat::{FileStat, SFlag, fstat, fstatat};
+
+use crate::prevent_materialization;
 
 mod content;
 pub use content::HashError;
@@ -184,6 +186,36 @@ pub struct DirectoryEntry {
     metadata: EntryMetadata,
 }
 
+struct DirectoryEntries {
+    directory: Dir,
+    entries: Option<ReadDir>,
+}
+
+impl Iterator for DirectoryEntries {
+    type Item = io::Result<DirectoryEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.entries.as_ref()?;
+        // Iterators can move between threads after creation. Enforce policy on
+        // the thread that actually enumerates, before readdir or metadata I/O.
+        if let Err(error) = prevent_materialization() {
+            self.entries = None;
+            return Some(Err(error));
+        }
+        let Some(entry) = self.entries.as_mut()?.next() else {
+            self.entries = None;
+            return None;
+        };
+        Some(entry.and_then(|entry| {
+            let name = entry.file_name();
+            Ok(DirectoryEntry {
+                metadata: EntryMetadata::at(&self.directory, Path::new(&name))?,
+                name: name.into_vec(),
+            })
+        }))
+    }
+}
+
 impl DirectoryEntry {
     pub fn name(&self) -> &[u8] {
         &self.name
@@ -197,12 +229,14 @@ impl DirectoryEntry {
 impl Root {
     /// Ambient authority is used only to select the root, never for descendants.
     pub fn open(path: &Path) -> io::Result<Self> {
+        prevent_materialization()?;
         Ok(Self {
             directory: Dir::open_ambient_dir(path, cap_std::ambient_authority())?,
         })
     }
 
     pub fn root_metadata(&self) -> io::Result<EntryMetadata> {
+        prevent_materialization()?;
         EntryMetadata::from_file(&self.directory)
     }
 
@@ -210,6 +244,49 @@ impl Root {
         Ok(Self {
             directory: self.directory.try_clone()?,
         })
+    }
+
+    /// Observe the held root's filesystem UUID without following its ambient
+    /// path. Missing platform/filesystem support is not a persistent identity.
+    /// Mount continuity and endpoint identity still require separate gates.
+    pub fn volume_uuid(&self) -> io::Result<Option<uuid::Uuid>> {
+        prevent_materialization()?;
+        #[cfg(target_os = "macos")]
+        {
+            let device = crate::volume::real_device(&self.directory)?;
+            let mut directory = self.directory.try_clone()?;
+            let mut visited = HashSet::new();
+            for _ in 0..MAX_ROOT_ANCESTORS {
+                let identity = FileIdentity::from_cap(&directory.dir_metadata()?);
+                if !visited.insert(identity) {
+                    return Err(io::Error::other(
+                        "Volume ancestry changed or contains a cycle",
+                    ));
+                }
+                let parent = directory.open_parent_dir(cap_std::ambient_authority())?;
+                let parent_device = crate::volume::real_device(&parent)?;
+                let parent_identity = FileIdentity::from_cap(&parent.dir_metadata()?);
+                if parent_device != device || parent_identity == identity {
+                    // Volume attributes require the physical mount root. Real
+                    // device IDs prevent APFS volume groups from hiding its edge.
+                    let uuid = crate::volume::uuid(&directory)?;
+                    if crate::volume::real_device(&self.directory)? != device {
+                        return Err(io::Error::other(
+                            "Root volume changed during identity lookup",
+                        ));
+                    }
+                    return Ok(uuid);
+                }
+                directory = parent;
+            }
+            Err(io::Error::other(
+                "Volume ancestry exceeds the verification limit",
+            ))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(None)
+        }
     }
 
     /// Compare held directories, including selected symlink/case aliases.
@@ -256,18 +333,15 @@ impl Root {
         &self,
         scope: DirectoryScope<'_>,
     ) -> io::Result<impl Iterator<Item = io::Result<DirectoryEntry>> + use<>> {
+        prevent_materialization()?;
         let directory = match scope {
             DirectoryScope::Root => self.directory.try_clone()?,
             DirectoryScope::At(path) => self.directory_at(path)?,
         };
-        Ok(directory.entries()?.map(move |result| {
-            let entry = result?;
-            let name = entry.file_name();
-            Ok(DirectoryEntry {
-                metadata: EntryMetadata::at(&directory, Path::new(&name))?,
-                name: name.into_vec(),
-            })
-        }))
+        Ok(DirectoryEntries {
+            entries: Some(directory.entries()?),
+            directory,
+        })
     }
 
     fn has_ancestor(&self, target: FileIdentity) -> io::Result<bool> {
@@ -297,6 +371,7 @@ impl Root {
     }
 
     fn directory_at(&self, path: &SyncPath) -> io::Result<Dir> {
+        prevent_materialization()?;
         let mut directory = self.directory.try_clone()?;
         // One component per open makes no-follow apply to every ancestor.
         for component in path.components() {
@@ -306,6 +381,7 @@ impl Root {
     }
 
     fn parent_of(&self, path: &SyncPath) -> io::Result<(Dir, PathBuf)> {
+        prevent_materialization()?;
         let parent = match path.parent() {
             Some(parent) => self.directory_at(&parent)?,
             None => self.directory.try_clone()?,

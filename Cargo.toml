@@ -30,9 +30,8 @@ license = "Unlicense"
 publish = false
 rust-version = "1.99"
 
-# Every crate opts in with `[lints] workspace = true` except
-# foldover-ffi: UniFFI's scaffolding macro expands to
-# `unsafe extern "C"` shims, so it cannot forbid unsafe code (its
-# Cargo.toml explains).
+# Crates inherit this prohibition except audited macOS driver bindings in
+# foldover-fs and generated UniFFI scaffolding in foldover-ffi. Their manifests
+# document the narrower exceptions.
 [workspace.lints.rust]
 unsafe_code = "forbid"
