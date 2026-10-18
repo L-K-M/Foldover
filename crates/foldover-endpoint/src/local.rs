@@ -1,8 +1,10 @@
+mod apply;
 mod version;
 
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 use foldover_fs::{
     DataResidency, DirectoryEntry, DirectoryScope, EntryMetadata, ExtendedMetadata, FileIdentity,
@@ -11,7 +13,9 @@ use foldover_fs::{
 pub use foldover_types::ScanControl;
 use foldover_types::{Digest, EntryVersion, InvalidSyncPath, MetadataPolicy, SyncPath};
 
-use version::{Attribute, Observed, Payload, entry_version};
+use version::{Attribute, Observed, Payload, entry_version, metadata_version};
+
+pub use apply::{ApplyError, Expected, InvalidRunName, RunScope};
 
 const INTERNAL_DIRECTORY: &[u8] = b".foldover";
 const TEMPORARY_PREFIX: &[u8] = b".foldover-tmp-";
@@ -82,19 +86,85 @@ impl LocalEntry {
 
 /// Returned only after traversal finishes. Even a completed metadata inventory
 /// needs content/metadata reads, watchers and freshness checks before planning.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ScanStats {
     entries: usize,
     skipped: usize,
+    leftovers: Vec<SyncPath>,
 }
 
 impl ScanStats {
-    pub fn entries(self) -> usize {
+    pub fn entries(&self) -> usize {
         self.entries
     }
 
-    pub fn skipped(self) -> usize {
+    pub fn skipped(&self) -> usize {
         self.skipped
+    }
+
+    /// Temporaries an interrupted write left behind. One may hold a displaced
+    /// original, so they are archived, never deleted.
+    pub fn leftovers(&self) -> &[SyncPath] {
+        &self.leftovers
+    }
+}
+
+/// How long after its last modification an entry's stat stays untrusted.
+/// Coarse timestamps (FAT, exFAT) cannot show an edit within the same tick.
+const RACY_WINDOW: Duration = Duration::from_secs(3);
+
+/// The exact stat a version was derived from. An identical later stat proves
+/// the version unchanged without rereading data, outside the racy window.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Fingerprint {
+    metadata: EntryMetadata,
+    observed_at: SystemTime,
+}
+
+impl Fingerprint {
+    fn proves_unchanged(&self, current: &EntryMetadata) -> bool {
+        let settled = self
+            .observed_at
+            .duration_since(self.metadata.modified())
+            .is_ok_and(|age| age >= RACY_WINDOW);
+        settled && *current == self.metadata
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObservedEntry {
+    version: EntryVersion,
+    fingerprint: Fingerprint,
+}
+
+impl ObservedEntry {
+    pub fn version(&self) -> EntryVersion {
+        self.version
+    }
+}
+
+/// A complete tree observation plus leftovers to recover before writing.
+#[derive(Debug, Default)]
+pub struct Observation {
+    entries: BTreeMap<SyncPath, ObservedEntry>,
+    leftovers: Vec<SyncPath>,
+}
+
+impl Observation {
+    pub fn entries(&self) -> &BTreeMap<SyncPath, ObservedEntry> {
+        &self.entries
+    }
+
+    pub fn leftovers(&self) -> &[SyncPath] {
+        &self.leftovers
+    }
+
+    /// The versions the planner compares.
+    pub fn versions(&self) -> BTreeMap<SyncPath, EntryVersion> {
+        self.entries
+            .iter()
+            .map(|(path, entry)| (path.clone(), entry.version))
+            .collect()
     }
 }
 
@@ -244,6 +314,11 @@ impl LocalEndpoint {
 
             if protected(entry.name()) {
                 stats.skipped += 1;
+                if temporary(entry.name()) {
+                    stats
+                        .leftovers
+                        .push(child_path(directory.path.as_ref(), entry.name())?);
+                }
                 continue;
             }
             let path = child_path(directory.path.as_ref(), entry.name())?;
@@ -306,22 +381,35 @@ impl LocalEndpoint {
         &self,
         policy: MetadataPolicy,
         control: &mut impl FnMut() -> ScanControl,
-    ) -> Result<BTreeMap<SyncPath, EntryVersion>, ScanError> {
+    ) -> Result<Observation, ScanError> {
         let mut entries = Vec::new();
-        self.scan_metadata(&mut |entry| {
+        let stats = self.scan_metadata(&mut |entry| {
             entries.push(entry);
             control()
         })?;
 
-        let mut versions = BTreeMap::new();
+        let mut observation = Observation {
+            entries: BTreeMap::new(),
+            leftovers: stats.leftovers,
+        };
         for entry in entries {
             if control() == ScanControl::Cancel {
                 return Err(ScanError::Cancelled);
             }
+            let observed_at = SystemTime::now();
             let version = self.entry_version(&entry, policy, control)?;
-            versions.insert(entry.path, version);
+            observation.entries.insert(
+                entry.path,
+                ObservedEntry {
+                    version,
+                    fingerprint: Fingerprint {
+                        metadata: entry.metadata,
+                        observed_at,
+                    },
+                },
+            );
         }
-        Ok(versions)
+        Ok(observation)
     }
 
     /// One entry's content and tracked metadata. Every read is checked
@@ -334,15 +422,7 @@ impl LocalEndpoint {
     ) -> Result<EntryVersion, ScanError> {
         let mut checkpoint = |_| control();
         let kind = entry.metadata.kind();
-        let extended = match self.read_extended_metadata(entry, &mut checkpoint) {
-            Ok(extended) => Some(extended),
-            // Linux cannot read link xattrs through a held descriptor (ADR 0016).
-            Err(ScanError::Metadata {
-                source: MetadataReadError::UnsupportedEntry,
-                ..
-            }) if kind == NodeKind::Symlink => None,
-            Err(error) => return Err(error),
-        };
+        let extended = self.optional_extended_metadata(entry, &mut checkpoint)?;
         let payload = match kind {
             NodeKind::File => Payload::File(self.hash_file(entry, &mut checkpoint)?),
             NodeKind::Directory => Payload::Directory,
@@ -354,26 +434,85 @@ impl LocalEndpoint {
             NodeKind::Other => return Err(ScanError::UnsupportedEntry(entry.path.clone())),
         };
 
-        let observed = Observed {
-            kind,
-            permissions: entry.metadata.permissions(),
-            modified: entry.metadata.modified(),
-            user_flags: entry.metadata.user_flags(),
-            attributes: extended.as_ref().map(|extended| {
-                extended
-                    .attributes()
-                    .iter()
-                    .map(|attribute| Attribute {
-                        role: entry.metadata.attribute_role(attribute.name()),
-                        name: attribute.name(),
-                        size: attribute.size(),
-                        digest: attribute.digest(),
-                    })
-                    .collect()
-            }),
-            access_control: extended.as_ref().map(ExtendedMetadata::access_control),
-        };
+        let observed = observed(&entry.metadata, extended.as_ref());
         Ok(entry_version(payload, &observed, policy))
+    }
+
+    /// Extended metadata, or `None` where the platform cannot report it.
+    fn optional_extended_metadata(
+        &self,
+        entry: &LocalEntry,
+        control: &mut impl FnMut(u64) -> ScanControl,
+    ) -> Result<Option<ExtendedMetadata>, ScanError> {
+        match self.read_extended_metadata(entry, control) {
+            Ok(extended) => Ok(Some(extended)),
+            // Linux cannot read link xattrs through a held descriptor (ADR 0016).
+            Err(ScanError::Metadata {
+                source: MetadataReadError::UnsupportedEntry,
+                ..
+            }) if entry.metadata.kind() == NodeKind::Symlink => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The entry at `path` now, under the inventory's protections; `None`
+    /// when nothing is there.
+    fn entry_at(&self, path: &SyncPath) -> Result<Option<LocalEntry>, ScanError> {
+        let at_path = Some(path.clone());
+        let metadata = match self.root.metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(ScanError::Io {
+                    path: at_path,
+                    source,
+                });
+            }
+        };
+        let mut entry = LocalEntry {
+            path: path.clone(),
+            metadata,
+            link_target: None,
+        };
+        self.validate_content_access(&entry)?;
+        reject_dataless(entry.metadata.data_residency(), &at_path)?;
+        match entry.metadata.kind() {
+            NodeKind::Other => return Err(ScanError::UnsupportedEntry(path.clone())),
+            NodeKind::Symlink => {
+                entry.link_target = Some(at(&at_path, self.root.read_link(path))?);
+                if at(&at_path, self.root.metadata(path))? != entry.metadata {
+                    return Err(ScanError::Changed(at_path));
+                }
+            }
+            NodeKind::File | NodeKind::Directory => {}
+        }
+        Ok(Some(entry))
+    }
+}
+
+/// The fields a version depends on, from one consistent observation.
+fn observed<'a>(
+    metadata: &'a EntryMetadata,
+    extended: Option<&'a ExtendedMetadata>,
+) -> Observed<'a> {
+    Observed {
+        kind: metadata.kind(),
+        permissions: metadata.permissions(),
+        modified: metadata.modified(),
+        user_flags: metadata.user_flags(),
+        attributes: extended.map(|extended| {
+            extended
+                .attributes()
+                .iter()
+                .map(|attribute| Attribute {
+                    role: metadata.attribute_role(attribute.name()),
+                    name: attribute.name(),
+                    size: attribute.size(),
+                    digest: attribute.digest(),
+                })
+                .collect()
+        }),
+        access_control: extended.map(ExtendedMetadata::access_control),
     }
 }
 
@@ -408,9 +547,12 @@ fn protected(name: &[u8]) -> bool {
     // Reserve ASCII aliases too: another endpoint may be case-insensitive.
     name.eq_ignore_ascii_case(INTERNAL_DIRECTORY)
         || name.eq_ignore_ascii_case(FINDER_STATE)
-        || name
-            .get(..TEMPORARY_PREFIX.len())
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(TEMPORARY_PREFIX))
+        || temporary(name)
+}
+
+fn temporary(name: &[u8]) -> bool {
+    name.get(..TEMPORARY_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(TEMPORARY_PREFIX))
 }
 
 fn at<T>(path: &Option<SyncPath>, result: io::Result<T>) -> Result<T, ScanError> {
@@ -789,6 +931,7 @@ mod tests {
             endpoint
                 .observe(ALL, &mut || ScanControl::Continue)
                 .unwrap()
+                .versions()
         };
         let first = observe();
         assert_eq!(
@@ -834,7 +977,8 @@ mod tests {
         let other = LocalEndpoint::open(elsewhere.path())
             .unwrap()
             .observe(ALL, &mut || ScanControl::Continue)
-            .unwrap();
+            .unwrap()
+            .versions();
         assert_eq!(other[&path(b"file")].content(), observe()[&file].content());
     }
 
@@ -866,7 +1010,8 @@ mod tests {
         let observe = || {
             endpoint
                 .observe(ALL, &mut || ScanControl::Continue)
-                .unwrap()[&path]
+                .unwrap()
+                .versions()[&path]
         };
         let plain = observe();
         let set = |name: &str, value: &[u8]| {

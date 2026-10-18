@@ -1,6 +1,6 @@
 # ADR 0019: Local write primitives
 
-Status: Driver implemented; endpoint verification, journaling and execution pending
+Status: Driver and endpoint operations implemented; execution pending
 
 ## Context
 
@@ -50,11 +50,32 @@ Linux only `user.` xattrs are synced; ACLs and labels need privileges.
 uses `F_FULLFSYNC` on macOS, which also flushes the drive's cache; Linux
 `fsync` already does.
 
+## Endpoint operations
+
+`LocalEndpoint::copy_from`, `update_metadata_from` and `remove` execute one
+planned change. Each first proves both sides still hold what the plan
+observed, then stages, checks that the staged content equals the source's
+planned content, rechecks the destination's stat, places and archives.
+Changes since the preview fail with `SourceChanged` or `DestinationChanged`
+and write nothing; content a target cannot store (such as a dropped resource
+fork) fails with `ContentNotStored`. Each operation returns the version
+actually stored, for the base.
+
+Observations keep each entry's stat as a fingerprint. An identical stat
+proves the version unchanged without rereading data, unless the entry was
+modified within three seconds of the observation: coarse FAT/exFAT
+timestamps cannot show an edit within one tick. Otherwise the version is
+recomputed.
+
+Archives go to `.foldover/archive/<run>/<path>`. Scans report leftover
+temporaries; `recover_leftover` archives them, because one may hold a
+displaced original.
+
 ## Consequences
 
 - A crash leaves either the old or the new entry at each path. A displaced
-  entry may remain under a temporary name; recovery must archive it, so the
-  journal has to record those names.
+  entry may remain under a temporary name; the next observation reports it
+  and recovery archives it.
 - The parent check before placement narrows, but does not close, the window
   in which a moved parent directory could receive the entry.
 - Removing an ACL on the source may not clear the target's; `fcopyfile`'s

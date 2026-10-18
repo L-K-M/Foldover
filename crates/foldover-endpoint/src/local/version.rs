@@ -74,6 +74,16 @@ pub(super) fn entry_version(
     EntryVersion::new(content, metadata_digest(observed, policy))
 }
 
+/// A version whose content is already known, such as after a metadata-only
+/// update, so the data need not be read again.
+pub(super) fn metadata_version(
+    content: EntryContent,
+    observed: &Observed<'_>,
+    policy: MetadataPolicy,
+) -> EntryVersion {
+    EntryVersion::new(content, metadata_digest(observed, policy))
+}
+
 fn file_content(data: Digest, fork: Option<&Attribute<'_>>) -> Digest {
     let mut hasher = blake3::Hasher::new_derive_key(FILE_CONTEXT);
     hasher.update(data.as_bytes());

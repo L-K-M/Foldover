@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Endpoint operations that execute one planned change: copy, metadata update
+  and removal, each verifying both sides against the preview first and
+  returning the stored version; leftover temporaries are reported and archived.
 - Local write primitives: staged copies placed by atomic no-replace or
   exchange renames, archive-by-rename, metadata applied per pair policy and
   durability; nothing is unlinked except empty folders and unplaced copies.

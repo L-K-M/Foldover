@@ -10,7 +10,10 @@ mod local;
 mod local_pair;
 
 #[cfg(unix)]
-pub use local::{LocalEndpoint, LocalEntry, ScanControl, ScanError, ScanStats};
+pub use local::{
+    ApplyError, Expected, InvalidRunName, LocalEndpoint, LocalEntry, Observation, ObservedEntry,
+    RunScope, ScanControl, ScanError, ScanStats,
+};
 
 #[cfg(unix)]
 pub use foldover_fs::{
