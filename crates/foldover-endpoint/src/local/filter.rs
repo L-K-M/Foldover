@@ -5,6 +5,7 @@
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+use std::time::SystemTime;
 
 use foldover_types::SyncPath;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -18,6 +19,7 @@ const IGNORE_FILE_LIMIT: u64 = 64 * 1024;
 pub struct Filter {
     rules: Gitignore,
     size_limit: Option<u64>,
+    cutoff: Option<SystemTime>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -32,6 +34,7 @@ impl Filter {
         Self {
             rules: Gitignore::empty(),
             size_limit: None,
+            cutoff: None,
         }
     }
 
@@ -53,7 +56,19 @@ impl Filter {
         Ok(Self {
             rules,
             size_limit: None,
+            cutoff: None,
         })
+    }
+
+    /// Report files last modified before `cutoff` as old. They are still
+    /// observed: callers skip a path only when it is old or absent in both
+    /// folders, so a recent edit on either side syncs.
+    pub fn with_cutoff(self, cutoff: Option<SystemTime>) -> Self {
+        Self { cutoff, ..self }
+    }
+
+    pub(super) fn is_old(&self, modified: SystemTime) -> bool {
+        self.cutoff.is_some_and(|cutoff| modified < cutoff)
     }
 
     /// Also skip files larger than `bytes`. Sizes differ between folders,

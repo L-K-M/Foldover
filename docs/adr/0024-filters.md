@@ -1,6 +1,6 @@
 # ADR 0024: Filters
 
-Status: Implemented (name and path rules, size limit); date terms pending
+Status: Implemented (name and path rules, size and age limits)
 
 ## Decision
 
@@ -24,9 +24,14 @@ therefore unnecessary, and the base is kept.
   stopping the scan.
 - **Size limit** (state schema v10): files larger than the limit are not
   read. Sizes differ between folders, so a path skipped in either folder
-  is removed from both observations before planning; with no base match
-  it is forgotten, never deleted. Removing the limit can surface the two
-  versions as a conflict.
+  is removed from both observations before planning.
+- **Age limit** (state schema v13): files unchanged for more than the
+  limit's days are skipped only when old or absent in both folders, so an
+  old file is not copied to a new place, while an edit on either side
+  still syncs. Old files are still read; snapshots keep that cheap.
+- Paths skipped by a limit are also hidden from the base while planning,
+  so their base rows stay: a file edited while skipped syncs as an edit
+  once it qualifies again, instead of looking new on both sides.
 - **Always Skip** on a preview row adds a rule matching exactly that path:
   anchored with `/`, with `\ * ? [ ] { }` and trailing spaces escaped
   (`docs/a*.txt` → `/docs/a\*.txt`). Names that are not UTF-8 cannot be
@@ -36,4 +41,3 @@ therefore unnecessary, and the base is kept.
 
 - A folder deleted on one side cannot be removed on the other while it
   still holds excluded entries; that removal fails and is reported.
-- Modification-date terms are not implemented.

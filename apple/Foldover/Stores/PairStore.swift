@@ -39,6 +39,8 @@ struct PairOptions: Equatable, Sendable {
     var filters: [String]
     /// Files larger than this many bytes are skipped in both folders.
     var sizeLimit: UInt64?
+    /// Files unchanged for more than this many days in both folders are skipped.
+    var ageLimit: UInt32?
 
     /// The engine's defaults, so the app never restates them.
     static var defaults: PairOptions { pairOptions(FoldoverCore.defaultPairOptions()) }
@@ -154,7 +156,8 @@ private func pairOptions(_ options: LocalPairOptions) -> PairOptions {
         durability: durability,
         schedule: syncSchedule(options.schedule),
         filters: options.filters,
-        sizeLimit: options.sizeLimit
+        sizeLimit: options.sizeLimit,
+        ageLimit: options.ageLimit
     )
 }
 
@@ -187,7 +190,8 @@ private func corePairOptions(_ options: PairOptions) -> LocalPairOptions {
         durability: durability,
         schedule: coreSchedule(options.schedule),
         filters: options.filters,
-        sizeLimit: options.sizeLimit
+        sizeLimit: options.sizeLimit,
+        ageLimit: options.ageLimit
     )
 }
 

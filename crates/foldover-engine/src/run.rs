@@ -12,7 +12,7 @@
 //! A crash loses at most an uncommitted batch. The next run then finds both
 //! sides equal and records them, or a leftover temporary and archives it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
 use foldover_endpoint::{
@@ -32,6 +32,7 @@ use crate::{
 
 /// Base updates per commit: bounds the work a crash can make the next run redo.
 const COMMIT_BATCH: usize = 256;
+const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 /// Free space a run leaves on each volume, so the system and other writers
 /// are not starved by a sync.
 const SPACE_RESERVE: u64 = 256 * 1024 * 1024;
@@ -360,8 +361,13 @@ impl PairRun {
                     .map_err(|source| observe_error(side, source))?,
             );
         }
+        let filters = draft.options().filters();
+        let cutoff = filters.age_limit().and_then(|days| {
+            SystemTime::now().checked_sub(Duration::from_secs(u64::from(days) * SECONDS_PER_DAY))
+        });
         let filter = Filter::new(rules.iter().map(String::as_str))?
-            .with_size_limit(draft.options().filters().size_limit());
+            .with_size_limit(filters.size_limit())
+            .with_cutoff(cutoff);
         let observe = |side: Side, control: &mut dyn FnMut() -> ScanControl| {
             let previous = match side {
                 Side::Left => &left_snapshot,
@@ -377,16 +383,34 @@ impl PairRun {
         };
         let mut left = observe(Side::Left, control)?;
         let mut right = observe(Side::Right, control)?;
-        // Sizes differ between folders: a file too large in either is
-        // skipped in both, so it is forgotten rather than deleted.
-        let oversized: Vec<SyncPath> = left
-            .oversized()
-            .iter()
-            .chain(right.oversized())
-            .cloned()
-            .collect();
-        left.exclude(&oversized);
-        right.exclude(&oversized);
+        // Size and age differ between folders. A file too large in either
+        // folder, or old or absent in both, is skipped in both, and hidden
+        // from the base too: its base row stays, so a later edit syncs as
+        // an edit rather than looking new on both sides.
+        let skipped: BTreeSet<SyncPath> = {
+            let left_old: BTreeSet<&SyncPath> = left.old().iter().collect();
+            let right_old: BTreeSet<&SyncPath> = right.old().iter().collect();
+            let old_or_absent = |old: &BTreeSet<&SyncPath>, seen: &Observation, path| {
+                old.contains(path) || !seen.entries().contains_key(*path)
+            };
+            left_old
+                .iter()
+                .chain(&right_old)
+                .filter(|path| {
+                    old_or_absent(&left_old, &left, path) && old_or_absent(&right_old, &right, path)
+                })
+                .copied()
+                .chain(left.oversized().iter().chain(right.oversized()))
+                .cloned()
+                .collect()
+        };
+        let skipped: Vec<SyncPath> = skipped.into_iter().collect();
+        left.exclude(&skipped);
+        right.exclude(&skipped);
+        let mut base = base;
+        for path in &skipped {
+            base.remove(path);
+        }
         let plan = plan_resolved(
             draft.mode(),
             &base,

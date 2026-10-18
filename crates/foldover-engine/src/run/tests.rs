@@ -16,6 +16,7 @@ struct Fixture {
     resolutions: BTreeMap<SyncPath, foldover_types::Resolution>,
     filters: Vec<String>,
     size_limit: Option<u64>,
+    age_limit: Option<u32>,
 }
 
 fn fixture(mode: SyncMode) -> Fixture {
@@ -29,6 +30,7 @@ fn fixture(mode: SyncMode) -> Fixture {
         resolutions: BTreeMap::new(),
         filters: Vec::new(),
         size_limit: None,
+        age_limit: None,
     }
 }
 
@@ -54,6 +56,7 @@ impl Fixture {
     fn try_prepare(&self) -> Result<PairRun, RunError> {
         let filters = foldover_types::Filters::new(self.filters.clone())
             .and_then(|filters| filters.with_size_limit(self.size_limit))
+            .and_then(|filters| filters.with_age_limit(self.age_limit))
             .unwrap();
         let draft = PairDraft::new(
             "pair".into(),
@@ -608,7 +611,7 @@ fn files_too_large_in_either_folder_are_skipped_in_both() {
     assert_eq!(fs::read(pair.left.path().join("big")).unwrap(), b"xyz");
     assert_eq!(fs::read(pair.right.path().join("small")).unwrap(), b"b");
 
-    // Without the limit, two different versions and no base: a conflict.
+    // The base row survived the skip, so the edit made meanwhile syncs.
     pair.size_limit = None;
     let preview = pair.prepare().preview();
     assert_eq!(
@@ -617,6 +620,45 @@ fn files_too_large_in_either_folder_are_skipped_in_both() {
             .iter()
             .map(|item| (item.path().clone(), item.action()))
             .collect::<Vec<_>>(),
-        [(path(b"big"), Action::Conflict(ConflictKind::BothChanged))]
+        [(
+            path(b"big"),
+            Action::Copy {
+                to: Side::Right,
+                change: ChangeKind::ReplaceContent
+            }
+        )]
     );
+}
+
+#[test]
+fn files_old_in_both_folders_are_skipped_until_edited() {
+    let mut pair = fixture(SyncMode::Sync);
+    let age = |name: &str, folder: &Path| {
+        let file = fs::File::options()
+            .write(true)
+            .open(folder.join(name))
+            .unwrap();
+        let hundred_days = std::time::Duration::from_secs(100 * 24 * 60 * 60);
+        file.set_modified(std::time::SystemTime::now() - hundred_days)
+            .unwrap();
+    };
+    // Synced long ago: the copy carries the old modification time.
+    fs::write(pair.left.path().join("kept"), b"k").unwrap();
+    age("kept", pair.left.path());
+    pair.sync();
+    fs::write(pair.left.path().join("stale"), b"s").unwrap();
+    age("stale", pair.left.path());
+    fs::write(pair.left.path().join("fresh"), b"f").unwrap();
+
+    pair.age_limit = Some(30);
+    let report = pair.sync();
+    assert_eq!(report.copied(), 1);
+    assert!(pair.right.path().join("fresh").exists());
+    assert!(!pair.right.path().join("stale").exists());
+
+    // An edit makes it recent on one side: it syncs as an edit.
+    fs::write(pair.left.path().join("kept"), b"edited").unwrap();
+    let report = pair.sync();
+    assert_eq!((report.copied(), report.conflicts().len()), (1, 0));
+    assert_eq!(fs::read(pair.right.path().join("kept")).unwrap(), b"edited");
 }

@@ -50,11 +50,14 @@ pub enum Durability {
 pub struct Filters {
     rules: Vec<String>,
     size_limit: Option<u64>,
+    age_limit: Option<u32>,
 }
 
 impl Filters {
     pub const MAX_RULES: usize = 256;
     pub const MAX_RULE_BYTES: usize = 1024;
+    /// A century: older than any file a person still means to sync.
+    pub const MAX_AGE_DAYS: u32 = 36_500;
 
     /// Syntax is checked where rules are compiled; here only size and
     /// characters that cannot be stored one per line.
@@ -69,7 +72,24 @@ impl Filters {
         Ok(Self {
             rules,
             size_limit: None,
+            age_limit: None,
         })
+    }
+
+    /// Skip files unchanged for more than `days` in both folders. A file
+    /// changed recently in either folder still syncs.
+    pub fn with_age_limit(self, days: Option<u32>) -> Result<Self, InvalidPair> {
+        if days.is_some_and(|days| days == 0 || days > Self::MAX_AGE_DAYS) {
+            return Err(InvalidPair::Filters);
+        }
+        Ok(Self {
+            age_limit: days,
+            ..self
+        })
+    }
+
+    pub fn age_limit(&self) -> Option<u32> {
+        self.age_limit
     }
 
     /// Skip files larger than `bytes`, in both folders. Zero is refused:
@@ -111,6 +131,7 @@ impl PairOptions {
             filters: Filters {
                 rules: Vec::new(),
                 size_limit: None,
+                age_limit: None,
             },
         }
     }
@@ -151,6 +172,22 @@ mod tests {
         assert!(ScheduleInterval::from_minutes(ScheduleInterval::MAX_MINUTES).is_ok());
         assert!(ScheduleInterval::from_minutes(ScheduleInterval::MAX_MINUTES + 1).is_err());
         assert_eq!(PairOptions::default().schedule(), Schedule::Manual);
+    }
+
+    #[test]
+    fn age_limits_span_a_day_to_a_century() {
+        let rules = Filters::new(Vec::new()).unwrap();
+        assert!(rules.clone().with_age_limit(Some(0)).is_err());
+        assert!(
+            rules
+                .clone()
+                .with_age_limit(Some(Filters::MAX_AGE_DAYS + 1))
+                .is_err()
+        );
+        assert_eq!(
+            rules.with_age_limit(Some(30)).unwrap().age_limit(),
+            Some(30)
+        );
     }
 
     #[test]

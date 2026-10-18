@@ -64,6 +64,19 @@ final class PairEditorViewModel: Identifiable {
         }
     }
 
+    private static let suggestedAgeDays: UInt32 = 365
+    private static let maxAgeDays: UInt32 = 36_500
+
+    var limitsAge: Bool {
+        get { options.ageLimit != nil }
+        set { options.ageLimit = newValue ? options.ageLimit ?? Self.suggestedAgeDays : nil }
+    }
+
+    var ageLimitDays: Int {
+        get { Int(options.ageLimit ?? 0) }
+        set { options.ageLimit = UInt32(min(max(1, newValue), Int(Self.maxAgeDays))) }
+    }
+
     /// Fixed choices, plus a stored interval set elsewhere (e.g. the CLI).
     var scheduleChoices: [SyncSchedule] {
         var choices: [SyncSchedule] = [.manual, .onChange, .every(minutes: 5), .every(minutes: 15),

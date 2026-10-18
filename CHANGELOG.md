@@ -16,6 +16,9 @@ All notable changes to this project are documented here. The format follows
   copies, updates, archives or conflicts.
 - Skip large files: a size limit per pair, in the editor and as
   `--max-size MEGABYTES`; a file over it in either folder is skipped in both.
+- Skip old files: an age limit per pair, in the editor and as
+  `--max-age DAYS`; a file is skipped while unchanged that long in both
+  folders, and syncs again once edited.
 - First-run guide: turn on the agent, create a pair, preview and sync.
 - A folder macOS refuses to share (Documents, external volumes) now says
   to allow Foldover in Full Disk Access; Settings opens that list.

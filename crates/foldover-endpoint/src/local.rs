@@ -116,6 +116,7 @@ pub struct ScanStats {
     skipped: usize,
     leftovers: Vec<SyncPath>,
     oversized: Vec<SyncPath>,
+    old: Vec<SyncPath>,
 }
 
 impl ScanStats {
@@ -231,6 +232,7 @@ pub struct Observation {
     entries: BTreeMap<SyncPath, ObservedEntry>,
     leftovers: Vec<SyncPath>,
     oversized: Vec<SyncPath>,
+    old: Vec<SyncPath>,
 }
 
 impl Observation {
@@ -245,6 +247,11 @@ impl Observation {
     /// Files skipped for exceeding the filter's size limit.
     pub fn oversized(&self) -> &[SyncPath] {
         &self.oversized
+    }
+
+    /// Observed files modified before the filter's cutoff.
+    pub fn old(&self) -> &[SyncPath] {
+        &self.old
     }
 
     /// Drop paths the other folder skipped, so both skip them.
@@ -464,6 +471,11 @@ impl LocalEndpoint {
                 stats.oversized.push(path);
                 continue;
             }
+            if entry.metadata().kind() == NodeKind::File
+                && filter.is_old(entry.metadata().modified())
+            {
+                stats.old.push(path.clone());
+            }
             if entry.name().starts_with(b"._") {
                 return Err(ScanError::UnclassifiedSidecar(path));
             }
@@ -547,6 +559,7 @@ impl LocalEndpoint {
             entries: BTreeMap::new(),
             leftovers: stats.leftovers,
             oversized: stats.oversized,
+            old: stats.old,
         };
         for entry in entries {
             if control() == ScanControl::Cancel {

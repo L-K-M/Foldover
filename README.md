@@ -99,7 +99,8 @@ or a number of minutes between automatic syncs, which start after the first
 sync you run yourself. `--exclude PATTERN` (repeatable) sets gitignore-style
 rules for files to skip in both folders; a `.foldoverignore` file in either
 folder adds more. `--max-size MEGABYTES` skips larger files in both folders
-(`none` removes the limit). Resource forks always
+and `--max-age DAYS` files unchanged for longer in both (`none` removes
+either limit). Resource forks always
 sync. Changing roots or metadata options resets the pair's sync history.
 `pairs show ID` reads one pair;
 `pairs update ID REVISION NAME LEFT RIGHT MODE [OPTIONS]` requires its current

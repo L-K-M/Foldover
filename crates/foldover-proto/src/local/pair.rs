@@ -99,6 +99,9 @@ pub struct PairSettings {
     pub filters: Vec<String>,
     /// Files larger than this many bytes are skipped in both folders.
     pub size_limit: Option<u64>,
+    /// Files unchanged for more than this many days in both folders are
+    /// skipped.
+    pub age_limit: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -147,6 +150,7 @@ impl From<&PairOptions> for PairSettings {
             },
             filters: options.filters().rules().to_vec(),
             size_limit: options.filters().size_limit(),
+            age_limit: options.filters().age_limit(),
         }
     }
 }
@@ -174,7 +178,11 @@ impl TryFrom<PairSettings> for PairOptions {
             },
         )
         .with_schedule(schedule)
-        .with_filters(Filters::new(settings.filters)?.with_size_limit(settings.size_limit)?))
+        .with_filters(
+            Filters::new(settings.filters)?
+                .with_size_limit(settings.size_limit)?
+                .with_age_limit(settings.age_limit)?,
+        ))
     }
 }
 

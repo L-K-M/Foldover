@@ -1155,6 +1155,11 @@ public struct LocalPairOptions: Equatable, Hashable {
      * Files larger than this many bytes are skipped in both folders.
      */
     public var sizeLimit: UInt64?
+    /**
+     * Files unchanged for more than this many days in both folders are
+     * skipped.
+     */
+    public var ageLimit: UInt32?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1164,7 +1169,11 @@ public struct LocalPairOptions: Equatable, Hashable {
          */filters: [String], 
         /**
          * Files larger than this many bytes are skipped in both folders.
-         */sizeLimit: UInt64?) {
+         */sizeLimit: UInt64?, 
+        /**
+         * Files unchanged for more than this many days in both folders are
+         * skipped.
+         */ageLimit: UInt32?) {
         self.modificationTimes = modificationTimes
         self.extendedAttributes = extendedAttributes
         self.permissions = permissions
@@ -1172,6 +1181,7 @@ public struct LocalPairOptions: Equatable, Hashable {
         self.schedule = schedule
         self.filters = filters
         self.sizeLimit = sizeLimit
+        self.ageLimit = ageLimit
     }
 
     
@@ -1196,7 +1206,8 @@ public struct FfiConverterTypeLocalPairOptions: FfiConverterRustBuffer {
                 durability: FfiConverterTypeWriteDurability.read(from: &buf), 
                 schedule: FfiConverterTypePairSchedule.read(from: &buf), 
                 filters: FfiConverterSequenceString.read(from: &buf), 
-                sizeLimit: FfiConverterOptionUInt64.read(from: &buf)
+                sizeLimit: FfiConverterOptionUInt64.read(from: &buf), 
+                ageLimit: FfiConverterOptionUInt32.read(from: &buf)
         )
     }
 
@@ -1208,6 +1219,7 @@ public struct FfiConverterTypeLocalPairOptions: FfiConverterRustBuffer {
         FfiConverterTypePairSchedule.write(value.schedule, into: &buf)
         FfiConverterSequenceString.write(value.filters, into: &buf)
         FfiConverterOptionUInt64.write(value.sizeLimit, into: &buf)
+        FfiConverterOptionUInt32.write(value.ageLimit, into: &buf)
     }
 }
 

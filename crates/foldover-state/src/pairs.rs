@@ -388,6 +388,7 @@ fn values(draft: &PairDraft) -> PairValues {
             .filters()
             .size_limit()
             .map(|bytes| i64::try_from(bytes).unwrap_or(i64::MAX)),
+        age_limit: options.filters().age_limit().map(i64::from),
     }
 }
 
@@ -447,7 +448,13 @@ fn from_row(row: PairRow) -> Result<PairConfig, Error> {
         "" => Vec::new(),
         text => text.split('\n').map(str::to_owned).collect(),
     })?
-    .with_size_limit(size_limit)?;
+    .with_size_limit(size_limit)?
+    .with_age_limit(
+        row.values
+            .age_limit
+            .map(|days| u32::try_from(days).map_err(|_| Error::InvalidStored("age limit")))
+            .transpose()?,
+    )?;
     let durability = match row.values.durability.as_str() {
         STANDARD_DURABILITY => Durability::Standard,
         FULL_DURABILITY => Durability::Full,
@@ -556,6 +563,7 @@ mod tests {
                 schedule_minutes: None,
                 filters: String::new(),
                 size_limit: None,
+                age_limit: None,
             })
             .unwrap();
         drop(database);
@@ -584,6 +592,7 @@ mod tests {
                 schedule_minutes: None,
                 filters: String::new(),
                 size_limit: None,
+                age_limit: None,
             })
             .unwrap();
         let id = PairId::from_bytes(row.id.try_into().unwrap()).unwrap();
@@ -675,6 +684,7 @@ mod tests {
         .with_filters(
             Filters::new(vec!["*.tmp".into(), "!keep.tmp".into(), String::new()])
                 .and_then(|filters| filters.with_size_limit(Some(5_000_000)))
+                .and_then(|filters| filters.with_age_limit(Some(90)))
                 .unwrap(),
         );
         let pair = store

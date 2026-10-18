@@ -88,6 +88,8 @@ struct OptionChanges {
     filters: Option<Filters>,
     /// `Some(None)` removes the limit.
     size_limit: Option<Option<u64>>,
+    /// Days; `Some(None)` removes the limit.
+    age_limit: Option<Option<u32>>,
 }
 
 impl OptionChanges {
@@ -108,6 +110,9 @@ impl OptionChanges {
             self.filters
                 .unwrap_or_else(|| base.filters().clone())
                 .with_size_limit(self.size_limit.unwrap_or(base.filters().size_limit()))
+                .and_then(|filters| {
+                    filters.with_age_limit(self.age_limit.unwrap_or(base.filters().age_limit()))
+                })
                 .expect("limits are checked when parsed"),
         )
     }
@@ -168,7 +173,7 @@ async fn main() -> ExitCode {
         },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT | --keep-left PATH | --keep-right PATH | --keep-both PATH] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT | --keep-left PATH | --keep-right PATH | --keep-both PATH] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -357,6 +362,17 @@ fn option_changes(args: &[OsString]) -> Option<OptionChanges> {
                             .ok()
                             .filter(|megabytes| *megabytes > 0)?
                             .checked_mul(BYTES_PER_MEGABYTE)?,
+                    ),
+                })
+                .is_some(),
+            "--max-age" => changes
+                .age_limit
+                .replace(match value {
+                    "none" => None,
+                    days => Some(
+                        days.parse::<u32>()
+                            .ok()
+                            .filter(|days| (1..=Filters::MAX_AGE_DAYS).contains(days))?,
                     ),
                 })
                 .is_some(),
@@ -754,6 +770,8 @@ mod tests {
             "build/",
             "--max-size",
             "500",
+            "--max-age",
+            "90",
             "--socket",
             "/tmp/s",
         ]) else {
@@ -763,6 +781,7 @@ mod tests {
         assert_eq!(draft.options().durability(), Durability::Full);
         assert_eq!(draft.options().filters().rules(), ["*.tmp", "build/"]);
         assert_eq!(draft.options().filters().size_limit(), Some(500_000_000));
+        assert_eq!(draft.options().filters().age_limit(), Some(90));
         assert_eq!(
             draft.options().schedule(),
             Schedule::Every(ScheduleInterval::from_minutes(15).unwrap())

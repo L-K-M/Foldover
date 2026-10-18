@@ -291,3 +291,18 @@ func sizeLimitsAreWholeMegabytes() {
     editor.limitsSize = false
     #expect(editor.options.sizeLimit == nil)
 }
+
+@MainActor
+@Test
+func ageLimitsAreWholeDaysUpToACentury() {
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()))
+    #expect(!editor.limitsAge)
+    editor.limitsAge = true
+    #expect(editor.options.ageLimit == 365)
+    editor.ageLimitDays = 0
+    #expect(editor.options.ageLimit == 1)
+    editor.ageLimitDays = .max
+    #expect(editor.options.ageLimit == 36_500)
+    editor.limitsAge = false
+    #expect(editor.options.ageLimit == nil)
+}

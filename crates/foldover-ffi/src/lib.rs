@@ -146,6 +146,9 @@ pub struct LocalPairOptions {
     pub filters: Vec<String>,
     /// Files larger than this many bytes are skipped in both folders.
     pub size_limit: Option<u64>,
+    /// Files unchanged for more than this many days in both folders are
+    /// skipped.
+    pub age_limit: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -197,6 +200,7 @@ impl From<&foldover_client::PairOptions> for LocalPairOptions {
             },
             filters: options.filters().rules().to_vec(),
             size_limit: options.filters().size_limit(),
+            age_limit: options.filters().age_limit(),
         }
     }
 }
@@ -225,7 +229,9 @@ impl TryFrom<LocalPairOptions> for foldover_client::PairOptions {
         )
         .with_schedule(schedule)
         .with_filters(
-            foldover_client::Filters::new(options.filters)?.with_size_limit(options.size_limit)?,
+            foldover_client::Filters::new(options.filters)?
+                .with_size_limit(options.size_limit)?
+                .with_age_limit(options.age_limit)?,
         ))
     }
 }
@@ -386,6 +392,7 @@ mod tests {
                     schedule: PairSchedule::OnChange,
                     filters: vec!["*.tmp".into(), "build/".into()],
                     size_limit: Some(1_000_000),
+                    age_limit: Some(365),
                 },
             };
             let domain = foldover_client::PairDraft::try_from(draft.clone()).unwrap();

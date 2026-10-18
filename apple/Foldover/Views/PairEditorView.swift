@@ -49,6 +49,12 @@ struct PairEditorView: View {
                         Text("A file this large in either folder is skipped in both, so it is never copied or deleted.")
                             .font(.callout).foregroundStyle(.secondary)
                     }
+                    Toggle("Skip old files", isOn: $viewModel.limitsAge)
+                    if viewModel.limitsAge {
+                        TextField("Unchanged for more than (days)", value: $viewModel.ageLimitDays, format: .number)
+                        Text("Skipped only while unchanged in both folders; editing one makes it sync again.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
                 }
                 Section("Schedule") {
                     Picker("Sync automatically", selection: $viewModel.options.schedule) {
