@@ -17,6 +17,7 @@ rustix = { version = "1", features = ["fs", "process"] }
 sha2 = "=0.11.1"
 thiserror = "2"
 tokio = { version = "1.53.2", features = ["net", "io-util", "time"] }
+zeroize = "1.9.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"

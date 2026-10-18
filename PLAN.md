@@ -574,8 +574,10 @@ FSEvents is a hint, never the truth.
 
 The transport driver provides pinned TLS connections, code exchange and
 live-channel revocation ([ADR 0004](docs/adr/0004-peer-pairing.md#driver-implementation)).
-Discovery, persistent identity and trust, authorization, wire messages and
-the peer endpoint remain P5 work.
+The endpoint layer can restore its exact identity from the macOS Keychain;
+installed-agent authorization across updates remains an integration gate.
+Discovery, persistent trust, authorization, wire messages and the peer
+endpoint remain P5 work.
 
 ### 4.12 Linux readiness
 

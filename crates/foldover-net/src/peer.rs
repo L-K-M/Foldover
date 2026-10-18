@@ -35,6 +35,8 @@ use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
 use sha2::{Digest, Sha256};
 
+mod identity;
+
 /// ALPN of Foldover's peer protocol, version 1.
 const ALPN: &[u8] = b"foldover-peer-1";
 const SERVER_NAME: &str = "foldover.local";
@@ -76,6 +78,8 @@ pub enum PeerError {
     Untrusted,
     #[error("The other Mac did not finish pairing in time")]
     PairingTimeout,
+    #[error("The stored peer identity is invalid; restore it before connecting")]
+    InvalidIdentity,
 }
 
 fn connection_error(error: impl fmt::Display) -> PeerError {

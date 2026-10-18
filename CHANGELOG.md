@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Keychain-backed peer identity loading, with stable certificate fingerprints,
+  exclusive creation and explicit storage failures; agent integration is pending.
 - Peer transport driver: pinned QUIC/TLS connections, six-digit pairing
   codes and live-connection revocation. Mac-to-Mac sync integration is pending.
 - Archive browser: list each folder's archived syncs and put items back,
