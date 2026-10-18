@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Per-pair base storage (state schema v2) with revision-bound atomic updates;
+  root changes and pair removal discard it.
 - Bounded held-root xattr/resource-fork digests, native ACL observations and
   stat fidelity fields, with cancellation and explicit unsupported metadata errors.
 - Revision-checked pair removal in the app and CLI, including offline pairs,

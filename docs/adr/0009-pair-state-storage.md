@@ -4,9 +4,9 @@ Status: Implemented initial store and agent ownership
 
 ## Scope
 
-The first state format stores local pair configuration only: opaque
-identity, revision, name, selected root bytes, mode and source direction.
-It does not store file snapshots, bases, journal entries or secrets yet.
+Version 1 stores local pair configuration: opaque identity, revision,
+name, selected root bytes, mode and source direction. Version 2 adds the
+per-path base. Snapshots, journal entries and secrets are not stored yet.
 Configuration does not establish endpoint identity, overlap safety,
 permissions or readiness to sync.
 
@@ -36,7 +36,8 @@ same store. Startup failures are explicit. Configuration dispatch is covered by
 - Existing supported containers get a unique SQLite online backup before
   migration. Backup file and directory metadata are flushed. Migration runs
   in one transaction; failure rolls back while retaining the backup.
-- The initial format is version 1. There is no destructive contraction or
+- Migrations are append-only steps; opening an older database runs every
+  later step in one transaction. There is no destructive contraction or
   automatic downgrade. Restore decisions require stopping the writer and
   selecting a verified backup; this slice does not add a restore command.
 
@@ -52,12 +53,23 @@ configuration unchanged. Missing pairs and invalid stored values are errors,
 never silently omitted rows. Removal requires the current revision and leaves
 endpoint data in place; its API scope is in [ADR 0011](0011-pair-configuration-api.md).
 
+## Base
+
+`base_entry` holds one row per pair and path: raw path bytes and each
+side's 65-byte version (kind, content digest, metadata digest). Removing a
+pair cascades to its base. Changing either root deletes the base in the
+same transaction; renames and mode changes keep it. Base updates are
+atomic and require the pair's current revision, so a run planned for other
+roots or another mode cannot commit. Stored rows whose sides disagree on
+content, or whose kind or length is invalid, are errors.
+
 ## Verification
 
 Driver tests cover reopen durability, single-writer ownership, SQL/schema
 constraints, stale updates, foreign/future refusal with unchanged database
 bytes, minimum-reader refusal, symlink/permission rejection, migration
-rollback and committed-WAL backup contents. State tests cover every mode,
+rollback, committed-WAL backup contents, v1→v2 migration with a backup,
+base ordering, atomic rollback, revision binding and cascades. State tests cover every mode,
 raw paths, stale revisions and invalid domain records.
 
 Linux checks pass locally. macOS filesystem/backup behavior is checked by CI.

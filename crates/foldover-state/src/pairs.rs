@@ -1,6 +1,13 @@
-use foldover_db::{Database, PairRow, PairValues, StateLocation};
-use foldover_types::{InvalidPair, LocalRoot, PairConfig, PairDraft, PairId, Side, SyncMode};
+use std::collections::BTreeMap;
 use std::os::unix::ffi::OsStrExt;
+
+use foldover_db::{BaseChange, Database, PairRow, PairValues, StateLocation};
+use foldover_types::{
+    BaselineEntry, InvalidPair, LocalRoot, PairConfig, PairDraft, PairId, Side, SyncMode, SyncPath,
+};
+
+use crate::BaseUpdate;
+use crate::base::{decode_entry, encode};
 
 const SYNC: &str = "sync";
 const MIRROR_LEFT: &str = "mirror-left";
@@ -92,6 +99,57 @@ impl PairStore {
         let current = self.pair(id)?.ok_or(Error::PairNotFound)?;
         self.database.remove_pair(id.as_bytes(), revision)?;
         Ok(current)
+    }
+}
+
+impl PairStore {
+    /// The pair's last-synced state. An unknown pair has an empty base.
+    pub fn base(&self, id: PairId) -> Result<BTreeMap<SyncPath, BaselineEntry>, Error> {
+        self.database
+            .base_rows(id.as_bytes())?
+            .into_iter()
+            .map(|row| {
+                let path =
+                    SyncPath::try_from(row.path).map_err(|_| Error::InvalidStored("base path"))?;
+                Ok((path, decode_entry(&row.left_version, &row.right_version)?))
+            })
+            .collect()
+    }
+
+    /// Apply updates atomically, only while the pair keeps `revision`, so a
+    /// run planned for other roots or another mode cannot commit its base.
+    pub fn update_base(
+        &mut self,
+        id: PairId,
+        revision: u64,
+        updates: &[BaseUpdate],
+    ) -> Result<(), Error> {
+        let revision = database_revision(revision)?;
+        let encoded: Vec<_> = updates
+            .iter()
+            .map(|update| match update {
+                BaseUpdate::Record(path, entry) => {
+                    (path, Some((encode(entry.left()), encode(entry.right()))))
+                }
+                BaseUpdate::Forget(path) => (path, None),
+            })
+            .collect();
+        let changes: Vec<_> = encoded
+            .iter()
+            .map(|(path, versions)| match versions {
+                Some((left, right)) => BaseChange::Put {
+                    path: path.as_bytes(),
+                    left_version: left,
+                    right_version: right,
+                },
+                None => BaseChange::Remove {
+                    path: path.as_bytes(),
+                },
+            })
+            .collect();
+        self.database
+            .change_base(id.as_bytes(), revision, &changes)?;
+        Ok(())
     }
 }
 
@@ -263,5 +321,67 @@ mod tests {
             store.pair(id),
             Err(Error::InvalidPair(InvalidPair::Name))
         ));
+    }
+
+    #[test]
+    fn base_round_trips_and_is_bound_to_the_pair_revision() {
+        use foldover_types::{Digest, EntryContent, EntryVersion};
+
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        let pair = store.create(&draft(SyncMode::Sync)).unwrap();
+        let path = |bytes: &[u8]| SyncPath::try_from(bytes).unwrap();
+        let version = |content, metadata| {
+            EntryVersion::new(content, Digest::from_bytes([metadata; Digest::BYTE_LEN]))
+        };
+        let file = EntryContent::File(Digest::from_bytes([1; Digest::BYTE_LEN]));
+        let folder = BaselineEntry::new(
+            version(EntryContent::Directory, 2),
+            version(EntryContent::Directory, 3),
+        )
+        .unwrap();
+        let photo = BaselineEntry::new(version(file, 4), version(file, 5)).unwrap();
+        store
+            .update_base(
+                pair.id(),
+                pair.revision(),
+                &[
+                    BaseUpdate::Record(path(b"folder/photo"), photo),
+                    BaseUpdate::Record(path(b"folder"), folder),
+                ],
+            )
+            .unwrap();
+        let base = store.base(pair.id()).unwrap();
+        assert_eq!(
+            base.into_iter().collect::<Vec<_>>(),
+            [(path(b"folder"), folder), (path(b"folder/photo"), photo)]
+        );
+
+        store
+            .update_base(
+                pair.id(),
+                pair.revision(),
+                &[BaseUpdate::Forget(path(b"folder/photo"))],
+            )
+            .unwrap();
+        assert_eq!(store.base(pair.id()).unwrap().len(), 1);
+
+        let moved = PairDraft::new(
+            "Photos".into(),
+            LocalRoot::from_bytes(b"/left/\xff".to_vec()).unwrap(),
+            LocalRoot::from_bytes(b"/moved".to_vec()).unwrap(),
+            SyncMode::Sync,
+        )
+        .unwrap();
+        let updated = store.update(pair.id(), pair.revision(), &moved).unwrap();
+        assert!(matches!(
+            store.update_base(
+                pair.id(),
+                pair.revision(),
+                &[BaseUpdate::Record(path(b"folder"), folder)]
+            ),
+            Err(Error::StaleRevision)
+        ));
+        assert!(store.base(updated.id()).unwrap().is_empty());
     }
 }
