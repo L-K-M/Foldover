@@ -14,7 +14,9 @@ use crate::BaseUpdate;
 use crate::base::{decode, decode_entry, encode};
 
 mod history;
+mod pause;
 pub use history::{HISTORY_LIMIT, HistoryEntry, HistoryOutcome, RunTrigger};
+pub use pause::Pause;
 
 const SYNC: &str = "sync";
 const MIRROR_LEFT: &str = "mirror-left";

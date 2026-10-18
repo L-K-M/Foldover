@@ -957,6 +957,66 @@ public func FfiConverterTypeArchivedRunRecord_lower(_ value: ArchivedRunRecord) 
 }
 
 
+public struct AutomationState: Equatable, Hashable {
+    public var paused: Bool
+    /**
+     * When a timed pause ends, in milliseconds since the Unix epoch.
+     */
+    public var untilMs: UInt64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(paused: Bool, 
+        /**
+         * When a timed pause ends, in milliseconds since the Unix epoch.
+         */untilMs: UInt64?) {
+        self.paused = paused
+        self.untilMs = untilMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension AutomationState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAutomationState: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationState {
+        return
+            try AutomationState(
+                paused: FfiConverterBool.read(from: &buf), 
+                untilMs: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AutomationState, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.paused, into: &buf)
+        FfiConverterOptionUInt64.write(value.untilMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationState_lift(_ buf: RustBuffer) throws -> AutomationState {
+    return try FfiConverterTypeAutomationState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationState_lower(_ value: AutomationState) -> RustBuffer {
+    return FfiConverterTypeAutomationState.lower(value)
+}
+
+
 public struct LocalPairConfiguration: Equatable, Hashable {
     public var id: String
     public var revision: UInt64
@@ -2910,6 +2970,30 @@ public func FfiConverterTypeWriteDurability_lower(_ value: WriteDurability) -> R
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = UInt32?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt32.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt32.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
     typealias SwiftType = UInt64?
 
@@ -3381,6 +3465,51 @@ public func archiveRuns(id: String, side: SyncSide)async throws  -> ArchivedRunL
             errorHandler: FfiConverterTypeAgentError_lift
         )
 }
+public func automationState()async throws  -> AutomationState  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_automation_state(
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeAutomationState_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+/**
+ * Pause automatic syncs for `minutes`, or until resumed when absent.
+ */
+public func pauseAutomation(minutes: UInt32?)async throws  -> AutomationState  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_pause_automation(FfiConverterOptionUInt32.lower(minutes)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeAutomationState_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+public func resumeAutomation()async throws  -> AutomationState  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_resume_automation(
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeAutomationState_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
 public func pairHistory(id: String)async throws  -> [RunHistoryEntry]  {
     return
         try  await uniffiRustCallAsync(
@@ -3551,6 +3680,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_archive_runs() != 43046) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_automation_state() != 127) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_pause_automation() != 17605) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_resume_automation() != 13518) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_pair_history() != 62355) {

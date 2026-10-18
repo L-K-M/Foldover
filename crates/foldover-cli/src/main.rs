@@ -30,6 +30,9 @@ enum Request {
     Sync(SocketLocation, PairId, SyncCommand),
     Archive(SocketLocation, PairId, Side, ArchiveCommand),
     History(SocketLocation, PairId),
+    /// Pause automatic syncs for minutes, or until resumed.
+    Pause(SocketLocation, Option<u32>),
+    Resume(SocketLocation),
     Usage,
 }
 
@@ -150,6 +153,12 @@ async fn main() -> ExitCode {
                 }
             }
         }
+        Request::Pause(location, minutes) => {
+            print_status(foldover_client::pause_automation(&location, minutes).await)
+        }
+        Request::Resume(location) => {
+            print_status(foldover_client::resume_automation(&location).await)
+        }
         Request::History(location, id) => match history(&location, id).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
@@ -159,7 +168,7 @@ async fn main() -> ExitCode {
         },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT | --keep-left PATH | --keep-right PATH | --keep-both PATH] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT | --keep-left PATH | --keep-right PATH | --keep-both PATH] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -194,6 +203,14 @@ fn request(args: impl Iterator<Item = OsString>) -> Request {
                 _ => Request::Usage,
             }
         }
+        [command] if command == "pause" => Request::Pause(location, None),
+        [command, minutes] if command == "pause" => {
+            match minutes.to_str().and_then(|minutes| minutes.parse().ok()) {
+                Some(minutes) => Request::Pause(location, Some(minutes)),
+                None => Request::Usage,
+            }
+        }
+        [command] if command == "resume" => Request::Resume(location),
         [command, id] if command == "history" => match id.to_str().and_then(|id| id.parse().ok()) {
             Some(id) => Request::History(location, id),
             None => Request::Usage,
@@ -466,6 +483,23 @@ async fn sync(
     })
 }
 
+/// Print an automation status as one JSON line.
+fn print_status(
+    status: Result<foldover_client::AutomationStatus, foldover_client::Error>,
+) -> ExitCode {
+    let printed = status.and_then(|status| Ok(serde_json::to_string(&status)?));
+    match printed {
+        Ok(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("foldover: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// Print the pair's finished runs as JSON lines, newest first.
 async fn history(location: &SocketLocation, id: PairId) -> Result<(), foldover_client::Error> {
     for run in foldover_client::history(location, id).await?.runs {
@@ -683,6 +717,10 @@ mod tests {
             Request::Archive(_, _, Side::Right, ArchiveCommand::PutBackAll(ref run)) if run == "RUN"
         ));
         assert!(matches!(req(&["history", id]), Request::History(..)));
+        assert!(matches!(req(&["pause"]), Request::Pause(_, None)));
+        assert!(matches!(req(&["pause", "60"]), Request::Pause(_, Some(60))));
+        assert!(matches!(req(&["pause", "soon"]), Request::Usage));
+        assert!(matches!(req(&["resume"]), Request::Resume(_)));
         for args in [
             vec!["history"],
             vec!["history", "bad"],

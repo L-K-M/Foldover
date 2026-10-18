@@ -16,7 +16,8 @@ side's last observation ([ADR 0018](0018-local-entry-versions.md)), a cache
 discarded with the base. Version 8 adds filter rules
 ([ADR 0024](0024-filters.md)). Version 9 adds run history
 ([ADR 0026](0026-run-history.md)). Version 10 adds the file size limit
-([ADR 0024](0024-filters.md)). Secrets are not stored yet.
+([ADR 0024](0024-filters.md)). Version 11 adds the automation pause
+([ADR 0022](0022-scheduled-runs.md)). Secrets are not stored yet.
 Configuration does not establish endpoint identity, overlap safety,
 permissions or readiness to sync.
 

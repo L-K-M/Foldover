@@ -37,6 +37,11 @@ is skipped until its job ends.
 - **Unattended gate:** unattended runs never carry approvals. Above the
   unattended deletion limit they stop with `NeedsApproval`, which the app
   shows ([ADR 0013](0013-deletion-review-fuse.md)).
+- **Pause** (state schema v11): `automation.pause` holds automatic runs
+  for every pair, for 1 minute to 1 week or until `automation.resume`.
+  It survives agent restarts. Changes noticed meanwhile stay recorded and
+  run after the pause; manual syncs are unaffected. The menu bar, the CLI
+  (`foldover pause [MINUTES]`, `foldover resume`) and Shortcuts set it.
 - Timing state lives in agent memory; a restart restarts every interval.
 
 ## Consequences

@@ -10,6 +10,8 @@
 
 mod archive;
 pub use archive::*;
+mod automation;
+pub use automation::*;
 mod history;
 pub use history::*;
 mod sync;

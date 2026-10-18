@@ -301,6 +301,23 @@ uint64_t uniffi_foldover_ffi_fn_func_archive_put_back_all(RustBuffer id, RustBuf
 uint64_t uniffi_foldover_ffi_fn_func_archive_runs(RustBuffer id, RustBuffer side
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_AUTOMATION_STATE
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_AUTOMATION_STATE
+uint64_t uniffi_foldover_ffi_fn_func_automation_state(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_PAUSE_AUTOMATION
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_PAUSE_AUTOMATION
+uint64_t uniffi_foldover_ffi_fn_func_pause_automation(RustBuffer minutes
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_RESUME_AUTOMATION
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_RESUME_AUTOMATION
+uint64_t uniffi_foldover_ffi_fn_func_resume_automation(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_PAIR_HISTORY
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_PAIR_HISTORY
 uint64_t uniffi_foldover_ffi_fn_func_pair_history(RustBuffer id
@@ -664,6 +681,24 @@ uint16_t uniffi_foldover_ffi_checksum_func_archive_put_back_all(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_ARCHIVE_RUNS
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_ARCHIVE_RUNS
 uint16_t uniffi_foldover_ffi_checksum_func_archive_runs(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_AUTOMATION_STATE
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_AUTOMATION_STATE
+uint16_t uniffi_foldover_ffi_checksum_func_automation_state(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_PAUSE_AUTOMATION
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_PAUSE_AUTOMATION
+uint16_t uniffi_foldover_ffi_checksum_func_pause_automation(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_RESUME_AUTOMATION
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_RESUME_AUTOMATION
+uint16_t uniffi_foldover_ffi_checksum_func_resume_automation(void
     
 );
 #endif

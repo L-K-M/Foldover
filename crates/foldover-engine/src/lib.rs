@@ -23,7 +23,7 @@ pub use configuration::{Engine, Error, ErrorKind};
 pub use conflict::{KeepBothError, keep_both};
 pub use foldover_state::RecordedIdentities;
 pub use foldover_state::StateLocation;
-pub use foldover_state::{HISTORY_LIMIT, HistoryEntry, HistoryOutcome, RunTrigger};
+pub use foldover_state::{HISTORY_LIMIT, HistoryEntry, HistoryOutcome, Pause, RunTrigger};
 pub use gates::{DeletionCounts, DeletionReview, InvalidDeletionCounts, RunContext};
 pub use plan::{
     CandidateDecision, CandidatePlan, PlanError, PlanRow, TreeRole, plan_candidates, plan_resolved,

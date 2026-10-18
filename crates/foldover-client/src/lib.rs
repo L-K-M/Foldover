@@ -8,23 +8,26 @@ use foldover_proto::local::{
     ARCHIVE_ITEMS, ARCHIVE_PUT_BACK, ARCHIVE_PUT_BACK_ALL, ARCHIVE_RUNS, ArchiveItemQuery,
     ArchiveKey, ArchivePlaced, ArchivePutBack, ArchiveRunKey,
 };
+use foldover_proto::local::{
+    AUTOMATION_PAUSE, AUTOMATION_RESUME, AUTOMATION_STATUS, AutomationPause, HISTORY_LIST,
+    PAIR_REMOVE, PairRevision,
+};
 pub use foldover_proto::local::{
     AgentCapability, ArchiveItem, ArchiveItems, ArchiveRestored, ArchiveRun, ArchiveRuns,
     DaemonStatus, History, HistoryOutcome, HistoryRecord, HistoryTrigger, PairSide, SyncAction,
     SyncConflict, SyncCounts, SyncDeletions, SyncFailure, SyncItem, SyncJob, SyncPreview,
     SyncResult, SyncStatus,
 };
+pub use foldover_proto::local::{AutomationStatus, SyncItemKind, SyncItemPage};
 use foldover_proto::local::{
     ConflictKeep, SYNC_CANCEL, SYNC_ITEMS, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS,
     SyncItemQuery, SyncKey, SyncResolve, SyncRun,
 };
 use foldover_proto::local::{DAEMON_STATUS, Hello, PROTOCOL_VERSION, Request, SESSION_HELLO};
-use foldover_proto::local::{HISTORY_LIST, PAIR_REMOVE, PairRevision};
 use foldover_proto::local::{
     PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_UPDATE, PairInput, PairKey, PairList,
     PairRecord, PairUpdate,
 };
-pub use foldover_proto::local::{SyncItemKind, SyncItemPage};
 pub use foldover_types::{
     Durability, Filters, InvalidPair, LocalRoot, MetadataPolicy, PairConfig, PairDraft, PairId,
     PairOptions, Propagation, Schedule, ScheduleInterval, Side, SyncMode,
@@ -124,6 +127,30 @@ pub async fn keep_both(
 
 pub async fn cancel_sync(location: &SocketLocation, id: PairId) -> Result<SyncStatus, Error> {
     sync_call(location, SYNC_CANCEL, id).await
+}
+
+/// Whether automatic syncs are paused.
+pub async fn automation_status(location: &SocketLocation) -> Result<AutomationStatus, Error> {
+    Ok(serde_json::from_value(
+        call(location, AUTOMATION_STATUS, None).await?,
+    )?)
+}
+
+/// Pause automatic syncs for `minutes`, or until resumed.
+pub async fn pause_automation(
+    location: &SocketLocation,
+    minutes: Option<u32>,
+) -> Result<AutomationStatus, Error> {
+    let params = serde_json::to_value(AutomationPause { minutes })?;
+    Ok(serde_json::from_value(
+        call(location, AUTOMATION_PAUSE, Some(params)).await?,
+    )?)
+}
+
+pub async fn resume_automation(location: &SocketLocation) -> Result<AutomationStatus, Error> {
+    Ok(serde_json::from_value(
+        call(location, AUTOMATION_RESUME, None).await?,
+    )?)
 }
 
 /// The pair's finished runs, newest first.

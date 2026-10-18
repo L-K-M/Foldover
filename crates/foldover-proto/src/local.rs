@@ -8,6 +8,12 @@ pub use archive::{
     ArchivePutBack, ArchiveRestored, ArchiveRun, ArchiveRunKey, ArchiveRuns,
 };
 
+mod automation;
+pub use automation::{
+    AUTOMATION_PAUSE, AUTOMATION_RESUME, AUTOMATION_STATUS, AutomationPause, AutomationStatus,
+    MAX_PAUSE_MINUTES,
+};
+
 mod history;
 pub use history::{HISTORY_LIST, History, HistoryOutcome, HistoryRecord, HistoryTrigger};
 

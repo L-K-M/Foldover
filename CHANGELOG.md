@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Pause automatic syncs for an hour, four hours or until resumed, from the
+  menu bar, Shortcuts or `foldover pause`; the pause survives restarts.
 - Every previewed change can be listed, 100 at a time, and filtered to
   copies, updates, archives or conflicts.
 - Skip large files: a size limit per pair, in the editor and as

@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use foldover_engine::PairWatcher;
 use foldover_types::{PairConfig, PairId, Schedule};
@@ -155,6 +155,13 @@ impl Service {
             let Ok(engine) = self.engine.lock() else {
                 return Vec::new();
             };
+            // Changes stay recorded during a pause and run after it.
+            if engine
+                .pause()
+                .is_ok_and(|pause| pause.active(SystemTime::now()))
+            {
+                return Vec::new();
+            }
             let Ok(pairs) = engine.pairs() else {
                 return Vec::new();
             };

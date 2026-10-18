@@ -3,6 +3,7 @@
 //! foldover-engine. See PLAN.md §4.4.
 
 mod archive;
+mod automation;
 mod history;
 mod schedule;
 mod sync;
@@ -11,8 +12,8 @@ use std::sync::{Arc, Mutex};
 
 use foldover_engine::{Approval, Engine, ErrorKind, StateLocation};
 use foldover_proto::local::{
-    ARCHIVE_ITEMS, ARCHIVE_PUT_BACK, ARCHIVE_PUT_BACK_ALL, ARCHIVE_RUNS, HISTORY_LIST, PAIR_REMOVE,
-    PairRevision,
+    ARCHIVE_ITEMS, ARCHIVE_PUT_BACK, ARCHIVE_PUT_BACK_ALL, ARCHIVE_RUNS, AUTOMATION_PAUSE,
+    AUTOMATION_RESUME, AUTOMATION_STATUS, HISTORY_LIST, PAIR_REMOVE, PairRevision,
 };
 use foldover_proto::local::{
     AgentCapability, DAEMON_STATUS, DaemonStatus, Hello, INTERNAL_ERROR, INVALID_PARAMS,
@@ -84,6 +85,12 @@ impl Service {
             ARCHIVE_RUNS | ARCHIVE_ITEMS | ARCHIVE_PUT_BACK | ARCHIVE_PUT_BACK_ALL
         ) {
             return archive::handle(&self.engine, &self.jobs, &request).await;
+        }
+        if matches!(
+            request.method(),
+            AUTOMATION_STATUS | AUTOMATION_PAUSE | AUTOMATION_RESUME
+        ) {
+            return automation::handle(&self.engine, &request).await;
         }
         if request.method() == HISTORY_LIST {
             return history::handle(&self.engine, &request).await;
@@ -1147,5 +1154,69 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(archives, json!({"items": [], "more": false}));
+    }
+
+    #[tokio::test]
+    async fn a_pause_holds_automatic_syncs_until_resumed() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Paused");
+        input["options"]["schedule"] = json!({"kind": "every", "minutes": 1});
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        settled(&service, &key).await;
+        let at = |seconds| service.scheduler.started() + std::time::Duration::from_secs(seconds);
+
+        let invalid = service
+            .handle(Request::call(
+                3,
+                AUTOMATION_PAUSE,
+                Some(json!({"minutes": 0})),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(invalid.code(), INVALID_PARAMS);
+        let paused = service
+            .handle(Request::call(
+                4,
+                AUTOMATION_PAUSE,
+                Some(json!({"minutes": null})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(paused, json!({"paused": true, "until_ms": null}));
+        assert!(service.run_due(at(61)).is_empty());
+
+        let resumed = service
+            .handle(Request::call(5, AUTOMATION_RESUME, None))
+            .await
+            .unwrap();
+        assert_eq!(resumed["paused"], false);
+        assert_eq!(service.run_due(at(62)).len(), 1);
+        settled(&service, &key).await;
+
+        let timed = service
+            .handle(Request::call(
+                6,
+                AUTOMATION_PAUSE,
+                Some(json!({"minutes": 30})),
+            ))
+            .await
+            .unwrap();
+        assert!(timed["until_ms"].as_u64().is_some());
+        assert_eq!(
+            service
+                .handle(Request::call(7, AUTOMATION_STATUS, None))
+                .await
+                .unwrap(),
+            timed
+        );
     }
 }

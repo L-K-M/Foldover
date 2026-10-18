@@ -8,7 +8,7 @@ use foldover_endpoint::{
     Filter, InvalidFilter, LocalEndpoint, LocalPair, ObservedEntry, PairRootError, RootRelation,
     ScanError,
 };
-use foldover_state::{HistoryEntry, PairStore, SnapshotEntry, StateLocation};
+use foldover_state::{HistoryEntry, PairStore, Pause, SnapshotEntry, StateLocation};
 use foldover_types::{PairConfig, PairDraft, PairId, Resolution, Side, SyncPath};
 
 use crate::{Commit, RunInputs};
@@ -200,6 +200,15 @@ impl Engine {
     /// The pair's newest runs first, at most `limit`.
     pub fn history(&self, id: PairId, limit: usize) -> Result<Vec<HistoryEntry>, Error> {
         Ok(self.pairs.history(id, limit)?)
+    }
+
+    /// Whether automatic syncs are paused, for every pair.
+    pub fn pause(&self) -> Result<Pause, Error> {
+        Ok(self.pairs.pause()?)
+    }
+
+    pub fn set_pause(&mut self, pause: Pause) -> Result<(), Error> {
+        Ok(self.pairs.set_pause(pause)?)
     }
 
     pub fn remove_pair(&mut self, id: PairId, revision: u64) -> Result<PairConfig, Error> {

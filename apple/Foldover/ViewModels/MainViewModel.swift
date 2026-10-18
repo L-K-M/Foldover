@@ -5,6 +5,21 @@
 import Foundation
 import Observation
 
+/// How long to hold automatic syncs.
+enum PauseLength: CaseIterable, Sendable {
+    case oneHour
+    case fourHours
+    case untilResumed
+
+    var minutes: UInt32? {
+        switch self {
+        case .oneHour: 60
+        case .fourHours: 240
+        case .untilResumed: nil
+        }
+    }
+}
+
 /// What Shortcuts can ask of a pair.
 enum PairAction: Sendable {
     case sync
@@ -56,6 +71,7 @@ final class MainViewModel {
     private let pairStore: PairStore
     private let syncStore: SyncStore
     private let archiveStore: ArchiveStore
+    private let automation: AutomationStore
     var selectedPairID: String?
     private(set) var editor: PairEditorViewModel?
     /// The pair whose archive browser is open.
@@ -67,12 +83,48 @@ final class MainViewModel {
     /// (an `App`, so main-actor isolated too) builds it in its `@State`
     /// initializer.
     init(appInfo: AppInfoStore, agent: AgentStore = AgentStore(), pairs: PairStore = PairStore(),
-         sync: SyncStore = SyncStore(), archive: ArchiveStore = ArchiveStore()) {
+         sync: SyncStore = SyncStore(), archive: ArchiveStore = ArchiveStore(),
+         automation: AutomationStore = AutomationStore()) {
         self.appInfo = appInfo
         self.agent = agent
         pairStore = pairs
         syncStore = sync
         archiveStore = archive
+        self.automation = automation
+    }
+
+    var isPaused: Bool {
+        if case .paused = automation.state { return true }
+        return false
+    }
+
+    /// Shown while automatic syncs are held.
+    var pauseText: String? {
+        guard case .paused(let until) = automation.state else { return nil }
+        guard let until else { return String(localized: "Automatic syncs are paused.") }
+        return String(localized: "Automatic syncs are paused until \(until.formatted(date: .omitted, time: .shortened)).")
+    }
+
+    static func title(_ length: PauseLength) -> String {
+        switch length {
+        case .oneHour: String(localized: "For 1 Hour")
+        case .fourHours: String(localized: "For 4 Hours")
+        case .untilResumed: String(localized: "Until I Resume")
+        }
+    }
+
+    func pause(_ length: PauseLength) async { await automation.pause(minutes: length.minutes) }
+    func resume() async { await automation.resume() }
+
+    /// Pause for Shortcuts and say what happened.
+    func pauseForShortcuts(_ length: PauseLength) async -> String {
+        await pause(length)
+        return automation.error ?? pauseText ?? String(localized: "Automatic syncs are running.")
+    }
+
+    func resumeForShortcuts() async -> String {
+        await resume()
+        return automation.error ?? pauseText ?? String(localized: "Automatic syncs are running.")
     }
 
     var title: String { "Foldover" }
@@ -172,6 +224,7 @@ final class MainViewModel {
             }
             if case .connected = agent.connection, pairStore.hasLoaded {
                 await syncStore.checkAll(pairStore.pairs)
+                await automation.refresh()
             }
             try? await Task.sleep(for: interval)
         }

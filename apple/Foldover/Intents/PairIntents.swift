@@ -53,6 +53,52 @@ struct PreviewPairIntent: AppIntent {
     }
 }
 
+/// How long Shortcuts pauses automatic syncs.
+enum PauseLengthEntity: String, AppEnum {
+    case oneHour
+    case fourHours
+    case untilResumed
+
+    static let typeDisplayRepresentation: TypeDisplayRepresentation = "Pause Length"
+    static let caseDisplayRepresentations: [PauseLengthEntity: DisplayRepresentation] = [
+        .oneHour: "For 1 Hour",
+        .fourHours: "For 4 Hours",
+        .untilResumed: "Until Resumed",
+    ]
+
+    var length: PauseLength {
+        switch self {
+        case .oneHour: .oneHour
+        case .fourHours: .fourHours
+        case .untilResumed: .untilResumed
+        }
+    }
+}
+
+struct PauseAutomaticSyncsIntent: AppIntent {
+    static let title: LocalizedStringResource = "Pause Automatic Syncs"
+    static let description: IntentDescription = IntentDescription("Holds scheduled and change-triggered syncs for every pair. Manual syncs still run.")
+
+    @Parameter(title: "Length", default: .oneHour) var length: PauseLengthEntity
+    @Dependency private var viewModel: MainViewModel
+
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        let outcome = await viewModel.pauseForShortcuts(length.length)
+        return .result(dialog: "\(outcome)")
+    }
+}
+
+struct ResumeAutomaticSyncsIntent: AppIntent {
+    static let title: LocalizedStringResource = "Resume Automatic Syncs"
+
+    @Dependency private var viewModel: MainViewModel
+
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        let outcome = await viewModel.resumeForShortcuts()
+        return .result(dialog: "\(outcome)")
+    }
+}
+
 struct FoldoverShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(intent: SyncPairIntent(), phrases: ["Sync a pair in \(.applicationName)"],

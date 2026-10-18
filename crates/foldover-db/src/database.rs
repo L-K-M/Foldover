@@ -7,7 +7,9 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
 mod history;
+mod pause;
 pub use history::HistoryRow;
+pub use pause::PauseRow;
 
 const APPLICATION_ID: i64 = 0x464f4c44; // FOLD
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
@@ -20,9 +22,9 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 10] = [
+const MIGRATIONS: [&str; 11] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
-    SCHEMA_V9, SCHEMA_V10,
+    SCHEMA_V9, SCHEMA_V10, SCHEMA_V11,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -115,6 +117,13 @@ CREATE TABLE run_history (
 // Files larger than this many bytes are skipped; NULL means no limit.
 const SCHEMA_V10: &str = "
 ALTER TABLE pair ADD COLUMN size_limit INTEGER CHECK(size_limit IS NULL OR size_limit > 0);
+";
+// Automatic syncs are paused while the row exists; NULL pauses until resumed.
+const SCHEMA_V11: &str = "
+CREATE TABLE automation_pause (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    until_ms INTEGER CHECK(until_ms IS NULL OR until_ms >= 0)
+) STRICT;
 ";
 
 #[derive(Debug, thiserror::Error)]

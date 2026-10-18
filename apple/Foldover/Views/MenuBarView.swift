@@ -32,6 +32,17 @@ struct MenuBarView: View {
                     .disabled(!viewModel.canSyncAll)
             }
 
+            if let pause = viewModel.pauseText {
+                Text(pause).font(.caption)
+                Button("Resume Automatic Syncs") { Task { await viewModel.resume() } }
+            } else {
+                Menu("Pause Automatic Syncs") {
+                    ForEach(PauseLength.allCases, id: \.self) { length in
+                        Button(MainViewModel.title(length)) { Task { await viewModel.pause(length) } }
+                    }
+                }
+            }
+
             Text(viewModel.agentStatusText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
