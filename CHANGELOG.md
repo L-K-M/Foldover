@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Peer transport driver: pinned QUIC/TLS connections, six-digit pairing
+  codes and live-connection revocation. Mac-to-Mac sync integration is pending.
 - Bounded held-root xattr/resource-fork digests, native ACL observations and
   stat fidelity fields, with cancellation and explicit unsupported metadata errors.
 - Revision-checked pair removal in the app and CLI, including offline pairs,

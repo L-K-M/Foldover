@@ -568,6 +568,11 @@ FSEvents is a hint, never the truth.
 | Wire | Versioned protobuf frames (`foldover-proto::peer`): hello, index offer (delta by index ID + sequence, as in Syncthing's BEP), block request/response, change stream, staged-write commit. Names in NFC. A reserved version-vector field leaves room for mesh sync |
 | Layering | The `peer` backend dials and listens. Incoming requests go to a handler trait that the engine implements: it checks scope in `state` and answers through the local endpoint |
 
+The transport driver provides pinned TLS connections, code exchange and
+live-channel revocation ([ADR 0004](docs/adr/0004-peer-pairing.md#driver-implementation)).
+Discovery, persistent identity and trust, authorization, wire messages and
+the peer endpoint remain P5 work.
+
 ### 4.12 Linux readiness
 
 - **CI from the first commit:** everything below the socket compiles and
