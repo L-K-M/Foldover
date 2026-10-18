@@ -50,6 +50,57 @@ private struct UnreachableSyncClient: SyncClient {
     }
 }
 
+/// Replies what the test sets, so each request sees a chosen agent state.
+private actor StubSyncClient: SyncClient {
+    private var statusReply: PairSyncState = .idle
+    private var previewReply: PairSyncState = .idle
+
+    func setStatusReply(_ reply: PairSyncState) { statusReply = reply }
+    func setPreviewReply(_ reply: PairSyncState) { previewReply = reply }
+
+    func preview(_ id: String) async throws -> PairSyncState { previewReply }
+    func status(_ id: String) async throws -> PairSyncState { statusReply }
+    func run(_ id: String, approvedA: UInt64, approvedB: UInt64) async throws -> PairSyncState { .idle }
+    func cancel(_ id: String) async throws -> PairSyncState { .idle }
+    func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState { .idle }
+}
+
+/// Holds every status reply until the test releases it, so a checkAll
+/// request can stay in flight while a manual job starts.
+private actor DeferredSyncClient: SyncClient {
+    private(set) var statusCalls = 0
+    private var pending: [CheckedContinuation<PairSyncState, Never>] = []
+    private var waiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var previewReply: PairSyncState = .idle
+
+    func setPreviewReply(_ reply: PairSyncState) { previewReply = reply }
+
+    func preview(_ id: String) async throws -> PairSyncState { previewReply }
+    func status(_ id: String) async throws -> PairSyncState {
+        statusCalls += 1
+        let ready = waiters.filter { statusCalls >= $0.0 }
+        waiters.removeAll { statusCalls >= $0.0 }
+        for (_, continuation) in ready { continuation.resume() }
+        return await withCheckedContinuation { pending.append($0) }
+    }
+    func run(_ id: String, approvedA: UInt64, approvedB: UInt64) async throws -> PairSyncState { .idle }
+    func cancel(_ id: String) async throws -> PairSyncState { .idle }
+    func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState { .idle }
+
+    /// Resumes the oldest unanswered status request.
+    func reply(_ state: PairSyncState) {
+        pending.removeFirst().resume(returning: state)
+    }
+
+    var pendingStatusCalls: Int { pending.count }
+
+    /// Suspends until at least `count` status requests are in flight.
+    func waitForStatusCalls(_ count: Int) async {
+        if statusCalls >= count { return }
+        await withCheckedContinuation { waiters.append((count, $0)) }
+    }
+}
+
 private func preview(archivesInA: UInt64, needsApproval: Bool) -> PreviewSummary {
     PreviewSummary(
         changes: [PlannedChange(path: Data("photos/a.jpg".utf8), action: .copy(to: .b)),
@@ -203,4 +254,93 @@ func alertTextsNameTheProblem() {
                                 conflicts: 2, failures: [], failureCount: 0, archive: "run")
     #expect(SyncStore.alert(for: pair(), state: .finished(conflicted))?.body.contains("2") == true)
     #expect(SyncStore.alert(for: pair(), state: .idle) == nil)
+}
+
+// Regression for PR57: declineApproval only flipped the local state, so
+// the next scheduled checkAll read the same needsApproval from the
+// agent, resurrected the dialog and reposted the notification.
+@MainActor
+@Test
+func declinedApprovalsStayDeclinedUntilTheJobOrResultChanges() async {
+    let summary = preview(archivesInA: 60, needsApproval: true)
+    let expanded = preview(archivesInA: 61, needsApproval: true)
+    let clean = preview(archivesInA: 0, needsApproval: false)
+    let client = StubSyncClient()
+    let recorder = AlertRecorder()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1)) { alert in
+        await recorder.record(alert)
+    }
+    let pair = pair()
+    let viewModel = PairSyncViewModel(pair: pair, store: store, agentConnected: true)
+
+    // The first observation never alerts, so establish the quiet baseline.
+    await store.checkAll([pair])
+    #expect(store.state(for: pair.id) == .idle)
+    #expect(await recorder.alerts.isEmpty)
+
+    // An automatic check that stops for approval notifies once.
+    await client.setStatusReply(.needsApproval(summary))
+    await store.checkAll([pair])
+    #expect(store.state(for: pair.id) == .needsApproval(summary))
+    #expect(viewModel.approvalRequest != nil)
+    #expect(await recorder.alerts.count == 1)
+
+    store.declineApproval(pair.id)
+    #expect(store.state(for: pair.id) == .previewed(summary))
+    #expect(viewModel.approvalRequest == nil)
+
+    // The same agent result keeps the decline: no dialog, no second alert.
+    await store.checkAll([pair])
+    #expect(store.state(for: pair.id) == .previewed(summary))
+    #expect(viewModel.approvalRequest == nil)
+    #expect(await recorder.alerts.count == 1)
+
+    // A substantively different reviewable result must surface again.
+    await client.setStatusReply(.needsApproval(expanded))
+    await store.checkAll([pair])
+    #expect(store.state(for: pair.id) == .needsApproval(expanded))
+    #expect(await recorder.alerts.count == 2)
+
+    // A new explicit job re-arms approval requests afterwards.
+    store.declineApproval(pair.id)
+    await client.setPreviewReply(.previewed(clean))
+    await client.setStatusReply(.needsApproval(summary))
+    await store.preview(pair.id)
+    #expect(store.state(for: pair.id) == .previewed(clean))
+    await store.checkAll([pair])
+    #expect(store.state(for: pair.id) == .needsApproval(summary))
+    #expect(await recorder.alerts.count == 3)
+}
+
+// Regression for PR57: a checkAll status reply requested before a manual
+// job started used to overwrite the working state — the pair looked idle
+// or finished while it was still syncing and the display stopped moving.
+@MainActor
+@Test
+func staleCheckAllRepliesCannotOverwriteManuallyStartedJobs() async {
+    let summary = preview(archivesInA: 3, needsApproval: false)
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.working(.preview, cancelling: false))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+
+    // The scheduled check parks inside its status request.
+    let check = Task { await store.checkAll([pair]) }
+    await client.waitForStatusCalls(1)
+
+    // A manual preview starts; the store begins polling the working job.
+    let manual = Task { await store.preview(pair.id) }
+    await client.waitForStatusCalls(2)
+
+    // The stale reply predates the job: it must not win.
+    await client.reply(.idle)
+    await check.value
+    #expect(store.state(for: pair.id) == .working(.preview, cancelling: false))
+
+    // The live poll still owns the pair and lands the real result.
+    while await client.pendingStatusCalls > 0 {
+        await client.reply(.previewed(summary))
+    }
+    await manual.value
+    #expect(store.state(for: pair.id) == .previewed(summary))
 }
