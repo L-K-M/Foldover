@@ -24,11 +24,11 @@ const MAX_ROOT_ANCESTORS: usize = 4096;
 // Darwin sys/stat.h defines this synthetic, read-only flag; libc omits it.
 #[cfg(target_os = "macos")]
 const SF_DATALESS: u32 = 0x4000_0000;
-// Owner-settable flags that describe the entry itself, not its storage:
-// compression, document tracking and data-vault state stay out.
+// Owner-set flags that describe the entry, not its storage or protection.
+// Lock and append-only flags are local choices that would block later sync
+// writes; compression, tracking and data-vault state are storage.
 #[cfg(target_os = "macos")]
-const USER_FLAGS: u32 =
-    libc::UF_NODUMP | libc::UF_IMMUTABLE | libc::UF_APPEND | libc::UF_OPAQUE | libc::UF_HIDDEN;
+const USER_FLAGS: u32 = libc::UF_NODUMP | libc::UF_HIDDEN;
 
 /// An opened root directory, independent of later changes to its ambient path.
 /// This read-only surface does not establish mount availability, volume UUIDs

@@ -4,7 +4,9 @@
 //! ```text
 //! content  = file: data digest + resource fork (if any)
 //!            symlink: target bytes
-//! metadata = permissions, file mtime, user flags, xattrs, ACL
+//! metadata = the pair's synced categories: file mtime; xattrs and the
+//!            hidden/no-dump flags; mode bits and ACL (else the file's
+//!            executable bit)
 //! ```
 //!
 //! Content must match across endpoints; metadata is recorded per side, so a
@@ -13,7 +15,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use foldover_fs::{AccessControl, NodeKind};
-use foldover_types::{Digest, EntryContent, EntryVersion};
+use foldover_types::{Digest, EntryContent, EntryVersion, MetadataPolicy, Propagation};
 
 // Domain separation keeps content, link and metadata digests distinct from
 // each other and from raw data hashes.
@@ -34,6 +36,7 @@ const SYSTEM_MANAGED: &[&[u8]] = &[
 ];
 
 const PERMISSION_BITS: u32 = 0o7777;
+const EXECUTE_BITS: u32 = 0o111;
 
 pub(super) enum Payload<'a> {
     File(Digest),
@@ -60,7 +63,11 @@ pub(super) struct Observed<'a> {
     pub(super) access_control: Option<&'a AccessControl>,
 }
 
-pub(super) fn entry_version(payload: Payload<'_>, observed: &Observed<'_>) -> EntryVersion {
+pub(super) fn entry_version(
+    payload: Payload<'_>,
+    observed: &Observed<'_>,
+    policy: MetadataPolicy,
+) -> EntryVersion {
     let attributes = observed.attributes.as_deref().unwrap_or_default();
     let fork = match payload {
         Payload::File(_) if !observed.compressed => attributes
@@ -77,7 +84,7 @@ pub(super) fn entry_version(payload: Payload<'_>, observed: &Observed<'_>) -> En
             EntryContent::Symlink(finish(&hasher))
         }
     };
-    EntryVersion::new(content, metadata_digest(observed))
+    EntryVersion::new(content, metadata_digest(observed, policy))
 }
 
 fn file_content(data: Digest, fork: Option<&Attribute<'_>>) -> Digest {
@@ -96,25 +103,48 @@ fn file_content(data: Digest, fork: Option<&Attribute<'_>>) -> Digest {
     finish(&hasher)
 }
 
-fn metadata_digest(observed: &Observed<'_>) -> Digest {
+fn metadata_digest(observed: &Observed<'_>, policy: MetadataPolicy) -> Digest {
     let mut hasher = blake3::Hasher::new_derive_key(METADATA_CONTEXT);
 
     // Link modes are not meaningful on Linux and not portable elsewhere.
-    if observed.kind != NodeKind::Symlink {
-        hasher.update(&(observed.permissions & PERMISSION_BITS).to_le_bytes());
+    match (policy.permissions(), observed.kind) {
+        (_, NodeKind::Symlink) => {}
+        (Propagation::Sync, _) => {
+            hasher
+                .update(&[1])
+                .update(&(observed.permissions & PERMISSION_BITS).to_le_bytes());
+            update_access_control(&mut hasher, observed.access_control);
+        }
+        (Propagation::Ignore, NodeKind::File) => {
+            let executable = observed.permissions & EXECUTE_BITS != 0;
+            hasher.update(&[2, u8::from(executable)]);
+        }
+        (Propagation::Ignore, _) => {
+            hasher.update(&[0]);
+        }
     }
 
     // Directory mtimes move with every child change, and link mtimes are
     // rarely settable; tracking either would create metadata churn.
-    if observed.kind == NodeKind::File {
-        update_time(&mut hasher, observed.modified);
+    match (policy.modification_times(), observed.kind) {
+        (Propagation::Sync, NodeKind::File) => {
+            hasher.update(&[1]);
+            update_time(&mut hasher, observed.modified);
+        }
+        _ => {
+            hasher.update(&[0]);
+        }
     }
 
+    if policy.extended_attributes() == Propagation::Ignore {
+        hasher.update(&[0]);
+        return finish(&hasher);
+    }
+    hasher.update(&[1]);
     match observed.user_flags {
         None => hasher.update(&[0]),
         Some(flags) => hasher.update(&[1]).update(&flags.to_le_bytes()),
     };
-
     match &observed.attributes {
         None => {
             hasher.update(&[0]);
@@ -134,8 +164,11 @@ fn metadata_digest(observed: &Observed<'_>) -> Digest {
             }
         }
     }
+    finish(&hasher)
+}
 
-    match observed.access_control {
+fn update_access_control(hasher: &mut blake3::Hasher, access_control: Option<&AccessControl>) {
+    match access_control {
         None | Some(AccessControl::NotReported) => hasher.update(&[0]),
         Some(AccessControl::MacOs(None)) => hasher.update(&[1]),
         Some(AccessControl::MacOs(Some(acl))) => hasher
@@ -143,7 +176,6 @@ fn metadata_digest(observed: &Observed<'_>) -> Digest {
             .update(&(acl.len() as u64).to_le_bytes())
             .update(acl),
     };
-    finish(&hasher)
 }
 
 fn tracked_attribute(observed: &Observed<'_>, name: &[u8]) -> bool {
@@ -178,6 +210,9 @@ mod tests {
 
     use super::*;
 
+    const ALL: MetadataPolicy =
+        MetadataPolicy::new(Propagation::Sync, Propagation::Sync, Propagation::Sync);
+
     fn digest(byte: u8) -> Digest {
         Digest::from_bytes([byte; Digest::BYTE_LEN])
     }
@@ -203,7 +238,7 @@ mod tests {
     }
 
     fn version(observed: &Observed<'_>) -> EntryVersion {
-        entry_version(Payload::File(digest(1)), observed)
+        entry_version(Payload::File(digest(1)), observed, ALL)
     }
 
     #[test]
@@ -278,19 +313,19 @@ mod tests {
     fn directory_and_link_versions_ignore_their_mtimes() {
         let mut directory = file(vec![]);
         directory.kind = NodeKind::Directory;
-        let first = entry_version(Payload::Directory, &directory);
+        let first = entry_version(Payload::Directory, &directory, ALL);
         directory.modified += Duration::from_secs(1);
-        assert_eq!(entry_version(Payload::Directory, &directory), first);
+        assert_eq!(entry_version(Payload::Directory, &directory, ALL), first);
         assert_eq!(first.content(), EntryContent::Directory);
 
         let mut link = file(vec![]);
         link.kind = NodeKind::Symlink;
         link.attributes = None;
-        let target = entry_version(Payload::Symlink(b"a"), &link);
+        let target = entry_version(Payload::Symlink(b"a"), &link, ALL);
         link.modified += Duration::from_secs(1);
         link.permissions = 0o777;
-        assert_eq!(entry_version(Payload::Symlink(b"a"), &link), target);
-        assert_ne!(entry_version(Payload::Symlink(b"b"), &link), target);
+        assert_eq!(entry_version(Payload::Symlink(b"a"), &link, ALL), target);
+        assert_ne!(entry_version(Payload::Symlink(b"b"), &link, ALL), target);
     }
 
     #[test]
@@ -299,10 +334,11 @@ mod tests {
         let file = entry_version(
             Payload::File(Digest::from_bytes(*data.as_bytes())),
             &file(vec![]),
+            ALL,
         );
         let mut link = super::tests::file(vec![]);
         link.kind = NodeKind::Symlink;
-        let link = entry_version(Payload::Symlink(b"a"), &link);
+        let link = entry_version(Payload::Symlink(b"a"), &link, ALL);
         let (EntryContent::File(file), EntryContent::Symlink(link)) =
             (file.content(), link.content())
         else {
@@ -310,5 +346,79 @@ mod tests {
         };
         assert_ne!(file, link);
         assert_ne!(file.as_bytes(), data.as_bytes());
+    }
+
+    fn with(observed: &Observed<'_>, policy: MetadataPolicy) -> EntryVersion {
+        entry_version(Payload::File(digest(1)), observed, policy)
+    }
+
+    #[test]
+    fn default_policy_syncs_times_and_attributes_but_only_the_executable_bit() {
+        let policy = MetadataPolicy::default();
+        let plain = with(&file(vec![]), policy);
+
+        let mut mode = file(vec![]);
+        mode.permissions = 0o100_600;
+        let acl = AccessControl::MacOs(Some(vec![1]));
+        let mut controlled = file(vec![]);
+        controlled.access_control = Some(&acl);
+        assert_eq!(with(&mode, policy), plain);
+        assert_eq!(with(&controlled, policy), plain);
+
+        let mut executable = file(vec![]);
+        executable.permissions = 0o100_744;
+        let mut touched = file(vec![]);
+        touched.modified += Duration::from_secs(1);
+        let tagged = file(vec![attribute(b"com.apple.metadata:_kMDItemUserTags", 2)]);
+        let mut hidden = file(vec![]);
+        hidden.user_flags = Some(0x8000);
+        for changed in [executable, touched, tagged, hidden] {
+            assert_ne!(with(&changed, policy).metadata(), plain.metadata());
+        }
+    }
+
+    #[test]
+    fn ignored_categories_never_change_versions_but_forks_stay_content() {
+        let nothing = MetadataPolicy::new(
+            Propagation::Ignore,
+            Propagation::Ignore,
+            Propagation::Ignore,
+        );
+        let plain = with(&file(vec![]), nothing);
+
+        let mut touched = file(vec![]);
+        touched.modified += Duration::from_secs(1);
+        let tagged = file(vec![attribute(b"com.apple.metadata:_kMDItemUserTags", 2)]);
+        let mut hidden = file(vec![]);
+        hidden.user_flags = Some(0x8000);
+        for unchanged in [touched, tagged, hidden] {
+            assert_eq!(with(&unchanged, nothing), plain);
+        }
+
+        let forked = with(&file(vec![attribute(RESOURCE_FORK, 2)]), nothing);
+        assert_ne!(forked.content(), plain.content());
+        assert_eq!(forked.metadata(), plain.metadata());
+    }
+
+    #[test]
+    fn digests_from_different_policies_never_match() {
+        let observed = file(vec![]);
+        let policies = [
+            ALL,
+            MetadataPolicy::default(),
+            MetadataPolicy::new(
+                Propagation::Ignore,
+                Propagation::Ignore,
+                Propagation::Ignore,
+            ),
+        ];
+        for (index, left) in policies.iter().enumerate() {
+            for right in &policies[index + 1..] {
+                assert_ne!(
+                    with(&observed, *left).metadata(),
+                    with(&observed, *right).metadata()
+                );
+            }
+        }
     }
 }

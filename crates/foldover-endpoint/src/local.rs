@@ -9,7 +9,7 @@ use foldover_fs::{
     FilesystemFeatures, HashError, MetadataReadError, NodeKind, Root, RootRelation,
 };
 pub use foldover_types::ScanControl;
-use foldover_types::{Digest, EntryVersion, InvalidSyncPath, SyncPath};
+use foldover_types::{Digest, EntryVersion, InvalidSyncPath, MetadataPolicy, SyncPath};
 
 use version::{Attribute, Observed, Payload, entry_version};
 
@@ -304,6 +304,7 @@ impl LocalEndpoint {
     /// observation; the planner never receives a partial tree.
     pub fn observe(
         &self,
+        policy: MetadataPolicy,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<BTreeMap<SyncPath, EntryVersion>, ScanError> {
         let mut entries = Vec::new();
@@ -317,7 +318,7 @@ impl LocalEndpoint {
             if control() == ScanControl::Cancel {
                 return Err(ScanError::Cancelled);
             }
-            let version = self.entry_version(&entry, control)?;
+            let version = self.entry_version(&entry, policy, control)?;
             versions.insert(entry.path, version);
         }
         Ok(versions)
@@ -328,6 +329,7 @@ impl LocalEndpoint {
     pub fn entry_version(
         &self,
         entry: &LocalEntry,
+        policy: MetadataPolicy,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<EntryVersion, ScanError> {
         let mut checkpoint = |_| control();
@@ -371,7 +373,7 @@ impl LocalEndpoint {
             }),
             access_control: extended.as_ref().map(ExtendedMetadata::access_control),
         };
-        Ok(entry_version(payload, &observed))
+        Ok(entry_version(payload, &observed, policy))
     }
 }
 
@@ -757,6 +759,12 @@ mod tests {
         assert_eq!(entries[1].path().as_bytes(), b"\xff");
     }
 
+    const ALL: MetadataPolicy = MetadataPolicy::new(
+        foldover_types::Propagation::Sync,
+        foldover_types::Propagation::Sync,
+        foldover_types::Propagation::Sync,
+    );
+
     #[cfg(target_os = "linux")]
     const TEST_ATTRIBUTE: &str = "user.ch.lkmc.foldover.test";
     #[cfg(not(target_os = "linux"))]
@@ -777,7 +785,11 @@ mod tests {
         let (folder, file, link) = (path(b"folder"), path(b"folder/file"), path(b"link"));
 
         let endpoint = LocalEndpoint::open(root).unwrap();
-        let observe = || endpoint.observe(&mut || ScanControl::Continue).unwrap();
+        let observe = || {
+            endpoint
+                .observe(ALL, &mut || ScanControl::Continue)
+                .unwrap()
+        };
         let first = observe();
         assert_eq!(
             first.keys().cloned().collect::<Vec<_>>(),
@@ -821,7 +833,7 @@ mod tests {
         fs::write(elsewhere.path().join("file"), b"edited").unwrap();
         let other = LocalEndpoint::open(elsewhere.path())
             .unwrap()
-            .observe(&mut || ScanControl::Continue)
+            .observe(ALL, &mut || ScanControl::Continue)
             .unwrap();
         assert_eq!(other[&path(b"file")].content(), observe()[&file].content());
     }
@@ -832,7 +844,7 @@ mod tests {
         fs::write(directory.path().join("file"), b"data").unwrap();
         let endpoint = LocalEndpoint::open(directory.path()).unwrap();
         let mut calls = 0;
-        let result = endpoint.observe(&mut || {
+        let result = endpoint.observe(ALL, &mut || {
             calls += 1;
             if calls > 1 {
                 ScanControl::Cancel
@@ -851,7 +863,11 @@ mod tests {
         fs::write(&file_path, b"data").unwrap();
         let path = SyncPath::try_from(b"file".as_slice()).unwrap();
         let endpoint = LocalEndpoint::open(directory.path()).unwrap();
-        let observe = || endpoint.observe(&mut || ScanControl::Continue).unwrap()[&path];
+        let observe = || {
+            endpoint
+                .observe(ALL, &mut || ScanControl::Continue)
+                .unwrap()[&path]
+        };
         let plain = observe();
         let set = |name: &str, value: &[u8]| {
             let handle = fs::File::open(&file_path).unwrap();

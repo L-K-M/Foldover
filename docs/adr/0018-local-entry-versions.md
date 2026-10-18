@@ -31,16 +31,31 @@ metadata-only conflict. On compressed files the fork and
 `com.apple.decmpfs` are compression storage and are ignored; decompressed
 reads already cover the data.
 
-**Metadata digest:** permission bits (not links), file mtime, user flags,
-xattr names/sizes/digests and the ACL. Excluded:
+**Metadata digest:** only the categories the pair syncs (owner decision,
+2026-10-18). Each is configurable per pair:
+
+| Category | Default | Covers |
+|---|---|---|
+| Modification times | Sync | File mtimes |
+| Extended attributes | Sync | Xattr names/sizes/digests (tags, Finder info, comments, quarantine), hidden and no-dump flags |
+| Permissions | Ignore | Mode bits (not links) and the ACL; when ignored, a file's executable bit still syncs |
+
+An ignored category is absent from the digest, so changing it never causes
+an update or conflict. Each category's state is also encoded, so digests
+computed under different policies never match.
+
+Never synced:
 
 - directory and symlink mtimes: they move with children and are rarely
   settable, so tracking them would cause churn;
 - owner and group: an unprivileged agent cannot set them;
 - creation time, link counts, ctime and inode: storage facts, not content;
+- lock and append-only flags: local protection choices that would block
+  later sync writes, and in two-way sync would block the other side;
 - storage flags (compression, tracking, data vault, system flags);
-- system-managed xattrs: `com.apple.lastuseddate#PS`, `com.apple.macl`,
-  `com.apple.provenance`, `com.apple.rootless`.
+- system-managed xattrs: `com.apple.lastuseddate#PS` (changes on every
+  open), `com.apple.macl` (per-Mac app access grants), `com.apple.provenance`
+  (set by macOS for files from downloaded apps) and `com.apple.rootless`.
 
 Linux symlinks report no extended metadata, because their xattrs cannot be
 read through a held descriptor. This is a distinct digest input, not an
