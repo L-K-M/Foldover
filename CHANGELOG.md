@@ -42,3 +42,7 @@ All notable changes to this project are documented here. The format follows
 - P0 foundations: Rust workspace with crate skeletons and a layer check,
   macOS app skeleton bridged to the core through UniFFI, build and release
   scripts, CI.
+
+### Fixed
+
+- Keep the agent running when a client disconnects before authentication.
