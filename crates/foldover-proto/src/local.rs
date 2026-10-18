@@ -8,6 +8,9 @@ pub use archive::{
     ArchiveRun, ArchiveRuns,
 };
 
+mod history;
+pub use history::{HISTORY_LIST, History, HistoryOutcome, HistoryRecord, HistoryTrigger};
+
 mod sync;
 pub use sync::{
     SYNC_CANCEL, SYNC_ITEM_LIMIT, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS, SyncAction,

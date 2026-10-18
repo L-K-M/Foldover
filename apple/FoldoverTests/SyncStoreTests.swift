@@ -10,10 +10,14 @@ private actor ScriptedSyncClient: SyncClient {
     private(set) var approvals: [(UInt64, UInt64)] = []
     private(set) var cancelled = false
     private(set) var kept: [FolderSide] = []
+    private let runs: [RunRecord]
 
-    init(_ replies: [PairSyncState]) {
+    init(_ replies: [PairSyncState], history: [RunRecord] = []) {
         self.replies = replies
+        runs = history
     }
+
+    func history(_ id: String) async throws -> [RunRecord] { runs }
 
     func preview(_ id: String) async throws -> PairSyncState { next() }
     func status(_ id: String) async throws -> PairSyncState { next() }
@@ -48,6 +52,7 @@ private struct UnreachableSyncClient: SyncClient {
     func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState {
         throw SyncFixtureError.unreachable
     }
+    func history(_ id: String) async throws -> [RunRecord] { throw SyncFixtureError.unreachable }
 }
 
 private func preview(archivesInA: UInt64, needsApproval: Bool) -> PreviewSummary {
@@ -203,4 +208,30 @@ func alertTextsNameTheProblem() {
                                 conflicts: 2, failures: [], failureCount: 0, archive: "run")
     #expect(SyncStore.alert(for: pair(), state: .finished(conflicted))?.body.contains("2") == true)
     #expect(SyncStore.alert(for: pair(), state: .idle) == nil)
+}
+
+@MainActor
+@Test
+func finishedRunsRefreshTheHistory() async {
+    let started = Date(timeIntervalSince1970: 1_000)
+    let runs = [
+        RunRecord(started: started, finished: started, trigger: .scheduled, end: .completed, copied: 2,
+                  updated: 0, archived: 1, conflicts: 1, failures: 0, message: nil),
+        RunRecord(started: started, finished: started, trigger: .manual, end: .failed, copied: 0,
+                  updated: 0, archived: 0, conflicts: 0, failures: 0, message: "Disk full"),
+        RunRecord(started: started, finished: started, trigger: .manual, end: .completed, copied: 0,
+                  updated: 0, archived: 0, conflicts: 0, failures: 0, message: nil),
+    ]
+    let result = RunSummary(cancelled: false, copied: 2, updated: 0, archived: 1, recovered: 0,
+                            conflicts: 1, failures: [], failureCount: 0, archive: "run")
+    let client = ScriptedSyncClient([.working(.run, cancelling: false), .finished(result)], history: runs)
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, agentConnected: true)
+    #expect(viewModel.historyRows.isEmpty)
+
+    await viewModel.sync()
+    #expect(viewModel.historyRows.map(\.summary) == [
+        "Copied 2, updated 0, archived 1. 1 conflicts.", "Stopped: Disk full", "No changes.",
+    ])
+    #expect(viewModel.historyRows[0].when.hasSuffix("automatic"))
 }

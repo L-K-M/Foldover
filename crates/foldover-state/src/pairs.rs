@@ -13,6 +13,9 @@ use foldover_types::{
 use crate::BaseUpdate;
 use crate::base::{decode, decode_entry, encode};
 
+mod history;
+pub use history::{HISTORY_LIMIT, HistoryEntry, HistoryOutcome, RunTrigger};
+
 const SYNC: &str = "sync";
 const MIRROR_LEFT: &str = "mirror-left";
 const MIRROR_RIGHT: &str = "mirror-right";
@@ -457,7 +460,7 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
-    fn location() -> (tempfile::TempDir, StateLocation) {
+    pub(super) fn location() -> (tempfile::TempDir, StateLocation) {
         let directory = tempfile::Builder::new()
             .permissions(fs::Permissions::from_mode(0o700))
             .tempdir()

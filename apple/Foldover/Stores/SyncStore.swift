@@ -67,6 +67,33 @@ struct RunSummary: Equatable, Sendable {
     let archive: String
 }
 
+enum RunTrigger: Sendable {
+    case manual
+    case scheduled
+}
+
+enum RunEnd: Sendable {
+    case completed
+    case cancelled
+    /// Stopped before writing: too many deletions to make without asking.
+    case needsApproval
+    case failed
+}
+
+/// One finished run in a pair's history.
+struct RunRecord: Equatable, Sendable {
+    let started: Date
+    let finished: Date
+    let trigger: RunTrigger
+    let end: RunEnd
+    let copied: UInt64
+    let updated: UInt64
+    let archived: UInt64
+    let conflicts: UInt64
+    let failures: UInt64
+    let message: String?
+}
+
 enum SyncJob: Sendable {
     case preview
     case run
@@ -88,6 +115,8 @@ protocol SyncClient: Sendable {
     func status(_ id: String) async throws -> PairSyncState
     func cancel(_ id: String) async throws -> PairSyncState
     func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState
+    /// Finished runs, newest first.
+    func history(_ id: String) async throws -> [RunRecord]
 }
 
 // Keep generated async values inside one actor; only native Sendable records leave it.
@@ -112,6 +141,30 @@ private actor CoreSyncClient: SyncClient {
 
     func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState {
         state(try await FoldoverCore.syncResolve(id: id, path: path, keep: keep == .a ? .left : .right))
+    }
+
+    func history(_ id: String) async throws -> [RunRecord] {
+        try await FoldoverCore.pairHistory(id: id).map { entry in
+            RunRecord(
+                started: date(entry.startedMs), finished: date(entry.finishedMs),
+                trigger: entry.trigger == .manual ? .manual : .scheduled, end: end(entry.outcome),
+                copied: entry.copied, updated: entry.updated, archived: entry.archived,
+                conflicts: entry.conflicts, failures: entry.failures, message: entry.message
+            )
+        }
+    }
+
+    private func date(_ milliseconds: UInt64) -> Date {
+        Date(timeIntervalSince1970: Double(milliseconds) / 1000)
+    }
+
+    private func end(_ outcome: RunOutcomeKind) -> RunEnd {
+        switch outcome {
+        case .completed: .completed
+        case .cancelled: .cancelled
+        case .needsApproval: .needsApproval
+        case .failed: .failed
+        }
     }
 
     private func state(_ state: SyncJobState) -> PairSyncState {
@@ -194,6 +247,7 @@ final class SyncStore {
     private var polling: Set<String> = []
     private(set) var states: [String: PairSyncState] = [:]
     private(set) var requestErrors: [String: String] = [:]
+    private(set) var histories: [String: [RunRecord]] = [:]
 
     init(client: any SyncClient = CoreSyncClient(), pollInterval: Duration = .milliseconds(500),
          alert: @escaping @MainActor (SyncAlert) async -> Void = SyncStore.postAlert) {
@@ -216,6 +270,7 @@ final class SyncStore {
             let previous = states[pair.id]
             guard let state = try? await client.status(pair.id) else { continue }
             states[pair.id] = state
+            if previous != state { await refreshHistory(pair.id) }
             guard let previous, previous != state, let alert = Self.alert(for: pair, state: state) else {
                 continue
             }
@@ -242,11 +297,19 @@ final class SyncStore {
     }
 
     func state(for id: String) -> PairSyncState { states[id] ?? .idle }
+    func history(for id: String) -> [RunRecord] { histories[id] ?? [] }
     func requestError(for id: String) -> String? { requestErrors[id] }
 
     func refresh(_ id: String) async {
         let client = client
         await perform(id) { try await client.status(id) }
+        await refreshHistory(id)
+    }
+
+    /// History is informational: a failed request keeps the last list.
+    func refreshHistory(_ id: String) async {
+        guard let runs = try? await client.history(id) else { return }
+        histories[id] = runs
     }
 
     func preview(_ id: String) async {
@@ -300,6 +363,7 @@ final class SyncStore {
         guard !polling.contains(id) else { return }
         polling.insert(id)
         defer { polling.remove(id) }
+        guard case .working = states[id] else { return }
         while case .working = states[id] {
             try? await Task.sleep(for: pollInterval)
             do {
@@ -309,5 +373,6 @@ final class SyncStore {
                 return
             }
         }
+        await refreshHistory(id)
     }
 }

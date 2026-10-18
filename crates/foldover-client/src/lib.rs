@@ -9,16 +9,16 @@ use foldover_proto::local::{
     ArchivePutBack,
 };
 pub use foldover_proto::local::{
-    AgentCapability, ArchiveItem, ArchiveItems, ArchiveRun, ArchiveRuns, DaemonStatus, PairSide,
-    SyncAction, SyncConflict, SyncCounts, SyncDeletions, SyncFailure, SyncItem, SyncJob,
-    SyncPreview, SyncResult, SyncStatus,
+    AgentCapability, ArchiveItem, ArchiveItems, ArchiveRun, ArchiveRuns, DaemonStatus, History,
+    HistoryOutcome, HistoryRecord, HistoryTrigger, PairSide, SyncAction, SyncConflict, SyncCounts,
+    SyncDeletions, SyncFailure, SyncItem, SyncJob, SyncPreview, SyncResult, SyncStatus,
 };
 use foldover_proto::local::{DAEMON_STATUS, Hello, PROTOCOL_VERSION, Request, SESSION_HELLO};
+use foldover_proto::local::{HISTORY_LIST, PAIR_REMOVE, PairRevision};
 use foldover_proto::local::{
     PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_UPDATE, PairInput, PairKey, PairList,
     PairRecord, PairUpdate,
 };
-use foldover_proto::local::{PAIR_REMOVE, PairRevision};
 use foldover_proto::local::{
     SYNC_CANCEL, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS, SyncKey, SyncResolve, SyncRun,
 };
@@ -86,6 +86,14 @@ pub async fn resolve_conflict(
 
 pub async fn cancel_sync(location: &SocketLocation, id: PairId) -> Result<SyncStatus, Error> {
     sync_call(location, SYNC_CANCEL, id).await
+}
+
+/// The pair's finished runs, newest first.
+pub async fn history(location: &SocketLocation, id: PairId) -> Result<History, Error> {
+    let params = serde_json::to_value(SyncKey { id: id.to_string() })?;
+    Ok(serde_json::from_value(
+        call(location, HISTORY_LIST, Some(params)).await?,
+    )?)
 }
 
 /// One side's archived runs, newest first.

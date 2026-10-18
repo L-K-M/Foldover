@@ -3,6 +3,7 @@
 //! foldover-engine. See PLAN.md §4.4.
 
 mod archive;
+mod history;
 mod schedule;
 mod sync;
 
@@ -10,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use foldover_engine::{Approval, Engine, ErrorKind, StateLocation};
 use foldover_proto::local::{
-    ARCHIVE_ITEMS, ARCHIVE_PUT_BACK, ARCHIVE_RUNS, PAIR_REMOVE, PairRevision,
+    ARCHIVE_ITEMS, ARCHIVE_PUT_BACK, ARCHIVE_RUNS, HISTORY_LIST, PAIR_REMOVE, PairRevision,
 };
 use foldover_proto::local::{
     AgentCapability, DAEMON_STATUS, DaemonStatus, Hello, INTERNAL_ERROR, INVALID_PARAMS,
@@ -73,6 +74,9 @@ impl Service {
             ARCHIVE_RUNS | ARCHIVE_ITEMS | ARCHIVE_PUT_BACK
         ) {
             return archive::handle(&self.engine, &self.jobs, &request).await;
+        }
+        if request.method() == HISTORY_LIST {
+            return history::handle(&self.engine, &request).await;
         }
         let command = Command::parse(&request)?;
         let permit = Arc::clone(&self.commands)
@@ -922,5 +926,42 @@ mod tests {
             .unwrap();
         assert_eq!(settled(&service, &key).await["result"]["copied"], 1);
         assert_eq!(fs::read(left.join("file")).unwrap(), b"data");
+    }
+
+    #[tokio::test]
+    async fn runs_but_not_previews_enter_the_history() {
+        let (directory, service) = fixture();
+        let created = service
+            .handle(Request::call(
+                1,
+                PAIR_CREATE,
+                Some(input(directory.path(), "Docs")),
+            ))
+            .await
+            .unwrap();
+        fs::write(directory.path().join("Docs-left/file"), b"data").unwrap();
+        let key = json!({"id": created["id"]});
+        service
+            .handle(Request::call(2, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        settled(&service, &key).await;
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        service
+            .handle(Request::call(3, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        settled(&service, &key).await;
+
+        let history = service
+            .handle(Request::call(4, HISTORY_LIST, Some(key)))
+            .await
+            .unwrap();
+        let runs = history["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 1, "{history}");
+        assert_eq!(runs[0]["trigger"], "manual");
+        assert_eq!(runs[0]["outcome"], "completed");
+        assert_eq!(runs[0]["copied"], 1);
+        assert!(runs[0]["finished_ms"].as_u64() >= runs[0]["started_ms"].as_u64());
     }
 }

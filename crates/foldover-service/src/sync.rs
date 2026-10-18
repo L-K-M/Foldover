@@ -165,7 +165,9 @@ impl Jobs {
         let jobs = Arc::clone(self);
         let engine = Arc::clone(engine);
         tokio::task::spawn_blocking(move || {
+            let started = SystemTime::now();
             let (status, conflicts) = perform(&engine, id, work, &cancel);
+            crate::history::record(&engine, id, work, started, &status);
             let mut jobs = jobs.jobs.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(job) = jobs.get_mut(&id) {
                 job.status = status;

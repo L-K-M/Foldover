@@ -296,6 +296,11 @@ uint64_t uniffi_foldover_ffi_fn_func_archive_put_back(RustBuffer id, RustBuffer 
 uint64_t uniffi_foldover_ffi_fn_func_archive_runs(RustBuffer id, RustBuffer side
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_PAIR_HISTORY
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_PAIR_HISTORY
+uint64_t uniffi_foldover_ffi_fn_func_pair_history(RustBuffer id
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_CANCEL
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_CANCEL
 uint64_t uniffi_foldover_ffi_fn_func_sync_cancel(RustBuffer id
@@ -638,6 +643,12 @@ uint16_t uniffi_foldover_ffi_checksum_func_archive_put_back(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_ARCHIVE_RUNS
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_ARCHIVE_RUNS
 uint16_t uniffi_foldover_ffi_checksum_func_archive_runs(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_PAIR_HISTORY
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_PAIR_HISTORY
+uint16_t uniffi_foldover_ffi_checksum_func_pair_history(void
     
 );
 #endif

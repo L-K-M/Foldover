@@ -49,6 +49,16 @@ struct PairSyncView: View {
             if let note = viewModel.archiveNote {
                 Text(note).font(.caption).foregroundStyle(.secondary)
             }
+            if !viewModel.historyRows.isEmpty {
+                Text("History").font(.headline)
+                ForEach(viewModel.historyRows) { row in
+                    VStack(alignment: .leading) {
+                        Text(row.when).font(.caption).foregroundStyle(.secondary)
+                        Text(row.summary)
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+            }
         }
         .confirmationDialog("Archive Many Items?", isPresented: Binding(
             get: { viewModel.approvalRequest != nil }, set: { _ in viewModel.declineApproval() }

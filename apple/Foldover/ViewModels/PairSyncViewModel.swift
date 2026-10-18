@@ -9,6 +9,13 @@ struct ChangeRow: Identifiable, Equatable {
     let resolvable: Data?
 }
 
+/// One finished run, ready to render.
+struct HistoryRow: Identifiable, Equatable {
+    let id: Int
+    let when: String
+    let summary: String
+}
+
 /// Deletion counts the user accepted for each folder.
 struct DeletionApproval: Equatable, Sendable {
     let a: UInt64
@@ -117,6 +124,17 @@ struct PairSyncViewModel {
         return hidden == 0 ? nil : String(localized: "and \(hidden) more")
     }
 
+    /// The newest finished runs.
+    var historyRows: [HistoryRow] {
+        store.history(for: pair.id).prefix(Self.historyRowLimit).enumerated().map { index, run in
+            let when = run.started.formatted(date: .abbreviated, time: .shortened)
+            let trigger = run.trigger == .scheduled ? String(localized: "automatic") : String(localized: "manual")
+            return HistoryRow(id: index, when: "\(when) · \(trigger)", summary: Self.summary(run))
+        }
+    }
+
+    private static let historyRowLimit = 10
+
     var archiveNote: String? {
         guard case .finished(let result) = state, result.archived + result.copied + result.updated > 0 else { return nil }
         return String(localized: "Replaced and removed items are in .foldover/archive/\(result.archive) inside each folder.")
@@ -171,6 +189,25 @@ struct PairSyncViewModel {
         if result.recovered > 0 {
             text += " " + String(localized: "Recovered \(result.recovered) items left by an interrupted sync.")
         }
+        return text
+    }
+
+    static func summary(_ run: RunRecord) -> String {
+        switch run.end {
+        case .cancelled:
+            return String(localized: "Cancelled after copying \(run.copied), updating \(run.updated) and archiving \(run.archived).")
+        case .needsApproval:
+            return String(localized: "Stopped before changing anything: too many items to archive without approval.")
+        case .failed:
+            return String(localized: "Stopped: \(run.message ?? String(localized: "unknown error"))")
+        case .completed:
+            break
+        }
+        var text = run.copied + run.updated + run.archived == 0
+            ? String(localized: "No changes.")
+            : String(localized: "Copied \(run.copied), updated \(run.updated), archived \(run.archived).")
+        if run.conflicts > 0 { text += " " + String(localized: "\(run.conflicts) conflicts.") }
+        if run.failures > 0 { text += " " + String(localized: "\(run.failures) failed.") }
         return text
     }
 

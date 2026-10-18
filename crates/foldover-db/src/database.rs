@@ -6,6 +6,9 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
+mod history;
+pub use history::HistoryRow;
+
 const APPLICATION_ID: i64 = 0x464f4c44; // FOLD
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 const DIRECTORY_MODE: u32 = 0o700;
@@ -17,8 +20,9 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 8] = [
+const MIGRATIONS: [&str; 9] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
+    SCHEMA_V9,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -88,6 +92,25 @@ CREATE TABLE snapshot_entry (
 // Exclusion rules, one per line.
 const SCHEMA_V8: &str = "
 ALTER TABLE pair ADD COLUMN filters TEXT NOT NULL DEFAULT '' CHECK(instr(filters, char(0)) = 0);
+";
+// Finished runs; times are milliseconds since the Unix epoch.
+const SCHEMA_V9: &str = "
+CREATE TABLE run_history (
+    pair_id BLOB NOT NULL REFERENCES pair(id) ON DELETE CASCADE,
+    started_ms INTEGER NOT NULL CHECK(started_ms >= 0),
+    finished_ms INTEGER NOT NULL CHECK(finished_ms >= started_ms),
+    trigger TEXT NOT NULL CHECK(trigger IN ('manual','scheduled')),
+    outcome TEXT NOT NULL CHECK(outcome IN ('completed','cancelled','needs_approval','failed')),
+    copied INTEGER NOT NULL CHECK(copied >= 0),
+    updated INTEGER NOT NULL CHECK(updated >= 0),
+    archived INTEGER NOT NULL CHECK(archived >= 0),
+    recovered INTEGER NOT NULL CHECK(recovered >= 0),
+    conflicts INTEGER NOT NULL CHECK(conflicts >= 0),
+    failures INTEGER NOT NULL CHECK(failures >= 0),
+    archive TEXT,
+    message TEXT,
+    PRIMARY KEY (pair_id, started_ms)
+) STRICT, WITHOUT ROWID;
 ";
 
 #[derive(Debug, thiserror::Error)]
@@ -796,11 +819,11 @@ fn pair_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairRow> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
 
-    fn location() -> (tempfile::TempDir, StateLocation) {
+    pub(super) fn location() -> (tempfile::TempDir, StateLocation) {
         let directory = tempfile::Builder::new()
             .permissions(fs::Permissions::from_mode(DIRECTORY_MODE))
             .tempdir()
@@ -809,7 +832,7 @@ mod tests {
         (directory, location)
     }
 
-    fn values() -> PairValues {
+    pub(super) fn values() -> PairValues {
         PairValues {
             name: "pair".into(),
             left_root: b"/left".to_vec(),

@@ -27,6 +27,7 @@ enum Request {
     Pairs(SocketLocation, PairCommand),
     Sync(SocketLocation, PairId, SyncCommand),
     Archive(SocketLocation, PairId, Side, ArchiveCommand),
+    History(SocketLocation, PairId),
     Usage,
 }
 
@@ -137,9 +138,16 @@ async fn main() -> ExitCode {
                 }
             }
         }
+        Request::History(location, id) => match history(&location, id).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("foldover: {error}");
+                ExitCode::FAILURE
+            }
+        },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT | --keep-left PATH | --keep-right PATH] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH]] [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT | --keep-left PATH | --keep-right PATH] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH]] [--socket PATH]\n       foldover history ID [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -174,6 +182,10 @@ fn request(args: impl Iterator<Item = OsString>) -> Request {
                 _ => Request::Usage,
             }
         }
+        [command, id] if command == "history" => match id.to_str().and_then(|id| id.parse().ok()) {
+            Some(id) => Request::History(location, id),
+            None => Request::Usage,
+        },
         [command, id, side, rest @ ..] if command == "archive" => {
             let side = match side.to_str() {
                 Some("left") => Some(Side::Left),
@@ -422,6 +434,14 @@ async fn sync(
     })
 }
 
+/// Print the pair's finished runs as JSON lines, newest first.
+async fn history(location: &SocketLocation, id: PairId) -> Result<(), foldover_client::Error> {
+    for run in foldover_client::history(location, id).await?.runs {
+        println!("{}", serde_json::to_string(&run)?);
+    }
+    Ok(())
+}
+
 /// Print runs or every item as JSON lines, or put an item back and print
 /// where it went.
 async fn archive(
@@ -618,7 +638,10 @@ mod tests {
             req(&["archive", id, "left", "RUN", "--put-back", "docs/a"]),
             Request::Archive(_, _, Side::Left, ArchiveCommand::PutBack { ref path, .. }) if path == b"docs/a"
         ));
+        assert!(matches!(req(&["history", id]), Request::History(..)));
         for args in [
+            vec!["history"],
+            vec!["history", "bad"],
             vec!["archive", id],
             vec!["archive", id, "a"],
             vec!["archive", "bad", "left"],
