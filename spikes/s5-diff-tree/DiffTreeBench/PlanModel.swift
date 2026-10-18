@@ -6,6 +6,7 @@
 
 import Foundation
 import Observation
+import QuartzCore
 
 /// What a plan row does to its target — the wireframe's four glyphs
 /// (PLAN.md §3.8). Folder rows carry the same verbs: a created folder
@@ -259,6 +260,10 @@ final class RowText {
     private let byteFormatter = ByteCountFormatter()
     /// A fixed base so every run renders identical strings.
     private let baseDate = Date(timeIntervalSince1970: 1_790_985_600)
+    private(set) var sizeFormattingMilliseconds = 0.0
+    private(set) var dateFormattingMilliseconds = 0.0
+    private(set) var formattedSizes = 0
+    private(set) var formattedDates = 0
 
     init() {
         dateFormatter.dateFormat = "MMM d"
@@ -266,13 +271,28 @@ final class RowText {
     }
 
     func size(bytes: Int64) -> String {
-        byteFormatter.string(fromByteCount: bytes)
+        let started = CACurrentMediaTime()
+        let value = byteFormatter.string(fromByteCount: bytes)
+        sizeFormattingMilliseconds += (CACurrentMediaTime() - started) * 1_000
+        formattedSizes += 1
+        return value
     }
 
     func date(daysAgo: Int) -> String {
-        dateFormatter.string(
+        let started = CACurrentMediaTime()
+        let value = dateFormatter.string(
             from: baseDate.addingTimeInterval(-Double(daysAgo) * 86_400)
         )
+        dateFormattingMilliseconds += (CACurrentMediaTime() - started) * 1_000
+        formattedDates += 1
+        return value
+    }
+
+    func resetProfile() {
+        sizeFormattingMilliseconds = 0
+        dateFormattingMilliseconds = 0
+        formattedSizes = 0
+        formattedDates = 0
     }
 }
 
