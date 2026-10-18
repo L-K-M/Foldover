@@ -33,6 +33,14 @@ execute: deletion gate ─▶ archive leftovers
   the target's stored version; archives and both-absent paths are forgotten.
   A commit fails if the pair's revision changed, which stops the run.
 
+**Retention.** Archives live in `.foldover/archive/<run>/` on each side,
+where `<run>` is the run's UTC start time
+(`2026-10-18T09-30-00.123Z`). After a run completes without cancellation,
+run folders older than 30 days are deleted permanently (owner decision,
+PLAN.md §10). Only canonical run names count, so other folders in the
+archive are kept. Deletion never follows links; a pruning failure is
+reported, not fatal. This is the only code path that deletes user data.
+
 **Recovery without a journal.** A crash loses at most one uncommitted
 batch of base updates. The next run then sees equal content on both sides
 and records it, or sees both absent and forgets it. A displaced original

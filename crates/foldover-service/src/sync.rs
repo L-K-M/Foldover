@@ -16,7 +16,7 @@ use std::time::SystemTime;
 
 use foldover_engine::{
     Action, Approval, Commit, Completion, DeletionReview, Engine, PairRun, Preview, RunContext,
-    RunError, RunOutcome, RunReport, run_name,
+    RunError, RunOutcome, RunReport,
 };
 use foldover_proto::local::RpcError;
 use foldover_proto::local::{
@@ -146,7 +146,6 @@ fn perform(engine: &Mutex<Engine>, id: PairId, work: Work, cancel: &AtomicBool) 
         }
         Work::Run(approval) => approval,
     };
-    let name = run_name(SystemTime::now());
     // A panic elsewhere cannot leave a half-applied transaction, so a
     // poisoned lock still guards a consistent store.
     let mut commit = |revision: u64, commit: Commit<'_>| {
@@ -158,12 +157,12 @@ fn perform(engine: &Mutex<Engine>, id: PairId, work: Work, cancel: &AtomicBool) 
     match run.execute(
         approval,
         RunContext::Interactive,
-        &name,
+        SystemTime::now(),
         &mut commit,
         &mut control,
     ) {
         Ok(RunOutcome::Ran(report)) => SyncStatus::Finished {
-            result: result(&report, name),
+            result: result(&report),
         },
         Ok(RunOutcome::NeedsApproval(preview_data)) => SyncStatus::NeedsApproval {
             preview: preview(&preview_data),
@@ -230,7 +229,7 @@ fn action(action: Action) -> SyncAction {
     }
 }
 
-fn result(report: &RunReport, archive: String) -> SyncResult {
+fn result(report: &RunReport) -> SyncResult {
     SyncResult {
         cancelled: report.completion() == Completion::Cancelled,
         copied: report.copied(),
@@ -248,7 +247,7 @@ fn result(report: &RunReport, archive: String) -> SyncResult {
             })
             .collect(),
         failure_count: report.failures().len() as u64,
-        archive,
+        archive: report.archive().to_owned(),
     }
 }
 

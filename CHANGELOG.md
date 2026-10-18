@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- 30-day archive retention: archive folders are named by run start time,
+  and runs older than 30 days are deleted after each completed sync.
 - Preview and Sync Now in the app, with the change list, results, cancellation
   and a confirmation before archiving many items.
 - Sync from the command line: `foldover sync ID` previews and runs as agent

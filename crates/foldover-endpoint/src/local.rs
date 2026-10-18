@@ -1,4 +1,5 @@
 mod apply;
+mod archive;
 mod identity;
 mod version;
 
@@ -16,7 +17,8 @@ use foldover_types::{Digest, EntryVersion, InvalidSyncPath, MetadataPolicy, Sync
 
 use version::{Attribute, Observed, Payload, entry_version, metadata_version};
 
-pub use apply::{ApplyError, Expected, InvalidRunName, RunScope};
+pub use apply::{ApplyError, Expected, RunScope};
+pub use archive::archive_name;
 
 const INTERNAL_DIRECTORY: &[u8] = b".foldover";
 const TEMPORARY_PREFIX: &[u8] = b".foldover-tmp-";

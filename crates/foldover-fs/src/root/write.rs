@@ -385,6 +385,14 @@ impl Root {
         Ok(())
     }
 
+    /// Permanently delete `path` and everything below it, never following
+    /// links. Only archive retention may call this.
+    pub fn remove_tree(&self, path: &SyncPath) -> Result<(), WriteError> {
+        let (parent, name) = self.parent_of(path)?;
+        remove_entry(&parent, &name, 0)?;
+        Ok(())
+    }
+
     /// Write a small private file that must not exist yet, creating private
     /// parents. The content appears complete or not at all.
     pub fn create_private_file(
@@ -462,6 +470,26 @@ impl Root {
         }
         Ok((directory, name))
     }
+}
+
+/// Deeper trees fail rather than holding one descriptor per level.
+const MAX_REMOVAL_DEPTH: usize = 128;
+
+fn remove_entry(parent: &Dir, name: &Path, depth: usize) -> io::Result<()> {
+    if EntryMetadata::at(parent, name)?.kind() != NodeKind::Directory {
+        rustix::fs::unlinkat(parent, name, AtFlags::empty())?;
+        return Ok(());
+    }
+    if depth >= MAX_REMOVAL_DEPTH {
+        return Err(io::Error::other("Folder nesting exceeds the removal limit"));
+    }
+    let directory = parent.open_dir_nofollow(name)?;
+    for entry in directory.entries()? {
+        let child = PathBuf::from(entry?.file_name());
+        remove_entry(&directory, &child, depth + 1)?;
+    }
+    rustix::fs::unlinkat(parent, name, AtFlags::REMOVEDIR)?;
+    Ok(())
 }
 
 fn temporary_name() -> PathBuf {

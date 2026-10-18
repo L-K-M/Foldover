@@ -30,6 +30,8 @@ fn root(path: &Path) -> LocalRoot {
     LocalRoot::from_bytes(path.as_os_str().as_bytes().to_vec()).unwrap()
 }
 
+const STARTED: std::time::SystemTime = std::time::UNIX_EPOCH;
+
 fn proceed() -> ScanControl {
     ScanControl::Continue
 }
@@ -67,7 +69,7 @@ impl Fixture {
             .execute(
                 approval,
                 context,
-                "run",
+                STARTED,
                 &mut |planned, commit| {
                     if planned != revision {
                         return Err(crate::Error::StaleRevision);
@@ -158,12 +160,22 @@ fn edits_replace_and_archive_and_deletions_propagate_to_the_archive() {
     assert_eq!((report.copied(), report.archived()), (1, 1));
     assert_eq!(fs::read(pair.right.path().join("edit")).unwrap(), b"v2");
     assert_eq!(
-        fs::read(pair.right.path().join(".foldover/archive/run/edit")).unwrap(),
+        fs::read(
+            pair.right
+                .path()
+                .join(".foldover/archive/1970-01-01T00-00-00.000Z/edit")
+        )
+        .unwrap(),
         b"v1"
     );
     assert!(!pair.left.path().join("delete").exists());
     assert_eq!(
-        fs::read(pair.left.path().join(".foldover/archive/run/delete")).unwrap(),
+        fs::read(
+            pair.left
+                .path()
+                .join(".foldover/archive/1970-01-01T00-00-00.000Z/delete")
+        )
+        .unwrap(),
         b"d"
     );
     assert!(!pair.base.contains_key(&path(b"delete")));
@@ -232,7 +244,7 @@ fn mirror_archives_target_extras_and_backup_keeps_them() {
         mirror
             .right
             .path()
-            .join(".foldover/archive/run/extra")
+            .join(".foldover/archive/1970-01-01T00-00-00.000Z/extra")
             .exists()
     );
 
@@ -253,7 +265,7 @@ fn a_changed_pair_revision_stops_the_run() {
     let result = prepared.execute(
         Approval::default(),
         RunContext::Interactive,
-        "run",
+        STARTED,
         &mut |planned, _| {
             if planned == pair.revision {
                 Ok(())
@@ -282,7 +294,7 @@ fn failed_folders_skip_their_contents_and_later_runs_recover_leftovers() {
         .execute(
             Approval::default(),
             RunContext::Interactive,
-            "run",
+            STARTED,
             &mut |_, commit| {
                 if let Commit::Base(updates) = commit {
                     for update in updates {
@@ -315,7 +327,7 @@ fn failed_folders_skip_their_contents_and_later_runs_recover_leftovers() {
         fs::read(
             pair.right
                 .path()
-                .join(".foldover/archive/run/.foldover-tmp-left")
+                .join(".foldover/archive/1970-01-01T00-00-00.000Z/.foldover-tmp-left")
         )
         .unwrap(),
         b"displaced"
@@ -348,9 +360,46 @@ fn a_replaced_folder_at_the_same_path_stops_before_any_change() {
 }
 
 #[test]
-fn run_names_are_utc_timestamps() {
-    let at = |millis| run_name(std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis));
-    assert_eq!(at(0), "1970-01-01T00-00-00.000Z");
-    assert_eq!(at(951_868_799_999), "2000-02-29T23-59-59.999Z");
-    assert_eq!(at(1_792_315_800_123), "2026-10-18T09-30-00.123Z");
+fn completed_runs_name_their_archive_and_prune_expired_runs() {
+    let pair = fixture(SyncMode::Mirror { source: Side::Left });
+    fs::write(pair.left.path().join("file"), b"x").unwrap();
+
+    // A run 31 days after an archived one deletes it; a newer one stays.
+    let day = std::time::Duration::from_secs(86_400);
+    let archive = pair.right.path().join(".foldover/archive");
+    for age in [31, 29] {
+        let name = foldover_endpoint::archive_name(std::time::UNIX_EPOCH + day * (40 - age));
+        fs::create_dir_all(archive.join(&name)).unwrap();
+        fs::write(archive.join(name).join("kept"), b"k").unwrap();
+    }
+    let prepared = pair.prepare();
+    let started = std::time::UNIX_EPOCH + day * 40;
+    let RunOutcome::Ran(report) = prepared
+        .execute(
+            Approval::default(),
+            RunContext::Interactive,
+            started,
+            &mut |_, _| Ok(()),
+            &mut proceed,
+        )
+        .unwrap()
+    else {
+        panic!("expected a run");
+    };
+    assert_eq!(report.archive(), foldover_endpoint::archive_name(started));
+    assert_eq!(report.pruned(), 1);
+    assert!(
+        !archive
+            .join(foldover_endpoint::archive_name(
+                std::time::UNIX_EPOCH + day * 9
+            ))
+            .exists()
+    );
+    assert!(
+        archive
+            .join(foldover_endpoint::archive_name(
+                std::time::UNIX_EPOCH + day * 11
+            ))
+            .exists()
+    );
 }

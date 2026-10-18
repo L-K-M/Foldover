@@ -8,17 +8,18 @@
 //!                                      ─▶ archive what was displaced
 //! ```
 
+use std::time::SystemTime;
+
 use foldover_fs::{Placement, WriteError};
 use foldover_types::{
     EntryContent, EntryKind, EntryVersion, InvalidSyncPath, PairOptions, SyncPath,
 };
 
+use super::archive::{ARCHIVE_ROOT, archive_name};
 use super::{
-    INTERNAL_DIRECTORY, LocalEndpoint, LocalEntry, NodeKind, ObservedEntry, Payload, ScanControl,
-    ScanError, entry_version, metadata_version, observed,
+    LocalEndpoint, LocalEntry, NodeKind, ObservedEntry, Payload, ScanControl, ScanError,
+    entry_version, metadata_version, observed,
 };
-
-const ARCHIVE_DIRECTORY: &[u8] = b"archive";
 
 /// What the plan observed on one side of a path.
 #[derive(Clone, Copy, Debug)]
@@ -30,30 +31,28 @@ pub enum Expected<'a> {
 /// Where one run's displaced and removed entries go, and how it writes.
 #[derive(Clone, Debug)]
 pub struct RunScope {
+    name: String,
     archive: SyncPath,
     options: PairOptions,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("A run name must be a single path component")]
-pub struct InvalidRunName;
-
 impl RunScope {
-    /// `run` names the archive folder, e.g. `2026-10-18T09-30-00Z-1a2b`.
-    pub fn new(run: &str, options: PairOptions) -> Result<Self, InvalidRunName> {
-        let name = SyncPath::try_from(run.as_bytes()).map_err(|_| InvalidRunName)?;
-        if name.parent().is_some() {
-            return Err(InvalidRunName);
-        }
-        let mut archive = INTERNAL_DIRECTORY.to_vec();
-        archive.push(b'/');
-        archive.extend_from_slice(ARCHIVE_DIRECTORY);
+    /// The archive folder is named after `started`.
+    pub fn new(started: SystemTime, options: PairOptions) -> Self {
+        let name = archive_name(started);
+        let mut archive = ARCHIVE_ROOT.to_vec();
         archive.push(b'/');
         archive.extend_from_slice(name.as_bytes());
-        Ok(Self {
-            archive: SyncPath::try_from(archive).map_err(|_| InvalidRunName)?,
+        Self {
+            name,
+            archive: SyncPath::try_from(archive).expect("run names are single path components"),
             options,
-        })
+        }
+    }
+
+    /// The run's folder under `.foldover/archive`.
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     fn archive_path(&self, path: &SyncPath) -> Result<SyncPath, InvalidSyncPath> {

@@ -13,11 +13,11 @@
 //! sides equal and records them, or a leftover temporary and archives it.
 
 use std::collections::BTreeMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use foldover_endpoint::{
-    ApplyError, Expected, InvalidRunName, LocalEndpoint, LocalPair, Observation, ObservedEntry,
-    PairRootError, RunScope, ScanError,
+    ApplyError, Expected, LocalEndpoint, LocalPair, Observation, ObservedEntry, PairRootError,
+    RunScope, ScanError,
 };
 use foldover_state::{BaseUpdate, RecordedIdentities};
 use foldover_types::{
@@ -32,9 +32,8 @@ use crate::{
 
 /// Base updates per commit: bounds the work a crash can make the next run redo.
 const COMMIT_BATCH: usize = 256;
-const SECONDS_PER_DAY: u64 = 86_400;
-const SECONDS_PER_HOUR: u64 = 3_600;
-const SECONDS_PER_MINUTE: u64 = 60;
+/// Owner decision (PLAN.md §10): archived versions are kept for 30 days.
+const ARCHIVE_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
@@ -59,8 +58,6 @@ pub enum RunError {
     },
     #[error(transparent)]
     Plan(#[from] PlanError),
-    #[error(transparent)]
-    RunName(#[from] InvalidRunName),
     #[error("Saving sync progress failed: {0}")]
     Commit(#[source] crate::Error),
     #[error("Run cancelled before planning finished")]
@@ -182,6 +179,8 @@ impl Failure {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RunReport {
     completion: Completion,
+    archive: String,
+    pruned: u64,
     copied: u64,
     updated: u64,
     archived: u64,
@@ -193,6 +192,14 @@ pub struct RunReport {
 impl RunReport {
     pub fn completion(&self) -> Completion {
         self.completion
+    }
+    /// This run's folder under `.foldover/archive` on each side.
+    pub fn archive(&self) -> &str {
+        &self.archive
+    }
+    /// Archived runs past retention, deleted after this run.
+    pub fn pruned(&self) -> u64 {
+        self.pruned
     }
     pub fn copied(&self) -> u64 {
         self.copied
@@ -328,7 +335,7 @@ impl PairRun {
         self,
         approval: Approval,
         context: RunContext,
-        run_name: &str,
+        started: SystemTime,
         commit: &mut impl FnMut(u64, Commit<'_>) -> Result<(), crate::Error>,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<RunOutcome, RunError> {
@@ -361,11 +368,14 @@ impl PairRun {
             commit(revision, identities).map_err(RunError::Commit)?;
         }
 
-        let scope = RunScope::new(run_name, options)?;
+        let scope = RunScope::new(started, options);
         let mut executor = Executor {
             run: &self,
+            report: RunReport {
+                archive: scope.name().to_owned(),
+                ..RunReport::default()
+            },
             scope,
-            report: RunReport::default(),
             pending: Vec::new(),
             failed: Vec::new(),
         };
@@ -402,6 +412,21 @@ impl PairRun {
             }
         }
         commit(&executor.pending)?;
+
+        // Retention deletes data, so it runs only after a complete run.
+        if executor.report.completion == Completion::Finished {
+            for side in [Side::Left, Side::Right] {
+                let endpoint = self.endpoints.endpoint(side);
+                match endpoint.prune_archive(ARCHIVE_RETENTION, started) {
+                    Ok(pruned) => executor.report.pruned += pruned,
+                    Err(error) => executor.fail_message(
+                        &SyncPath::try_from(b".foldover/archive".as_slice())
+                            .expect("the archive path is valid"),
+                        &error.to_string(),
+                    ),
+                }
+            }
+        }
         Ok(RunOutcome::Ran(executor.report))
     }
 
@@ -411,42 +436,6 @@ impl PairRun {
             Side::Right => &self.right,
         }
     }
-}
-
-/// A sortable, Finder-safe name for a run's archive folder, in UTC, e.g.
-/// `2026-10-18T09-30-00.123Z`. Runs of one pair never share a millisecond.
-pub fn run_name(now: SystemTime) -> String {
-    let since = now.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let seconds = since.as_secs();
-    let (year, month, day) = civil_from_days(seconds / SECONDS_PER_DAY);
-    let time = seconds % SECONDS_PER_DAY;
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}-{:02}-{:02}.{:03}Z",
-        time / SECONDS_PER_HOUR,
-        time % SECONDS_PER_HOUR / SECONDS_PER_MINUTE,
-        time % SECONDS_PER_MINUTE,
-        since.subsec_millis()
-    )
-}
-
-/// Howard Hinnant's days-to-civil conversion for the proleptic Gregorian
-/// calendar, from days since 1970-01-01.
-fn civil_from_days(days: u64) -> (u64, u64, u64) {
-    let shifted = days + 719_468;
-    let era = shifted / 146_097;
-    let day_of_era = shifted % 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_index = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 {
-        month_index + 3
-    } else {
-        month_index - 9
-    };
-    let year = year_of_era + era * 400 + u64::from(month <= 2);
-    (year, month, day)
 }
 
 fn is_archive(decision: &CandidateDecision) -> bool {

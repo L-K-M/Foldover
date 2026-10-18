@@ -524,3 +524,22 @@ fn private_files_are_created_once_and_read_without_following_links() {
     symlink(elsewhere.path().join("id"), target.join(".foldover/id")).unwrap();
     assert!(roots.target.read_private_file(&id, 64).is_err());
 }
+
+#[test]
+fn trees_are_removed_without_following_links() {
+    let roots = roots();
+    let target = roots.target_directory.path();
+    fs::create_dir_all(target.join("old/a/b")).unwrap();
+    fs::write(target.join("old/a/b/file"), b"x").unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("keep"), b"keep").unwrap();
+    symlink(outside.path(), target.join("old/a/link")).unwrap();
+    fs::write(target.join("other"), b"y").unwrap();
+
+    roots.target.remove_tree(&path(b"old")).unwrap();
+    assert_eq!(names(target), [b"other".to_vec()]);
+    assert_eq!(fs::read(outside.path().join("keep")).unwrap(), b"keep");
+    roots.target.remove_tree(&path(b"other")).unwrap();
+    assert!(names(target).is_empty());
+    assert!(roots.target.remove_tree(&path(b"missing")).is_err());
+}

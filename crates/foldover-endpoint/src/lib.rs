@@ -11,8 +11,8 @@ mod local_pair;
 
 #[cfg(unix)]
 pub use local::{
-    ApplyError, Expected, InvalidRunName, LocalEndpoint, LocalEntry, Observation, ObservedEntry,
-    RunScope, ScanControl, ScanError, ScanStats,
+    ApplyError, Expected, LocalEndpoint, LocalEntry, Observation, ObservedEntry, RunScope,
+    ScanControl, ScanError, ScanStats, archive_name,
 };
 
 #[cfg(unix)]
