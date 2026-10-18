@@ -4,6 +4,7 @@ import SwiftUI
 struct ArchiveView: View {
     let viewModel: ArchiveViewModel
     @Environment(\.dismiss) private var dismiss
+    @State private var confirmingPutBackAll = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -46,8 +47,13 @@ struct ArchiveView: View {
                                 .disabled(!viewModel.canPutBack)
                         }
                     }
-                    if viewModel.canLoadMore {
-                        Button("Show More") { Task { await viewModel.loadMore() } }
+                    HStack {
+                        if viewModel.canLoadMore {
+                            Button("Show More") { Task { await viewModel.loadMore() } }
+                        }
+                        Spacer()
+                        Button("Put Back All…") { confirmingPutBackAll = true }
+                            .disabled(!viewModel.canPutBackAll)
                     }
                 }
             }
@@ -61,6 +67,9 @@ struct ArchiveView: View {
             if let placed = viewModel.placedText {
                 Text(placed).foregroundStyle(.secondary)
             }
+            if let restored = viewModel.restoreText {
+                Text(restored).foregroundStyle(.secondary)
+            }
             if let error = viewModel.error {
                 Text(error).foregroundStyle(.red).textSelection(.enabled)
             }
@@ -71,6 +80,12 @@ struct ArchiveView: View {
         }
         .padding(20)
         .frame(minWidth: 680, minHeight: 440)
+        .confirmationDialog("Put Back All?", isPresented: $confirmingPutBackAll) {
+            Button("Put Back All") { Task { await viewModel.putBackAll() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(viewModel.putBackAllQuestion)
+        }
         .task { await viewModel.load() }
     }
 }

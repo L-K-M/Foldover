@@ -44,6 +44,30 @@ impl ArchiveError {
     }
 }
 
+/// What putting back a whole run did.
+#[derive(Debug, Default)]
+pub struct PutBackReport {
+    restored: u64,
+    beside: u64,
+    failures: Vec<(SyncPath, String)>,
+}
+
+impl PutBackReport {
+    /// Items back at their original path.
+    pub fn restored(&self) -> u64 {
+        self.restored
+    }
+
+    /// Items put beside a newer entry at their path, as `(restored)`.
+    pub fn beside(&self) -> u64 {
+        self.beside
+    }
+
+    pub fn failures(&self) -> &[(SyncPath, String)] {
+        &self.failures
+    }
+}
+
 /// One side's archive. Opening it needs only the pair's configuration, so
 /// callers browse without holding the engine.
 pub struct PairArchive {
@@ -84,6 +108,24 @@ impl PairArchive {
     /// taken, and return where it went. The next sync copies it across.
     pub fn put_back(&self, run: &str, path: &SyncPath) -> Result<SyncPath, ArchiveError> {
         Ok(self.endpoint.put_back(run, path, self.durability)?)
+    }
+
+    /// Put back everything `run` archived. One item's failure does not stop
+    /// the rest; the report lists it.
+    pub fn put_back_all(&self, run: &str) -> Result<PutBackReport, ArchiveError> {
+        // List first: putting items back changes the folder being listed.
+        let (items, _) = self.items(run, None, usize::MAX)?;
+        let mut report = PutBackReport::default();
+        for item in items {
+            match self.put_back(run, item.path()) {
+                Ok(placed) if &placed == item.path() => report.restored += 1,
+                Ok(_) => report.beside += 1,
+                Err(error) => report
+                    .failures
+                    .push((item.path().clone(), error.to_string())),
+            }
+        }
+        Ok(report)
     }
 }
 
@@ -132,6 +174,17 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+
+        // The rest of a run comes back in one go, beside anything newer.
+        fs::write(folder.join("a"), b"a").unwrap();
+        fs::write(folder.join("b"), b"b").unwrap();
+        fs::write(left.join("b"), b"newer").unwrap();
+        let report = archive.put_back_all(&run).unwrap();
+        assert_eq!((report.restored(), report.beside()), (1, 1));
+        assert!(report.failures().is_empty());
+        assert_eq!(fs::read(left.join("b")).unwrap(), b"newer");
+        assert_eq!(fs::read(left.join("b (restored)")).unwrap(), b"b");
+
         assert_eq!(
             archive
                 .put_back("nope", items[0].path())

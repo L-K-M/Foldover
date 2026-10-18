@@ -5,13 +5,14 @@
 
 pub use foldover_ipc::{Error, SocketLocation};
 use foldover_proto::local::{
-    ARCHIVE_ITEMS, ARCHIVE_PUT_BACK, ARCHIVE_RUNS, ArchiveItemQuery, ArchiveKey, ArchivePlaced,
-    ArchivePutBack,
+    ARCHIVE_ITEMS, ARCHIVE_PUT_BACK, ARCHIVE_PUT_BACK_ALL, ARCHIVE_RUNS, ArchiveItemQuery,
+    ArchiveKey, ArchivePlaced, ArchivePutBack, ArchiveRunKey,
 };
 pub use foldover_proto::local::{
-    AgentCapability, ArchiveItem, ArchiveItems, ArchiveRun, ArchiveRuns, DaemonStatus, History,
-    HistoryOutcome, HistoryRecord, HistoryTrigger, PairSide, SyncAction, SyncConflict, SyncCounts,
-    SyncDeletions, SyncFailure, SyncItem, SyncJob, SyncPreview, SyncResult, SyncStatus,
+    AgentCapability, ArchiveItem, ArchiveItems, ArchiveRestored, ArchiveRun, ArchiveRuns,
+    DaemonStatus, History, HistoryOutcome, HistoryRecord, HistoryTrigger, PairSide, SyncAction,
+    SyncConflict, SyncCounts, SyncDeletions, SyncFailure, SyncItem, SyncJob, SyncPreview,
+    SyncResult, SyncStatus,
 };
 use foldover_proto::local::{
     ConflictKeep, SYNC_CANCEL, SYNC_ITEMS, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS,
@@ -191,6 +192,28 @@ pub async fn put_back(
         .await?,
     )?;
     Ok(placed.path)
+}
+
+/// Put back everything one run archived on one side.
+pub async fn put_back_all(
+    location: &SocketLocation,
+    id: PairId,
+    side: Side,
+    run: &str,
+) -> Result<ArchiveRestored, Error> {
+    let params = ArchiveRunKey {
+        id: id.to_string(),
+        side: side.into(),
+        run: run.to_owned(),
+    };
+    Ok(serde_json::from_value(
+        call(
+            location,
+            ARCHIVE_PUT_BACK_ALL,
+            Some(serde_json::to_value(params)?),
+        )
+        .await?,
+    )?)
 }
 
 async fn sync_call(

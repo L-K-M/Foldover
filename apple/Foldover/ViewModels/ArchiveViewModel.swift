@@ -59,6 +59,26 @@ struct ArchiveViewModel {
         store.hasOlderRuns ? String(localized: "Older syncs are not listed.") : nil
     }
 
+    var canPutBackAll: Bool { canPutBack && !store.items.isEmpty }
+
+    var putBackAllQuestion: String {
+        String(localized: "Put back everything this sync archived in \(PairSyncViewModel.folderName(store.side))? Nothing is replaced: items whose place is taken go beside it with \"(restored)\" in their name.")
+    }
+
+    var restoreText: String? {
+        guard let restore = store.restore else { return nil }
+        var text = String(localized: "Put back \(restore.restored + restore.beside) items.")
+        if restore.beside > 0 {
+            text += " " + String(localized: "\(restore.beside) went beside newer versions.")
+        }
+        if restore.failures > 0 {
+            text += " " + String(localized: "\(restore.failures) could not be put back and stay in the archive.")
+        }
+        return text
+    }
+
+    func putBackAll() async { await store.putBackAll() }
+
     var placedText: String? {
         guard let placed = store.placed else { return nil }
         return String(localized: "Put back as \(PairSyncViewModel.pathText(placed)). The next sync copies it to the other folder.")

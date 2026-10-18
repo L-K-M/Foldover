@@ -6,8 +6,9 @@ Status: Implemented
 
 The app's **Browse Archive** sheet and `foldover archive` list each side's
 archived runs (newest first) and the files and links a run archived, and put
-an item back. Requests go through the agent (`archive.runs`,
-`archive.items`, `archive.putBack`); clients never touch `.foldover`.
+an item back, or everything a run archived. Requests go through the agent
+(`archive.runs`, `archive.items`, `archive.putBack`, `archive.putBackAll`);
+clients never touch `.foldover`.
 
 ```text
 .foldover/archive/2026-10-18T09-30-00.000Z/docs/report.txt
@@ -28,6 +29,9 @@ lose the end of their stem, never the extension, and stay valid UTF-8.
 - A put-back is refused while the pair previews or syncs, so a running
   job's plan stays accurate. A racing run cannot lose data either way:
   both sides only create with no-replace.
+- **Put Back All** lists the run first, then puts back each item the same
+  way; one item's failure does not stop the rest, and the result counts
+  items restored, items placed beside newer versions, and failures.
 - Items are paged in path order (100 per response, `after` cursor); runs
   are capped at 1,000 per response.
 

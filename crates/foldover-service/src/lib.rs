@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 
 use foldover_engine::{Approval, Engine, ErrorKind, StateLocation};
 use foldover_proto::local::{
-    ARCHIVE_ITEMS, ARCHIVE_PUT_BACK, ARCHIVE_RUNS, HISTORY_LIST, PAIR_REMOVE, PairRevision,
+    ARCHIVE_ITEMS, ARCHIVE_PUT_BACK, ARCHIVE_PUT_BACK_ALL, ARCHIVE_RUNS, HISTORY_LIST, PAIR_REMOVE,
+    PairRevision,
 };
 use foldover_proto::local::{
     AgentCapability, DAEMON_STATUS, DaemonStatus, Hello, INTERNAL_ERROR, INVALID_PARAMS,
@@ -80,7 +81,7 @@ impl Service {
         }
         if matches!(
             request.method(),
-            ARCHIVE_RUNS | ARCHIVE_ITEMS | ARCHIVE_PUT_BACK
+            ARCHIVE_RUNS | ARCHIVE_ITEMS | ARCHIVE_PUT_BACK | ARCHIVE_PUT_BACK_ALL
         ) {
             return archive::handle(&self.engine, &self.jobs, &request).await;
         }

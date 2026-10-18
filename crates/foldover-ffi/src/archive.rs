@@ -1,8 +1,8 @@
 //! Archive browsing for Swift: one side's runs and items, and put-back.
 
-use foldover_client::{ArchiveItems, ArchiveRuns, SocketLocation};
+use foldover_client::{ArchiveItems, ArchiveRestored, ArchiveRuns, SocketLocation};
 
-use crate::{AgentError, SyncSide, invalid_configuration};
+use crate::{AgentError, SyncFailureItem, SyncSide, invalid_configuration};
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct ArchivedRunRecord {
@@ -76,6 +76,48 @@ pub async fn archive_put_back(
     foldover_client::put_back(&SocketLocation::Default, id, side.into(), &run, &path)
         .await
         .map_err(AgentError::from)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct ArchiveRestoreSummary {
+    pub restored: u64,
+    /// Put beside a newer entry as `(restored)`.
+    pub beside: u64,
+    /// The first failures; `failure_count` counts all of them.
+    pub failures: Vec<SyncFailureItem>,
+    pub failure_count: u64,
+}
+
+/// Put back everything one run archived on one side.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn archive_put_back_all(
+    id: String,
+    side: SyncSide,
+    run: String,
+) -> Result<ArchiveRestoreSummary, AgentError> {
+    let id = id.parse().map_err(invalid_configuration)?;
+    let restored = foldover_client::put_back_all(&SocketLocation::Default, id, side.into(), &run)
+        .await
+        .map_err(AgentError::from)?;
+    Ok(restored.into())
+}
+
+impl From<ArchiveRestored> for ArchiveRestoreSummary {
+    fn from(restored: ArchiveRestored) -> Self {
+        Self {
+            restored: restored.restored,
+            beside: restored.beside,
+            failures: restored
+                .failures
+                .into_iter()
+                .map(|failure| SyncFailureItem {
+                    path: failure.path,
+                    message: failure.message,
+                })
+                .collect(),
+            failure_count: restored.failure_count,
+        }
+    }
 }
 
 impl From<ArchiveRuns> for ArchivedRunList {

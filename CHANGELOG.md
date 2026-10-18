@@ -27,7 +27,8 @@ All notable changes to this project are documented here. The format follows
 - Run history: each pair's last 100 syncs with their outcome and counts,
   shown in the app and printed by `foldover history`.
 - Archive browser: list each folder's archived syncs and put items back,
-  beside the current version when the original path is taken.
+  one at a time or a whole sync at once, beside the current version when
+  the original path is taken.
 - Free-space gate: a sync stops before writing when a folder's disk cannot
   hold the files copied to it plus a 256 MiB reserve.
 - Releases: pushing a version tag publishes the ad-hoc-signed app as a GitHub

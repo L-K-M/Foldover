@@ -291,6 +291,11 @@ uint64_t uniffi_foldover_ffi_fn_func_archive_items(RustBuffer id, RustBuffer sid
 uint64_t uniffi_foldover_ffi_fn_func_archive_put_back(RustBuffer id, RustBuffer side, RustBuffer run, RustBuffer path
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_ARCHIVE_PUT_BACK_ALL
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_ARCHIVE_PUT_BACK_ALL
+uint64_t uniffi_foldover_ffi_fn_func_archive_put_back_all(RustBuffer id, RustBuffer side, RustBuffer run
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_ARCHIVE_RUNS
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_ARCHIVE_RUNS
 uint64_t uniffi_foldover_ffi_fn_func_archive_runs(RustBuffer id, RustBuffer side
@@ -647,6 +652,12 @@ uint16_t uniffi_foldover_ffi_checksum_func_archive_items(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_ARCHIVE_PUT_BACK
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_ARCHIVE_PUT_BACK
 uint16_t uniffi_foldover_ffi_checksum_func_archive_put_back(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_ARCHIVE_PUT_BACK_ALL
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_ARCHIVE_PUT_BACK_ALL
+uint16_t uniffi_foldover_ffi_checksum_func_archive_put_back_all(void
     
 );
 #endif

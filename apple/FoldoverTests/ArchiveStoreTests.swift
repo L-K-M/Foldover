@@ -24,6 +24,12 @@ private actor ArchiveFixtureClient: ArchiveClient {
         stored.removeAll { $0 == path }
         return path + Data(" (restored)".utf8)
     }
+
+    func putBackAll(_ id: String, side: FolderSide, run: String) async throws -> RunRestore {
+        let count = UInt64(stored.count)
+        stored.removeAll()
+        return RunRestore(restored: count - 1, beside: 1, failures: 0)
+    }
 }
 
 private func docs() -> SyncPair {
@@ -65,4 +71,18 @@ func putBackRemovesTheRowAndSaysWhereItWent() async throws {
     await viewModel.putBack(row)
     #expect(viewModel.itemRows.map(\.path) == ["b"])
     #expect(viewModel.placedText?.hasPrefix("Put back as a (restored).") == true)
+}
+
+@MainActor
+@Test
+func putBackAllEmptiesTheRunAndSummarizes() async {
+    let store = ArchiveStore(client: ArchiveFixtureClient())
+    let viewModel = ArchiveViewModel(pair: docs(), store: store, agentConnected: true)
+    await viewModel.show(.b)
+    #expect(viewModel.canPutBackAll)
+
+    await viewModel.putBackAll()
+    #expect(viewModel.itemRows.isEmpty)
+    #expect(viewModel.restoreText == "Put back 3 items. 1 went beside newer versions.")
+    #expect(!viewModel.canPutBackAll)
 }

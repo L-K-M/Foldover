@@ -16,7 +16,9 @@ mod watch;
 #[cfg(test)]
 mod plan_properties;
 
-pub use archive::{ArchiveError, ArchiveErrorKind, ArchivedItem, ArchivedRun, PairArchive};
+pub use archive::{
+    ArchiveError, ArchiveErrorKind, ArchivedItem, ArchivedRun, PairArchive, PutBackReport,
+};
 pub use configuration::{Engine, Error, ErrorKind};
 pub use conflict::{KeepBothError, keep_both};
 pub use foldover_state::RecordedIdentities;

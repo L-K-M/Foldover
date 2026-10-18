@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub const ARCHIVE_RUNS: &str = "archive.runs";
 pub const ARCHIVE_ITEMS: &str = "archive.items";
 pub const ARCHIVE_PUT_BACK: &str = "archive.putBack";
+pub const ARCHIVE_PUT_BACK_ALL: &str = "archive.putBackAll";
 /// Runs per response, newest first. Names are short timestamps.
 pub const ARCHIVE_RUN_LIMIT: usize = 1000;
 /// Items per response; sized like `SYNC_ITEM_LIMIT` for the frame limit.
@@ -67,6 +68,26 @@ pub struct ArchivePutBack {
     pub side: super::PairSide,
     pub run: String,
     pub path: Vec<u8>,
+}
+
+/// Every item one run archived on one side.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchiveRunKey {
+    pub id: String,
+    pub side: super::PairSide,
+    pub run: String,
+}
+
+/// What putting back a whole run did; `failures` holds the first 100.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchiveRestored {
+    pub restored: u64,
+    /// Put beside a newer entry as `(restored)`.
+    pub beside: u64,
+    pub failures: Vec<super::SyncFailure>,
+    pub failure_count: u64,
 }
 
 /// Where the item went: its original path, or a `(restored)` name beside

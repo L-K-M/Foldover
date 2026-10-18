@@ -37,6 +37,7 @@ enum ArchiveCommand {
     Runs,
     Items(String),
     PutBack { run: String, path: Vec<u8> },
+    PutBackAll(String),
 }
 
 enum SyncCommand {
@@ -158,7 +159,7 @@ async fn main() -> ExitCode {
         },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT | --keep-left PATH | --keep-right PATH | --keep-both PATH] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH]] [--socket PATH]\n       foldover history ID [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT | --keep-left PATH | --keep-right PATH | --keep-both PATH] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -222,6 +223,9 @@ fn archive_command(args: &[OsString]) -> Option<ArchiveCommand> {
     match args {
         [] => Some(ArchiveCommand::Runs),
         [run] => Some(ArchiveCommand::Items(run.to_str()?.to_owned())),
+        [run, flag] if flag == "--put-back-all" => {
+            Some(ArchiveCommand::PutBackAll(run.to_str()?.to_owned()))
+        }
         [run, flag, path] if flag == "--put-back" => Some(ArchiveCommand::PutBack {
             run: run.to_str()?.to_owned(),
             path: path.as_bytes().to_vec(),
@@ -507,6 +511,10 @@ async fn archive(
             let placed = foldover_client::put_back(location, id, side, &run, &path).await?;
             println!("{}", serde_json::json!({ "path": placed }));
         }
+        ArchiveCommand::PutBackAll(run) => {
+            let restored = foldover_client::put_back_all(location, id, side, &run).await?;
+            println!("{}", serde_json::to_string(&restored)?);
+        }
     }
     Ok(())
 }
@@ -669,6 +677,10 @@ mod tests {
         assert!(matches!(
             req(&["archive", id, "left", "RUN", "--put-back", "docs/a"]),
             Request::Archive(_, _, Side::Left, ArchiveCommand::PutBack { ref path, .. }) if path == b"docs/a"
+        ));
+        assert!(matches!(
+            req(&["archive", id, "right", "RUN", "--put-back-all"]),
+            Request::Archive(_, _, Side::Right, ArchiveCommand::PutBackAll(ref run)) if run == "RUN"
         ));
         assert!(matches!(req(&["history", id]), Request::History(..)));
         for args in [

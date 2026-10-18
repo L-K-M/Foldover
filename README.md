@@ -123,6 +123,7 @@ foldover history ID              # finished runs, newest first
 foldover archive ID left         # archived runs in folder A, newest first
 foldover archive ID left RUN     # items one run archived
 foldover archive ID left RUN --put-back PATH
+foldover archive ID left RUN --put-back-all
 ```
 
 Each command waits for its job and prints the final status as JSON. A run

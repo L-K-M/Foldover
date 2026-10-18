@@ -3,9 +3,9 @@ use serde_json::{Value, json};
 
 mod archive;
 pub use archive::{
-    ARCHIVE_ITEM_LIMIT, ARCHIVE_ITEMS, ARCHIVE_PUT_BACK, ARCHIVE_RUN_LIMIT, ARCHIVE_RUNS,
-    ArchiveItem, ArchiveItemQuery, ArchiveItems, ArchiveKey, ArchivePlaced, ArchivePutBack,
-    ArchiveRun, ArchiveRuns,
+    ARCHIVE_ITEM_LIMIT, ARCHIVE_ITEMS, ARCHIVE_PUT_BACK, ARCHIVE_PUT_BACK_ALL, ARCHIVE_RUN_LIMIT,
+    ARCHIVE_RUNS, ArchiveItem, ArchiveItemQuery, ArchiveItems, ArchiveKey, ArchivePlaced,
+    ArchivePutBack, ArchiveRestored, ArchiveRun, ArchiveRunKey, ArchiveRuns,
 };
 
 mod history;

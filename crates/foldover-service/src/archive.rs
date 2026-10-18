@@ -7,10 +7,10 @@ use std::time::UNIX_EPOCH;
 
 use foldover_engine::{ArchiveError, ArchiveErrorKind, Engine, PairArchive};
 use foldover_proto::local::{
-    ARCHIVE_ITEM_LIMIT, ARCHIVE_ITEMS, ARCHIVE_NOT_FOUND, ARCHIVE_RUN_LIMIT, ARCHIVE_RUNS,
-    ArchiveItem, ArchiveItemQuery, ArchiveItems, ArchiveKey, ArchivePlaced, ArchivePutBack,
-    ArchiveRun, ArchiveRuns, INTERNAL_ERROR, INVALID_PARAMS, ROOT_UNAVAILABLE, Request, RpcError,
-    SYNC_BUSY, SyncStatus,
+    ARCHIVE_ITEM_LIMIT, ARCHIVE_ITEMS, ARCHIVE_NOT_FOUND, ARCHIVE_PUT_BACK_ALL, ARCHIVE_RUN_LIMIT,
+    ARCHIVE_RUNS, ArchiveItem, ArchiveItemQuery, ArchiveItems, ArchiveKey, ArchivePlaced,
+    ArchivePutBack, ArchiveRestored, ArchiveRun, ArchiveRunKey, ArchiveRuns, INTERNAL_ERROR,
+    INVALID_PARAMS, ROOT_UNAVAILABLE, Request, RpcError, SYNC_BUSY, SyncFailure, SyncStatus,
 };
 use foldover_types::{PairId, Side, SyncPath};
 use serde_json::Value;
@@ -57,18 +57,30 @@ pub(crate) async fn handle(
                 .collect();
             encode(ArchiveItems { items, more })
         }
+        ARCHIVE_PUT_BACK_ALL => {
+            let params: ArchiveRunKey = parameters(request)?;
+            require_idle(jobs, pair_id(&params.id)?)?;
+            let archive = open(engine, &params.id, params.side.into()).await?;
+            let report = blocking(move || archive.put_back_all(&params.run)).await?;
+            encode(ArchiveRestored {
+                restored: report.restored(),
+                beside: report.beside(),
+                failures: report
+                    .failures()
+                    .iter()
+                    .take(ARCHIVE_ITEM_LIMIT)
+                    .map(|(path, message)| SyncFailure {
+                        path: path.as_bytes().to_vec(),
+                        message: message.clone(),
+                    })
+                    .collect(),
+                failure_count: report.failures().len() as u64,
+            })
+        }
         _ => {
             let params: ArchivePutBack = parameters(request)?;
             let path = sync_path(params.path)?;
-            let id = pair_id(&params.id)?;
-            // A put-back never replaces anything, so racing a run cannot
-            // lose data; refusing it only keeps the run's preview accurate.
-            if matches!(jobs.status(id), SyncStatus::Working { .. }) {
-                return Err(RpcError::new(
-                    SYNC_BUSY,
-                    "Wait for the current preview or sync to finish",
-                ));
-            }
+            require_idle(jobs, pair_id(&params.id)?)?;
             let archive = open(engine, &params.id, params.side.into()).await?;
             let placed = blocking(move || archive.put_back(&params.run, &path)).await?;
             encode(ArchivePlaced {
@@ -76,6 +88,18 @@ pub(crate) async fn handle(
             })
         }
     }
+}
+
+/// A put-back never replaces anything, so racing a run cannot lose data;
+/// refusing it only keeps the run's preview accurate.
+fn require_idle(jobs: &Jobs, id: PairId) -> Result<(), RpcError> {
+    if matches!(jobs.status(id), SyncStatus::Working { .. }) {
+        return Err(RpcError::new(
+            SYNC_BUSY,
+            "Wait for the current preview or sync to finish",
+        ));
+    }
+    Ok(())
 }
 
 async fn open(engine: &Arc<Mutex<Engine>>, id: &str, side: Side) -> Result<PairArchive, RpcError> {

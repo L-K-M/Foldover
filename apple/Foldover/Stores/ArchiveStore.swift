@@ -30,11 +30,20 @@ struct ArchivePage: Equatable, Sendable {
     let more: Bool
 }
 
+/// What putting back a whole run did.
+struct RunRestore: Equatable, Sendable {
+    let restored: UInt64
+    /// Put beside a newer entry as "(restored)".
+    let beside: UInt64
+    let failures: UInt64
+}
+
 protocol ArchiveClient: Sendable {
     func runs(_ id: String, side: FolderSide) async throws -> ArchiveRuns
     func items(_ id: String, side: FolderSide, run: String, after: Data?) async throws -> ArchivePage
     /// Returns where the item went.
     func putBack(_ id: String, side: FolderSide, run: String, path: Data) async throws -> Data
+    func putBackAll(_ id: String, side: FolderSide, run: String) async throws -> RunRestore
 }
 
 // Keep generated async values inside one actor; only native Sendable records leave it.
@@ -56,6 +65,11 @@ private actor CoreArchiveClient: ArchiveClient {
 
     func putBack(_ id: String, side: FolderSide, run: String, path: Data) async throws -> Data {
         try await FoldoverCore.archivePutBack(id: id, side: coreSide(side), run: run, path: path)
+    }
+
+    func putBackAll(_ id: String, side: FolderSide, run: String) async throws -> RunRestore {
+        let summary = try await FoldoverCore.archivePutBackAll(id: id, side: coreSide(side), run: run)
+        return RunRestore(restored: summary.restored, beside: summary.beside, failures: summary.failureCount)
     }
 
     private func coreSide(_ side: FolderSide) -> SyncSide {
@@ -83,6 +97,8 @@ final class ArchiveStore {
     private(set) var error: String?
     /// Where the last put-back went.
     private(set) var placed: Data?
+    /// What the last whole-run put-back did.
+    private(set) var restore: RunRestore?
 
     init(client: any ArchiveClient = CoreArchiveClient()) {
         self.client = client
@@ -118,7 +134,23 @@ final class ArchiveStore {
         items = []
         hasMoreItems = false
         placed = nil
+        restore = nil
         await loadItems(after: nil)
+    }
+
+    /// Put back everything the selected run archived, then list what is left.
+    func putBackAll() async {
+        guard let pairID, let run else { return }
+        let side = side
+        error = nil
+        do {
+            let restore = try await client.putBackAll(pairID, side: side, run: run)
+            guard self.pairID == pairID, self.side == side, self.run == run else { return }
+            await select(run)
+            self.restore = restore
+        } catch {
+            self.error = PairStore.message(for: error)
+        }
     }
 
     func loadMore() async {

@@ -637,6 +637,80 @@ public func FfiConverterTypeAgentHealth_lower(_ value: AgentHealth) -> RustBuffe
 }
 
 
+public struct ArchiveRestoreSummary: Equatable, Hashable {
+    public var restored: UInt64
+    /**
+     * Put beside a newer entry as `(restored)`.
+     */
+    public var beside: UInt64
+    /**
+     * The first failures; `failure_count` counts all of them.
+     */
+    public var failures: [SyncFailureItem]
+    public var failureCount: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(restored: UInt64, 
+        /**
+         * Put beside a newer entry as `(restored)`.
+         */beside: UInt64, 
+        /**
+         * The first failures; `failure_count` counts all of them.
+         */failures: [SyncFailureItem], failureCount: UInt64) {
+        self.restored = restored
+        self.beside = beside
+        self.failures = failures
+        self.failureCount = failureCount
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ArchiveRestoreSummary: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeArchiveRestoreSummary: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ArchiveRestoreSummary {
+        return
+            try ArchiveRestoreSummary(
+                restored: FfiConverterUInt64.read(from: &buf), 
+                beside: FfiConverterUInt64.read(from: &buf), 
+                failures: FfiConverterSequenceTypeSyncFailureItem.read(from: &buf), 
+                failureCount: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ArchiveRestoreSummary, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.restored, into: &buf)
+        FfiConverterUInt64.write(value.beside, into: &buf)
+        FfiConverterSequenceTypeSyncFailureItem.write(value.failures, into: &buf)
+        FfiConverterUInt64.write(value.failureCount, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeArchiveRestoreSummary_lift(_ buf: RustBuffer) throws -> ArchiveRestoreSummary {
+    return try FfiConverterTypeArchiveRestoreSummary.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeArchiveRestoreSummary_lower(_ value: ArchiveRestoreSummary) -> RustBuffer {
+    return FfiConverterTypeArchiveRestoreSummary.lower(value)
+}
+
+
 public struct ArchivedItemPage: Equatable, Hashable {
     /**
      * In path order.
@@ -3276,6 +3350,23 @@ public func archivePutBack(id: String, side: SyncSide, run: String, path: Data)a
             errorHandler: FfiConverterTypeAgentError_lift
         )
 }
+/**
+ * Put back everything one run archived on one side.
+ */
+public func archivePutBackAll(id: String, side: SyncSide, run: String)async throws  -> ArchiveRestoreSummary  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_archive_put_back_all(FfiConverterString.lower(id),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeArchiveRestoreSummary_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
 public func archiveRuns(id: String, side: SyncSide)async throws  -> ArchivedRunList  {
     return
         try  await uniffiRustCallAsync(
@@ -3454,6 +3545,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_archive_put_back() != 6455) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_archive_put_back_all() != 35866) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_archive_runs() != 43046) {
