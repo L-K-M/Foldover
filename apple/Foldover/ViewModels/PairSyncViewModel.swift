@@ -1,0 +1,165 @@
+import Foundation
+
+/// One planned or failed change, ready to render.
+struct ChangeRow: Identifiable, Equatable {
+    let id: Int
+    let path: String
+    let description: String
+}
+
+/// Deletion counts the user accepted for each folder.
+struct DeletionApproval: Equatable, Sendable {
+    let a: UInt64
+    let b: UInt64
+}
+
+/// Preview and run controls for the selected pair: strings and actions only.
+@MainActor
+struct PairSyncViewModel {
+    let pair: SyncPair
+    let store: SyncStore
+    let agentConnected: Bool
+
+    private var state: PairSyncState { store.state(for: pair.id) }
+
+    var isWorking: Bool {
+        if case .working = state { return true }
+        return false
+    }
+    var canStart: Bool { agentConnected && !isWorking }
+    var canCancel: Bool {
+        if case .working(_, let cancelling) = state { return !cancelling }
+        return false
+    }
+    var requestError: String? { store.requestError(for: pair.id) }
+
+    var statusText: String {
+        switch state {
+        case .idle:
+            String(localized: "Preview to see what a sync would change. Nothing is written until you sync.")
+        case .working(_, cancelling: true):
+            String(localized: "Stopping…")
+        case .working(.preview, _):
+            String(localized: "Comparing folders…")
+        case .working(.run, _):
+            String(localized: "Syncing…")
+        case .previewed(let preview):
+            preview.total == 0
+                ? String(localized: "Folders are in sync.")
+                : Self.summary(preview)
+        case .needsApproval(let preview):
+            String(localized: "Nothing was changed. This sync would archive more items than Foldover moves without asking.")
+                + " " + Self.summary(preview)
+        case .finished(let result):
+            Self.summary(result)
+        case .failed(let message):
+            String(localized: "Sync stopped: \(message)")
+        }
+    }
+
+    /// What approving the current request would allow. Read it when the user
+    /// confirms: dismissing the dialog declines the request.
+    var approval: DeletionApproval? {
+        guard case .needsApproval(let preview) = state else { return nil }
+        return DeletionApproval(a: preview.a.deletions, b: preview.b.deletions)
+    }
+
+    /// The approval to request when a run stopped for too many deletions.
+    var approvalRequest: String? {
+        guard case .needsApproval(let preview) = state else { return nil }
+        return String(localized: "Archive \(preview.a.deletions) items in \(Self.folderName(.a)) and \(preview.b.deletions) in \(Self.folderName(.b))? Archived items stay in .foldover/archive for 30 days.")
+    }
+
+    var rows: [ChangeRow] {
+        switch state {
+        case .previewed(let preview), .needsApproval(let preview):
+            preview.changes.enumerated().map { index, change in
+                ChangeRow(id: index, path: Self.pathText(change.path), description: Self.description(change.action))
+            }
+        case .finished(let result):
+            result.failures.enumerated().map { index, failure in
+                ChangeRow(id: index, path: Self.pathText(failure.path), description: failure.message)
+            }
+        default:
+            []
+        }
+    }
+
+    /// Rows not shown because responses carry only the first changes.
+    var hiddenRowsText: String? {
+        let hidden: UInt64 = switch state {
+        case .previewed(let preview), .needsApproval(let preview): preview.total - UInt64(preview.changes.count)
+        case .finished(let result): result.failureCount - UInt64(result.failures.count)
+        default: 0
+        }
+        return hidden == 0 ? nil : String(localized: "and \(hidden) more")
+    }
+
+    var archiveNote: String? {
+        guard case .finished(let result) = state, result.archived + result.copied + result.updated > 0 else { return nil }
+        return String(localized: "Replaced and removed items are in .foldover/archive/\(result.archive) inside each folder.")
+    }
+
+    func preview() async { await store.preview(pair.id) }
+    func sync() async { await store.run(pair.id) }
+    func cancel() async { await store.cancel(pair.id) }
+    func refresh() async { await store.refresh(pair.id) }
+
+    func approve(_ approval: DeletionApproval) async {
+        await store.run(pair.id, approvedA: approval.a, approvedB: approval.b)
+    }
+
+    func declineApproval() { store.declineApproval(pair.id) }
+
+    static func summary(_ preview: PreviewSummary) -> String {
+        var parts = [String]()
+        if preview.copies > 0 { parts.append(String(localized: "\(preview.copies) to copy")) }
+        if preview.updates > 0 { parts.append(String(localized: "\(preview.updates) metadata updates")) }
+        if preview.archives > 0 { parts.append(String(localized: "\(preview.archives) to archive")) }
+        if preview.conflicts > 0 { parts.append(String(localized: "\(preview.conflicts) conflicts")) }
+        if preview.blocked > 0 { parts.append(String(localized: "\(preview.blocked) waiting on conflicts")) }
+        if preview.kept > 0 { parts.append(String(localized: "\(preview.kept) kept in the backup")) }
+        return parts.joined(separator: ", ") + "."
+    }
+
+    static func summary(_ result: RunSummary) -> String {
+        var text = result.cancelled
+            ? String(localized: "Sync cancelled after copying \(result.copied), updating \(result.updated) and archiving \(result.archived).")
+            : String(localized: "Synced: copied \(result.copied), updated \(result.updated), archived \(result.archived).")
+        if result.conflicts > 0 {
+            text += " " + String(localized: "\(result.conflicts) conflicts were left untouched.")
+        }
+        if result.failureCount > 0 {
+            text += " " + String(localized: "\(result.failureCount) items failed and will be retried next time.")
+        }
+        if result.recovered > 0 {
+            text += " " + String(localized: "Recovered \(result.recovered) items left by an interrupted sync.")
+        }
+        return text
+    }
+
+    static func description(_ action: ChangeAction) -> String {
+        switch action {
+        case .copy(let to): String(localized: "Copy to \(folderName(to))")
+        case .update(let to): String(localized: "Update metadata in \(folderName(to))")
+        case .archive(let on): String(localized: "Archive in \(folderName(on))")
+        case .conflict(.bothChanged): String(localized: "Conflict: changed in both folders")
+        case .conflict(.deletedVersusEdited): String(localized: "Conflict: deleted in one folder, changed in the other")
+        case .conflict(.typeMismatch): String(localized: "Conflict: a file in one folder, a folder in the other")
+        case .conflict(.metadataOnly): String(localized: "Conflict: different metadata in both folders")
+        case .blocked: String(localized: "Waiting on a conflict in an enclosing folder")
+        case .keep: String(localized: "Kept in the backup")
+        }
+    }
+
+    static func folderName(_ side: FolderSide) -> String {
+        switch side {
+        case .a: String(localized: "Folder A")
+        case .b: String(localized: "Folder B")
+        }
+    }
+
+    static func pathText(_ path: Data) -> String {
+        String(data: path, encoding: .utf8) ?? String(decoding: path, as: UTF8.self)
+    }
+}

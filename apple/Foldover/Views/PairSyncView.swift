@@ -1,0 +1,57 @@
+import SwiftUI
+
+/// Preview, sync and their results for one pair.
+struct PairSyncView: View {
+    let viewModel: PairSyncViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Button("Preview") { Task { await viewModel.preview() } }
+                    .disabled(!viewModel.canStart)
+                Button("Sync Now") { Task { await viewModel.sync() } }
+                    .keyboardShortcut("s")
+                    .disabled(!viewModel.canStart)
+                if viewModel.isWorking {
+                    ProgressView().controlSize(.small)
+                    Button("Cancel") { Task { await viewModel.cancel() } }
+                        .disabled(!viewModel.canCancel)
+                }
+            }
+            Text(viewModel.statusText)
+                .foregroundStyle(.secondary)
+                .accessibilityAddTraits(.updatesFrequently)
+            if let error = viewModel.requestError {
+                Text(error).foregroundStyle(.red)
+            }
+            if !viewModel.rows.isEmpty {
+                List(viewModel.rows) { row in
+                    VStack(alignment: .leading) {
+                        Text(row.path).lineLimit(1).truncationMode(.middle)
+                        Text(row.description).font(.caption).foregroundStyle(.secondary)
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+                .frame(minHeight: 160)
+                if let hidden = viewModel.hiddenRowsText {
+                    Text(hidden).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if let note = viewModel.archiveNote {
+                Text(note).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .confirmationDialog("Archive Many Items?", isPresented: Binding(
+            get: { viewModel.approvalRequest != nil }, set: { _ in viewModel.declineApproval() }
+        )) {
+            Button("Archive and Sync", role: .destructive) {
+                guard let approval = viewModel.approval else { return }
+                Task { await viewModel.approve(approval) }
+            }
+            Button("Cancel", role: .cancel) { viewModel.declineApproval() }
+        } message: {
+            Text(viewModel.approvalRequest ?? "")
+        }
+        .task(id: viewModel.pair.id) { await viewModel.refresh() }
+    }
+}

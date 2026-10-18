@@ -1,4 +1,4 @@
-// Pair configuration and background-agent controls (PLAN.md §3.8).
+// Pairs, their sync controls and background-agent status (PLAN.md §3.8).
 
 import SwiftUI
 
@@ -49,15 +49,15 @@ struct MainView: View {
                     Button("Edit Pair") { viewModel.editPair() }.disabled(!viewModel.canConfigurePairs)
                     Button("Remove Pair", role: .destructive) { viewModel.requestRemoval() }
                         .disabled(!viewModel.canConfigurePairs)
-                    Text("Configuration saved. Preview and sync are not available yet.")
-                        .foregroundStyle(.secondary)
+                    Divider()
+                    PairSyncView(viewModel: viewModel.sync(for: pair))
                 }
                 .textSelection(.enabled)
                 .padding(24)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             } else {
                 ContentUnavailableView(viewModel.detailTitle, systemImage: "folder.badge.plus",
-                    description: Text("Choose two folders and a sync mode. Preview and sync are not available yet."))
+                    description: Text("Choose two folders and a sync mode, then preview and sync."))
             }
         }
         .toolbar {

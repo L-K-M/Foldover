@@ -1,6 +1,6 @@
 # ADR 0021: Sync job API
 
-Status: Implemented in the agent and CLI; app pending
+Status: Implemented in the agent, CLI and app
 
 ## Context
 
@@ -36,6 +36,11 @@ Idle ─start─▶ Working ─▶ Previewed | NeedsApproval | Finished | Failed
 The CLI starts a job, polls every 250 ms and prints the final status as one
 JSON line: `foldover sync ID [--preview | --cancel | --approve LEFT RIGHT]`.
 A run that needs approval exits 3; failures and cancellations exit 1.
+
+The app's `SyncStore` keeps generated values inside one actor, starts jobs
+and polls every 500 ms while one works. A run that needs approval shows the
+deletion counts; confirming retries with exactly those counts. Declining
+keeps the preview visible.
 
 ## Consequences
 

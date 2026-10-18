@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Preview and Sync Now in the app, with the change list, results, cancellation
+  and a confirmation before archiving many items.
 - Sync from the command line: `foldover sync ID` previews and runs as agent
   background jobs, with deletion approval and cancellation.
 - Folder identity check: the first sync writes `.foldover/id` into both

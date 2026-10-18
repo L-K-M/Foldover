@@ -8,6 +8,9 @@
 
 // Adapted from L-K-M/Sweetbriar.
 
+mod sync;
+pub use sync::*;
+
 /// `coreVersion()` in Swift: the workspace version, via the client.
 #[uniffi::export]
 pub fn core_version() -> String {

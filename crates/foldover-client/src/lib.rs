@@ -5,7 +5,7 @@
 
 pub use foldover_ipc::{Error, SocketLocation};
 pub use foldover_proto::local::{
-    AgentCapability, DaemonStatus, SyncAction, SyncConflict, SyncCounts, SyncDeletions,
+    AgentCapability, DaemonStatus, PairSide, SyncAction, SyncConflict, SyncCounts, SyncDeletions,
     SyncFailure, SyncItem, SyncJob, SyncPreview, SyncResult, SyncStatus,
 };
 use foldover_proto::local::{DAEMON_STATUS, Hello, PROTOCOL_VERSION, Request, SESSION_HELLO};

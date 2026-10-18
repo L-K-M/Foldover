@@ -12,6 +12,7 @@ final class MainViewModel {
     private let appInfo: AppInfoStore
     private let agent: AgentStore
     private let pairStore: PairStore
+    private let syncStore: SyncStore
     var selectedPairID: String?
     private(set) var editor: PairEditorViewModel?
     private(set) var removalTarget: SyncPair?
@@ -20,10 +21,12 @@ final class MainViewModel {
     /// Main-actor isolated like the rest of the class: `FoldoverApp`
     /// (an `App`, so main-actor isolated too) builds it in its `@State`
     /// initializer.
-    init(appInfo: AppInfoStore, agent: AgentStore = AgentStore(), pairs: PairStore = PairStore()) {
+    init(appInfo: AppInfoStore, agent: AgentStore = AgentStore(), pairs: PairStore = PairStore(),
+         sync: SyncStore = SyncStore()) {
         self.appInfo = appInfo
         self.agent = agent
         pairStore = pairs
+        syncStore = sync
     }
 
     var title: String { "Foldover" }
@@ -34,7 +37,7 @@ final class MainViewModel {
         if pairStore.loadError != nil { return String(localized: "Pair catalog unavailable") }
         guard pairStore.hasLoaded else { return String(localized: "Pairs have not loaded") }
         guard !pairs.isEmpty else { return emptyState }
-        return String(localized: "Configured pairs: \(pairs.count). Sync is not available yet.")
+        return String(localized: "Configured pairs: \(pairs.count)")
     }
 
     var pairs: [SyncPair] {
@@ -64,9 +67,15 @@ final class MainViewModel {
         case .disconnected: String(localized: "Background agent is off")
         case .connecting: String(localized: "Connecting to the background agent…")
         case .approvalRequired: String(localized: "Approve Foldover in Login Items, then refresh")
-        case .connected(let version): String(localized: "Agent \(version) connected. Sync is not available yet.")
+        case .connected(let version): String(localized: "Agent \(version) connected")
         case .failed(let message): String(localized: "Background agent unavailable: \(message)")
         }
+    }
+
+    func sync(for pair: SyncPair) -> PairSyncViewModel {
+        var connected = false
+        if case .connected = agent.connection { connected = true }
+        return PairSyncViewModel(pair: pair, store: syncStore, agentConnected: connected)
     }
 
     var agentNeedsApproval: Bool {

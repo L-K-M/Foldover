@@ -46,7 +46,7 @@ struct PairEditorView: View {
                 }
             }
             .disabled(viewModel.isSaving)
-            Text("Saving configures the pair. Preview and sync are not available yet.")
+            Text("Saving configures the pair. Nothing is copied until you preview and sync.")
                 .font(.callout).foregroundStyle(.secondary)
             if let message = viewModel.errorMessage {
                 Text(message).foregroundStyle(.red).textSelection(.enabled)

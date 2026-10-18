@@ -281,6 +281,26 @@ uint64_t uniffi_foldover_ffi_fn_func_pair_remove(RustBuffer id, uint64_t revisio
 uint64_t uniffi_foldover_ffi_fn_func_pair_update(RustBuffer id, uint64_t revision, RustBuffer configuration
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_CANCEL
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_CANCEL
+uint64_t uniffi_foldover_ffi_fn_func_sync_cancel(RustBuffer id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_PREVIEW
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_PREVIEW
+uint64_t uniffi_foldover_ffi_fn_func_sync_preview(RustBuffer id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_RUN
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_RUN
+uint64_t uniffi_foldover_ffi_fn_func_sync_run(RustBuffer id, uint64_t approved_left_deletions, uint64_t approved_right_deletions
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_STATUS
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_STATUS
+uint64_t uniffi_foldover_ffi_fn_func_sync_status(RustBuffer id
+);
+#endif
 #ifndef UNIFFI_FFIDEF_FFI_FOLDOVER_FFI_RUSTBUFFER_ALLOC
 #define UNIFFI_FFIDEF_FFI_FOLDOVER_FFI_RUSTBUFFER_ALLOC
 RustBuffer ffi_foldover_ffi_rustbuffer_alloc(uint64_t size, RustCallStatus *_Nonnull out_status
@@ -580,6 +600,30 @@ uint16_t uniffi_foldover_ffi_checksum_func_pair_remove(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_PAIR_UPDATE
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_PAIR_UPDATE
 uint16_t uniffi_foldover_ffi_checksum_func_pair_update(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_SYNC_CANCEL
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_SYNC_CANCEL
+uint16_t uniffi_foldover_ffi_checksum_func_sync_cancel(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_SYNC_PREVIEW
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_SYNC_PREVIEW
+uint16_t uniffi_foldover_ffi_checksum_func_sync_preview(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_SYNC_RUN
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_SYNC_RUN
+uint16_t uniffi_foldover_ffi_checksum_func_sync_run(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_SYNC_STATUS
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_SYNC_STATUS
+uint16_t uniffi_foldover_ffi_checksum_func_sync_status(void
     
 );
 #endif
