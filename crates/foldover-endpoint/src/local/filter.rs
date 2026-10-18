@@ -17,6 +17,7 @@ const IGNORE_FILE_LIMIT: u64 = 64 * 1024;
 
 pub struct Filter {
     rules: Gitignore,
+    size_limit: Option<u64>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -30,6 +31,7 @@ impl Filter {
     pub fn none() -> Self {
         Self {
             rules: Gitignore::empty(),
+            size_limit: None,
         }
     }
 
@@ -48,7 +50,23 @@ impl Filter {
             rule: String::new(),
             message: error.to_string(),
         })?;
-        Ok(Self { rules })
+        Ok(Self {
+            rules,
+            size_limit: None,
+        })
+    }
+
+    /// Also skip files larger than `bytes`. Sizes differ between folders,
+    /// so callers must skip a path skipped in either folder in both.
+    pub fn with_size_limit(self, bytes: Option<u64>) -> Self {
+        Self {
+            size_limit: bytes,
+            ..self
+        }
+    }
+
+    pub(super) fn too_large(&self, size: u64) -> bool {
+        self.size_limit.is_some_and(|limit| size > limit)
     }
 
     pub(super) fn excludes(&self, path: &SyncPath, directory: bool) -> bool {

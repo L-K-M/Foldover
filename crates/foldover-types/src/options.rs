@@ -43,10 +43,14 @@ pub enum Durability {
     Full,
 }
 
-/// Gitignore-style exclusion rules, one per line. They apply to both
-/// folders, so an excluded entry never looks deleted on one side.
+/// Gitignore-style exclusion rules, one per line, and an optional file
+/// size limit. They apply to both folders, so an excluded entry never
+/// looks deleted on one side.
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
-pub struct Filters(Vec<String>);
+pub struct Filters {
+    rules: Vec<String>,
+    size_limit: Option<u64>,
+}
 
 impl Filters {
     pub const MAX_RULES: usize = 256;
@@ -62,11 +66,30 @@ impl Filters {
         {
             return Err(InvalidPair::Filters);
         }
-        Ok(Self(rules))
+        Ok(Self {
+            rules,
+            size_limit: None,
+        })
+    }
+
+    /// Skip files larger than `bytes`, in both folders. Zero is refused:
+    /// it would skip every file with content.
+    pub fn with_size_limit(self, bytes: Option<u64>) -> Result<Self, InvalidPair> {
+        if bytes == Some(0) {
+            return Err(InvalidPair::Filters);
+        }
+        Ok(Self {
+            size_limit: bytes,
+            ..self
+        })
     }
 
     pub fn rules(&self) -> &[String] {
-        &self.0
+        &self.rules
+    }
+
+    pub fn size_limit(&self) -> Option<u64> {
+        self.size_limit
     }
 }
 
@@ -85,7 +108,10 @@ impl PairOptions {
             metadata,
             durability,
             schedule: Schedule::Manual,
-            filters: Filters(Vec::new()),
+            filters: Filters {
+                rules: Vec::new(),
+                size_limit: None,
+            },
         }
     }
 
@@ -125,5 +151,15 @@ mod tests {
         assert!(ScheduleInterval::from_minutes(ScheduleInterval::MAX_MINUTES).is_ok());
         assert!(ScheduleInterval::from_minutes(ScheduleInterval::MAX_MINUTES + 1).is_err());
         assert_eq!(PairOptions::default().schedule(), Schedule::Manual);
+    }
+
+    #[test]
+    fn size_limits_must_allow_some_content() {
+        let rules = Filters::new(Vec::new()).unwrap();
+        assert!(rules.clone().with_size_limit(Some(0)).is_err());
+        assert_eq!(
+            rules.with_size_limit(Some(1)).unwrap().size_limit(),
+            Some(1)
+        );
     }
 }

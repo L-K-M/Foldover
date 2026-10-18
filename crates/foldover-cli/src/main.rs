@@ -14,6 +14,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
+/// `--max-size` counts decimal megabytes, as Finder does.
+const BYTES_PER_MEGABYTE: u64 = 1_000_000;
 /// How a usage failure exits.
 const USAGE_EXIT: u8 = 2;
 /// A run stopped for deletion approval; nothing was written.
@@ -80,6 +82,8 @@ struct OptionChanges {
     durability: Option<Durability>,
     schedule: Option<Schedule>,
     filters: Option<Filters>,
+    /// `Some(None)` removes the limit.
+    size_limit: Option<Option<u64>>,
 }
 
 impl OptionChanges {
@@ -96,7 +100,12 @@ impl OptionChanges {
             self.durability.unwrap_or(base.durability()),
         )
         .with_schedule(self.schedule.unwrap_or(base.schedule()))
-        .with_filters(self.filters.unwrap_or_else(|| base.filters().clone()))
+        .with_filters(
+            self.filters
+                .unwrap_or_else(|| base.filters().clone())
+                .with_size_limit(self.size_limit.unwrap_or(base.filters().size_limit()))
+                .expect("limits are checked when parsed"),
+        )
     }
 }
 
@@ -149,7 +158,7 @@ async fn main() -> ExitCode {
         },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT | --keep-left PATH | --keep-right PATH | --keep-both PATH] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH]] [--socket PATH]\n       foldover history ID [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT | --keep-left PATH | --keep-right PATH | --keep-both PATH] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH]] [--socket PATH]\n       foldover history ID [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -315,6 +324,19 @@ fn option_changes(args: &[OsString]) -> Option<OptionChanges> {
                     "standard" => Durability::Standard,
                     "full" => Durability::Full,
                     _ => return None,
+                })
+                .is_some(),
+            "--max-size" => changes
+                .size_limit
+                .replace(match value {
+                    "none" => None,
+                    megabytes => Some(
+                        megabytes
+                            .parse::<u64>()
+                            .ok()
+                            .filter(|megabytes| *megabytes > 0)?
+                            .checked_mul(BYTES_PER_MEGABYTE)?,
+                    ),
                 })
                 .is_some(),
             "--schedule" => changes
@@ -680,6 +702,8 @@ mod tests {
             "*.tmp",
             "--exclude",
             "build/",
+            "--max-size",
+            "500",
             "--socket",
             "/tmp/s",
         ]) else {
@@ -688,6 +712,7 @@ mod tests {
         let defaults = PairOptions::default();
         assert_eq!(draft.options().durability(), Durability::Full);
         assert_eq!(draft.options().filters().rules(), ["*.tmp", "build/"]);
+        assert_eq!(draft.options().filters().size_limit(), Some(500_000_000));
         assert_eq!(
             draft.options().schedule(),
             Schedule::Every(ScheduleInterval::from_minutes(15).unwrap())
@@ -704,17 +729,42 @@ mod tests {
         ]) else {
             panic!("expected an update command");
         };
+        let limited = Filters::default().with_size_limit(Some(7)).unwrap();
         let current = PairOptions::new(
             MetadataPolicy::new(Propagation::Sync, Propagation::Ignore, Propagation::Sync),
             Durability::Full,
-        );
+        )
+        .with_filters(limited.clone());
         assert_eq!(
-            options.apply(current),
+            options.apply(current.clone()),
             PairOptions::new(
                 MetadataPolicy::new(Propagation::Ignore, Propagation::Ignore, Propagation::Sync),
                 Durability::Full,
             )
+            .with_filters(limited)
         );
+
+        let Request::Pairs(_, PairCommand::Update { options, .. }) = req(&[
+            "pairs",
+            "update",
+            id,
+            "1",
+            "Photos",
+            "/a",
+            "/b",
+            "sync",
+            "--max-size",
+            "none",
+        ]) else {
+            panic!("expected an update command");
+        };
+        assert_eq!(options.apply(current).filters().size_limit(), None);
+        for value in ["0", "-1", "lots"] {
+            assert!(matches!(
+                req(&["pairs", "add", "P", "/a", "/b", "sync", "--max-size", value]),
+                Request::Usage
+            ));
+        }
     }
 
     #[test]

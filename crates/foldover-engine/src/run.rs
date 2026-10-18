@@ -360,7 +360,8 @@ impl PairRun {
                     .map_err(|source| observe_error(side, source))?,
             );
         }
-        let filter = Filter::new(rules.iter().map(String::as_str))?;
+        let filter = Filter::new(rules.iter().map(String::as_str))?
+            .with_size_limit(draft.options().filters().size_limit());
         let observe = |side: Side, control: &mut dyn FnMut() -> ScanControl| {
             let previous = match side {
                 Side::Left => &left_snapshot,
@@ -374,8 +375,18 @@ impl PairRun {
                     source => observe_error(side, source),
                 })
         };
-        let left = observe(Side::Left, control)?;
-        let right = observe(Side::Right, control)?;
+        let mut left = observe(Side::Left, control)?;
+        let mut right = observe(Side::Right, control)?;
+        // Sizes differ between folders: a file too large in either is
+        // skipped in both, so it is forgotten rather than deleted.
+        let oversized: Vec<SyncPath> = left
+            .oversized()
+            .iter()
+            .chain(right.oversized())
+            .cloned()
+            .collect();
+        left.exclude(&oversized);
+        right.exclude(&oversized);
         let plan = plan_resolved(
             draft.mode(),
             &base,

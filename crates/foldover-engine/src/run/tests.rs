@@ -15,6 +15,7 @@ struct Fixture {
     identities: RecordedIdentities,
     resolutions: BTreeMap<SyncPath, foldover_types::Resolution>,
     filters: Vec<String>,
+    size_limit: Option<u64>,
 }
 
 fn fixture(mode: SyncMode) -> Fixture {
@@ -27,6 +28,7 @@ fn fixture(mode: SyncMode) -> Fixture {
         identities: RecordedIdentities::default(),
         resolutions: BTreeMap::new(),
         filters: Vec::new(),
+        size_limit: None,
     }
 }
 
@@ -50,7 +52,9 @@ impl Fixture {
     }
 
     fn try_prepare(&self) -> Result<PairRun, RunError> {
-        let filters = foldover_types::Filters::new(self.filters.clone()).unwrap();
+        let filters = foldover_types::Filters::new(self.filters.clone())
+            .and_then(|filters| filters.with_size_limit(self.size_limit))
+            .unwrap();
         let draft = PairDraft::new(
             "pair".into(),
             root(self.left.path()),
@@ -580,4 +584,39 @@ fn copies_need_their_size_plus_the_reserve() {
         })
     ));
     assert!(super::require_space(Side::Left, u64::MAX, u64::MAX).is_err());
+}
+
+#[test]
+fn files_too_large_in_either_folder_are_skipped_in_both() {
+    let mut pair = fixture(SyncMode::Sync);
+    fs::write(pair.left.path().join("small"), b"a").unwrap();
+    fs::write(pair.left.path().join("big"), b"0123456789").unwrap();
+    pair.sync();
+
+    pair.size_limit = Some(5);
+    assert!(pair.prepare().preview().items().is_empty());
+
+    // Shrinking it on one side changes nothing while the other is too large.
+    fs::write(pair.left.path().join("big"), b"xyz").unwrap();
+    fs::write(pair.left.path().join("small"), b"b").unwrap();
+    let report = pair.sync();
+    assert_eq!((report.copied(), report.archived()), (1, 0));
+    assert_eq!(
+        fs::read(pair.right.path().join("big")).unwrap(),
+        b"0123456789"
+    );
+    assert_eq!(fs::read(pair.left.path().join("big")).unwrap(), b"xyz");
+    assert_eq!(fs::read(pair.right.path().join("small")).unwrap(), b"b");
+
+    // Without the limit, two different versions and no base: a conflict.
+    pair.size_limit = None;
+    let preview = pair.prepare().preview();
+    assert_eq!(
+        preview
+            .items()
+            .iter()
+            .map(|item| (item.path().clone(), item.action()))
+            .collect::<Vec<_>>(),
+        [(path(b"big"), Action::Conflict(ConflictKind::BothChanged))]
+    );
 }

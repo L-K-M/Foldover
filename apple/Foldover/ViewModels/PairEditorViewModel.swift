@@ -43,6 +43,27 @@ final class PairEditorViewModel: Identifiable {
         }
     }
 
+    /// Sizes in whole decimal megabytes, as Finder shows them.
+    private static let bytesPerMegabyte: UInt64 = 1_000_000
+    private static let suggestedLimitMegabytes: UInt64 = 1_000
+
+    var limitsSize: Bool {
+        get { options.sizeLimit != nil }
+        set {
+            options.sizeLimit = newValue
+                ? options.sizeLimit ?? Self.suggestedLimitMegabytes * Self.bytesPerMegabyte
+                : nil
+        }
+    }
+
+    var sizeLimitMegabytes: Int {
+        get { Int(clamping: (options.sizeLimit ?? 0) / Self.bytesPerMegabyte) }
+        set {
+            let megabytes = min(UInt64(max(1, newValue)), UInt64.max / Self.bytesPerMegabyte)
+            options.sizeLimit = megabytes * Self.bytesPerMegabyte
+        }
+    }
+
     /// Fixed choices, plus a stored interval set elsewhere (e.g. the CLI).
     var scheduleChoices: [SyncSchedule] {
         var choices: [SyncSchedule] = [.manual, .onChange, .every(minutes: 5), .every(minutes: 15),

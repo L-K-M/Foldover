@@ -43,6 +43,12 @@ struct PairEditorView: View {
                         .accessibilityLabel("Rules for files to skip")
                     Text("One rule per line, like .gitignore: *.tmp skips temporary files, build/ skips folders named build. Rules apply to both folders; a .foldoverignore file in either folder adds more.")
                         .font(.callout).foregroundStyle(.secondary)
+                    Toggle("Skip large files", isOn: $viewModel.limitsSize)
+                    if viewModel.limitsSize {
+                        TextField("Larger than (MB)", value: $viewModel.sizeLimitMegabytes, format: .number)
+                        Text("A file this large in either folder is skipped in both, so it is never copied or deleted.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
                 }
                 Section("Schedule") {
                     Picker("Sync automatically", selection: $viewModel.options.schedule) {

@@ -380,6 +380,10 @@ fn values(draft: &PairDraft) -> PairValues {
             Schedule::Manual | Schedule::OnChange => None,
         },
         filters: options.filters().rules().join("\n"),
+        size_limit: options
+            .filters()
+            .size_limit()
+            .map(|bytes| i64::try_from(bytes).unwrap_or(i64::MAX)),
     }
 }
 
@@ -430,10 +434,16 @@ fn from_row(row: PairRow) -> Result<PairConfig, Error> {
         _ => return Err(Error::InvalidStored("schedule")),
     };
     // Rules are single lines, so an empty column means no rules.
+    let size_limit = row
+        .values
+        .size_limit
+        .map(|bytes| u64::try_from(bytes).map_err(|_| Error::InvalidStored("size limit")))
+        .transpose()?;
     let filters = Filters::new(match row.values.filters.as_str() {
         "" => Vec::new(),
         text => text.split('\n').map(str::to_owned).collect(),
-    })?;
+    })?
+    .with_size_limit(size_limit)?;
     let durability = match row.values.durability.as_str() {
         STANDARD_DURABILITY => Durability::Standard,
         FULL_DURABILITY => Durability::Full,
@@ -541,6 +551,7 @@ mod tests {
                 schedule: MANUAL_SCHEDULE.into(),
                 schedule_minutes: None,
                 filters: String::new(),
+                size_limit: None,
             })
             .unwrap();
         drop(database);
@@ -568,6 +579,7 @@ mod tests {
                 schedule: MANUAL_SCHEDULE.into(),
                 schedule_minutes: None,
                 filters: String::new(),
+                size_limit: None,
             })
             .unwrap();
         let id = PairId::from_bytes(row.id.try_into().unwrap()).unwrap();
@@ -657,7 +669,9 @@ mod tests {
         )
         .with_schedule(Schedule::Every(ScheduleInterval::from_minutes(15).unwrap()))
         .with_filters(
-            Filters::new(vec!["*.tmp".into(), "!keep.tmp".into(), String::new()]).unwrap(),
+            Filters::new(vec!["*.tmp".into(), "!keep.tmp".into(), String::new()])
+                .and_then(|filters| filters.with_size_limit(Some(5_000_000)))
+                .unwrap(),
         );
         let pair = store
             .create(&draft(SyncMode::Sync).with_options(options.clone()))

@@ -1017,19 +1017,27 @@ public struct LocalPairOptions: Equatable, Hashable {
      * Gitignore-style exclusion rules, one per entry.
      */
     public var filters: [String]
+    /**
+     * Files larger than this many bytes are skipped in both folders.
+     */
+    public var sizeLimit: UInt64?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(modificationTimes: MetadataSync, extendedAttributes: MetadataSync, permissions: MetadataSync, durability: WriteDurability, schedule: PairSchedule, 
         /**
          * Gitignore-style exclusion rules, one per entry.
-         */filters: [String]) {
+         */filters: [String], 
+        /**
+         * Files larger than this many bytes are skipped in both folders.
+         */sizeLimit: UInt64?) {
         self.modificationTimes = modificationTimes
         self.extendedAttributes = extendedAttributes
         self.permissions = permissions
         self.durability = durability
         self.schedule = schedule
         self.filters = filters
+        self.sizeLimit = sizeLimit
     }
 
     
@@ -1053,7 +1061,8 @@ public struct FfiConverterTypeLocalPairOptions: FfiConverterRustBuffer {
                 permissions: FfiConverterTypeMetadataSync.read(from: &buf), 
                 durability: FfiConverterTypeWriteDurability.read(from: &buf), 
                 schedule: FfiConverterTypePairSchedule.read(from: &buf), 
-                filters: FfiConverterSequenceString.read(from: &buf)
+                filters: FfiConverterSequenceString.read(from: &buf), 
+                sizeLimit: FfiConverterOptionUInt64.read(from: &buf)
         )
     }
 
@@ -1064,6 +1073,7 @@ public struct FfiConverterTypeLocalPairOptions: FfiConverterRustBuffer {
         FfiConverterTypeWriteDurability.write(value.durability, into: &buf)
         FfiConverterTypePairSchedule.write(value.schedule, into: &buf)
         FfiConverterSequenceString.write(value.filters, into: &buf)
+        FfiConverterOptionUInt64.write(value.sizeLimit, into: &buf)
     }
 }
 
@@ -2665,6 +2675,30 @@ public func FfiConverterTypeWriteDurability_lower(_ value: WriteDurability) -> R
     return FfiConverterTypeWriteDurability.lower(value)
 }
 
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
+    typealias SwiftType = UInt64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
 
 #if swift(>=5.8)
 @_documentation(visibility: private)

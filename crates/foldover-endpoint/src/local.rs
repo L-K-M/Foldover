@@ -115,6 +115,7 @@ pub struct ScanStats {
     entries: usize,
     skipped: usize,
     leftovers: Vec<SyncPath>,
+    oversized: Vec<SyncPath>,
 }
 
 impl ScanStats {
@@ -229,6 +230,7 @@ impl ObservedEntry {
 pub struct Observation {
     entries: BTreeMap<SyncPath, ObservedEntry>,
     leftovers: Vec<SyncPath>,
+    oversized: Vec<SyncPath>,
 }
 
 impl Observation {
@@ -238,6 +240,18 @@ impl Observation {
 
     pub fn leftovers(&self) -> &[SyncPath] {
         &self.leftovers
+    }
+
+    /// Files skipped for exceeding the filter's size limit.
+    pub fn oversized(&self) -> &[SyncPath] {
+        &self.oversized
+    }
+
+    /// Drop paths the other folder skipped, so both skip them.
+    pub fn exclude(&mut self, paths: &[SyncPath]) {
+        for path in paths {
+            self.entries.remove(path);
+        }
     }
 
     /// The versions the planner compares.
@@ -437,6 +451,13 @@ impl LocalEndpoint {
                 stats.skipped += 1;
                 continue;
             }
+            if entry.metadata().kind() == NodeKind::File
+                && filter.too_large(entry.metadata().size())
+            {
+                stats.skipped += 1;
+                stats.oversized.push(path);
+                continue;
+            }
             if entry.name().starts_with(b"._") {
                 return Err(ScanError::UnclassifiedSidecar(path));
             }
@@ -519,6 +540,7 @@ impl LocalEndpoint {
         let mut observation = Observation {
             entries: BTreeMap::new(),
             leftovers: stats.leftovers,
+            oversized: stats.oversized,
         };
         for entry in entries {
             if control() == ScanControl::Cancel {

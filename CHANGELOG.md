@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Skip large files: a size limit per pair, in the editor and as
+  `--max-size MEGABYTES`; a file over it in either folder is skipped in both.
 - First-run guide: turn on the agent, create a pair, preview and sync.
 - A folder macOS refuses to share (Documents, external volumes) now says
   to allow Foldover in Full Disk Access; Settings opens that list.

@@ -97,6 +97,8 @@ pub struct PairSettings {
     pub schedule: PairSchedule,
     /// Gitignore-style exclusion rules, one per entry.
     pub filters: Vec<String>,
+    /// Files larger than this many bytes are skipped in both folders.
+    pub size_limit: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -144,6 +146,7 @@ impl From<&PairOptions> for PairSettings {
                 Schedule::OnChange => PairSchedule::OnChange,
             },
             filters: options.filters().rules().to_vec(),
+            size_limit: options.filters().size_limit(),
         }
     }
 }
@@ -171,7 +174,7 @@ impl TryFrom<PairSettings> for PairOptions {
             },
         )
         .with_schedule(schedule)
-        .with_filters(Filters::new(settings.filters)?))
+        .with_filters(Filters::new(settings.filters)?.with_size_limit(settings.size_limit)?))
     }
 }
 

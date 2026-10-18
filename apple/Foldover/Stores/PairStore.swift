@@ -37,6 +37,8 @@ struct PairOptions: Equatable, Sendable {
     var schedule: SyncSchedule
     /// Gitignore-style exclusion rules, applied to both folders.
     var filters: [String]
+    /// Files larger than this many bytes are skipped in both folders.
+    var sizeLimit: UInt64?
 
     /// The engine's defaults, so the app never restates them.
     static var defaults: PairOptions { pairOptions(FoldoverCore.defaultPairOptions()) }
@@ -151,7 +153,8 @@ private func pairOptions(_ options: LocalPairOptions) -> PairOptions {
         syncPermissions: options.permissions == .sync,
         durability: durability,
         schedule: syncSchedule(options.schedule),
-        filters: options.filters
+        filters: options.filters,
+        sizeLimit: options.sizeLimit
     )
 }
 
@@ -183,7 +186,8 @@ private func corePairOptions(_ options: PairOptions) -> LocalPairOptions {
         permissions: metadata(options.syncPermissions),
         durability: durability,
         schedule: coreSchedule(options.schedule),
-        filters: options.filters
+        filters: options.filters,
+        sizeLimit: options.sizeLimit
     )
 }
 

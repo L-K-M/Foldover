@@ -274,3 +274,20 @@ func filterTextKeepsOneRulePerLine() {
     #expect(editor.options.filters == ["*.tmp", "build/"])
     #expect(editor.filterText == "*.tmp\nbuild/")
 }
+
+@MainActor
+@Test
+func sizeLimitsAreWholeMegabytes() {
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()))
+    #expect(!editor.limitsSize)
+    editor.limitsSize = true
+    #expect(editor.options.sizeLimit == 1_000_000_000)
+    editor.sizeLimitMegabytes = 0
+    #expect(editor.options.sizeLimit == 1_000_000)
+    editor.sizeLimitMegabytes = 250
+    #expect(editor.sizeLimitMegabytes == 250)
+    editor.sizeLimitMegabytes = .max
+    #expect(editor.options.sizeLimit! > 0)
+    editor.limitsSize = false
+    #expect(editor.options.sizeLimit == nil)
+}

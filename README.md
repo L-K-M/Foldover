@@ -98,7 +98,8 @@ The suffix selects the source. Options follow the mode:
 or a number of minutes between automatic syncs, which start after the first
 sync you run yourself. `--exclude PATTERN` (repeatable) sets gitignore-style
 rules for files to skip in both folders; a `.foldoverignore` file in either
-folder adds more. Resource forks always
+folder adds more. `--max-size MEGABYTES` skips larger files in both folders
+(`none` removes the limit). Resource forks always
 sync. Changing roots or metadata options resets the pair's sync history.
 `pairs show ID` reads one pair;
 `pairs update ID REVISION NAME LEFT RIGHT MODE [OPTIONS]` requires its current
