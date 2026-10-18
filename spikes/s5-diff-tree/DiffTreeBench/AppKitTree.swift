@@ -17,6 +17,7 @@ import SwiftUI
 @MainActor
 final class AppKitTreeRefs {
     var outlineView: NSOutlineView?
+    var tableView: NSTableView?
     var scrollView: NSScrollView?
     var lastBatchProfile: OutlineBatchProfile?
 }
@@ -69,6 +70,7 @@ struct OutlineTreeRepresentable: NSViewRepresentable {
         }
 
         refs.outlineView = outline
+        refs.tableView = outline
         refs.scrollView = scroll
         return scroll
     }
@@ -76,6 +78,81 @@ struct OutlineTreeRepresentable: NSViewRepresentable {
     /// Nothing here is driven by SwiftUI state — batches apply
     /// imperatively through `model.onBatch`.
     func updateNSView(_ scroll: NSScrollView, context: Context) {}
+}
+
+/// The documented large-plan fallback: one row per full relative path, without
+/// outline expansion work. It receives the same model and batch cadence.
+struct FlatTableRepresentable: NSViewRepresentable {
+    let model: PlanModel
+    let refs: AppKitTreeRefs
+
+    func makeCoordinator() -> FlatTableCoordinator {
+        FlatTableCoordinator(model: model, refs: refs)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let table = NSTableView()
+        table.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("plan")))
+        table.headerView = nil
+        table.style = .plain
+        table.usesAutomaticRowHeights = false
+        table.rowHeight = DiffTreeMetrics.pitch
+        table.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
+        table.dataSource = context.coordinator
+        table.delegate = context.coordinator
+
+        let scroll = NSScrollView()
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        model.onBatch = { [weak coordinator = context.coordinator] journal in
+            coordinator?.apply(journal)
+        }
+        refs.tableView = table
+        refs.scrollView = scroll
+        return scroll
+    }
+
+    func updateNSView(_ scroll: NSScrollView, context: Context) {}
+}
+
+@MainActor
+final class FlatTableCoordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    private static let cellIdentifier = NSUserInterfaceItemIdentifier("FlatPlanRow")
+    private let model: PlanModel
+    private weak var refs: AppKitTreeRefs?
+
+    init(model: PlanModel, refs: AppKitTreeRefs) {
+        self.model = model
+        self.refs = refs
+    }
+
+    func apply(_ journal: BatchJournal) {
+        guard let table = refs?.tableView else { return }
+        let started = CACurrentMediaTime()
+        let inserted = IndexSet(integersIn: table.numberOfRows ..< model.deliveredCount)
+        table.insertRows(at: inserted, withAnimation: [])
+        refs?.lastBatchProfile = OutlineBatchProfile(
+            insertionMilliseconds: (CACurrentMediaTime() - started) * 1_000,
+            expansionMilliseconds: 0,
+            parentGroups: 1,
+            newFolders: journal.newFolders.count,
+            visibleRows: table.numberOfRows
+        )
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        model.deliveredCount
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard let node = model.node(id: row) else { return nil }
+        let cell = tableView.makeView(withIdentifier: Self.cellIdentifier, owner: nil)
+            as? DiffTreeCellView ?? DiffTreeCellView()
+        cell.identifier = Self.cellIdentifier
+        cell.configure(node: node, displayName: node.relativePath)
+        return cell
+    }
 }
 
 /// The outline's data source and delegate: reads the model's node tree
@@ -204,14 +281,17 @@ private final class DiffTreeCellView: NSTableCellView {
 
     override var isFlipped: Bool { true }
 
-    func configure(node: PlanNode) {
+    func configure(node: PlanNode, displayName: String? = nil) {
         glyphField.stringValue = node.action.glyph
         glyphField.textColor = Self.tint(for: node.action)
-        nameField.stringValue = node.name
+        nameField.stringValue = displayName ?? node.name
         sizeField.stringValue = node.isFolder ? "" : node.sizeText
         dateField.stringValue = node.dateText
         setAccessibilityElement(true)
-        setAccessibilityLabel(node.accessibilityText)
+        let accessibility = displayName.map {
+            "\(node.action.accessibilityVerb) \($0), \(node.sizeText), modified \(node.dateText)"
+        } ?? node.accessibilityText
+        setAccessibilityLabel(accessibility)
         needsLayout = true
     }
 
