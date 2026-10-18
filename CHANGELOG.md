@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Filters: gitignore-style rules per pair and in `.foldoverignore` files,
+  applied to both folders so excluded files are never deleted.
 - Sync when files change: pairs set to "When files change" watch both
   folders and sync after 5 seconds of quiet, plus hourly.
 - Faster repeat syncs: files whose complete stat is unchanged since the last

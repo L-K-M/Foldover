@@ -3,8 +3,8 @@
 
 use foldover_client::SyncStatus;
 use foldover_client::{
-    Durability, LocalRoot, MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions, Propagation,
-    Schedule, ScheduleInterval, Side, SocketLocation, SyncMode,
+    Durability, Filters, LocalRoot, MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions,
+    Propagation, Schedule, ScheduleInterval, Side, SocketLocation, SyncMode,
 };
 use foldover_proto::local::PairRecord;
 use std::env;
@@ -62,13 +62,14 @@ enum PairCommand {
 }
 
 /// Pair options named on the command line; the rest keep a base value.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct OptionChanges {
     modification_times: Option<Propagation>,
     extended_attributes: Option<Propagation>,
     permissions: Option<Propagation>,
     durability: Option<Durability>,
     schedule: Option<Schedule>,
+    filters: Option<Filters>,
 }
 
 impl OptionChanges {
@@ -85,6 +86,7 @@ impl OptionChanges {
             self.durability.unwrap_or(base.durability()),
         )
         .with_schedule(self.schedule.unwrap_or(base.schedule()))
+        .with_filters(self.filters.unwrap_or_else(|| base.filters().clone()))
     }
 }
 
@@ -121,7 +123,7 @@ async fn main() -> ExitCode {
         },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT | --keep-left PATH | --keep-right PATH] [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME ABSOLUTE_LEFT ABSOLUTE_RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT | --keep-left PATH | --keep-right PATH] [--socket PATH]\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -221,11 +223,17 @@ fn sync_command(args: &[OsString]) -> Option<SyncCommand> {
 
 fn option_changes(args: &[OsString]) -> Option<OptionChanges> {
     let mut changes = OptionChanges::default();
+    // Each `--exclude` adds a rule; together they replace the pair's rules.
+    let mut excludes: Option<Vec<String>> = None;
     for pair in args.chunks(2) {
         let [option, value] = pair else {
             return None;
         };
         let value = value.to_str()?;
+        if option == "--exclude" {
+            excludes.get_or_insert_with(Vec::new).push(value.to_owned());
+            continue;
+        }
         let propagation = || match value {
             "sync" => Some(Propagation::Sync),
             "ignore" => Some(Propagation::Ignore),
@@ -262,6 +270,11 @@ fn option_changes(args: &[OsString]) -> Option<OptionChanges> {
         if replaced {
             return None;
         }
+    }
+    if let Some(rules) = excludes {
+        // A single empty rule clears the list.
+        let rules = rules.into_iter().filter(|rule| !rule.is_empty()).collect();
+        changes.filters = Some(Filters::new(rules).ok()?);
     }
     Some(changes)
 }
@@ -318,7 +331,7 @@ async fn pairs(
         } => {
             // A stale read is harmless: the revision check rejects the update.
             let current = foldover_client::pair(location, id).await?;
-            let draft = draft.with_options(options.apply(current.draft().options()));
+            let draft = draft.with_options(options.apply(current.draft().options().clone()));
             print_pair(&foldover_client::update_pair(location, id, revision, &draft).await?)
         }
         PairCommand::Remove { id, revision } => {
@@ -519,6 +532,10 @@ mod tests {
             "full",
             "--schedule",
             "15",
+            "--exclude",
+            "*.tmp",
+            "--exclude",
+            "build/",
             "--socket",
             "/tmp/s",
         ]) else {
@@ -526,6 +543,7 @@ mod tests {
         };
         let defaults = PairOptions::default();
         assert_eq!(draft.options().durability(), Durability::Full);
+        assert_eq!(draft.options().filters().rules(), ["*.tmp", "build/"]);
         assert_eq!(
             draft.options().schedule(),
             Schedule::Every(ScheduleInterval::from_minutes(15).unwrap())

@@ -16,6 +16,7 @@ foldover-watch = { path = "../foldover-watch" }
 foldover-net = { path = "../foldover-net" }
 foldover-os = { path = "../foldover-os" }
 blake3 = "1.8.2"
+ignore = "0.4.33"
 thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 

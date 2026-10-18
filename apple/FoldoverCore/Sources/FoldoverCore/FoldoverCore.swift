@@ -767,15 +767,23 @@ public struct LocalPairOptions: Equatable, Hashable {
     public var permissions: MetadataSync
     public var durability: WriteDurability
     public var schedule: PairSchedule
+    /**
+     * Gitignore-style exclusion rules, one per entry.
+     */
+    public var filters: [String]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(modificationTimes: MetadataSync, extendedAttributes: MetadataSync, permissions: MetadataSync, durability: WriteDurability, schedule: PairSchedule) {
+    public init(modificationTimes: MetadataSync, extendedAttributes: MetadataSync, permissions: MetadataSync, durability: WriteDurability, schedule: PairSchedule, 
+        /**
+         * Gitignore-style exclusion rules, one per entry.
+         */filters: [String]) {
         self.modificationTimes = modificationTimes
         self.extendedAttributes = extendedAttributes
         self.permissions = permissions
         self.durability = durability
         self.schedule = schedule
+        self.filters = filters
     }
 
     
@@ -798,7 +806,8 @@ public struct FfiConverterTypeLocalPairOptions: FfiConverterRustBuffer {
                 extendedAttributes: FfiConverterTypeMetadataSync.read(from: &buf), 
                 permissions: FfiConverterTypeMetadataSync.read(from: &buf), 
                 durability: FfiConverterTypeWriteDurability.read(from: &buf), 
-                schedule: FfiConverterTypePairSchedule.read(from: &buf)
+                schedule: FfiConverterTypePairSchedule.read(from: &buf), 
+                filters: FfiConverterSequenceString.read(from: &buf)
         )
     }
 
@@ -808,6 +817,7 @@ public struct FfiConverterTypeLocalPairOptions: FfiConverterRustBuffer {
         FfiConverterTypeMetadataSync.write(value.permissions, into: &buf)
         FfiConverterTypeWriteDurability.write(value.durability, into: &buf)
         FfiConverterTypePairSchedule.write(value.schedule, into: &buf)
+        FfiConverterSequenceString.write(value.filters, into: &buf)
     }
 }
 
@@ -2143,6 +2153,31 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
         case 1: return try FfiConverterString.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]
+
+    public static func write(_ value: [String], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterString.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [String]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
     }
 }
 

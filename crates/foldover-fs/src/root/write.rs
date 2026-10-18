@@ -152,7 +152,7 @@ impl Root {
         path: &SyncPath,
         source: &Root,
         expected: &EntryMetadata,
-        options: PairOptions,
+        options: &PairOptions,
         control: &mut impl FnMut(u64) -> ScanControl,
     ) -> Result<StagedFile, WriteError> {
         let mut source_file = source.open_observed_file(path, expected, control)?;
@@ -267,7 +267,7 @@ impl Root {
         path: &SyncPath,
         source: &Root,
         expected: &EntryMetadata,
-        options: PairOptions,
+        options: &PairOptions,
     ) -> Result<(), WriteError> {
         let source_directory = source.open_observed(path, expected)?;
         let (parent, name) = self.parent_of(path)?;
@@ -306,7 +306,7 @@ impl Root {
         expected: &EntryMetadata,
         source: &Root,
         source_expected: &EntryMetadata,
-        options: PairOptions,
+        options: &PairOptions,
     ) -> Result<(), WriteError> {
         if expected.kind() != source_expected.kind() {
             return Err(WriteError::UnsupportedEntry);

@@ -35,6 +35,8 @@ struct PairOptions: Equatable, Sendable {
     var syncPermissions: Bool
     var durability: PairDurability
     var schedule: SyncSchedule
+    /// Gitignore-style exclusion rules, applied to both folders.
+    var filters: [String]
 
     /// The engine's defaults, so the app never restates them.
     static var defaults: PairOptions { pairOptions(FoldoverCore.defaultPairOptions()) }
@@ -148,7 +150,8 @@ private func pairOptions(_ options: LocalPairOptions) -> PairOptions {
         syncExtendedAttributes: options.extendedAttributes == .sync,
         syncPermissions: options.permissions == .sync,
         durability: durability,
-        schedule: syncSchedule(options.schedule)
+        schedule: syncSchedule(options.schedule),
+        filters: options.filters
     )
 }
 
@@ -179,7 +182,8 @@ private func corePairOptions(_ options: PairOptions) -> LocalPairOptions {
         extendedAttributes: metadata(options.syncExtendedAttributes),
         permissions: metadata(options.syncPermissions),
         durability: durability,
-        schedule: coreSchedule(options.schedule)
+        schedule: coreSchedule(options.schedule),
+        filters: options.filters
     )
 }
 

@@ -16,8 +16,8 @@ use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 use foldover_endpoint::{
-    ApplyError, Expected, LocalEndpoint, LocalPair, Observation, ObservedEntry, PairRootError,
-    RunScope, ScanError,
+    ApplyError, Expected, Filter, InvalidFilter, LocalEndpoint, LocalPair, Observation,
+    ObservedEntry, PairRootError, RunScope, ScanError,
 };
 use foldover_state::{BaseUpdate, RecordedIdentities, SnapshotEntry};
 use foldover_types::{
@@ -56,6 +56,8 @@ pub enum RunError {
         #[source]
         source: ApplyError,
     },
+    #[error(transparent)]
+    Filter(#[from] InvalidFilter),
     #[error(transparent)]
     Plan(#[from] PlanError),
     #[error("Saving sync progress failed: {0}")]
@@ -324,6 +326,17 @@ impl PairRun {
             }
         }
         let policy = draft.options().metadata();
+        // One filter for both sides, so an exclusion never looks like a deletion.
+        let mut rules: Vec<String> = draft.options().filters().rules().to_vec();
+        for side in [Side::Left, Side::Right] {
+            rules.extend(
+                endpoints
+                    .endpoint(side)
+                    .ignore_rules()
+                    .map_err(|source| RunError::Observe { side, source })?,
+            );
+        }
+        let filter = Filter::new(rules.iter().map(String::as_str))?;
         let observe = |side: Side, control: &mut dyn FnMut() -> ScanControl| {
             let previous = match side {
                 Side::Left => &left_snapshot,
@@ -331,7 +344,7 @@ impl PairRun {
             };
             endpoints
                 .endpoint(side)
-                .observe_from(policy, previous, &mut || control())
+                .observe_from(policy, &filter, previous, &mut || control())
                 .map_err(|source| match source {
                     ScanError::Cancelled => RunError::Cancelled,
                     source => RunError::Observe { side, source },
@@ -460,7 +473,7 @@ impl PairRun {
             commit(revision, identities).map_err(RunError::Commit)?;
         }
 
-        let scope = RunScope::new(started, options);
+        let scope = RunScope::new(started, options.clone());
         let mut executor = Executor {
             run: &self,
             report: RunReport {

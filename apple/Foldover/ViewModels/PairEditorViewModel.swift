@@ -34,6 +34,15 @@ final class PairEditorViewModel: Identifiable {
     var title: String { editing == nil ? String(localized: "New Pair") : String(localized: "Edit Pair") }
     var canSave: Bool { !isSaving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && left != nil && right != nil }
 
+    /// Exclusion rules as editable text, one per line.
+    var filterText: String {
+        get { options.filters.joined(separator: "\n") }
+        set {
+            options.filters = newValue.split(separator: "\n", omittingEmptySubsequences: false)
+                .map(String.init)
+        }
+    }
+
     /// Fixed choices, plus a stored interval set elsewhere (e.g. the CLI).
     var scheduleChoices: [SyncSchedule] {
         var choices: [SyncSchedule] = [.manual, .onChange, .every(minutes: 5), .every(minutes: 15),

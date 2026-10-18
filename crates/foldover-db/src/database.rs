@@ -14,11 +14,11 @@ const PERMISSION_BITS: u32 = 0o777;
 const DATABASE_NAME: &str = "state.db";
 const WRITER_LOCK: &str = "writer.lock";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes";
+const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 7] = [
-    SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7,
+const MIGRATIONS: [&str; 8] = [
+    SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -84,6 +84,10 @@ CREATE TABLE snapshot_entry (
     version BLOB NOT NULL,
     PRIMARY KEY (pair_id, side, path)
 ) STRICT, WITHOUT ROWID;
+";
+// Exclusion rules, one per line.
+const SCHEMA_V8: &str = "
+ALTER TABLE pair ADD COLUMN filters TEXT NOT NULL DEFAULT '' CHECK(instr(filters, char(0)) = 0);
 ";
 
 #[derive(Debug, thiserror::Error)]
@@ -201,6 +205,7 @@ pub struct PairValues {
     pub durability: String,
     pub schedule: String,
     pub schedule_minutes: Option<i64>,
+    pub filters: String,
 }
 
 #[derive(Clone, Debug)]
@@ -295,7 +300,7 @@ impl Database {
     pub fn create_pair(&mut self, values: &PairValues) -> Result<PairRow, Error> {
         let id = uuid::Uuid::new_v4().into_bytes();
         self.connection.execute(
-            "INSERT INTO pair (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,schedule,schedule_minutes) VALUES (?1,1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            "INSERT INTO pair (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,schedule,schedule_minutes,filters) VALUES (?1,1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             params![
                 id.as_slice(),
                 values.name,
@@ -307,7 +312,8 @@ impl Database {
                 values.permissions,
                 values.durability,
                 values.schedule,
-                values.schedule_minutes
+                values.schedule_minutes,
+                values.filters
             ],
         )?;
         self.pair(&id)?
@@ -372,7 +378,7 @@ impl Database {
         }
         let changed = transaction.execute(
             // A changed root is a different endpoint; forget its identity.
-            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,schedule=?11,schedule_minutes=?12,left_identity=CASE WHEN left_root=?4 THEN left_identity END,right_identity=CASE WHEN right_root=?5 THEN right_identity END WHERE id=?1 AND revision=?2",
+            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,schedule=?11,schedule_minutes=?12,filters=?13,left_identity=CASE WHEN left_root=?4 THEN left_identity END,right_identity=CASE WHEN right_root=?5 THEN right_identity END WHERE id=?1 AND revision=?2",
             params![
                 id,
                 revision,
@@ -385,7 +391,8 @@ impl Database {
                 values.permissions,
                 values.durability,
                 values.schedule,
-                values.schedule_minutes
+                values.schedule_minutes,
+                values.filters
             ],
         )?;
         if changed == 0 {
@@ -783,6 +790,7 @@ fn pair_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairRow> {
             durability: row.get(9)?,
             schedule: row.get(10)?,
             schedule_minutes: row.get(11)?,
+            filters: row.get(12)?,
         },
     })
 }
@@ -813,6 +821,7 @@ mod tests {
             durability: "standard".into(),
             schedule: "manual".into(),
             schedule_minutes: None,
+            filters: String::new(),
         }
     }
 

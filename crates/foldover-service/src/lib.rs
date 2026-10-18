@@ -252,6 +252,7 @@ pub(crate) fn engine_error(error: foldover_engine::Error) -> RpcError {
         ErrorKind::Changed => STALE_REVISION,
         ErrorKind::Unavailable => ROOT_UNAVAILABLE,
         ErrorKind::Overlap => ROOT_OVERLAP,
+        ErrorKind::Invalid => INVALID_PARAMS,
     };
     RpcError::new(code, error.to_string())
 }
@@ -317,7 +318,7 @@ mod tests {
         let right = directory.join(format!("{name}-right"));
         fs::create_dir(&left).unwrap();
         fs::create_dir(&right).unwrap();
-        json!({"name":name, "left_root":left.as_os_str().as_bytes(), "right_root":right.as_os_str().as_bytes(), "mode":{"kind":"sync"}, "options":{"modification_times":"sync","extended_attributes":"sync","permissions":"ignore","durability":"standard","schedule":{"kind":"manual"}}})
+        json!({"name":name, "left_root":left.as_os_str().as_bytes(), "right_root":right.as_os_str().as_bytes(), "mode":{"kind":"sync"}, "options":{"modification_times":"sync","extended_attributes":"sync","permissions":"ignore","durability":"standard","schedule":{"kind":"manual"},"filters":[]}})
     }
 
     #[tokio::test]
@@ -825,5 +826,29 @@ mod tests {
         assert!(service.run_due(at(40)).is_empty());
         assert_eq!(service.run_due(at(26 + 3_600)), [id]);
         settled(&service, &key).await;
+    }
+
+    #[tokio::test]
+    async fn invalid_filter_rules_are_rejected_when_saved() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Rules");
+        input["options"]["filters"] = json!(["a{"]);
+        assert_eq!(
+            service
+                .handle(Request::call(1, PAIR_CREATE, Some(input.clone())))
+                .await
+                .unwrap_err()
+                .code(),
+            INVALID_PARAMS
+        );
+        input["options"]["filters"] = json!(["*.tmp", "!keep.tmp"]);
+        let created = service
+            .handle(Request::call(2, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        assert_eq!(
+            created["configuration"]["options"]["filters"],
+            json!(["*.tmp", "!keep.tmp"])
+        );
     }
 }

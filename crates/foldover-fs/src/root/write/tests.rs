@@ -71,7 +71,7 @@ fn staged_copies_carry_data_mode_mtime_and_xattrs_and_place_without_replacing() 
 
     let staged = roots
         .target
-        .stage_file(&file, &roots.source, &observed, ALL, &mut proceed)
+        .stage_file(&file, &roots.source, &observed, &ALL, &mut proceed)
         .unwrap();
     assert_eq!(
         staged.data_digest(),
@@ -111,7 +111,7 @@ fn staged_copies_carry_data_mode_mtime_and_xattrs_and_place_without_replacing() 
     // A second create never replaces the placed file, and cleans up its copy.
     let again = roots
         .target
-        .stage_file(&file, &roots.source, &observed, ALL, &mut proceed)
+        .stage_file(&file, &roots.source, &observed, &ALL, &mut proceed)
         .unwrap();
     assert!(matches!(
         roots
@@ -134,7 +134,7 @@ fn replacement_displaces_the_old_entry_for_archiving() {
 
     let staged = roots
         .target
-        .stage_file(&file, &roots.source, &observed, ALL, &mut proceed)
+        .stage_file(&file, &roots.source, &observed, &ALL, &mut proceed)
         .unwrap();
     let displaced = roots
         .target
@@ -172,7 +172,7 @@ fn replacing_a_missing_entry_fails_and_keeps_nothing() {
     let observed = roots.source.metadata(&file).unwrap();
     let staged = roots
         .target
-        .stage_file(&file, &roots.source, &observed, ALL, &mut proceed)
+        .stage_file(&file, &roots.source, &observed, &ALL, &mut proceed)
         .unwrap();
     assert!(matches!(
         roots
@@ -247,7 +247,7 @@ fn directories_are_created_with_source_metadata_and_removed_only_when_empty() {
 
     roots
         .target
-        .create_directory(&folder, &roots.source, &observed, ALL)
+        .create_directory(&folder, &roots.source, &observed, &ALL)
         .unwrap();
     let created = roots.target.metadata(&folder).unwrap();
     assert_eq!(created.kind(), NodeKind::Directory);
@@ -255,7 +255,7 @@ fn directories_are_created_with_source_metadata_and_removed_only_when_empty() {
     assert!(matches!(
         roots
             .target
-            .create_directory(&folder, &roots.source, &observed, ALL),
+            .create_directory(&folder, &roots.source, &observed, &ALL),
         Err(WriteError::Exists)
     ));
 
@@ -300,7 +300,7 @@ fn metadata_copies_replace_stale_attributes_and_require_fresh_observations() {
             &target_observed,
             &roots.source,
             &source_observed,
-            ALL,
+            &ALL,
         )
         .unwrap();
     let copied = roots.target.metadata(&file).unwrap();
@@ -313,7 +313,7 @@ fn metadata_copies_replace_stale_attributes_and_require_fresh_observations() {
             &target_observed,
             &roots.source,
             &source_observed,
-            ALL
+            &ALL
         ),
         Err(WriteError::Changed)
     ));
@@ -330,7 +330,7 @@ fn changed_sources_are_not_staged() {
     assert!(matches!(
         roots
             .target
-            .stage_file(&file, &roots.source, &observed, ALL, &mut proceed),
+            .stage_file(&file, &roots.source, &observed, &ALL, &mut proceed),
         Err(WriteError::Source(HashError::Changed))
     ));
     assert!(names(roots.target_directory.path()).is_empty());
@@ -343,7 +343,7 @@ fn changed_sources_are_not_staged() {
             &path(b"link"),
             &roots.source,
             &link_observed,
-            ALL,
+            &ALL,
             &mut proceed
         ),
         Err(WriteError::Source(HashError::NotRegular))
@@ -374,7 +374,7 @@ fn ignored_categories_are_not_copied_but_the_executable_bit_is() {
 
     let staged = roots
         .target
-        .stage_file(&script, &roots.source, &observed, NOTHING, &mut proceed)
+        .stage_file(&script, &roots.source, &observed, &NOTHING, &mut proceed)
         .unwrap();
     let copied = staged.metadata().unwrap();
     assert_ne!(copied.modified(), past);
@@ -401,7 +401,13 @@ fn ignored_categories_are_not_copied_but_the_executable_bit_is() {
     let target_observed = roots.target.metadata(&script).unwrap();
     roots
         .target
-        .update_metadata(&script, &target_observed, &roots.source, &observed, NOTHING)
+        .update_metadata(
+            &script,
+            &target_observed,
+            &roots.source,
+            &observed,
+            &NOTHING,
+        )
         .unwrap();
     let target = roots.target_directory.path().join("script");
     assert_eq!(mode_of(&target) & 0o111, 0);
@@ -418,7 +424,7 @@ fn synced_permissions_copy_exact_bits_but_never_setuid() {
     let observed = roots.source.metadata(&file).unwrap();
     let staged = roots
         .target
-        .stage_file(&file, &roots.source, &observed, ALL, &mut proceed)
+        .stage_file(&file, &roots.source, &observed, &ALL, &mut proceed)
         .unwrap();
     assert_eq!(staged.metadata().unwrap().permissions() & 0o7777, 0o751);
 }
@@ -442,7 +448,7 @@ fn ignored_attributes_leave_existing_target_attributes_alone() {
             &target_observed,
             &roots.source,
             &source_observed,
-            NOTHING,
+            &NOTHING,
         )
         .unwrap();
     let mut value = [0; 16];
@@ -480,7 +486,7 @@ fn forks_always_copy_hidden_follows_attributes_and_locks_stay_behind() {
     for (options, hidden) in [(NOTHING, false), (ALL, true)] {
         let staged = roots
             .target
-            .stage_file(&file, &roots.source, &observed, options, &mut proceed)
+            .stage_file(&file, &roots.source, &observed, &options, &mut proceed)
             .unwrap();
         let flags = staged.metadata().unwrap().flags().unwrap();
         assert_eq!(flags & libc::UF_HIDDEN != 0, hidden);

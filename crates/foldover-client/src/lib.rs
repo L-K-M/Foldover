@@ -18,8 +18,8 @@ use foldover_proto::local::{
     SYNC_CANCEL, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS, SyncKey, SyncResolve, SyncRun,
 };
 pub use foldover_types::{
-    Durability, InvalidPair, LocalRoot, MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions,
-    Propagation, Schedule, ScheduleInterval, Side, SyncMode,
+    Durability, Filters, InvalidPair, LocalRoot, MetadataPolicy, PairConfig, PairDraft, PairId,
+    PairOptions, Propagation, Schedule, ScheduleInterval, Side, SyncMode,
 };
 use serde_json::Value;
 use serde_json::json;

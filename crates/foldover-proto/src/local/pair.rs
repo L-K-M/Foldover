@@ -1,6 +1,6 @@
 use foldover_types::{
-    Durability, InvalidPair, LocalRoot, MetadataPolicy, PairConfig, PairDraft, PairOptions,
-    Propagation, Schedule, ScheduleInterval, Side, SyncMode,
+    Durability, Filters, InvalidPair, LocalRoot, MetadataPolicy, PairConfig, PairDraft,
+    PairOptions, Propagation, Schedule, ScheduleInterval, Side, SyncMode,
 };
 use serde::{Deserialize, Serialize};
 
@@ -87,7 +87,7 @@ pub enum PairDurability {
     Full,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairSettings {
     pub modification_times: PairPropagation,
@@ -95,6 +95,8 @@ pub struct PairSettings {
     pub permissions: PairPropagation,
     pub durability: PairDurability,
     pub schedule: PairSchedule,
+    /// Gitignore-style exclusion rules, one per entry.
+    pub filters: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -123,8 +125,8 @@ impl From<PairPropagation> for Propagation {
     }
 }
 
-impl From<PairOptions> for PairSettings {
-    fn from(options: PairOptions) -> Self {
+impl From<&PairOptions> for PairSettings {
+    fn from(options: &PairOptions) -> Self {
         let metadata = options.metadata();
         Self {
             modification_times: metadata.modification_times().into(),
@@ -141,6 +143,7 @@ impl From<PairOptions> for PairSettings {
                 },
                 Schedule::OnChange => PairSchedule::OnChange,
             },
+            filters: options.filters().rules().to_vec(),
         }
     }
 }
@@ -167,7 +170,8 @@ impl TryFrom<PairSettings> for PairOptions {
                 PairDurability::Full => Durability::Full,
             },
         )
-        .with_schedule(schedule))
+        .with_schedule(schedule)
+        .with_filters(Filters::new(settings.filters)?))
     }
 }
 

@@ -16,7 +16,7 @@ pub use pair::{
 
 pub use endpoint_id::EndpointId;
 pub use metadata_policy::{MetadataPolicy, Propagation};
-pub use options::{Durability, PairOptions, Schedule, ScheduleInterval};
+pub use options::{Durability, Filters, PairOptions, Schedule, ScheduleInterval};
 
 pub use reconcile::{
     BaselineEntry, BaselineMismatch, ChangeKind, ConflictKind, Digest, EntryContent, EntryDecision,

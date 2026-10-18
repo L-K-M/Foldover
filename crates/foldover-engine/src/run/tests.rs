@@ -14,6 +14,7 @@ struct Fixture {
     base: BTreeMap<SyncPath, BaselineEntry>,
     identities: RecordedIdentities,
     resolutions: BTreeMap<SyncPath, foldover_types::Resolution>,
+    filters: Vec<String>,
 }
 
 fn fixture(mode: SyncMode) -> Fixture {
@@ -25,6 +26,7 @@ fn fixture(mode: SyncMode) -> Fixture {
         base: BTreeMap::new(),
         identities: RecordedIdentities::default(),
         resolutions: BTreeMap::new(),
+        filters: Vec::new(),
     }
 }
 
@@ -48,13 +50,15 @@ impl Fixture {
     }
 
     fn try_prepare(&self) -> Result<PairRun, RunError> {
+        let filters = foldover_types::Filters::new(self.filters.clone()).unwrap();
         let draft = PairDraft::new(
             "pair".into(),
             root(self.left.path()),
             root(self.right.path()),
             self.mode,
         )
-        .unwrap();
+        .unwrap()
+        .with_options(foldover_types::PairOptions::default().with_filters(filters));
         let pair =
             PairConfig::from_stored(PairId::from_bytes([1; 16]).unwrap(), self.revision, draft)
                 .unwrap();
@@ -507,4 +511,29 @@ fn earlier_snapshots_supply_versions_for_settled_unchanged_entries() {
     let second = PairRun::prepare(inputs, &mut proceed).unwrap();
     let preview = second.preview();
     assert_eq!(preview.items()[0].versions().0, Some(stored));
+}
+
+#[test]
+fn filters_from_the_pair_and_both_ignore_files_exclude_entries_on_both_sides() {
+    let mut pair = fixture(SyncMode::Sync);
+    pair.filters = vec!["*.tmp".into()];
+    fs::write(pair.left.path().join("a.tmp"), b"tmp").unwrap();
+    fs::write(pair.left.path().join("keep"), b"k").unwrap();
+    fs::create_dir(pair.right.path().join("cache")).unwrap();
+    fs::write(pair.right.path().join("cache/blob"), b"b").unwrap();
+    // Only the right root names the cache; both sides honor it.
+    fs::write(pair.right.path().join(".foldoverignore"), b"cache/\n").unwrap();
+    pair.sync();
+    assert!(!pair.right.path().join("a.tmp").exists());
+    assert!(pair.right.path().join("keep").exists());
+    assert!(!pair.left.path().join("cache").exists());
+    assert!(pair.left.path().join(".foldoverignore").exists());
+
+    // Excluding an already synced file forgets it instead of deleting it.
+    fs::write(pair.left.path().join(".foldoverignore"), b"cache/\nkeep\n").unwrap();
+    pair.sync();
+    fs::remove_file(pair.left.path().join("keep")).unwrap();
+    let report = pair.sync();
+    assert_eq!(report.archived(), 0);
+    assert!(pair.right.path().join("keep").exists());
 }

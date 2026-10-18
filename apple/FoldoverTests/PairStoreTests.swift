@@ -264,3 +264,13 @@ func editedOptionsAreSavedAndOnlyMetadataChangesResetHistory() async {
     #expect(await editor.save())
     #expect(await client.savedSettings?.options == editor.options)
 }
+
+@MainActor
+@Test
+func filterTextKeepsOneRulePerLine() {
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()))
+    #expect(editor.filterText.isEmpty)
+    editor.filterText = "*.tmp\nbuild/"
+    #expect(editor.options.filters == ["*.tmp", "build/"])
+    #expect(editor.filterText == "*.tmp\nbuild/")
+}

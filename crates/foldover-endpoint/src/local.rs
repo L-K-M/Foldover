@@ -1,5 +1,6 @@
 mod apply;
 mod archive;
+mod filter;
 mod identity;
 mod version;
 
@@ -19,6 +20,7 @@ use version::{Attribute, Observed, Payload, entry_version, metadata_version};
 
 pub use apply::{ApplyError, Expected, RunScope};
 pub use archive::archive_name;
+pub use filter::{Filter, InvalidFilter};
 
 const INTERNAL_DIRECTORY: &[u8] = b".foldover";
 const TEMPORARY_PREFIX: &[u8] = b".foldover-tmp-";
@@ -59,6 +61,8 @@ pub enum ScanError {
     Dataless(Option<SyncPath>),
     #[error("The folder's .foldover/id file is not a Foldover identity")]
     InvalidIdentity,
+    #[error("The folder's .foldoverignore file is not UTF-8 text")]
+    InvalidIgnoreFile,
     #[error("Extended metadata is unavailable at {path:?}: {source}")]
     Metadata {
         path: Option<SyncPath>,
@@ -340,6 +344,16 @@ impl LocalEndpoint {
         &self,
         sink: &mut impl FnMut(LocalEntry) -> ScanControl,
     ) -> Result<ScanStats, ScanError> {
+        self.scan_filtered(&Filter::none(), sink)
+    }
+
+    /// `scan_metadata` without excluded entries; excluded folders are not
+    /// entered at all.
+    pub fn scan_filtered(
+        &self,
+        filter: &Filter,
+        sink: &mut impl FnMut(LocalEntry) -> ScanControl,
+    ) -> Result<ScanStats, ScanError> {
         let root = at(&None, self.root.try_clone())?;
         if at(&None, root.root_metadata())?.identity() != self.identity {
             return Err(ScanError::Changed(None));
@@ -374,6 +388,10 @@ impl LocalEndpoint {
                 continue;
             }
             let path = child_path(directory.path.as_ref(), entry.name())?;
+            if filter.excludes(&path, entry.metadata().kind() == NodeKind::Directory) {
+                stats.skipped += 1;
+                continue;
+            }
             if entry.name().starts_with(b"._") {
                 return Err(ScanError::UnclassifiedSidecar(path));
             }
@@ -434,7 +452,7 @@ impl LocalEndpoint {
         policy: MetadataPolicy,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<Observation, ScanError> {
-        self.observe_from(policy, &BTreeMap::new(), control)
+        self.observe_from(policy, &Filter::none(), &BTreeMap::new(), control)
     }
 
     /// `observe`, reusing a previous observation's version for every entry
@@ -443,11 +461,12 @@ impl LocalEndpoint {
     pub fn observe_from(
         &self,
         policy: MetadataPolicy,
+        filter: &Filter,
         previous: &BTreeMap<SyncPath, ObservedEntry>,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<Observation, ScanError> {
         let mut entries = Vec::new();
-        let stats = self.scan_metadata(&mut |entry| {
+        let stats = self.scan_filtered(filter, &mut |entry| {
             entries.push(entry);
             control()
         })?;
@@ -1174,7 +1193,9 @@ mod tests {
             .set_modified(past)
             .unwrap();
         let second = endpoint
-            .observe_from(ALL, &previous, &mut || ScanControl::Continue)
+            .observe_from(ALL, &Filter::none(), &previous, &mut || {
+                ScanControl::Continue
+            })
             .unwrap()
             .versions();
         let path = |name: &[u8]| SyncPath::try_from(name).unwrap();
@@ -1182,5 +1203,27 @@ mod tests {
         assert_ne!(second[&path(b"edited")], stale);
         // Modified moments before its observation: never trusted.
         assert_ne!(second[&path(b"recent")], stale);
+    }
+
+    #[test]
+    fn filtered_scans_skip_excluded_entries_and_folders() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir_all(root.join("build/deep")).unwrap();
+        fs::write(root.join("build/deep/out.o"), b"").unwrap();
+        fs::write(root.join("a.tmp"), b"").unwrap();
+        fs::write(root.join("._sidecar"), b"").unwrap();
+        fs::write(root.join("kept.txt"), b"").unwrap();
+        let endpoint = LocalEndpoint::open(root).unwrap();
+        let filter = Filter::new(["build/", "*.tmp", "._*"]).unwrap();
+        let observed = endpoint
+            .observe_from(ALL, &filter, &BTreeMap::new(), &mut || {
+                ScanControl::Continue
+            })
+            .unwrap();
+        assert_eq!(
+            observed.versions().keys().collect::<Vec<_>>(),
+            [&SyncPath::try_from(b"kept.txt".as_slice()).unwrap()]
+        );
     }
 }

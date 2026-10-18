@@ -5,7 +5,8 @@ use std::path::Path;
 use std::collections::BTreeMap;
 
 use foldover_endpoint::{
-    LocalEndpoint, LocalPair, ObservedEntry, PairRootError, RootRelation, ScanError,
+    Filter, InvalidFilter, LocalEndpoint, LocalPair, ObservedEntry, PairRootError, RootRelation,
+    ScanError,
 };
 use foldover_state::{PairStore, SnapshotEntry, StateLocation};
 use foldover_types::{PairConfig, PairDraft, PairId, Resolution, Side, SyncPath};
@@ -30,6 +31,8 @@ pub enum Error {
     CatalogUnavailable { pair: PairId, source: PairRootError },
     #[error("Selected root overlaps the agent's state directory")]
     StateOverlap,
+    #[error(transparent)]
+    Filter(#[from] InvalidFilter),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -39,6 +42,7 @@ pub enum ErrorKind {
     Changed,
     Unavailable,
     Overlap,
+    Invalid,
 }
 
 impl Error {
@@ -50,6 +54,7 @@ impl Error {
             Self::Roots(PairRootError::Overlap(_))
             | Self::CatalogOverlap(_)
             | Self::StateOverlap => ErrorKind::Overlap,
+            Self::Filter(_) => ErrorKind::Invalid,
             Self::Roots(_) | Self::Endpoint(_) | Self::CatalogUnavailable { .. } => {
                 ErrorKind::Unavailable
             }
@@ -100,6 +105,7 @@ impl Engine {
     }
 
     pub fn create_pair(&mut self, draft: &PairDraft) -> Result<PairConfig, Error> {
+        validate_filters(draft)?;
         self.validate_roots(draft, None)?;
         Ok(self.pairs.create(draft)?)
     }
@@ -113,6 +119,7 @@ impl Engine {
         if self.pair(id)?.revision() != revision {
             return Err(Error::StaleRevision);
         }
+        validate_filters(draft)?;
         self.validate_roots(draft, Some(id))?;
         Ok(self.pairs.update(id, revision, draft)?)
     }
@@ -230,6 +237,12 @@ impl Engine {
             }
         }
     }
+}
+
+/// Rules are checked when saved, so a run never meets an invalid one.
+fn validate_filters(draft: &PairDraft) -> Result<(), Error> {
+    Filter::new(draft.options().filters().rules().iter().map(String::as_str))?;
+    Ok(())
 }
 
 #[cfg(test)]

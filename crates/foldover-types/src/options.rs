@@ -43,12 +43,40 @@ pub enum Durability {
     Full,
 }
 
+/// Gitignore-style exclusion rules, one per line. They apply to both
+/// folders, so an excluded entry never looks deleted on one side.
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+pub struct Filters(Vec<String>);
+
+impl Filters {
+    pub const MAX_RULES: usize = 256;
+    pub const MAX_RULE_BYTES: usize = 1024;
+
+    /// Syntax is checked where rules are compiled; here only size and
+    /// characters that cannot be stored one per line.
+    pub fn new(rules: Vec<String>) -> Result<Self, InvalidPair> {
+        if rules.len() > Self::MAX_RULES
+            || rules
+                .iter()
+                .any(|rule| rule.len() > Self::MAX_RULE_BYTES || rule.contains(['\n', '\r', '\0']))
+        {
+            return Err(InvalidPair::Filters);
+        }
+        Ok(Self(rules))
+    }
+
+    pub fn rules(&self) -> &[String] {
+        &self.0
+    }
+}
+
 /// Per-pair settings beyond roots and mode.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct PairOptions {
     metadata: MetadataPolicy,
     durability: Durability,
     schedule: Schedule,
+    filters: Filters,
 }
 
 impl PairOptions {
@@ -57,23 +85,32 @@ impl PairOptions {
             metadata,
             durability,
             schedule: Schedule::Manual,
+            filters: Filters(Vec::new()),
         }
     }
 
-    pub const fn with_schedule(self, schedule: Schedule) -> Self {
+    pub fn with_schedule(self, schedule: Schedule) -> Self {
         Self { schedule, ..self }
     }
 
-    pub const fn metadata(self) -> MetadataPolicy {
+    pub fn with_filters(self, filters: Filters) -> Self {
+        Self { filters, ..self }
+    }
+
+    pub const fn metadata(&self) -> MetadataPolicy {
         self.metadata
     }
 
-    pub const fn durability(self) -> Durability {
+    pub const fn durability(&self) -> Durability {
         self.durability
     }
 
-    pub const fn schedule(self) -> Schedule {
+    pub const fn schedule(&self) -> Schedule {
         self.schedule
+    }
+
+    pub fn filters(&self) -> &Filters {
+        &self.filters
     }
 }
 

@@ -129,13 +129,15 @@ pub enum WriteDurability {
     Full,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct LocalPairOptions {
     pub modification_times: MetadataSync,
     pub extended_attributes: MetadataSync,
     pub permissions: MetadataSync,
     pub durability: WriteDurability,
     pub schedule: PairSchedule,
+    /// Gitignore-style exclusion rules, one per entry.
+    pub filters: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -167,8 +169,8 @@ impl From<MetadataSync> for foldover_client::Propagation {
     }
 }
 
-impl From<foldover_client::PairOptions> for LocalPairOptions {
-    fn from(options: foldover_client::PairOptions) -> Self {
+impl From<&foldover_client::PairOptions> for LocalPairOptions {
+    fn from(options: &foldover_client::PairOptions) -> Self {
         let metadata = options.metadata();
         Self {
             modification_times: metadata.modification_times().into(),
@@ -185,6 +187,7 @@ impl From<foldover_client::PairOptions> for LocalPairOptions {
                 },
                 foldover_client::Schedule::OnChange => PairSchedule::OnChange,
             },
+            filters: options.filters().rules().to_vec(),
         }
     }
 }
@@ -211,14 +214,15 @@ impl TryFrom<LocalPairOptions> for foldover_client::PairOptions {
                 WriteDurability::Full => foldover_client::Durability::Full,
             },
         )
-        .with_schedule(schedule))
+        .with_schedule(schedule)
+        .with_filters(foldover_client::Filters::new(options.filters)?))
     }
 }
 
 /// The engine's defaults, so the app never restates them.
 #[uniffi::export]
 pub fn default_pair_options() -> LocalPairOptions {
-    foldover_client::PairOptions::default().into()
+    (&foldover_client::PairOptions::default()).into()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
@@ -369,6 +373,7 @@ mod tests {
                     permissions: MetadataSync::Sync,
                     durability: WriteDurability::Full,
                     schedule: PairSchedule::OnChange,
+                    filters: vec!["*.tmp".into(), "build/".into()],
                 },
             };
             let domain = foldover_client::PairDraft::try_from(draft.clone()).unwrap();

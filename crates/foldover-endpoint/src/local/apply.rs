@@ -124,7 +124,7 @@ impl LocalEndpoint {
                     return Err(ApplyError::Unsupported(path.clone()));
                 }
                 self.root
-                    .create_directory(path, &source.root, source_entry.metadata(), run.options)
+                    .create_directory(path, &source.root, source_entry.metadata(), &run.options)
                     .map_err(|error| write_error(path, error))?;
                 let created = self
                     .entry_at(path)?
@@ -139,7 +139,7 @@ impl LocalEndpoint {
                         path,
                         &source.root,
                         source_entry.metadata(),
-                        run.options,
+                        &run.options,
                         &mut checkpoint,
                     )
                     .map_err(|error| match error {
@@ -246,7 +246,7 @@ impl LocalEndpoint {
                 destination.metadata(),
                 &source.root,
                 source_entry.metadata(),
-                run.options,
+                &run.options,
             )
             .map_err(|error| match error {
                 WriteError::Changed => ApplyError::DestinationChanged(path.clone()),

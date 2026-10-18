@@ -5,9 +5,9 @@ use foldover_db::{
     BaseChange, Database, PairRow, PairValues, ResolutionRow, SnapshotRow, StateLocation,
 };
 use foldover_types::{
-    BaselineEntry, Durability, EndpointId, InvalidPair, LocalRoot, MetadataPolicy, PairConfig,
-    PairDraft, PairId, PairOptions, Propagation, Resolution, Schedule, ScheduleInterval, Side,
-    SyncMode, SyncPath,
+    BaselineEntry, Durability, EndpointId, Filters, InvalidPair, LocalRoot, MetadataPolicy,
+    PairConfig, PairDraft, PairId, PairOptions, Propagation, Resolution, Schedule,
+    ScheduleInterval, Side, SyncMode, SyncPath,
 };
 
 use crate::BaseUpdate;
@@ -376,6 +376,7 @@ fn values(draft: &PairDraft) -> PairValues {
             Schedule::Every(interval) => Some(i64::from(interval.minutes())),
             Schedule::Manual | Schedule::OnChange => None,
         },
+        filters: options.filters().rules().join("\n"),
     }
 }
 
@@ -425,6 +426,11 @@ fn from_row(row: PairRow) -> Result<PairConfig, Error> {
         )?),
         _ => return Err(Error::InvalidStored("schedule")),
     };
+    // Rules are single lines, so an empty column means no rules.
+    let filters = Filters::new(match row.values.filters.as_str() {
+        "" => Vec::new(),
+        text => text.split('\n').map(str::to_owned).collect(),
+    })?;
     let durability = match row.values.durability.as_str() {
         STANDARD_DURABILITY => Durability::Standard,
         FULL_DURABILITY => Durability::Full,
@@ -436,7 +442,11 @@ fn from_row(row: PairRow) -> Result<PairConfig, Error> {
         LocalRoot::from_bytes(row.values.right_root)?,
         mode,
     )?
-    .with_options(PairOptions::new(metadata, durability).with_schedule(schedule));
+    .with_options(
+        PairOptions::new(metadata, durability)
+            .with_schedule(schedule)
+            .with_filters(filters),
+    );
     let revision = u64::try_from(row.revision).map_err(|_| Error::InvalidStored("revision"))?;
     Ok(PairConfig::from_stored(id, revision, draft)?)
 }
@@ -527,6 +537,7 @@ mod tests {
                 durability: STANDARD_DURABILITY.into(),
                 schedule: MANUAL_SCHEDULE.into(),
                 schedule_minutes: None,
+                filters: String::new(),
             })
             .unwrap();
         drop(database);
@@ -553,6 +564,7 @@ mod tests {
                 durability: STANDARD_DURABILITY.into(),
                 schedule: MANUAL_SCHEDULE.into(),
                 schedule_minutes: None,
+                filters: String::new(),
             })
             .unwrap();
         let id = PairId::from_bytes(row.id.try_into().unwrap()).unwrap();
@@ -640,13 +652,16 @@ mod tests {
             MetadataPolicy::new(Propagation::Ignore, Propagation::Sync, Propagation::Sync),
             Durability::Full,
         )
-        .with_schedule(Schedule::Every(ScheduleInterval::from_minutes(15).unwrap()));
+        .with_schedule(Schedule::Every(ScheduleInterval::from_minutes(15).unwrap()))
+        .with_filters(
+            Filters::new(vec!["*.tmp".into(), "!keep.tmp".into(), String::new()]).unwrap(),
+        );
         let pair = store
-            .create(&draft(SyncMode::Sync).with_options(options))
+            .create(&draft(SyncMode::Sync).with_options(options.clone()))
             .unwrap();
         assert_eq!(
             store.pair(pair.id()).unwrap().unwrap().draft().options(),
-            options
+            &options
         );
         assert_eq!(
             store
@@ -654,7 +669,7 @@ mod tests {
                 .unwrap()
                 .draft()
                 .options(),
-            PairOptions::default()
+            &PairOptions::default()
         );
 
         let version = EntryVersion::new(
@@ -683,7 +698,7 @@ mod tests {
 
         let defaults = draft(SyncMode::Sync);
         let updated = store.update(pair.id(), 2, &defaults).unwrap();
-        assert_eq!(updated.draft().options(), PairOptions::default());
+        assert_eq!(updated.draft().options(), &PairOptions::default());
         assert!(store.base(pair.id()).unwrap().is_empty());
     }
 
