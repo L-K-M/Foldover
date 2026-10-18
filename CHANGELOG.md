@@ -8,6 +8,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Native app icon from the supplied artwork, at every macOS asset size.
 - Keychain-backed peer identity loading, with stable certificate fingerprints,
   exclusive creation and explicit storage failures; agent integration is pending.
 - Peer transport driver: pinned QUIC/TLS connections, six-digit pairing
