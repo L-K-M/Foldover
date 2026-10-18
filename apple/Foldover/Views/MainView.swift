@@ -56,6 +56,8 @@ struct MainView: View {
                 .textSelection(.enabled)
                 .padding(24)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            } else if viewModel.showsSetup {
+                SetupView(viewModel: viewModel)
             } else {
                 ContentUnavailableView(viewModel.detailTitle, systemImage: "folder.badge.plus",
                     description: Text("Choose two folders and a sync mode, then preview and sync."))

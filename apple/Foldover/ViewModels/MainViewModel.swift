@@ -17,6 +17,28 @@ struct IntentPair: Equatable, Sendable {
     let name: String
 }
 
+enum SetupProgress: Equatable {
+    case done
+    case current
+    case upcoming
+}
+
+/// What a first-run step asks the person to do.
+enum SetupAction: Equatable {
+    case enableAgent
+    case openLoginItems
+    case newPair
+}
+
+/// One step of the first-run guide.
+struct SetupStep: Identifiable, Equatable {
+    let id: Int
+    let title: String
+    let detail: String
+    let progress: SetupProgress
+    let action: SetupAction?
+}
+
 /// One pair in the menu bar.
 struct MenuPairRow: Identifiable, Equatable {
     let id: String
@@ -173,6 +195,41 @@ final class MainViewModel {
     }
 
     func dismissArchive() { archivePair = nil }
+
+    /// Shown instead of an empty detail until the first pair exists.
+    var showsSetup: Bool { selectedPair == nil && pairs.isEmpty && !pairStore.isLoading }
+
+    var setupSteps: [SetupStep] {
+        let connected = if case .connected = agent.connection { true } else { false }
+        let agentStep = SetupStep(
+            id: 1, title: String(localized: "Turn on the background agent"),
+            detail: agentNeedsApproval
+                ? String(localized: "Allow Foldover in System Settings › General › Login Items, then refresh.")
+                : String(localized: "It syncs your folders even when this window is closed."),
+            progress: connected ? .done : .current,
+            action: connected ? nil : (agentNeedsApproval ? .openLoginItems : .enableAgent)
+        )
+        let pairStep = SetupStep(
+            id: 2, title: String(localized: "Create a pair"),
+            detail: String(localized: "Choose two folders and whether changes go both ways or one way."),
+            progress: !pairs.isEmpty ? .done : (connected ? .current : .upcoming),
+            action: canConfigurePairs ? .newPair : nil
+        )
+        let syncStep = SetupStep(
+            id: 3, title: String(localized: "Preview, then sync"),
+            detail: String(localized: "Nothing changes until you sync. Replaced and removed files stay in each folder's archive for 30 days."),
+            progress: .upcoming, action: nil
+        )
+        return [agentStep, pairStep, syncStep]
+    }
+
+    func perform(_ action: SetupAction) async {
+        switch action {
+        case .enableAgent: await enableAgent()
+        case .openLoginItems: openLoginItems()
+        case .newPair: newPair()
+        }
+    }
 
     var agentNeedsApproval: Bool {
         if case .approvalRequired = agent.connection { return true }

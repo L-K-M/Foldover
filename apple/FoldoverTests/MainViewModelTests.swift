@@ -61,3 +61,33 @@ func shortcutsLoadPairsThenSyncAndSayWhatChanged() async {
     #expect(await viewModel.perform(.sync, onPairWithID: docsID).hasPrefix("Synced: copied 2"))
     #expect(await viewModel.perform(.sync, onPairWithID: "missing") == viewModel.agentStatusText)
 }
+
+@MainActor
+@Test
+func setupGuidesFromAgentToFirstPair() async {
+    let offline = MainViewModel(appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { throw SetupFixtureError.off }))
+    #expect(offline.showsSetup)
+    #expect(offline.setupSteps.map(\.progress) == [.current, .upcoming, .upcoming])
+    #expect(offline.setupSteps[0].action == .enableAgent)
+
+    let empty = MainViewModel(
+        appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { "1.0" }),
+        pairs: PairStore(client: EmptyCatalogClient())
+    )
+    await empty.refreshAgent()
+    #expect(empty.setupSteps.map(\.progress) == [.done, .current, .upcoming])
+    #expect(empty.setupSteps[1].action == .newPair)
+    await empty.perform(.newPair)
+    #expect(empty.editor != nil)
+}
+
+private enum SetupFixtureError: Error { case off }
+
+private actor EmptyCatalogClient: PairClient {
+    func page(after: String?) async throws -> PairCatalogPage { PairCatalogPage(pairs: [], next: nil) }
+    func create(_ settings: PairSettings) async throws -> SyncPair {
+        SyncPair(id: docsID, revision: 1, settings: settings)
+    }
+    func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { pair }
+    func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
+}

@@ -8,6 +8,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- First-run guide: turn on the agent, create a pair, preview and sync.
 - A folder macOS refuses to share (Documents, external volumes) now says
   to allow Foldover in Full Disk Access; Settings opens that list.
 - Always Skip on a preview row adds a filter rule for exactly that path.
