@@ -2,8 +2,8 @@ use std::io;
 use std::path::Path;
 
 use foldover_fs::{
-    DirectoryEntry, DirectoryScope, EntryMetadata, FileIdentity, HashError, NodeKind, Root,
-    RootRelation,
+    DataResidency, DirectoryEntry, DirectoryScope, EntryMetadata, FileIdentity, HashError,
+    NodeKind, Root, RootRelation,
 };
 pub use foldover_types::ScanControl;
 use foldover_types::{Digest, InvalidSyncPath, SyncPath};
@@ -43,6 +43,8 @@ pub enum ScanError {
     UnclassifiedSidecar(SyncPath),
     #[error("Internal endpoint path is protected: {0:?}")]
     ProtectedPath(SyncPath),
+    #[error("Dataless entry cannot form a complete scan: {0:?}")]
+    Dataless(Option<SyncPath>),
 }
 
 /// Exact path and observed attributes. A link target is data, never a scan root.
@@ -95,6 +97,7 @@ struct Directory {
 impl Directory {
     fn open(root: Root, path: Option<SyncPath>) -> Result<Self, ScanError> {
         let before = at(&path, root.root_metadata())?;
+        reject_dataless(before.data_residency(), &path)?;
         let entries = Box::new(at(&path, root.entries(DirectoryScope::Root))?);
         Ok(Self {
             root,
@@ -145,6 +148,7 @@ impl LocalEndpoint {
                 },
                 HashError::Changed => ScanError::Changed(Some(entry.path.clone())),
                 HashError::NotRegular => ScanError::UnsupportedEntry(entry.path.clone()),
+                HashError::Dataless => ScanError::Dataless(Some(entry.path.clone())),
                 HashError::Cancelled => ScanError::Cancelled,
             })
     }
@@ -192,6 +196,9 @@ impl LocalEndpoint {
             let at_path = Some(path.clone());
             let name = SyncPath::try_from(entry.name())?;
             let metadata = entry.metadata().clone();
+            // An unavailable entry is not absence. Stop rather than publish a
+            // complete inventory that could turn skipped placeholders into deletes.
+            reject_dataless(metadata.data_residency(), &at_path)?;
             if metadata.identity().device() != self.identity.device() {
                 return Err(ScanError::NestedFilesystem(path));
             }
@@ -236,6 +243,13 @@ impl LocalEndpoint {
     }
 }
 
+fn reject_dataless(residency: DataResidency, path: &Option<SyncPath>) -> Result<(), ScanError> {
+    if residency == DataResidency::Dataless {
+        return Err(ScanError::Dataless(path.clone()));
+    }
+    Ok(())
+}
+
 fn child_path(parent: Option<&SyncPath>, name: &[u8]) -> Result<SyncPath, InvalidSyncPath> {
     let mut bytes = Vec::new();
     if let Some(parent) = parent {
@@ -271,6 +285,20 @@ mod tests {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::symlink;
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn dataless_roots_and_entries_cannot_complete_an_inventory() {
+        for path in [
+            None,
+            Some(SyncPath::try_from(b"placeholder".as_slice()).unwrap()),
+        ] {
+            assert!(
+                matches!(reject_dataless(DataResidency::Dataless, &path), Err(ScanError::Dataless(actual)) if actual == path)
+            );
+            assert!(reject_dataless(DataResidency::Materialized, &path).is_ok());
+            assert!(reject_dataless(DataResidency::NotReported, &path).is_ok());
+        }
+    }
 
     #[test]
     fn hashes_observed_regular_files_but_never_follows_links() {
