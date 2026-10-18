@@ -162,8 +162,12 @@ exporters, frame limits and truncation, and revocation of live channels.
 Ed25519 private key from a generic-password item in the user's default
 file Keychain. Its service is `ch.lkmc.foldover.peer-identity`, its account
 is `local-device`, and synchronization is disabled. The existing Keychain
-ACL and lock policy apply. Access uses per-operation authentication-UI
-failure, without changing the process's global interaction setting.
+ACL and lock policy apply. File Keychains ignore per-query authentication-UI
+flags, which the first native locked-store test exposed by hanging. The OS
+driver serializes credential operations, temporarily disables Keychain UI
+for its process, and restores the previous setting on completion or unwind.
+Normal returns report restoration failures. Other Keychain access in this
+process must use the same driver boundary.
 
 The stored versioned binary record includes the original certificate DER
 and PKCS#8 key. Keeping only the key and issuing another certificate would
@@ -181,7 +185,8 @@ must run outside async runtime worker threads.
 Tests cover exact fingerprint restoration, corrupt and mismatched records,
 concurrent creators, read/write/read-back failures and pinned loopback
 reconnects after reloading both identities. Native tests use temporary
-Keychains to check reopen, exclusive creation and locked-store failure.
+Keychains to check reopen, exclusive creation, prompt-free locked-store
+failure and preservation of an already-disabled interaction policy.
 Installed-agent Keychain authorization across ad-hoc app updates remains
 an integration gate.
 

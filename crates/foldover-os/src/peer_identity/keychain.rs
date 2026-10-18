@@ -1,8 +1,10 @@
 //! Audited macOS binding: exact-key, noninteractive SecItem operations.
 //! Native pointers stay inside this module and become owned CF values.
 
+use std::sync::{Mutex, PoisonError};
+
 use core_foundation::array::CFArray;
-use core_foundation::base::{CFType, TCFType};
+use core_foundation::base::{Boolean, CFType, TCFType};
 use core_foundation::boolean::CFBoolean;
 use core_foundation::data::CFData;
 use core_foundation::dictionary::CFDictionary;
@@ -11,8 +13,10 @@ use security_framework::os::macos::keychain::SecKeychain;
 use security_framework_sys::base::{errSecDuplicateItem, errSecItemNotFound, errSecSuccess};
 use security_framework_sys::item::{
     kSecAttrAccount, kSecAttrLabel, kSecAttrService, kSecAttrSynchronizable, kSecClass,
-    kSecClassGenericPassword, kSecMatchSearchList, kSecReturnData, kSecUseAuthenticationUI,
-    kSecUseKeychain, kSecValueData,
+    kSecClassGenericPassword, kSecMatchSearchList, kSecReturnData, kSecUseKeychain, kSecValueData,
+};
+use security_framework_sys::keychain::{
+    SecKeychainGetUserInteractionAllowed, SecKeychainSetUserInteractionAllowed,
 };
 use security_framework_sys::keychain_item::{SecItemAdd, SecItemCopyMatching};
 use zeroize::Zeroizing;
@@ -23,12 +27,11 @@ const SERVICE: &str = "ch.lkmc.foldover.peer-identity";
 const ACCOUNT: &str = "local-device";
 const LABEL: &str = "Foldover peer identity";
 const MAX_SECRET_BYTES: usize = 64 * 1024;
+static KEYCHAIN_INTERACTION: Mutex<()> = Mutex::new(());
 
 // These SDK declarations are missing from security-framework-sys 2.17.
 #[link(name = "Security", kind = "framework")]
 unsafe extern "C" {
-    static kSecUseAuthenticationUIFail: core_foundation::string::CFStringRef;
-
     #[cfg(test)]
     fn SecKeychainDelete(keychain: security_framework_sys::base::SecKeychainRef) -> i32;
     #[cfg(test)]
@@ -43,8 +46,9 @@ pub struct KeychainIdentityStore {
 
 impl KeychainIdentityStore {
     pub fn open() -> Result<Self, IdentityStoreError> {
-        let keychain =
-            SecKeychain::default().map_err(|error| keychain_error("open", error.code()))?;
+        let keychain = noninteractive(|| {
+            SecKeychain::default().map_err(|error| keychain_error("open", error.code()))
+        })?;
         Ok(Self { keychain })
     }
 
@@ -69,10 +73,6 @@ impl KeychainIdentityStore {
                     string(kSecAttrSynchronizable),
                     CFBoolean::false_value().into_CFType(),
                 ),
-                (
-                    string(kSecUseAuthenticationUI),
-                    string(kSecUseAuthenticationUIFail).into_CFType(),
-                ),
             ]
         }
     }
@@ -90,6 +90,74 @@ fn keychain_error(operation: &'static str, status: i32) -> IdentityStoreError {
 
 impl PeerIdentityStore for KeychainIdentityStore {
     fn read(&self) -> Result<Option<Zeroizing<Vec<u8>>>, IdentityStoreError> {
+        noninteractive(|| self.read_native())
+    }
+
+    fn create_if_absent(&self, bytes: &[u8]) -> Result<(), IdentityStoreError> {
+        noninteractive(|| self.create_native(bytes))
+    }
+}
+
+// File Keychains ignore per-query authentication-UI flags. Serialize this
+// process-wide setting and restore its previous value, even during unwinding.
+fn noninteractive<T>(
+    work: impl FnOnce() -> Result<T, IdentityStoreError>,
+) -> Result<T, IdentityStoreError> {
+    let _lock = KEYCHAIN_INTERACTION
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let interaction = InteractionGuard::disable()?;
+    let result = work();
+    interaction.restore()?;
+    result
+}
+
+struct InteractionGuard {
+    previous: Option<Boolean>,
+}
+
+impl InteractionGuard {
+    fn disable() -> Result<Self, IdentityStoreError> {
+        let mut previous = 0;
+        // SAFETY: `previous` is a writable Boolean output slot. This setting
+        // is accessed only while the module's process-wide mutex is held.
+        let status = unsafe { SecKeychainGetUserInteractionAllowed(&mut previous) };
+        if status != errSecSuccess {
+            return Err(keychain_error("read interaction policy", status));
+        }
+        // SAFETY: Zero is the native false Boolean; the mutex serializes changes.
+        let status = unsafe { SecKeychainSetUserInteractionAllowed(0) };
+        if status != errSecSuccess {
+            return Err(keychain_error("disable interaction", status));
+        }
+        Ok(Self {
+            previous: Some(previous),
+        })
+    }
+
+    fn restore(mut self) -> Result<(), IdentityStoreError> {
+        let previous = self.previous.take().expect("active interaction guard");
+        // SAFETY: Restore the Boolean returned by the getter under the same lock.
+        let status = unsafe { SecKeychainSetUserInteractionAllowed(previous) };
+        if status != errSecSuccess {
+            return Err(keychain_error("restore interaction", status));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for InteractionGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            // SAFETY: During unwinding the mutex is still held. Normal returns
+            // use `restore` to report failures rather than silently succeeding.
+            unsafe { SecKeychainSetUserInteractionAllowed(previous) };
+        }
+    }
+}
+
+impl KeychainIdentityStore {
+    fn read_native(&self) -> Result<Option<Zeroizing<Vec<u8>>>, IdentityStoreError> {
         let mut query = self.query();
         // SAFETY: Constants are live CFStrings; the array retains the keychain.
         unsafe {
@@ -129,7 +197,7 @@ impl PeerIdentityStore for KeychainIdentityStore {
         Ok(Some(Zeroizing::new(data.bytes().to_vec())))
     }
 
-    fn create_if_absent(&self, bytes: &[u8]) -> Result<(), IdentityStoreError> {
+    fn create_native(&self, bytes: &[u8]) -> Result<(), IdentityStoreError> {
         if bytes.is_empty() || bytes.len() > MAX_SECRET_BYTES {
             return Err(IdentityStoreError::InvalidData);
         }
@@ -163,8 +231,10 @@ impl PeerIdentityStore for KeychainIdentityStore {
 mod tests {
     use super::*;
     use security_framework::os::macos::keychain::CreateOptions;
+    use std::time::{Duration, Instant};
 
     const PASSWORD: &str = "Foldover temporary Keychain test";
+    const LOCKED_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
     struct Fixture {
         store: KeychainIdentityStore,
@@ -235,10 +305,15 @@ mod tests {
             unsafe { SecKeychainLock(fixture.store.keychain.as_concrete_TypeRef()) },
             errSecSuccess
         );
+        let started = Instant::now();
         assert!(matches!(
             fixture.store.read(),
             Err(IdentityStoreError::Keychain { .. })
         ));
+        assert!(
+            started.elapsed() < LOCKED_READ_TIMEOUT,
+            "locked Keychain prompted or stalled"
+        );
 
         let mut keychain = fixture.store.keychain.clone();
         keychain.unlock(Some(PASSWORD)).unwrap();
@@ -246,5 +321,45 @@ mod tests {
             fixture.store.read().unwrap().unwrap().as_slice(),
             b"original identity"
         );
+    }
+
+    #[test]
+    fn interaction_guards_preserve_an_already_disabled_policy() {
+        let _lock = KEYCHAIN_INTERACTION
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let previous = SecKeychain::user_interaction_allowed().unwrap();
+        let outer = InteractionGuard::disable().unwrap();
+        assert!(!SecKeychain::user_interaction_allowed().unwrap());
+        let inner = InteractionGuard::disable().unwrap();
+        inner.restore().unwrap();
+        assert!(!SecKeychain::user_interaction_allowed().unwrap());
+        outer.restore().unwrap();
+        assert_eq!(SecKeychain::user_interaction_allowed().unwrap(), previous);
+    }
+
+    #[test]
+    fn failed_and_panicked_operations_restore_the_interaction_policy() {
+        let policy = || {
+            let _lock = KEYCHAIN_INTERACTION
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            SecKeychain::user_interaction_allowed().unwrap()
+        };
+        let previous = policy();
+        assert!(
+            noninteractive::<()>(|| {
+                assert!(!SecKeychain::user_interaction_allowed().unwrap());
+                Err(IdentityStoreError::InvalidData)
+            })
+            .is_err()
+        );
+        assert_eq!(policy(), previous);
+
+        let panicked = std::panic::catch_unwind(|| {
+            let _ = noninteractive::<()>(|| panic!("test Keychain operation panic"));
+        });
+        assert!(panicked.is_err());
+        assert_eq!(policy(), previous);
     }
 }
