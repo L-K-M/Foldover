@@ -158,7 +158,7 @@ final class MainViewModel {
     func sync(for pair: SyncPair) -> PairSyncViewModel {
         var connected = false
         if case .connected = agent.connection { connected = true }
-        return PairSyncViewModel(pair: pair, store: syncStore, agentConnected: connected)
+        return PairSyncViewModel(pair: pair, store: syncStore, pairs: pairStore, agentConnected: connected)
     }
 
     func archive(for pair: SyncPair) -> ArchiveViewModel {

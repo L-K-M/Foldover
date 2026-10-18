@@ -32,6 +32,12 @@ struct PairSyncView: View {
                             Text(row.description).font(.caption).foregroundStyle(.secondary)
                         }
                         .accessibilityElement(children: .combine)
+                        .contextMenu {
+                            if row.skippable != nil {
+                                Button("Always Skip") { Task { await viewModel.skipAlways(row) } }
+                                    .disabled(!viewModel.canStart)
+                            }
+                        }
                         if row.resolvable != nil {
                             Spacer()
                             Button("Keep A") { Task { await viewModel.keep(.a, for: row) } }

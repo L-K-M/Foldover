@@ -74,6 +74,26 @@ private func preview(archivesInA: UInt64, needsApproval: Bool) -> PreviewSummary
     )
 }
 
+/// Holds the test pair and records saved settings.
+private actor CatalogClient: PairClient {
+    private(set) var saved: [PairSettings] = []
+
+    func page(after: String?) async throws -> PairCatalogPage {
+        PairCatalogPage(pairs: after == nil ? [pair()] : [], next: nil)
+    }
+    func create(_ settings: PairSettings) async throws -> SyncPair { pair() }
+    func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair {
+        saved.append(settings)
+        return SyncPair(id: pair.id, revision: pair.revision + 1, settings: settings)
+    }
+    func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
+}
+
+@MainActor
+private func catalog(_ client: CatalogClient = CatalogClient()) -> PairStore {
+    PairStore(client: client)
+}
+
 private func pair() -> SyncPair {
     SyncPair(id: "11111111111111111111111111111111", revision: 1, settings: PairSettings(
         name: "Photos", left: SelectedFolder(bytes: Data("/a".utf8)),
@@ -88,7 +108,7 @@ func previewsPollUntilTheJobFinishes() async {
     let client = ScriptedSyncClient([.working(.preview, cancelling: false),
                                      .working(.preview, cancelling: false), .previewed(summary)])
     let store = SyncStore(client: client, pollInterval: .milliseconds(1))
-    let viewModel = PairSyncViewModel(pair: pair(), store: store, agentConnected: true)
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
     await viewModel.preview()
     #expect(store.state(for: pair().id) == .previewed(summary))
     let size = PairSyncViewModel.byteText(2_000_000)
@@ -110,7 +130,7 @@ func runsNeedingApprovalRetryWithTheReviewedCountsOrKeepThePreview() async throw
     let client = ScriptedSyncClient([.needsApproval(summary), .working(.run, cancelling: false),
                                      .finished(result)])
     let store = SyncStore(client: client, pollInterval: .milliseconds(1))
-    let viewModel = PairSyncViewModel(pair: pair(), store: store, agentConnected: true)
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
 
     await viewModel.sync()
     #expect(viewModel.approvalRequest?.contains("60") == true)
@@ -126,7 +146,7 @@ func runsNeedingApprovalRetryWithTheReviewedCountsOrKeepThePreview() async throw
 
     let declined = SyncStore(client: ScriptedSyncClient([.needsApproval(summary)]),
                              pollInterval: .milliseconds(1))
-    let declining = PairSyncViewModel(pair: pair(), store: declined, agentConnected: true)
+    let declining = PairSyncViewModel(pair: pair(), store: declined, pairs: catalog(), agentConnected: true)
     await declining.sync()
     declining.declineApproval()
     #expect(declined.state(for: pair().id) == .previewed(summary))
@@ -138,12 +158,12 @@ func runsNeedingApprovalRetryWithTheReviewedCountsOrKeepThePreview() async throw
 func workingJobsCanBeCancelledAndControlsFollowTheAgent() async {
     let client = ScriptedSyncClient([.working(.run, cancelling: true), .idle])
     let store = SyncStore(client: client, pollInterval: .milliseconds(1))
-    let viewModel = PairSyncViewModel(pair: pair(), store: store, agentConnected: true)
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
     await viewModel.cancel()
     #expect(await client.cancelled)
     #expect(store.state(for: pair().id) == .idle)
 
-    let offline = PairSyncViewModel(pair: pair(), store: store, agentConnected: false)
+    let offline = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: false)
     #expect(!offline.canStart)
 }
 
@@ -151,7 +171,7 @@ func workingJobsCanBeCancelledAndControlsFollowTheAgent() async {
 @Test
 func unreachableAgentsReportErrorsWithoutChangingState() async {
     let store = SyncStore(client: UnreachableSyncClient(), pollInterval: .milliseconds(1))
-    let viewModel = PairSyncViewModel(pair: pair(), store: store, agentConnected: true)
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
     await viewModel.preview()
     #expect(viewModel.requestError != nil)
     #expect(store.state(for: pair().id) == .idle)
@@ -170,7 +190,7 @@ func keepingASideResolvesThenPreviewsAgain() async throws {
     let resolved = preview(archivesInA: 0, needsApproval: false)
     let client = ScriptedSyncClient([.previewed(conflicted), .previewed(conflicted), .previewed(resolved)])
     let store = SyncStore(client: client, pollInterval: .milliseconds(1))
-    let viewModel = PairSyncViewModel(pair: pair(), store: store, agentConnected: true)
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
     await viewModel.preview()
     let rows = viewModel.rows
     #expect(rows[0].resolvable == Data("notes.txt".utf8))
@@ -193,7 +213,7 @@ func keepBothIsOfferedOnlyForFilesChangedInBothFolders() async {
     )
     let client = ScriptedSyncClient([.previewed(conflicted), .previewed(conflicted), .previewed(conflicted)])
     let store = SyncStore(client: client, pollInterval: .milliseconds(1))
-    let viewModel = PairSyncViewModel(pair: pair(), store: store, agentConnected: true)
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
     await viewModel.preview()
     let rows = viewModel.rows
     #expect(rows.map(\.keepsBoth) == [true, false])
@@ -258,7 +278,7 @@ func finishedRunsRefreshTheHistory() async {
                             conflicts: 1, failures: [], failureCount: 0, archive: "run")
     let client = ScriptedSyncClient([.working(.run, cancelling: false), .finished(result)], history: runs)
     let store = SyncStore(client: client, pollInterval: .milliseconds(1))
-    let viewModel = PairSyncViewModel(pair: pair(), store: store, agentConnected: true)
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
     #expect(viewModel.historyRows.isEmpty)
 
     await viewModel.sync()
@@ -272,10 +292,37 @@ func finishedRunsRefreshTheHistory() async {
 @Test
 func automaticSyncsWaitingForAFolderSayWhichOneQuietly() async {
     let store = SyncStore(client: ScriptedSyncClient([.waiting(.b)]), pollInterval: .milliseconds(1))
-    let viewModel = PairSyncViewModel(pair: pair(), store: store, agentConnected: true)
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
     await viewModel.refresh()
     #expect(viewModel.statusText.hasPrefix("Folder B is not connected."))
     #expect(viewModel.shortStatus == "Waiting for folder")
     #expect(viewModel.canStart)
     #expect(SyncStore.alert(for: pair(), state: .waiting(.b)) == nil)
+}
+
+@MainActor
+@Test
+func skipRulesMatchExactlyOnePath() {
+    #expect(PairStore.skipRule(for: Data("docs/a*.txt".utf8)) == "/docs/a\\*.txt")
+    #expect(PairStore.skipRule(for: Data("odd [1]{2}?\\ ".utf8)) == "/odd \\[1\\]\\{2\\}\\?\\\\\\ ")
+    #expect(PairStore.skipRule(for: Data([0x6f, 0xff])) == nil)
+}
+
+@MainActor
+@Test
+func alwaysSkipAddsAFilterRuleThenPreviewsAgain() async throws {
+    let summary = preview(archivesInA: 0, needsApproval: false)
+    let client = ScriptedSyncClient([.previewed(summary), .previewed(summary)])
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pairs = CatalogClient()
+    let catalog = catalog(pairs)
+    await catalog.refresh()
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog, agentConnected: true)
+    await viewModel.preview()
+    let row = try #require(viewModel.rows.first)
+    #expect(viewModel.rows.map { $0.skippable != nil } == [true, false])
+
+    await viewModel.skipAlways(row)
+    #expect(await pairs.saved.map(\.options.filters) == [["/photos/a.jpg"]])
+    #expect(viewModel.requestError == nil)
 }

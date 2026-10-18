@@ -22,6 +22,10 @@ therefore unnecessary, and the base is kept.
   A `.foldoverignore` that is not UTF-8 text stops the run before planning.
 - Excluding an AppleDouble pattern such as `._*` skips sidecars instead of
   stopping the scan.
+- **Always Skip** on a preview row adds a rule matching exactly that path:
+  anchored with `/`, with `\ * ? [ ] { }` and trailing spaces escaped
+  (`docs/a*.txt` → `/docs/a\*.txt`). Names that are not UTF-8 cannot be
+  written as rules and are not offered.
 
 ## Consequences
 

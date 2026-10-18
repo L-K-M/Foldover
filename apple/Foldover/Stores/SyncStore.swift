@@ -368,6 +368,11 @@ final class SyncStore {
         await preview(id)
     }
 
+    /// Show a failed request made elsewhere for this pair, e.g. a skip rule.
+    func report(_ message: String, for id: String) {
+        requestErrors[id] = message
+    }
+
     /// Keep the reviewed changes visible after declining an approval.
     func declineApproval(_ id: String) {
         guard case .needsApproval(let preview) = states[id] else { return }

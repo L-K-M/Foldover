@@ -98,6 +98,17 @@ mod tests {
         assert!(Filter::new(["a{"]).is_err());
     }
 
+    /// The app skips one path with an anchored rule that escapes
+    /// pattern characters and trailing spaces.
+    #[test]
+    fn escaped_anchored_rules_match_exactly_one_path() {
+        let filter = Filter::new([r"/dir/odd \*\[x\]\{y\}\?.txt\ "]).unwrap();
+        assert!(filter.excludes(&path(b"dir/odd *[x]{y}?.txt "), false));
+        assert!(!filter.excludes(&path(b"dir/odd a[x]{y}b.txt "), false));
+        assert!(!filter.excludes(&path(b"dir/odd *[x]{y}?.txt"), false));
+        assert!(!filter.excludes(&path(b"other/dir/odd *[x]{y}?.txt "), false));
+    }
+
     #[test]
     fn ignore_files_are_read_as_lines_and_must_be_text() {
         let directory = tempfile::tempdir().unwrap();

@@ -191,9 +191,11 @@ private enum PairStoreError: LocalizedError {
     case invalidFolder
     case invalidPage
     case saving
+    case unskippablePath
 
     var errorDescription: String? {
         switch self {
+        case .unskippablePath: String(localized: "This name is not valid UTF-8 text, so a rule cannot skip it. Add a pattern in the pair's settings instead.")
         case .invalidFolder: String(localized: "Choose a folder on this Mac or a mounted volume.")
         case .invalidPage: String(localized: "The agent returned an invalid pair page. Refresh to try again.")
         case .saving: String(localized: "Wait for the current settings to finish saving.")
@@ -259,6 +261,36 @@ final class PairStore {
         pairs.append(saved)
         pairs.sort { $0.id < $1.id }
         return saved
+    }
+
+    /// Skip `path` from now on: add a rule matching exactly it to the
+    /// pair's filters. The base is kept, so nothing is deleted.
+    func skip(_ path: Data, inPairWithID id: String) async throws {
+        guard let rule = Self.skipRule(for: path) else { throw PairStoreError.unskippablePath }
+        guard let pair = pairs.first(where: { $0.id == id }) else { throw PairStoreError.invalidPage }
+        var options = pair.settings.options
+        guard !options.filters.contains(rule) else { return }
+        options.filters.append(rule)
+        let settings = PairSettings(name: pair.settings.name, left: pair.settings.left,
+                                    right: pair.settings.right, mode: pair.settings.mode, options: options)
+        _ = try await save(settings, editing: pair)
+    }
+
+    /// An anchored gitignore rule for exactly `path`: `docs/a*.txt`
+    /// becomes `/docs/a\*.txt`. Nil when the path is not UTF-8 text,
+    /// which rules cannot express.
+    static func skipRule(for path: Data) -> String? {
+        guard let text = String(data: path, encoding: .utf8) else { return nil }
+        let body = text.reversed().drop(while: { $0 == " " }).reversed()
+        let trailingSpaces = text.count - body.count
+        var rule = "/"
+        for character in body {
+            if "\\*?[]{}".contains(character) { rule.append("\\") }
+            rule.append(character)
+        }
+        // Gitignore drops unescaped trailing spaces.
+        rule += String(repeating: "\\ ", count: trailingSpaces)
+        return rule
     }
 
     func folder(from url: URL) throws -> SelectedFolder {

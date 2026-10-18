@@ -9,6 +9,8 @@ struct ChangeRow: Identifiable, Equatable {
     let resolvable: Data?
     /// Both versions can be kept: the conflict changed a file in both folders.
     var keepsBoth = false
+    /// Raw path bytes, for skipping this item from now on.
+    var skippable: Data?
 }
 
 /// One finished run, ready to render.
@@ -29,6 +31,7 @@ struct DeletionApproval: Equatable, Sendable {
 struct PairSyncViewModel {
     let pair: SyncPair
     let store: SyncStore
+    let pairs: PairStore
     let agentConnected: Bool
 
     private var state: PairSyncState { store.state(for: pair.id) }
@@ -108,7 +111,8 @@ struct PairSyncViewModel {
                 ChangeRow(id: index, path: Self.pathText(change.path),
                           description: Self.description(change),
                           resolvable: Self.resolvable(change.action) ? change.path : nil,
-                          keepsBoth: change.action == .conflict(.bothChanged))
+                          keepsBoth: change.action == .conflict(.bothChanged),
+                          skippable: PairStore.skipRule(for: change.path) == nil ? nil : change.path)
             }
         case .finished(let result):
             result.failures.enumerated().map { index, failure in
@@ -161,6 +165,19 @@ struct PairSyncViewModel {
     func keep(_ side: FolderSide, for row: ChangeRow) async {
         guard let path = row.resolvable else { return }
         await store.resolve(pair.id, path: path, keep: side)
+    }
+
+    /// Skip this item from now on with a rule in the pair's filters, then
+    /// preview again.
+    func skipAlways(_ row: ChangeRow) async {
+        guard let path = row.skippable else { return }
+        do {
+            try await pairs.skip(path, inPairWithID: pair.id)
+        } catch {
+            store.report(PairStore.message(for: error), for: pair.id)
+            return
+        }
+        await store.preview(pair.id)
     }
 
     /// Keep both versions; Folder B's is saved beside the item.
