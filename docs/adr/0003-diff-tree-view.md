@@ -171,8 +171,32 @@ sizes were formatted. Stream p95 was 39.33 ms, scroll p95 16.67 ms, maximum
 stall 50.17 ms and scroll memory growth 1.05%. The stream budget still failed.
 
 Outline expansion p95 remained 389.90 ms. Moving unchanged formatting off the
-main actor targets the measured flat-table bottleneck. Its performance result
-is pending; the workload, cadence, presentation and budgets remain unchanged.
+main actor targets the measured flat-table bottleneck.
+
+### Worker preparation
+
+[Baseline 39082926960](https://github.com/L-K-M/Foldover/actions/runs/39082926960),
+commit `16164a8`, and
+[worker run 39082940427](https://github.com/L-K-M/Foldover/actions/runs/39082940427),
+commit `9460803`, used the same workload and virtual-Mac configuration above.
+The native worker reference check passed. Both AppKit candidates exposed all
+200,000 rows and reached the last row; all dates and sizes were formatted,
+with zero worker batches on the main thread.
+
+| Flat-table metric | Baseline | Worker |
+|---|---|---|
+| Main-actor model p95 (ms) | 52.50 | 11.27 |
+| Worker preparation p95 (ms) | Not separate | 48.16 |
+| First rows (ms) | 95.85 | 112.35 |
+| Stream frame p95 (ms) | 59.46 | 33.33 |
+| Scroll frame p95 (ms) | 33.33 | 28.57 |
+| Maximum stall (ms) | 83.36 | 91.14 |
+| Scroll memory growth (%) | 1.11 | 1.12 |
+
+Measured main-actor model cost fell, but both frame-time budgets still fail.
+Outline collapse/expansion stalls also remain above 100 ms. Host variance,
+scroll/layout profiling, physical-Mac calibration and valid SwiftUI scrolling
+remain open. Workload, cadence, presentation and budgets are unchanged.
 
 ## Decision
 
