@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- A pair's first sync always shows its preview first; nothing is written
+  until you approve that plan.
+- A folder that is suddenly empty no longer empties its partner without
+  review, however few files it held.
+- A sync stops at once when a folder's disk or share goes away or is
+  swapped mid-run, instead of failing file by file.
+
 - Native app icon from the supplied artwork, at every macOS asset size.
 - Keychain-backed peer identity loading, with stable certificate fingerprints,
   exclusive creation and explicit storage failures; agent integration is pending.

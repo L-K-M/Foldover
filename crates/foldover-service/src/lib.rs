@@ -728,6 +728,32 @@ mod tests {
         started
     }
 
+    /// A pair's first run must be reviewed by a person (PLAN.md §3.2):
+    /// preview it, then run that plan back with its token. Returns the
+    /// run's settled status.
+    async fn first_sync(service: &Service, key: &Value) -> Value {
+        first_run(service, key, 3_000).await
+    }
+
+    /// `first_sync` for plans that copy or archive dozens of entries.
+    async fn first_sync_slow(service: &Service, key: &Value) -> Value {
+        first_run(service, key, 10_000).await
+    }
+
+    async fn first_run(service: &Service, key: &Value, polls: usize) -> Value {
+        service
+            .handle(Request::call(8, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        let previewed = settle(service, key, polls).await;
+        let run = json!({"id": key["id"], "approved_left_deletions": 0, "approved_right_deletions": 0, "review_token": previewed["preview"]["review_token"]});
+        service
+            .handle(Request::call(9, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        settle(service, key, polls).await
+    }
+
     #[tokio::test]
     async fn previews_and_runs_execute_as_background_jobs() {
         let (directory, service) = fixture();
@@ -763,9 +789,25 @@ mod tests {
         );
         assert!(!right.join("file").exists());
 
+        // PLAN.md §3.2: a pair's first run is always reviewed. Unreviewed
+        // it stops with the plan a person must see; nothing is written.
         let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
         service
-            .handle(Request::call(4, SYNC_RUN, Some(run)))
+            .handle(Request::call(4, SYNC_RUN, Some(run.clone())))
+            .await
+            .unwrap();
+        let held = settled(&service, &key).await;
+        assert_eq!(held["state"], "needsApproval", "{held}");
+        assert_eq!(held["preview"]["counts"]["copies"], 1);
+        assert!(!right.join("file").exists());
+        assert!(!right.join(".foldover/id").exists());
+
+        // The same plan named by the held preview's token is reviewed
+        // and runs.
+        let mut reviewed = run.clone();
+        reviewed["review_token"] = held["preview"]["review_token"].clone();
+        service
+            .handle(Request::call(4, SYNC_RUN, Some(reviewed)))
             .await
             .unwrap();
         let finished = settled(&service, &key).await;
@@ -830,12 +872,7 @@ mod tests {
 
         // A first run is always reviewed by a person.
         assert!(service.run_due(at(120)).is_empty());
-        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
-        service
-            .handle(Request::call(2, SYNC_RUN, Some(run)))
-            .await
-            .unwrap();
-        assert_eq!(settled(&service, &key).await["result"]["copied"], 1);
+        assert_eq!(first_sync(&service, &key).await["result"]["copied"], 1);
 
         fs::write(left.join("b"), b"b").unwrap();
         assert!(service.run_due(at(30)).is_empty());
@@ -862,11 +899,7 @@ mod tests {
             .unwrap();
         let key = json!({"id": created["id"]});
         let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
-        service
-            .handle(Request::call(2, SYNC_RUN, Some(run.clone())))
-            .await
-            .unwrap();
-        settled(&service, &key).await;
+        first_sync(&service, &key).await;
         fs::write(left.join("text"), b"left").unwrap();
         fs::write(right.join("text"), b"right").unwrap();
 
@@ -923,12 +956,7 @@ mod tests {
             .unwrap();
         let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
         let key = json!({"id": created["id"]});
-        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
-        service
-            .handle(Request::call(2, SYNC_RUN, Some(run)))
-            .await
-            .unwrap();
-        settled(&service, &key).await;
+        first_sync(&service, &key).await;
         let start = service.scheduler.started();
         let at = |seconds| start + std::time::Duration::from_secs(seconds);
 
@@ -982,14 +1010,19 @@ mod tests {
         let key = json!({"id": created["id"]});
         let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
         fs::write(left.join("file"), b"data").unwrap();
-        service
-            .handle(Request::call(2, SYNC_RUN, Some(run.clone())))
-            .await
-            .unwrap();
-        settled(&service, &key).await;
+        first_sync(&service, &key).await;
         fs::remove_file(left.join("file")).unwrap();
+        // The emptied left side archives on the right only after review.
         service
             .handle(Request::call(3, SYNC_RUN, Some(run.clone())))
+            .await
+            .unwrap();
+        let stopped = settled(&service, &key).await;
+        assert_eq!(stopped["state"], "needsApproval", "{stopped}");
+        let mut reviewed = run.clone();
+        reviewed["review_token"] = stopped["preview"]["review_token"].clone();
+        service
+            .handle(Request::call(3, SYNC_RUN, Some(reviewed)))
             .await
             .unwrap();
         assert_eq!(settled(&service, &key).await["result"]["archived"], 1);
@@ -1046,8 +1079,8 @@ mod tests {
             .handle(Request::call(2, SYNC_PREVIEW, Some(key.clone())))
             .await
             .unwrap();
-        settled(&service, &key).await;
-        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        let previewed = settled(&service, &key).await;
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0, "review_token": previewed["preview"]["review_token"]});
         service
             .handle(Request::call(3, SYNC_RUN, Some(run)))
             .await
@@ -1076,12 +1109,7 @@ mod tests {
             .await
             .unwrap();
         let key = json!({"id": created["id"]});
-        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
-        service
-            .handle(Request::call(2, SYNC_RUN, Some(run)))
-            .await
-            .unwrap();
-        settled(&service, &key).await;
+        first_sync(&service, &key).await;
         let start = service.scheduler.started();
         let at = |seconds| start + std::time::Duration::from_secs(seconds);
 
@@ -1124,12 +1152,7 @@ mod tests {
             .await
             .unwrap();
         let key = json!({"id": created["id"]});
-        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
-        service
-            .handle(Request::call(2, SYNC_RUN, Some(run)))
-            .await
-            .unwrap();
-        settled(&service, &key).await;
+        first_sync(&service, &key).await;
 
         let probes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         service.scheduler.set_probe({
@@ -1170,13 +1193,8 @@ mod tests {
                 .handle(Request::call(1, PAIR_CREATE, Some(input)))
                 .await
                 .unwrap();
-            let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
-            service
-                .handle(Request::call(2, SYNC_RUN, Some(run)))
-                .await
-                .unwrap();
             let key = json!({"id": created["id"]});
-            settled(&service, &key).await;
+            first_sync(&service, &key).await;
             ids.push(created["id"].as_str().unwrap().parse::<PairId>().unwrap());
         }
         let (parked_id, ready_id) = (ids[0], ids[1]);
@@ -1253,13 +1271,8 @@ mod tests {
             .handle(Request::call(1, PAIR_CREATE, Some(input)))
             .await
             .unwrap();
-        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
-        service
-            .handle(Request::call(2, SYNC_RUN, Some(run)))
-            .await
-            .unwrap();
         let key = json!({"id": created["id"]});
-        settled(&service, &key).await;
+        first_sync(&service, &key).await;
         let id = created["id"].as_str().unwrap().parse::<PairId>().unwrap();
 
         let entered = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1319,11 +1332,7 @@ mod tests {
         let key = json!({"id": created["id"]});
         let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
         fs::write(left.join("text.md"), b"base").unwrap();
-        service
-            .handle(Request::call(2, SYNC_RUN, Some(run.clone())))
-            .await
-            .unwrap();
-        settled(&service, &key).await;
+        first_sync(&service, &key).await;
         fs::write(left.join("text.md"), b"left").unwrap();
         fs::write(right.join("text.md"), b"right").unwrap();
         service
@@ -1470,12 +1479,7 @@ mod tests {
             .await
             .unwrap();
         let key = json!({"id": created["id"]});
-        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
-        service
-            .handle(Request::call(2, SYNC_RUN, Some(run)))
-            .await
-            .unwrap();
-        settled(&service, &key).await;
+        first_sync(&service, &key).await;
         let at = |seconds| service.scheduler.started() + std::time::Duration::from_secs(seconds);
 
         let invalid = service
@@ -1568,12 +1572,7 @@ mod tests {
             .unwrap();
         let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
         let key = json!({"id": created["id"]});
-        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
-        service
-            .handle(Request::call(2, SYNC_RUN, Some(run)))
-            .await
-            .unwrap();
-        settled(&service, &key).await;
+        first_sync(&service, &key).await;
         let start = service.scheduler.started();
         let at = |seconds| start + std::time::Duration::from_secs(seconds);
 
@@ -1623,12 +1622,7 @@ mod tests {
             .unwrap();
         let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
         let key = json!({"id": created["id"]});
-        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
-        service
-            .handle(Request::call(2, SYNC_RUN, Some(run)))
-            .await
-            .unwrap();
-        settled(&service, &key).await;
+        first_sync(&service, &key).await;
         fs::remove_file(left.join("file")).unwrap();
         let start = service.scheduler.started();
         let at = |seconds| start + std::time::Duration::from_secs(seconds);
@@ -1755,11 +1749,7 @@ mod tests {
             .unwrap();
         let key = json!({"id": created["id"]});
         let run = |right_deletions| json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": right_deletions});
-        service
-            .handle(Request::call(2, SYNC_RUN, Some(run(0))))
-            .await
-            .unwrap();
-        assert_eq!(settled_slow(&service, &key).await["state"], "finished");
+        assert_eq!(first_sync_slow(&service, &key).await["state"], "finished");
 
         // The reviewed plan deletes file001..file051 from the right folder.
         for index in 1..=51_u32 {
@@ -1811,11 +1801,7 @@ mod tests {
             .unwrap();
         let key = json!({"id": created["id"]});
         let run = |right_deletions| json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": right_deletions});
-        service
-            .handle(Request::call(2, SYNC_RUN, Some(run(0))))
-            .await
-            .unwrap();
-        assert_eq!(settled_slow(&service, &key).await["state"], "finished");
+        assert_eq!(first_sync_slow(&service, &key).await["state"], "finished");
 
         // The reviewed plan deletes file001..file051 from the right folder.
         for index in 1..=51_u32 {
@@ -1890,25 +1876,9 @@ mod tests {
         let first_key = json!({"id": first_pair["id"]});
         let second_key = json!({"id": second_pair["id"]});
         let run = |id: &Value, right_deletions: u64, token: &Value| json!({"id": id, "approved_left_deletions": 0, "approved_right_deletions": right_deletions, "review_token": token});
-        service
-            .handle(Request::call(
-                3,
-                SYNC_RUN,
-                Some(run(&second_pair["id"], 0, &Value::Null)),
-            ))
-            .await
-            .unwrap();
-        settled(&service, &second_key).await;
-        service
-            .handle(Request::call(
-                3,
-                SYNC_RUN,
-                Some(run(&first_pair["id"], 0, &Value::Null)),
-            ))
-            .await
-            .unwrap();
+        first_sync(&service, &second_key).await;
         assert_eq!(
-            settled_slow(&service, &first_key).await["state"],
+            first_sync_slow(&service, &first_key).await["state"],
             "finished"
         );
 
@@ -2209,11 +2179,7 @@ mod tests {
             .unwrap();
         let key = json!({"id": created["id"]});
         let run = |right_deletions| json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": right_deletions});
-        service
-            .handle(Request::call(2, SYNC_RUN, Some(run(0))))
-            .await
-            .unwrap();
-        assert_eq!(settled_slow(&service, &key).await["state"], "finished");
+        assert_eq!(first_sync_slow(&service, &key).await["state"], "finished");
 
         // Deleting 51 of 60 trips the fuse; approving without ever holding
         // the reviewed plan must not authorize it.
@@ -2515,14 +2481,19 @@ mod tests {
         let key = json!({"id": created["id"]});
         let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
         fs::write(left.join("file"), b"data").unwrap();
-        service
-            .handle(Request::call(2, SYNC_RUN, Some(run.clone())))
-            .await
-            .unwrap();
-        settled(service, &key).await;
+        first_sync(service, &key).await;
         fs::remove_file(left.join("file")).unwrap();
         service
-            .handle(Request::call(3, SYNC_RUN, Some(run)))
+            .handle(Request::call(3, SYNC_RUN, Some(run.clone())))
+            .await
+            .unwrap();
+        // The emptied left side archives on the right only after review.
+        let stopped = settled(service, &key).await;
+        assert_eq!(stopped["state"], "needsApproval", "{stopped}");
+        let mut reviewed = run.clone();
+        reviewed["review_token"] = stopped["preview"]["review_token"].clone();
+        service
+            .handle(Request::call(3, SYNC_RUN, Some(reviewed)))
             .await
             .unwrap();
         assert_eq!(settled(service, &key).await["result"]["archived"], 1);
@@ -2660,13 +2631,8 @@ mod tests {
             .unwrap();
         let (left, right) = (directory.join("Both-left"), directory.join("Both-right"));
         let key = json!({"id": created["id"]});
-        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
         fs::write(left.join("text.md"), b"base").unwrap();
-        service
-            .handle(Request::call(2, SYNC_RUN, Some(run)))
-            .await
-            .unwrap();
-        settled(service, &key).await;
+        first_sync(service, &key).await;
         fs::write(left.join("text.md"), b"left").unwrap();
         fs::write(right.join("text.md"), b"right").unwrap();
         service

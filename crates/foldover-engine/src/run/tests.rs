@@ -169,8 +169,14 @@ impl Fixture {
             .unwrap()
     }
 
+    /// A first run stands for the reviewed preview a person accepted.
     fn sync(&mut self) -> RunReport {
-        match self.run(Approval::default(), RunContext::Interactive) {
+        let context = if self.identities.side(Side::Left).is_none() {
+            RunContext::Reviewed
+        } else {
+            RunContext::Interactive
+        };
+        match self.run(Approval::default(), context) {
             RunOutcome::Ran(report) => report,
             RunOutcome::NeedsApproval(preview) => {
                 panic!("unexpected approval request: {preview:?}")
@@ -282,7 +288,8 @@ fn conflicts_are_reported_and_both_versions_stay_untouched() {
 #[test]
 fn mass_deletions_need_approval_and_unattended_runs_stop() {
     let mut pair = fixture(SyncMode::Sync);
-    for index in 0..60 {
+    // One file stays, so the emptied-folder gate does not decide this.
+    for index in 0..=60 {
         fs::write(pair.left.path().join(format!("{index}")), b"x").unwrap();
     }
     pair.sync();
@@ -296,7 +303,7 @@ fn mass_deletions_need_approval_and_unattended_runs_stop() {
     };
     assert_eq!(preview.deletions(Side::Left).deletions(), 60);
     // Every file plus the identity folder survives the refused run.
-    assert_eq!(fs::read_dir(pair.left.path()).unwrap().count(), 61);
+    assert_eq!(fs::read_dir(pair.left.path()).unwrap().count(), 62);
     assert!(matches!(
         pair.run(Approval::new(60, 0), RunContext::Unattended),
         RunOutcome::NeedsApproval(_)
@@ -317,7 +324,7 @@ fn mirror_archives_target_extras_and_backup_keeps_them() {
     let mut mirror = fixture(SyncMode::Mirror { source: Side::Left });
     fs::write(mirror.left.path().join("kept"), b"k").unwrap();
     fs::write(mirror.right.path().join("extra"), b"e").unwrap();
-    // A first run that archives target content waits for review (§3.6).
+    // A first run waits for a reviewed preview (§3.2, §3.6).
     assert!(matches!(
         mirror.run(Approval::default(), RunContext::Interactive),
         RunOutcome::NeedsApproval(_)
@@ -352,7 +359,7 @@ fn a_changed_pair_revision_stops_the_run() {
     pair.revision = 2;
     let result = prepared.execute(
         Approval::default(),
-        RunContext::Interactive,
+        RunContext::Reviewed,
         STARTED,
         &mut |planned, _| {
             if planned == pair.revision {
@@ -381,7 +388,7 @@ fn failed_folders_skip_their_contents_and_later_runs_recover_leftovers() {
     let RunOutcome::Ran(report) = prepared
         .execute(
             Approval::default(),
-            RunContext::Interactive,
+            RunContext::Reviewed,
             STARTED,
             &mut |_, commit| {
                 if let Commit::Base(updates) = commit {
@@ -465,7 +472,7 @@ fn completed_runs_name_their_archive_and_prune_expired_runs() {
     let RunOutcome::Ran(report) = prepared
         .execute(
             Approval::default(),
-            RunContext::Interactive,
+            RunContext::Reviewed,
             started,
             &mut |_, _| Ok(()),
             &mut proceed,
@@ -574,7 +581,11 @@ fn a_folder_choice_settles_the_whole_folder() {
             foldover_types::Resolution::new(keep, left, right),
         );
 
-        let report = pair.sync();
+        // Keeping B's deletion empties folder A, so the choice runs as the
+        // reviewed preview a person accepts after choosing (§3.6).
+        let RunOutcome::Ran(report) = pair.run(Approval::new(3, 0), RunContext::Reviewed) else {
+            panic!("a reviewed choice runs");
+        };
         assert!(report.conflicts().is_empty(), "{:?}", report.conflicts());
         assert!(report.failures().is_empty(), "{:?}", report.failures());
         match keep {
@@ -918,4 +929,143 @@ fn full_durability_rejects_a_run_with_an_sftp_side() {
     assert!(!pair.right.path().join(".foldover").exists());
     assert!(!pair.right.path().join("report").exists());
     assert_eq!(fs::read(pair.left.path().join("report")).unwrap(), b"new");
+}
+
+#[test]
+fn a_first_run_waits_for_a_reviewed_preview_even_when_it_only_copies() {
+    let mut pair = fixture(SyncMode::Sync);
+    fs::write(pair.left.path().join("new"), b"n").unwrap();
+
+    for context in [RunContext::Interactive, RunContext::Unattended] {
+        let RunOutcome::NeedsApproval(preview) = pair.run(Approval::default(), context) else {
+            panic!("an unreviewed first run must wait");
+        };
+        assert_eq!(preview.items().len(), 1);
+    }
+    // Nothing was written: no identities, no copy.
+    assert!(pair.identities.side(Side::Left).is_none());
+    assert!(!pair.left.path().join(".foldover").exists());
+    assert_eq!(fs::read_dir(pair.right.path()).unwrap().count(), 0);
+
+    let RunOutcome::Ran(report) = pair.run(Approval::default(), RunContext::Reviewed) else {
+        panic!("a reviewed first run runs");
+    };
+    assert_eq!(report.copied(), 1);
+    assert!(pair.identities.side(Side::Right).is_some());
+}
+
+#[test]
+fn a_suddenly_empty_folder_needs_review_before_the_other_side_is_emptied() {
+    let mut pair = fixture(SyncMode::Sync);
+    for index in 0..3 {
+        fs::write(pair.left.path().join(format!("{index}")), b"x").unwrap();
+    }
+    pair.sync();
+    for index in 0..3 {
+        fs::remove_file(pair.right.path().join(format!("{index}"))).unwrap();
+    }
+
+    // Three deletions are far below the mass-deletion fuse.
+    for context in [RunContext::Interactive, RunContext::Unattended] {
+        assert!(matches!(
+            pair.run(Approval::new(3, 0), context),
+            RunOutcome::NeedsApproval(_)
+        ));
+    }
+    assert_eq!(fs::read_dir(pair.left.path()).unwrap().count(), 4);
+    let RunOutcome::Ran(report) = pair.run(Approval::new(3, 0), RunContext::Reviewed) else {
+        panic!("a reviewed plan runs");
+    };
+    assert_eq!(report.archived(), 3);
+
+    // An emptied Backup target only receives copies again: no review.
+    let mut backup = fixture(SyncMode::Backup { source: Side::Left });
+    fs::write(backup.left.path().join("kept"), b"k").unwrap();
+    backup.sync();
+    fs::remove_file(backup.right.path().join("kept")).unwrap();
+    assert_eq!(backup.sync().copied(), 1);
+}
+
+#[test]
+fn a_root_whose_identity_changes_mid_run_stops_at_the_next_batch() {
+    let mut pair = fixture(SyncMode::Sync);
+    fs::write(pair.left.path().join("first"), b"f").unwrap();
+    pair.sync();
+    for index in 0..300 {
+        fs::write(pair.left.path().join(format!("{index:03}")), b"x").unwrap();
+    }
+
+    let prepared = pair.prepare();
+    let identity = pair.right.path().join(".foldover/id");
+    let other = EndpointId::from_bytes([7; 16]);
+    let mut calls = 0;
+    let mut control = || {
+        calls += 1;
+        if calls == 10 {
+            fs::write(&identity, format!("{other}\n")).unwrap();
+        }
+        ScanControl::Continue
+    };
+    let base = &mut pair.base;
+    let error = prepared
+        .execute(
+            Approval::default(),
+            RunContext::Interactive,
+            STARTED,
+            &mut |_, commit| {
+                if let Commit::Base(updates) = commit {
+                    for update in updates {
+                        if let BaseUpdate::Record(path, entry) = update {
+                            base.insert(path.clone(), *entry);
+                        }
+                    }
+                }
+                Ok(())
+            },
+            &mut control,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, RunError::IdentityChanged { side: Side::Right }),
+        "{error:?}"
+    );
+
+    // Writes up to the check landed and were recorded; the rest waited.
+    let copied = fs::read_dir(pair.right.path()).unwrap().count() - 1;
+    assert_eq!(copied, pair.base.len());
+    assert_eq!(copied, 1 + COMMIT_BATCH);
+}
+
+/// Review: with only one identity recorded (the other root was changed),
+/// the recorded side must still be checked, not adopted, before writes.
+#[test]
+fn a_recorded_side_must_still_match_when_the_other_side_is_new() {
+    let mut pair = fixture(SyncMode::Sync);
+    fs::write(pair.left.path().join("file"), b"x").unwrap();
+    pair.sync();
+    let left = pair.identities.side(Side::Left).unwrap();
+    pair.identities = RecordedIdentities::new(Some(left), None);
+    pair.right = tempfile::tempdir().unwrap();
+
+    let prepared = pair.prepare();
+    // The left disk is swapped while the scan runs.
+    let other = EndpointId::from_bytes([9; 16]);
+    fs::write(pair.left.path().join(".foldover/id"), format!("{other}\n")).unwrap();
+    let error = prepared
+        .execute(
+            Approval::default(),
+            RunContext::Reviewed,
+            STARTED,
+            &mut |_, commit| {
+                assert!(!matches!(commit, Commit::Identities { .. }));
+                Ok(())
+            },
+            &mut proceed,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, RunError::IdentityChanged { side: Side::Left }),
+        "{error:?}"
+    );
+    assert_eq!(fs::read_dir(pair.right.path()).unwrap().count(), 0);
 }

@@ -38,10 +38,21 @@ execute: deletion gate ─▶ archive leftovers
   approval can never authorize deletions a person did not see, even when
   another client's preview replaced the held plan. A matching review also
   marks the run `RunContext::Reviewed`.
-- **First run:** while either root lacks a recorded identity, a plan that
-  archives or replaces content the target already holds stops for review
-  even below the fuse — a non-empty target gets explicit confirmation
-  (PLAN.md §3.6). A `Reviewed` retry of the unchanged plan proceeds.
+- **First run:** while either root lacks a recorded identity, every run
+  stops with its preview unless it is `Reviewed` — the first run of every
+  pair is previewed (PLAN.md §3.2, §3.6), which also confirms a non-empty
+  target. A `Reviewed` retry of the unchanged plan proceeds.
+- **Emptied side:** when one side holds no entries while the base
+  remembers some, a plan that archives on the other side stops for review
+  even below the fuse, so a wiped folder or a stale empty copy cannot
+  empty its partner unseen (PLAN.md §3.6). Copies into an emptied side,
+  such as a Backup target, need no review.
+- **Roots during the run:** writes go through handles held on each root.
+  Both roots' identity files are read again before the first write and
+  every 256 planned entries; a missing, unreadable or different identity
+  commits the work done so far and stops the run (`IdentityChanged` or
+  `RootLost`), so an unplugged or swapped disk stops the run at once
+  instead of failing entry by entry (PLAN.md §4.7).
 - **Operations:** each planned change goes through the endpoint operations
   ([ADR 0019](0019-local-write-primitives.md)), which recheck both sides.
   A failure is reported per path and skips that path's descendants; other
@@ -72,10 +83,6 @@ atomic exchange may still need one.
   re-gates; approvals stay counts plus an opaque `review_token` on the
   wire, and the service binds them to the held preview by token and exact
   equality — a changed or superseded plan needs new review.
-- A first run that only creates files still runs without a prior preview:
-  the non-empty-target confirmation covers archiving and overwriting, not
-  copies into empty space. Requiring a preview step before every first run
-  remains a client convention, not an agent rule.
 - Configuration changes during a run stop it at the next commit; up to one
   batch of writes may already have used the previous configuration's roots.
 - Missing: free-space checks, progress events and cancellation from
