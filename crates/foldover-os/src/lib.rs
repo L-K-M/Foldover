@@ -14,6 +14,10 @@ pub use peer_identity::KeychainIdentityStore;
 #[allow(unsafe_code)]
 mod mount;
 
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod power;
+
 use std::io;
 use std::path::PathBuf;
 
@@ -33,6 +37,32 @@ pub fn computer_name() -> String {
         return String::from("Mac");
     }
     name
+}
+
+/// Keeps the Mac from sleeping when idle until dropped. Sleep the person
+/// chooses, such as closing the lid, still happens.
+pub struct IdleSleepAssertion {
+    /// Held for its release on drop.
+    #[cfg(target_os = "macos")]
+    _held: power::Assertion,
+}
+
+impl IdleSleepAssertion {
+    /// `reason` names the assertion in `pmset -g assertions`, e.g.
+    /// "Foldover is syncing Photos". Fails with `Unsupported` on systems
+    /// without power assertions.
+    pub fn take(reason: &str) -> io::Result<Self> {
+        #[cfg(target_os = "macos")]
+        return power::Assertion::prevent_idle_sleep(reason).map(|held| Self { _held: held });
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = reason;
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Power assertions are not supported on this system",
+            ))
+        }
+    }
 }
 
 /// Mount the network share at `url`, e.g. `smb://alice@nas.local/Photos`,

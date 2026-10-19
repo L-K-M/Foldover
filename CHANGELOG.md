@@ -56,6 +56,8 @@ All notable changes to this project are documented here. The format follows
 - A sync stops at once when a folder's disk or share goes away or is
   swapped mid-run, instead of failing file by file.
 
+- The Mac stays awake while a preview scans or a sync runs; sleeping on
+  purpose still works.
 - Native app icon from the supplied artwork, at every macOS asset size.
 - Keychain-backed peer identity loading, with stable certificate fingerprints,
   exclusive creation and explicit storage failures; agent integration is pending.
