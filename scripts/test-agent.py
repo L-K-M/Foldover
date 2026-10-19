@@ -145,8 +145,10 @@ def synchronization(cli, endpoint, directory):
         raise RuntimeError(f"Preview failed: {preview}")
     if (right / "note.txt").exists():
         raise RuntimeError("Preview wrote to an endpoint")
-    for expected in (1, 0):
-        run = invoke(cli, endpoint, ("sync", pair))
+    token = status["preview"]["review_token"]
+    reviewed = ("sync", pair, "--approve", "0", "0", "--review", token)
+    for arguments, expected in [(reviewed, 1), (("sync", pair), 0)]:
+        run = invoke(cli, endpoint, arguments)
         status = json.loads(run.stdout) if run.returncode == 0 else {}
         if status.get("state") != "finished" or status["result"]["copied"] != expected:
             raise RuntimeError(f"Sync run failed: {run}")

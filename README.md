@@ -121,7 +121,7 @@ client does not cancel a committing configuration change.
 
 ```sh
 foldover sync ID --preview       # list changes; writes nothing
-foldover sync ID                 # run
+foldover sync ID                 # run; a pair's first run needs review
 foldover sync ID --approve 60 0 --review TOKEN  # approve the reviewed deletions
 foldover sync ID --keep-right PATH --review TOKEN  # keep B's reviewed version
 foldover sync ID --keep-both PATH --review TOKEN   # keep both reviewed versions
@@ -134,8 +134,9 @@ foldover archive ID left RUN --put-back-all
 ```
 
 Each command waits for its job and prints the final status as JSON. A run
-stops before writing when it would delete more than the automatic limits
-allow and exits with status 3; rerun with `--approve` and the preview's
+stops before writing, exiting with status 3, when it is the pair's first
+run, when it would delete more than the automatic limits allow, or when
+one folder is suddenly empty; rerun with `--approve` and the preview's
 `review_token` as `--review TOKEN`. Choices also echo that token. A changed plan
 or configuration requires a fresh review. Replaced and removed
 files go to `.foldover/archive/<run>/` inside the folder where they were

@@ -3,10 +3,12 @@
 //!
 //! ```text
 //! prepare: open roots ─▶ observe both sides ─▶ plan against the base
-//! execute: deletion gate ─▶ archive leftovers
+//! execute: first-run, emptiness and deletion gates ─▶ root identities
+//!          ─▶ archive leftovers
 //!          ─▶ forward pass (parents first): copies, metadata, base records
 //!          ─▶ reverse pass (children first): archives
 //!          ─▶ base commits in batches, each checked against the revision
+//!             after both roots' identities are read again
 //! ```
 //!
 //! A crash loses at most an uncommitted batch. The next run then finds both
@@ -60,6 +62,15 @@ pub enum RunError {
          or different. Reconnect the original disk, or change the pair to start over."
     )]
     IdentityChanged { side: Side },
+    #[error(
+        "The {side:?} folder could not be read during the sync, so it stopped: {source}. \
+         Reconnect its disk or share and sync again."
+    )]
+    RootLost {
+        side: Side,
+        #[source]
+        source: ScanError,
+    },
     #[error("Writing the {side:?} folder's identity failed: {source}")]
     IdentityWrite {
         side: Side,
@@ -417,6 +428,15 @@ pub struct PairRun {
     left_cache: BTreeMap<SyncPath, ObservedEntry>,
     right_cache: BTreeMap<SyncPath, ObservedEntry>,
     plan: CandidatePlan,
+    /// Whether the base remembered any entry the filters still include.
+    remembers: Remembers,
+}
+
+/// Whether a run's base held entries, which makes an empty side news.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Remembers {
+    Nothing,
+    Entries,
 }
 
 impl PairRun {
@@ -551,6 +571,11 @@ impl PairRun {
             left_cache,
             right_cache,
             plan,
+            remembers: if base.is_empty() {
+                Remembers::Nothing
+            } else {
+                Remembers::Entries
+            },
         })
     }
 
@@ -663,23 +688,19 @@ impl PairRun {
             }
         }
 
-        // PLAN.md §3.6: a non-empty target needs explicit confirmation on the
-        // first run. Archiving or replacing content destroys what the target
-        // already held, so an unreviewed first run stops here however small
-        // the change; `RunContext::Reviewed` marks a plan a person accepted.
+        // PLAN.md §3.2, §3.6: the first run of every pair is previewed,
+        // which also covers a non-empty target's confirmation. Only the
+        // exact plan a person saw (`RunContext::Reviewed`) records the
+        // identities and writes; anything else returns the plan for review.
         let first_run = self.identities.side(Side::Left).is_none()
             || self.identities.side(Side::Right).is_none();
-        let destroys_target = self.plan.rows().iter().any(|row| {
-            matches!(
-                row.decision(),
-                CandidateDecision::Entry(EntryDecision::Archive { .. })
-                    | CandidateDecision::Entry(EntryDecision::Propagate {
-                        change: ChangeKind::ReplaceContent,
-                        ..
-                    })
-            )
-        });
-        if first_run && destroys_target && context != RunContext::Reviewed {
+        if first_run && context != RunContext::Reviewed {
+            return Ok(RunOutcome::NeedsApproval(self.preview()));
+        }
+        // PLAN.md §3.6: a folder that is suddenly empty — wiped, or a stale
+        // copy put in its place — must not empty the other side unseen,
+        // even below the mass-deletion fuse.
+        if self.emptied_side_archives() && context != RunContext::Reviewed {
             return Ok(RunOutcome::NeedsApproval(self.preview()));
         }
         for side in [Side::Left, Side::Right] {
@@ -710,20 +731,29 @@ impl PairRun {
         }
 
         let revision = self.pair.revision();
-        if self.identities.side(Side::Left).is_none() || self.identities.side(Side::Right).is_none()
-        {
-            let ensure = |side: Side| {
-                self.endpoints
-                    .endpoint(side)
-                    .ensure_identity(options.durability())
-                    .map_err(|source| RunError::IdentityWrite { side, source })
-            };
-            let identities = Commit::Identities {
-                left: ensure(Side::Left)?,
-                right: ensure(Side::Right)?,
-            };
-            commit(revision, identities).map_err(RunError::Commit)?;
-        }
+        let identities = match (
+            self.identities.side(Side::Left),
+            self.identities.side(Side::Right),
+        ) {
+            // The scan may have taken hours; both roots must still be the
+            // recorded ones before the first write.
+            (Some(left), Some(right)) => {
+                let identities = [left, right];
+                self.check_roots(identities)?;
+                identities
+            }
+            _ => {
+                let ensure = |side: Side| {
+                    self.endpoints
+                        .endpoint(side)
+                        .ensure_identity(options.durability())
+                        .map_err(|source| RunError::IdentityWrite { side, source })
+                };
+                let (left, right) = (ensure(Side::Left)?, ensure(Side::Right)?);
+                commit(revision, Commit::Identities { left, right }).map_err(RunError::Commit)?;
+                [left, right]
+            }
+        };
 
         let scope = RunScope::new(started, options.clone());
         let mut executor = Executor {
@@ -757,10 +787,21 @@ impl PairRun {
         let rows = self.plan.rows();
         let forward = rows.iter().filter(|row| !is_archive(row.decision()));
         let reverse = rows.iter().rev().filter(|row| is_archive(row.decision()));
-        for row in forward.chain(reverse) {
+        for (index, row) in forward.chain(reverse).enumerate() {
             if control() == ScanControl::Cancel {
                 executor.report.completion = Completion::Cancelled;
                 break;
+            }
+            // PLAN.md §4.7: writes go through handles held on the roots, so
+            // an unmounted disk fails rather than taking writes at its old
+            // path. Reading both identities every batch stops the run at the
+            // first sign of that instead of failing entry by entry.
+            if index > 0
+                && index % COMMIT_BATCH == 0
+                && let Err(error) = self.check_roots(identities)
+            {
+                commit(&executor.pending)?;
+                return Err(error);
             }
             executor.apply(row.path(), row.decision(), control);
             if executor.pending.len() >= COMMIT_BATCH {
@@ -785,6 +826,37 @@ impl PairRun {
             }
         }
         Ok(RunOutcome::Ran(executor.report))
+    }
+
+    /// Both roots still hold `identities`, in left, right order.
+    fn check_roots(&self, identities: [EndpointId; 2]) -> Result<(), RunError> {
+        for (side, identity) in [Side::Left, Side::Right].into_iter().zip(identities) {
+            let observed = self
+                .endpoints
+                .endpoint(side)
+                .identity()
+                .map_err(|source| RunError::RootLost { side, source })?;
+            if observed != Some(identity) {
+                return Err(RunError::IdentityChanged { side });
+            }
+        }
+        Ok(())
+    }
+
+    /// One side holds nothing although the base remembers entries, and the
+    /// plan archives on the other side because of it.
+    fn emptied_side_archives(&self) -> bool {
+        if self.remembers == Remembers::Nothing {
+            return false;
+        }
+        [Side::Left, Side::Right].into_iter().any(|side| {
+            self.observation(side).entries().is_empty() && self.plan.rows().iter().any(|row| {
+                matches!(
+                    row.decision(),
+                    CandidateDecision::Entry(EntryDecision::Archive { on }) if *on == side.other()
+                )
+            })
+        })
     }
 
     /// Data bytes the plan copies to `side`.
