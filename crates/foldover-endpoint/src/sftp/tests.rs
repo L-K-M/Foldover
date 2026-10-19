@@ -158,15 +158,10 @@ fn roots_relate_only_on_one_server_and_hosts_fold_case() {
     outer.server = Some("other:22".into());
     assert_eq!(outer.relation_to(&inner), crate::RootRelation::Disjoint);
 
-    // Roots compare as raw bytes, whatever the filesystem's case rules.
+    // Synthetic locators test raw comparison on case-insensitive hosts too.
     outer.server = Some("nas:22".into());
-    let casing = directory.path().join("Inner");
-    fs::create_dir(&casing).unwrap();
-    let Some(mut cased) = sftp(&casing) else {
-        return;
-    };
-    cased.server = Some("nas:22".into());
-    assert_eq!(inner.relation_to(&cased), crate::RootRelation::Disjoint);
+    outer.root.extend_from_slice(b"/Inner");
+    assert_eq!(inner.relation_to(&outer), crate::RootRelation::Disjoint);
 }
 
 #[test]
