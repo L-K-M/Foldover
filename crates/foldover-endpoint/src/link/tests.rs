@@ -22,11 +22,26 @@ fn link_with(
     name: &str,
     store: Store,
 ) -> (Arc<PeerLink>, mpsc::UnboundedReceiver<(DeviceId, String)>) {
+    link_at(
+        name,
+        SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        Presence::Unlisted,
+        store,
+    )
+}
+
+fn link_at(
+    name: &str,
+    address: SocketAddr,
+    presence: Presence,
+    store: Store,
+) -> (Arc<PeerLink>, mpsc::UnboundedReceiver<(DeviceId, String)>) {
     let (recorded, paired) = mpsc::unbounded_channel();
     let link = PeerLink::start(
         Identity::generate().unwrap(),
         name.into(),
-        SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        address,
+        presence,
         [],
         move |device, name| {
             let _ = recorded.send((device, name));
@@ -66,7 +81,7 @@ async fn both_confirmations_pin_both_macs_and_one_pins_nothing() {
     let (b, mut b_paired) = link("Studio");
     let window = b.open_pairing(Duration::from_secs(60)).unwrap();
 
-    let shown = tokio::time::timeout(WAIT, a.pair(b.device(), window))
+    let shown = tokio::time::timeout(WAIT, a.pair(b.device(), Some(window)))
         .await
         .unwrap()
         .unwrap();
@@ -96,7 +111,7 @@ async fn a_cancel_on_either_side_pins_nothing() {
         let (a, mut a_paired) = link("Laptop");
         let (b, mut b_paired) = link("Studio");
         let window = b.open_pairing(Duration::from_secs(60)).unwrap();
-        tokio::time::timeout(WAIT, a.pair(b.device(), window))
+        tokio::time::timeout(WAIT, a.pair(b.device(), Some(window)))
             .await
             .unwrap()
             .unwrap();
@@ -121,7 +136,7 @@ async fn a_mac_without_an_open_window_refuses_to_pair() {
     let (a, _) = link("Laptop");
     let (b, _) = link("Studio");
     // B's paired-only node takes no unpaired device.
-    let result = tokio::time::timeout(WAIT, a.pair(b.device(), b.address().unwrap()))
+    let result = tokio::time::timeout(WAIT, a.pair(b.device(), Some(b.address().unwrap())))
         .await
         .unwrap();
     assert!(result.is_err());
@@ -130,6 +145,47 @@ async fn a_mac_without_an_open_window_refuses_to_pair() {
         a.decide(b.device(), Decision::Confirm),
         Err(LinkError::NoSuchPairing)
     ));
+
+    // Unlisted Macs see nobody, so pairing needs an address.
+    assert_eq!(a.nearby().unwrap(), []);
+    assert!(matches!(
+        a.pair(b.device(), None).await,
+        Err(LinkError::NotNearby)
+    ));
+}
+
+/// Live multicast on this host; set FOLDOVER_MDNS_TESTS=1 to run it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mac_open_for_pairing_is_found_on_the_network_and_paired_without_an_address() {
+    if std::env::var_os("FOLDOVER_MDNS_TESTS").is_none() {
+        return;
+    }
+    let everywhere = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
+    let (a, _) = link_at("Laptop", everywhere, Presence::Announced, Store::Working);
+    let (b, _) = link_at("Studio", everywhere, Presence::Announced, Store::Working);
+    b.open_pairing(Duration::from_secs(60)).unwrap();
+
+    let mut found = None;
+    for _ in 0..400 {
+        found = a
+            .nearby()
+            .unwrap()
+            .into_iter()
+            .find(|nearby| nearby.device == b.device() && nearby.pairing.is_some());
+        if found.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let found = found.expect("B never appeared open for pairing");
+    assert_eq!(found.name, "Studio");
+    assert_eq!(found.address.port(), b.address().unwrap().port());
+
+    let shown = tokio::time::timeout(WAIT, a.pair(b.device(), None))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending_on(&b, a.device()).await.code, shown.code);
 }
 
 /// Review: closing a window closed its node, and with it the connections
@@ -139,7 +195,7 @@ async fn a_code_shown_before_the_window_closed_can_still_be_confirmed() {
     let (a, mut a_paired) = link("Laptop");
     let (b, mut b_paired) = link("Studio");
     let window = b.open_pairing(Duration::from_secs(60)).unwrap();
-    tokio::time::timeout(WAIT, a.pair(b.device(), window))
+    tokio::time::timeout(WAIT, a.pair(b.device(), Some(window)))
         .await
         .unwrap()
         .unwrap();
@@ -161,7 +217,7 @@ async fn a_device_that_could_not_be_recorded_is_not_trusted() {
     let (a, mut a_paired) = link("Laptop");
     let (b, mut b_paired) = link_with("Studio", Store::Failing);
     let window = b.open_pairing(Duration::from_secs(60)).unwrap();
-    tokio::time::timeout(WAIT, a.pair(b.device(), window))
+    tokio::time::timeout(WAIT, a.pair(b.device(), Some(window)))
         .await
         .unwrap()
         .unwrap();

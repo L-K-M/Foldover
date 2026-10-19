@@ -30,9 +30,11 @@ use foldover_proto::local::{
 };
 use foldover_proto::local::{
     PEER_CANCEL, PEER_CONFIRM, PEER_PAIR, PEER_PAIRING_CLOSE, PEER_PAIRING_OPEN, PEER_REVOKE,
-    PEER_STATUS, PeerKey, PeerPair, PeerPairingOpen,
+    PEER_START, PEER_STATUS, PeerKey, PeerPair, PeerPairingOpen,
 };
-pub use foldover_proto::local::{PeerDeviceRecord, PeerPendingRecord, PeerStatus};
+pub use foldover_proto::local::{
+    PeerDeviceRecord, PeerNearbyRecord, PeerPendingRecord, PeerStatus,
+};
 pub use foldover_types::DeviceId;
 pub use foldover_types::{
     Durability, Filters, InvalidPair, InvalidReviewToken, LocalRoot, MetadataPolicy, PairConfig,
@@ -387,10 +389,18 @@ pub async fn remove_pair(
     Ok(removed)
 }
 
-/// This Mac's device, its pairing window and the Macs paired with it.
+/// This Mac's device, its pairing window and the Macs paired with it;
+/// never turns Mac-to-Mac on.
 pub async fn peer_status(location: &SocketLocation) -> Result<PeerStatus, Error> {
     Ok(serde_json::from_value(
         call(location, PEER_STATUS, None).await?,
+    )?)
+}
+
+/// Turn Mac-to-Mac on: listen, and look for Macs on the network.
+pub async fn start_peers(location: &SocketLocation) -> Result<PeerStatus, Error> {
+    Ok(serde_json::from_value(
+        call(location, PEER_START, None).await?,
     )?)
 }
 
@@ -411,16 +421,17 @@ pub async fn close_pairing(location: &SocketLocation) -> Result<PeerStatus, Erro
     )?)
 }
 
-/// Connect to `device`'s open pairing window at `address`. Both Macs then
-/// show the returned code; a person confirms it on each.
+/// Connect to `device`'s open pairing window at `address`, or where the
+/// local network says when None. Both Macs then show the returned code; a
+/// person confirms it on each.
 pub async fn pair_device(
     location: &SocketLocation,
     device: DeviceId,
-    address: SocketAddr,
+    address: Option<SocketAddr>,
 ) -> Result<PeerPendingRecord, Error> {
     let params = serde_json::to_value(PeerPair {
         device: device.to_string(),
-        address: address.to_string(),
+        address: address.map(|address| address.to_string()),
     })?;
     Ok(serde_json::from_value(
         call(location, PEER_PAIR, Some(params)).await?,
