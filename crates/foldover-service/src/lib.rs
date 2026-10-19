@@ -1440,6 +1440,66 @@ mod tests {
         );
     }
 
+    /// P5.3: a paired Mac reports changes in a folder it shares, so a
+    /// pair with that folder runs when it changes.
+    #[tokio::test]
+    async fn changes_in_a_folder_another_mac_shares_are_reported() {
+        let ((a_directory, a), (_b_directory, b), a_device, b_device) = paired_agents().await;
+        let shared = tempfile::tempdir().unwrap();
+        let share = b
+            .handle(Request::call(
+                1,
+                SHARE_ADD,
+                Some(json!({"device": a_device.to_string(), "root": shared.path().as_os_str().as_bytes(), "name": "Photos"})),
+            ))
+            .await
+            .unwrap();
+        let mut mac = input(a_directory.path(), "Mac");
+        mac["right_root"] =
+            json!(format!("peer://{b_device}/{}", share["id"].as_str().unwrap()).into_bytes());
+        let created = a
+            .handle(Request::call(2, PAIR_CREATE, Some(mac)))
+            .await
+            .unwrap();
+        let pair = a.engine.lock().unwrap().pairs().unwrap()[0].clone();
+        assert_eq!(pair.id().to_string(), created["id"]);
+
+        let (reported, mut reports) = tokio::sync::mpsc::unbounded_channel();
+        let mut watcher = foldover_engine::PairWatcher::new(move |id| {
+            let _ = reported.send(id);
+        })
+        .unwrap();
+        let reach = a.engine.lock().unwrap().reach();
+        assert!(
+            watcher
+                .watch(std::slice::from_ref(&pair), &reach)
+                .is_empty()
+        );
+        // Without the link, the folder cannot be watched and says so.
+        let unwatched = foldover_engine::PairWatcher::new(|_| {}).unwrap().watch(
+            std::slice::from_ref(&pair),
+            &foldover_engine::Reach::default(),
+        );
+        assert_eq!(unwatched.len(), 1);
+
+        // Changes keep being reported once B watches.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut index = 0;
+        loop {
+            fs::write(shared.path().join(format!("{index}.jpg")), b"new").unwrap();
+            index += 1;
+            match tokio::time::timeout(std::time::Duration::from_millis(1_500), reports.recv())
+                .await
+            {
+                Ok(Some(id)) => {
+                    assert_eq!(id, pair.id());
+                    break;
+                }
+                _ => assert!(std::time::Instant::now() < deadline, "no change reported"),
+            }
+        }
+    }
+
     /// Two agents pair over loopback; the pin survives a restart and
     /// revoking forgets it.
     #[tokio::test]

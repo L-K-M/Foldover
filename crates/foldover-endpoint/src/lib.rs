@@ -49,11 +49,11 @@ pub use endpoint::{Endpoint, ObserveStep, Reach};
 mod link;
 pub use link::{
     Answer, Decision, LinkError, NearbyMac, NotRecorded, PeerHost, PeerLink, PendingPairing,
-    Presence,
+    Presence, WatchHandle,
 };
 
 mod remote;
-pub use remote::{FolderCache, PeerEndpoint, serve_folder};
+pub use remote::{FolderCache, PeerEndpoint, serve_folder, watch_folder};
 
 #[cfg(unix)]
 pub use pair::{EndpointPair, PairRootError, access_denied};

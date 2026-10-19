@@ -244,7 +244,7 @@ impl Scheduler {
     /// Unwatchable folders (unmounted disks) are retried each tick and get
     /// hourly runs meanwhile; one that becomes watchable counts as changed,
     /// since it may have changed while it was away.
-    fn watch(&self, pairs: &[PairConfig], now: Instant) {
+    fn watch(&self, pairs: &[PairConfig], reach: &Reach, now: Instant) {
         let ids: Vec<_> = pairs.iter().map(PairConfig::id).collect();
         let mut watched = self.watched.lock().unwrap_or_else(PoisonError::into_inner);
         let mut unwatchable = self
@@ -260,7 +260,11 @@ impl Scheduler {
             return;
         };
 
-        let failed: HashSet<_> = watcher.watch(pairs).into_iter().map(|(id, _)| id).collect();
+        let failed: HashSet<_> = watcher
+            .watch(pairs, reach)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
         for id in unwatchable.difference(&failed) {
             if watched.contains(id) {
                 self.mark_changed(*id, now);
@@ -322,7 +326,12 @@ impl Service {
             .filter(|pair| pair.draft().options().schedule() == Schedule::OnChange)
             .cloned()
             .collect();
-        self.scheduler.watch(&changing, now);
+        let reach = self
+            .engine
+            .lock()
+            .map(|engine| engine.reach())
+            .unwrap_or_default();
+        self.scheduler.watch(&changing, &reach, now);
 
         let mut started = Vec::new();
         for pair in candidates {
@@ -441,11 +450,11 @@ mod tests {
         *scheduler.watcher.lock().unwrap() = Some(PairWatcher::new(|_| {}).unwrap());
         let at = |seconds| start + Duration::from_secs(seconds);
 
-        scheduler.watch(std::slice::from_ref(&pair), at(1));
+        scheduler.watch(std::slice::from_ref(&pair), &Reach::default(), at(1));
         assert!(!scheduler.due(&pair, at(10)));
 
         fs::create_dir(&right).unwrap();
-        scheduler.watch(std::slice::from_ref(&pair), at(20));
+        scheduler.watch(std::slice::from_ref(&pair), &Reach::default(), at(20));
         assert!(!scheduler.due(&pair, at(21)));
         assert!(scheduler.due(&pair, at(26)));
     }
