@@ -32,9 +32,11 @@ impl ArchiveError {
             Self::Folder(ScanError::UnknownArchiveRun)
             | Self::PutBack(ApplyError::Scan(ScanError::UnknownArchiveRun))
             | Self::PutBack(ApplyError::NotArchived(_)) => ArchiveErrorKind::NotFound,
-            Self::PutBack(ApplyError::Unsupported(_) | ApplyError::InvalidPath(_)) => {
-                ArchiveErrorKind::Invalid
-            }
+            Self::PutBack(
+                ApplyError::Unsupported(_)
+                | ApplyError::InvalidPath(_)
+                | ApplyError::DurabilityUnsupported(_),
+            ) => ArchiveErrorKind::Invalid,
             Self::Folder(_) | Self::PutBack(_) => ArchiveErrorKind::Unavailable,
         }
     }
@@ -103,6 +105,11 @@ impl PairArchive {
     /// Move an item back to its original path, or beside it when that is
     /// taken, and return where it went. The next sync copies it across.
     pub fn put_back(&self, run: &str, path: &SyncPath) -> Result<SyncPath, ArchiveError> {
+        // A rename has no flush over SFTP, so a full-durability pair is
+        // refused rather than silently downgraded.
+        if self.durability == Durability::Full && matches!(self.endpoint, Endpoint::Sftp(_)) {
+            return Err(ApplyError::DurabilityUnsupported(path.clone()).into());
+        }
         Ok(self.endpoint.put_back(run, path, self.durability)?)
     }
 
@@ -190,5 +197,64 @@ mod tests {
                 .kind(),
             ArchiveErrorKind::NotFound
         );
+    }
+
+    /// Putting an item back renames on the server; a pair asking for
+    /// full durability is refused before the rename is attempted.
+    #[test]
+    fn full_durability_put_back_is_rejected_on_sftp() {
+        let Some(server) = std::env::var_os("FOLDOVER_SFTP_SERVER")
+            .map(std::path::PathBuf::from)
+            .into_iter()
+            .chain(
+                [
+                    "/usr/libexec/sftp-server",
+                    "/usr/lib/openssh/sftp-server",
+                    "/usr/lib/ssh/sftp-server",
+                ]
+                .map(std::path::PathBuf::from),
+            )
+            .find(|path| path.exists())
+        else {
+            eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
+            return;
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = foldover_endpoint::SftpEndpoint::spawn(
+            &server,
+            &[OsStr::new("-d"), OsStr::new("/")],
+            directory.path().as_os_str().as_bytes(),
+        )
+        .unwrap();
+        let run = archive_name(std::time::UNIX_EPOCH);
+        let folder = directory.path().join(".foldover/archive").join(&run);
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("note"), b"kept").unwrap();
+
+        let archive = PairArchive {
+            endpoint: Endpoint::Sftp(endpoint),
+            durability: Durability::Full,
+        };
+        let path = SyncPath::try_from(b"note".as_slice()).unwrap();
+        let error = archive.put_back(&run, &path).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ArchiveError::PutBack(ApplyError::DurabilityUnsupported(_))
+            ),
+            "{error:?}"
+        );
+        assert_eq!(error.kind(), ArchiveErrorKind::Invalid);
+        // The item stayed in the archive; nothing appeared at its path.
+        assert!(!directory.path().join("note").exists());
+        assert_eq!(fs::read(folder.join("note")).unwrap(), b"kept");
+
+        // Standard puts it back on the same server.
+        let archive = PairArchive {
+            endpoint: archive.endpoint,
+            durability: Durability::Standard,
+        };
+        assert_eq!(archive.put_back(&run, &path).unwrap(), path);
+        assert_eq!(fs::read(directory.path().join("note")).unwrap(), b"kept");
     }
 }

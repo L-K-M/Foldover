@@ -21,8 +21,8 @@ use foldover_endpoint::{
 };
 use foldover_state::{BaseUpdate, MountSources, RecordedIdentities, SnapshotEntry};
 use foldover_types::{
-    BaselineEntry, ChangeKind, ConflictKind, EndpointId, EntryDecision, EntryVersion, PairConfig,
-    Resolution, ScanControl, Side, SyncPath,
+    BaselineEntry, ChangeKind, ConflictKind, Durability, EndpointId, EntryDecision, EntryVersion,
+    PairConfig, Resolution, ScanControl, Side, SyncPath,
 };
 
 use crate::{
@@ -66,6 +66,11 @@ pub enum RunError {
         #[source]
         source: ApplyError,
     },
+    #[error(
+        "The {side:?} folder is on an SFTP server, which cannot guarantee full durability; \
+         choose standard durability for this pair"
+    )]
+    UnsupportedDurability { side: Side },
     #[error(
         "The {side:?} folder's disk has {available} bytes free; this sync needs {needed} plus a \
          256 MiB reserve. Free space and sync again."
@@ -318,6 +323,9 @@ pub struct PairRun {
     endpoints: EndpointPair,
     left: Observation,
     right: Observation,
+    /// Observations the filters excluded, kept for the next run's cache.
+    left_cache: BTreeMap<SyncPath, ObservedEntry>,
+    right_cache: BTreeMap<SyncPath, ObservedEntry>,
     plan: CandidatePlan,
 }
 
@@ -415,6 +423,17 @@ impl PairRun {
                 .collect()
         };
         let skipped: Vec<SyncPath> = skipped.into_iter().collect();
+        // Excluded entries leave the plan, but unchanged ones should not be
+        // reread every run: their observations stay cached for the next one.
+        let cache = |observation: &Observation| {
+            skipped
+                .iter()
+                .filter_map(|path| observation.entries().get_key_value(path))
+                .map(|(path, entry)| (path.clone(), entry.clone()))
+                .collect()
+        };
+        let left_cache = cache(&left);
+        let right_cache = cache(&right);
         left.exclude(&skipped);
         right.exclude(&skipped);
         let mut base = base;
@@ -439,6 +458,8 @@ impl PairRun {
             endpoints,
             left,
             right,
+            left_cache,
+            right_cache,
             plan,
         })
     }
@@ -463,11 +484,20 @@ impl PairRun {
         }
     }
 
-    /// This run's observation of one side, for the next run to reuse.
+    /// This run's observation of one side, for the next run to reuse,
+    /// filtered entries included: skipping them in the plan must not make
+    /// the next run reread unchanged data.
     pub fn snapshot(&self, side: Side) -> Vec<SnapshotEntry> {
-        self.observation(side)
-            .entries()
+        let cache = match side {
+            Side::Left => &self.left_cache,
+            Side::Right => &self.right_cache,
+        };
+        let entries: BTreeMap<_, _> = cache
             .iter()
+            .chain(self.observation(side).entries())
+            .collect();
+        entries
+            .into_iter()
             .map(|(path, entry)| SnapshotEntry {
                 path: path.clone(),
                 fingerprint: entry.fingerprint_bytes(),
@@ -530,6 +560,17 @@ impl PairRun {
         commit: &mut impl FnMut(u64, Commit<'_>) -> Result<(), crate::Error>,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<RunOutcome, RunError> {
+        let options = self.pair.draft().options();
+        // Full durability is a promise a generic SFTP server cannot
+        // keep; refuse before anything — identities included — mutates
+        // either folder.
+        for side in [Side::Left, Side::Right] {
+            if options.durability() == Durability::Full
+                && matches!(self.endpoints.endpoint(side), Endpoint::Sftp(_))
+            {
+                return Err(RunError::UnsupportedDurability { side });
+            }
+        }
         for side in [Side::Left, Side::Right] {
             let approved = self.plan.deletions(side).deletions() <= approval.deletions(side);
             let allowed = match self.plan.deletion_review(side, context) {
@@ -558,7 +599,6 @@ impl PairRun {
         }
 
         let revision = self.pair.revision();
-        let options = self.pair.draft().options();
         if self.identities.side(Side::Left).is_none() || self.identities.side(Side::Right).is_none()
         {
             let ensure = |side: Side| {

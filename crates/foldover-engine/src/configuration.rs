@@ -9,7 +9,9 @@ use foldover_endpoint::{
     RootRelation, ScanError,
 };
 use foldover_state::{HistoryEntry, MountSources, PairStore, Pause, SnapshotEntry, StateLocation};
-use foldover_types::{PairConfig, PairDraft, PairId, PairRoot, Resolution, Side, SyncPath};
+use foldover_types::{
+    Durability, PairConfig, PairDraft, PairId, PairRoot, Resolution, Side, SyncPath,
+};
 
 use crate::{Commit, RunInputs};
 
@@ -31,6 +33,8 @@ pub enum Error {
     CatalogUnavailable { pair: PairId, source: PairRootError },
     #[error("Selected root overlaps the agent's state directory")]
     StateOverlap,
+    #[error("SFTP folders cannot guarantee full durability; choose standard durability")]
+    DurabilityUnsupported,
     #[error(transparent)]
     Filter(#[from] InvalidFilter),
 }
@@ -54,7 +58,7 @@ impl Error {
             Self::Roots(PairRootError::Overlap(_))
             | Self::CatalogOverlap(_)
             | Self::StateOverlap => ErrorKind::Overlap,
-            Self::Filter(_) => ErrorKind::Invalid,
+            Self::Filter(_) | Self::DurabilityUnsupported => ErrorKind::Invalid,
             Self::Roots(_) | Self::Endpoint(_) | Self::CatalogUnavailable { .. } => {
                 ErrorKind::Unavailable
             }
@@ -107,7 +111,7 @@ impl Engine {
     }
 
     pub fn create_pair(&mut self, draft: &PairDraft) -> Result<PairConfig, Error> {
-        validate_filters(draft)?;
+        validate_options(draft)?;
         self.validate_roots(draft, None)?;
         Ok(self.pairs.create(draft)?)
     }
@@ -121,7 +125,7 @@ impl Engine {
         if self.pair(id)?.revision() != revision {
             return Err(Error::StaleRevision);
         }
-        validate_filters(draft)?;
+        validate_options(draft)?;
         self.validate_roots(draft, Some(id))?;
         Ok(self.pairs.update(id, revision, draft)?)
     }
@@ -290,6 +294,20 @@ impl Engine {
     }
 }
 
+/// Options the chosen folders cannot keep are refused before any root
+/// is opened, so an unreachable server cannot hide the rejection.
+fn validate_options(draft: &PairDraft) -> Result<(), Error> {
+    // SFTP has no flush for namespace changes, so full durability can
+    // never be promised to or from it.
+    let remote = |root: &PairRoot| matches!(root, PairRoot::Sftp(_));
+    if draft.options().durability() == Durability::Full
+        && (remote(draft.left()) || remote(draft.right()))
+    {
+        return Err(Error::DurabilityUnsupported);
+    }
+    validate_filters(draft)
+}
+
 /// Rules are checked when saved, so a run never meets an invalid one.
 fn validate_filters(draft: &PairDraft) -> Result<(), Error> {
     Filter::new(draft.options().filters().rules().iter().map(String::as_str))?;
@@ -369,6 +387,70 @@ mod tests {
         drop(engine);
         let engine = Engine::open(&location).unwrap();
         assert_eq!(engine.pair(saved.id()).unwrap(), updated);
+    }
+
+    /// Full durability cannot be promised on SFTP: the check precedes
+    /// root validation, so an unreachable server cannot hide it.
+    #[test]
+    fn sftp_pairs_reject_full_durability_before_any_root_check() {
+        let temporary = tempfile::tempdir().unwrap();
+        let location = StateLocation::Directory(temporary.path().join("state"));
+        let mut engine = Engine::open(&location).unwrap();
+        let right = temporary.path().join("right");
+        fs::create_dir(&right).unwrap();
+        let sftp = PairRoot::from_bytes(b"sftp://nas/srv".to_vec()).unwrap();
+        let full = foldover_types::PairOptions::new(
+            foldover_types::MetadataPolicy::default(),
+            foldover_types::Durability::Full,
+        );
+        for (left, right_root) in [
+            (sftp.clone(), PairRoot::from(root(&right))),
+            (PairRoot::from(root(&right)), sftp.clone()),
+        ] {
+            let draft = PairDraft::new("Pair".into(), left, right_root, SyncMode::Sync)
+                .unwrap()
+                .with_options(full.clone());
+            let error = engine.create_pair(&draft).unwrap_err();
+            assert!(matches!(error, Error::DurabilityUnsupported), "{error:?}");
+            assert_eq!(error.kind(), ErrorKind::Invalid);
+        }
+        assert!(engine.pairs().unwrap().is_empty());
+        drop(engine);
+
+        // A draft with Full over SFTP still decodes from stored bytes:
+        // the rejection lives in the save path, not the data model.
+        let draft = PairDraft::new("Pair".into(), sftp.clone(), root(&right), SyncMode::Sync)
+            .unwrap()
+            .with_options(full.clone());
+        let stored =
+            PairConfig::from_stored(PairId::from_bytes([7; PairId::BYTE_LEN]).unwrap(), 1, draft)
+                .unwrap();
+        assert_eq!(
+            stored.draft().options().durability(),
+            foldover_types::Durability::Full
+        );
+
+        // An existing full-durability pair stays editable as long as
+        // the saved draft remains one the folders can keep.
+        let left = temporary.path().join("left");
+        fs::create_dir(&left).unwrap();
+        let draft = PairDraft::new("Pair".into(), root(&left), root(&right), SyncMode::Sync)
+            .unwrap()
+            .with_options(full.clone());
+        let mut engine = Engine::open(&location).unwrap();
+        let pair = engine.create_pair(&draft).unwrap();
+        let revision = engine
+            .update_pair(pair.id(), pair.revision(), pair.draft())
+            .unwrap()
+            .revision();
+        // The same pair gains an SFTP root: re-saving it is refused.
+        let remote = PairDraft::new("Pair".into(), root(&left), sftp, SyncMode::Sync)
+            .unwrap()
+            .with_options(full);
+        assert!(matches!(
+            engine.update_pair(pair.id(), revision, &remote),
+            Err(Error::DurabilityUnsupported)
+        ));
     }
 
     #[test]

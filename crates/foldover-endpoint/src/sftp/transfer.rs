@@ -73,6 +73,9 @@ pub(crate) fn copy(
     run: &RunScope,
     control: &mut impl FnMut() -> ScanControl,
 ) -> Result<EntryVersion, ApplyError> {
+    if let Endpoint::Sftp(_) = to {
+        super::check_durability(run.options().durability(), path)?;
+    }
     let source = source(from, path, planned, run, control)?;
     let kind = planned.version().kind();
     let expected = planned.version().content();
@@ -130,6 +133,9 @@ pub(crate) fn update_metadata(
     run: &RunScope,
     control: &mut impl FnMut() -> ScanControl,
 ) -> Result<EntryVersion, ApplyError> {
+    if let Endpoint::Sftp(_) = to {
+        super::check_durability(run.options().durability(), path)?;
+    }
     if planned.version().content() != current.version().content() {
         return Err(ApplyError::Unsupported(path.clone()));
     }

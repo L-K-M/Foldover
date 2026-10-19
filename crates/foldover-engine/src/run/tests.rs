@@ -17,6 +17,7 @@ struct Fixture {
     filters: Vec<String>,
     size_limit: Option<u64>,
     age_limit: Option<u32>,
+    durability: foldover_types::Durability,
     right_kind: RightKind,
 }
 
@@ -55,6 +56,7 @@ fn fixture(mode: SyncMode) -> Fixture {
         filters: Vec::new(),
         size_limit: None,
         age_limit: None,
+        durability: foldover_types::Durability::Standard,
         right_kind: RightKind::Local,
     }
 }
@@ -78,7 +80,7 @@ impl Fixture {
         self.try_prepare().unwrap()
     }
 
-    fn try_prepare(&self) -> Result<PairRun, RunError> {
+    fn inputs(&self) -> RunInputs {
         let filters = foldover_types::Filters::new(self.filters.clone())
             .and_then(|filters| filters.with_size_limit(self.size_limit))
             .and_then(|filters| filters.with_age_limit(self.age_limit))
@@ -90,16 +92,26 @@ impl Fixture {
             self.mode,
         )
         .unwrap()
-        .with_options(foldover_types::PairOptions::default().with_filters(filters));
+        .with_options(
+            foldover_types::PairOptions::new(
+                foldover_types::MetadataPolicy::default(),
+                self.durability,
+            )
+            .with_filters(filters),
+        );
         let pair =
             PairConfig::from_stored(PairId::from_bytes([1; 16]).unwrap(), self.revision, draft)
                 .unwrap();
-        let inputs = RunInputs::new(
+        RunInputs::new(
             pair,
             self.base.clone(),
             self.identities,
             self.resolutions.clone(),
-        );
+        )
+    }
+
+    fn try_prepare(&self) -> Result<PairRun, RunError> {
+        let inputs = self.inputs();
         if self.right_kind == RightKind::Local {
             return PairRun::prepare(inputs, &mut proceed);
         }
@@ -704,6 +716,54 @@ fn files_old_in_both_folders_are_skipped_until_edited() {
 }
 
 #[test]
+fn age_excluded_files_stay_in_the_snapshot_cache_for_reuse() {
+    let mut pair = fixture(SyncMode::Sync);
+    let file = pair.left.path().join("old");
+    fs::write(&file, b"data").unwrap();
+    let hundred_days = std::time::Duration::from_secs(100 * 24 * 60 * 60);
+    fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - hundred_days)
+        .unwrap();
+    pair.age_limit = Some(30);
+
+    // Old on the only side that has it: skipped in both, so not planned.
+    let first = pair.prepare();
+    assert!(first.preview().items().is_empty());
+    // The observation still feeds the next run's cache.
+    let cached = first
+        .snapshot(Side::Left)
+        .into_iter()
+        .find(|entry| entry.path == path(b"old"))
+        .expect("an age-excluded file stays cached");
+
+    // A wrong stored version proves the next run reused it without rereading.
+    let stored = foldover_types::EntryVersion::new(
+        foldover_types::EntryContent::File(foldover_types::Digest::from_bytes([7; 32])),
+        foldover_types::Digest::from_bytes([7; 32]),
+    );
+    let left: BTreeMap<_, _> = [(
+        cached.path.clone(),
+        foldover_endpoint::ObservedEntry::restore(stored, &cached.fingerprint).unwrap(),
+    )]
+    .into_iter()
+    .collect();
+    let inputs = pair.inputs().with_snapshots(left, BTreeMap::new());
+    let second = PairRun::prepare(inputs, &mut proceed).unwrap();
+    assert!(second.preview().items().is_empty());
+    assert_eq!(
+        second
+            .snapshot(Side::Left)
+            .iter()
+            .find(|entry| entry.path == path(b"old"))
+            .map(|entry| entry.version),
+        Some(stored)
+    );
+}
+
+#[test]
 fn sftp_folders_sync_like_local_ones() {
     if sftp_server().is_none() {
         eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
@@ -764,4 +824,37 @@ fn sftp_folders_sync_like_local_ones() {
         fs::read(pair.right.path().join("docs/a.txt")).unwrap(),
         b"there"
     );
+}
+
+/// Full durability cannot be promised to an SFTP folder; the run must
+/// refuse before anything mutates either side, identity files included.
+#[test]
+fn full_durability_rejects_a_run_with_an_sftp_side() {
+    if sftp_server().is_none() {
+        eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
+        return;
+    }
+    let mut pair = fixture(SyncMode::Sync);
+    pair.right_kind = RightKind::Sftp;
+    pair.durability = foldover_types::Durability::Full;
+    fs::write(pair.left.path().join("report"), b"new").unwrap();
+    let error = pair
+        .prepare()
+        .execute(
+            Approval::default(),
+            RunContext::Interactive,
+            STARTED,
+            &mut |_, _| panic!("nothing may commit"),
+            &mut proceed,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, RunError::UnsupportedDurability { side: Side::Right }),
+        "{error:?}"
+    );
+    // Nothing was written: no identities, no copy, no archive.
+    assert!(!pair.left.path().join(".foldover").exists());
+    assert!(!pair.right.path().join(".foldover").exists());
+    assert!(!pair.right.path().join("report").exists());
+    assert_eq!(fs::read(pair.left.path().join("report")).unwrap(), b"new");
 }

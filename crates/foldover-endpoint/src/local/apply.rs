@@ -91,6 +91,8 @@ pub enum ApplyError {
     NotArchived(SyncPath),
     #[error("Operation does not apply to this entry kind: {0:?}")]
     Unsupported(SyncPath),
+    #[error("Full durability cannot be guaranteed on this folder: {0:?}")]
+    DurabilityUnsupported(SyncPath),
     #[error(transparent)]
     InvalidPath(#[from] InvalidSyncPath),
 }
