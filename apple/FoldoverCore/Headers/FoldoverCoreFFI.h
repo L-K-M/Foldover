@@ -353,6 +353,11 @@ uint64_t uniffi_foldover_ffi_fn_func_sync_resolve(RustBuffer id, RustBuffer path
 uint64_t uniffi_foldover_ffi_fn_func_sync_run(RustBuffer id, uint64_t approved_left_deletions, uint64_t approved_right_deletions, RustBuffer review_token
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_SKIP_ONCE
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_SKIP_ONCE
+uint64_t uniffi_foldover_ffi_fn_func_sync_skip_once(RustBuffer id, RustBuffer path, RustBuffer review_token
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_STATUS
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_STATUS
 uint64_t uniffi_foldover_ffi_fn_func_sync_status(RustBuffer id
@@ -746,6 +751,12 @@ uint16_t uniffi_foldover_ffi_checksum_func_sync_resolve(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_SYNC_RUN
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_SYNC_RUN
 uint16_t uniffi_foldover_ffi_checksum_func_sync_run(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_SYNC_SKIP_ONCE
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_SYNC_SKIP_ONCE
+uint16_t uniffi_foldover_ffi_checksum_func_sync_skip_once(void
     
 );
 #endif

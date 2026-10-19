@@ -24,7 +24,7 @@ pub use root::{PairRoot, SftpRoot};
 
 pub use reconcile::{
     BaselineEntry, BaselineMismatch, ChangeKind, ConflictKind, Digest, EntryContent, EntryDecision,
-    EntryKind, EntryVersion, Resolution, Side, SyncMode,
+    EntryKind, EntryVersion, Resolution, Side, Skip, SyncMode,
 };
 pub use sync_path::{InvalidSyncPath, SyncPath};
 

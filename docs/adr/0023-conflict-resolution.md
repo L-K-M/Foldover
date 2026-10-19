@@ -1,6 +1,6 @@
-# ADR 0023: Conflict resolution
+# ADR 0023: Conflict resolution and per-item overrides
 
-Status: Implemented for files and links
+Status: Implemented for files, links and folders present on one side
 
 ## Decision
 
@@ -51,6 +51,27 @@ The date is the copied version's modification day (UTC); `2`, `3` and so
 on are appended when the name is taken. The next run replaces B's
 version with A's, archiving it as usual, and copies the new file to A.
 The app shows Keep Both on such conflicts; the CLI uses `--keep-both PATH`.
+
+## Per-item overrides
+
+PLAN.md §3.8 offers, on every previewed change, "copy the other way, skip
+once, always skip" (Always Skip adds a filter rule; ADR 0024).
+
+- **Copy the other way** is a side choice on any change, not only a
+  conflict: keeping the folder a change would have overwritten copies its
+  version back instead. An archive becomes a restore into the folder the
+  item went missing from; a copy of a new item archives it where it was
+  created. The app labels these "Restore to Folder A" or "Copy the Other
+  Way"; the CLI uses `--keep-left PATH` or `--keep-right PATH`. Blocked
+  items wait for the conflict above them.
+- A folder present on one side only is settled as a branch, as for folder
+  conflicts. A choice for a folder present on both sides copies only its
+  metadata; a file/folder mismatch is still resolved by hand.
+- **Skip once** (`keep: "skip"`, `--skip PATH`) leaves a previewed change
+  and everything inside it as it is — no write, no base change — in the
+  pair's next run that executes, scheduled or not, while both sides still
+  hold what the person saw. The agent keeps skips in memory: a restart
+  forgets them, and the next preview shows the change again.
 
 ## Consequences
 

@@ -26,7 +26,7 @@ use foldover_state::{
 };
 use foldover_types::{
     BaselineEntry, ChangeKind, ConflictKind, Durability, EndpointId, EntryContent, EntryDecision,
-    EntryVersion, PairConfig, PairId, Resolution, ReviewToken, ScanControl, Side, SyncPath,
+    EntryVersion, PairConfig, PairId, Resolution, ReviewToken, ScanControl, Side, Skip, SyncPath,
 };
 
 use crate::{
@@ -173,7 +173,8 @@ pub enum Action {
     Conflict(ConflictKind),
     /// An ancestor's conflict must be resolved first.
     Blocked,
-    /// Backup keeps a target-only entry or edit.
+    /// Backup keeps a target-only entry or edit, or a person skipped this
+    /// change for one run.
     KeepTarget,
 }
 
@@ -400,6 +401,7 @@ pub struct RunInputs {
     base: BTreeMap<SyncPath, BaselineEntry>,
     identities: RecordedIdentities,
     resolutions: BTreeMap<SyncPath, Resolution>,
+    skips: BTreeMap<SyncPath, Skip>,
     left_snapshot: BTreeMap<SyncPath, ObservedEntry>,
     right_snapshot: BTreeMap<SyncPath, ObservedEntry>,
 }
@@ -416,9 +418,15 @@ impl RunInputs {
             base,
             identities,
             resolutions,
+            skips: BTreeMap::new(),
             left_snapshot: BTreeMap::new(),
             right_snapshot: BTreeMap::new(),
         }
+    }
+
+    /// Changes a person chose to leave alone in this run only.
+    pub fn with_skips(self, skips: BTreeMap<SyncPath, Skip>) -> Self {
+        Self { skips, ..self }
     }
 
     /// Previous observations, whose versions are reused for entries with an
@@ -483,6 +491,7 @@ impl PairRun {
             base,
             identities,
             resolutions,
+            skips,
             left_snapshot,
             right_snapshot,
         } = inputs;
@@ -577,6 +586,7 @@ impl PairRun {
             &left.versions(),
             &right.versions(),
             &resolutions,
+            &skips,
             control,
         )
         .map_err(|error| match error {

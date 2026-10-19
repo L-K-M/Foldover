@@ -158,6 +158,7 @@ impl Service {
                     ConflictKeep::Left => jobs.resolve(&engine, id, &path, Side::Left, token),
                     ConflictKeep::Right => jobs.resolve(&engine, id, &path, Side::Right, token),
                     ConflictKeep::Both => jobs.keep_both(&engine, id, &path, token),
+                    ConflictKeep::Skip => jobs.skip(id, &path, token),
                 })
                 .await
                 .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))??;
@@ -1181,6 +1182,80 @@ mod tests {
             .unwrap();
         assert_eq!(settled(&service, &key).await["result"]["copied"], 1);
         assert_eq!(run_due_started(&service, at(600)).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn previewed_changes_can_go_the_other_way_or_wait_one_run() {
+        let (directory, service) = fixture();
+        let created = service
+            .handle(Request::call(
+                1,
+                PAIR_CREATE,
+                Some(input(directory.path(), "Docs")),
+            ))
+            .await
+            .unwrap();
+        let (left, right) = (
+            directory.path().join("Docs-left"),
+            directory.path().join("Docs-right"),
+        );
+        fs::write(left.join("keep"), b"k").unwrap();
+        fs::write(left.join("gone"), b"g").unwrap();
+        let key = json!({"id": created["id"]});
+        first_sync(&service, &key).await;
+        fs::remove_file(left.join("gone")).unwrap();
+        fs::write(left.join("later"), b"l").unwrap();
+        fs::write(left.join("now"), b"n").unwrap();
+
+        service
+            .handle(Request::call(2, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        let previewed = settled(&service, &key).await;
+        let token = previewed["preview"]["review_token"].clone();
+        let choose = |path: &[u8], keep: &str| json!({"id": created["id"], "path": path, "keep": keep, "review_token": token});
+        // Keeping B's file copies it back to A instead of archiving it.
+        service
+            .handle(Request::call(
+                3,
+                SYNC_RESOLVE,
+                Some(choose(b"gone", "right")),
+            ))
+            .await
+            .unwrap();
+        service
+            .handle(Request::call(
+                4,
+                SYNC_RESOLVE,
+                Some(choose(b"later", "skip")),
+            ))
+            .await
+            .unwrap();
+
+        service
+            .handle(Request::call(5, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        let chosen = settled(&service, &key).await;
+        assert_eq!(chosen["preview"]["counts"]["archives"], 0, "{chosen}");
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0, "review_token": chosen["preview"]["review_token"]});
+        service
+            .handle(Request::call(6, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        assert_eq!(settled(&service, &key).await["result"]["copied"], 2);
+        assert_eq!(fs::read(left.join("gone")).unwrap(), b"g");
+        assert!(right.join("now").exists());
+        assert!(!right.join("later").exists());
+
+        // A skip lasts one run.
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        service
+            .handle(Request::call(7, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        assert_eq!(settled(&service, &key).await["result"]["copied"], 1);
+        assert!(right.join("later").exists());
     }
 
     #[tokio::test]

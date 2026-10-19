@@ -281,6 +281,19 @@ pub async fn sync_keep_both(
     state(foldover_client::keep_both(&SocketLocation::Default, id, &path, token).await)
 }
 
+/// Leave a previewed change, and everything inside it, alone in the next
+/// run. `review_token` must be the token of the preview it was shown in.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn sync_skip_once(
+    id: String,
+    path: Vec<u8>,
+    review_token: String,
+) -> Result<SyncJobState, AgentError> {
+    let id = id.parse().map_err(invalid_configuration)?;
+    let token = parse_review_token(&review_token)?;
+    state(foldover_client::skip_once(&SocketLocation::Default, id, &path, token).await)
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn sync_cancel(id: String) -> Result<SyncJobState, AgentError> {
     let id = id.parse().map_err(invalid_configuration)?;

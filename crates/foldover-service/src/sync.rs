@@ -9,7 +9,7 @@
 //! Jobs hold the engine lock only to read inputs and commit progress, so
 //! configuration requests stay responsive during long runs.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
@@ -29,7 +29,7 @@ use foldover_proto::local::{
 };
 use foldover_types::{
     ChangeKind, ConflictKind, EntryVersion, PairId, Resolution, ReviewToken, ScanControl, Side,
-    SyncPath,
+    Skip, SyncPath,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -56,14 +56,13 @@ impl Work {
 /// Each side's version of a conflicted path; `None` when absent.
 type ConflictVersions = (Option<EntryVersion>, Option<EntryVersion>);
 
-/// The plan a person last saw: every item, for paging; the conflict
-/// versions `sync.resolve` binds to; and the whole preview a nonzero
-/// approval must match (ADRs 0013, 0020).
+/// The plan a person last saw: every item, for paging and for the
+/// versions a choice binds to, and the whole preview a nonzero approval
+/// must match (ADRs 0013, 0020, 0023).
 struct Reviewed {
     revision: u64,
     /// Fingerprint of `plan`; clients present it to bind to this preview.
     token: ReviewToken,
-    versions: HashMap<SyncPath, (ConflictKind, ConflictVersions)>,
     items: Vec<SyncItem>,
     plan: Preview,
 }
@@ -73,17 +72,16 @@ impl Reviewed {
         Self {
             revision: preview.revision(),
             token: preview.token(),
-            versions: preview
-                .items()
-                .iter()
-                .filter_map(|item| match item.action() {
-                    Action::Conflict(kind) => Some((item.path().clone(), (kind, item.versions()))),
-                    _ => None,
-                })
-                .collect(),
             items: preview.items().iter().map(wire_item).collect(),
             plan: preview.clone(),
         }
+    }
+
+    /// The item at `path`; items are in path order.
+    fn item(&self, path: &SyncPath) -> Option<&PreviewItem> {
+        let items = self.plan.items();
+        let index = items.binary_search_by(|item| item.path().cmp(path)).ok()?;
+        Some(&items[index])
     }
 }
 
@@ -96,6 +94,9 @@ struct Job {
 #[derive(Default)]
 struct State {
     jobs: HashMap<PairId, Job>,
+    /// Changes a person chose to leave alone in the pair's next run; spent
+    /// by the next run that executes.
+    skips: HashMap<PairId, BTreeMap<SyncPath, Skip>>,
     /// Pairs whose configuration is being replaced refuse new job claims.
     mutating: HashSet<PairId>,
 }
@@ -149,7 +150,7 @@ impl Jobs {
         keep: Side,
         token: Option<ReviewToken>,
     ) -> Result<(), RpcError> {
-        let (revision, _, (left, right)) = self.conflict(id, path, token)?;
+        let (revision, _, (left, right)) = self.choice(id, path, token)?;
         engine
             .lock()
             .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?
@@ -169,8 +170,8 @@ impl Jobs {
         let _mutation = self.mutation(id)?;
         #[cfg(test)]
         self.wait_mutation_gate();
-        let (revision, kind, (_, right)) = self.conflict(id, path, token)?;
-        let (ConflictKind::BothChanged, Some(right)) = (kind, right) else {
+        let (revision, action, (_, right)) = self.choice(id, path, token)?;
+        let (Action::Conflict(ConflictKind::BothChanged), Some(right)) = (action, right) else {
             return Err(RpcError::new(
                 INVALID_PARAMS,
                 "Keep both applies to files changed in both folders",
@@ -202,19 +203,40 @@ impl Jobs {
         self.resolve_reviewed(engine, id, path, Side::Left, token)
     }
 
-    /// A conflict from the pair's latest preview, while no job works.
-    /// `token` must name that preview, so a choice cannot follow a newer
-    /// plan the caller never saw.
-    fn conflict(
+    /// Leave a previewed change alone in the pair's next run, while both
+    /// sides still hold what the person saw (PLAN.md §3.8, skip once).
+    pub(crate) fn skip(
+        self: &Arc<Self>,
+        id: PairId,
+        path: &SyncPath,
+        token: Option<ReviewToken>,
+    ) -> Result<(), RpcError> {
+        let _mutation = self.mutation(id)?;
+        let (_, _, (left, right)) = self.choice(id, path, token)?;
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .skips
+            .entry(id)
+            .or_default()
+            .insert(path.clone(), Skip::new(left, right));
+        Ok(())
+    }
+
+    /// A change or conflict from the pair's latest preview, while no job
+    /// works. `token` must name that preview, so a choice cannot follow a
+    /// newer plan the caller never saw. Blocked items wait for the
+    /// conflict above them.
+    fn choice(
         &self,
         id: PairId,
         path: &SyncPath,
         token: Option<ReviewToken>,
-    ) -> Result<(u64, ConflictKind, ConflictVersions), RpcError> {
+    ) -> Result<(u64, Action, ConflictVersions), RpcError> {
         let stale = || {
             RpcError::new(
                 PREVIEW_REQUIRED,
-                "This conflict is not in the pair's latest preview; preview again",
+                "This change is not in the pair's latest preview; preview again",
             )
         };
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -229,8 +251,14 @@ impl Jobs {
         if token != Some(reviewed.token) {
             return Err(stale());
         }
-        let (kind, versions) = *reviewed.versions.get(path).ok_or_else(stale)?;
-        Ok((reviewed.revision, kind, versions))
+        let item = reviewed.item(path).ok_or_else(stale)?;
+        if item.action() == Action::Blocked {
+            return Err(RpcError::new(
+                INVALID_PARAMS,
+                "Resolve the conflict above this item first",
+            ));
+        }
+        Ok((reviewed.revision, item.action(), item.versions()))
     }
 
     /// A page of the latest preview's items after `after`, optionally of
@@ -329,12 +357,17 @@ impl Jobs {
         work: Work,
     ) -> Result<SyncStatus, RpcError> {
         let cancel = Arc::new(AtomicBool::new(false));
-        let held = self.claim(id, work, &cancel)?;
+        let (held, skips) = self.claim(id, work, &cancel)?;
         let engine = Arc::clone(engine);
+        let jobs = Arc::clone(self);
         self.spawn(id, move || {
             let started = SystemTime::now();
-            let (status, reviewed) = perform(&engine, id, work, &cancel, held);
+            let (status, reviewed) = perform(&engine, id, work, &cancel, held, skips);
             crate::history::record(&engine, id, work, started, &status);
+            // A skip lasts one executed run.
+            if matches!(status, SyncStatus::Finished { .. }) {
+                jobs.spend_skips(id);
+            }
             (status, reviewed)
         });
         Ok(self.status(id))
@@ -429,7 +462,7 @@ impl Jobs {
         id: PairId,
         work: Work,
         cancel: &Arc<AtomicBool>,
-    ) -> Result<Option<Reviewed>, RpcError> {
+    ) -> Result<(Option<Reviewed>, BTreeMap<SyncPath, Skip>), RpcError> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let blocked = if state.mutating.contains(&id) {
             Some("The pair's configuration is changing")
@@ -470,7 +503,16 @@ impl Jobs {
                 },
             )
             .and_then(|previous| previous.reviewed);
-        Ok(held)
+        let skips = state.skips.get(&id).cloned().unwrap_or_default();
+        Ok((held, skips))
+    }
+
+    fn spend_skips(&self, id: PairId) {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .skips
+            .remove(&id);
     }
 
     /// Run `run` on the blocking pool and publish its result. A panic
@@ -525,6 +567,7 @@ fn perform(
     work: Work,
     cancel: &AtomicBool,
     held: Option<Reviewed>,
+    skips: BTreeMap<SyncPath, Skip>,
 ) -> (SyncStatus, Option<Reviewed>) {
     let failed = |message: String| (SyncStatus::Failed { message }, None);
     let stored = match engine.lock() {
@@ -537,6 +580,7 @@ fn perform(
         Ok(stored) => stored,
         Err(error) => return failed(error.to_string()),
     };
+    let inputs = inputs.with_skips(skips);
     let journal = match work {
         Work::Undo => {
             let engine = engine.lock().unwrap_or_else(PoisonError::into_inner);

@@ -125,6 +125,7 @@ foldover sync ID                 # run; a pair's first run needs review
 foldover sync ID --approve 60 0 --review TOKEN  # approve the reviewed deletions
 foldover sync ID --keep-right PATH --review TOKEN  # keep B's reviewed version
 foldover sync ID --keep-both PATH --review TOKEN   # keep both reviewed versions
+foldover sync ID --skip PATH --review TOKEN        # leave a reviewed change for one run
 foldover sync ID --undo          # undo the newest sync that changed anything
 foldover history ID              # finished runs, newest first
 foldover pause [MINUTES]         # hold automatic syncs; `foldover resume` ends it

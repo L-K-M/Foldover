@@ -78,8 +78,10 @@ pub async fn sync_status(location: &SocketLocation, id: PairId) -> Result<SyncSt
     sync_call(location, SYNC_STATUS, id).await
 }
 
-/// Keep one side's version of a conflict in the pair's latest preview.
-/// `review_token` must be that preview's; a stale one fails.
+/// Keep one side's version of a change or conflict in the pair's latest
+/// preview; for a change, that copies it the other way when it is the side
+/// the change would overwrite. `review_token` must be that preview's; a
+/// stale one fails.
 pub async fn resolve_conflict(
     location: &SocketLocation,
     id: PairId,
@@ -131,6 +133,25 @@ pub async fn keep_both(
         id: id.to_string(),
         path: path.to_vec(),
         keep: ConflictKeep::Both,
+        review_token: Some(review_token.to_string()),
+    };
+    Ok(serde_json::from_value(
+        call(location, SYNC_RESOLVE, Some(serde_json::to_value(params)?)).await?,
+    )?)
+}
+
+/// Leave a change in the pair's latest preview, and everything inside it,
+/// alone in the next run. `review_token` must be that preview's.
+pub async fn skip_once(
+    location: &SocketLocation,
+    id: PairId,
+    path: &[u8],
+    review_token: ReviewToken,
+) -> Result<SyncStatus, Error> {
+    let params = SyncResolve {
+        id: id.to_string(),
+        path: path.to_vec(),
+        keep: ConflictKeep::Skip,
         review_token: Some(review_token.to_string()),
     };
     Ok(serde_json::from_value(

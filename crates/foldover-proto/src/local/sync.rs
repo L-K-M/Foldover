@@ -58,6 +58,8 @@ pub enum ConflictKeep {
     Left,
     Right,
     Both,
+    /// Leave the change, and everything inside it, alone in the next run.
+    Skip,
 }
 
 impl From<foldover_types::Side> for ConflictKeep {

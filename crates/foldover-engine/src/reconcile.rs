@@ -53,9 +53,11 @@ pub fn reconcile_entry(
     }
 }
 
-/// Turn a conflict into the change a person chose. `None` when the choice no
-/// longer matches both sides, or involves a folder: the planner settles a
-/// folder choice for the folder's whole branch.
+/// Turn a person's choice of side, for a conflict or any other previewed
+/// change, into that side's change. `None` when the choice no longer
+/// matches both sides, for a file/folder mismatch (resolved by hand), or
+/// for a folder present on one side only: the planner settles that choice
+/// for the folder's whole branch.
 pub(crate) fn resolve(
     resolution: Resolution,
     left: Option<EntryVersion>,
@@ -69,14 +71,13 @@ pub(crate) fn resolve(
         Side::Left => (left, right),
         Side::Right => (right, left),
     };
-    if [kept, replaced]
-        .into_iter()
-        .flatten()
-        .any(|version| version.kind() == EntryKind::Directory)
-    {
-        return None;
-    }
+    let folder = |version: Option<EntryVersion>| {
+        version.is_some_and(|version| version.kind() == EntryKind::Directory)
+    };
     match (kept, replaced) {
+        (Some(kept), Some(replaced)) if kept.kind() != replaced.kind() => None,
+        (Some(kept), Some(replaced)) if kept == replaced => None,
+        _ if (kept.is_none() || replaced.is_none()) && (folder(kept) || folder(replaced)) => None,
         (Some(kept), Some(replaced)) => Some(EntryDecision::Propagate {
             from: keep,
             change: if kept.content() == replaced.content() {

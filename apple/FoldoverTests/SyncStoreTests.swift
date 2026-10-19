@@ -19,6 +19,8 @@ private actor ScriptedSyncClient: SyncClient {
     private(set) var keptTokens: [String] = []
     private(set) var keptBoth: [Data] = []
     private(set) var keptBothTokens: [String] = []
+    private(set) var skipped: [Data] = []
+    private(set) var skipTokens: [String] = []
     private(set) var changeTokens: [String] = []
     private let runs: [RunRecord]
 
@@ -42,6 +44,12 @@ private actor ScriptedSyncClient: SyncClient {
     func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState {
         keptBoth.append(path)
         keptBothTokens.append(reviewToken)
+        return next()
+    }
+
+    func skipOnce(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState {
+        skipped.append(path)
+        skipTokens.append(reviewToken)
         return next()
     }
 
@@ -97,6 +105,9 @@ private struct UnreachableSyncClient: SyncClient {
     func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState {
         throw SyncFixtureError.unreachable
     }
+    func skipOnce(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState {
+        throw SyncFixtureError.unreachable
+    }
 }
 
 /// Holds every changes() call until the test answers it, in call order.
@@ -116,6 +127,7 @@ private actor GatedChangesClient: SyncClient {
     func resolve(_ id: String, path: Data, keep: FolderSide,
                  reviewToken: String) async throws -> PairSyncState { .idle }
     func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
+    func skipOnce(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
     func history(_ id: String) async throws -> [RunRecord] { [] }
 
     func changes(_ id: String, after: Data?, filter: ChangeFilter?,
@@ -183,6 +195,7 @@ private actor StubSyncClient: SyncClient {
     func resolve(_ id: String, path: Data, keep: FolderSide,
                  reviewToken: String) async throws -> PairSyncState { .idle }
     func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
+    func skipOnce(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
     func history(_ id: String) async throws -> [RunRecord] { [] }
     func changes(_ id: String, after: Data?, filter: ChangeFilter?,
                  reviewToken: String) async throws -> ChangePage {
@@ -257,6 +270,7 @@ private actor DeferredSyncClient: SyncClient {
         return try await withCheckedThrowingContinuation { pendingResolves.append($0) }
     }
     func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
+    func skipOnce(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
     func history(_ id: String) async throws -> [RunRecord] {
         historyCalls += 1
         if let terminalHistory { return terminalHistory }
@@ -1860,4 +1874,29 @@ func syncsThatChangedNothingOfferNoUndo() async {
     #expect(!viewModel.canUndo)
     await viewModel.undo()
     #expect(await client.undone == 0)
+}
+
+@MainActor
+@Test
+func previewedChangesCanBeCopiedTheOtherWayOrSkippedOnce() async {
+    // The fixture copies photos/a.jpg to B and archives a file in A.
+    let shown = preview(archivesInA: 1, needsApproval: false)
+    let client = ScriptedSyncClient([.previewed(shown), .previewed(shown), .previewed(shown),
+                                     .previewed(shown), .previewed(shown)])
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
+    await viewModel.preview()
+    let rows = viewModel.rows
+    #expect(rows.map(\.otherWay) == [.b, .a])
+    #expect(rows.map(\.otherWayTitle) == ["Copy the Other Way", "Restore to Folder B"])
+    #expect(rows.allSatisfy { $0.item != nil })
+
+    // Copying the other way keeps the folder the change would have changed.
+    await viewModel.copyOtherWay(rows[1])
+    #expect(await client.kept == [.a])
+    #expect(await client.keptTokens == [shown.reviewToken])
+
+    await viewModel.skipOnce(viewModel.rows[0])
+    #expect(await client.skipped == [Data("photos/a.jpg".utf8)])
+    #expect(await client.skipTokens == [shown.reviewToken])
 }

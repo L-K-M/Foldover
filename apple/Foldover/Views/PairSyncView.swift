@@ -51,6 +51,15 @@ struct PairSyncView: View {
                         }
                         .accessibilityElement(children: .combine)
                         .contextMenu {
+                            if let side = row.otherWay, let title = row.otherWayTitle {
+                                Button(title) { Task { await viewModel.copyOtherWay(row) } }
+                                    .disabled(!viewModel.canStart)
+                                    .help("Keeps \(PairSyncViewModel.folderName(side))'s version and copies it to the other folder; if \(PairSyncViewModel.folderName(side)) has none, the item is archived there instead.")
+                            }
+                            if row.item != nil {
+                                Button("Skip Once") { Task { await viewModel.skipOnce(row) } }
+                                    .disabled(!viewModel.canStart)
+                            }
                             if row.skippable != nil {
                                 Button("Always Skip") { Task { await viewModel.skipAlways(row) } }
                                     .disabled(!viewModel.canStart)
