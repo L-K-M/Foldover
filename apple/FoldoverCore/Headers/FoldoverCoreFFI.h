@@ -358,6 +358,11 @@ uint64_t uniffi_foldover_ffi_fn_func_sync_run(RustBuffer id, uint64_t approved_l
 uint64_t uniffi_foldover_ffi_fn_func_sync_status(RustBuffer id
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_UNDO
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_UNDO
+uint64_t uniffi_foldover_ffi_fn_func_sync_undo(RustBuffer id
+);
+#endif
 #ifndef UNIFFI_FFIDEF_FFI_FOLDOVER_FFI_RUSTBUFFER_ALLOC
 #define UNIFFI_FFIDEF_FFI_FOLDOVER_FFI_RUSTBUFFER_ALLOC
 RustBuffer ffi_foldover_ffi_rustbuffer_alloc(uint64_t size, RustCallStatus *_Nonnull out_status
@@ -747,6 +752,12 @@ uint16_t uniffi_foldover_ffi_checksum_func_sync_run(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_SYNC_STATUS
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_SYNC_STATUS
 uint16_t uniffi_foldover_ffi_checksum_func_sync_status(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_SYNC_UNDO
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_SYNC_UNDO
+uint16_t uniffi_foldover_ffi_checksum_func_sync_undo(void
     
 );
 #endif

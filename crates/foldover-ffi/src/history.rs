@@ -8,6 +8,9 @@ use crate::{AgentError, invalid_configuration};
 pub enum RunTriggerKind {
     Manual,
     Scheduled,
+    /// An undo of the sync before it: `archived` counts what that sync
+    /// created, `recovered` what came back, `failures` what was left.
+    Undo,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -56,6 +59,7 @@ fn entries(history: History) -> Vec<RunHistoryEntry> {
             trigger: match run.trigger {
                 HistoryTrigger::Manual => RunTriggerKind::Manual,
                 HistoryTrigger::Scheduled => RunTriggerKind::Scheduled,
+                HistoryTrigger::Undo => RunTriggerKind::Undo,
             },
             outcome: match run.outcome {
                 HistoryOutcome::Completed => RunOutcomeKind::Completed,

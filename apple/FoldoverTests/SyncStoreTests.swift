@@ -14,6 +14,7 @@ private actor ScriptedSyncClient: SyncClient {
     /// (approvedA, approvedB, reviewToken) per run call.
     private(set) var approvals: [(UInt64, UInt64, String?)] = []
     private(set) var cancelled = false
+    private(set) var undone = 0
     private(set) var kept: [FolderSide] = []
     private(set) var keptTokens: [String] = []
     private(set) var keptBoth: [Data] = []
@@ -58,6 +59,11 @@ private actor ScriptedSyncClient: SyncClient {
         return next()
     }
 
+    func undo(_ id: String) async throws -> PairSyncState {
+        undone += 1
+        return next()
+    }
+
     func resolve(_ id: String, path: Data, keep: FolderSide,
                  reviewToken: String) async throws -> PairSyncState {
         kept.append(keep)
@@ -78,6 +84,7 @@ private struct UnreachableSyncClient: SyncClient {
     }
     func status(_ id: String) async throws -> PairSyncState { throw SyncFixtureError.unreachable }
     func cancel(_ id: String) async throws -> PairSyncState { throw SyncFixtureError.unreachable }
+    func undo(_ id: String) async throws -> PairSyncState { throw SyncFixtureError.unreachable }
     func resolve(_ id: String, path: Data, keep: FolderSide,
                  reviewToken: String) async throws -> PairSyncState {
         throw SyncFixtureError.unreachable
@@ -105,6 +112,7 @@ private actor GatedChangesClient: SyncClient {
              reviewToken: String?) async throws -> PairSyncState { reply }
     func status(_ id: String) async throws -> PairSyncState { reply }
     func cancel(_ id: String) async throws -> PairSyncState { .idle }
+    func undo(_ id: String) async throws -> PairSyncState { .idle }
     func resolve(_ id: String, path: Data, keep: FolderSide,
                  reviewToken: String) async throws -> PairSyncState { .idle }
     func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
@@ -171,6 +179,7 @@ private actor StubSyncClient: SyncClient {
     func run(_ id: String, approvedA: UInt64, approvedB: UInt64,
              reviewToken: String?) async throws -> PairSyncState { .idle }
     func cancel(_ id: String) async throws -> PairSyncState { .idle }
+    func undo(_ id: String) async throws -> PairSyncState { .idle }
     func resolve(_ id: String, path: Data, keep: FolderSide,
                  reviewToken: String) async throws -> PairSyncState { .idle }
     func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
@@ -238,6 +247,8 @@ private actor DeferredSyncClient: SyncClient {
         cancelled = true
         return .idle
     }
+
+    func undo(_ id: String) async throws -> PairSyncState { .idle }
     func resolve(_ id: String, path: Data, keep: FolderSide,
                  reviewToken: String) async throws -> PairSyncState {
         resolveCalls += 1
@@ -261,6 +272,8 @@ private actor DeferredSyncClient: SyncClient {
         switch job {
         case .preview: previewCalls += 1
         case .run: runCalls += 1
+        // This fake answers undo directly; nothing waits on it.
+        case .undo: return
         }
         let calls = job == .preview ? previewCalls : runCalls
         let ready = startWaiters.filter { $0.job == job && calls >= $0.count }
@@ -619,11 +632,11 @@ func finishedRunsRefreshTheHistory() async {
     let started = Date(timeIntervalSince1970: 1_000)
     let runs = [
         RunRecord(started: started, finished: started, trigger: .scheduled, end: .completed, copied: 2,
-                  updated: 0, archived: 1, conflicts: 1, failures: 0, message: nil),
+                  updated: 0, archived: 1, recovered: 0, conflicts: 1, failures: 0, message: nil),
         RunRecord(started: started, finished: started, trigger: .manual, end: .failed, copied: 0,
-                  updated: 0, archived: 0, conflicts: 0, failures: 0, message: "Disk full"),
+                  updated: 0, archived: 0, recovered: 0, conflicts: 0, failures: 0, message: "Disk full"),
         RunRecord(started: started, finished: started, trigger: .manual, end: .completed, copied: 0,
-                  updated: 0, archived: 0, conflicts: 0, failures: 0, message: nil),
+                  updated: 0, archived: 0, recovered: 0, conflicts: 0, failures: 0, message: nil),
     ]
     let result = RunSummary(cancelled: false, copied: 2, updated: 0, archived: 1, recovered: 0,
                             conflicts: 1, failures: [], failureCount: 0, archive: "run")
@@ -1785,4 +1798,66 @@ func outdatedPreviewsOfferNoReviewActions() async {
     #expect(viewModel.canSync)
     await viewModel.sync()
     #expect(await client.approvals.map(\.2) == [current.reviewToken])
+}
+
+@MainActor
+@Test
+func aSyncThatChangedSomethingCanBeUndoneAndTheUndoExplainsItself() async {
+    let result = RunSummary(cancelled: false, copied: 2, updated: 0, archived: 1, recovered: 0,
+                            conflicts: 0, failures: [], failureCount: 0,
+                            archive: "2026-10-18T09-30-00.123Z")
+    let undone = UndoSummary(cancelled: false, removed: 2, restored: 1, beside: 0,
+                             notUndone: [RunFailure(path: Data("notes.txt".utf8),
+                                                    message: "Changed since the sync; left as it is")],
+                             notUndoneCount: 1, archive: "2026-10-18T10-00-00.000Z")
+    let client = ScriptedSyncClient([.finished(result), .working(.undo, cancelling: false), .undone(undone)])
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
+
+    await viewModel.refresh()
+    #expect(viewModel.canUndo)
+    await viewModel.undo()
+    #expect(await client.undone == 1)
+    #expect(store.state(for: pair().id) == .undone(undone))
+    #expect(viewModel.statusText.contains("put back 1, archived 2"))
+    #expect(viewModel.statusText.contains("1 items were left as they are."))
+    #expect(viewModel.shortStatus == "Partly undone")
+    #expect(viewModel.rows.map(\.path) == ["notes.txt"])
+    // An undo is not undone again; previewing shows what syncing would redo.
+    #expect(!viewModel.canUndo)
+}
+
+// Review: a cancelled undo read "Undone" in the status line and as a
+// complete undo in History.
+@MainActor
+@Test
+func stoppedUndosNeverReadAsComplete() async {
+    let stopped = UndoSummary(cancelled: true, removed: 1, restored: 2, beside: 0, notUndone: [],
+                              notUndoneCount: 0, archive: "2026-10-18T10-00-00.000Z")
+    let store = SyncStore(client: ScriptedSyncClient([.undone(stopped)]), pollInterval: .milliseconds(1))
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
+    await viewModel.refresh()
+    #expect(viewModel.shortStatus == "Undo stopped")
+
+    let started = Date(timeIntervalSince1970: 1_000)
+    let cancelled = RunRecord(started: started, finished: started, trigger: .undo, end: .cancelled,
+                              copied: 0, updated: 0, archived: 1, recovered: 2, conflicts: 0,
+                              failures: 0, message: nil)
+    #expect(PairSyncViewModel.summary(cancelled) == "Undo stopped: put back 2, archived 1.")
+}
+
+@MainActor
+@Test
+func syncsThatChangedNothingOfferNoUndo() async {
+    let nothing = RunSummary(cancelled: false, copied: 0, updated: 0, archived: 0, recovered: 0,
+                             conflicts: 0, failures: [], failureCount: 0,
+                             archive: "2026-10-18T09-30-00.123Z")
+    let client = ScriptedSyncClient([.finished(nothing)])
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
+
+    await viewModel.refresh()
+    #expect(!viewModel.canUndo)
+    await viewModel.undo()
+    #expect(await client.undone == 0)
 }

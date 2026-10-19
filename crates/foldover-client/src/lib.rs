@@ -16,12 +16,12 @@ pub use foldover_proto::local::{
     AgentCapability, ArchiveItem, ArchiveItems, ArchiveRestored, ArchiveRun, ArchiveRuns,
     DaemonStatus, History, HistoryOutcome, HistoryRecord, HistoryTrigger, PairSide, SyncAction,
     SyncConflict, SyncCounts, SyncDeletions, SyncFailure, SyncItem, SyncJob, SyncPreview,
-    SyncResult, SyncStatus,
+    SyncResult, SyncStatus, UndoResult,
 };
 pub use foldover_proto::local::{AutomationStatus, SyncItemKind, SyncItemPage};
 use foldover_proto::local::{
     ConflictKeep, SYNC_CANCEL, SYNC_ITEMS, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS,
-    SyncItemQuery, SyncKey, SyncResolve, SyncRun,
+    SYNC_UNDO, SyncItemQuery, SyncKey, SyncResolve, SyncRun,
 };
 use foldover_proto::local::{DAEMON_STATUS, Hello, PROTOCOL_VERSION, Request, SESSION_HELLO};
 use foldover_proto::local::{
@@ -140,6 +140,12 @@ pub async fn keep_both(
 
 pub async fn cancel_sync(location: &SocketLocation, id: PairId) -> Result<SyncStatus, Error> {
     sync_call(location, SYNC_CANCEL, id).await
+}
+
+/// Start undoing the pair's newest sync that changed anything; poll
+/// `sync_status` for the result.
+pub async fn undo_sync(location: &SocketLocation, id: PairId) -> Result<SyncStatus, Error> {
+    sync_call(location, SYNC_UNDO, id).await
 }
 
 /// Whether automatic syncs are paused.

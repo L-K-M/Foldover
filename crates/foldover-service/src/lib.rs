@@ -24,7 +24,7 @@ use foldover_proto::local::{
 };
 use foldover_proto::local::{
     ConflictKeep, SYNC_CANCEL, SYNC_ITEMS, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS,
-    SyncItemQuery, SyncKey, SyncResolve, SyncRun,
+    SYNC_UNDO, SyncItemQuery, SyncKey, SyncResolve, SyncRun,
 };
 use foldover_types::{PairDraft, PairId, ReviewToken, Side};
 use schedule::Scheduler;
@@ -68,7 +68,7 @@ impl Service {
         }
         if matches!(
             request.method(),
-            SYNC_PREVIEW | SYNC_RUN | SYNC_STATUS | SYNC_CANCEL | SYNC_RESOLVE
+            SYNC_PREVIEW | SYNC_RUN | SYNC_STATUS | SYNC_CANCEL | SYNC_RESOLVE | SYNC_UNDO
         ) {
             return self.sync(&request).await;
         }
@@ -177,6 +177,7 @@ impl Service {
                 let id = pair(&parameters::<SyncKey>(request)?.id)?;
                 match method {
                     SYNC_PREVIEW => self.jobs.start(&self.engine, id, Work::Preview)?,
+                    SYNC_UNDO => self.jobs.start(&self.engine, id, Work::Undo)?,
                     SYNC_CANCEL => {
                         self.jobs.cancel(id);
                         self.jobs.status(id)
@@ -1097,6 +1098,89 @@ mod tests {
         assert_eq!(runs[0]["outcome"], "completed");
         assert_eq!(runs[0]["copied"], 1);
         assert!(runs[0]["finished_ms"].as_u64() >= runs[0]["started_ms"].as_u64());
+    }
+
+    #[tokio::test]
+    async fn undo_reverts_the_newest_sync_and_holds_automatic_runs() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Docs");
+        input["options"]["schedule"] = json!({"kind": "every", "minutes": 1});
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let (left, right) = (
+            directory.path().join("Docs-left"),
+            directory.path().join("Docs-right"),
+        );
+        fs::write(left.join("keep"), b"k").unwrap();
+        let key = json!({"id": created["id"]});
+        first_sync(&service, &key).await;
+        fs::write(left.join("new"), b"n").unwrap();
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        assert_eq!(settled(&service, &key).await["result"]["copied"], 1);
+
+        let started = service
+            .handle(Request::call(3, SYNC_UNDO, Some(key.clone())))
+            .await
+            .unwrap();
+        assert_eq!(started["job"], "undo");
+        let undone = settled(&service, &key).await;
+        assert_eq!(undone["state"], "undone", "{undone}");
+        assert_eq!(undone["result"]["removed"], 1);
+        assert_eq!(undone["result"]["not_undone_count"], 0);
+        assert!(!right.join("new").exists());
+        assert!(right.join("keep").exists());
+
+        // An automatic run would redo the undo unseen; it waits for a person.
+        let start = service.scheduler.started();
+        let at = |seconds| start + std::time::Duration::from_secs(seconds);
+        assert!(run_due_started(&service, at(600)).await.is_empty());
+        assert_eq!(settled(&service, &key).await["state"], "undone");
+
+        let history = service
+            .handle(Request::call(4, HISTORY_LIST, Some(key.clone())))
+            .await
+            .unwrap();
+        assert_eq!(history["runs"][0]["trigger"], "undo", "{history}");
+        assert_eq!(history["runs"][0]["archived"], 1);
+
+        // A restart forgets the undone status, not the hold.
+        drop(service);
+        let engine =
+            Engine::open(&StateLocation::Directory(directory.path().join("state"))).unwrap();
+        let service = Service::new(engine);
+        let start = service.scheduler.started();
+        let at = |seconds| start + std::time::Duration::from_secs(seconds);
+        assert!(run_due_started(&service, at(600)).await.is_empty());
+
+        // The undo spent the journal.
+        service
+            .handle(Request::call(5, SYNC_UNDO, Some(key.clone())))
+            .await
+            .unwrap();
+        let again = settled(&service, &key).await;
+        assert_eq!(again["state"], "failed");
+        assert!(
+            again["message"]
+                .as_str()
+                .unwrap()
+                .contains("no sync to undo"),
+            "{again}"
+        );
+
+        // Once a person syncs again, automatic runs resume.
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        service
+            .handle(Request::call(6, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        assert_eq!(settled(&service, &key).await["result"]["copied"], 1);
+        assert_eq!(run_due_started(&service, at(600)).await.len(), 1);
     }
 
     #[tokio::test]

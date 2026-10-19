@@ -461,6 +461,7 @@ Entry classification and per-side baselines: [ADR 0007](docs/adr/0007-entry-reco
 Local entry versions (content and tracked metadata): [ADR 0018](docs/adr/0018-local-entry-versions.md).
 Pure deletion-review thresholds: [ADR 0013](docs/adr/0013-deletion-review-fuse.md).
 Run execution, approvals and journal-free recovery: [ADR 0020](docs/adr/0020-run-execution.md).
+Run journal and Undo: [ADR 0029](docs/adr/0029-undo.md).
 Hierarchy-aware candidate generation is implemented below the agent API;
 [ADR 0014](docs/adr/0014-tree-plan-candidates.md) records tree validation,
 conflicted-branch suppression and remaining executable-plan gates.

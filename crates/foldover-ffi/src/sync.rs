@@ -2,7 +2,7 @@
 
 use foldover_client::{
     PairSide, ReviewToken, SocketLocation, SyncAction, SyncConflict, SyncDeletions, SyncItemKind,
-    SyncItemPage, SyncJob, SyncPreview, SyncResult, SyncStatus,
+    SyncItemPage, SyncJob, SyncPreview, SyncResult, SyncStatus, UndoResult,
 };
 
 use crate::{AgentError, invalid_configuration};
@@ -100,6 +100,23 @@ pub struct SyncRunSummary {
 pub enum SyncJobKind {
     Preview,
     Run,
+    Undo,
+}
+
+/// What undoing the newest sync did; see `foldover_client::UndoResult`.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct SyncUndoSummary {
+    pub cancelled: bool,
+    /// Entries the sync created, now in this undo's archive folder.
+    pub removed: u64,
+    /// Entries it replaced or archived, back at their paths.
+    pub restored: u64,
+    /// Put back beside a newer entry at their path.
+    pub beside: u64,
+    /// The first entries left as they were, with why.
+    pub not_undone: Vec<SyncFailureItem>,
+    pub not_undone_count: u64,
+    pub archive: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -118,6 +135,10 @@ pub enum SyncJobState {
     },
     Finished {
         result: SyncRunSummary,
+    },
+    /// The newest sync was undone; automatic syncs wait for a person.
+    Undone {
+        result: SyncUndoSummary,
     },
     Failed {
         message: String,
@@ -266,6 +287,14 @@ pub async fn sync_cancel(id: String) -> Result<SyncJobState, AgentError> {
     state(foldover_client::cancel_sync(&SocketLocation::Default, id).await)
 }
 
+/// Start undoing the pair's newest sync that changed anything; poll
+/// `sync_status` for the result.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn sync_undo(id: String) -> Result<SyncJobState, AgentError> {
+    let id = id.parse().map_err(invalid_configuration)?;
+    state(foldover_client::undo_sync(&SocketLocation::Default, id).await)
+}
+
 fn state(status: Result<SyncStatus, foldover_client::Error>) -> Result<SyncJobState, AgentError> {
     Ok(status.map_err(AgentError::from)?.into())
 }
@@ -278,6 +307,7 @@ impl From<SyncStatus> for SyncJobState {
                 job: match job {
                     SyncJob::Preview => SyncJobKind::Preview,
                     SyncJob::Run => SyncJobKind::Run,
+                    SyncJob::Undo => SyncJobKind::Undo,
                 },
                 cancelling,
             },
@@ -288,6 +318,9 @@ impl From<SyncStatus> for SyncJobState {
                 preview: preview.into(),
             },
             SyncStatus::Finished { result } => Self::Finished {
+                result: result.into(),
+            },
+            SyncStatus::Undone { result } => Self::Undone {
                 result: result.into(),
             },
             SyncStatus::Failed { message } => Self::Failed { message },
@@ -353,6 +386,27 @@ impl From<SyncResult> for SyncRunSummary {
                 })
                 .collect(),
             failure_count: result.failure_count,
+            archive: result.archive,
+        }
+    }
+}
+
+impl From<UndoResult> for SyncUndoSummary {
+    fn from(result: UndoResult) -> Self {
+        Self {
+            cancelled: result.cancelled,
+            removed: result.removed,
+            restored: result.restored,
+            beside: result.beside,
+            not_undone: result
+                .not_undone
+                .into_iter()
+                .map(|failure| SyncFailureItem {
+                    path: failure.path,
+                    message: failure.message,
+                })
+                .collect(),
+            not_undone_count: result.not_undone_count,
             archive: result.archive,
         }
     }
@@ -478,5 +532,35 @@ mod tests {
         assert!(result.cancelled);
         assert_eq!(result.failure_count, 6);
         assert_eq!(result.failures[0].message, "failed");
+
+        let undone: SyncJobState = SyncStatus::Undone {
+            result: UndoResult {
+                cancelled: false,
+                removed: 1,
+                restored: 2,
+                beside: 3,
+                not_undone: vec![SyncFailure {
+                    path: b"y/\xff".to_vec(),
+                    message: "changed".into(),
+                }],
+                not_undone_count: 4,
+                archive: "undo".into(),
+            },
+        }
+        .into();
+        let SyncJobState::Undone { result } = undone else {
+            panic!("unexpected state");
+        };
+        assert_eq!(
+            (
+                result.removed,
+                result.restored,
+                result.beside,
+                result.not_undone_count
+            ),
+            (1, 2, 3, 4)
+        );
+        assert_eq!(result.not_undone[0].path, b"y/\xff");
+        assert_eq!(result.archive, "undo");
     }
 }

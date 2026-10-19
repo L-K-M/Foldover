@@ -54,6 +54,7 @@ pub(crate) fn record(
         Work::Preview => return,
         Work::Run(..) => RunTrigger::Manual,
         Work::Scheduled => RunTrigger::Scheduled,
+        Work::Undo => RunTrigger::Undo,
     };
     let unwritten = |outcome, message| HistoryEntry {
         started,
@@ -85,6 +86,18 @@ pub(crate) fn record(
             archive: Some(result.archive.clone()),
             ..unwritten(HistoryOutcome::Completed, None)
         },
+        SyncStatus::Undone { result } => HistoryEntry {
+            outcome: if result.cancelled {
+                HistoryOutcome::Cancelled
+            } else {
+                HistoryOutcome::Completed
+            },
+            archived: result.removed,
+            recovered: result.restored.saturating_add(result.beside),
+            failures: result.not_undone_count,
+            archive: Some(result.archive.clone()),
+            ..unwritten(HistoryOutcome::Completed, None)
+        },
         SyncStatus::NeedsApproval { .. } => unwritten(HistoryOutcome::NeedsApproval, None),
         SyncStatus::Failed { message } => unwritten(HistoryOutcome::Failed, Some(message.clone())),
         // Cancelled before anything was written.
@@ -111,6 +124,7 @@ fn wire(entry: &HistoryEntry) -> HistoryRecord {
         trigger: match entry.trigger {
             RunTrigger::Manual => HistoryTrigger::Manual,
             RunTrigger::Scheduled => HistoryTrigger::Scheduled,
+            RunTrigger::Undo => HistoryTrigger::Undo,
         },
         outcome: match entry.outcome {
             HistoryOutcome::Completed => foldover_proto::local::HistoryOutcome::Completed,

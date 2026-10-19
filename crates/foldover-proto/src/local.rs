@@ -20,9 +20,9 @@ pub use history::{HISTORY_LIST, History, HistoryOutcome, HistoryRecord, HistoryT
 mod sync;
 pub use sync::{
     ConflictKeep, SYNC_CANCEL, SYNC_ITEM_LIMIT, SYNC_ITEMS, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN,
-    SYNC_STATUS, SyncAction, SyncConflict, SyncCounts, SyncDeletions, SyncFailure, SyncItem,
-    SyncItemKind, SyncItemPage, SyncItemQuery, SyncJob, SyncKey, SyncPreview, SyncResolve,
-    SyncResult, SyncRun, SyncStatus,
+    SYNC_STATUS, SYNC_UNDO, SyncAction, SyncConflict, SyncCounts, SyncDeletions, SyncFailure,
+    SyncItem, SyncItemKind, SyncItemPage, SyncItemQuery, SyncJob, SyncKey, SyncPreview,
+    SyncResolve, SyncResult, SyncRun, SyncStatus, UndoResult,
 };
 
 mod pair;
@@ -32,7 +32,7 @@ pub use pair::{
 };
 
 pub const JSON_RPC_VERSION: &str = "2.0";
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 pub const SESSION_HELLO: &str = "session.hello";
 pub const DAEMON_STATUS: &str = "daemon.status";
 pub const PARSE_ERROR: i32 = -32700;

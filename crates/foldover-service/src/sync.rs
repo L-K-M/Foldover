@@ -2,7 +2,7 @@
 //! a job, then poll its status; the result stays until the pair's next job.
 //!
 //! ```text
-//! Idle ─start─▶ Working ─▶ Previewed | NeedsApproval | Finished | Failed
+//! Idle ─start─▶ Working ─▶ Previewed | NeedsApproval | Finished | Undone | Failed
 //!                  └─cancel─▶ Idle (before writing) or Finished (cancelled)
 //! ```
 //!
@@ -19,13 +19,13 @@ use std::time::SystemTime;
 
 use foldover_engine::{
     Action, Approval, Commit, Completion, DeletionReview, Engine, KeepBothError, PairRun, Preview,
-    PreviewItem, RunContext, RunError, RunOutcome, RunReport, missing_side, reconnect,
+    PreviewItem, RunContext, RunError, RunOutcome, RunReport, UndoReport, missing_side, reconnect,
 };
 use foldover_proto::local::RpcError;
 use foldover_proto::local::{
     INTERNAL_ERROR, INVALID_PARAMS, PREVIEW_REQUIRED, ROOT_UNAVAILABLE, SYNC_BUSY, SYNC_ITEM_LIMIT,
     SyncAction, SyncConflict, SyncCounts, SyncDeletions, SyncFailure, SyncItem, SyncItemKind,
-    SyncItemPage, SyncJob, SyncPreview, SyncResult, SyncStatus,
+    SyncItemPage, SyncJob, SyncPreview, SyncResult, SyncStatus, UndoResult,
 };
 use foldover_types::{
     ChangeKind, ConflictKind, EntryVersion, PairId, Resolution, ReviewToken, ScanControl, Side,
@@ -39,6 +39,8 @@ pub(crate) enum Work {
     Run(Approval, Option<ReviewToken>),
     /// Unattended: stops instead of asking when deletions need approval.
     Scheduled,
+    /// Undo the pair's newest writing run (ADR 0029).
+    Undo,
 }
 
 impl Work {
@@ -46,6 +48,7 @@ impl Work {
         match self {
             Self::Preview => SyncJob::Preview,
             Self::Run(..) | Self::Scheduled => SyncJob::Run,
+            Self::Undo => SyncJob::Undo,
         }
     }
 }
@@ -294,6 +297,7 @@ impl Jobs {
                     SyncStatus::Working { .. }
                         | SyncStatus::Previewed { .. }
                         | SyncStatus::NeedsApproval { .. }
+                        | SyncStatus::Undone { .. }
                         | SyncStatus::Failed { .. }
                 ) => {}
             Some(job) => job.status = waiting,
@@ -434,9 +438,11 @@ impl Jobs {
                 Some(SyncStatus::Working { .. }) => {
                     Some("This pair already has a preview or sync in progress")
                 }
+                // An undo waits too: an unattended run would redo it unseen.
                 Some(
                     SyncStatus::Previewed { .. }
                     | SyncStatus::NeedsApproval { .. }
+                    | SyncStatus::Undone { .. }
                     | SyncStatus::Failed { .. },
                 ) if matches!(work, Work::Scheduled) => {
                     Some("The pair is waiting for review; sync it manually")
@@ -531,6 +537,19 @@ fn perform(
         Ok(stored) => stored,
         Err(error) => return failed(error.to_string()),
     };
+    let journal = match work {
+        Work::Undo => {
+            let engine = engine.lock().unwrap_or_else(PoisonError::into_inner);
+            let journal = match engine.journal(id) {
+                Ok(Some(journal)) => journal,
+                Ok(None) => return failed(RunError::NothingToUndo.to_string()),
+                Err(error) => return failed(error.to_string()),
+            };
+            // The engine holds the pair with its first change.
+            Some(journal)
+        }
+        Work::Preview | Work::Run(..) | Work::Scheduled => None,
+    };
     // Someone asked for this run: mount a share that went away. The
     // scheduler makes its own, rate-limited attempts.
     if !matches!(work, Work::Scheduled)
@@ -568,7 +587,29 @@ fn perform(
             .unwrap_or_else(PoisonError::into_inner)
             .store_snapshot(id, run.revision(), side, &snapshot);
     }
+    // A panic elsewhere cannot leave a half-applied transaction, so a
+    // poisoned lock still guards a consistent store.
+    let mut commit = |revision: u64, commit: Commit<'_>| {
+        engine
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .commit_run(id, revision, commit)
+    };
     let (approval, context) = match work {
+        Work::Undo => {
+            let Some(journal) = journal else {
+                return failed(RunError::NothingToUndo.to_string());
+            };
+            return match run.undo(journal, SystemTime::now(), &mut commit, &mut control) {
+                Ok(report) => (
+                    SyncStatus::Undone {
+                        result: undone(&report),
+                    },
+                    None,
+                ),
+                Err(error) => failed(error.to_string()),
+            };
+        }
         Work::Preview => {
             let planned = run.preview();
             let status = SyncStatus::Previewed {
@@ -605,14 +646,6 @@ fn perform(
         }
         Work::Scheduled => (Approval::default(), RunContext::Unattended),
     };
-    // A panic elsewhere cannot leave a half-applied transaction, so a
-    // poisoned lock still guards a consistent store.
-    let mut commit = |revision: u64, commit: Commit<'_>| {
-        engine
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .commit_run(id, revision, commit)
-    };
     match run.execute(
         approval,
         context,
@@ -620,12 +653,22 @@ fn perform(
         &mut commit,
         &mut control,
     ) {
-        Ok(RunOutcome::Ran(report)) => (
-            SyncStatus::Finished {
-                result: result(&report),
-            },
-            None,
-        ),
+        Ok(RunOutcome::Ran(report)) => {
+            // A person's sync that ran ends a hold an undo left; one that
+            // stopped before running leaves it.
+            if !matches!(work, Work::Scheduled) {
+                let _ = engine
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .release_automation(id);
+            }
+            (
+                SyncStatus::Finished {
+                    result: result(&report),
+                },
+                None,
+            )
+        }
         Ok(RunOutcome::NeedsApproval(planned)) => (
             SyncStatus::NeedsApproval {
                 preview: preview(&planned),
@@ -720,6 +763,26 @@ fn result(report: &RunReport) -> SyncResult {
             })
             .collect(),
         failure_count: report.failures().len() as u64,
+        archive: report.archive().to_owned(),
+    }
+}
+
+fn undone(report: &UndoReport) -> UndoResult {
+    UndoResult {
+        cancelled: report.completion() == Completion::Cancelled,
+        removed: report.removed(),
+        restored: report.restored(),
+        beside: report.beside(),
+        not_undone: report
+            .not_undone()
+            .iter()
+            .take(SYNC_ITEM_LIMIT)
+            .map(|failure| SyncFailure {
+                path: failure.path().as_bytes().to_vec(),
+                message: failure.message().to_owned(),
+            })
+            .collect(),
+        not_undone_count: report.not_undone().len() as u64,
         archive: report.archive().to_owned(),
     }
 }

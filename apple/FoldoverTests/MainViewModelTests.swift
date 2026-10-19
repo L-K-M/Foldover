@@ -46,6 +46,7 @@ private struct FinishingSyncClient: SyncClient {
     }
     func status(_ id: String) async throws -> PairSyncState { .finished(result) }
     func cancel(_ id: String) async throws -> PairSyncState { .idle }
+    func undo(_ id: String) async throws -> PairSyncState { .idle }
     func resolve(_ id: String, path: Data, keep: FolderSide,
                  reviewToken: String) async throws -> PairSyncState { .idle }
     func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
@@ -201,6 +202,7 @@ private actor SyncProbe: SyncClient {
     func run(_ id: String, approvedA: UInt64, approvedB: UInt64,
              reviewToken: String?) async throws -> PairSyncState { .idle }
     func cancel(_ id: String) async throws -> PairSyncState { .idle }
+    func undo(_ id: String) async throws -> PairSyncState { .idle }
     func resolve(_ id: String, path: Data, keep: FolderSide,
                  reviewToken: String) async throws -> PairSyncState { .idle }
     func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }

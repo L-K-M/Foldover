@@ -8,7 +8,10 @@ use foldover_endpoint::{
     Endpoint, EndpointPair, Filter, InvalidFilter, LocalEndpoint, ObservedEntry, PairRootError,
     RootRelation, ScanError,
 };
-use foldover_state::{HistoryEntry, MountSources, PairStore, Pause, SnapshotEntry, StateLocation};
+use foldover_state::{
+    HistoryEntry, Journal, JournalUpdate, MountSources, PairStore, Pause, SnapshotEntry,
+    StateLocation,
+};
 use foldover_types::{
     Durability, PairConfig, PairDraft, PairId, PairRoot, Resolution, Side, SyncPath,
 };
@@ -177,6 +180,19 @@ impl Engine {
             .record_resolution(id, revision, path, resolution)?)
     }
 
+    pub fn release_automation(&mut self, id: PairId) -> Result<(), Error> {
+        Ok(self.pairs.release_automation(id)?)
+    }
+
+    pub fn automation_held(&self, id: PairId) -> Result<bool, Error> {
+        Ok(self.pairs.automation_held(id)?)
+    }
+
+    /// The pair's newest writing run, while it can still be undone.
+    pub fn journal(&self, id: PairId) -> Result<Option<Journal>, Error> {
+        Ok(self.pairs.journal(id)?)
+    }
+
     /// Whether the pair has completed a first sync, which records identities.
     pub fn first_synced(&self, id: PairId) -> Result<bool, Error> {
         let identities = self.pairs.identities(id)?;
@@ -194,7 +210,34 @@ impl Engine {
             Commit::Identities { left, right } => {
                 Ok(self.pairs.record_identities(id, revision, left, right)?)
             }
-            Commit::Base(updates) => Ok(self.pairs.update_base(id, revision, updates)?),
+            Commit::Base {
+                run,
+                updates,
+                journal,
+            } => Ok(self.pairs.update_base(
+                id,
+                revision,
+                updates,
+                JournalUpdate::Record {
+                    run,
+                    entries: journal,
+                },
+            )?),
+            Commit::Undoing { updates } => {
+                Ok(self
+                    .pairs
+                    .update_base(id, revision, updates, JournalUpdate::Hold)?)
+            }
+            Commit::Undid { run, seqs } => {
+                Ok(self
+                    .pairs
+                    .update_base(id, revision, &[], JournalUpdate::Undid { run, seqs })?)
+            }
+            Commit::Undone { run, updates } => {
+                Ok(self
+                    .pairs
+                    .update_base(id, revision, updates, JournalUpdate::Spend { run })?)
+            }
         }
     }
 

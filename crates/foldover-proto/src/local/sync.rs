@@ -9,6 +9,8 @@ pub const SYNC_STATUS: &str = "sync.status";
 pub const SYNC_CANCEL: &str = "sync.cancel";
 pub const SYNC_RESOLVE: &str = "sync.resolve";
 pub const SYNC_ITEMS: &str = "sync.items";
+/// Undo the pair's newest sync that changed anything (ADR 0029).
+pub const SYNC_UNDO: &str = "sync.undo";
 /// Items per response. Even maximum-length paths, as byte arrays, keep a
 /// status below the 1 MiB IPC frame limit.
 pub const SYNC_ITEM_LIMIT: usize = 100;
@@ -220,11 +222,32 @@ pub struct SyncResult {
     pub archive: String,
 }
 
+/// What undoing a sync did. Undone paths have their base from before
+/// that sync again, so the next preview shows what syncing would redo.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UndoResult {
+    pub cancelled: bool,
+    /// Entries the sync created, now in this undo's archive folder.
+    pub removed: u64,
+    /// Entries it replaced or archived, back at their paths.
+    pub restored: u64,
+    /// Archived entries put back beside a newer entry at their path.
+    pub beside: u64,
+    /// The first entries left as they were, and why; `not_undone_count`
+    /// covers all of them.
+    pub not_undone: Vec<SyncFailure>,
+    pub not_undone_count: u64,
+    /// This undo's folder under `.foldover/archive` on each side.
+    pub archive: String,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SyncJob {
     Preview,
     Run,
+    Undo,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -244,6 +267,11 @@ pub enum SyncStatus {
     },
     Finished {
         result: SyncResult,
+    },
+    /// The newest sync was undone. Unattended runs wait until a person
+    /// syncs, so they do not redo it unseen.
+    Undone {
+        result: UndoResult,
     },
     Failed {
         message: String,
