@@ -101,9 +101,22 @@ impl Service {
             .await
             .map_err(|_| RpcError::new(INTERNAL_ERROR, "Configuration worker is unavailable"))?;
         let engine = Arc::clone(&self.engine);
+        let jobs = Arc::clone(&self.jobs);
         tokio::task::spawn_blocking(move || {
             // Retain ownership even if a client disconnects while its command commits.
             let _permit = permit;
+            // The reservation and the busy check are one lock acquisition,
+            // so a job cannot start in between; the guard outlives the
+            // write below. The jobs lock itself is never held across the
+            // engine lock, keeping the two lock orders disjoint.
+            let _mutation = if let Some(id) = command.mutation_target() {
+                let mutation = jobs.mutation(id)?;
+                #[cfg(test)]
+                jobs.wait_mutation_gate();
+                Some(mutation)
+            } else {
+                None
+            };
             let mut engine = engine
                 .lock()
                 .map_err(|_| RpcError::new(INTERNAL_ERROR, "Configuration worker failed"))?;
@@ -128,22 +141,17 @@ impl Service {
                 let id = pair(&params.id)?;
                 let path = foldover_types::SyncPath::try_from(params.path)
                     .map_err(|error| RpcError::new(INVALID_PARAMS, error.to_string()))?;
-                let keep = match params.keep {
-                    ConflictKeep::Left => Side::Left,
-                    ConflictKeep::Right => Side::Right,
-                    ConflictKeep::Both => {
-                        // Copying hashes the file; keep it off the runtime.
-                        let (jobs, engine) = (Arc::clone(&self.jobs), Arc::clone(&self.engine));
-                        tokio::task::spawn_blocking(move || jobs.keep_both(&engine, id, &path))
-                            .await
-                            .map_err(|_| {
-                                RpcError::new(INTERNAL_ERROR, "The sync engine failed")
-                            })??;
-                        return encode(self.jobs.status(id));
-                    }
-                };
-                self.jobs.resolve(&self.engine, id, &path, keep)?;
-                self.jobs.status(id)
+                let (jobs, engine) = (Arc::clone(&self.jobs), Arc::clone(&self.engine));
+                // Resolutions record to the engine and keep-both copies
+                // files; keep them off the runtime.
+                tokio::task::spawn_blocking(move || match params.keep {
+                    ConflictKeep::Left => jobs.resolve(&engine, id, &path, Side::Left),
+                    ConflictKeep::Right => jobs.resolve(&engine, id, &path, Side::Right),
+                    ConflictKeep::Both => jobs.keep_both(&engine, id, &path),
+                })
+                .await
+                .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))??;
+                return encode(self.jobs.status(id));
             }
             SYNC_RUN => {
                 let params: SyncRun = parameters(request)?;
@@ -224,6 +232,14 @@ impl Command {
                 })
             }
             _ => Err(RpcError::new(METHOD_NOT_FOUND, "Method not found")),
+        }
+    }
+
+    /// The existing pair whose configuration this command replaces.
+    fn mutation_target(&self) -> Option<PairId> {
+        match self {
+            Self::Update { id, .. } | Self::Remove { id, .. } => Some(*id),
+            Self::List(_) | Self::Get(_) | Self::Create(_) => None,
         }
     }
 
@@ -346,6 +362,10 @@ async fn health(request: Request) -> Result<Value, RpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use foldover_engine::Completion;
+    use foldover_proto::local::{
+        SyncCounts, SyncDeletions, SyncJob, SyncPreview, SyncResult, SyncStatus,
+    };
     use serde_json::json;
     use std::{fs, os::unix::ffi::OsStrExt, path::Path};
 
@@ -646,7 +666,16 @@ mod tests {
 
     async fn settled(service: &Service, key: &Value) -> Value {
         // Generous: runs wait out the racy-timestamp window on slow hosts.
-        for _ in 0..3_000 {
+        settle(service, key, 3_000).await
+    }
+
+    /// Runs that copy or archive dozens of entries take longer to finish.
+    async fn settled_slow(service: &Service, key: &Value) -> Value {
+        settle(service, key, 10_000).await
+    }
+
+    async fn settle(service: &Service, key: &Value, polls: usize) -> Value {
+        for _ in 0..polls {
             let status = service
                 .handle(Request::call(9, SYNC_STATUS, Some(key.clone())))
                 .await
@@ -1433,5 +1462,795 @@ mod tests {
                 .unwrap(),
             timed
         );
+    }
+
+    fn sync_preview() -> SyncPreview {
+        let deletions = || SyncDeletions {
+            deletions: 0,
+            paths: 0,
+            needs_approval: false,
+        };
+        SyncPreview {
+            items: Vec::new(),
+            counts: SyncCounts::default(),
+            left: deletions(),
+            right: deletions(),
+        }
+    }
+
+    fn sync_finished(completion: Completion) -> SyncStatus {
+        SyncStatus::Finished {
+            result: SyncResult {
+                cancelled: completion == Completion::Cancelled,
+                copied: 0,
+                updated: 0,
+                archived: 0,
+                recovered: 0,
+                conflicts: 0,
+                failures: Vec::new(),
+                failure_count: 0,
+                archive: String::new(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn unattended_runs_skip_pairs_whose_result_waits_for_review() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Docs");
+        input["options"]["schedule"] = json!({"kind": "every", "minutes": 1});
+        fs::write(directory.path().join("Docs-left/file"), b"data").unwrap();
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        let key = json!({"id": created["id"]});
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        settled(&service, &key).await;
+        let start = service.scheduler.started();
+        let at = |seconds| start + std::time::Duration::from_secs(seconds);
+
+        // States a person must see are never replaced by the scheduler.
+        for status in [
+            SyncStatus::Previewed {
+                preview: sync_preview(),
+            },
+            SyncStatus::NeedsApproval {
+                preview: sync_preview(),
+            },
+            SyncStatus::Failed {
+                message: "read error".into(),
+            },
+            SyncStatus::Working {
+                job: SyncJob::Run,
+                cancelling: false,
+            },
+        ] {
+            service.jobs.force_status(id, status.clone());
+            assert!(service.run_due(at(120)).is_empty(), "{status:?}");
+            assert_eq!(service.jobs.status(id), status);
+        }
+
+        // Finished runs, cancelled or not, keep the schedule recurring.
+        for (completion, later) in [(Completion::Finished, 120), (Completion::Cancelled, 240)] {
+            service.jobs.force_status(id, sync_finished(completion));
+            assert_eq!(
+                run_due_started(&service, at(later)).await,
+                [id],
+                "{completion:?}"
+            );
+            settled(&service, &key).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stopped_unattended_run_stays_until_a_person_syncs() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Notes");
+        input["options"]["schedule"] = json!({"kind": "every", "minutes": 1});
+        let left = directory.path().join("Notes-left");
+        fs::write(left.join("file"), b"data").unwrap();
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        let key = json!({"id": created["id"]});
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        settled(&service, &key).await;
+        fs::remove_file(left.join("file")).unwrap();
+        let start = service.scheduler.started();
+        let at = |seconds| start + std::time::Duration::from_secs(seconds);
+
+        // Deleting one entry out of one exceeds the unattended fuse (ADR 0013).
+        assert_eq!(run_due_started(&service, at(61)).await, [id]);
+        let stopped = settled(&service, &key).await;
+        assert_eq!(stopped["state"], "needsApproval", "{stopped}");
+
+        // ADR 0022: the stop waits for a person; it is not retried or replaced.
+        for later in [122, 600] {
+            assert!(service.run_due(at(later)).is_empty());
+            assert!(matches!(
+                service.jobs.status(id),
+                SyncStatus::NeedsApproval { .. }
+            ));
+        }
+
+        // A person's run releases the latch and the schedule resumes.
+        let approved = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 10});
+        service
+            .handle(Request::call(3, SYNC_RUN, Some(approved)))
+            .await
+            .unwrap();
+        assert_eq!(settled(&service, &key).await["state"], "finished");
+        assert_eq!(run_due_started(&service, at(661)).await, [id]);
+        settled(&service, &key).await;
+    }
+
+    #[tokio::test]
+    async fn a_first_mirror_run_on_a_nonempty_target_waits_for_review() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Photos");
+        input["mode"] = json!({"kind": "mirror", "source": "left"});
+        let right = directory.path().join("Photos-right");
+        fs::write(right.join("extra"), b"keep me").unwrap();
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let run = |right_deletions| json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": right_deletions});
+
+        // PLAN.md §3.6: a non-empty target needs explicit confirmation on the
+        // first run, even below the deletion fuse. Nothing may be archived yet.
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run(0))))
+            .await
+            .unwrap();
+        let stopped = settled_slow(&service, &key).await;
+        assert_eq!(stopped["state"], "needsApproval", "{stopped}");
+        assert_eq!(stopped["preview"]["right"]["deletions"], 1);
+        assert_eq!(fs::read(right.join("extra")).unwrap(), b"keep me");
+        assert!(!right.join(".foldover/archive").exists());
+
+        // Approving the held, reviewed result runs it.
+        service
+            .handle(Request::call(3, SYNC_RUN, Some(run(1))))
+            .await
+            .unwrap();
+        let finished = settled_slow(&service, &key).await;
+        assert_eq!(finished["state"], "finished", "{finished}");
+        assert_eq!(finished["result"]["archived"], 1);
+        assert!(!right.join("extra").exists());
+        assert!(right.join(".foldover/archive").exists());
+    }
+
+    #[tokio::test]
+    async fn a_first_mirror_run_that_overwrites_target_content_waits_for_review() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Photos");
+        input["mode"] = json!({"kind": "mirror", "source": "left"});
+        let left = directory.path().join("Photos-left");
+        let right = directory.path().join("Photos-right");
+        fs::write(left.join("shared"), b"new").unwrap();
+        fs::write(right.join("shared"), b"old").unwrap();
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+
+        // The first run replaces existing target content: a non-empty target
+        // needs explicit confirmation even when nothing is deleted (§3.6).
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run.clone())))
+            .await
+            .unwrap();
+        let stopped = settled(&service, &key).await;
+        assert_eq!(stopped["state"], "needsApproval", "{stopped}");
+        assert_eq!(fs::read(right.join("shared")).unwrap(), b"old");
+        assert!(!right.join(".foldover/archive").exists());
+
+        // A reviewed retry of the unchanged plan runs it.
+        service
+            .handle(Request::call(3, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        let finished = settled(&service, &key).await;
+        assert_eq!(finished["state"], "finished", "{finished}");
+        assert_eq!(fs::read(right.join("shared")).unwrap(), b"new");
+    }
+
+    #[tokio::test]
+    async fn an_approval_does_not_authorize_a_changed_deletion_set() {
+        let (directory, service) = fixture();
+        let input = input(directory.path(), "Docs");
+        let left = directory.path().join("Docs-left");
+        let right = directory.path().join("Docs-right");
+        for index in 1..=102_u32 {
+            fs::write(left.join(format!("file{index:03}")), b"data").unwrap();
+        }
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let run = |right_deletions| json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": right_deletions});
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run(0))))
+            .await
+            .unwrap();
+        assert_eq!(settled_slow(&service, &key).await["state"], "finished");
+
+        // The reviewed plan deletes file001..file051 from the right folder.
+        for index in 1..=51_u32 {
+            fs::remove_file(left.join(format!("file{index:03}"))).unwrap();
+        }
+        service
+            .handle(Request::call(3, SYNC_RUN, Some(run(0))))
+            .await
+            .unwrap();
+        let stopped = settled_slow(&service, &key).await;
+        assert_eq!(stopped["state"], "needsApproval", "{stopped}");
+        assert_eq!(stopped["preview"]["right"]["deletions"], 51);
+
+        // The same count now covers a different set: file052..file102.
+        for index in 1..=51_u32 {
+            fs::write(left.join(format!("file{index:03}")), b"data").unwrap();
+            fs::remove_file(left.join(format!("file{:03}", index + 51))).unwrap();
+        }
+        service
+            .handle(Request::call(4, SYNC_RUN, Some(run(51))))
+            .await
+            .unwrap();
+        let stopped = settled_slow(&service, &key).await;
+        assert_eq!(stopped["state"], "needsApproval", "{stopped}");
+        // The unreviewed set must be untouched: nothing was archived.
+        for index in 52..=102_u32 {
+            assert_eq!(
+                fs::read(right.join(format!("file{index:03}"))).unwrap(),
+                b"data"
+            );
+        }
+        assert!(!right.join(".foldover/archive").exists());
+    }
+
+    #[tokio::test]
+    async fn a_run_cannot_approve_deletions_it_never_reviewed() {
+        let (directory, service) = fixture();
+        let input = input(directory.path(), "Docs");
+        let left = directory.path().join("Docs-left");
+        let right = directory.path().join("Docs-right");
+        for index in 1..=60_u32 {
+            fs::write(left.join(format!("file{index:03}")), b"data").unwrap();
+        }
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let run = |right_deletions| json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": right_deletions});
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run(0))))
+            .await
+            .unwrap();
+        assert_eq!(settled_slow(&service, &key).await["state"], "finished");
+
+        // Deleting 51 of 60 trips the fuse; approving without ever holding
+        // the reviewed plan must not authorize it.
+        for index in 1..=51_u32 {
+            fs::remove_file(left.join(format!("file{index:03}"))).unwrap();
+        }
+        service
+            .handle(Request::call(3, SYNC_RUN, Some(run(51))))
+            .await
+            .unwrap();
+        let stopped = settled_slow(&service, &key).await;
+        assert_eq!(stopped["state"], "needsApproval", "{stopped}");
+        for index in 1..=60_u32 {
+            assert_eq!(
+                fs::read(right.join(format!("file{index:03}"))).unwrap(),
+                b"data"
+            );
+        }
+        assert!(!right.join(".foldover/archive").exists());
+    }
+
+    #[tokio::test]
+    async fn a_pair_with_a_running_job_cannot_be_removed() {
+        let (directory, service) = fixture();
+        let pair = service
+            .handle(Request::call(
+                1,
+                PAIR_CREATE,
+                Some(input(directory.path(), "Docs")),
+            ))
+            .await
+            .unwrap();
+        let id: PairId = pair["id"].as_str().unwrap().parse().unwrap();
+        let remove = || {
+            Request::call(
+                2,
+                PAIR_REMOVE,
+                Some(json!({"id": pair["id"], "revision": 1})),
+            )
+        };
+
+        service.jobs.force_status(
+            id,
+            SyncStatus::Working {
+                job: SyncJob::Run,
+                cancelling: false,
+            },
+        );
+        assert_eq!(
+            service.handle(remove()).await.unwrap_err().code(),
+            foldover_proto::local::SYNC_BUSY
+        );
+        service
+            .handle(Request::call(3, PAIR_GET, Some(json!({"id": pair["id"]}))))
+            .await
+            .unwrap();
+
+        service.jobs.force_status(
+            id,
+            SyncStatus::Failed {
+                message: "read error".into(),
+            },
+        );
+        service.handle(remove()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_removal_in_progress_rejects_new_job_claims() {
+        let (directory, service) = fixture();
+        let pair = service
+            .handle(Request::call(
+                1,
+                PAIR_CREATE,
+                Some(input(directory.path(), "Docs")),
+            ))
+            .await
+            .unwrap();
+        fs::write(directory.path().join("Docs-left/file"), b"data").unwrap();
+        let (reached, release) = service.jobs.gate_mutation();
+        let removing = service.clone();
+        let id = pair["id"].clone();
+        let remover = tokio::spawn(async move {
+            removing
+                .handle(Request::call(
+                    2,
+                    PAIR_REMOVE,
+                    Some(json!({"id": id, "revision": 1})),
+                ))
+                .await
+        });
+        // The removal passed its busy check and waits before the delete.
+        tokio::task::spawn_blocking(move || reached.recv().unwrap())
+            .await
+            .unwrap();
+        // A claim landing in that window must not win.
+        let attempt = service
+            .handle(Request::call(
+                3,
+                SYNC_PREVIEW,
+                Some(json!({"id": pair["id"]})),
+            ))
+            .await;
+        release.send(()).unwrap();
+        let removed = remover.await.unwrap();
+        assert_eq!(
+            attempt.unwrap_err().code(),
+            foldover_proto::local::SYNC_BUSY
+        );
+        removed.unwrap();
+        assert_eq!(
+            service
+                .handle(Request::call(4, PAIR_GET, Some(json!({"id": pair["id"]}))))
+                .await
+                .unwrap_err()
+                .code(),
+            PAIR_NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pair_with_a_running_job_cannot_be_updated() {
+        let (directory, service) = fixture();
+        let input = input(directory.path(), "Docs");
+        let pair = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input.clone())))
+            .await
+            .unwrap();
+        let id: PairId = pair["id"].as_str().unwrap().parse().unwrap();
+        let mut renamed = input.clone();
+        renamed["name"] = json!("Renamed");
+        let update = || {
+            Request::call(
+                2,
+                PAIR_UPDATE,
+                Some(
+                    json!({"id": pair["id"], "revision": pair["revision"], "configuration": renamed.clone()}),
+                ),
+            )
+        };
+
+        service.jobs.force_status(
+            id,
+            SyncStatus::Working {
+                job: SyncJob::Run,
+                cancelling: false,
+            },
+        );
+        assert_eq!(
+            service.handle(update()).await.unwrap_err().code(),
+            foldover_proto::local::SYNC_BUSY
+        );
+        // The rejected update changed nothing.
+        assert_eq!(
+            service
+                .handle(Request::call(3, PAIR_GET, Some(json!({"id": pair["id"]}))))
+                .await
+                .unwrap()["configuration"]["name"],
+            "Docs"
+        );
+
+        service.jobs.force_status(
+            id,
+            SyncStatus::Failed {
+                message: "read error".into(),
+            },
+        );
+        assert_eq!(
+            service.handle(update()).await.unwrap()["configuration"]["name"],
+            "Renamed"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_update_in_progress_rejects_new_job_claims() {
+        let (directory, service) = fixture();
+        let input = input(directory.path(), "Docs");
+        let pair = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input.clone())))
+            .await
+            .unwrap();
+        fs::write(directory.path().join("Docs-left/file"), b"data").unwrap();
+        let mut renamed = input.clone();
+        renamed["name"] = json!("Renamed");
+        let (reached, release) = service.jobs.gate_mutation();
+        let updating = service.clone();
+        let id = pair["id"].clone();
+        let updater = tokio::spawn(async move {
+            updating
+                .handle(Request::call(
+                    2,
+                    PAIR_UPDATE,
+                    Some(json!({"id": id, "revision": 1, "configuration": renamed})),
+                ))
+                .await
+        });
+        // The update waits before its engine write.
+        tokio::task::spawn_blocking(move || reached.recv().unwrap())
+            .await
+            .unwrap();
+        // A claim landing in that window must not win.
+        let attempt = service
+            .handle(Request::call(
+                3,
+                SYNC_PREVIEW,
+                Some(json!({"id": pair["id"]})),
+            ))
+            .await;
+        release.send(()).unwrap();
+        let updated = updater.await.unwrap();
+        assert_eq!(
+            attempt.unwrap_err().code(),
+            foldover_proto::local::SYNC_BUSY
+        );
+        updated.unwrap();
+        // With the mutation done, the pair takes jobs again.
+        assert_eq!(
+            service
+                .handle(Request::call(
+                    4,
+                    SYNC_PREVIEW,
+                    Some(json!({"id": pair["id"]})),
+                ))
+                .await
+                .unwrap()["state"],
+            "working"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_late_folder_probe_never_replaces_a_result_waiting_for_review() {
+        let (directory, service) = fixture();
+        let created = service
+            .handle(Request::call(
+                1,
+                PAIR_CREATE,
+                Some(input(directory.path(), "Docs")),
+            ))
+            .await
+            .unwrap();
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+
+        // A probe result landing late must not hide a state a person is
+        // reviewing, an active job, or a pair mid-configuration.
+        for status in [
+            SyncStatus::Previewed {
+                preview: sync_preview(),
+            },
+            SyncStatus::NeedsApproval {
+                preview: sync_preview(),
+            },
+            SyncStatus::Failed {
+                message: "read error".into(),
+            },
+            SyncStatus::Working {
+                job: SyncJob::Run,
+                cancelling: false,
+            },
+        ] {
+            service.jobs.force_status(id, status.clone());
+            service.jobs.wait_for(id, Side::Left);
+            assert_eq!(service.jobs.status(id), status);
+        }
+
+        service.jobs.force_status(id, SyncStatus::Idle);
+        {
+            let _mutation = service.jobs.mutation(id).unwrap();
+            service.jobs.wait_for(id, Side::Right);
+            assert_eq!(service.jobs.status(id), SyncStatus::Idle);
+        }
+
+        // Finished and unstarted pairs still show the wait.
+        service
+            .jobs
+            .force_status(id, sync_finished(Completion::Finished));
+        service.jobs.wait_for(id, Side::Left);
+        assert!(matches!(
+            service.jobs.status(id),
+            SyncStatus::Waiting { .. }
+        ));
+        service
+            .jobs
+            .force_status(id, sync_finished(Completion::Cancelled));
+        service.jobs.wait_for(id, Side::Right);
+        assert!(matches!(
+            service.jobs.status(id),
+            SyncStatus::Waiting { .. }
+        ));
+    }
+
+    /// Run two syncs so `file` lands in the pair's right-side archive;
+    /// returns the archive run name.
+    async fn archived_run(
+        directory: &Path,
+        service: &Service,
+        created: &Value,
+        folder: &str,
+    ) -> Value {
+        let left = directory.join(format!("{folder}-left"));
+        let key = json!({"id": created["id"]});
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        fs::write(left.join("file"), b"data").unwrap();
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run.clone())))
+            .await
+            .unwrap();
+        settled(service, &key).await;
+        fs::remove_file(left.join("file")).unwrap();
+        service
+            .handle(Request::call(3, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        assert_eq!(settled(service, &key).await["result"]["archived"], 1);
+        let runs = service
+            .handle(Request::call(
+                4,
+                ARCHIVE_RUNS,
+                Some(json!({"id": created["id"], "side": "right"})),
+            ))
+            .await
+            .unwrap();
+        runs["runs"][0]["name"].clone()
+    }
+
+    #[tokio::test]
+    async fn a_put_back_in_progress_rejects_new_job_claims() {
+        let (directory, service) = fixture();
+        let created = service
+            .handle(Request::call(
+                1,
+                PAIR_CREATE,
+                Some(input(directory.path(), "Docs")),
+            ))
+            .await
+            .unwrap();
+        let run_name = archived_run(directory.path(), &service, &created, "Docs").await;
+        let put_back =
+            json!({"id": created["id"], "side": "right", "run": run_name, "path": b"file"});
+
+        let (reached, release) = service.jobs.gate_mutation();
+        let restoring = service.clone();
+        let put = tokio::spawn(async move {
+            restoring
+                .handle(Request::call(5, ARCHIVE_PUT_BACK, Some(put_back)))
+                .await
+        });
+        // The put-back passed its idle check and waits before writing.
+        tokio::task::spawn_blocking(move || reached.recv().unwrap())
+            .await
+            .unwrap();
+        // Cancellation and claims landing in that window: cancel stays a
+        // cheap no-op, but a claim must not win.
+        service
+            .handle(Request::call(
+                6,
+                SYNC_CANCEL,
+                Some(json!({"id": created["id"]})),
+            ))
+            .await
+            .unwrap();
+        let attempt = service
+            .handle(Request::call(
+                7,
+                SYNC_PREVIEW,
+                Some(json!({"id": created["id"]})),
+            ))
+            .await;
+        release.send(()).unwrap();
+        put.await.unwrap().unwrap();
+        assert_eq!(
+            attempt.unwrap_err().code(),
+            foldover_proto::local::SYNC_BUSY
+        );
+        // With the put-back done, the pair takes jobs again.
+        assert_eq!(
+            service
+                .handle(Request::call(
+                    8,
+                    SYNC_PREVIEW,
+                    Some(json!({"id": created["id"]}))
+                ))
+                .await
+                .unwrap()["state"],
+            "working"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_configuration_change_in_progress_rejects_put_backs() {
+        let (directory, service) = fixture();
+        let input = input(directory.path(), "Docs");
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input.clone())))
+            .await
+            .unwrap();
+        let run_name = archived_run(directory.path(), &service, &created, "Docs").await;
+        let mut renamed = input.clone();
+        renamed["name"] = json!("Renamed");
+
+        let (reached, release) = service.jobs.gate_mutation();
+        let updating = service.clone();
+        let (id, revision) = (created["id"].clone(), created["revision"].clone());
+        let update = tokio::spawn(async move {
+            updating
+                .handle(Request::call(
+                    5,
+                    PAIR_UPDATE,
+                    Some(json!({"id": id, "revision": revision, "configuration": renamed})),
+                ))
+                .await
+        });
+        // The update holds the pair and parks before its engine write.
+        tokio::task::spawn_blocking(move || reached.recv().unwrap())
+            .await
+            .unwrap();
+        // A put-back must not write while the configuration changes.
+        let put_back = service
+            .handle(Request::call(
+                6,
+                ARCHIVE_PUT_BACK,
+                Some(
+                    json!({"id": created["id"], "side": "right", "run": run_name, "path": b"file"}),
+                ),
+            ))
+            .await;
+        release.send(()).unwrap();
+        update.await.unwrap().unwrap();
+        assert_eq!(
+            put_back.unwrap_err().code(),
+            foldover_proto::local::SYNC_BUSY
+        );
+    }
+
+    /// Create a pair, sync `text.md`, edit it on both sides and preview,
+    /// leaving a both-changed conflict in the pair's latest preview.
+    async fn conflicted_pair(directory: &Path, service: &Service) -> Value {
+        let created = service
+            .handle(Request::call(
+                1,
+                PAIR_CREATE,
+                Some(input(directory, "Both")),
+            ))
+            .await
+            .unwrap();
+        let (left, right) = (directory.join("Both-left"), directory.join("Both-right"));
+        let key = json!({"id": created["id"]});
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        fs::write(left.join("text.md"), b"base").unwrap();
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        settled(service, &key).await;
+        fs::write(left.join("text.md"), b"left").unwrap();
+        fs::write(right.join("text.md"), b"right").unwrap();
+        service
+            .handle(Request::call(3, SYNC_PREVIEW, Some(key)))
+            .await
+            .unwrap();
+        settled(service, &json!({"id": created["id"]})).await;
+        created
+    }
+
+    // A resolution that passed its conflict check and parks before writing
+    // must still own the pair: a claim landing in that window is refused.
+    async fn claim_during_resolution(service: &Service, created: &Value, keep: &str) -> Value {
+        let (reached, release) = service.jobs.gate_mutation();
+        let resolving = service.clone();
+        let request = Request::call(
+            4,
+            SYNC_RESOLVE,
+            Some(json!({"id": created["id"], "path": b"text.md", "keep": keep})),
+        );
+        let resolver = tokio::spawn(async move { resolving.handle(request).await });
+        tokio::task::spawn_blocking(move || reached.recv().unwrap())
+            .await
+            .unwrap();
+        let attempt = service
+            .handle(Request::call(
+                5,
+                SYNC_PREVIEW,
+                Some(json!({"id": created["id"]})),
+            ))
+            .await;
+        release.send(()).unwrap();
+        let resolved = resolver.await.unwrap();
+        assert_eq!(
+            attempt.unwrap_err().code(),
+            foldover_proto::local::SYNC_BUSY,
+            "keep={keep}"
+        );
+        resolved.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_keep_both_in_progress_rejects_new_job_claims() {
+        let (directory, service) = fixture();
+        let created = conflicted_pair(directory.path(), &service).await;
+        let status = claim_during_resolution(&service, &created, "both").await;
+        assert_eq!(status["state"], "previewed");
+    }
+
+    #[tokio::test]
+    async fn a_resolve_in_progress_rejects_new_job_claims() {
+        let (directory, service) = fixture();
+        let created = conflicted_pair(directory.path(), &service).await;
+        let status = claim_during_resolution(&service, &created, "left").await;
+        assert_eq!(status["state"], "previewed");
     }
 }

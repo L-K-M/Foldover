@@ -29,6 +29,16 @@ execute: deletion gate ─▶ archive leftovers
   limit need an `Approval` covering at least that many deletions; unattended
   runs above their limit always stop. A stopped run writes nothing and
   returns the preview.
+- **Confirmation binds to the plan:** the agent keeps each pair's latest
+  preview — its revision and every item's action and versions. A run with
+  a nonzero approval executes only when its freshly planned preview equals
+  that held one; otherwise it stops with the fresh `NeedsApproval` preview,
+  so an approval can never authorize deletions a person did not see.
+  A matching review also marks the run `RunContext::Reviewed`.
+- **First run:** while either root lacks a recorded identity, a plan that
+  archives or replaces content the target already holds stops for review
+  even below the fuse — a non-empty target gets explicit confirmation
+  (PLAN.md §3.6). A `Reviewed` retry of the unchanged plan proceeds.
 - **Operations:** each planned change goes through the endpoint operations
   ([ADR 0019](0019-local-write-primitives.md)), which recheck both sides.
   A failure is reported per path and skips that path's descendants; other
@@ -56,7 +66,12 @@ atomic exchange may still need one.
 ## Consequences
 
 - A preview and its run are separate observations. The run re-plans and
-  re-gates, so approvals are counts, not references to a stored plan.
+  re-gates; approvals stay counts on the wire, but the service binds them
+  to the held preview by exact equality — a changed plan needs new review.
+- A first run that only creates files still runs without a prior preview:
+  the non-empty-target confirmation covers archiving and overwriting, not
+  copies into empty space. Requiring a preview step before every first run
+  remains a client convention, not an agent rule.
 - Configuration changes during a run stop it at the next commit; up to one
   batch of writes may already have used the previous configuration's roots.
 - Missing: free-space checks, progress events and cancellation from

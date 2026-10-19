@@ -298,7 +298,22 @@ final class SyncStore {
     private let client: any SyncClient
     private let pollInterval: Duration
     private let alert: @MainActor (SyncAlert) async -> Void
-    private var polling: Set<String> = []
+    /// The pair's live poller, owned by token: a newer caller replaces
+    /// the owner instead of skipping, and an old owner's reply or defer
+    /// cannot touch the successor.
+    private var polling: [String: Int] = [:]
+    private var pollSequence = 0
+    /// Writes a pair has seen. A reply requested before the latest write
+    /// is stale and must not overwrite it, even if the state cycles back
+    /// to the same value.
+    private var generations: [String: Int] = [:]
+    /// Starts the agent has not answered yet. One counts as a local
+    /// write — replies requested before it are stale — keeps the pair
+    /// busy for `canStart`, and refuses a duplicate start.
+    private var pendingStarts: Set<String> = []
+    /// Approval results the user declined; the same result stays declined
+    /// until an explicit job or a different reviewable result.
+    private var declined: [String: PreviewSummary] = [:]
     private(set) var states: [String: PairSyncState] = [:]
     private(set) var requestErrors: [String: String] = [:]
     private(set) var histories: [String: [RunRecord]] = [:]
@@ -321,10 +336,14 @@ final class SyncStore {
     /// outcomes that need a person become notifications. A pair's first
     /// observation never alerts, so launching the app does not replay them.
     func checkAll(_ pairs: [SyncPair]) async {
-        for pair in pairs where !polling.contains(pair.id) {
+        for pair in pairs where polling[pair.id] == nil && !pendingStarts.contains(pair.id) {
             let previous = states[pair.id]
-            guard let state = try? await client.status(pair.id) else { continue }
-            update(pair.id, to: state)
+            let generation = generations[pair.id] ?? 0
+            guard var state = try? await client.status(pair.id) else { continue }
+            // A local write while the request was in flight is newer.
+            guard (generations[pair.id] ?? 0) == generation else { continue }
+            state = normalized(pair.id, state)
+            set(pair.id, state)
             if previous != state { await refreshHistory(pair.id) }
             guard let previous, previous != state, let alert = Self.alert(for: pair, state: state) else {
                 continue
@@ -380,17 +399,16 @@ final class SyncStore {
         }
     }
 
-    /// A new state starts a new change list.
-    private func update(_ id: String, to state: PairSyncState) {
-        if states[id] != state { listings[id] = nil }
-        states[id] = state
-    }
     func history(for id: String) -> [RunRecord] { histories[id] ?? [] }
     func requestError(for id: String) -> String? { requestErrors[id] }
+    /// An explicit preview/run is on the wire and unanswered.
+    func isStarting(_ id: String) -> Bool { pendingStarts.contains(id) }
 
     func refresh(_ id: String) async {
+        // A pending start's own reply is fresher; asking again would race it.
+        guard !pendingStarts.contains(id) else { return }
         let client = client
-        await perform(id) { try await client.status(id) }
+        await perform(id, .other) { try await client.status(id) }
         await refreshHistory(id)
     }
 
@@ -401,19 +419,21 @@ final class SyncStore {
     }
 
     func preview(_ id: String) async {
+        guard beginStart(id) else { return }
         let client = client
-        await perform(id) { try await client.preview(id) }
+        await perform(id, .start) { try await client.preview(id) }
     }
 
     /// Approvals are deletion counts the user accepted for each folder.
     func run(_ id: String, approvedA: UInt64 = 0, approvedB: UInt64 = 0) async {
+        guard beginStart(id) else { return }
         let client = client
-        await perform(id) { try await client.run(id, approvedA: approvedA, approvedB: approvedB) }
+        await perform(id, .start) { try await client.run(id, approvedA: approvedA, approvedB: approvedB) }
     }
 
     func cancel(_ id: String) async {
         let client = client
-        await perform(id) { try await client.cancel(id) }
+        await perform(id, .other) { try await client.cancel(id) }
     }
 
     /// Keep one folder's version of a previewed conflict, then preview again
@@ -432,9 +452,11 @@ final class SyncStore {
 
     private func choose(_ id: String, _ request: @Sendable () async throws -> Void) async {
         requestErrors[id] = nil
+        let generation = generations[id] ?? 0
         do {
             try await request()
         } catch {
+            guard !Task.isCancelled, (generations[id] ?? 0) == generation else { return }
             requestErrors[id] = PairStore.message(for: error)
             return
         }
@@ -447,36 +469,105 @@ final class SyncStore {
     }
 
     /// Keep the reviewed changes visible after declining an approval.
+    /// The decline holds for that result until an explicit job runs.
     func declineApproval(_ id: String) {
         guard case .needsApproval(let preview) = states[id] else { return }
-        update(id, to: .previewed(preview))
+        declined[id] = preview
+        set(id, .previewed(preview))
     }
 
-    private func perform(_ id: String, _ request: @Sendable () async throws -> PairSyncState) async {
+    /// Whether a foreground request is an explicit job start. A start's
+    /// answer releases the pair's pending start and — when its reply is
+    /// the newest — spends the declined approval, so the job resurfaces
+    /// reviewable results; every other request leaves both alone.
+    private enum RequestKind {
+        case start
+        case other
+    }
+
+    /// Registers a start the agent has not answered yet. Registration is
+    /// itself a local write, so replies requested before it go stale.
+    private func beginStart(_ id: String) -> Bool {
+        guard pendingStarts.insert(id).inserted else { return false }
+        generations[id, default: 0] += 1
+        return true
+    }
+
+    /// Runs one request and publishes its outcome. A reply or error that
+    /// a newer local write superseded — or that belongs to a cancelled
+    /// caller — is dropped instead of landing on the pair's current job.
+    private func perform(_ id: String, _ kind: RequestKind,
+                         _ request: @Sendable () async throws -> PairSyncState) async {
         requestErrors[id] = nil
+        let generation = generations[id] ?? 0
+        let reply: PairSyncState
         do {
-            update(id, to: try await request())
+            reply = try await request()
         } catch {
+            if kind == .start { pendingStarts.remove(id) }
+            guard !Task.isCancelled, (generations[id] ?? 0) == generation else { return }
             requestErrors[id] = PairStore.message(for: error)
             return
         }
+        if kind == .start { pendingStarts.remove(id) }
+        guard !Task.isCancelled, (generations[id] ?? 0) == generation else { return }
+        // An explicit job that ran re-arms approval requests for the pair.
+        if kind == .start { declined[id] = nil }
+        set(id, normalized(id, reply))
         await pollWhileWorking(id)
     }
 
+    /// The latest caller owns the pair's poller by token. A reply an old
+    /// poller awaited across a cancel or a new job is stale: it is
+    /// dropped and only that poller ends, while the successor keeps
+    /// polling. A cancelled caller stops polling without cancelling the
+    /// agent's job.
     private func pollWhileWorking(_ id: String) async {
-        guard !polling.contains(id) else { return }
-        polling.insert(id)
-        defer { polling.remove(id) }
         guard case .working = states[id] else { return }
-        while case .working = states[id] {
-            try? await Task.sleep(for: pollInterval)
+        pollSequence += 1
+        let owner = pollSequence
+        polling[id] = owner
+        defer {
+            if polling[id] == owner { polling[id] = nil }
+        }
+        while case .working = states[id], !Task.isCancelled {
             do {
-                update(id, to: try await client.status(id))
+                try await Task.sleep(for: pollInterval)
             } catch {
+                return
+            }
+            let generation = generations[id] ?? 0
+            let reply: PairSyncState
+            do {
+                reply = try await client.status(id)
+            } catch {
+                guard polling[id] == owner, !Task.isCancelled,
+                      (generations[id] ?? 0) == generation else { return }
                 requestErrors[id] = PairStore.message(for: error)
                 return
             }
+            guard polling[id] == owner,
+                  (generations[id] ?? 0) == generation else { return }
+            set(id, normalized(id, reply))
         }
         await refreshHistory(id)
+    }
+
+    /// A declined approval keeps the identical result from resurfacing
+    /// until an explicit job or a changed result; normalize before the
+    /// state is published or alerted on.
+    private func normalized(_ id: String, _ state: PairSyncState) -> PairSyncState {
+        if case .needsApproval(let preview) = state, declined[id] == preview {
+            return .previewed(preview)
+        }
+        return state
+    }
+
+    /// Every write advances the pair's generation; a new state starts a
+    /// new change list.
+    private func set(_ id: String, _ state: PairSyncState) {
+        generations[id, default: 0] += 1
+        if states[id] != state { listings[id] = nil }
+        states[id] = state
     }
 }

@@ -116,6 +116,12 @@ impl Approval {
         }
     }
 
+    /// Any accepted deletion count at all; such approvals must bind to a
+    /// reviewed plan.
+    pub fn approves_anything(self) -> bool {
+        self.left_deletions > 0 || self.right_deletions > 0
+    }
+
     fn deletions(self, side: Side) -> u64 {
         match side {
             Side::Left => self.left_deletions,
@@ -570,6 +576,26 @@ impl PairRun {
             {
                 return Err(RunError::UnsupportedDurability { side });
             }
+        }
+
+        // PLAN.md §3.6: a non-empty target needs explicit confirmation on the
+        // first run. Archiving or replacing content destroys what the target
+        // already held, so an unreviewed first run stops here however small
+        // the change; `RunContext::Reviewed` marks a plan a person accepted.
+        let first_run = self.identities.side(Side::Left).is_none()
+            || self.identities.side(Side::Right).is_none();
+        let destroys_target = self.plan.rows().iter().any(|row| {
+            matches!(
+                row.decision(),
+                CandidateDecision::Entry(EntryDecision::Archive { .. })
+                    | CandidateDecision::Entry(EntryDecision::Propagate {
+                        change: ChangeKind::ReplaceContent,
+                        ..
+                    })
+            )
+        });
+        if first_run && destroys_target && context != RunContext::Reviewed {
+            return Ok(RunOutcome::NeedsApproval(self.preview()));
         }
         for side in [Side::Left, Side::Right] {
             let approved = self.plan.deletions(side).deletions() <= approval.deletions(side);

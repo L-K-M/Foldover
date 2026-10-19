@@ -40,7 +40,7 @@ struct PairSyncViewModel {
         if case .working = state { return true }
         return false
     }
-    var canStart: Bool { agentConnected && !isWorking }
+    var canStart: Bool { agentConnected && !isWorking && !store.isStarting(pair.id) }
     var canCancel: Bool {
         if case .working(_, let cancelling) = state { return !cancelling }
         return false

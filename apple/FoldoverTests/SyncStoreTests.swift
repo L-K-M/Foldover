@@ -133,6 +133,191 @@ private actor GatedChangesClient: SyncClient {
     }
 }
 
+/// Replies what the test sets, so each request sees a chosen agent state.
+private actor StubSyncClient: SyncClient {
+    private var statusReply: PairSyncState = .idle
+    private var previewReply: PairSyncState = .idle
+    private var previewError: (any Error)?
+
+    func setStatusReply(_ reply: PairSyncState) { statusReply = reply }
+    func setPreviewReply(_ reply: PairSyncState) { previewReply = reply }
+    func setPreviewError(_ error: (any Error)?) { previewError = error }
+
+    func preview(_ id: String) async throws -> PairSyncState {
+        if let previewError { throw previewError }
+        return previewReply
+    }
+    func status(_ id: String) async throws -> PairSyncState { statusReply }
+    func run(_ id: String, approvedA: UInt64, approvedB: UInt64) async throws -> PairSyncState { .idle }
+    func cancel(_ id: String) async throws -> PairSyncState { .idle }
+    func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState { .idle }
+    func keepBoth(_ id: String, path: Data) async throws -> PairSyncState { .idle }
+    func history(_ id: String) async throws -> [RunRecord] { [] }
+    func changes(_ id: String, after: Data?, filter: ChangeFilter?) async throws -> ChangePage {
+        ChangePage(changes: [], more: false)
+    }
+}
+
+/// Holds every status reply until the test releases it, so a checkAll
+/// request can stay in flight while a manual job starts.
+private actor DeferredSyncClient: SyncClient {
+    private(set) var statusCalls = 0
+    private(set) var previewCalls = 0
+    private(set) var runCalls = 0
+    private(set) var resolveCalls = 0
+    private(set) var cancelled = false
+    private var pending: [CheckedContinuation<PairSyncState, any Error>] = []
+    private var waiters: [(id: UUID, count: Int, then: CheckedContinuation<Bool, Never>)] = []
+    private var pendingStarts: [CheckedContinuation<PairSyncState, any Error>] = []
+    private var pendingResolves: [CheckedContinuation<PairSyncState, any Error>] = []
+    private var startWaiters: [(id: UUID, job: SyncJob, count: Int,
+                               then: CheckedContinuation<Bool, Never>)] = []
+    private var holdStarts = false
+    private var holdResolves = false
+    private var previewReply: PairSyncState = .idle
+
+    func setPreviewReply(_ reply: PairSyncState) { previewReply = reply }
+    /// Park preview/run requests until the test releases them.
+    func holdStartReplies() { holdStarts = true }
+    /// Park resolve requests until the test releases them.
+    func holdResolveReplies() { holdResolves = true }
+
+    func preview(_ id: String) async throws -> PairSyncState {
+        started(.preview)
+        guard holdStarts else { return previewReply }
+        return try await withCheckedThrowingContinuation { pendingStarts.append($0) }
+    }
+    func status(_ id: String) async throws -> PairSyncState {
+        statusCalls += 1
+        let ready = waiters.filter { statusCalls >= $0.count }
+        waiters.removeAll { statusCalls >= $0.count }
+        for waiter in ready { waiter.then.resume(returning: true) }
+        return try await withCheckedThrowingContinuation { pending.append($0) }
+    }
+    func run(_ id: String, approvedA: UInt64, approvedB: UInt64) async throws -> PairSyncState {
+        started(.run)
+        guard holdStarts else { return .idle }
+        return try await withCheckedThrowingContinuation { pendingStarts.append($0) }
+    }
+    func cancel(_ id: String) async throws -> PairSyncState {
+        cancelled = true
+        return .idle
+    }
+    func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState {
+        resolveCalls += 1
+        guard holdResolves else { return .idle }
+        return try await withCheckedThrowingContinuation { pendingResolves.append($0) }
+    }
+    func keepBoth(_ id: String, path: Data) async throws -> PairSyncState { .idle }
+    func history(_ id: String) async throws -> [RunRecord] { [] }
+    func changes(_ id: String, after: Data?, filter: ChangeFilter?) async throws -> ChangePage {
+        ChangePage(changes: [], more: false)
+    }
+
+    private func started(_ job: SyncJob) {
+        switch job {
+        case .preview: previewCalls += 1
+        case .run: runCalls += 1
+        }
+        let calls = job == .preview ? previewCalls : runCalls
+        let ready = startWaiters.filter { $0.job == job && calls >= $0.count }
+        startWaiters.removeAll { $0.job == job && calls >= $0.count }
+        for waiter in ready { waiter.then.resume(returning: true) }
+    }
+
+    /// Resumes the oldest unanswered status request.
+    func reply(_ state: PairSyncState) {
+        pending.removeFirst().resume(returning: state)
+    }
+
+    /// Resumes the newest unanswered status request.
+    func replyLatest(_ state: PairSyncState) {
+        pending.removeLast().resume(returning: state)
+    }
+
+    /// Fails the oldest unanswered status request.
+    func replyError(_ error: any Error) {
+        pending.removeFirst().resume(throwing: error)
+    }
+
+    /// Resumes the oldest parked preview/run request.
+    func replyStart(_ state: PairSyncState) {
+        pendingStarts.removeFirst().resume(returning: state)
+    }
+
+    /// Fails the oldest parked preview/run request.
+    func replyStartError(_ error: any Error) {
+        pendingStarts.removeFirst().resume(throwing: error)
+    }
+
+    /// Resumes the oldest parked resolve request.
+    func replyResolve(_ state: PairSyncState) {
+        pendingResolves.removeFirst().resume(returning: state)
+    }
+
+    var pendingStatusCalls: Int { pending.count }
+    var pendingStartCalls: Int { pendingStarts.count }
+    var pendingResolveCalls: Int { pendingResolves.count }
+
+    /// Suspends until at least `count` status requests are in flight.
+    func waitForStatusCalls(_ count: Int) async {
+        _ = await waitForStatusCalls(count, timeout: .seconds(30))
+    }
+
+    /// Bounded variant: a request a bug suppresses fails instead of
+    /// hanging the test.
+    @discardableResult
+    func waitForStatusCalls(_ count: Int, timeout: Duration) async -> Bool {
+        if statusCalls >= count { return true }
+        let id = UUID()
+        return await withCheckedContinuation { continuation in
+            waiters.append((id, count, continuation))
+            Task {
+                try? await Task.sleep(for: timeout)
+                self.expire(id)
+            }
+        }
+    }
+
+    /// Bounded wait on preview/run requests of one kind, so a start a
+    /// bug suppresses fails instead of hanging the test.
+    @discardableResult
+    func waitForStartCalls(_ job: SyncJob, _ count: Int, timeout: Duration) async -> Bool {
+        let calls = job == .preview ? previewCalls : runCalls
+        if calls >= count { return true }
+        let id = UUID()
+        return await withCheckedContinuation { continuation in
+            startWaiters.append((id, job, count, continuation))
+            Task {
+                try? await Task.sleep(for: timeout)
+                self.expireStartWaiter(id)
+            }
+        }
+    }
+
+    /// Bounded wait on resolve requests, so a call a bug suppresses
+    /// fails instead of hanging the test.
+    @discardableResult
+    func waitForResolveCalls(_ count: Int, timeout: Duration) async -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        while resolveCalls < count {
+            if ContinuousClock.now >= deadline { return false }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        return true
+    }
+
+    private func expire(_ id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        waiters.remove(at: index).then.resume(returning: false)
+    }
+
+    private func expireStartWaiter(_ id: UUID) {
+        guard let index = startWaiters.firstIndex(where: { $0.id == id }) else { return }
+        startWaiters.remove(at: index).then.resume(returning: false)
+    }
+}
+
 private func preview(archivesInA: UInt64, needsApproval: Bool) -> PreviewSummary {
     PreviewSummary(
         changes: [PlannedChange(path: Data("photos/a.jpg".utf8), action: .copy(to: .b), bytes: 2_000_000),
@@ -420,6 +605,551 @@ func previewsListMoreChangesByKindAndResetOnTheNextPreview() async {
     #expect(store.listing(for: pair().id) == nil)
 }
 
+// Regression for PR57: declineApproval only flipped the local state, so
+// the next scheduled checkAll read the same needsApproval from the
+// agent, resurrected the dialog and reposted the notification.
+@MainActor
+@Test
+func declinedApprovalsStayDeclinedUntilTheJobOrResultChanges() async {
+    let summary = preview(archivesInA: 60, needsApproval: true)
+    let expanded = preview(archivesInA: 61, needsApproval: true)
+    let clean = preview(archivesInA: 0, needsApproval: false)
+    let client = StubSyncClient()
+    let recorder = AlertRecorder()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1)) { alert in
+        await recorder.record(alert)
+    }
+    let pair = pair()
+    let viewModel = PairSyncViewModel(pair: pair, store: store, pairs: catalog(), agentConnected: true)
+
+    // The first observation never alerts, so establish the quiet baseline.
+    await store.checkAll([pair])
+    #expect(store.state(for: pair.id) == .idle)
+    #expect(await recorder.alerts.isEmpty)
+
+    // An automatic check that stops for approval notifies once.
+    await client.setStatusReply(.needsApproval(summary))
+    await store.checkAll([pair])
+    #expect(store.state(for: pair.id) == .needsApproval(summary))
+    #expect(viewModel.approvalRequest != nil)
+    #expect(await recorder.alerts.count == 1)
+
+    store.declineApproval(pair.id)
+    #expect(store.state(for: pair.id) == .previewed(summary))
+    #expect(viewModel.approvalRequest == nil)
+
+    // The same agent result keeps the decline: no dialog, no second alert.
+    await store.checkAll([pair])
+    #expect(store.state(for: pair.id) == .previewed(summary))
+    #expect(viewModel.approvalRequest == nil)
+    #expect(await recorder.alerts.count == 1)
+
+    // A substantively different reviewable result must surface again.
+    await client.setStatusReply(.needsApproval(expanded))
+    await store.checkAll([pair])
+    #expect(store.state(for: pair.id) == .needsApproval(expanded))
+    #expect(await recorder.alerts.count == 2)
+
+    // A new explicit job re-arms approval requests afterwards.
+    store.declineApproval(pair.id)
+    await client.setPreviewReply(.previewed(clean))
+    await client.setStatusReply(.needsApproval(summary))
+    await store.preview(pair.id)
+    #expect(store.state(for: pair.id) == .previewed(clean))
+    await store.checkAll([pair])
+    #expect(store.state(for: pair.id) == .needsApproval(summary))
+    #expect(await recorder.alerts.count == 3)
+}
+
+// Regression for PR57: a checkAll status reply requested before a manual
+// job started used to overwrite the working state — the pair looked idle
+// or finished while it was still syncing and the display stopped moving.
+@MainActor
+@Test
+func staleCheckAllRepliesCannotOverwriteManuallyStartedJobs() async {
+    let summary = preview(archivesInA: 3, needsApproval: false)
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.working(.preview, cancelling: false))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+
+    // The scheduled check parks inside its status request.
+    let check = Task { await store.checkAll([pair]) }
+    await client.waitForStatusCalls(1)
+
+    // A manual preview starts; the store begins polling the working job.
+    let manual = Task { await store.preview(pair.id) }
+    await client.waitForStatusCalls(2)
+
+    // The stale reply predates the job: it must not win.
+    await client.reply(.idle)
+    await check.value
+    #expect(store.state(for: pair.id) == .working(.preview, cancelling: false))
+
+    // The live poll still owns the pair and lands the real result.
+    while await client.pendingStatusCalls > 0 {
+        await client.reply(.previewed(summary))
+    }
+    await manual.value
+    #expect(store.state(for: pair.id) == .previewed(summary))
+}
+
+/// Polls a MainActor condition with a deadline, so an effect a bug
+/// suppresses fails the test instead of hanging it.
+@MainActor
+private func eventually(_ condition: @MainActor () -> Bool,
+                        timeout: Duration = .seconds(3)) async -> Bool {
+    let deadline = ContinuousClock.now + timeout
+    while !condition() {
+        if ContinuousClock.now >= deadline { return false }
+        try? await Task.sleep(for: .milliseconds(1))
+    }
+    return true
+}
+
+// The stale-reply guard counts writes, not state values: a pair can
+// leave .idle and cycle back to it while a checkAll request is in
+// flight, and that reply is still stale (ABA).
+@MainActor
+@Test
+func staleCheckAllRepliesStayDroppedWhenTheStateCyclesBack() async {
+    let summary = preview(archivesInA: 60, needsApproval: true)
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.working(.preview, cancelling: false))
+    let recorder = AlertRecorder()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1)) { alert in
+        await recorder.record(alert)
+    }
+    let pair = pair()
+
+    let check = Task { await store.checkAll([pair]) }
+    await client.waitForStatusCalls(1)
+
+    // A manual job cycles the pair .idle → .working → .idle.
+    let manual = Task { await store.preview(pair.id) }
+    await client.waitForStatusCalls(2)
+    await client.replyLatest(.idle)
+    await manual.value
+    #expect(store.state(for: pair.id) == .idle)
+
+    // The parked checkAll reply must not resurrect the approval even
+    // though the pair is .idle again, the value its request started on.
+    await client.reply(.needsApproval(summary))
+    await check.value
+    #expect(store.state(for: pair.id) == .idle)
+    #expect(await recorder.alerts.isEmpty)
+}
+
+// Regression for PR57 follow-up: the live poller wrote each status reply
+// unconditionally. A reply requested before a cancel-and-restart was
+// stale, could overwrite the new job's .working with a terminal result,
+// and then retired the only poller — the new job never updated again.
+@MainActor
+@Test
+func staleLivePollRepliesCannotRetireANewerJob() async {
+    let stale = preview(archivesInA: 3, needsApproval: false)
+    let done = preview(archivesInA: 0, needsApproval: false)
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.working(.preview, cancelling: false))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+
+    // A working job is being polled; its status request is in flight.
+    let first = Task { await store.preview(pair.id) }
+    await client.waitForStatusCalls(1)
+
+    // An explicit cancel lands .idle, then a new job starts .working
+    // while the old poller is still suspended on its status request.
+    await store.cancel(pair.id)
+    #expect(store.state(for: pair.id) == .idle)
+    let second = Task { await store.preview(pair.id) }
+    #expect(await eventually {
+        store.state(for: pair.id) == .working(.preview, cancelling: false)
+    })
+
+    // The stale poll reply must not overwrite the new job's state, and
+    // a poller must keep asking until the job really finishes.
+    await client.reply(.previewed(stale))
+    let keptPolling = await client.waitForStatusCalls(2, timeout: .seconds(3))
+    #expect(store.state(for: pair.id) == .working(.preview, cancelling: false))
+    #expect(keptPolling)
+
+    // Drain every outstanding request so buggy and fixed paths finish.
+    while await client.pendingStatusCalls > 0 {
+        await client.reply(.previewed(done))
+    }
+    await first.value
+    await second.value
+    #expect(store.state(for: pair.id) == .previewed(done))
+}
+
+// Regression for PR57 follow-up: navigating back to a pair refreshes
+// its status through perform, which cleared the declined marker, so
+// the same agent result resurrected the approval dialog. Refreshes and
+// live polls must keep the decline; only a new explicit preview/run
+// (or a changed approval result) re-arms it.
+@MainActor
+@Test
+func declinedApprovalsSurviveStatusRefreshesAndPolls() async {
+    let summary = preview(archivesInA: 60, needsApproval: true)
+    let expanded = preview(archivesInA: 61, needsApproval: true)
+    let client = StubSyncClient()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+    let viewModel = PairSyncViewModel(pair: pair, store: store, pairs: catalog(), agentConnected: true)
+
+    await client.setStatusReply(.needsApproval(summary))
+    await store.checkAll([pair])
+    #expect(store.state(for: pair.id) == .needsApproval(summary))
+
+    store.declineApproval(pair.id)
+    #expect(store.state(for: pair.id) == .previewed(summary))
+    #expect(viewModel.approvalRequest == nil)
+
+    // The view's automatic refresh must not resurrect the decline.
+    await store.refresh(pair.id)
+    #expect(store.state(for: pair.id) == .previewed(summary))
+    #expect(viewModel.approvalRequest == nil)
+
+    // Neither does a live poll that meets the same declined result.
+    await client.setStatusReply(.working(.run, cancelling: false))
+    let refreshing = Task { await store.refresh(pair.id) }
+    #expect(await eventually {
+        store.state(for: pair.id) == .working(.run, cancelling: false)
+    })
+    await client.setStatusReply(.needsApproval(summary))
+    await refreshing.value
+    #expect(store.state(for: pair.id) == .previewed(summary))
+    #expect(viewModel.approvalRequest == nil)
+
+    // A changed approval result still resurfaces.
+    await client.setStatusReply(.needsApproval(expanded))
+    await store.refresh(pair.id)
+    #expect(store.state(for: pair.id) == .needsApproval(expanded))
+    #expect(viewModel.approvalRequest != nil)
+}
+
+// Regression for PR57 follow-up: when the caller Task is cancelled
+// while its poller has a status request in flight, a new job must
+// still get its own poller. The cancelled owner's late reply must not
+// overwrite the new job or strip the successor's ownership.
+@MainActor
+@Test
+func cancelledPollersYieldOwnershipToNewerJobs() async {
+    let stale = preview(archivesInA: 3, needsApproval: false)
+    let done = preview(archivesInA: 0, needsApproval: false)
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.working(.preview, cancelling: false))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+
+    let first = Task { await store.preview(pair.id) }
+    await client.waitForStatusCalls(1)
+    first.cancel()
+
+    // The new job's caller becomes the successor poller even though the
+    // cancelled one is still suspended on its status request.
+    let second = Task { await store.preview(pair.id) }
+    #expect(await eventually {
+        store.state(for: pair.id) == .working(.preview, cancelling: false)
+    })
+
+    // The stale reply belongs to the cancelled owner: drop it without
+    // clearing the successor's ownership.
+    await client.reply(.previewed(stale))
+    let keptPolling = await client.waitForStatusCalls(2, timeout: .seconds(3))
+    #expect(store.state(for: pair.id) == .working(.preview, cancelling: false))
+    #expect(keptPolling)
+
+    // Drain every outstanding request so buggy and fixed paths finish.
+    while await client.pendingStatusCalls > 0 {
+        await client.reply(.previewed(done))
+    }
+    await first.value
+    await second.value
+    #expect(store.state(for: pair.id) == .previewed(done))
+}
+
+// Regression for PR57 follow-up: the poller swallowed Task.sleep's
+// CancellationError, so a caller Task that was cancelled kept issuing
+// status requests with no delay while the job stayed .working. The
+// caller's cancellation must stop polling without cancelling the job.
+@MainActor
+@Test
+func cancellingTheCallerStopsPollingWithoutCancellingTheJob() async {
+    let done = preview(archivesInA: 0, needsApproval: false)
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.working(.preview, cancelling: false))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+
+    let job = Task { await store.preview(pair.id) }
+    await client.waitForStatusCalls(1)
+    job.cancel()
+
+    // The in-flight reply still applies; then polling must stop instead
+    // of firing the next status request from a cancelled task.
+    await client.reply(.working(.preview, cancelling: false))
+    let polledAgain = await client.waitForStatusCalls(2, timeout: .seconds(3))
+    #expect(!polledAgain)
+    #expect(await client.cancelled == false)
+    #expect(store.state(for: pair.id) == .working(.preview, cancelling: false))
+
+    // A terminal reply ends any poller the buggy path left running.
+    while await client.pendingStatusCalls > 0 {
+        await client.reply(.previewed(done))
+    }
+    await job.value
+}
+
+// Regression for PR57 follow-up: perform writes the request's reply
+// unconditionally. A view-driven refresh parked inside its status
+// request can resolve after a manual job started, overwrite the new
+// .working with .idle, and — through the generation bump — retire the
+// successor's live poller. The stale reply must be dropped.
+@MainActor
+@Test
+func staleRefreshRepliesCannotOverwriteManuallyStartedJobs() async {
+    let done = preview(archivesInA: 0, needsApproval: false)
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.working(.preview, cancelling: false))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+
+    // The automatic refresh parks inside its status request.
+    let refreshing = Task { await store.refresh(pair.id) }
+    await client.waitForStatusCalls(1)
+
+    // A manual preview starts and takes over live polling.
+    let manual = Task { await store.preview(pair.id) }
+    #expect(await eventually {
+        store.state(for: pair.id) == .working(.preview, cancelling: false)
+    })
+
+    // The refresh reply predates the job: it must not win, and a poller
+    // must keep asking until the job really finishes.
+    await client.reply(.idle)
+    await refreshing.value
+    let keptPolling = await client.waitForStatusCalls(2, timeout: .seconds(3))
+    #expect(store.state(for: pair.id) == .working(.preview, cancelling: false))
+    #expect(keptPolling)
+
+    // Drain every outstanding request so buggy and fixed paths finish.
+    while await client.pendingStatusCalls > 0 {
+        await client.reply(.previewed(done))
+    }
+    await manual.value
+    #expect(store.state(for: pair.id) == .previewed(done))
+}
+
+// Regression for PR57 follow-up: the same stale-perform path writes
+// requestErrors unconditionally. A parked refresh that fails after a
+// newer job started must not report its error on the healthy successor.
+@MainActor
+@Test
+func staleRefreshErrorsCannotLandOnANewerJob() async {
+    let done = preview(archivesInA: 0, needsApproval: false)
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.working(.preview, cancelling: false))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+
+    let refreshing = Task { await store.refresh(pair.id) }
+    await client.waitForStatusCalls(1)
+
+    let manual = Task { await store.preview(pair.id) }
+    #expect(await eventually {
+        store.state(for: pair.id) == .working(.preview, cancelling: false)
+    })
+
+    // The parked refresh fails after the job started: neither the error
+    // nor any stale state may touch the successor.
+    await client.replyError(SyncFixtureError.unreachable)
+    await refreshing.value
+    #expect(store.requestError(for: pair.id) == nil)
+    #expect(store.state(for: pair.id) == .working(.preview, cancelling: false))
+
+    while await client.pendingStatusCalls > 0 {
+        await client.reply(.previewed(done))
+    }
+    await manual.value
+    #expect(store.state(for: pair.id) == .previewed(done))
+}
+
+// Regression for PR57 follow-up: a caller task cancelled while its
+// request is in flight must not publish the CancellationError as a
+// request error the user sees on the pair.
+@MainActor
+@Test
+func cancelledRefreshesDoNotReportCancellationAsAnError() async {
+    let client = DeferredSyncClient()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+
+    let refreshing = Task { await store.refresh(pair.id) }
+    await client.waitForStatusCalls(1)
+    refreshing.cancel()
+
+    await client.replyError(CancellationError())
+    await refreshing.value
+    #expect(store.requestError(for: pair.id) == nil)
+    #expect(store.state(for: pair.id) == .idle)
+}
+
+// Regression for PR57 follow-up: while a start RPC is parked the pair
+// still reads .idle, so canStart stays true and a second tap or an
+// overlapping caller issues a duplicate job. A pending start must look
+// busy and a concurrent start must not reach the agent — while the
+// accepted first start still lands its reply.
+@MainActor
+@Test
+func pendingStartsAreBusyAndRejectDuplicateStarts() async {
+    let done = preview(archivesInA: 0, needsApproval: false)
+    let client = DeferredSyncClient()
+    await client.holdStartReplies()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+    let viewModel = PairSyncViewModel(pair: pair, store: store, pairs: catalog(), agentConnected: true)
+
+    let first = Task { await store.preview(pair.id) }
+    #expect(await client.waitForStartCalls(.preview, 1, timeout: .seconds(3)))
+    #expect(!viewModel.canStart)
+
+    // A concurrent start must not issue a second preview RPC.
+    let duplicate = Task { await store.preview(pair.id) }
+    let secondIssued = await client.waitForStartCalls(
+        .preview, 2, timeout: .milliseconds(500))
+    #expect(!secondIssued)
+
+    // The accepted start still applies its reply.
+    while await client.pendingStartCalls > 0 {
+        await client.replyStart(.previewed(done))
+    }
+    await first.value
+    await duplicate.value
+    #expect(store.state(for: pair.id) == .previewed(done))
+
+    // The same holds while a run RPC is parked.
+    let runJob = Task { await store.run(pair.id) }
+    #expect(await client.waitForStartCalls(.run, 1, timeout: .seconds(3)))
+    #expect(!viewModel.canStart)
+    let duplicateRun = Task { await store.run(pair.id) }
+    let secondRunIssued = await client.waitForStartCalls(
+        .run, 2, timeout: .milliseconds(500))
+    #expect(!secondRunIssued)
+    while await client.pendingStartCalls > 0 {
+        await client.replyStart(.idle)
+    }
+    await runJob.value
+    await duplicateRun.value
+    #expect(store.state(for: pair.id) == .idle)
+}
+
+// Regression for PR57 follow-up: preview/run clear the declined marker
+// before the request is known to succeed, so a failed explicit attempt
+// spends the decline and the next automatic check resurrects the same
+// approval. A failed start must preserve the decline.
+@MainActor
+@Test
+func declinedApprovalsSurviveFailedJobAttempts() async {
+    let summary = preview(archivesInA: 60, needsApproval: true)
+    let client = StubSyncClient()
+    let recorder = AlertRecorder()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1)) { alert in
+        await recorder.record(alert)
+    }
+    let pair = pair()
+    let viewModel = PairSyncViewModel(pair: pair, store: store, pairs: catalog(), agentConnected: true)
+
+    await client.setStatusReply(.needsApproval(summary))
+    await store.checkAll([pair])
+    store.declineApproval(pair.id)
+    #expect(store.state(for: pair.id) == .previewed(summary))
+
+    // A failed explicit attempt reports its error but must not spend
+    // the decline.
+    await client.setPreviewError(SyncFixtureError.unreachable)
+    await store.preview(pair.id)
+    #expect(store.requestError(for: pair.id) != nil)
+    #expect(store.state(for: pair.id) == .previewed(summary))
+
+    // The next scheduled check sees the same result: still declined.
+    await store.checkAll([pair])
+    #expect(store.state(for: pair.id) == .previewed(summary))
+    #expect(viewModel.approvalRequest == nil)
+    #expect(await recorder.alerts.isEmpty)
+}
+
+// Regression for PR57 follow-up: while a start is pending, refresh and
+// checkAll must not issue a status request — the start's own reply is
+// fresher — and a reply requested before the start stays stale even when
+// it lands inside the pending window. A freshness gate that counts
+// writes but forgets the start's registration would let such a reply
+// retire the start's answer.
+@MainActor
+@Test
+func startsOwnThePairWhileTheirRequestIsInFlight() async {
+    let done = preview(archivesInA: 0, needsApproval: false)
+    let client = DeferredSyncClient()
+    await client.holdStartReplies()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+
+    // A refresh parks inside its status request before the start.
+    let refreshing = Task { await store.refresh(pair.id) }
+    await client.waitForStatusCalls(1)
+
+    // The start parks too; while it is unanswered no status read may run.
+    let starting = Task { await store.preview(pair.id) }
+    #expect(await client.waitForStartCalls(.preview, 1, timeout: .seconds(3)))
+    await store.refresh(pair.id)
+    await store.checkAll([pair])
+    #expect(await client.statusCalls == 1)
+
+    // The refresh's reply lands inside the pending window: requested
+    // before the start, it must not publish or retire the start's reply.
+    await client.reply(.idle)
+    await refreshing.value
+    await client.replyStart(.working(.preview, cancelling: false))
+    #expect(await eventually {
+        store.state(for: pair.id) == .working(.preview, cancelling: false)
+    })
+
+    // The accepted job polls to its real terminal result.
+    #expect(await client.waitForStatusCalls(2, timeout: .seconds(3)))
+    while await client.pendingStatusCalls > 0 {
+        await client.reply(.previewed(done))
+    }
+    await starting.value
+    #expect(store.state(for: pair.id) == .previewed(done))
+}
+
+// Regression for PR57 follow-up: while an approving run's start RPC is
+// unanswered the pair still reads .needsApproval, so approvalRequest
+// stays non-nil and the dialog the user just confirmed re-presents. A
+// pending start must already hide the dialog.
+@MainActor
+@Test
+func pendingApprovedRunsHideTheApprovalDialog() async {
+    let summary = preview(archivesInA: 60, needsApproval: true)
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.needsApproval(summary))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+    let viewModel = PairSyncViewModel(pair: pair, store: store, pairs: catalog(), agentConnected: true)
+
+    await store.preview(pair.id)
+    #expect(viewModel.approvalRequest != nil)
+
+    await client.holdStartReplies()
+    let approving = Task { await store.run(pair.id) }
+    #expect(await client.waitForStartCalls(.run, 1, timeout: .seconds(3)))
+    #expect(viewModel.approvalRequest == nil)
+
+    await client.replyStart(.idle)
+    await approving.value
+}
+
 @MainActor
 @Test
 func theLastFilterTapWinsOverStaleResponses() async throws {
@@ -484,4 +1214,180 @@ func aSupersededChangesRequestReportsNoError() async throws {
     #expect(viewModel.changeFilter == .archives)
     #expect(viewModel.rows.map(\.path) == ["old.zip"])
     #expect(viewModel.requestError == nil)
+}
+
+@MainActor
+@Test
+func overwriteOnlyApprovalsExplainThePendingCopy() async {
+    let check = DeletionCheck(deletions: 0, paths: 1, needsApproval: false)
+    let summary = PreviewSummary(
+        changes: [PlannedChange(path: Data("note".utf8), action: .copy(to: .b))],
+        copies: 1, updates: 0, archives: 0, conflicts: 0, blocked: 0, kept: 0,
+        a: check, b: check
+    )
+    let store = SyncStore(client: ScriptedSyncClient([.needsApproval(summary)]))
+    let pair = pair()
+    let viewModel = PairSyncViewModel(pair: pair, store: store, pairs: catalog(), agentConnected: true)
+    await store.preview(pair.id)
+
+    // First-run overwrites need review even with no standalone deletions.
+    let request = viewModel.approvalRequest?.lowercased()
+    #expect(request?.contains("copy") == true)
+    #expect(request?.contains("1") == true)
+    #expect(!viewModel.statusText.contains("more items"))
+}
+
+// Regression for PR57 follow-up: dismissing the dialog while an
+// approving run is in flight writes .previewed and bumps the generation,
+// so the accepted .working reply is dropped and no poller ever runs —
+// the pair shows a stale preview while the agent may be running the
+// sync. A dismissal during a pending start must not abandon the
+// accepted reply or its poller.
+@MainActor
+@Test
+func dismissingDuringAPendingStartCannotAbandonTheAcceptedRun() async {
+    let summary = preview(archivesInA: 60, needsApproval: true)
+    let finished = RunSummary(cancelled: false, copied: 1, updated: 0, archived: 60,
+                              recovered: 0, conflicts: 0, failures: [], failureCount: 0,
+                              archive: "run")
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.needsApproval(summary))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+    let viewModel = PairSyncViewModel(pair: pair, store: store, pairs: catalog(), agentConnected: true)
+
+    await store.preview(pair.id)
+    await client.holdStartReplies()
+    let approving = Task { await store.run(pair.id) }
+    #expect(await client.waitForStartCalls(.run, 1, timeout: .seconds(3)))
+    #expect(viewModel.approvalRequest == nil)
+
+    // A dismissal while the start is in flight must not retire it.
+    store.declineApproval(pair.id)
+    #expect(viewModel.approvalRequest == nil)
+
+    await client.replyStart(.working(.run, cancelling: false))
+    #expect(await eventually {
+        store.state(for: pair.id) == .working(.run, cancelling: false)
+    })
+    #expect(await client.waitForStatusCalls(1, timeout: .seconds(3)))
+
+    while await client.pendingStatusCalls > 0 {
+        await client.reply(.finished(finished))
+    }
+    await approving.value
+    #expect(store.state(for: pair.id) == .finished(finished))
+}
+
+// Regression for PR57 follow-up: the same dismissal also retires the
+// start's error path — a run that legitimately fails lands after the
+// decline's write, so its error is dropped and the failure is hidden.
+@MainActor
+@Test
+func dismissingDuringAPendingStartCannotHideTheRunsFailure() async {
+    let summary = preview(archivesInA: 60, needsApproval: true)
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.needsApproval(summary))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+    let viewModel = PairSyncViewModel(pair: pair, store: store, pairs: catalog(), agentConnected: true)
+
+    await store.preview(pair.id)
+    await client.holdStartReplies()
+    let approving = Task { await store.run(pair.id) }
+    #expect(await client.waitForStartCalls(.run, 1, timeout: .seconds(3)))
+
+    store.declineApproval(pair.id)
+    await client.replyStartError(SyncFixtureError.unreachable)
+    await approving.value
+    #expect(store.requestError(for: pair.id) != nil)
+    // The run never ran: the approval it would have cleared is still live.
+    #expect(viewModel.approvalRequest != nil)
+}
+
+// Regression for PR57 follow-up: a poller from the previous job can wake
+// inside a new start's pending window, land a terminal reply that bumps
+// the generation, and retire the new start's accepted reply — leaving no
+// poller for the job the agent is actually running.
+@MainActor
+@Test
+func oldPollerRepliesCannotRetireAPendingStart() async {
+    let done = preview(archivesInA: 0, needsApproval: false)
+    let finished = RunSummary(cancelled: false, copied: 1, updated: 0, archived: 3,
+                              recovered: 0, conflicts: 0, failures: [], failureCount: 0,
+                              archive: "run")
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.working(.preview, cancelling: false))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(250))
+    let pair = pair()
+
+    // Job one's poller is in its first sleep when the new start begins.
+    let first = Task { await store.preview(pair.id) }
+    #expect(await eventually {
+        store.state(for: pair.id) == .working(.preview, cancelling: false)
+    })
+
+    await client.holdStartReplies()
+    let second = Task { await store.preview(pair.id) }
+    #expect(await client.waitForStartCalls(.preview, 2, timeout: .seconds(3)))
+
+    // Give the old poller its poll window inside the pending start, then
+    // answer every request it managed to issue with a terminal reply.
+    _ = await client.waitForStatusCalls(1, timeout: .seconds(1))
+    let issuedBeforeReply = await client.statusCalls
+    while await client.pendingStatusCalls > 0 {
+        await client.reply(.finished(finished))
+    }
+
+    // The accepted start's reply still wins and owns the live poller.
+    await client.replyStart(.working(.preview, cancelling: false))
+    #expect(await eventually {
+        store.state(for: pair.id) == .working(.preview, cancelling: false)
+    })
+    #expect(await client.waitForStatusCalls(issuedBeforeReply + 1, timeout: .seconds(3)))
+
+    while await client.pendingStatusCalls > 0 {
+        await client.reply(.previewed(done))
+    }
+    await first.value
+    await second.value
+    #expect(store.state(for: pair.id) == .previewed(done))
+}
+
+// Regression for PR57 follow-up: resolve always previews again once its
+// request answers, even when a newer action took over the pair while it
+// was in flight — the re-preview belongs to the old conflict-resolution
+// flow and must not issue against the pair's new job.
+@MainActor
+@Test
+func staleResolveRepliesCannotTriggerNewPreviews() async {
+    let done = preview(archivesInA: 0, needsApproval: false)
+    let client = DeferredSyncClient()
+    await client.holdResolveReplies()
+    await client.setPreviewReply(.working(.preview, cancelling: false))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+
+    let resolving = Task { await store.resolve(pair.id, path: Data("a".utf8), keep: .a) }
+    #expect(await client.waitForResolveCalls(1, timeout: .seconds(3)))
+
+    // A newer action owns the pair before the resolve answers.
+    let manual = Task { await store.preview(pair.id) }
+    #expect(await eventually {
+        store.state(for: pair.id) == .working(.preview, cancelling: false)
+    })
+
+    // The stale resolve's answer must not start another preview.
+    await client.replyResolve(.idle)
+    let secondIssued = await client.waitForStartCalls(.preview, 2, timeout: .milliseconds(500))
+    #expect(!secondIssued)
+
+    while await client.pendingStatusCalls > 0 {
+        await client.reply(.previewed(done))
+    }
+    while await client.pendingResolveCalls > 0 {
+        await client.replyResolve(.idle)
+    }
+    await resolving.value
+    await manual.value
 }

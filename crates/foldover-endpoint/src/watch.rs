@@ -81,20 +81,17 @@ impl<K: Clone + Eq + Send + 'static> RootWatcher<K> {
     }
 }
 
-/// A change inside `root` that is not Foldover's own bookkeeping.
+/// A change inside `root` that is not Foldover's own bookkeeping. Scanning
+/// excludes internal names at every depth, so watching does too.
 fn relevant(root: &Path, path: &Path) -> bool {
     let Ok(relative) = path.strip_prefix(root) else {
         return false;
     };
-    let mut components = relative.components();
-    match components.next() {
-        // The root itself changed, e.g. renamed or replaced.
-        None => true,
-        Some(Component::Normal(first)) if is_internal_name(first.as_bytes()) => false,
-        Some(_) => !relative
-            .file_name()
-            .is_some_and(|name| is_internal_name(name.as_bytes())),
-    }
+    // The root itself, or a path whose components all survive filtering.
+    relative.components().all(|component| match component {
+        Component::Normal(name) => !is_internal_name(name.as_bytes()),
+        _ => true,
+    })
 }
 
 #[cfg(test)]
@@ -112,6 +109,9 @@ mod tests {
         assert!(!relevant(root, Path::new("/r/.foldover/archive/x")));
         assert!(!relevant(root, Path::new("/r/a/.foldover-tmp-12")));
         assert!(!relevant(root, Path::new("/r/a/.DS_Store")));
+        // Scanning excludes internal names at every depth, not just the ends.
+        assert!(!relevant(root, Path::new("/r/a/.foldover-tmp-12/b")));
+        assert!(!relevant(root, Path::new("/r/deep/.foldover/x")));
         assert!(!relevant(root, Path::new("/other/a")));
         assert!(!relevant(root, Path::new("/rx/a")));
     }

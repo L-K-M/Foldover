@@ -1,6 +1,6 @@
 # ADR 0013: Deletion review thresholds
 
-Status: Implemented pure policy; plan and execution integration pending
+Status: Implemented; execution binds confirmations to the held preview
 
 ## Counts and policy
 
@@ -26,10 +26,11 @@ counts fail before assessment; an empty analysis permits zero deletions only.
 
 `WithinLimits` reports only this fuse's requirement. It does not authorize
 filesystem operations. Root availability/identity, sudden emptiness, canary,
-space, first-run preview, freshness and journal gates remain required.
-Extra confirmation must bind to the exact reviewed plan and configuration
-revision. A cached pair-level acceptance must not authorize a changed plan.
-The agent and app do not expose executable plans yet.
+space, first-run destructive-review, freshness and journal gates remain
+required. Extra confirmation binds to the exact reviewed plan and
+configuration revision: the agent holds each pair's latest preview and a
+run executes a nonzero approval only when its fresh preview equals it, so
+a changed plan stops for review again rather than reusing old counts.
 
 ## Verification
 

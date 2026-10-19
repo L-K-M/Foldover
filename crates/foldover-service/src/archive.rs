@@ -10,7 +10,7 @@ use foldover_proto::local::{
     ARCHIVE_ITEM_LIMIT, ARCHIVE_ITEMS, ARCHIVE_NOT_FOUND, ARCHIVE_PUT_BACK_ALL, ARCHIVE_RUN_LIMIT,
     ARCHIVE_RUNS, ArchiveItem, ArchiveItemQuery, ArchiveItems, ArchiveKey, ArchivePlaced,
     ArchivePutBack, ArchiveRestored, ArchiveRun, ArchiveRunKey, ArchiveRuns, INTERNAL_ERROR,
-    INVALID_PARAMS, ROOT_UNAVAILABLE, Request, RpcError, SYNC_BUSY, SyncFailure, SyncStatus,
+    INVALID_PARAMS, ROOT_UNAVAILABLE, Request, RpcError, SyncFailure,
 };
 use foldover_types::{PairId, Side, SyncPath};
 use serde_json::Value;
@@ -20,7 +20,7 @@ use crate::{encode, parameters};
 
 pub(crate) async fn handle(
     engine: &Arc<Mutex<Engine>>,
-    jobs: &Jobs,
+    jobs: &Arc<Jobs>,
     request: &Request,
 ) -> Result<Value, RpcError> {
     match request.method() {
@@ -59,9 +59,19 @@ pub(crate) async fn handle(
         }
         ARCHIVE_PUT_BACK_ALL => {
             let params: ArchiveRunKey = parameters(request)?;
-            require_idle(jobs, pair_id(&params.id)?)?;
+            // The reservation and the busy check are one lock
+            // acquisition; the guard blocks job claims and other
+            // mutations across the whole read-and-restore.
+            let _mutation = jobs.mutation(pair_id(&params.id)?)?;
             let archive = open(engine, &params.id, params.side.into()).await?;
-            let report = blocking(move || archive.put_back_all(&params.run)).await?;
+            #[cfg(test)]
+            let jobs = Arc::clone(jobs);
+            let report = blocking(move || {
+                #[cfg(test)]
+                jobs.wait_mutation_gate();
+                archive.put_back_all(&params.run)
+            })
+            .await?;
             encode(ArchiveRestored {
                 restored: report.restored(),
                 beside: report.beside(),
@@ -80,26 +90,22 @@ pub(crate) async fn handle(
         _ => {
             let params: ArchivePutBack = parameters(request)?;
             let path = sync_path(params.path)?;
-            require_idle(jobs, pair_id(&params.id)?)?;
+            // Same reservation as the run-all variant above.
+            let _mutation = jobs.mutation(pair_id(&params.id)?)?;
             let archive = open(engine, &params.id, params.side.into()).await?;
-            let placed = blocking(move || archive.put_back(&params.run, &path)).await?;
+            #[cfg(test)]
+            let jobs = Arc::clone(jobs);
+            let placed = blocking(move || {
+                #[cfg(test)]
+                jobs.wait_mutation_gate();
+                archive.put_back(&params.run, &path)
+            })
+            .await?;
             encode(ArchivePlaced {
                 path: placed.as_bytes().to_vec(),
             })
         }
     }
-}
-
-/// A put-back never replaces anything, so racing a run cannot lose data;
-/// refusing it only keeps the run's preview accurate.
-fn require_idle(jobs: &Jobs, id: PairId) -> Result<(), RpcError> {
-    if matches!(jobs.status(id), SyncStatus::Working { .. }) {
-        return Err(RpcError::new(
-            SYNC_BUSY,
-            "Wait for the current preview or sync to finish",
-        ));
-    }
-    Ok(())
 }
 
 async fn open(engine: &Arc<Mutex<Engine>>, id: &str, side: Side) -> Result<PairArchive, RpcError> {

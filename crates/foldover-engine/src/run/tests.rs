@@ -317,7 +317,15 @@ fn mirror_archives_target_extras_and_backup_keeps_them() {
     let mut mirror = fixture(SyncMode::Mirror { source: Side::Left });
     fs::write(mirror.left.path().join("kept"), b"k").unwrap();
     fs::write(mirror.right.path().join("extra"), b"e").unwrap();
-    let report = mirror.sync();
+    // A first run that archives target content waits for review (§3.6).
+    assert!(matches!(
+        mirror.run(Approval::default(), RunContext::Interactive),
+        RunOutcome::NeedsApproval(_)
+    ));
+    assert!(mirror.right.path().join("extra").exists());
+    let RunOutcome::Ran(report) = mirror.run(Approval::new(0, 1), RunContext::Reviewed) else {
+        panic!("a reviewed approval runs the mirror")
+    };
     assert_eq!((report.copied(), report.archived()), (1, 1));
     assert!(!mirror.right.path().join("extra").exists());
     assert!(
