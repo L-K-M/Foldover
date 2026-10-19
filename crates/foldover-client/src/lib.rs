@@ -28,6 +28,12 @@ use foldover_proto::local::{
     PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_UPDATE, PairInput, PairKey, PairList,
     PairRecord, PairUpdate,
 };
+use foldover_proto::local::{
+    PEER_CANCEL, PEER_CONFIRM, PEER_PAIR, PEER_PAIRING_CLOSE, PEER_PAIRING_OPEN, PEER_REVOKE,
+    PEER_STATUS, PeerKey, PeerPair, PeerPairingOpen,
+};
+pub use foldover_proto::local::{PeerDeviceRecord, PeerPendingRecord, PeerStatus};
+pub use foldover_types::DeviceId;
 pub use foldover_types::{
     Durability, Filters, InvalidPair, InvalidReviewToken, LocalRoot, MetadataPolicy, PairConfig,
     PairDraft, PairId, PairOptions, PairRoot, Propagation, ReviewToken, Schedule, ScheduleInterval,
@@ -35,6 +41,7 @@ pub use foldover_types::{
 };
 use serde_json::Value;
 use serde_json::json;
+use std::net::SocketAddr;
 
 /// The workspace version expected from the agent handshake and exposed to clients.
 pub fn version() -> &'static str {
@@ -378,6 +385,82 @@ pub async fn remove_pair(
         ));
     }
     Ok(removed)
+}
+
+/// This Mac's device, its pairing window and the Macs paired with it.
+pub async fn peer_status(location: &SocketLocation) -> Result<PeerStatus, Error> {
+    Ok(serde_json::from_value(
+        call(location, PEER_STATUS, None).await?,
+    )?)
+}
+
+/// Let unpaired Macs reach this one for `minutes` (10 when absent).
+pub async fn open_pairing(
+    location: &SocketLocation,
+    minutes: Option<u32>,
+) -> Result<PeerStatus, Error> {
+    let params = serde_json::to_value(PeerPairingOpen { minutes })?;
+    Ok(serde_json::from_value(
+        call(location, PEER_PAIRING_OPEN, Some(params)).await?,
+    )?)
+}
+
+pub async fn close_pairing(location: &SocketLocation) -> Result<PeerStatus, Error> {
+    Ok(serde_json::from_value(
+        call(location, PEER_PAIRING_CLOSE, None).await?,
+    )?)
+}
+
+/// Connect to `device`'s open pairing window at `address`. Both Macs then
+/// show the returned code; a person confirms it on each.
+pub async fn pair_device(
+    location: &SocketLocation,
+    device: DeviceId,
+    address: SocketAddr,
+) -> Result<PeerPendingRecord, Error> {
+    let params = serde_json::to_value(PeerPair {
+        device: device.to_string(),
+        address: address.to_string(),
+    })?;
+    Ok(serde_json::from_value(
+        call(location, PEER_PAIR, Some(params)).await?,
+    )?)
+}
+
+/// Confirm that `device`'s code matches the one the other Mac shows.
+pub async fn confirm_pairing(
+    location: &SocketLocation,
+    device: DeviceId,
+) -> Result<PeerStatus, Error> {
+    peer_call(location, PEER_CONFIRM, device).await
+}
+
+pub async fn cancel_pairing(
+    location: &SocketLocation,
+    device: DeviceId,
+) -> Result<PeerStatus, Error> {
+    peer_call(location, PEER_CANCEL, device).await
+}
+
+/// Forget a paired Mac and close its connections.
+pub async fn revoke_device(
+    location: &SocketLocation,
+    device: DeviceId,
+) -> Result<PeerStatus, Error> {
+    peer_call(location, PEER_REVOKE, device).await
+}
+
+async fn peer_call(
+    location: &SocketLocation,
+    method: &str,
+    device: DeviceId,
+) -> Result<PeerStatus, Error> {
+    let params = serde_json::to_value(PeerKey {
+        device: device.to_string(),
+    })?;
+    Ok(serde_json::from_value(
+        call(location, method, Some(params)).await?,
+    )?)
 }
 
 fn decode_pair(value: Value) -> Result<PairConfig, Error> {

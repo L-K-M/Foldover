@@ -3,3 +3,4 @@
 //! may depend on `foldover-types` only. See PLAN.md §4.4.
 
 pub mod local;
+pub mod peer;

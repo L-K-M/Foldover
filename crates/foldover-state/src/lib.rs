@@ -8,6 +8,7 @@ mod pairs;
 pub use base::BaseUpdate;
 pub use foldover_db::StateLocation;
 pub use pairs::{
-    Error, HISTORY_LIMIT, HistoryEntry, HistoryOutcome, Journal, JournalAction, JournalEntry,
-    JournalUpdate, MountSources, PairStore, Pause, RecordedIdentities, RunTrigger, SnapshotEntry,
+    Device, Error, HISTORY_LIMIT, HistoryEntry, HistoryOutcome, Journal, JournalAction,
+    JournalEntry, JournalUpdate, MountSources, PairStore, Pause, RecordedIdentities, RunTrigger,
+    SnapshotEntry,
 };

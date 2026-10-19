@@ -7,6 +7,7 @@ mod archive;
 mod configuration;
 mod conflict;
 mod gates;
+mod peers;
 mod plan;
 mod readiness;
 mod reconcile;
@@ -25,9 +26,12 @@ pub use foldover_endpoint::ObserveStep;
 pub use foldover_state::RecordedIdentities;
 pub use foldover_state::StateLocation;
 pub use foldover_state::{
-    HISTORY_LIMIT, HistoryEntry, HistoryOutcome, MountSources, Pause, RunTrigger,
+    Device, HISTORY_LIMIT, HistoryEntry, HistoryOutcome, MountSources, Pause, RunTrigger,
 };
 pub use gates::{DeletionCounts, DeletionReview, InvalidDeletionCounts, RunContext};
+pub use peers::{
+    Decision, LinkError, PeerIdentity, PeerLink, PendingPairing, computer_name, peer_identity,
+};
 pub use plan::{
     CandidateDecision, CandidatePlan, Choices, PlanError, PlanRow, TreeRole, plan_candidates,
     plan_resolved,

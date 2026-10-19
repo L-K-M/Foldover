@@ -42,6 +42,10 @@ async fn run(location: foldover_ipc::SocketLocation) -> Result<(), Box<dyn std::
     let listener = foldover_ipc::bind(&location)?;
     let service = foldover_service::Service::open()?;
     service.start_scheduler();
+    // Folder sync works without other Macs.
+    if let Err(error) = service.start_peers().await {
+        eprintln!("foldoverd: Mac-to-Mac is unavailable: {}", error.message());
+    }
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
         result = foldover_ipc::serve(listener, move |request| {

@@ -68,6 +68,9 @@ targets:
         ENABLE_USER_SCRIPT_SANDBOXING: NO
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
+        # The embedded agent connects to paired Macs (ADR 0031); macOS asks
+        # for Local Network access on the app's behalf.
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: Foldover connects to the Macs you pair with to sync folders over your local network.
 
   FoldoverTests:
     type: bundle.unit-test
