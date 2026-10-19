@@ -18,6 +18,8 @@ pub(crate) const IGNORE_FILE_LIMIT: u64 = 64 * 1024;
 
 pub struct Filter {
     rules: Gitignore,
+    /// The rules as written, for a folder on another Mac to apply.
+    texts: Vec<String>,
     size_limit: Option<u64>,
     cutoff: Option<SystemTime>,
 }
@@ -33,6 +35,7 @@ impl Filter {
     pub fn none() -> Self {
         Self {
             rules: Gitignore::empty(),
+            texts: Vec::new(),
             size_limit: None,
             cutoff: None,
         }
@@ -41,7 +44,9 @@ impl Filter {
     /// Later rules override earlier ones; `!` re-includes, as in gitignore.
     pub fn new<'a>(rules: impl IntoIterator<Item = &'a str>) -> Result<Self, InvalidFilter> {
         let mut builder = GitignoreBuilder::new("");
+        let mut texts = Vec::new();
         for rule in rules {
+            texts.push(rule.to_owned());
             builder
                 .add_line(None, rule)
                 .map_err(|error| InvalidFilter {
@@ -55,6 +60,7 @@ impl Filter {
         })?;
         Ok(Self {
             rules,
+            texts,
             size_limit: None,
             cutoff: None,
         })
@@ -82,6 +88,18 @@ impl Filter {
 
     pub(crate) fn too_large(&self, size: u64) -> bool {
         self.size_limit.is_some_and(|limit| size > limit)
+    }
+
+    pub(crate) fn texts(&self) -> &[String] {
+        &self.texts
+    }
+
+    pub(crate) fn size_limit(&self) -> Option<u64> {
+        self.size_limit
+    }
+
+    pub(crate) fn cutoff(&self) -> Option<SystemTime> {
+        self.cutoff
     }
 
     pub(crate) fn excludes(&self, path: &SyncPath, directory: bool) -> bool {

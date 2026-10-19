@@ -1,6 +1,6 @@
 use foldover_types::{PairRoot, Side};
 
-use crate::{Endpoint, RootRelation, ScanError};
+use crate::{Endpoint, Reach, RootRelation, ScanError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PairRootError {
@@ -11,7 +11,7 @@ pub enum PairRootError {
     /// Nothing is at that side's path, e.g. its disk is not mounted.
     #[error("The {0:?} folder is missing; connect its disk or share")]
     Missing(Side),
-    /// The side's SFTP server could not be reached or refused the login.
+    /// The side's SFTP server or paired Mac could not be reached.
     #[error("The {0:?} folder's server is unreachable: {1}")]
     Unreachable(Side, String),
     #[error("{}", access_denied(*.0))]
@@ -35,11 +35,13 @@ pub struct EndpointPair {
 }
 
 impl EndpointPair {
-    pub fn open(left: &PairRoot, right: &PairRoot) -> Result<Self, PairRootError> {
+    pub fn open(left: &PairRoot, right: &PairRoot, reach: &Reach) -> Result<Self, PairRootError> {
         let open = |root: &PairRoot, side| {
-            Endpoint::open(root).map_err(|error| match error {
+            Endpoint::open(root, reach).map_err(|error| match error {
                 ScanError::RootMissing => PairRootError::Missing(side),
-                ScanError::Unreachable(message) => PairRootError::Unreachable(side, message),
+                ScanError::Unreachable(message) | ScanError::MacUnreachable(message) => {
+                    PairRootError::Unreachable(side, message)
+                }
                 error if error.is_access_denied() => PairRootError::AccessDenied(side),
                 error => PairRootError::Endpoint(error),
             })
@@ -96,7 +98,7 @@ mod tests {
             (&child, &alias, RootRelation::Within),
         ] {
             assert!(matches!(
-                EndpointPair::open(&root(left), &root(right)),
+                EndpointPair::open(&root(left), &root(right), &Reach::default()),
                 Err(PairRootError::Overlap(found)) if found == relation,
             ));
         }
@@ -110,7 +112,7 @@ mod tests {
         fs::create_dir(&left).unwrap();
         fs::create_dir(&right).unwrap();
         fs::write(left.join("file"), b"content").unwrap();
-        let pair = EndpointPair::open(&root(&left), &root(&right)).unwrap();
+        let pair = EndpointPair::open(&root(&left), &root(&right), &Reach::default()).unwrap();
         fs::rename(&left, temporary.path().join("moved")).unwrap();
         fs::create_dir(&left).unwrap();
         let (Endpoint::Local(left), Endpoint::Local(right)) =
@@ -144,11 +146,11 @@ mod tests {
         let missing = temporary.path().join("unmounted");
 
         assert!(matches!(
-            EndpointPair::open(&root(&present), &root(&missing)),
+            EndpointPair::open(&root(&present), &root(&missing), &Reach::default()),
             Err(PairRootError::Missing(Side::Right))
         ));
         assert!(matches!(
-            EndpointPair::open(&root(&missing), &root(&present)),
+            EndpointPair::open(&root(&missing), &root(&present), &Reach::default()),
             Err(PairRootError::Missing(Side::Left))
         ));
     }
@@ -163,7 +165,7 @@ mod tests {
         fs::create_dir(&readable).unwrap();
         fs::create_dir(&locked).unwrap();
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
-        let opened = EndpointPair::open(&root(&readable), &root(&locked));
+        let opened = EndpointPair::open(&root(&readable), &root(&locked), &Reach::default());
         // Superusers read anything; the check needs an ordinary account.
         let enforced = fs::read_dir(&locked).is_err();
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();

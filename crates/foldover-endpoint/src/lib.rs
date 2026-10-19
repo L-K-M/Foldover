@@ -44,12 +44,16 @@ pub use foldover_fs::{
 };
 
 #[cfg(unix)]
-pub use endpoint::{Endpoint, ObserveStep};
+pub use endpoint::{Endpoint, ObserveStep, Reach};
 
 mod link;
 pub use link::{
-    Decision, LinkError, NearbyMac, NotRecorded, PeerHost, PeerLink, PendingPairing, Presence,
+    Answer, Decision, LinkError, NearbyMac, NotRecorded, PeerHost, PeerLink, PendingPairing,
+    Presence,
 };
+
+mod remote;
+pub use remote::{FolderCache, PeerEndpoint, serve_folder};
 
 #[cfg(unix)]
 pub use pair::{EndpointPair, PairRootError, access_denied};

@@ -561,6 +561,7 @@ dependencies = [
  "foldover-watch",
  "ignore",
  "rustix",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",

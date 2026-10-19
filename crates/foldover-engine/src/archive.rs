@@ -2,7 +2,7 @@
 //! side keeps what runs displaced or removed under
 //! `.foldover/archive/<run>/<original path>` for 30 days.
 
-use foldover_endpoint::{ApplyError, Endpoint, ScanError};
+use foldover_endpoint::{ApplyError, Endpoint, Reach, ScanError};
 use foldover_types::{Durability, PairConfig, Side, SyncPath};
 
 pub use foldover_endpoint::{ArchivedItem, ArchivedRun};
@@ -74,12 +74,12 @@ pub struct PairArchive {
 }
 
 impl PairArchive {
-    pub fn open(pair: &PairConfig, side: Side) -> Result<Self, ArchiveError> {
+    pub fn open(pair: &PairConfig, side: Side, reach: &Reach) -> Result<Self, ArchiveError> {
         let root = match side {
             Side::Left => pair.draft().left(),
             Side::Right => pair.draft().right(),
         };
-        let endpoint = Endpoint::open(root)?;
+        let endpoint = Endpoint::open(root, reach)?;
         Ok(Self {
             endpoint,
             durability: pair.draft().options().durability(),
@@ -162,7 +162,7 @@ mod tests {
             PairConfig::from_stored(PairId::from_bytes([1; PairId::BYTE_LEN]).unwrap(), 1, draft)
                 .unwrap();
 
-        let archive = PairArchive::open(&pair, Side::Left).unwrap();
+        let archive = PairArchive::open(&pair, Side::Left, &Reach::default()).unwrap();
         assert_eq!(archive.runs().unwrap()[0].name(), run);
         let (items, more) = archive.items(&run, None, 10).unwrap();
         assert_eq!(items[0].path().as_bytes(), b"note");
@@ -173,7 +173,7 @@ mod tests {
             b"kept"
         );
         assert!(
-            PairArchive::open(&pair, Side::Right)
+            PairArchive::open(&pair, Side::Right, &Reach::default())
                 .unwrap()
                 .runs()
                 .unwrap()

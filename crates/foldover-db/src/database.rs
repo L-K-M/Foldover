@@ -31,10 +31,10 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 17] = [
+const MIGRATIONS: [&str; 18] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
     SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, SCHEMA_V15, SCHEMA_V16,
-    SCHEMA_V17,
+    SCHEMA_V17, SCHEMA_V18,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -226,6 +226,42 @@ CREATE TABLE device (
     name TEXT NOT NULL CHECK(length(trim(name)) > 0 AND instr(name, char(0)) = 0),
     paired_ms INTEGER NOT NULL CHECK(paired_ms >= 0)
 ) STRICT, WITHOUT ROWID;
+";
+
+// Pair sides may be folders paired Macs share (peer://device/share); older
+// readers would refuse them.
+const SCHEMA_V18: &str = "
+CREATE TABLE pair_next (
+    id BLOB PRIMARY KEY NOT NULL CHECK(length(id) = 16 AND id != zeroblob(16)),
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    name TEXT NOT NULL CHECK(length(trim(name)) > 0 AND instr(name, char(0)) = 0),
+    left_root BLOB NOT NULL CHECK(length(left_root) > 0 AND instr(left_root,x'00') = 0 AND
+        (substr(left_root,1,1) = x'2f' OR (length(left_root) > length('sftp://') AND substr(left_root,1,length('sftp://')) = CAST('sftp://' AS BLOB)) OR
+         (length(left_root) > length('peer://') AND substr(left_root,1,length('peer://')) = CAST('peer://' AS BLOB)))),
+    right_root BLOB NOT NULL CHECK(length(right_root) > 0 AND instr(right_root,x'00') = 0 AND
+        (substr(right_root,1,1) = x'2f' OR (length(right_root) > length('sftp://') AND substr(right_root,1,length('sftp://')) = CAST('sftp://' AS BLOB)) OR
+         (length(right_root) > length('peer://') AND substr(right_root,1,length('peer://')) = CAST('peer://' AS BLOB)))),
+    mode TEXT NOT NULL CHECK(mode IN ('sync','mirror-left','mirror-right','backup-left','backup-right')),
+    modification_times TEXT NOT NULL DEFAULT 'sync' CHECK(modification_times IN ('sync','ignore')),
+    extended_attributes TEXT NOT NULL DEFAULT 'sync' CHECK(extended_attributes IN ('sync','ignore')),
+    permissions TEXT NOT NULL DEFAULT 'ignore' CHECK(permissions IN ('sync','ignore')),
+    durability TEXT NOT NULL DEFAULT 'standard' CHECK(durability IN ('standard','full')),
+    left_identity BLOB CHECK(left_identity IS NULL OR length(left_identity) = 16),
+    right_identity BLOB CHECK(right_identity IS NULL OR length(right_identity) = 16),
+    schedule TEXT NOT NULL DEFAULT 'manual' CHECK(schedule IN ('manual','every','changes')),
+    schedule_minutes INTEGER CHECK(schedule_minutes IS NULL OR schedule_minutes BETWEEN 1 AND 10080),
+    filters TEXT NOT NULL DEFAULT '' CHECK(instr(filters, char(0)) = 0),
+    size_limit INTEGER CHECK(size_limit IS NULL OR size_limit > 0),
+    left_mount TEXT CHECK(left_mount IS NULL OR length(left_mount) > 0),
+    right_mount TEXT CHECK(right_mount IS NULL OR length(right_mount) > 0),
+    age_limit INTEGER CHECK(age_limit IS NULL OR age_limit > 0),
+    CHECK(left_root != right_root)
+) STRICT;
+INSERT INTO pair_next (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,left_identity,right_identity,schedule,schedule_minutes,filters,size_limit,left_mount,right_mount,age_limit)
+    SELECT id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,left_identity,right_identity,schedule,schedule_minutes,filters,size_limit,left_mount,right_mount,age_limit FROM pair;
+DROP TABLE pair;
+ALTER TABLE pair_next RENAME TO pair;
+UPDATE state_meta SET minimum_reader=max(minimum_reader,18) WHERE singleton=1;
 ";
 
 /// Folders this Mac shares, each with one paired device (ADR 0031);
@@ -1553,7 +1589,7 @@ pub(super) mod tests {
 
         // v15, the newest step, raised the floor last.
         let mut database = Database::open(&location).unwrap();
-        assert_eq!(minimum_reader(&database.connection), 15);
+        assert_eq!(minimum_reader(&database.connection), 18);
         assert_eq!(
             database
                 .connection
@@ -1607,11 +1643,14 @@ pub(super) mod tests {
 
         input.left_root = b"sftp://nas/srv/photos/\xff".to_vec();
         database.create_pair(&input).unwrap();
+        input.left_root = format!("peer://{}/{}", "ab".repeat(32), "cd".repeat(16)).into_bytes();
+        database.create_pair(&input).unwrap();
         for invalid in [
             b"relative".as_slice(),
             b"ftp://nas/path",
             b"sftp://",
             b"sftp://nas/\0bad",
+            b"peer://",
         ] {
             input.left_root = invalid.to_vec();
             assert!(database.create_pair(&input).is_err(), "{invalid:?}");

@@ -1,15 +1,18 @@
-//! Where one side of a pair lives: a local folder, or a folder on an SFTP
-//! server. Both are kept as the bytes a person chose:
+//! Where one side of a pair lives: a local folder, a folder on an SFTP
+//! server, or a folder another Mac shares. All are kept as the bytes a
+//! person chose:
 //!
 //! ```text
 //! /Users/alice/Photos                       local, absolute
 //! sftp://alice@nas.local:2222/srv/photos    SFTP, absolute path
 //! sftp://backup/~/photos                    SFTP, below the login's home
+//! peer://<device: 64 hex>/<share: 32 hex>   shared by a paired Mac
 //! ```
 
-use crate::{InvalidPair, LocalRoot, MAX_LOCAL_ROOT_BYTES};
+use crate::{DeviceId, InvalidPair, LocalRoot, MAX_LOCAL_ROOT_BYTES, ShareId};
 
 const SFTP_SCHEME: &[u8] = b"sftp://";
+const PEER_SCHEME: &[u8] = b"peer://";
 const HOME: &[u8] = b"/~";
 const SSH_PORT: u16 = 22;
 
@@ -17,12 +20,16 @@ const SSH_PORT: u16 = 22;
 pub enum PairRoot {
     Local(LocalRoot),
     Sftp(SftpRoot),
+    Peer(PeerRoot),
 }
 
 impl PairRoot {
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidPair> {
         if bytes.starts_with(SFTP_SCHEME) {
             return Ok(Self::Sftp(SftpRoot::from_bytes(bytes)?));
+        }
+        if bytes.starts_with(PEER_SCHEME) {
+            return Ok(Self::Peer(PeerRoot::from_bytes(bytes)?));
         }
         Ok(Self::Local(LocalRoot::from_bytes(bytes)?))
     }
@@ -31,7 +38,43 @@ impl PairRoot {
         match self {
             Self::Local(root) => root.as_bytes(),
             Self::Sftp(root) => &root.locator,
+            Self::Peer(root) => &root.locator,
         }
+    }
+}
+
+/// A folder a paired Mac shares with this one (ADR 0031).
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct PeerRoot {
+    locator: Vec<u8>,
+    device: DeviceId,
+    share: ShareId,
+}
+
+impl PeerRoot {
+    pub fn new(device: DeviceId, share: ShareId) -> Self {
+        Self {
+            locator: format!("peer://{device}/{share}").into_bytes(),
+            device,
+            share,
+        }
+    }
+
+    fn from_bytes(locator: Vec<u8>) -> Result<Self, InvalidPair> {
+        let rest =
+            std::str::from_utf8(&locator[PEER_SCHEME.len()..]).map_err(|_| InvalidPair::Root)?;
+        let (device, share) = rest.split_once('/').ok_or(InvalidPair::Root)?;
+        let device = device.parse().map_err(|_| InvalidPair::Root)?;
+        let share = share.parse().map_err(|_| InvalidPair::Root)?;
+        Ok(Self::new(device, share))
+    }
+
+    pub fn device(&self) -> DeviceId {
+        self.device
+    }
+
+    pub fn share(&self) -> ShareId {
+        self.share
     }
 }
 
@@ -158,10 +201,36 @@ fn split_port(address: &str) -> Result<(&str, Option<u16>), InvalidPair> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn peer_roots_name_a_device_and_its_share_exactly() {
+        let device = "ab".repeat(32);
+        let share = "cd".repeat(16);
+        let text = format!("peer://{device}/{share}");
+        let PairRoot::Peer(root) = PairRoot::from_bytes(text.clone().into_bytes()).unwrap() else {
+            panic!("not a peer root");
+        };
+        assert_eq!(root.device().to_string(), device);
+        assert_eq!(root.share().to_string(), share);
+        assert_eq!(PairRoot::Peer(root).as_bytes(), text.as_bytes());
+
+        for bad in [
+            format!("peer://{device}"),
+            format!("peer://{device}/{share}/sub"),
+            format!("peer://{}/{share}", "AB".repeat(32)),
+            format!("peer://{device}/"),
+            "peer://".to_owned(),
+        ] {
+            assert!(
+                PairRoot::from_bytes(bad.clone().into_bytes()).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
     fn sftp(text: &str) -> Result<SftpRoot, InvalidPair> {
         match PairRoot::from_bytes(text.as_bytes().to_vec())? {
             PairRoot::Sftp(root) => Ok(root),
-            PairRoot::Local(_) => panic!("not an SFTP root"),
+            PairRoot::Local(_) | PairRoot::Peer(_) => panic!("not an SFTP root"),
         }
     }
 

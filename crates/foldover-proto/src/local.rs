@@ -40,8 +40,9 @@ pub use sync::{
 
 mod pair;
 pub use pair::{
-    PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_REMOVE, PAIR_UPDATE, PairInput, PairKey,
-    PairList, PairMode, PairPage, PairRecord, PairRevision, PairSchedule, PairSide, PairUpdate,
+    PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_REMOVE, PAIR_UPDATE, PairDurability,
+    PairInput, PairKey, PairList, PairMode, PairPage, PairPropagation, PairRecord, PairRevision,
+    PairSchedule, PairSide, PairUpdate,
 };
 
 pub const JSON_RPC_VERSION: &str = "2.0";

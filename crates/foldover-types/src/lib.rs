@@ -25,7 +25,7 @@ pub use metadata_policy::{MetadataPolicy, Propagation};
 pub use names::{CaseMatching, NameMatching, UnicodeMatching};
 pub use options::{Durability, Filters, PairOptions, Schedule, ScheduleInterval};
 pub use review::{InvalidReviewToken, ReviewToken};
-pub use root::{PairRoot, SftpRoot};
+pub use root::{PairRoot, PeerRoot, SftpRoot};
 pub use share::{InvalidShareId, ShareId};
 
 pub use reconcile::{
