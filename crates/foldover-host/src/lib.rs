@@ -20,15 +20,9 @@ pub struct RunAwake {
 /// Keep the Mac awake while `pair` syncs. Fails only where power
 /// assertions exist and taking one failed.
 pub fn keep_awake(pair: &str) -> io::Result<RunAwake> {
-    match IdleSleepAssertion::take(&format!("Foldover is syncing {pair}")) {
-        Ok(assertion) => Ok(RunAwake {
-            _assertion: Some(assertion),
-        }),
-        Err(error) if error.kind() == io::ErrorKind::Unsupported => {
-            Ok(RunAwake { _assertion: None })
-        }
-        Err(error) => Err(error),
-    }
+    Ok(RunAwake {
+        _assertion: IdleSleepAssertion::take(&format!("Foldover is syncing {pair}"))?,
+    })
 }
 
 #[cfg(test)]
