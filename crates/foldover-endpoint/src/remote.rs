@@ -14,6 +14,7 @@
 use std::cell::RefCell;
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use foldover_fs::{ForeignMetadata, WriteError};
@@ -26,7 +27,7 @@ use foldover_types::{
     PeerRoot, ScanControl, SyncPath, UnicodeMatching,
 };
 
-use crate::link::{Exchange, Incoming, LinkError, PeerLink};
+use crate::link::{Exchange, Incoming, LinkError, PeerLink, WatchHandle, Watched};
 use crate::{
     ApplyError, ArchivedItem, ArchivedRun, Expected, Filter, Observation, ObserveStep,
     ObservedEntry, RootRelation, RunScope, ScanError,
@@ -36,6 +37,30 @@ mod serve;
 mod wire;
 
 pub use serve::{FolderCache, serve_folder};
+
+/// Report changes in a folder a paired Mac shares until the handle drops.
+/// Changes while the request was broken are unknown, so the first report
+/// after a break counts as a change.
+pub fn watch_folder(
+    link: &Arc<PeerLink>,
+    root: &PeerRoot,
+    changed: impl Fn() + Send + Sync + 'static,
+) -> WatchHandle {
+    let call = PeerCall::Folder {
+        share: root.share().to_string(),
+        op: Box::new(FolderOp::Watch),
+    };
+    let broken = AtomicBool::new(false);
+    link.watch(root.device(), call, move |watched| match watched {
+        Watched::Reply(PeerReply::Changed) => changed(),
+        Watched::Reply(PeerReply::Watching) => {
+            if broken.swap(false, Ordering::Relaxed) {
+                changed();
+            }
+        }
+        Watched::Reply(_) | Watched::Lost => broken.store(true, Ordering::Relaxed),
+    })
+}
 
 pub struct PeerEndpoint {
     link: Arc<PeerLink>,

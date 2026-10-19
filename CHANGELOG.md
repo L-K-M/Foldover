@@ -23,7 +23,7 @@ All notable changes to this project are documented here. The format follows
   a paired Mac shares with yours (`foldover peers shares`). A pair's
   folder can be one a paired Mac shares (`peer://DEVICE/SHARE`): syncs
   run through that Mac, which stages, verifies and archives in its own
-  folder.
+  folder, and "When files change" pairs run when that folder changes.
 
 - Names that one folder would store as one file, such as `Report.txt`
   and `report.txt` on a case-insensitive Mac volume, are a conflict to

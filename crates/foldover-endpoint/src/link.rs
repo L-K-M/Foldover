@@ -32,6 +32,9 @@ use tokio::task::JoinHandle;
 mod stream;
 pub use stream::{Answer, Exchange, Incoming};
 
+/// How long a broken watch waits before asking again.
+const WATCH_RETRY: Duration = Duration::from_secs(30);
+
 /// How long a person has to confirm a code once both Macs show it.
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// How long a final pairing message may take to reach the other Mac.
@@ -429,6 +432,42 @@ impl PeerLink {
         Ok(Exchange::new(self.runtime.clone(), send, recv))
     }
 
+    /// Keep `call`, a request answered with reports, open to `device`:
+    /// `report` runs for each reply, and when the request breaks. A broken
+    /// request is asked again after a pause; dropping the handle stops it.
+    pub fn watch(
+        self: &Arc<Self>,
+        device: DeviceId,
+        call: PeerCall,
+        report: impl Fn(Watched) + Send + Sync + 'static,
+    ) -> WatchHandle {
+        let link = Arc::downgrade(self);
+        let request = PeerRequest {
+            protocol: PEER_PROTOCOL,
+            call,
+        };
+        WatchHandle(self.runtime.spawn(async move {
+            loop {
+                let Some(asking) = link.upgrade() else {
+                    return;
+                };
+                let opened = asking.open(device, &request).await;
+                drop(asking);
+                if let Ok((mut send, mut recv)) = opened {
+                    let _ = send.finish();
+                    while let Ok(bytes) = stream::receive_json(&mut recv).await {
+                        match serde_json::from_slice(&bytes) {
+                            Ok(reply) => report(Watched::Reply(reply)),
+                            Err(_) => break,
+                        }
+                    }
+                }
+                report(Watched::Lost);
+                tokio::time::sleep(WATCH_RETRY).await;
+            }
+        }))
+    }
+
     /// A stream to `device` carrying `request`. A connection that went
     /// stale is replaced once.
     async fn open(
@@ -667,6 +706,23 @@ async fn settle(
     let _ = tokio::time::timeout(DELIVERY_TIMEOUT, send.finish_delivered()).await;
     connection.close();
     link.drain();
+}
+
+/// What a kept-open request reports.
+#[derive(Debug, Eq, PartialEq)]
+pub enum Watched {
+    Reply(PeerReply),
+    /// The request broke, e.g. the other Mac slept; it is asked again.
+    Lost,
+}
+
+/// A request kept open by `PeerLink::watch`; dropping it closes it.
+pub struct WatchHandle(JoinHandle<()>);
+
+impl Drop for WatchHandle {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// Answer each request a paired device sends on `connection`.
