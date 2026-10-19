@@ -212,6 +212,14 @@ private actor SyncProbe: SyncClient {
     func waitForPair(_ id: String) async -> Bool { await probe.wait(for: .tag(id)) }
 }
 
+/// Keeps monitor()'s per-tick automation read off the real core while
+/// every other client is mocked.
+private actor AutomationProbe: AutomationClient {
+    func state() async throws -> AutomationState { .running }
+    func pause(minutes: UInt32?) async throws -> AutomationState { .running }
+    func resume() async throws -> AutomationState { .running }
+}
+
 private func monitorPair(_ id: String, _ name: String) -> SyncPair {
     SyncPair(id: id, revision: 1, settings: PairSettings(
         name: name, left: SelectedFolder(bytes: Data("/a".utf8)),
@@ -247,7 +255,8 @@ func monitorRefreshesTheAgentAndCatalogAfterTheFirstLoad() async {
         appInfo: AppInfoStore(),
         agent: AgentStore(statusRequest: { try await agent.status() }),
         pairs: PairStore(client: catalog),
-        sync: SyncStore(client: sync, pollInterval: .milliseconds(1))
+        sync: SyncStore(client: sync, pollInterval: .milliseconds(1)),
+        automation: AutomationStore(client: AutomationProbe())
     )
 
     let monitor = Task { await viewModel.monitor(every: .milliseconds(1)) }

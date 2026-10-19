@@ -314,6 +314,12 @@ final class SyncStore {
     /// Approval results the user declined; the same result stays declined
     /// until an explicit job or a different reviewable result.
     private var declined: [String: PreviewSummary] = [:]
+    /// The pair's latest change-list request, owned by token like the
+    /// poller: only the newest request may publish a page or an error,
+    /// and a new state — which starts a new list — retires every
+    /// request still in flight.
+    private var listingRequests: [String: Int] = [:]
+    private var listingSequence = 0
     private(set) var states: [String: PairSyncState] = [:]
     private(set) var requestErrors: [String: String] = [:]
     private(set) var histories: [String: [RunRecord]] = [:]
@@ -383,18 +389,23 @@ final class SyncStore {
         await loadChanges(id, after: last.path, filter: listing.filter)
     }
 
+    /// The latest tap wins: a newer request — or a state change, which
+    /// retired the list in `set` — drops this request's page and error
+    /// instead of letting the last response to arrive overwrite them.
     private func loadChanges(_ id: String, after: Data?, filter: ChangeFilter?) async {
-        let state = states[id]
+        listingSequence += 1
+        let ticket = listingSequence
+        listingRequests[id] = ticket
         requestErrors[id] = nil
         do {
             let page = try await client.changes(id, after: after, filter: filter)
-            // A newer preview replaced the one this page belongs to.
-            guard states[id] == state else { return }
+            guard listingRequests[id] == ticket, !Task.isCancelled else { return }
             var listing = after == nil ? ChangeListing(filter: filter, changes: [], more: false) : listings[id]
             listing?.changes += page.changes
             listing?.more = page.more
             listings[id] = listing
         } catch {
+            guard listingRequests[id] == ticket, !Task.isCancelled else { return }
             requestErrors[id] = PairStore.message(for: error)
         }
     }
@@ -569,10 +580,14 @@ final class SyncStore {
     }
 
     /// Every write advances the pair's generation; a new state starts a
-    /// new change list.
+    /// new change list and retires the requests still fetching the old
+    /// one.
     private func set(_ id: String, _ state: PairSyncState) {
         generations[id, default: 0] += 1
-        if states[id] != state { listings[id] = nil }
+        if states[id] != state {
+            listings[id] = nil
+            listingRequests[id] = nil
+        }
         states[id] = state
     }
 }

@@ -113,8 +113,16 @@ final class MainViewModel {
         }
     }
 
-    func pause(_ length: PauseLength) async { await automation.pause(minutes: length.minutes) }
-    func resume() async { await automation.resume() }
+    // A pause/resume failure surfaces like any other operation error
+    // and stays until the next request answers; refresh() only reads.
+    func pause(_ length: PauseLength) async {
+        await automation.pause(minutes: length.minutes)
+        operationError = automation.error
+    }
+    func resume() async {
+        await automation.resume()
+        operationError = automation.error
+    }
 
     /// Pause for Shortcuts and say what happened.
     func pauseForShortcuts(_ length: PauseLength) async -> String {

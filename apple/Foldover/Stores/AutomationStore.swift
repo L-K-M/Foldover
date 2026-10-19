@@ -44,8 +44,11 @@ final class AutomationStore {
         self.client = client
     }
 
+    /// A status read is informational: it keeps the last state on
+    /// failure and never touches `error`, so a failed pause or resume
+    /// stays reported until the next request answers.
     func refresh() async {
-        await perform { try await $0.state() }
+        if let current = try? await client.state() { state = current }
     }
 
     func pause(minutes: UInt32?) async {

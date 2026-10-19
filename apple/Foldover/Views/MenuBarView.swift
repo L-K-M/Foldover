@@ -43,6 +43,10 @@ struct MenuBarView: View {
                 }
             }
 
+            if let error = viewModel.operationError {
+                Text(error).font(.caption).foregroundStyle(.red)
+            }
+
             Text(viewModel.agentStatusText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
