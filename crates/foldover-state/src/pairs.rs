@@ -18,11 +18,13 @@ mod history;
 mod journal;
 mod mounts;
 mod pause;
+mod share;
 pub use device::Device;
 pub use history::{HISTORY_LIMIT, HistoryEntry, HistoryOutcome, RunTrigger};
 pub use journal::{Journal, JournalAction, JournalEntry, JournalUpdate};
 pub use mounts::MountSources;
 pub use pause::Pause;
+pub use share::Share;
 
 const SYNC: &str = "sync";
 const MIRROR_LEFT: &str = "mirror-left";

@@ -9,11 +9,12 @@ use foldover_endpoint::{
     RootRelation, ScanError,
 };
 use foldover_state::{
-    Device, HistoryEntry, Journal, JournalUpdate, MountSources, PairStore, Pause, SnapshotEntry,
-    StateLocation,
+    Device, HistoryEntry, Journal, JournalUpdate, MountSources, PairStore, Pause, Share,
+    SnapshotEntry, StateLocation,
 };
 use foldover_types::{
-    DeviceId, Durability, PairConfig, PairDraft, PairId, PairRoot, Resolution, Side, SyncPath,
+    DeviceId, Durability, LocalRoot, MAX_PAIR_NAME_BYTES, PairConfig, PairDraft, PairId, PairRoot,
+    Resolution, ShareId, Side, SyncPath,
 };
 
 use crate::{Commit, RunInputs};
@@ -40,6 +41,10 @@ pub enum Error {
     DurabilityUnsupported,
     #[error(transparent)]
     Filter(#[from] InvalidFilter),
+    #[error("That Mac is not paired with this one")]
+    DeviceNotPaired,
+    #[error("Name the shared folder, as the other Mac will show it")]
+    InvalidShareName,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,12 +61,14 @@ impl Error {
     pub fn kind(&self) -> ErrorKind {
         match self {
             Self::State(_) => ErrorKind::Storage,
-            Self::PairNotFound => ErrorKind::NotFound,
+            Self::PairNotFound | Self::DeviceNotPaired => ErrorKind::NotFound,
             Self::StaleRevision => ErrorKind::Changed,
             Self::Roots(PairRootError::Overlap(_))
             | Self::CatalogOverlap(_)
             | Self::StateOverlap => ErrorKind::Overlap,
-            Self::Filter(_) | Self::DurabilityUnsupported => ErrorKind::Invalid,
+            Self::Filter(_) | Self::DurabilityUnsupported | Self::InvalidShareName => {
+                ErrorKind::Invalid
+            }
             Self::Roots(_) | Self::Endpoint(_) | Self::CatalogUnavailable { .. } => {
                 ErrorKind::Unavailable
             }
@@ -202,9 +209,54 @@ impl Engine {
         })?)
     }
 
-    /// Forget a device; whether it was paired.
+    /// Forget a device, and end what this Mac shared with it; whether it
+    /// was paired.
     pub fn remove_device(&mut self, id: DeviceId) -> Result<bool, Error> {
         Ok(self.pairs.remove_device(id)?)
+    }
+
+    /// Folders shared with paired Macs, by name.
+    pub fn shares(&self) -> Result<Vec<Share>, Error> {
+        Ok(self.pairs.shares()?)
+    }
+
+    /// What a paired Mac may sync with.
+    pub fn shares_for(&self, device: DeviceId) -> Result<Vec<Share>, Error> {
+        Ok(self.pairs.shares_for(device)?)
+    }
+
+    /// Share an existing folder with a paired Mac, under the name that Mac
+    /// shows. The folder must stay clear of this agent's state.
+    pub fn add_share(
+        &mut self,
+        device: DeviceId,
+        root: LocalRoot,
+        name: &str,
+    ) -> Result<Share, Error> {
+        if !self
+            .pairs
+            .devices()?
+            .iter()
+            .any(|paired| paired.id == device)
+        {
+            return Err(Error::DeviceNotPaired);
+        }
+        let name = name.trim();
+        if name.is_empty() || name.contains('\0') || name.len() > MAX_PAIR_NAME_BYTES {
+            return Err(Error::InvalidShareName);
+        }
+        let folder = Endpoint::open(&PairRoot::Local(root.clone()))?;
+        if folder.relation_to(&self.state_root)? != RootRelation::Disjoint {
+            return Err(Error::StateOverlap);
+        }
+        Ok(self
+            .pairs
+            .add_share(device, &root, name, std::time::SystemTime::now())?)
+    }
+
+    /// Stop sharing; whether the share existed.
+    pub fn remove_share(&mut self, id: ShareId) -> Result<bool, Error> {
+        Ok(self.pairs.remove_share(id)?)
     }
 
     /// The pair's newest writing run, while it can still be undone.

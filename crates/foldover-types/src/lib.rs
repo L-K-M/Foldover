@@ -11,6 +11,7 @@ mod pair;
 mod reconcile;
 mod review;
 mod root;
+mod share;
 mod sync_path;
 
 pub use pair::{
@@ -25,6 +26,7 @@ pub use names::{CaseMatching, NameMatching, UnicodeMatching};
 pub use options::{Durability, Filters, PairOptions, Schedule, ScheduleInterval};
 pub use review::{InvalidReviewToken, ReviewToken};
 pub use root::{PairRoot, SftpRoot};
+pub use share::{InvalidShareId, ShareId};
 
 pub use reconcile::{
     BaselineEntry, BaselineMismatch, ChangeKind, ConflictKind, Digest, EntryContent, EntryDecision,

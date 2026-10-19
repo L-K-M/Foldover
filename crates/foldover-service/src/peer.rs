@@ -7,14 +7,16 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, UNIX_EPOCH};
 
 use foldover_engine::{
-    Decision, Device, Engine, LinkError, PeerIdentity, PeerLink, PendingPairing, Presence,
+    Decision, Device, Engine, LinkError, NotRecorded, PeerHost, PeerIdentity, PeerLink,
+    PendingPairing, Presence,
 };
 use foldover_proto::local::{
     INTERNAL_ERROR, INVALID_PARAMS, MAX_PAIRING_MINUTES, PEER_CANCEL, PEER_CONFIRM, PEER_PAIR,
-    PEER_PAIRING_CLOSE, PEER_PAIRING_OPEN, PEER_REVOKE, PEER_STATUS, PEER_UNAVAILABLE,
+    PEER_PAIRING_CLOSE, PEER_PAIRING_OPEN, PEER_REVOKE, PEER_SHARES, PEER_STATUS, PEER_UNAVAILABLE,
     PeerDeviceRecord, PeerKey, PeerNearbyRecord, PeerPair, PeerPairingOpen, PeerPendingRecord,
-    PeerStatus, Request, RpcError,
+    PeerShareList, PeerShareRecord, PeerStatus, Request, RpcError,
 };
+use foldover_proto::peer::{OfferedShare, PeerCall, PeerReply};
 use foldover_types::DeviceId;
 use serde_json::Value;
 use tokio::sync::OnceCell;
@@ -69,24 +71,56 @@ pub(crate) async fn open(
     presence: Presence,
 ) -> Result<Arc<PeerLink>, RpcError> {
     let paired = devices(engine).await?;
-    let recording = Arc::clone(engine);
     PeerLink::start(
         identity,
         foldover_engine::computer_name(),
         address,
         presence,
         paired.iter().map(|device| device.id),
-        move |device, name| {
-            recording
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .add_device(device, name)
-                .map_err(|error| {
-                    eprintln!("foldoverd: could not record the paired Mac {device}: {error}");
-                })
-        },
+        Arc::new(Host {
+            engine: Arc::clone(engine),
+        }),
     )
     .map_err(unavailable)
+}
+
+/// This agent's side of the link: it records pairings, and tells each
+/// paired Mac only what this Mac shares with it.
+struct Host {
+    engine: Arc<Mutex<Engine>>,
+}
+
+impl PeerHost for Host {
+    fn paired(&self, device: DeviceId, name: String) -> Result<(), NotRecorded> {
+        self.engine
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .add_device(device, name)
+            .map_err(|error| {
+                eprintln!("foldoverd: could not record the paired Mac {device}: {error}");
+                NotRecorded
+            })
+    }
+
+    fn serve(&self, device: DeviceId, call: PeerCall) -> PeerReply {
+        let engine = self.engine.lock().unwrap_or_else(PoisonError::into_inner);
+        match call {
+            PeerCall::Shares => match engine.shares_for(device) {
+                Ok(shares) => PeerReply::Shares {
+                    shares: shares
+                        .into_iter()
+                        .map(|share| OfferedShare {
+                            id: share.id.to_string(),
+                            name: share.name,
+                        })
+                        .collect(),
+                },
+                Err(_) => PeerReply::Refused {
+                    reason: "That Mac could not read its shared folders".into(),
+                },
+            },
+        }
+    }
 }
 
 pub(crate) async fn handle(
@@ -143,6 +177,28 @@ pub(crate) async fn handle(
             };
             link.decide(device(&params.device)?, decision)
                 .map_err(|error| RpcError::new(INVALID_PARAMS, error.to_string()))?;
+        }
+        PEER_SHARES => {
+            let params: PeerKey = parameters(request)?;
+            let shares = match link
+                .request(device(&params.device)?, PeerCall::Shares)
+                .await
+                .map_err(unavailable)?
+            {
+                PeerReply::Shares { shares } => shares,
+                PeerReply::Refused { reason } => {
+                    return Err(RpcError::new(PEER_UNAVAILABLE, reason));
+                }
+            };
+            return encode(PeerShareList {
+                shares: shares
+                    .into_iter()
+                    .map(|share| PeerShareRecord {
+                        id: share.id,
+                        name: share.name,
+                    })
+                    .collect(),
+            });
         }
         PEER_REVOKE => {
             let params: PeerKey = parameters(request)?;

@@ -18,7 +18,9 @@ All notable changes to this project are documented here. The format follows
 - Pair two Macs: open pairing on one, pick it on the other from the Macs
   found on your network, and confirm the same six-digit code on both
   (Settings › Mac-to-Mac, or `foldover peers`). Forgetting a Mac revokes
-  it. Syncing folders between paired Macs comes next.
+  it. Share a folder with a paired Mac (`foldover shares`), and list what
+  a paired Mac shares with yours (`foldover peers shares`). Syncing those
+  folders comes next.
 
 - Names that one folder would store as one file, such as `Report.txt`
   and `report.txt` on a case-insensitive Mac volume, are a conflict to
