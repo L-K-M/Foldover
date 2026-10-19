@@ -743,11 +743,23 @@ impl PairRun {
                 identities
             }
             _ => {
+                // A side whose identity is recorded must still hold it,
+                // as when only the other root changed; only an unrecorded
+                // side gets one written or adopted.
                 let ensure = |side: Side| {
-                    self.endpoints
-                        .endpoint(side)
-                        .ensure_identity(options.durability())
-                        .map_err(|source| RunError::IdentityWrite { side, source })
+                    let endpoint = self.endpoints.endpoint(side);
+                    let Some(recorded) = self.identities.side(side) else {
+                        return endpoint
+                            .ensure_identity(options.durability())
+                            .map_err(|source| RunError::IdentityWrite { side, source });
+                    };
+                    let observed = endpoint
+                        .identity()
+                        .map_err(|source| RunError::RootLost { side, source })?;
+                    if observed != Some(recorded) {
+                        return Err(RunError::IdentityChanged { side });
+                    }
+                    Ok(recorded)
                 };
                 let (left, right) = (ensure(Side::Left)?, ensure(Side::Right)?);
                 commit(revision, Commit::Identities { left, right }).map_err(RunError::Commit)?;

@@ -1035,3 +1035,37 @@ fn a_root_whose_identity_changes_mid_run_stops_at_the_next_batch() {
     assert_eq!(copied, pair.base.len());
     assert_eq!(copied, 1 + COMMIT_BATCH);
 }
+
+/// Review: with only one identity recorded (the other root was changed),
+/// the recorded side must still be checked, not adopted, before writes.
+#[test]
+fn a_recorded_side_must_still_match_when_the_other_side_is_new() {
+    let mut pair = fixture(SyncMode::Sync);
+    fs::write(pair.left.path().join("file"), b"x").unwrap();
+    pair.sync();
+    let left = pair.identities.side(Side::Left).unwrap();
+    pair.identities = RecordedIdentities::new(Some(left), None);
+    pair.right = tempfile::tempdir().unwrap();
+
+    let prepared = pair.prepare();
+    // The left disk is swapped while the scan runs.
+    let other = EndpointId::from_bytes([9; 16]);
+    fs::write(pair.left.path().join(".foldover/id"), format!("{other}\n")).unwrap();
+    let error = prepared
+        .execute(
+            Approval::default(),
+            RunContext::Reviewed,
+            STARTED,
+            &mut |_, commit| {
+                assert!(!matches!(commit, Commit::Identities { .. }));
+                Ok(())
+            },
+            &mut proceed,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, RunError::IdentityChanged { side: Side::Left }),
+        "{error:?}"
+    );
+    assert_eq!(fs::read_dir(pair.right.path()).unwrap().count(), 0);
+}
