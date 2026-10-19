@@ -54,11 +54,16 @@ private struct UnreachableSyncClient: SyncClient {
 private actor StubSyncClient: SyncClient {
     private var statusReply: PairSyncState = .idle
     private var previewReply: PairSyncState = .idle
+    private var previewError: (any Error)?
 
     func setStatusReply(_ reply: PairSyncState) { statusReply = reply }
     func setPreviewReply(_ reply: PairSyncState) { previewReply = reply }
+    func setPreviewError(_ error: (any Error)?) { previewError = error }
 
-    func preview(_ id: String) async throws -> PairSyncState { previewReply }
+    func preview(_ id: String) async throws -> PairSyncState {
+        if let previewError { throw previewError }
+        return previewReply
+    }
     func status(_ id: String) async throws -> PairSyncState { statusReply }
     func run(_ id: String, approvedA: UInt64, approvedB: UInt64) async throws -> PairSyncState { .idle }
     func cancel(_ id: String) async throws -> PairSyncState { .idle }
@@ -69,27 +74,54 @@ private actor StubSyncClient: SyncClient {
 /// request can stay in flight while a manual job starts.
 private actor DeferredSyncClient: SyncClient {
     private(set) var statusCalls = 0
+    private(set) var previewCalls = 0
+    private(set) var runCalls = 0
     private(set) var cancelled = false
-    private var pending: [CheckedContinuation<PairSyncState, Never>] = []
+    private var pending: [CheckedContinuation<PairSyncState, any Error>] = []
     private var waiters: [(id: UUID, count: Int, then: CheckedContinuation<Bool, Never>)] = []
+    private var pendingStarts: [CheckedContinuation<PairSyncState, any Error>] = []
+    private var startWaiters: [(id: UUID, job: SyncJob, count: Int,
+                               then: CheckedContinuation<Bool, Never>)] = []
+    private var holdStarts = false
     private var previewReply: PairSyncState = .idle
 
     func setPreviewReply(_ reply: PairSyncState) { previewReply = reply }
+    /// Park preview/run requests until the test releases them.
+    func holdStartReplies() { holdStarts = true }
 
-    func preview(_ id: String) async throws -> PairSyncState { previewReply }
+    func preview(_ id: String) async throws -> PairSyncState {
+        started(.preview)
+        guard holdStarts else { return previewReply }
+        return try await withCheckedThrowingContinuation { pendingStarts.append($0) }
+    }
     func status(_ id: String) async throws -> PairSyncState {
         statusCalls += 1
         let ready = waiters.filter { statusCalls >= $0.count }
         waiters.removeAll { statusCalls >= $0.count }
         for waiter in ready { waiter.then.resume(returning: true) }
-        return await withCheckedContinuation { pending.append($0) }
+        return try await withCheckedThrowingContinuation { pending.append($0) }
     }
-    func run(_ id: String, approvedA: UInt64, approvedB: UInt64) async throws -> PairSyncState { .idle }
+    func run(_ id: String, approvedA: UInt64, approvedB: UInt64) async throws -> PairSyncState {
+        started(.run)
+        guard holdStarts else { return .idle }
+        return try await withCheckedThrowingContinuation { pendingStarts.append($0) }
+    }
     func cancel(_ id: String) async throws -> PairSyncState {
         cancelled = true
         return .idle
     }
     func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState { .idle }
+
+    private func started(_ job: SyncJob) {
+        switch job {
+        case .preview: previewCalls += 1
+        case .run: runCalls += 1
+        }
+        let calls = job == .preview ? previewCalls : runCalls
+        let ready = startWaiters.filter { $0.job == job && calls >= $0.count }
+        startWaiters.removeAll { $0.job == job && calls >= $0.count }
+        for waiter in ready { waiter.then.resume(returning: true) }
+    }
 
     /// Resumes the oldest unanswered status request.
     func reply(_ state: PairSyncState) {
@@ -101,7 +133,18 @@ private actor DeferredSyncClient: SyncClient {
         pending.removeLast().resume(returning: state)
     }
 
+    /// Fails the oldest unanswered status request.
+    func replyError(_ error: any Error) {
+        pending.removeFirst().resume(throwing: error)
+    }
+
+    /// Resumes the oldest parked preview/run request.
+    func replyStart(_ state: PairSyncState) {
+        pendingStarts.removeFirst().resume(returning: state)
+    }
+
     var pendingStatusCalls: Int { pending.count }
+    var pendingStartCalls: Int { pendingStarts.count }
 
     /// Suspends until at least `count` status requests are in flight.
     func waitForStatusCalls(_ count: Int) async {
@@ -123,9 +166,30 @@ private actor DeferredSyncClient: SyncClient {
         }
     }
 
+    /// Bounded wait on preview/run requests of one kind, so a start a
+    /// bug suppresses fails instead of hanging the test.
+    @discardableResult
+    func waitForStartCalls(_ job: SyncJob, _ count: Int, timeout: Duration) async -> Bool {
+        let calls = job == .preview ? previewCalls : runCalls
+        if calls >= count { return true }
+        let id = UUID()
+        return await withCheckedContinuation { continuation in
+            startWaiters.append((id, job, count, continuation))
+            Task {
+                try? await Task.sleep(for: timeout)
+                self.expireStartWaiter(id)
+            }
+        }
+    }
+
     private func expire(_ id: UUID) {
         guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
         waiters.remove(at: index).then.resume(returning: false)
+    }
+
+    private func expireStartWaiter(_ id: UUID) {
+        guard let index = startWaiters.firstIndex(where: { $0.id == id }) else { return }
+        startWaiters.remove(at: index).then.resume(returning: false)
     }
 }
 
@@ -579,4 +643,182 @@ func cancellingTheCallerStopsPollingWithoutCancellingTheJob() async {
         await client.reply(.previewed(done))
     }
     await job.value
+}
+
+// Regression for PR57 follow-up: perform writes the request's reply
+// unconditionally. A view-driven refresh parked inside its status
+// request can resolve after a manual job started, overwrite the new
+// .working with .idle, and — through the generation bump — retire the
+// successor's live poller. The stale reply must be dropped.
+@MainActor
+@Test
+func staleRefreshRepliesCannotOverwriteManuallyStartedJobs() async {
+    let done = preview(archivesInA: 0, needsApproval: false)
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.working(.preview, cancelling: false))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+
+    // The automatic refresh parks inside its status request.
+    let refreshing = Task { await store.refresh(pair.id) }
+    await client.waitForStatusCalls(1)
+
+    // A manual preview starts and takes over live polling.
+    let manual = Task { await store.preview(pair.id) }
+    #expect(await eventually {
+        store.state(for: pair.id) == .working(.preview, cancelling: false)
+    })
+
+    // The refresh reply predates the job: it must not win, and a poller
+    // must keep asking until the job really finishes.
+    await client.reply(.idle)
+    await refreshing.value
+    let keptPolling = await client.waitForStatusCalls(2, timeout: .seconds(3))
+    #expect(store.state(for: pair.id) == .working(.preview, cancelling: false))
+    #expect(keptPolling)
+
+    // Drain every outstanding request so buggy and fixed paths finish.
+    while await client.pendingStatusCalls > 0 {
+        await client.reply(.previewed(done))
+    }
+    await manual.value
+    #expect(store.state(for: pair.id) == .previewed(done))
+}
+
+// Regression for PR57 follow-up: the same stale-perform path writes
+// requestErrors unconditionally. A parked refresh that fails after a
+// newer job started must not report its error on the healthy successor.
+@MainActor
+@Test
+func staleRefreshErrorsCannotLandOnANewerJob() async {
+    let done = preview(archivesInA: 0, needsApproval: false)
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.working(.preview, cancelling: false))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+
+    let refreshing = Task { await store.refresh(pair.id) }
+    await client.waitForStatusCalls(1)
+
+    let manual = Task { await store.preview(pair.id) }
+    #expect(await eventually {
+        store.state(for: pair.id) == .working(.preview, cancelling: false)
+    })
+
+    // The parked refresh fails after the job started: neither the error
+    // nor any stale state may touch the successor.
+    await client.replyError(SyncFixtureError.unreachable)
+    await refreshing.value
+    #expect(store.requestError(for: pair.id) == nil)
+    #expect(store.state(for: pair.id) == .working(.preview, cancelling: false))
+
+    while await client.pendingStatusCalls > 0 {
+        await client.reply(.previewed(done))
+    }
+    await manual.value
+    #expect(store.state(for: pair.id) == .previewed(done))
+}
+
+// Regression for PR57 follow-up: a caller task cancelled while its
+// request is in flight must not publish the CancellationError as a
+// request error the user sees on the pair.
+@MainActor
+@Test
+func cancelledRefreshesDoNotReportCancellationAsAnError() async {
+    let client = DeferredSyncClient()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+
+    let refreshing = Task { await store.refresh(pair.id) }
+    await client.waitForStatusCalls(1)
+    refreshing.cancel()
+
+    await client.replyError(CancellationError())
+    await refreshing.value
+    #expect(store.requestError(for: pair.id) == nil)
+    #expect(store.state(for: pair.id) == .idle)
+}
+
+// Regression for PR57 follow-up: while a start RPC is parked the pair
+// still reads .idle, so canStart stays true and a second tap or an
+// overlapping caller issues a duplicate job. A pending start must look
+// busy and a concurrent start must not reach the agent — while the
+// accepted first start still lands its reply.
+@MainActor
+@Test
+func pendingStartsAreBusyAndRejectDuplicateStarts() async {
+    let done = preview(archivesInA: 0, needsApproval: false)
+    let client = DeferredSyncClient()
+    await client.holdStartReplies()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+    let viewModel = PairSyncViewModel(pair: pair, store: store, agentConnected: true)
+
+    let first = Task { await store.preview(pair.id) }
+    #expect(await client.waitForStartCalls(.preview, 1, timeout: .seconds(3)))
+    #expect(!viewModel.canStart)
+
+    // A concurrent start must not issue a second preview RPC.
+    let duplicate = Task { await store.preview(pair.id) }
+    let secondIssued = await client.waitForStartCalls(
+        .preview, 2, timeout: .milliseconds(500))
+    #expect(!secondIssued)
+
+    // The accepted start still applies its reply.
+    while await client.pendingStartCalls > 0 {
+        await client.replyStart(.previewed(done))
+    }
+    await first.value
+    await duplicate.value
+    #expect(store.state(for: pair.id) == .previewed(done))
+
+    // The same holds while a run RPC is parked.
+    let runJob = Task { await store.run(pair.id) }
+    #expect(await client.waitForStartCalls(.run, 1, timeout: .seconds(3)))
+    #expect(!viewModel.canStart)
+    let duplicateRun = Task { await store.run(pair.id) }
+    let secondRunIssued = await client.waitForStartCalls(
+        .run, 2, timeout: .milliseconds(500))
+    #expect(!secondRunIssued)
+    while await client.pendingStartCalls > 0 {
+        await client.replyStart(.idle)
+    }
+    await runJob.value
+    await duplicateRun.value
+    #expect(store.state(for: pair.id) == .idle)
+}
+
+// Regression for PR57 follow-up: preview/run clear the declined marker
+// before the request is known to succeed, so a failed explicit attempt
+// spends the decline and the next automatic check resurrects the same
+// approval. A failed start must preserve the decline.
+@MainActor
+@Test
+func declinedApprovalsSurviveFailedJobAttempts() async {
+    let summary = preview(archivesInA: 60, needsApproval: true)
+    let client = StubSyncClient()
+    let recorder = AlertRecorder()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1)) { alert in
+        await recorder.record(alert)
+    }
+    let pair = pair()
+    let viewModel = PairSyncViewModel(pair: pair, store: store, agentConnected: true)
+
+    await client.setStatusReply(.needsApproval(summary))
+    await store.checkAll([pair])
+    store.declineApproval(pair.id)
+    #expect(store.state(for: pair.id) == .previewed(summary))
+
+    // A failed explicit attempt reports its error but must not spend
+    // the decline.
+    await client.setPreviewError(SyncFixtureError.unreachable)
+    await store.preview(pair.id)
+    #expect(store.requestError(for: pair.id) != nil)
+    #expect(store.state(for: pair.id) == .previewed(summary))
+
+    // The next scheduled check sees the same result: still declined.
+    await store.checkAll([pair])
+    #expect(store.state(for: pair.id) == .previewed(summary))
+    #expect(viewModel.approvalRequest == nil)
+    #expect(await recorder.alerts.isEmpty)
 }
