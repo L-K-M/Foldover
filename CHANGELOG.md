@@ -17,7 +17,8 @@ All notable changes to this project are documented here. The format follows
 
 - Pair two Macs: open pairing on one, pick it on the other from the Macs
   found on your network, and confirm the same six-digit code on both
-  (Settings › Mac-to-Mac, or `foldover peers`). Forgetting a Mac revokes
+  (Settings › Mac-to-Mac, or `foldover peers`). Share folders with a
+  paired Mac there, and pick them in the pair editor with Another Mac…. Forgetting a Mac revokes
   it. Share a folder with a paired Mac (`foldover shares`), and list what
   a paired Mac shares with yours (`foldover peers shares`). A pair's
   folder can be one a paired Mac shares (`peer://DEVICE/SHARE`): syncs

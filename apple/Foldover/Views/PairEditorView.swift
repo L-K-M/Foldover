@@ -8,6 +8,7 @@ struct PairEditorView: View {
     @State private var choosingFolder = false
     @State private var enteringServer: PairFolderSide?
     @State private var serverText = ""
+    @State private var choosingOtherMac: PairFolderSide?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -18,11 +19,17 @@ struct PairEditorView: View {
                     Text(viewModel.folderText(.left)).lineLimit(2).textSelection(.enabled)
                     Button("Choose A…") { choosingSide = .left; choosingFolder = true }
                     Button("SFTP…") { enteringServer = .left }
+                    if viewModel.offersOtherMacs {
+                        Button("Another Mac…") { choosingOtherMac = .left }
+                    }
                 }
                 LabeledContent("Folder B") {
                     Text(viewModel.folderText(.right)).lineLimit(2).textSelection(.enabled)
                     Button("Choose B…") { choosingSide = .right; choosingFolder = true }
                     Button("SFTP…") { enteringServer = .right }
+                    if viewModel.offersOtherMacs {
+                        Button("Another Mac…") { choosingOtherMac = .right }
+                    }
                 }
                 if let warning = viewModel.serverWarning {
                     Text(warning)
@@ -124,5 +131,69 @@ struct PairEditorView: View {
         .fileImporter(isPresented: $choosingFolder, allowedContentTypes: [.folder], allowsMultipleSelection: false) {
             viewModel.chooseFolder($0, side: choosingSide)
         }
+        .sheet(item: $choosingOtherMac) { side in
+            OtherMacFolderPicker(viewModel: viewModel, side: side)
+        }
     }
+}
+
+/// A folder a paired Mac shares, for one side of a pair.
+private struct OtherMacFolderPicker: View {
+    @Environment(\.dismiss) private var dismiss
+    let viewModel: PairEditorViewModel
+    let side: PairFolderSide
+    @State private var mac: PairedDevice?
+    @State private var folders: [OfferedShare] = []
+    @State private var loading = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Choose a Folder on Another Mac").font(.headline)
+            Text(viewModel.otherMacsNote).font(.callout).foregroundStyle(.secondary)
+            if !viewModel.pairedMacs.isEmpty {
+                Picker("Mac", selection: $mac) {
+                    Text("Choose a Mac").tag(PairedDevice?.none)
+                    ForEach(viewModel.pairedMacs) { mac in
+                        Text(mac.name).tag(PairedDevice?.some(mac))
+                    }
+                }
+                List(folders) { folder in
+                    Button(folder.name) {
+                        if let mac {
+                            viewModel.chooseShared(folder, on: mac, side: side)
+                        }
+                        dismiss()
+                    }
+                }
+                .overlay {
+                    if loading {
+                        ProgressView()
+                    } else if mac != nil && folders.isEmpty {
+                        Text("That Mac shares no folders with this one.").foregroundStyle(.secondary)
+                    }
+                }
+            }
+            if let error = viewModel.otherMacsError {
+                Text(error).foregroundStyle(.red).textSelection(.enabled)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+            }
+        }
+        .padding()
+        .frame(width: 380, height: 340)
+        .onChange(of: mac) { _, mac in
+            guard let mac else { return folders = [] }
+            loading = true
+            Task {
+                folders = await viewModel.folders(on: mac)
+                loading = false
+            }
+        }
+    }
+}
+
+extension PairFolderSide: Identifiable {
+    var id: Self { self }
 }

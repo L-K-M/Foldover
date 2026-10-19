@@ -1,9 +1,13 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Pairing with other Macs, in Settings.
 struct MacToMacView: View {
     let viewModel: MacToMacViewModel
     @State private var forgetting: MacToMacViewModel.PairedRow?
+    /// The Mac a folder is being chosen for; kept past the panel closing.
+    @State private var sharingWith: MacToMacViewModel.PairedRow?
+    @State private var choosingShare = false
 
     var body: some View {
         Form {
@@ -57,7 +61,7 @@ struct MacToMacView: View {
                 }
             }
             if !viewModel.paired.isEmpty {
-                Section("Paired Macs") {
+                Section {
                     ForEach(viewModel.paired) { row in
                         HStack {
                             VStack(alignment: .leading) {
@@ -66,9 +70,30 @@ struct MacToMacView: View {
                             }
                             .accessibilityElement(children: .combine)
                             Spacer()
+                            Button("Share a Folder…") {
+                                sharingWith = row
+                                choosingShare = true
+                            }
                             Button("Forget…") { forgetting = row }
                         }
+                        ForEach(row.shares) { share in
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text(share.name)
+                                    Text(share.path).font(.caption).foregroundStyle(.secondary)
+                                        .lineLimit(1).truncationMode(.middle)
+                                }
+                                .accessibilityElement(children: .combine)
+                                Spacer()
+                                Button("Stop Sharing") { Task { await viewModel.stopSharing(share) } }
+                            }
+                            .padding(.leading)
+                        }
                     }
+                } header: {
+                    Text("Paired Macs")
+                } footer: {
+                    Text(viewModel.sharingNote).font(.callout).foregroundStyle(.secondary)
                 }
             }
             if let error = viewModel.error {
@@ -77,6 +102,11 @@ struct MacToMacView: View {
         }
         .formStyle(.grouped)
         .task { await viewModel.monitor() }
+        .fileImporter(isPresented: $choosingShare, allowedContentTypes: [.folder],
+                      allowsMultipleSelection: false) { result in
+            guard let row = sharingWith, let url = try? result.get().first else { return }
+            Task { await viewModel.share(url, with: row) }
+        }
         .confirmationDialog(
             "Forget “\(forgetting?.name ?? "")”?",
             isPresented: Binding(get: { forgetting != nil }, set: { if !$0 { forgetting = nil } }),
