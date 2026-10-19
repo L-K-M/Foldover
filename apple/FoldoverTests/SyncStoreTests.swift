@@ -258,6 +258,13 @@ private actor DeferredSyncClient: SyncClient {
         pendingStarts.removeFirst().resume(throwing: error)
     }
 
+    /// Lets starts answer at once again and releases any still parked.
+    func resumeStarts(replying reply: PairSyncState) {
+        holdStarts = false
+        previewReply = reply
+        while !pendingStarts.isEmpty { replyStart(reply) }
+    }
+
     /// Resumes the oldest parked resolve request.
     func replyResolve(_ state: PairSyncState) {
         pendingResolves.removeFirst().resume(returning: state)
@@ -1392,4 +1399,105 @@ func staleResolveRepliesCannotTriggerNewPreviews() async {
     }
     await resolving.value
     await manual.value
+}
+
+// Regression for PR57 follow-up: a conflict choice in flight owns the
+// pair, but nothing marks it. A checkAll that reports the same cached
+// preview still counts as a write, so the accepted resolve fails its
+// freshness gate and the automatic re-preview never issues; the choice
+// is silently abandoned.
+@MainActor
+@Test
+func checkAllRepliesCannotRetireAPendingChoice() async {
+    let conflicted = PreviewSummary(
+        changes: [PlannedChange(path: Data("notes.txt".utf8), action: .conflict(.bothChanged)),
+                  PlannedChange(path: Data("folder".utf8), action: .conflict(.typeMismatch))],
+        copies: 0, updates: 0, archives: 0, conflicts: 2, blocked: 0, kept: 0,
+        a: DeletionCheck(deletions: 0, paths: 2, needsApproval: false),
+        b: DeletionCheck(deletions: 0, paths: 2, needsApproval: false)
+    )
+    let resolved = preview(archivesInA: 0, needsApproval: false)
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.previewed(conflicted))
+    await client.holdResolveReplies()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+    await store.preview(pair.id)
+
+    let resolving = Task { await store.resolve(pair.id, path: Data("notes.txt".utf8), keep: .a) }
+    #expect(await client.waitForResolveCalls(1, timeout: .seconds(3)))
+
+    // The agent reports the same cached preview while the choice is on
+    // the wire. A fixed store may skip the read while the pair is owned,
+    // so the terminal reply also covers a late issue and any later poll.
+    let checking = Task { await store.checkAll([pair]) }
+    await client.finishPolling(.previewed(conflicted))
+    await checking.value
+
+    // The accepted choice must still trigger its fresh preview.
+    await client.setPreviewReply(.previewed(resolved))
+    await client.replyResolve(.idle)
+    #expect(await client.waitForStartCalls(.preview, 2, timeout: .seconds(3)))
+    #expect(await eventually { store.state(for: pair.id) == .previewed(resolved) })
+
+    await resolving.value
+}
+
+// Regression for PR57 follow-up: while a conflict choice is on the wire
+// the pair is owned, so the UI must refuse new jobs. A start that slips
+// through, even one the agent rejects as busy, reaches the client and
+// bumps the generation out from under the accepted choice's re-preview.
+@MainActor
+@Test
+func newStartsCannotRetireAPendingChoice() async {
+    let conflicted = PreviewSummary(
+        changes: [PlannedChange(path: Data("notes.txt".utf8), action: .conflict(.bothChanged)),
+                  PlannedChange(path: Data("folder".utf8), action: .conflict(.typeMismatch))],
+        copies: 0, updates: 0, archives: 0, conflicts: 2, blocked: 0, kept: 0,
+        a: DeletionCheck(deletions: 0, paths: 2, needsApproval: false),
+        b: DeletionCheck(deletions: 0, paths: 2, needsApproval: false)
+    )
+    let resolved = preview(archivesInA: 0, needsApproval: false)
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.previewed(conflicted))
+    await client.holdResolveReplies()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+    await store.preview(pair.id)
+
+    let resolving = Task { await store.resolve(pair.id, path: Data("notes.txt".utf8), keep: .a) }
+    #expect(await client.waitForResolveCalls(1, timeout: .seconds(3)))
+
+    let viewModel = PairSyncViewModel(pair: pair, store: store, pairs: catalog(), agentConnected: true)
+    #expect(!viewModel.canStart)
+
+    // A user start during the choice must not reach the client; if the
+    // bug lets it through, the agent's busy rejection follows.
+    await client.holdStartReplies()
+    let conflicting = Task { await store.preview(pair.id) }
+    let issued = await client.waitForStartCalls(.preview, 2, timeout: .milliseconds(500))
+    #expect(!issued)
+    if issued { await client.replyStartError(SyncFixtureError.unreachable) }
+
+    // A second choice is a duplicate, not a new command.
+    let second = Task { await store.resolve(pair.id, path: Data("notes.txt".utf8), keep: .b) }
+    let secondIssued = await client.waitForResolveCalls(2, timeout: .milliseconds(500))
+    #expect(!secondIssued)
+
+    // Later starts answer at once so the choice's own re-preview can run.
+    await client.resumeStarts(replying: .previewed(resolved))
+    await client.replyResolve(.idle)
+    #expect(await eventually { store.state(for: pair.id) == .previewed(resolved) })
+
+    await client.finishPolling(.idle)
+    while await client.pendingResolveCalls > 0 {
+        await client.replyResolve(.idle)
+    }
+    while await client.pendingStartCalls > 0 {
+        await client.replyStart(.idle)
+    }
+    await conflicting.value
+    await second.value
+    await resolving.value
+    #expect(store.requestError(for: pair.id) == nil)
 }
