@@ -37,7 +37,7 @@ A pair joins two folders. Each side can be:
   [ADR 0011](../adr/0011-pair-configuration-api.md)).
 - **"Same code path" is not a guarantee.** A mounted share uses exactly
   the local implementation, but Foldover has not yet measured what real
-  SMB, NFS or exFAT targets preserve, so the table marks those rows as
+  SMB, NFS or WebDAV shares preserve, so the table marks those rows as
   dependent on the filesystem
   ([ADR 0005](../adr/0005-metadata-fidelity.md),
   [ADR 0019](../adr/0019-local-write-primitives.md)).

@@ -133,5 +133,7 @@ changes or guarantee a drive-cache flush
 - Manual runs fail with a clear error from ssh
   ([ADR 0028](../adr/0028-sftp-endpoints.md)).
 - Saving a pair connects to its own servers, but other pairs' SFTP roots
-  are compared by locator only, so an offline server does not block the
-  catalog ([ADR 0028](../adr/0028-sftp-endpoints.md)).
+  are compared by their locators without connecting, so an offline
+  server does not block the catalog. One folder written two ways, say
+  with another user name or through `~`, is not caught as an overlap
+  ([ADR 0028](../adr/0028-sftp-endpoints.md)).

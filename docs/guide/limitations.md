@@ -9,8 +9,8 @@ What you need to know before trusting a pair with your data.
   that ([ADR 0020](../adr/0020-run-execution.md),
   [ADR 0022](../adr/0022-scheduled-runs.md)).
 - **Deletion fuse.** An interactive run stops when a target would lose
-  more than 50 paths and more than 1% of what it holds; an unattended
-  run stops above 50%. You confirm with the exact preview you saw; a
+  both more than 50 paths and more than 1% of its paths; an unattended
+  run stops only when it would lose more than half its paths. You confirm with the exact preview you saw; a
   changed plan needs a fresh review
   ([ADR 0013](../adr/0013-deletion-review-fuse.md),
   [ADR 0020](../adr/0020-run-execution.md)).
@@ -82,7 +82,8 @@ What you need to know before trusting a pair with your data.
 - **Always Skip** writes an exact-path rule; names that are not UTF-8
   cannot be written and are not offered
   ([ADR 0024](../adr/0024-filters.md)).
-- **Skip once lives in memory.** An agent restart forgets it and the
+- **Skip once lives in memory.** Restarting the agent (the background
+  process that runs syncs for the app and the CLI) forgets it, and the
   next preview shows the change again
   ([ADR 0023](../adr/0023-conflict-resolution.md)).
 - A folder deleted on one side cannot be removed on the other while it
@@ -118,7 +119,7 @@ What you need to know before trusting a pair with your data.
 
 ## Watching and schedules
 
-- FSEvents and inotify events are hints; each one starts a full
+- FSEvents events (inotify on Linux) are hints; each one starts a full
   observation, and "When files change" also verifies hourly
   ([ADR 0022](../adr/0022-scheduled-runs.md)).
 - A mounted share only reports changes your Mac makes. Writes from other
