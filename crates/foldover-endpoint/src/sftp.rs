@@ -245,6 +245,9 @@ impl SftpEndpoint {
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<Observation, ScanError> {
         let mut observation = Observation::default();
+        // Listing the whole tree first, as local roots do, makes checked
+        // over listed a fair measure of how far the comparison is.
+        let mut listed = Vec::new();
         let mut pending: Vec<Option<SyncPath>> = vec![None];
         while let Some(directory) = pending.pop() {
             if control() == ScanControl::Cancel {
@@ -288,10 +291,13 @@ impl SftpEndpoint {
                     pending.push(Some(path.clone()));
                 }
                 progress(ObserveStep::Listed);
-                let entry = self.observe_entry(&path, &attributes, policy, control)?;
-                observation.entries.insert(path, entry);
-                progress(ObserveStep::Checked);
+                listed.push((path, attributes));
             }
+        }
+        for (path, attributes) in listed {
+            let entry = self.observe_entry(&path, &attributes, policy, control)?;
+            observation.entries.insert(path, entry);
+            progress(ObserveStep::Checked);
         }
         Ok(observation)
     }
