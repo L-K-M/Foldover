@@ -76,18 +76,23 @@ private actor DeferredSyncClient: SyncClient {
     private(set) var statusCalls = 0
     private(set) var previewCalls = 0
     private(set) var runCalls = 0
+    private(set) var resolveCalls = 0
     private(set) var cancelled = false
     private var pending: [CheckedContinuation<PairSyncState, any Error>] = []
     private var waiters: [(id: UUID, count: Int, then: CheckedContinuation<Bool, Never>)] = []
     private var pendingStarts: [CheckedContinuation<PairSyncState, any Error>] = []
+    private var pendingResolves: [CheckedContinuation<PairSyncState, any Error>] = []
     private var startWaiters: [(id: UUID, job: SyncJob, count: Int,
                                then: CheckedContinuation<Bool, Never>)] = []
     private var holdStarts = false
+    private var holdResolves = false
     private var previewReply: PairSyncState = .idle
 
     func setPreviewReply(_ reply: PairSyncState) { previewReply = reply }
     /// Park preview/run requests until the test releases them.
     func holdStartReplies() { holdStarts = true }
+    /// Park resolve requests until the test releases them.
+    func holdResolveReplies() { holdResolves = true }
 
     func preview(_ id: String) async throws -> PairSyncState {
         started(.preview)
@@ -110,7 +115,11 @@ private actor DeferredSyncClient: SyncClient {
         cancelled = true
         return .idle
     }
-    func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState { .idle }
+    func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState {
+        resolveCalls += 1
+        guard holdResolves else { return .idle }
+        return try await withCheckedThrowingContinuation { pendingResolves.append($0) }
+    }
 
     private func started(_ job: SyncJob) {
         switch job {
@@ -143,8 +152,19 @@ private actor DeferredSyncClient: SyncClient {
         pendingStarts.removeFirst().resume(returning: state)
     }
 
+    /// Fails the oldest parked preview/run request.
+    func replyStartError(_ error: any Error) {
+        pendingStarts.removeFirst().resume(throwing: error)
+    }
+
+    /// Resumes the oldest parked resolve request.
+    func replyResolve(_ state: PairSyncState) {
+        pendingResolves.removeFirst().resume(returning: state)
+    }
+
     var pendingStatusCalls: Int { pending.count }
     var pendingStartCalls: Int { pendingStarts.count }
+    var pendingResolveCalls: Int { pendingResolves.count }
 
     /// Suspends until at least `count` status requests are in flight.
     func waitForStatusCalls(_ count: Int) async {
@@ -180,6 +200,18 @@ private actor DeferredSyncClient: SyncClient {
                 self.expireStartWaiter(id)
             }
         }
+    }
+
+    /// Bounded wait on resolve requests, so a call a bug suppresses
+    /// fails instead of hanging the test.
+    @discardableResult
+    func waitForResolveCalls(_ count: Int, timeout: Duration) async -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        while resolveCalls < count {
+            if ContinuousClock.now >= deadline { return false }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        return true
     }
 
     private func expire(_ id: UUID) {
@@ -865,4 +897,206 @@ func startsOwnThePairWhileTheirRequestIsInFlight() async {
     }
     await starting.value
     #expect(store.state(for: pair.id) == .previewed(done))
+}
+
+// Regression for PR57 follow-up: while an approving run's start RPC is
+// unanswered the pair still reads .needsApproval, so approvalRequest
+// stays non-nil and the dialog the user just confirmed re-presents. A
+// pending start must already hide the dialog.
+@MainActor
+@Test
+func pendingApprovedRunsHideTheApprovalDialog() async {
+    let summary = preview(archivesInA: 60, needsApproval: true)
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.needsApproval(summary))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+    let viewModel = PairSyncViewModel(pair: pair, store: store, agentConnected: true)
+
+    await store.preview(pair.id)
+    #expect(viewModel.approvalRequest != nil)
+
+    await client.holdStartReplies()
+    let approving = Task { await store.run(pair.id) }
+    #expect(await client.waitForStartCalls(.run, 1, timeout: .seconds(3)))
+    #expect(viewModel.approvalRequest == nil)
+
+    await client.replyStart(.idle)
+    await approving.value
+}
+
+@MainActor
+@Test
+func overwriteOnlyApprovalsExplainThePendingCopy() async {
+    let check = DeletionCheck(deletions: 0, paths: 1, needsApproval: false)
+    let summary = PreviewSummary(
+        changes: [PlannedChange(path: Data("note".utf8), action: .copy(to: .b))],
+        copies: 1, updates: 0, archives: 0, conflicts: 0, blocked: 0, kept: 0,
+        a: check, b: check
+    )
+    let store = SyncStore(client: ScriptedSyncClient([.needsApproval(summary)]))
+    let pair = pair()
+    let viewModel = PairSyncViewModel(pair: pair, store: store, agentConnected: true)
+    await store.preview(pair.id)
+
+    // First-run overwrites need review even with no standalone deletions.
+    let request = viewModel.approvalRequest?.lowercased()
+    #expect(request?.contains("copy") == true)
+    #expect(request?.contains("1") == true)
+    #expect(!viewModel.statusText.contains("more items"))
+}
+
+// Regression for PR57 follow-up: dismissing the dialog while an
+// approving run is in flight writes .previewed and bumps the generation,
+// so the accepted .working reply is dropped and no poller ever runs —
+// the pair shows a stale preview while the agent may be running the
+// sync. A dismissal during a pending start must not abandon the
+// accepted reply or its poller.
+@MainActor
+@Test
+func dismissingDuringAPendingStartCannotAbandonTheAcceptedRun() async {
+    let summary = preview(archivesInA: 60, needsApproval: true)
+    let finished = RunSummary(cancelled: false, copied: 1, updated: 0, archived: 60,
+                              recovered: 0, conflicts: 0, failures: [], failureCount: 0,
+                              archive: "run")
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.needsApproval(summary))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+    let viewModel = PairSyncViewModel(pair: pair, store: store, agentConnected: true)
+
+    await store.preview(pair.id)
+    await client.holdStartReplies()
+    let approving = Task { await store.run(pair.id) }
+    #expect(await client.waitForStartCalls(.run, 1, timeout: .seconds(3)))
+    #expect(viewModel.approvalRequest == nil)
+
+    // A dismissal while the start is in flight must not retire it.
+    store.declineApproval(pair.id)
+    #expect(viewModel.approvalRequest == nil)
+
+    await client.replyStart(.working(.run, cancelling: false))
+    #expect(await eventually {
+        store.state(for: pair.id) == .working(.run, cancelling: false)
+    })
+    #expect(await client.waitForStatusCalls(1, timeout: .seconds(3)))
+
+    while await client.pendingStatusCalls > 0 {
+        await client.reply(.finished(finished))
+    }
+    await approving.value
+    #expect(store.state(for: pair.id) == .finished(finished))
+}
+
+// Regression for PR57 follow-up: the same dismissal also retires the
+// start's error path — a run that legitimately fails lands after the
+// decline's write, so its error is dropped and the failure is hidden.
+@MainActor
+@Test
+func dismissingDuringAPendingStartCannotHideTheRunsFailure() async {
+    let summary = preview(archivesInA: 60, needsApproval: true)
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.needsApproval(summary))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+    let viewModel = PairSyncViewModel(pair: pair, store: store, agentConnected: true)
+
+    await store.preview(pair.id)
+    await client.holdStartReplies()
+    let approving = Task { await store.run(pair.id) }
+    #expect(await client.waitForStartCalls(.run, 1, timeout: .seconds(3)))
+
+    store.declineApproval(pair.id)
+    await client.replyStartError(SyncFixtureError.unreachable)
+    await approving.value
+    #expect(store.requestError(for: pair.id) != nil)
+    // The run never ran: the approval it would have cleared is still live.
+    #expect(viewModel.approvalRequest != nil)
+}
+
+// Regression for PR57 follow-up: a poller from the previous job can wake
+// inside a new start's pending window, land a terminal reply that bumps
+// the generation, and retire the new start's accepted reply — leaving no
+// poller for the job the agent is actually running.
+@MainActor
+@Test
+func oldPollerRepliesCannotRetireAPendingStart() async {
+    let done = preview(archivesInA: 0, needsApproval: false)
+    let finished = RunSummary(cancelled: false, copied: 1, updated: 0, archived: 3,
+                              recovered: 0, conflicts: 0, failures: [], failureCount: 0,
+                              archive: "run")
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.working(.preview, cancelling: false))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(250))
+    let pair = pair()
+
+    // Job one's poller is in its first sleep when the new start begins.
+    let first = Task { await store.preview(pair.id) }
+    #expect(await eventually {
+        store.state(for: pair.id) == .working(.preview, cancelling: false)
+    })
+
+    await client.holdStartReplies()
+    let second = Task { await store.preview(pair.id) }
+    #expect(await client.waitForStartCalls(.preview, 2, timeout: .seconds(3)))
+
+    // Give the old poller its poll window inside the pending start, then
+    // answer every request it managed to issue with a terminal reply.
+    _ = await client.waitForStatusCalls(1, timeout: .seconds(1))
+    let issuedBeforeReply = await client.statusCalls
+    while await client.pendingStatusCalls > 0 {
+        await client.reply(.finished(finished))
+    }
+
+    // The accepted start's reply still wins and owns the live poller.
+    await client.replyStart(.working(.preview, cancelling: false))
+    #expect(await eventually {
+        store.state(for: pair.id) == .working(.preview, cancelling: false)
+    })
+    #expect(await client.waitForStatusCalls(issuedBeforeReply + 1, timeout: .seconds(3)))
+
+    while await client.pendingStatusCalls > 0 {
+        await client.reply(.previewed(done))
+    }
+    await first.value
+    await second.value
+    #expect(store.state(for: pair.id) == .previewed(done))
+}
+
+// Regression for PR57 follow-up: resolve always previews again once its
+// request answers, even when a newer action took over the pair while it
+// was in flight — the re-preview belongs to the old conflict-resolution
+// flow and must not issue against the pair's new job.
+@MainActor
+@Test
+func staleResolveRepliesCannotTriggerNewPreviews() async {
+    let done = preview(archivesInA: 0, needsApproval: false)
+    let client = DeferredSyncClient()
+    await client.holdResolveReplies()
+    await client.setPreviewReply(.working(.preview, cancelling: false))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+
+    let resolving = Task { await store.resolve(pair.id, path: Data("a".utf8), keep: .a) }
+    #expect(await client.waitForResolveCalls(1, timeout: .seconds(3)))
+
+    // A newer action owns the pair before the resolve answers.
+    let manual = Task { await store.preview(pair.id) }
+    #expect(await eventually {
+        store.state(for: pair.id) == .working(.preview, cancelling: false)
+    })
+
+    // The stale resolve's answer must not start another preview.
+    await client.replyResolve(.idle)
+    let secondIssued = await client.waitForStartCalls(.preview, 2, timeout: .milliseconds(500))
+    #expect(!secondIssued)
+
+    while await client.pendingStatusCalls > 0 {
+        await client.reply(.previewed(done))
+    }
+    while await client.pendingResolveCalls > 0 {
+        await client.replyResolve(.idle)
+    }
+    await resolving.value
+    await manual.value
 }
