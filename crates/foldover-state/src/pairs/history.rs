@@ -12,6 +12,7 @@ pub const HISTORY_LIMIT: usize = 100;
 
 const MANUAL: &str = "manual";
 const SCHEDULED: &str = "scheduled";
+const UNDO: &str = "undo";
 const COMPLETED: &str = "completed";
 const CANCELLED: &str = "cancelled";
 const NEEDS_APPROVAL: &str = "needs_approval";
@@ -22,6 +23,9 @@ const FAILED: &str = "failed";
 pub enum RunTrigger {
     Manual,
     Scheduled,
+    /// An undo of the sync before it: `archived` counts what that sync
+    /// created, `recovered` what came back, `failures` what was left.
+    Undo,
 }
 
 /// How a run ended.
@@ -63,6 +67,7 @@ impl PairStore {
             trigger: match entry.trigger {
                 RunTrigger::Manual => MANUAL,
                 RunTrigger::Scheduled => SCHEDULED,
+                RunTrigger::Undo => UNDO,
             }
             .into(),
             outcome: match entry.outcome {
@@ -111,6 +116,7 @@ fn entry(row: HistoryRow) -> Result<HistoryEntry, Error> {
         trigger: match row.trigger.as_str() {
             MANUAL => RunTrigger::Manual,
             SCHEDULED => RunTrigger::Scheduled,
+            UNDO => RunTrigger::Undo,
             _ => return Err(invalid()),
         },
         outcome: match row.outcome.as_str() {

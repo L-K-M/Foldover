@@ -9,6 +9,9 @@ pub const HISTORY_LIST: &str = "history.list";
 pub enum HistoryTrigger {
     Manual,
     Scheduled,
+    /// An undo of the sync before it: `archived` counts what that sync
+    /// created, `recovered` what came back, `failures` what was left.
+    Undo,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

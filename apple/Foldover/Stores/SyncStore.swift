@@ -77,6 +77,21 @@ struct RunSummary: Equatable, Sendable {
     let archive: String
 }
 
+/// What undoing a pair's newest sync did.
+struct UndoSummary: Equatable, Sendable {
+    let cancelled: Bool
+    /// Entries the sync created, now in this undo's archive folder.
+    let removed: UInt64
+    /// Entries it replaced or archived, back at their paths.
+    let restored: UInt64
+    /// Put back beside a newer entry at their path.
+    let beside: UInt64
+    /// The first entries left as they were, with why.
+    let notUndone: [RunFailure]
+    let notUndoneCount: UInt64
+    let archive: String
+}
+
 /// Which planned changes to list.
 enum ChangeFilter: CaseIterable, Hashable, Sendable {
     case copies
@@ -102,6 +117,8 @@ struct ChangeListing: Equatable, Sendable {
 enum RunTrigger: Sendable {
     case manual
     case scheduled
+    /// An undo of the sync before it.
+    case undo
 }
 
 enum RunEnd: Sendable {
@@ -121,6 +138,8 @@ struct RunRecord: Equatable, Sendable {
     let copied: UInt64
     let updated: UInt64
     let archived: UInt64
+    /// Leftovers recovered; for an undo, what came back.
+    let recovered: UInt64
     let conflicts: UInt64
     let failures: UInt64
     let message: String?
@@ -129,6 +148,7 @@ struct RunRecord: Equatable, Sendable {
 enum SyncJob: Sendable {
     case preview
     case run
+    case undo
 }
 
 enum PairSyncState: Equatable, Sendable {
@@ -138,6 +158,9 @@ enum PairSyncState: Equatable, Sendable {
     /// Too many deletions for this run; nothing was written.
     case needsApproval(PreviewSummary)
     case finished(RunSummary)
+    /// The newest sync was undone; automatic syncs wait until a person
+    /// syncs, so they do not redo it unseen.
+    case undone(UndoSummary)
     case failed(String)
     /// An automatic sync waits for this folder, e.g. an unmounted disk.
     case waiting(FolderSide)
@@ -151,6 +174,8 @@ protocol SyncClient: Sendable {
              reviewToken: String?) async throws -> PairSyncState
     func status(_ id: String) async throws -> PairSyncState
     func cancel(_ id: String) async throws -> PairSyncState
+    /// Undo the newest sync that changed anything.
+    func undo(_ id: String) async throws -> PairSyncState
     /// `reviewToken` must be the token of the preview the choice was
     /// made from.
     func resolve(_ id: String, path: Data, keep: FolderSide,
@@ -187,6 +212,10 @@ private actor CoreSyncClient: SyncClient {
         state(try await FoldoverCore.syncCancel(id: id))
     }
 
+    func undo(_ id: String) async throws -> PairSyncState {
+        state(try await FoldoverCore.syncUndo(id: id))
+    }
+
     func resolve(_ id: String, path: Data, keep: FolderSide,
                  reviewToken: String) async throws -> PairSyncState {
         state(try await FoldoverCore.syncResolve(
@@ -220,15 +249,24 @@ private actor CoreSyncClient: SyncClient {
         try await FoldoverCore.pairHistory(id: id).map { entry in
             RunRecord(
                 started: date(entry.startedMs), finished: date(entry.finishedMs),
-                trigger: entry.trigger == .manual ? .manual : .scheduled, end: end(entry.outcome),
+                trigger: trigger(entry.trigger), end: end(entry.outcome),
                 copied: entry.copied, updated: entry.updated, archived: entry.archived,
-                conflicts: entry.conflicts, failures: entry.failures, message: entry.message
+                recovered: entry.recovered, conflicts: entry.conflicts, failures: entry.failures,
+                message: entry.message
             )
         }
     }
 
     private func date(_ milliseconds: UInt64) -> Date {
         Date(timeIntervalSince1970: Double(milliseconds) / 1000)
+    }
+
+    private func trigger(_ trigger: RunTriggerKind) -> RunTrigger {
+        switch trigger {
+        case .manual: .manual
+        case .scheduled: .scheduled
+        case .undo: .undo
+        }
     }
 
     private func end(_ outcome: RunOutcomeKind) -> RunEnd {
@@ -243,13 +281,31 @@ private actor CoreSyncClient: SyncClient {
     private func state(_ state: SyncJobState) -> PairSyncState {
         switch state {
         case .idle: .idle
-        case .working(let job, let cancelling): .working(job == .preview ? .preview : .run, cancelling: cancelling)
+        case .working(let job, let cancelling): .working(self.job(job), cancelling: cancelling)
         case .previewed(let preview): .previewed(summary(preview))
         case .needsApproval(let preview): .needsApproval(summary(preview))
         case .finished(let result): .finished(summary(result))
+        case .undone(let result): .undone(summary(result))
         case .failed(let message): .failed(message)
         case .waiting(let folder): .waiting(side(folder))
         }
+    }
+
+    private func job(_ job: SyncJobKind) -> SyncJob {
+        switch job {
+        case .preview: .preview
+        case .run: .run
+        case .undo: .undo
+        }
+    }
+
+    private func summary(_ result: SyncUndoSummary) -> UndoSummary {
+        UndoSummary(
+            cancelled: result.cancelled, removed: result.removed, restored: result.restored,
+            beside: result.beside,
+            notUndone: result.notUndone.map { RunFailure(path: $0.path, message: $0.message) },
+            notUndoneCount: result.notUndoneCount, archive: result.archive
+        )
     }
 
     private func summary(_ preview: SyncPreviewSummary) -> PreviewSummary {
@@ -495,6 +551,13 @@ final class SyncStore {
             try await client.run(id, approvedA: approvedA, approvedB: approvedB,
                                  reviewToken: reviewToken)
         }
+    }
+
+    /// Undo the pair's newest sync that changed anything.
+    func undo(_ id: String) async {
+        guard beginOperation(id, .start) else { return }
+        let client = client
+        await perform(id, .start) { try await client.undo(id) }
     }
 
     func cancel(_ id: String) async {

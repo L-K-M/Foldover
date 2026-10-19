@@ -19,6 +19,7 @@ struct Fixture {
     age_limit: Option<u32>,
     durability: foldover_types::Durability,
     right_kind: RightKind,
+    journal: Option<foldover_state::Journal>,
 }
 
 /// How the fixture reaches its right folder.
@@ -58,6 +59,70 @@ fn fixture(mode: SyncMode) -> Fixture {
         age_limit: None,
         durability: foldover_types::Durability::Standard,
         right_kind: RightKind::Local,
+        journal: None,
+    }
+}
+
+/// Applies commits like the state store, journal included.
+struct Store<'a> {
+    revision: u64,
+    base: &'a mut BTreeMap<SyncPath, BaselineEntry>,
+    identities: &'a mut RecordedIdentities,
+    journal: &'a mut Option<foldover_state::Journal>,
+}
+
+impl Store<'_> {
+    fn apply(&mut self, planned: u64, commit: Commit<'_>) -> Result<(), crate::Error> {
+        if planned != self.revision {
+            return Err(crate::Error::StaleRevision);
+        }
+        let updates = match commit {
+            Commit::Identities { left, right } => {
+                *self.identities = RecordedIdentities::new(Some(left), Some(right));
+                return Ok(());
+            }
+            Commit::Base {
+                run,
+                updates,
+                journal,
+            } => {
+                match self.journal {
+                    _ if journal.is_empty() => {}
+                    Some(current) if current.run == run => {
+                        current.entries.extend_from_slice(journal)
+                    }
+                    _ => {
+                        *self.journal = Some(foldover_state::Journal {
+                            run: run.to_owned(),
+                            entries: journal.to_vec(),
+                        })
+                    }
+                }
+                updates
+            }
+            Commit::Undoing { updates } => updates,
+            Commit::Undone { run, updates } => {
+                if self
+                    .journal
+                    .as_ref()
+                    .is_some_and(|journal| journal.run == run)
+                {
+                    *self.journal = None;
+                }
+                updates
+            }
+        };
+        for update in updates {
+            match update {
+                BaseUpdate::Record(path, entry) => {
+                    self.base.insert(path.clone(), *entry);
+                }
+                BaseUpdate::Forget(path) => {
+                    self.base.remove(path);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -132,41 +197,35 @@ impl Fixture {
 
     /// Run with an in-memory base that applies commits like the state store.
     fn run(&mut self, approval: Approval, context: RunContext) -> RunOutcome {
+        self.run_at(approval, context, STARTED)
+    }
+
+    fn run_at(
+        &mut self,
+        approval: Approval,
+        context: RunContext,
+        started: std::time::SystemTime,
+    ) -> RunOutcome {
         let prepared = self.prepare();
-        let revision = self.revision;
-        let base = &mut self.base;
-        let identities = &mut self.identities;
+        let mut store = self.store();
         prepared
             .execute(
                 approval,
                 context,
-                STARTED,
-                &mut |planned, commit| {
-                    if planned != revision {
-                        return Err(crate::Error::StaleRevision);
-                    }
-                    let updates = match commit {
-                        Commit::Identities { left, right } => {
-                            *identities = RecordedIdentities::new(Some(left), Some(right));
-                            return Ok(());
-                        }
-                        Commit::Base(updates) => updates,
-                    };
-                    for update in updates {
-                        match update {
-                            BaseUpdate::Record(path, entry) => {
-                                base.insert(path.clone(), *entry);
-                            }
-                            BaseUpdate::Forget(path) => {
-                                base.remove(path);
-                            }
-                        }
-                    }
-                    Ok(())
-                },
+                started,
+                &mut |planned, commit| store.apply(planned, commit),
                 &mut proceed,
             )
             .unwrap()
+    }
+
+    fn store(&mut self) -> Store<'_> {
+        Store {
+            revision: self.revision,
+            base: &mut self.base,
+            identities: &mut self.identities,
+            journal: &mut self.journal,
+        }
     }
 
     /// A first run stands for the reviewed preview a person accepted.
@@ -391,7 +450,7 @@ fn failed_folders_skip_their_contents_and_later_runs_recover_leftovers() {
             RunContext::Reviewed,
             STARTED,
             &mut |_, commit| {
-                if let Commit::Base(updates) = commit {
+                if let Commit::Base { updates, .. } = commit {
                     for update in updates {
                         if let BaseUpdate::Record(path, entry) = update {
                             base.insert(path.clone(), *entry);
@@ -1013,7 +1072,7 @@ fn a_root_whose_identity_changes_mid_run_stops_at_the_next_batch() {
             RunContext::Interactive,
             STARTED,
             &mut |_, commit| {
-                if let Commit::Base(updates) = commit {
+                if let Commit::Base { updates, .. } = commit {
                     for update in updates {
                         if let BaseUpdate::Record(path, entry) = update {
                             base.insert(path.clone(), *entry);
@@ -1034,6 +1093,184 @@ fn a_root_whose_identity_changes_mid_run_stops_at_the_next_batch() {
     let copied = fs::read_dir(pair.right.path()).unwrap().count() - 1;
     assert_eq!(copied, pair.base.len());
     assert_eq!(copied, 1 + COMMIT_BATCH);
+}
+
+const HOUR: std::time::Duration = std::time::Duration::from_secs(3_600);
+
+/// Runs `hours` after the first, so each gets its own archive folder.
+fn at(hours: u32) -> std::time::SystemTime {
+    STARTED + HOUR * hours
+}
+
+impl Fixture {
+    fn ran(&mut self, approval: Approval, started: std::time::SystemTime) -> RunReport {
+        match self.run_at(approval, RunContext::Interactive, started) {
+            RunOutcome::Ran(report) => report,
+            RunOutcome::NeedsApproval(preview) => panic!("unexpected approval: {preview:?}"),
+        }
+    }
+
+    fn undo_at(&mut self, started: std::time::SystemTime) -> UndoReport {
+        let journal = self.journal.clone().expect("a journaled run");
+        let prepared = self.prepare();
+        let mut store = self.store();
+        prepared
+            .undo(
+                journal,
+                started,
+                &mut |planned, commit| store.apply(planned, commit),
+                &mut proceed,
+            )
+            .unwrap()
+    }
+}
+
+#[test]
+fn undo_reverts_the_newest_run_and_the_next_preview_shows_the_redo() {
+    let mut pair = fixture(SyncMode::Sync);
+    let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+    fs::write(left.join("edit.txt"), b"v1").unwrap();
+    fs::write(left.join("gone.txt"), b"g").unwrap();
+    fs::write(left.join("keep.txt"), b"k").unwrap();
+    pair.sync();
+    let before = pair.base.clone();
+
+    fs::write(left.join("edit.txt"), b"version 2").unwrap();
+    fs::remove_file(left.join("gone.txt")).unwrap();
+    fs::write(left.join("new.txt"), b"n").unwrap();
+    fs::create_dir(left.join("folder")).unwrap();
+    fs::write(left.join("folder/x.txt"), b"x").unwrap();
+    let report = pair.ran(Approval::new(0, 1), at(1));
+    assert_eq!((report.copied(), report.archived()), (4, 1));
+
+    let undo = pair.undo_at(at(2));
+    assert!(undo.not_undone().is_empty(), "{:?}", undo.not_undone());
+    assert_eq!((undo.removed(), undo.restored(), undo.beside()), (3, 2, 0));
+    assert_eq!(fs::read(right.join("edit.txt")).unwrap(), b"v1");
+    assert_eq!(fs::read(right.join("gone.txt")).unwrap(), b"g");
+    assert!(!right.join("new.txt").exists());
+    assert!(!right.join("folder").exists());
+    // What the run created waits in the undo's own archive.
+    let archive = right.join(".foldover/archive").join(undo.archive());
+    assert_eq!(fs::read(archive.join("new.txt")).unwrap(), b"n");
+    assert_eq!(fs::read(archive.join("folder/x.txt")).unwrap(), b"x");
+
+    // The base is back to before the run, and the journal is spent.
+    assert_eq!(pair.base, before);
+    assert!(pair.journal.is_none());
+    // Syncing again would redo exactly what was undone.
+    assert_eq!(pair.prepare().preview().items().len(), 5);
+}
+
+#[test]
+fn undo_leaves_entries_changed_since_the_run_and_says_why() {
+    let mut pair = fixture(SyncMode::Sync);
+    let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+    fs::write(left.join("keep.txt"), b"k").unwrap();
+    pair.sync();
+    fs::write(left.join("new.txt"), b"n").unwrap();
+    pair.ran(Approval::default(), at(1));
+    fs::write(right.join("new.txt"), b"edited in B").unwrap();
+
+    let undo = pair.undo_at(at(2));
+    assert_eq!(undo.removed(), 0);
+    assert_eq!(undo.not_undone().len(), 1);
+    assert_eq!(undo.not_undone()[0].path(), &path(b"new.txt"));
+    assert!(undo.not_undone()[0].message().starts_with("Changed since"));
+    assert_eq!(fs::read(right.join("new.txt")).unwrap(), b"edited in B");
+    assert!(pair.journal.is_none());
+}
+
+#[test]
+fn undo_puts_a_removed_folder_back_with_its_files() {
+    let mut pair = fixture(SyncMode::Sync);
+    let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+    fs::write(left.join("keep.txt"), b"k").unwrap();
+    fs::create_dir(left.join("dir")).unwrap();
+    fs::write(left.join("dir/a"), b"a").unwrap();
+    fs::write(left.join("dir/b"), b"b").unwrap();
+    pair.sync();
+    let before = pair.base.clone();
+    fs::remove_dir_all(left.join("dir")).unwrap();
+    assert_eq!(pair.ran(Approval::new(0, 3), at(1)).archived(), 3);
+    assert!(!right.join("dir").exists());
+
+    let undo = pair.undo_at(at(2));
+    assert!(undo.not_undone().is_empty(), "{:?}", undo.not_undone());
+    assert_eq!(undo.restored(), 3);
+    assert_eq!(fs::read(right.join("dir/a")).unwrap(), b"a");
+    assert_eq!(fs::read(right.join("dir/b")).unwrap(), b"b");
+    assert_eq!(pair.base, before);
+}
+
+#[test]
+fn undo_keeps_the_newer_version_when_the_earlier_one_left_the_archive() {
+    let mut pair = fixture(SyncMode::Sync);
+    let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+    fs::write(left.join("edit.txt"), b"v1").unwrap();
+    pair.sync();
+    fs::write(left.join("edit.txt"), b"version 2").unwrap();
+    let report = pair.ran(Approval::default(), at(1));
+    let archived = right
+        .join(".foldover/archive")
+        .join(report.archive())
+        .join("edit.txt");
+    fs::remove_file(archived).unwrap();
+
+    let undo = pair.undo_at(at(2));
+    assert_eq!(undo.restored(), 0);
+    assert_eq!(
+        undo.not_undone()[0].message(),
+        "The earlier version is no longer in the archive"
+    );
+    assert_eq!(fs::read(right.join("edit.txt")).unwrap(), b"version 2");
+}
+
+/// Review: base restores committed after the reverts could be lost to a
+/// crash, leaving a base that makes the next sync propagate the undo.
+/// They now commit first; a crash right after that leaves both sides as
+/// the run left them under their pre-run base, which plans no writes.
+#[test]
+fn a_crash_after_an_undo_commits_its_base_plans_no_writes_and_undo_can_retry() {
+    let mut pair = fixture(SyncMode::Sync);
+    let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+    fs::write(left.join("edit.txt"), b"v1").unwrap();
+    fs::write(left.join("gone.txt"), b"g").unwrap();
+    fs::write(left.join("keep.txt"), b"k").unwrap();
+    pair.sync();
+    fs::write(left.join("edit.txt"), b"version 2").unwrap();
+    fs::remove_file(left.join("gone.txt")).unwrap();
+    fs::write(left.join("new.txt"), b"n").unwrap();
+    pair.ran(Approval::new(0, 1), at(1));
+
+    let journal = pair.journal.clone().unwrap();
+    let prepared = pair.prepare();
+    let mut store = pair.store();
+    let error = prepared
+        .undo(
+            journal,
+            at(2),
+            &mut |planned, commit| {
+                let undoing = matches!(commit, Commit::Undoing { .. });
+                store.apply(planned, commit)?;
+                if undoing {
+                    // The agent dies right after the base commit.
+                    return Err(crate::Error::StaleRevision);
+                }
+                Ok(())
+            },
+            &mut proceed,
+        )
+        .unwrap_err();
+    assert!(matches!(error, RunError::Commit(_)), "{error:?}");
+    assert_eq!(fs::read(right.join("edit.txt")).unwrap(), b"version 2");
+    assert!(right.join("new.txt").exists() && !right.join("gone.txt").exists());
+    assert!(pair.prepare().preview().items().is_empty());
+
+    let undo = pair.undo_at(at(3));
+    assert!(undo.not_undone().is_empty(), "{:?}", undo.not_undone());
+    assert_eq!((undo.removed(), undo.restored()), (1, 2));
+    assert_eq!(fs::read(right.join("edit.txt")).unwrap(), b"v1");
 }
 
 /// Review: with only one identity recorded (the other root was changed),

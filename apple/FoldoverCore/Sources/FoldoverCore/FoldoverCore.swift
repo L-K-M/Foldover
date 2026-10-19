@@ -1841,6 +1841,107 @@ public func FfiConverterTypeSyncSideDeletions_lower(_ value: SyncSideDeletions) 
 }
 
 
+/**
+ * What undoing the newest sync did; see `foldover_client::UndoResult`.
+ */
+public struct SyncUndoSummary: Equatable, Hashable {
+    public var cancelled: Bool
+    /**
+     * Entries the sync created, now in this undo's archive folder.
+     */
+    public var removed: UInt64
+    /**
+     * Entries it replaced or archived, back at their paths.
+     */
+    public var restored: UInt64
+    /**
+     * Put back beside a newer entry at their path.
+     */
+    public var beside: UInt64
+    /**
+     * The first entries left as they were, with why.
+     */
+    public var notUndone: [SyncFailureItem]
+    public var notUndoneCount: UInt64
+    public var archive: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(cancelled: Bool, 
+        /**
+         * Entries the sync created, now in this undo's archive folder.
+         */removed: UInt64, 
+        /**
+         * Entries it replaced or archived, back at their paths.
+         */restored: UInt64, 
+        /**
+         * Put back beside a newer entry at their path.
+         */beside: UInt64, 
+        /**
+         * The first entries left as they were, with why.
+         */notUndone: [SyncFailureItem], notUndoneCount: UInt64, archive: String) {
+        self.cancelled = cancelled
+        self.removed = removed
+        self.restored = restored
+        self.beside = beside
+        self.notUndone = notUndone
+        self.notUndoneCount = notUndoneCount
+        self.archive = archive
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SyncUndoSummary: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSyncUndoSummary: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SyncUndoSummary {
+        return
+            try SyncUndoSummary(
+                cancelled: FfiConverterBool.read(from: &buf), 
+                removed: FfiConverterUInt64.read(from: &buf), 
+                restored: FfiConverterUInt64.read(from: &buf), 
+                beside: FfiConverterUInt64.read(from: &buf), 
+                notUndone: FfiConverterSequenceTypeSyncFailureItem.read(from: &buf), 
+                notUndoneCount: FfiConverterUInt64.read(from: &buf), 
+                archive: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SyncUndoSummary, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.cancelled, into: &buf)
+        FfiConverterUInt64.write(value.removed, into: &buf)
+        FfiConverterUInt64.write(value.restored, into: &buf)
+        FfiConverterUInt64.write(value.beside, into: &buf)
+        FfiConverterSequenceTypeSyncFailureItem.write(value.notUndone, into: &buf)
+        FfiConverterUInt64.write(value.notUndoneCount, into: &buf)
+        FfiConverterString.write(value.archive, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncUndoSummary_lift(_ buf: RustBuffer) throws -> SyncUndoSummary {
+    return try FfiConverterTypeSyncUndoSummary.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncUndoSummary_lower(_ value: SyncUndoSummary) -> RustBuffer {
+    return FfiConverterTypeSyncUndoSummary.lower(value)
+}
+
+
 
 public enum AgentCapability: Equatable, Hashable {
     
@@ -2332,6 +2433,11 @@ public enum RunTriggerKind: Equatable, Hashable {
     
     case manual
     case scheduled
+    /**
+     * An undo of the sync before it: `archived` counts what that sync
+     * created, `recovered` what came back, `failures` what was left.
+     */
+    case undo
 
 
 
@@ -2357,6 +2463,8 @@ public struct FfiConverterTypeRunTriggerKind: FfiConverterRustBuffer {
         
         case 2: return .scheduled
         
+        case 3: return .undo
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -2371,6 +2479,10 @@ public struct FfiConverterTypeRunTriggerKind: FfiConverterRustBuffer {
         
         case .scheduled:
             writeInt(&buf, Int32(2))
+        
+        
+        case .undo:
+            writeInt(&buf, Int32(3))
         
         }
     }
@@ -2681,6 +2793,7 @@ public enum SyncJobKind: Equatable, Hashable {
     
     case preview
     case run
+    case undo
 
 
 
@@ -2706,6 +2819,8 @@ public struct FfiConverterTypeSyncJobKind: FfiConverterRustBuffer {
         
         case 2: return .run
         
+        case 3: return .undo
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -2720,6 +2835,10 @@ public struct FfiConverterTypeSyncJobKind: FfiConverterRustBuffer {
         
         case .run:
             writeInt(&buf, Int32(2))
+        
+        
+        case .undo:
+            writeInt(&buf, Int32(3))
         
         }
     }
@@ -2756,6 +2875,11 @@ public enum SyncJobState: Equatable, Hashable {
     case needsApproval(preview: SyncPreviewSummary
     )
     case finished(result: SyncRunSummary
+    )
+    /**
+     * The newest sync was undone; automatic syncs wait for a person.
+     */
+    case undone(result: SyncUndoSummary
     )
     case failed(message: String
     )
@@ -2799,10 +2923,13 @@ public struct FfiConverterTypeSyncJobState: FfiConverterRustBuffer {
         case 5: return .finished(result: try FfiConverterTypeSyncRunSummary.read(from: &buf)
         )
         
-        case 6: return .failed(message: try FfiConverterString.read(from: &buf)
+        case 6: return .undone(result: try FfiConverterTypeSyncUndoSummary.read(from: &buf)
         )
         
-        case 7: return .waiting(side: try FfiConverterTypeSyncSide.read(from: &buf)
+        case 7: return .failed(message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 8: return .waiting(side: try FfiConverterTypeSyncSide.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -2838,13 +2965,18 @@ public struct FfiConverterTypeSyncJobState: FfiConverterRustBuffer {
             FfiConverterTypeSyncRunSummary.write(result, into: &buf)
             
         
-        case let .failed(message):
+        case let .undone(result):
             writeInt(&buf, Int32(6))
+            FfiConverterTypeSyncUndoSummary.write(result, into: &buf)
+            
+        
+        case let .failed(message):
+            writeInt(&buf, Int32(7))
             FfiConverterString.write(message, into: &buf)
             
         
         case let .waiting(side):
-            writeInt(&buf, Int32(7))
+            writeInt(&buf, Int32(8))
             FfiConverterTypeSyncSide.write(side, into: &buf)
             
         }
@@ -3679,6 +3811,24 @@ public func syncStatus(id: String)async throws  -> SyncJobState  {
             errorHandler: FfiConverterTypeAgentError_lift
         )
 }
+/**
+ * Start undoing the pair's newest sync that changed anything; poll
+ * `sync_status` for the result.
+ */
+public func syncUndo(id: String)async throws  -> SyncJobState  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_sync_undo(FfiConverterString.lower(id)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeSyncJobState_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
 
 private enum InitializationResult {
     case ok
@@ -3759,6 +3909,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_sync_status() != 35739) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_sync_undo() != 21516) {
         return InitializationResult.apiChecksumMismatch
     }
 

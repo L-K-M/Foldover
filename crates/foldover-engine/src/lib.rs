@@ -34,6 +34,6 @@ pub use readiness::{missing_side, reconnect};
 pub use reconcile::reconcile_entry;
 pub use run::{
     Action, Approval, Commit, Completion, Failure, PairRun, Preview, PreviewItem, RunError,
-    RunInputs, RunOutcome, RunReport,
+    RunInputs, RunOutcome, RunReport, UndoReport,
 };
 pub use watch::PairWatcher;

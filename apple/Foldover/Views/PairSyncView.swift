@@ -19,6 +19,10 @@ struct PairSyncView: View {
                     Button("Cancel") { Task { await viewModel.cancel() } }
                         .disabled(!viewModel.canCancel)
                 }
+                if viewModel.canUndo {
+                    Button("Undo") { Task { await viewModel.undo() } }
+                        .help("Put back what this sync replaced or archived, and archive what it created.")
+                }
             }
             Text(viewModel.statusText)
                 .foregroundStyle(.secondary)

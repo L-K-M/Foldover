@@ -58,6 +58,8 @@ same store. Startup failures are explicit. Configuration dispatch is covered by
   records. Foreign-key cascades are disabled before that transaction, references
   are checked before commit, and enforcement is restored before serving requests.
   Older readers refuse schema 14; its minimum reader is also 14.
+- Version 15 adds the run journal ([ADR 0029](0029-undo.md)) and rebuilds
+  `run_history` to allow undo rows; its minimum reader is 15.
 
 ## Pair updates
 

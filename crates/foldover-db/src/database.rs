@@ -7,9 +7,12 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
 mod history;
+mod hold;
+mod journal;
 mod mounts;
 mod pause;
 pub use history::HistoryRow;
+pub use journal::{JournalChange, JournalRow};
 pub use mounts::MountRow;
 pub use pause::PauseRow;
 
@@ -24,9 +27,9 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 14] = [
+const MIGRATIONS: [&str; 15] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
-    SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14,
+    SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, SCHEMA_V15,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -167,6 +170,48 @@ INSERT INTO pair_next (id,revision,name,left_root,right_root,mode,modification_t
 DROP TABLE pair;
 ALTER TABLE pair_next RENAME TO pair;
 UPDATE state_meta SET minimum_reader=max(minimum_reader,14) WHERE singleton=1;
+";
+// The newest writing run's operations per pair, so it can be undone;
+// history rows for undos; and pairs whose automatic syncs wait after one. Older agents would keep a stale journal and
+// cannot read undo rows, so they may no longer open this database.
+const SCHEMA_V15: &str = "
+CREATE TABLE run_journal (
+    pair_id BLOB NOT NULL REFERENCES pair(id) ON DELETE CASCADE,
+    run TEXT NOT NULL CHECK(length(run) > 0),
+    seq INTEGER NOT NULL CHECK(seq >= 0),
+    path BLOB NOT NULL CHECK(length(path) > 0 AND substr(path,1,1) != x'2f' AND instr(path,x'00') = 0),
+    side TEXT NOT NULL CHECK(side IN ('left','right')),
+    action TEXT NOT NULL CHECK(action IN ('create','replace','metadata','archive')),
+    version BLOB NOT NULL,
+    base_left BLOB,
+    base_right BLOB,
+    CHECK((base_left IS NULL) = (base_right IS NULL)),
+    PRIMARY KEY (pair_id, run, seq)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE run_history_next (
+    pair_id BLOB NOT NULL REFERENCES pair(id) ON DELETE CASCADE,
+    started_ms INTEGER NOT NULL CHECK(started_ms >= 0),
+    finished_ms INTEGER NOT NULL CHECK(finished_ms >= started_ms),
+    trigger TEXT NOT NULL CHECK(trigger IN ('manual','scheduled','undo')),
+    outcome TEXT NOT NULL CHECK(outcome IN ('completed','cancelled','needs_approval','failed')),
+    copied INTEGER NOT NULL CHECK(copied >= 0),
+    updated INTEGER NOT NULL CHECK(updated >= 0),
+    archived INTEGER NOT NULL CHECK(archived >= 0),
+    recovered INTEGER NOT NULL CHECK(recovered >= 0),
+    conflicts INTEGER NOT NULL CHECK(conflicts >= 0),
+    failures INTEGER NOT NULL CHECK(failures >= 0),
+    archive TEXT,
+    message TEXT,
+    PRIMARY KEY (pair_id, started_ms)
+) STRICT, WITHOUT ROWID;
+-- Pairs whose automatic syncs wait for a person, e.g. after an undo.
+CREATE TABLE automation_hold (
+    pair_id BLOB PRIMARY KEY NOT NULL REFERENCES pair(id) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+INSERT INTO run_history_next SELECT * FROM run_history;
+DROP TABLE run_history;
+ALTER TABLE run_history_next RENAME TO run_history;
+UPDATE state_meta SET minimum_reader=max(minimum_reader,15) WHERE singleton=1;
 ";
 
 #[derive(Debug, thiserror::Error)]
@@ -445,7 +490,7 @@ impl Database {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         // A base and conflict choices hold versions of these roots under
         // these metadata categories; changing either invalidates them.
-        for table in ["base_entry", "resolution", "snapshot_entry"] {
+        for table in ["base_entry", "resolution", "snapshot_entry", "run_journal"] {
             transaction.execute(
                 &format!("DELETE FROM {table} WHERE pair_id=?1 AND EXISTS (SELECT 1 FROM pair WHERE id=?1 AND revision=?2 AND (left_root!=?3 OR right_root!=?4 OR modification_times!=?5 OR extended_attributes!=?6 OR permissions!=?7))"),
                 params![
@@ -649,6 +694,7 @@ impl Database {
         pair: &[u8],
         revision: i64,
         changes: &[BaseChange<'_>],
+        journal: JournalChange<'_>,
     ) -> Result<(), Error> {
         let transaction = self
             .connection
@@ -690,6 +736,7 @@ impl Database {
                 }
             }
         }
+        journal::apply(&transaction, pair, journal)?;
         transaction.commit()?;
         Ok(())
     }
@@ -1172,7 +1219,12 @@ pub(super) mod tests {
         let mut database = Database::open(&location).unwrap();
         let pair = database.create_pair(&values()).unwrap();
         database
-            .change_base(&pair.id, 1, &[put(b"b", b"2"), put(b"a", b"1")])
+            .change_base(
+                &pair.id,
+                1,
+                &[put(b"b", b"2"), put(b"a", b"1")],
+                JournalChange::None,
+            )
             .unwrap();
         let paths: Vec<_> = database
             .base_rows(&pair.id)
@@ -1187,6 +1239,7 @@ pub(super) mod tests {
                 &pair.id,
                 1,
                 &[put(b"a", b"3"), BaseChange::Remove { path: b"b" }],
+                JournalChange::None,
             )
             .unwrap();
         assert_eq!(
@@ -1201,17 +1254,22 @@ pub(super) mod tests {
         // An invalid row rolls back the whole change.
         assert!(
             database
-                .change_base(&pair.id, 1, &[put(b"c", b"4"), put(b"/absolute", b"5")])
+                .change_base(
+                    &pair.id,
+                    1,
+                    &[put(b"c", b"4"), put(b"/absolute", b"5")],
+                    JournalChange::None
+                )
                 .is_err()
         );
         assert_eq!(database.base_rows(&pair.id).unwrap().len(), 1);
 
         assert!(matches!(
-            database.change_base(&pair.id, 2, &[put(b"c", b"4")]),
+            database.change_base(&pair.id, 2, &[put(b"c", b"4")], JournalChange::None),
             Err(Error::StaleRevision)
         ));
         assert!(matches!(
-            database.change_base(&[7; 16], 1, &[put(b"c", b"4")]),
+            database.change_base(&[7; 16], 1, &[put(b"c", b"4")], JournalChange::None),
             Err(Error::PairNotFound)
         ));
         assert_eq!(database.base_rows(&pair.id).unwrap().len(), 1);
@@ -1223,7 +1281,7 @@ pub(super) mod tests {
         let mut database = Database::open(&location).unwrap();
         let pair = database.create_pair(&values()).unwrap();
         database
-            .change_base(&pair.id, 1, &[put(b"a", b"1")])
+            .change_base(&pair.id, 1, &[put(b"a", b"1")], JournalChange::None)
             .unwrap();
 
         let mut renamed = values();
@@ -1245,7 +1303,7 @@ pub(super) mod tests {
         assert!(database.base_rows(&pair.id).unwrap().is_empty());
 
         database
-            .change_base(&pair.id, 3, &[put(b"a", b"1")])
+            .change_base(&pair.id, 3, &[put(b"a", b"1")], JournalChange::None)
             .unwrap();
         database.remove_pair(&pair.id, 3).unwrap();
         let orphans: i64 = database
@@ -1279,7 +1337,7 @@ pub(super) mod tests {
         let mut database = Database::open(&location).unwrap();
         assert_eq!(database.pairs().unwrap()[0].values.name, "old");
         database
-            .change_base(&[9; 16], 1, &[put(b"a", b"1")])
+            .change_base(&[9; 16], 1, &[put(b"a", b"1")], JournalChange::None)
             .unwrap();
         let backups = fs::read_dir(directory.path())
             .unwrap()
@@ -1347,8 +1405,16 @@ pub(super) mod tests {
         input.size_limit = Some(9876);
         input.age_limit = Some(42);
         let pair = legacy.create_pair(&input).unwrap();
+        // A legacy agent's rename; today's update_pair expects newer tables.
         input.name = "Preserved".into();
-        let pair = legacy.update_pair(&pair.id, pair.revision, &input).unwrap();
+        legacy
+            .connection
+            .execute(
+                "UPDATE pair SET name=?2, revision=revision+1 WHERE id=?1",
+                params![pair.id, input.name],
+            )
+            .unwrap();
+        let pair = legacy.pair(&pair.id).unwrap().unwrap();
         legacy
             .record_identities(&pair.id, pair.revision, &[1; 16], &[2; 16])
             .unwrap();
@@ -1363,7 +1429,12 @@ pub(super) mod tests {
             )
             .unwrap();
         legacy
-            .change_base(&pair.id, pair.revision, &[put(b"kept", b"version")])
+            .change_base(
+                &pair.id,
+                pair.revision,
+                &[put(b"kept", b"version")],
+                JournalChange::None,
+            )
             .unwrap();
         legacy
             .record_resolution(
@@ -1453,11 +1524,9 @@ pub(super) mod tests {
         assert_eq!(minimum_reader(&legacy.connection), legacy_reader);
         drop(legacy);
 
+        // v15, the newest step, raised the floor last.
         let mut database = Database::open(&location).unwrap();
-        assert_eq!(
-            minimum_reader(&database.connection),
-            LOCAL_ROOT_SCHEMA as i64 + 1
-        );
+        assert_eq!(minimum_reader(&database.connection), 15);
         assert_eq!(
             database
                 .connection
@@ -1600,7 +1669,7 @@ pub(super) mod tests {
         );
 
         database
-            .change_base(&pair.id, 1, &[put(b"a", b"1")])
+            .change_base(&pair.id, 1, &[put(b"a", b"1")], JournalChange::None)
             .unwrap();
         assert_eq!(database.resolutions(&pair.id).unwrap(), [row(b"b")]);
 

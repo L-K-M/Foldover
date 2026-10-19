@@ -21,7 +21,9 @@ use foldover_endpoint::{
     ApplyError, Endpoint, EndpointPair, Expected, Filter, InvalidFilter, Observation,
     ObservedEntry, PairRootError, RunScope, ScanError, access_denied,
 };
-use foldover_state::{BaseUpdate, MountSources, RecordedIdentities, SnapshotEntry};
+use foldover_state::{
+    BaseUpdate, JournalAction, JournalEntry, MountSources, RecordedIdentities, SnapshotEntry,
+};
 use foldover_types::{
     BaselineEntry, ChangeKind, ConflictKind, Durability, EndpointId, EntryContent, EntryDecision,
     EntryVersion, PairConfig, PairId, Resolution, ReviewToken, ScanControl, Side, SyncPath,
@@ -99,17 +101,31 @@ pub enum RunError {
     Commit(#[source] crate::Error),
     #[error("Run cancelled before planning finished")]
     Cancelled,
+    #[error("This pair has no sync to undo: its newest sync changed nothing or was undone")]
+    NothingToUndo,
 }
 
 /// Durable progress a run hands to the state store, in order.
 #[derive(Clone, Copy, Debug)]
 pub enum Commit<'a> {
     /// First run only, before any other write.
-    Identities {
-        left: EndpointId,
-        right: EndpointId,
+    Identities { left: EndpointId, right: EndpointId },
+    /// Base updates, with the journal entries of `run`'s writes behind
+    /// them (ADR 0029), so the run can be undone.
+    Base {
+        run: &'a str,
+        updates: &'a [BaseUpdate],
+        journal: &'a [JournalEntry],
     },
-    Base(&'a [BaseUpdate]),
+    /// An undo's base restorations for paths it is about to revert; the
+    /// pair's automatic syncs are held from then on, so none redoes it.
+    Undoing { updates: &'a [BaseUpdate] },
+    /// An undo of `run` finished: the last base restorations, and `run`'s
+    /// journal is spent.
+    Undone {
+        run: &'a str,
+        updates: &'a [BaseUpdate],
+    },
 }
 
 /// What the user saw and accepted in a preview.
@@ -428,6 +444,8 @@ pub struct PairRun {
     left_cache: BTreeMap<SyncPath, ObservedEntry>,
     right_cache: BTreeMap<SyncPath, ObservedEntry>,
     plan: CandidatePlan,
+    /// The base the plan was made against, for the journal's undo records.
+    base: BTreeMap<SyncPath, BaselineEntry>,
     /// Whether the base remembered any entry the filters still include.
     remembers: Remembers,
 }
@@ -576,6 +594,7 @@ impl PairRun {
             } else {
                 Remembers::Entries
             },
+            base,
         })
     }
 
@@ -768,18 +787,29 @@ impl PairRun {
         };
 
         let scope = RunScope::new(started, options.clone());
+        let name = scope.name().to_owned();
         let mut executor = Executor {
             run: &self,
             report: RunReport {
-                archive: scope.name().to_owned(),
+                archive: name.clone(),
                 ..RunReport::default()
             },
             scope,
             pending: Vec::new(),
+            journal: Vec::new(),
+            written: 0,
             failed: Vec::new(),
         };
-        let mut commit = |updates: &[BaseUpdate]| {
-            commit(revision, Commit::Base(updates)).map_err(RunError::Commit)
+        let mut commit = |executor: &mut Executor<'_>| {
+            let updates = Commit::Base {
+                run: &name,
+                updates: &executor.pending,
+                journal: &executor.journal,
+            };
+            commit(revision, updates).map_err(RunError::Commit)?;
+            executor.pending.clear();
+            executor.journal.clear();
+            Ok::<_, RunError>(())
         };
 
         for side in [Side::Left, Side::Right] {
@@ -812,16 +842,15 @@ impl PairRun {
                 && index % COMMIT_BATCH == 0
                 && let Err(error) = self.check_roots(identities)
             {
-                commit(&executor.pending)?;
+                commit(&mut executor)?;
                 return Err(error);
             }
             executor.apply(row.path(), row.decision(), control);
-            if executor.pending.len() >= COMMIT_BATCH {
-                commit(&executor.pending)?;
-                executor.pending.clear();
+            if executor.pending.len().max(executor.journal.len()) >= COMMIT_BATCH {
+                commit(&mut executor)?;
             }
         }
-        commit(&executor.pending)?;
+        commit(&mut executor)?;
 
         // Retention deletes data, so it runs only after a complete run.
         if executor.report.completion == Completion::Finished {
@@ -936,6 +965,10 @@ struct Executor<'a> {
     scope: RunScope,
     report: RunReport,
     pending: Vec<BaseUpdate>,
+    /// The writes behind `pending`, committed with it.
+    journal: Vec<JournalEntry>,
+    /// Writes journaled so far: the next entry's sequence number.
+    written: u64,
     /// Paths whose change failed; their descendants are skipped.
     failed: Vec<SyncPath>,
 }
@@ -990,6 +1023,7 @@ impl Executor<'_> {
                 {
                     Ok(()) => {
                         self.report.archived += 1;
+                        self.journal(path, on, JournalAction::Archive(current.version()));
                         self.pending.push(BaseUpdate::Forget(path.clone()));
                     }
                     Err(error) => self.fail(path, &error),
@@ -1029,6 +1063,13 @@ impl Executor<'_> {
         stored: EntryVersion,
         change: ChangeKind,
     ) {
+        // The write happened whatever the base says next.
+        let action = match change {
+            ChangeKind::Create => JournalAction::Create(stored),
+            ChangeKind::ReplaceContent => JournalAction::Replace(stored),
+            ChangeKind::UpdateMetadata => JournalAction::Metadata(stored),
+        };
+        self.journal(path, from.other(), action);
         let (left, right) = match from {
             Side::Left => (source, stored),
             Side::Right => (stored, source),
@@ -1045,6 +1086,17 @@ impl Executor<'_> {
         }
     }
 
+    fn journal(&mut self, path: &SyncPath, side: Side, action: JournalAction) {
+        self.journal.push(JournalEntry {
+            seq: self.written,
+            path: path.clone(),
+            side,
+            action,
+            before: self.run.base.get(path).copied(),
+        });
+        self.written += 1;
+    }
+
     fn fail(&mut self, path: &SyncPath, error: &ApplyError) {
         self.fail_message(path, &error.to_string());
     }
@@ -1057,6 +1109,9 @@ impl Executor<'_> {
         self.failed.push(path.clone());
     }
 }
+
+mod undo;
+pub use undo::UndoReport;
 
 #[cfg(test)]
 mod tests;

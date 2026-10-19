@@ -14,9 +14,11 @@ use crate::BaseUpdate;
 use crate::base::{decode, decode_entry, encode};
 
 mod history;
+mod journal;
 mod mounts;
 mod pause;
 pub use history::{HISTORY_LIMIT, HistoryEntry, HistoryOutcome, RunTrigger};
+pub use journal::{Journal, JournalAction, JournalEntry, JournalUpdate};
 pub use mounts::MountSources;
 pub use pause::Pause;
 
@@ -308,15 +310,13 @@ impl PairStore {
             .collect()
     }
 
-    /// Apply updates atomically, only while the pair keeps `revision`, so a
-    /// run planned for other roots or another mode cannot commit its base.
-    pub fn update_base(
+    fn change_base(
         &mut self,
         id: PairId,
-        revision: u64,
+        revision: i64,
         updates: &[BaseUpdate],
+        journal: foldover_db::JournalChange<'_>,
     ) -> Result<(), Error> {
-        let revision = database_revision(revision)?;
         let encoded: Vec<_> = updates
             .iter()
             .map(|update| match update {
@@ -340,7 +340,7 @@ impl PairStore {
             })
             .collect();
         self.database
-            .change_base(id.as_bytes(), revision, &changes)?;
+            .change_base(id.as_bytes(), revision, &changes, journal)?;
         Ok(())
     }
 }
@@ -684,6 +684,7 @@ mod tests {
                     BaseUpdate::Record(path(b"folder/photo"), photo),
                     BaseUpdate::Record(path(b"folder"), folder),
                 ],
+                JournalUpdate::None,
             )
             .unwrap();
         let base = store.base(pair.id()).unwrap();
@@ -697,6 +698,7 @@ mod tests {
                 pair.id(),
                 pair.revision(),
                 &[BaseUpdate::Forget(path(b"folder/photo"))],
+                JournalUpdate::None,
             )
             .unwrap();
         assert_eq!(store.base(pair.id()).unwrap().len(), 1);
@@ -713,11 +715,108 @@ mod tests {
             store.update_base(
                 pair.id(),
                 pair.revision(),
-                &[BaseUpdate::Record(path(b"folder"), folder)]
+                &[BaseUpdate::Record(path(b"folder"), folder)],
+                JournalUpdate::None
             ),
             Err(Error::StaleRevision)
         ));
         assert!(store.base(updated.id()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn journals_round_trip_with_the_base_and_root_changes_discard_them() {
+        use foldover_types::{Digest, EntryContent, EntryVersion};
+
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        let pair = store.create(&draft(SyncMode::Sync)).unwrap();
+        let path = |bytes: &[u8]| SyncPath::try_from(bytes).unwrap();
+        let file = |content: u8, metadata: u8| {
+            EntryVersion::new(
+                EntryContent::File(Digest::from_bytes([content; Digest::BYTE_LEN])),
+                Digest::from_bytes([metadata; Digest::BYTE_LEN]),
+            )
+        };
+        let old = BaselineEntry::new(file(1, 1), file(1, 2)).unwrap();
+        let new = BaselineEntry::new(file(3, 1), file(3, 2)).unwrap();
+        let entries = [
+            JournalEntry {
+                seq: 0,
+                path: path(b"new"),
+                side: Side::Right,
+                action: JournalAction::Create(file(4, 4)),
+                before: None,
+            },
+            JournalEntry {
+                seq: 1,
+                path: path(b"edited"),
+                side: Side::Left,
+                action: JournalAction::Replace(new.left()),
+                before: Some(old),
+            },
+            JournalEntry {
+                seq: 2,
+                path: path(b"gone"),
+                side: Side::Right,
+                action: JournalAction::Archive(old.right()),
+                before: Some(old),
+            },
+        ];
+        store
+            .update_base(
+                pair.id(),
+                pair.revision(),
+                &[BaseUpdate::Record(path(b"edited"), new)],
+                JournalUpdate::Record {
+                    run: "2026-10-19T10-00-00.000Z",
+                    entries: &entries,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            store.journal(pair.id()).unwrap(),
+            Some(Journal {
+                run: "2026-10-19T10-00-00.000Z".into(),
+                entries: entries.to_vec(),
+            })
+        );
+        assert_eq!(store.base(pair.id()).unwrap()[&path(b"edited")], new);
+
+        // Undoing restores the base and spends the journal together.
+        store
+            .update_base(
+                pair.id(),
+                pair.revision(),
+                &[BaseUpdate::Record(path(b"edited"), old)],
+                JournalUpdate::Spend {
+                    run: "2026-10-19T10-00-00.000Z",
+                },
+            )
+            .unwrap();
+        assert_eq!(store.journal(pair.id()).unwrap(), None);
+        assert_eq!(store.base(pair.id()).unwrap()[&path(b"edited")], old);
+
+        // A journal describes these roots; moving one discards it.
+        store
+            .update_base(
+                pair.id(),
+                pair.revision(),
+                &[],
+                JournalUpdate::Record {
+                    run: "2026-10-19T11-00-00.000Z",
+                    entries: &entries[..1],
+                },
+            )
+            .unwrap();
+        let moved = PairDraft::new(
+            "Photos".into(),
+            LocalRoot::from_bytes(b"/left/\xff".to_vec()).unwrap(),
+            LocalRoot::from_bytes(b"/moved".to_vec()).unwrap(),
+            SyncMode::Sync,
+        )
+        .unwrap();
+        store.update(pair.id(), pair.revision(), &moved).unwrap();
+        assert_eq!(store.journal(pair.id()).unwrap(), None);
     }
 
     #[test]
@@ -765,6 +864,7 @@ mod tests {
                     pair.id(),
                     revision,
                     &[BaseUpdate::Record(path.clone(), entry)],
+                    JournalUpdate::None,
                 )
                 .unwrap();
         };
@@ -888,6 +988,7 @@ mod tests {
                     left_version: &[],
                     right_version: &version,
                 }],
+                foldover_db::JournalChange::None,
             )
             .unwrap();
         assert!(matches!(

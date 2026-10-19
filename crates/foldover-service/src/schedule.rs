@@ -313,6 +313,8 @@ impl Service {
                 .into_iter()
                 .filter(|pair| pair.draft().options().schedule() != Schedule::Manual)
                 .filter(|pair| engine.first_synced(pair.id()).unwrap_or(false))
+                // After an undo; an unreadable hold counts as held.
+                .filter(|pair| !engine.automation_held(pair.id()).unwrap_or(true))
                 .collect::<Vec<_>>()
         };
         let changing: Vec<_> = candidates

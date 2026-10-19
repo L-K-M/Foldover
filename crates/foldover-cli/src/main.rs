@@ -59,6 +59,8 @@ enum SyncCommand {
         review: Option<ReviewToken>,
     },
     Cancel,
+    /// Undo the newest sync that changed anything (ADR 0029).
+    Undo,
     /// Keep one side of a conflict from the preview `review` names.
     Keep {
         side: Side,
@@ -185,7 +187,7 @@ async fn main() -> ExitCode {
         },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\nLEFT, RIGHT: an absolute path, or sftp://[user@]host[:port]/path\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\nLEFT, RIGHT: an absolute path, or sftp://[user@]host[:port]/path\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -317,6 +319,7 @@ fn sync_command(args: &[OsString]) -> Option<SyncCommand> {
         }),
         [flag] if flag == "--preview" => Some(SyncCommand::Preview),
         [flag] if flag == "--cancel" => Some(SyncCommand::Cancel),
+        [flag] if flag == "--undo" => Some(SyncCommand::Undo),
         [flag, path, rest @ ..] if flag == "--keep-left" || flag == "--keep-right" => {
             Some(SyncCommand::Keep {
                 side: if flag == "--keep-left" {
@@ -508,6 +511,7 @@ async fn sync(
             review,
         } => foldover_client::start_run(location, id, left, right, review).await?,
         SyncCommand::Cancel => foldover_client::cancel_sync(location, id).await?,
+        SyncCommand::Undo => foldover_client::undo_sync(location, id).await?,
         SyncCommand::Keep { side, path, review } => {
             foldover_client::resolve_conflict(location, id, &path, side, review).await?
         }
@@ -523,6 +527,10 @@ async fn sync(
     Ok(match &status {
         SyncStatus::Idle | SyncStatus::Previewed { .. } => ExitCode::SUCCESS,
         SyncStatus::Finished { result } if result.failure_count == 0 && !result.cancelled => {
+            ExitCode::SUCCESS
+        }
+        // Entries left as they were are listed and fail the command.
+        SyncStatus::Undone { result } if result.not_undone_count == 0 && !result.cancelled => {
             ExitCode::SUCCESS
         }
         SyncStatus::NeedsApproval { preview } => {
@@ -771,6 +779,10 @@ mod tests {
         assert!(matches!(
             req(&["sync", id, "--cancel"]),
             Request::Sync(_, _, SyncCommand::Cancel)
+        ));
+        assert!(matches!(
+            req(&["sync", id, "--undo"]),
+            Request::Sync(_, _, SyncCommand::Undo)
         ));
         let token = "ab".repeat(32);
         assert!(matches!(

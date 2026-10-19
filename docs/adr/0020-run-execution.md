@@ -75,7 +75,8 @@ and records it, or sees both absent and forgets it. A displaced original
 left under a temporary name is reported by the next observation and
 archived. No path is ever left without its old or new entry. This replaces
 the planned operation journal for local pairs; remote endpoints without
-atomic exchange may still need one.
+atomic exchange may still need one. The run journal of
+[ADR 0029](0029-undo.md) records writes for Undo only.
 
 ## Consequences
 

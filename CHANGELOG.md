@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Undo the last sync: what it created moves to the archive, and what it
+  replaced or archived comes back. Anything changed since is left as it is
+  and listed. Automatic syncs then wait until you sync again.
+
 - A pair's first sync always shows its preview first; nothing is written
   until you approve that plan.
 - A folder that is suddenly empty no longer empties its partner without

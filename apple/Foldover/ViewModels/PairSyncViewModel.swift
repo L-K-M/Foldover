@@ -85,6 +85,13 @@ struct PairSyncViewModel {
         default: return true
         }
     }
+    /// The shown result is a sync that copied or archived something, which
+    /// Undo can reverse while the agent still holds its journal; metadata
+    /// updates alone cannot be undone.
+    var canUndo: Bool {
+        guard canStart, case .finished(let result) = state else { return false }
+        return result.copied + result.archived > 0
+    }
     var canCancel: Bool {
         if case .working(_, let cancelling) = state { return !cancelling }
         return false
@@ -98,6 +105,7 @@ struct PairSyncViewModel {
         case .idle: String(localized: "Ready")
         case .working(.preview, _): String(localized: "Comparing…")
         case .working(.run, _): String(localized: "Syncing…")
+        case .working(.undo, _): String(localized: "Undoing…")
         case .previewed(let preview):
             reviewable == nil ? String(localized: "Preview again")
                 : preview.total == 0 ? String(localized: "In sync") : String(localized: "\(preview.total) changes")
@@ -107,6 +115,8 @@ struct PairSyncViewModel {
         case .finished(let result) where result.conflicts > 0: String(localized: "\(result.conflicts) conflicts")
         case .finished(let result) where result.failureCount > 0: String(localized: "\(result.failureCount) failed")
         case .finished: String(localized: "In sync")
+        case .undone(let result) where result.notUndoneCount > 0: String(localized: "Partly undone")
+        case .undone: String(localized: "Undone")
         case .failed: String(localized: "Stopped")
         case .waiting: String(localized: "Waiting for folder")
         }
@@ -123,6 +133,8 @@ struct PairSyncViewModel {
             return String(localized: "Comparing folders…")
         case .working(.run, _):
             return String(localized: "Syncing…")
+        case .working(.undo, _):
+            return String(localized: "Undoing the last sync…")
         case .previewed(let preview):
             guard reviewable != nil else { return Self.outdated }
             return preview.total == 0
@@ -134,6 +146,8 @@ struct PairSyncViewModel {
                 + " " + Self.summary(preview)
                 + " " + Self.archiveCounts(preview)
         case .finished(let result):
+            return Self.summary(result)
+        case .undone(let result):
             return Self.summary(result)
         case .failed(let message):
             return String(localized: "Sync stopped: \(message)")
@@ -207,13 +221,15 @@ struct PairSyncViewModel {
                               review: review)
                 }
         }
-        if case .finished(let result) = state {
-            return result.failures.enumerated().map { index, failure in
-                ChangeRow(id: index, path: Self.pathText(failure.path), description: failure.message,
-                          resolvable: nil)
-            }
+        let failures: [RunFailure] = switch state {
+        case .finished(let result): result.failures
+        case .undone(let result): result.notUndone
+        default: []
         }
-        return []
+        return failures.enumerated().map { index, failure in
+            ChangeRow(id: index, path: Self.pathText(failure.path), description: failure.message,
+                      resolvable: nil)
+        }
     }
 
     /// Rows not shown because responses carry only the first changes.
@@ -226,6 +242,8 @@ struct PairSyncViewModel {
             hidden = preview.total - UInt64(preview.changes.count)
         } else if case .finished(let result) = state {
             hidden = result.failureCount - UInt64(result.failures.count)
+        } else if case .undone(let result) = state {
+            hidden = result.notUndoneCount - UInt64(result.notUndone.count)
         } else {
             hidden = 0
         }
@@ -236,7 +254,11 @@ struct PairSyncViewModel {
     var historyRows: [HistoryRow] {
         store.history(for: pair.id).prefix(Self.historyRowLimit).enumerated().map { index, run in
             let when = run.started.formatted(date: .abbreviated, time: .shortened)
-            let trigger = run.trigger == .scheduled ? String(localized: "automatic") : String(localized: "manual")
+            let trigger = switch run.trigger {
+            case .scheduled: String(localized: "automatic")
+            case .manual: String(localized: "manual")
+            case .undo: String(localized: "undo")
+            }
             return HistoryRow(id: index, when: "\(when) · \(trigger)", summary: Self.summary(run))
         }
     }
@@ -257,6 +279,11 @@ struct PairSyncViewModel {
         await store.run(pair.id, reviewToken: reviewable?.reviewToken)
     }
     func cancel() async { await store.cancel(pair.id) }
+    /// Reverse the shown sync. Automatic syncs then wait for a person.
+    func undo() async {
+        guard canUndo else { return }
+        await store.undo(pair.id)
+    }
     func refresh() async { await store.refresh(pair.id) }
 
     /// Approve the request the dialog was presented with: its pair, its
@@ -340,7 +367,26 @@ struct PairSyncViewModel {
         return text
     }
 
+    static func summary(_ result: UndoSummary) -> String {
+        var text = result.cancelled
+            ? String(localized: "Undo stopped after putting back \(result.restored) and archiving \(result.removed) items.")
+            : String(localized: "Undid the last sync: put back \(result.restored), archived \(result.removed) it had created.")
+        if result.beside > 0 {
+            text += " " + String(localized: "\(result.beside) went beside newer versions as \"(restored)\".")
+        }
+        if result.notUndoneCount > 0 {
+            text += " " + String(localized: "\(result.notUndoneCount) items were left as they are.")
+        }
+        text += " " + String(localized: "Automatic syncs wait until you sync again; preview to see what syncing would redo.")
+        return text
+    }
+
     static func summary(_ run: RunRecord) -> String {
+        if run.trigger == .undo {
+            return run.end == .failed
+                ? String(localized: "Undo stopped: \(run.message ?? String(localized: "unknown error"))")
+                : String(localized: "Undo: put back \(run.recovered), archived \(run.archived).")
+        }
         switch run.end {
         case .cancelled:
             return String(localized: "Cancelled after copying \(run.copied), updating \(run.updated) and archiving \(run.archived).")
