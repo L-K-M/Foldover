@@ -1414,6 +1414,63 @@ public func FfiConverterTypeNearbyMac_lower(_ value: NearbyMac) -> RustBuffer {
 }
 
 
+/**
+ * A folder a paired Mac shares with this one.
+ */
+public struct OfferedFolder: Equatable, Hashable {
+    public var id: String
+    public var name: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, name: String) {
+        self.id = id
+        self.name = name
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension OfferedFolder: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOfferedFolder: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OfferedFolder {
+        return
+            try OfferedFolder(
+                id: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: OfferedFolder, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOfferedFolder_lift(_ buf: RustBuffer) throws -> OfferedFolder {
+    return try FfiConverterTypeOfferedFolder.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOfferedFolder_lower(_ value: OfferedFolder) -> RustBuffer {
+    return FfiConverterTypeOfferedFolder.lower(value)
+}
+
+
 public struct PairConfigurationPage: Equatable, Hashable {
     public var pairs: [LocalPairConfiguration]
     public var next: String?
@@ -1696,6 +1753,89 @@ public func FfiConverterTypeRunHistoryEntry_lift(_ buf: RustBuffer) throws -> Ru
 #endif
 public func FfiConverterTypeRunHistoryEntry_lower(_ value: RunHistoryEntry) -> RustBuffer {
     return FfiConverterTypeRunHistoryEntry.lower(value)
+}
+
+
+/**
+ * A folder this Mac shares with one paired Mac.
+ */
+public struct SharedFolder: Equatable, Hashable {
+    public var id: String
+    /**
+     * The paired Mac that may sync with it.
+     */
+    public var device: String
+    /**
+     * Absolute path bytes.
+     */
+    public var path: Data
+    /**
+     * What that Mac shows, e.g. "Photos".
+     */
+    public var name: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, 
+        /**
+         * The paired Mac that may sync with it.
+         */device: String, 
+        /**
+         * Absolute path bytes.
+         */path: Data, 
+        /**
+         * What that Mac shows, e.g. "Photos".
+         */name: String) {
+        self.id = id
+        self.device = device
+        self.path = path
+        self.name = name
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SharedFolder: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSharedFolder: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SharedFolder {
+        return
+            try SharedFolder(
+                id: FfiConverterString.read(from: &buf), 
+                device: FfiConverterString.read(from: &buf), 
+                path: FfiConverterData.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SharedFolder, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.device, into: &buf)
+        FfiConverterData.write(value.path, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSharedFolder_lift(_ buf: RustBuffer) throws -> SharedFolder {
+    return try FfiConverterTypeSharedFolder.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSharedFolder_lower(_ value: SharedFolder) -> RustBuffer {
+    return FfiConverterTypeSharedFolder.lower(value)
 }
 
 
@@ -3766,6 +3906,31 @@ fileprivate struct FfiConverterSequenceTypeNearbyMac: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeOfferedFolder: FfiConverterRustBuffer {
+    typealias SwiftType = [OfferedFolder]
+
+    public static func write(_ value: [OfferedFolder], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeOfferedFolder.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [OfferedFolder] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [OfferedFolder]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeOfferedFolder.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypePairedMac: FfiConverterRustBuffer {
     typealias SwiftType = [PairedMac]
 
@@ -3833,6 +3998,31 @@ fileprivate struct FfiConverterSequenceTypeRunHistoryEntry: FfiConverterRustBuff
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeRunHistoryEntry.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeSharedFolder: FfiConverterRustBuffer {
+    typealias SwiftType = [SharedFolder]
+
+    public static func write(_ value: [SharedFolder], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSharedFolder.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SharedFolder] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SharedFolder]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSharedFolder.read(from: &buf))
         }
         return seq
     }
@@ -4230,6 +4420,23 @@ public func macToMacStatus()async throws  -> MacToMac  {
         )
 }
 /**
+ * The folders paired `device` shares with this Mac; asks that Mac.
+ */
+public func offeredFolders(device: String)async throws  -> [OfferedFolder]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_offered_folders(FfiConverterString.lower(device)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeOfferedFolder.lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+/**
  * Let other Macs pair with this one for `minutes` (10 when absent).
  */
 public func openMacPairing(minutes: UInt32?)async throws  -> MacToMac  {
@@ -4264,6 +4471,37 @@ public func pairWithMac(device: String)async throws  -> PairingCode  {
         )
 }
 /**
+ * Share the folder at `path` with paired `device`, shown there as `name`.
+ */
+public func shareFolder(device: String, path: Data, name: String)async throws  -> SharedFolder  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_share_folder(FfiConverterString.lower(device),FfiConverterData.lower(path),FfiConverterString.lower(name)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeSharedFolder_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+public func sharedFolders()async throws  -> [SharedFolder]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_shared_folders(
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeSharedFolder.lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+/**
  * Turn Mac-to-Mac on: listen, and look for Macs on the network.
  */
 public func startMacToMac()async throws  -> MacToMac  {
@@ -4277,6 +4515,20 @@ public func startMacToMac()async throws  -> MacToMac  {
             completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeMacToMac_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+public func stopSharing(id: String)async throws  -> [SharedFolder]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_stop_sharing(FfiConverterString.lower(id)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeSharedFolder.lift,
             errorHandler: FfiConverterTypeAgentError_lift
         )
 }
@@ -4509,13 +4761,25 @@ private let initializationResult: InitializationResult = {
     if (uniffi_foldover_ffi_checksum_func_mac_to_mac_status() != 24201) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_foldover_ffi_checksum_func_offered_folders() != 14295) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_foldover_ffi_checksum_func_open_mac_pairing() != 59773) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_pair_with_mac() != 20514) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_foldover_ffi_checksum_func_share_folder() != 33141) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_shared_folders() != 32777) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_foldover_ffi_checksum_func_start_mac_to_mac() != 54810) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_stop_sharing() != 48617) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_sync_cancel() != 20891) {

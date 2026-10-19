@@ -152,7 +152,11 @@ Local Network prompt next to a Turn On button that calls `peer.start`.
 Once on, it polls every second while open: Allow pairing opens a window,
 nearby Macs ready to pair offer Pair, each pending code shows in two
 groups of three digits with Confirm and Cancel, and paired Macs can be
-forgotten after a confirmation.
+forgotten after a confirmation. Under each paired Mac, Share a Folder…
+grants a folder (named after it) and Stop Sharing ends a grant. The pair
+editor offers Another Mac… for either side: it lists paired Macs and the
+folders each shares with this one, asked live, and the chosen folder
+reads as "Studio › Photos" wherever the pair shows.
 
 ## Consequences
 

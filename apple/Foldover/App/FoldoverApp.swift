@@ -9,10 +9,13 @@ import SwiftUI
 struct FoldoverApp: App {
     @State private var viewModel: MainViewModel
     @State private var settings = SettingsStore()
-    @State private var macToMac = MacToMacStore()
+    @State private var macToMac: MacToMacStore
 
     init() {
-        let viewModel = MainViewModel(appInfo: AppInfoStore())
+        // One store, so the pair editor sees the Macs Settings paired.
+        let macToMac = MacToMacStore()
+        _macToMac = State(initialValue: macToMac)
+        let viewModel = MainViewModel(appInfo: AppInfoStore(), macToMac: macToMac)
         _viewModel = State(initialValue: viewModel)
         // Shortcuts actions run in the app and share its state.
         AppDependencyManager.shared.add(dependency: viewModel)

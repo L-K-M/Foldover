@@ -1,7 +1,7 @@
 //! Pairing with other Macs, for Swift (ADR 0031). Devices are 64 hex
 //! digits, as the agent reports them.
 
-use foldover_client::{DeviceId, PeerPendingRecord, PeerStatus, SocketLocation};
+use foldover_client::{DeviceId, PeerPendingRecord, PeerStatus, ShareRecord, SocketLocation};
 
 use crate::AgentError;
 
@@ -138,4 +138,81 @@ fn state(status: Result<PeerStatus, foldover_client::Error>) -> Result<MacToMac,
             .collect(),
         discovery_problem: status.discovery,
     })
+}
+
+/// A folder this Mac shares with one paired Mac.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct SharedFolder {
+    pub id: String,
+    /// The paired Mac that may sync with it.
+    pub device: String,
+    /// Absolute path bytes.
+    pub path: Vec<u8>,
+    /// What that Mac shows, e.g. "Photos".
+    pub name: String,
+}
+
+/// A folder a paired Mac shares with this one.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct OfferedFolder {
+    pub id: String,
+    pub name: String,
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn shared_folders() -> Result<Vec<SharedFolder>, AgentError> {
+    let listed = foldover_client::shares(&SocketLocation::Default)
+        .await
+        .map_err(AgentError::from)?;
+    Ok(listed.shares.into_iter().map(shared).collect())
+}
+
+/// Share the folder at `path` with paired `device`, shown there as `name`.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn share_folder(
+    device: String,
+    path: Vec<u8>,
+    name: String,
+) -> Result<SharedFolder, AgentError> {
+    let record =
+        foldover_client::add_share(&SocketLocation::Default, parse(&device)?, &path, &name)
+            .await
+            .map_err(AgentError::from)?;
+    Ok(shared(record))
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn stop_sharing(id: String) -> Result<Vec<SharedFolder>, AgentError> {
+    let id = id.parse().map_err(|_| AgentError::Request {
+        message: "Invalid shared folder".into(),
+    })?;
+    let listed = foldover_client::remove_share(&SocketLocation::Default, id)
+        .await
+        .map_err(AgentError::from)?;
+    Ok(listed.shares.into_iter().map(shared).collect())
+}
+
+/// The folders paired `device` shares with this Mac; asks that Mac.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn offered_folders(device: String) -> Result<Vec<OfferedFolder>, AgentError> {
+    let offered = foldover_client::peer_shares(&SocketLocation::Default, parse(&device)?)
+        .await
+        .map_err(AgentError::from)?;
+    Ok(offered
+        .shares
+        .into_iter()
+        .map(|share| OfferedFolder {
+            id: share.id,
+            name: share.name,
+        })
+        .collect())
+}
+
+fn shared(record: ShareRecord) -> SharedFolder {
+    SharedFolder {
+        id: record.id,
+        device: record.device,
+        path: record.root,
+        name: record.name,
+    }
 }

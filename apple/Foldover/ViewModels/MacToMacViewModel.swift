@@ -29,6 +29,14 @@ struct MacToMacViewModel {
         let id: String
         let name: String
         let detail: String
+        /// Folders this Mac shares with it.
+        let shares: [ShareRow]
+    }
+
+    struct ShareRow: Identifiable, Equatable {
+        let id: String
+        let name: String
+        let path: String
     }
 
     var isOn: Bool { store.state?.isOn ?? false }
@@ -85,11 +93,19 @@ struct MacToMacViewModel {
     var paired: [PairedRow] {
         (store.state?.paired ?? []).map { paired in
             PairedRow(id: paired.device, name: paired.name,
-                      detail: String(localized: "Paired \(paired.paired.formatted(date: .abbreviated, time: .omitted))"))
+                      detail: String(localized: "Paired \(paired.paired.formatted(date: .abbreviated, time: .omitted))"),
+                      shares: store.shares.filter { $0.device == paired.device }.map { share in
+                          ShareRow(id: share.id, name: share.name,
+                                   path: String(data: share.path, encoding: .utf8) ?? share.name)
+                      })
         }
     }
 
     var error: String? { store.error }
+
+    var sharingNote: String {
+        String(localized: "A paired Mac can sync only the folders you share with it here. It sees each by its name, not where it is on this Mac.")
+    }
 
     /// Six digits in two groups, e.g. "012 345".
     nonisolated static func codeText(_ code: UInt32) -> String {
@@ -111,4 +127,6 @@ struct MacToMacViewModel {
     func confirm(_ row: CodeRow) async { await store.confirm(row.id) }
     func cancel(_ row: CodeRow) async { await store.cancel(row.id) }
     func forget(_ row: PairedRow) async { await store.forget(row.id) }
+    func share(_ url: URL, with row: PairedRow) async { await store.share(url, with: row.id) }
+    func stopSharing(_ share: ShareRow) async { await store.stopSharing(share.id) }
 }

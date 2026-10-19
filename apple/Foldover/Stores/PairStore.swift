@@ -307,13 +307,17 @@ final class PairStore {
     }
 
     func folder(from url: URL) throws -> SelectedFolder {
-        guard url.isFileURL else { throw PairStoreError.invalidFolder }
-        let bytes = url.withUnsafeFileSystemRepresentation { path -> Data? in
+        guard let bytes = Self.folderBytes(url) else { throw PairStoreError.invalidFolder }
+        return SelectedFolder(bytes: bytes)
+    }
+
+    /// A file URL's exact path bytes, as the agent takes them.
+    static func folderBytes(_ url: URL) -> Data? {
+        guard url.isFileURL else { return nil }
+        return url.withUnsafeFileSystemRepresentation { path -> Data? in
             guard let path else { return nil }
             return Data(bytes: path, count: strlen(path))
         }
-        guard let bytes else { throw PairStoreError.invalidFolder }
-        return SelectedFolder(bytes: bytes)
     }
 
     func remove(_ pair: SyncPair) async throws {

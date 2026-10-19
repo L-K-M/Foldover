@@ -13,6 +13,7 @@ private actor MacToMacFixtureClient: MacToMacClient {
     private var pending: [PendingCode] = []
     private var paired: [PairedDevice] = []
     private var failure: Error?
+    private var shared: [FolderShare] = []
     private(set) var starts = 0
 
     func state() async throws -> MacToMacState {
@@ -64,6 +65,25 @@ private actor MacToMacFixtureClient: MacToMacClient {
     func forget(device: String) async throws -> MacToMacState {
         paired.removeAll { $0.device == device }
         return try await state()
+    }
+
+    func shares() async throws -> [FolderShare] { shared }
+
+    func share(path: Data, name: String, device: String) async throws -> FolderShare {
+        if let failure { throw failure }
+        let share = FolderShare(id: "share-\(shared.count)", device: device, path: path, name: name)
+        shared.append(share)
+        return share
+    }
+
+    func stopSharing(id: String) async throws -> [FolderShare] {
+        shared.removeAll { $0.id == id }
+        return shared
+    }
+
+    func offered(device: String) async throws -> [OfferedShare] {
+        if let failure { throw failure }
+        return device == "studio" ? [OfferedShare(id: "photos-id", name: "Photos")] : []
     }
 
     func rejectRequests() { failure = MacToMacFixtureError.unreachable }
@@ -141,4 +161,45 @@ func failedMacToMacRequestsStayVisiblePastRefreshes() async {
 func codesShowSixDigitsInTwoGroups() {
     #expect(MacToMacViewModel.codeText(7) == "000 007")
     #expect(MacToMacViewModel.codeText(987_654) == "987 654")
+}
+
+@MainActor
+@Test
+func foldersSharedWithAPairedMacAreListedUnderItAndCanStop() async {
+    let store = MacToMacStore(client: MacToMacFixtureClient())
+    let viewModel = MacToMacViewModel(store: store)
+    await viewModel.turnOn()
+    await viewModel.pair(viewModel.nearby[0])
+    await viewModel.confirm(viewModel.codes[0])
+
+    await viewModel.share(URL(fileURLWithPath: "/Users/a/Photos"), with: viewModel.paired[0])
+    #expect(viewModel.paired[0].shares == [
+        .init(id: "share-0", name: "Photos", path: "/Users/a/Photos"),
+    ])
+    await viewModel.stopSharing(viewModel.paired[0].shares[0])
+    #expect(viewModel.paired[0].shares.isEmpty)
+}
+
+@MainActor
+@Test
+func aPairSideCanBeAFolderAPairedMacShares() async {
+    let macs = MacToMacStore(client: MacToMacFixtureClient())
+    let macToMac = MacToMacViewModel(store: macs)
+    await macToMac.turnOn()
+    await macToMac.pair(macToMac.nearby[0])
+    await macToMac.confirm(macToMac.codes[0])
+    let editor = PairEditorViewModel(store: PairStore(), macs: macs)
+    #expect(editor.offersOtherMacs)
+
+    let studio = editor.pairedMacs[0]
+    let folders = await editor.folders(on: studio)
+    #expect(folders.map(\.name) == ["Photos"])
+    editor.chooseShared(folders[0], on: studio, side: .right)
+    #expect(editor.folderText(.right) == "Studio › Photos")
+    #expect(editor.usesOtherMac)
+    #expect(editor.metadataNote.contains("between Macs"))
+    // Without the folder names fetched, the Mac's name still shows.
+    let fresh = MacToMacStore(client: MacToMacFixtureClient())
+    #expect(fresh.folderName(for: Data("peer://studio/photos-id".utf8)) == "A folder on another Mac")
+    #expect(macs.folderName(for: Data("/Users/a".utf8)) == nil)
 }
