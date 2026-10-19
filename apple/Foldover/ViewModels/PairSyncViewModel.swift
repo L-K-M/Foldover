@@ -67,8 +67,9 @@ struct PairSyncViewModel {
                 ? String(localized: "Folders are in sync.")
                 : Self.summary(preview)
         case .needsApproval(let preview):
-            String(localized: "Nothing was changed. This sync would archive more items than Foldover moves without asking.")
+            String(localized: "Nothing was changed. This sync needs approval before it replaces or removes items:")
                 + " " + Self.summary(preview)
+                + " " + Self.archiveCounts(preview)
         case .finished(let result):
             Self.summary(result)
         case .failed(let message):
@@ -83,10 +84,15 @@ struct PairSyncViewModel {
         return DeletionApproval(a: preview.a.deletions, b: preview.b.deletions)
     }
 
-    /// The approval to request when a run stopped for too many deletions.
+    /// The approval to request when a run needs review. Hidden while the
+    /// approving start is in flight, so the dialog cannot re-present.
     var approvalRequest: String? {
-        guard case .needsApproval(let preview) = state else { return nil }
-        return String(localized: "Archive \(preview.a.deletions) items in \(Self.folderName(.a)) and \(preview.b.deletions) in \(Self.folderName(.b))? Archived items stay in .foldover/archive for 30 days.")
+        guard case .needsApproval(let preview) = state,
+              !store.isStarting(pair.id) else { return nil }
+        return String(localized: "Approve this sync?")
+            + " " + Self.summary(preview)
+            + " " + Self.archiveCounts(preview)
+            + " " + String(localized: "Archived items stay in .foldover/archive for 30 days.")
     }
 
     var rows: [ChangeRow] {
@@ -145,6 +151,11 @@ struct PairSyncViewModel {
         case .conflict(.bothChanged), .conflict(.deletedVersusEdited), .conflict(.metadataOnly): true
         default: false
         }
+    }
+
+    /// The per-folder counts approval accepts.
+    private static func archiveCounts(_ preview: PreviewSummary) -> String {
+        String(localized: "Archive \(preview.a.deletions) items in \(folderName(.a)) and \(preview.b.deletions) in \(folderName(.b)).")
     }
 
     static func summary(_ preview: PreviewSummary) -> String {

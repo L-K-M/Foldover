@@ -303,13 +303,17 @@ final class SyncStore {
             requestErrors[id] = PairStore.message(for: error)
             return
         }
+        // A stale resolution must not preview over a newer job.
+        guard !Task.isCancelled, (generations[id] ?? 0) == generation else { return }
         await preview(id)
     }
 
     /// Keep the reviewed changes visible after declining an approval.
     /// The decline holds for that result until an explicit job runs.
+    /// Hiding a pending start's dialog is not a new decline.
     func declineApproval(_ id: String) {
-        guard case .needsApproval(let preview) = states[id] else { return }
+        guard !pendingStarts.contains(id),
+              case .needsApproval(let preview) = states[id] else { return }
         declined[id] = preview
         set(id, .previewed(preview))
     }
@@ -323,11 +327,11 @@ final class SyncStore {
         case other
     }
 
-    /// Registers a start the agent has not answered yet. Registration is
-    /// itself a local write, so replies requested before it go stale.
+    /// Registration invalidates older replies and relinquishes the old poller.
     private func beginStart(_ id: String) -> Bool {
         guard pendingStarts.insert(id).inserted else { return false }
         generations[id, default: 0] += 1
+        polling[id] = nil
         return true
     }
 
@@ -368,12 +372,13 @@ final class SyncStore {
         defer {
             if polling[id] == owner { polling[id] = nil }
         }
-        while case .working = states[id], !Task.isCancelled {
+        while case .working = states[id], polling[id] == owner, !Task.isCancelled {
             do {
                 try await Task.sleep(for: pollInterval)
             } catch {
                 return
             }
+            guard polling[id] == owner, !Task.isCancelled else { return }
             let generation = generations[id] ?? 0
             let reply: PairSyncState
             do {
