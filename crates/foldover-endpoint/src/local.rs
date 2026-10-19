@@ -169,8 +169,7 @@ impl Fingerprint {
         self.proves_unchanged_by(&current.stat_key(), current.modified())
     }
 
-    /// For entries whose stat is another system's: `key` must hold every
-    /// field a change moves, `modified` included.
+    /// Store another system's stat; incomplete keys cannot justify version reuse.
     pub(crate) fn from_key(key: Vec<u8>, size: u64, observed_at: SystemTime) -> Self {
         Self {
             key,
@@ -179,7 +178,7 @@ impl Fingerprint {
         }
     }
 
-    pub(crate) fn proves_unchanged_by(&self, key: &[u8], modified: SystemTime) -> bool {
+    fn proves_unchanged_by(&self, key: &[u8], modified: SystemTime) -> bool {
         // Equal keys include equal mtimes, so `modified` is the current one.
         let settled = self
             .observed_at

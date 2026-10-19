@@ -47,7 +47,7 @@ writes keep 16 requests of 32 KiB in flight.
 | | Local root | SFTP folder |
 |---|---|---|
 | Metadata kept | mode, times, xattrs, flags, ACL | mode, modification time in whole seconds |
-| Unchanged-stat proof | full stat incl. inode | size, time, mode, owner |
+| Unchanged-stat proof | full stat incl. inode | unavailable; contents and link targets are re-read |
 | Change notifications | FSEvents / inotify | none; hourly verification on "When files change" |
 | Free space | `fstatvfs` | `statvfs@openssh.com`, else unchecked |
 | Durability "Full" | `F_FULLFSYNC` | unsupported: file fsync cannot flush namespace changes or guarantee drive-cache flush |

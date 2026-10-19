@@ -223,6 +223,62 @@ fn oversized_sidecars_are_excluded_before_classification() {
 }
 
 #[test]
+fn unchanged_sftp_attributes_cannot_hide_a_content_change() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("note");
+    let settled = UNIX_EPOCH + Duration::from_secs(1);
+    let set_time = || {
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(settled))
+            .unwrap();
+    };
+    fs::write(&file, b"before").unwrap();
+    set_time();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    let options = PairOptions::default();
+    let first = remote
+        .observe_from(
+            options.metadata(),
+            &Filter::none(),
+            &Default::default(),
+            &mut proceed,
+        )
+        .unwrap();
+    let before = remote.session().lstat(&remote.remote(b"note")).unwrap();
+
+    // Preserving size and mtime is normal for remote copy/edit tools.
+    fs::write(&file, b"after!").unwrap();
+    set_time();
+    let after = remote.session().lstat(&remote.remote(b"note")).unwrap();
+    assert_eq!(stat_key(&before), stat_key(&after));
+    let second = remote
+        .observe_from(
+            options.metadata(),
+            &Filter::none(),
+            first.entries(),
+            &mut proceed,
+        )
+        .unwrap();
+    let key = path(b"note");
+    assert_ne!(
+        first.versions()[&key].content(),
+        second.versions()[&key].content()
+    );
+    let run = RunScope::new(UNIX_EPOCH, options);
+    assert!(matches!(
+        remote.remove(&key, &first.entries()[&key], &run, &mut proceed),
+        Err(ApplyError::DestinationChanged(_))
+    ));
+    assert_eq!(fs::read(&file).unwrap(), b"after!");
+    assert!(!directory.path().join(".foldover/archive").exists());
+}
+
+#[test]
 fn reads_stop_at_the_observed_length_and_refuse_a_changed_file() {
     let directory = tempfile::tempdir().unwrap();
     let Some(remote) = sftp(directory.path()) else {

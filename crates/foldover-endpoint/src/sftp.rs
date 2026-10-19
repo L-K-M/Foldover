@@ -222,13 +222,13 @@ impl SftpEndpoint {
         }
     }
 
-    /// Every entry below the root, reusing `previous` versions whose stat
-    /// is unchanged and settled.
+    /// Reobserve contents and link targets: SFTP stat cannot prove they
+    /// stayed unchanged, even when size and modification time match.
     pub fn observe_from(
         &self,
         policy: MetadataPolicy,
         filter: &Filter,
-        previous: &std::collections::BTreeMap<SyncPath, ObservedEntry>,
+        _previous: &std::collections::BTreeMap<SyncPath, ObservedEntry>,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<Observation, ScanError> {
         let mut observation = Observation::default();
@@ -274,8 +274,7 @@ impl SftpEndpoint {
                 if kind == FileKind::Directory {
                     pending.push(Some(path.clone()));
                 }
-                let entry =
-                    self.observe_entry(&path, &attributes, policy, previous.get(&path), control)?;
+                let entry = self.observe_entry(&path, &attributes, policy, control)?;
                 observation.entries.insert(path, entry);
             }
         }
@@ -287,17 +286,9 @@ impl SftpEndpoint {
         path: &SyncPath,
         attributes: &Attributes,
         policy: MetadataPolicy,
-        previous: Option<&ObservedEntry>,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<ObservedEntry, ScanError> {
         let key = stat_key(attributes);
-        if let Some(previous) = previous
-            && previous
-                .fingerprint
-                .proves_unchanged_by(&key, modified(attributes))
-        {
-            return Ok(previous.clone());
-        }
         let observed_at = SystemTime::now();
         let version = self.version(path, attributes, policy, control)?;
         Ok(ObservedEntry {
@@ -406,12 +397,6 @@ impl SftpEndpoint {
     ) -> Result<Attributes, ApplyError> {
         let changed = || ApplyError::DestinationChanged(path.clone());
         let attributes = self.attributes(path)?.ok_or_else(changed)?;
-        if expected
-            .fingerprint
-            .proves_unchanged_by(&stat_key(&attributes), modified(&attributes))
-        {
-            return Ok(attributes);
-        }
         if self.version(path, &attributes, policy, control)? != expected.version {
             return Err(changed());
         }
@@ -1008,7 +993,7 @@ fn temporary_beside(path: &[u8]) -> Vec<u8> {
     }
 }
 
-/// Every stat field a change moves; there is no inode to add.
+/// Available stat fields, useful as observations but not unchanged-data proof.
 fn stat_key(attributes: &Attributes) -> Vec<u8> {
     let mut key = b"sftp".to_vec();
     key.extend_from_slice(&attributes.size.unwrap_or(u64::MAX).to_le_bytes());
