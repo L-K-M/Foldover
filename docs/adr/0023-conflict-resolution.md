@@ -18,8 +18,17 @@ exactly those versions; otherwise the conflict is reported again.
 
 - Nothing is deleted: a replaced or removed version goes to the run's
   archive ([ADR 0020](0020-run-execution.md)).
-- Choices involving a folder are not applied: a folder conflict is
-  resolved through the entries inside it, or by hand.
+- A choice for a folder conflict (a folder deleted in one folder while
+  something inside it changed in the other) covers the whole folder: the
+  kept side wins every entry inside it, as a mirror from that side would.
+  Keeping the folder copies it back with its contents; keeping the
+  deletion archives it with its contents. The choice applies while the
+  folder itself is unchanged; a later edit inside the folder follows the
+  choice and is archived, never lost. Type mismatches between a file and
+  a folder are still resolved by hand. Limit: if copying a kept folder back
+  fails partway, an unchanged file not yet copied looks deleted on the
+  next run and is archived after that run's preview; the run journal
+  (PLAN.md §4.7) is meant to close this.
 - `sync.resolve` (`id`, `path`, `keep`, `review_token`) needs the pair's
   latest preview to contain the conflict, and the token must name that
   preview — a choice cannot follow a plan another client published after
@@ -27,7 +36,7 @@ exactly those versions; otherwise the conflict is reported again.
   copies anything. Otherwise it fails with `PREVIEW_REQUIRED` (-32008).
   Applying a choice spends it, and changing the pair's roots or metadata
   categories discards all choices.
-- The app shows Keep A and Keep B on file conflicts and previews again
+- The app shows Keep A and Keep B on conflicts and previews again
   after a choice. The CLI uses `--keep-left PATH` and `--keep-right PATH`.
 
 **Keep both** (`keep: "both"`, for files changed in both folders): the

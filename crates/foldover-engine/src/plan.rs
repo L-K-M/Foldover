@@ -100,6 +100,76 @@ impl CandidatePlan {
     }
 }
 
+/// A choice made for a folder conflict — a folder deleted on one side while
+/// something inside it changed on the other — covers the folder and
+/// everything in it: the kept side wins each entry, as in a mirror from it.
+/// `resolve` cannot do this per entry, because a folder's own versions do
+/// not change when its contents do; without this the conflict would block
+/// its branch forever.
+///
+/// ```text
+/// photos/        deleted on B, kept A   ─▶ create on B
+/// photos/a.jpg   edited on A            ─▶ create on B
+/// photos/b.jpg   unchanged on A         ─▶ create on B   (kept B: all archived on A)
+/// ```
+fn settle_folder_choices(
+    rows: &mut [PlanRow],
+    base: &BTreeMap<SyncPath, BaselineEntry>,
+    left: &BTreeMap<SyncPath, EntryVersion>,
+    right: &BTreeMap<SyncPath, EntryVersion>,
+    resolutions: &BTreeMap<SyncPath, Resolution>,
+    control: &mut impl FnMut() -> ScanControl,
+) -> Result<(), PlanError> {
+    let mut branches: BTreeMap<SyncPath, Side> = BTreeMap::new();
+    for row in rows.iter_mut() {
+        check_control(control)?;
+        let (left, right) = (left.get(&row.path).copied(), right.get(&row.path).copied());
+        let mut keep = None;
+        let mut parent = row.path.parent();
+        while let Some(path) = parent {
+            if let Some(side) = branches.get(&path) {
+                keep = Some(*side);
+            }
+            parent = path.parent();
+        }
+        if keep.is_none() {
+            keep = folder_choice(row, resolutions.get(&row.path), left, right);
+            if let Some(side) = keep {
+                branches.insert(row.path.clone(), side);
+            }
+        }
+        let Some(keep) = keep else {
+            continue;
+        };
+        row.decision = CandidateDecision::Entry(reconcile_entry(
+            SyncMode::Mirror { source: keep },
+            base.get(&row.path).copied(),
+            left,
+            right,
+        ));
+    }
+    Ok(())
+}
+
+/// The side a person chose for this folder conflict, while both sides still
+/// match what they saw.
+fn folder_choice(
+    row: &PlanRow,
+    resolution: Option<&Resolution>,
+    left: Option<EntryVersion>,
+    right: Option<EntryVersion>,
+) -> Option<Side> {
+    let resolution = resolution?;
+    let folder = [left, right]
+        .into_iter()
+        .flatten()
+        .any(|version| version.kind() == EntryKind::Directory);
+    let current = (left, right) == (resolution.left(), resolution.right());
+    let conflicted = row.decision
+        == CandidateDecision::Entry(EntryDecision::Conflict(ConflictKind::DeletedVersusEdited));
+    (folder && current && conflicted).then_some(resolution.keep())
+}
+
 /// Merge complete logical trees in exact byte-path order. Incomplete scans,
 /// excluded/unavailable entries and read errors must not be supplied as absence.
 /// Confirmation binding, naming capabilities, operation ordering, readiness and
@@ -199,6 +269,8 @@ pub fn plan_resolved(
             }
         }
     }
+
+    settle_folder_choices(&mut rows, base, left, right, resolutions, control)?;
 
     // Ancestors precede descendants. Suppression therefore propagates an outer
     // conflict through the whole branch without recursive traversal.

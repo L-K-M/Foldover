@@ -6,6 +6,21 @@ import Testing
 private actor ArchiveFixtureClient: ArchiveClient {
     private var stored = [Data("a".utf8), Data("b".utf8), Data("c".utf8)]
     private(set) var sides: [FolderSide] = []
+    /// Requests for later pages, and the next one to hold until released.
+    private(set) var pageRequests = 0
+    private var holdsNextPage = false
+    private var held: CheckedContinuation<Void, Never>?
+
+    func holdNextPage() { holdsNextPage = true }
+
+    func waitForHeldPage() async {
+        while held == nil { await Task.yield() }
+    }
+
+    func releasePage() {
+        held?.resume()
+        held = nil
+    }
 
     func runs(_ id: String, side: FolderSide) async throws -> ArchiveRuns {
         sides.append(side)
@@ -17,7 +32,15 @@ private actor ArchiveFixtureClient: ArchiveClient {
 
     func items(_ id: String, side: FolderSide, run: String, after: Data?) async throws -> ArchivePage {
         let rest = stored.filter { path in after.map { $0.lexicographicallyPrecedes(path) } ?? true }
-        return ArchivePage(items: rest.prefix(2).map { ArchiveItem(path: $0, size: 1) }, more: rest.count > 2)
+        // Answered as of the request, even when held.
+        let page = ArchivePage(items: rest.prefix(2).map { ArchiveItem(path: $0, size: 1) }, more: rest.count > 2)
+        guard after != nil else { return page }
+        pageRequests += 1
+        if holdsNextPage {
+            holdsNextPage = false
+            await withCheckedContinuation { held = $0 }
+        }
+        return page
     }
 
     func putBack(_ id: String, side: FolderSide, run: String, path: Data) async throws -> Data {
@@ -85,4 +108,42 @@ func putBackAllEmptiesTheRunAndSummarizes() async {
     #expect(viewModel.itemRows.isEmpty)
     #expect(viewModel.restoreText == "Put back 3 items. 1 went beside newer versions.")
     #expect(!viewModel.canPutBackAll)
+}
+
+@MainActor
+@Test
+func aPageAskedForBeforePutBackAllNeverListsRestoredItems() async {
+    let client = ArchiveFixtureClient()
+    let store = ArchiveStore(client: client)
+    let viewModel = ArchiveViewModel(pair: docs(), store: store, agentConnected: true)
+    await viewModel.show(.b)
+
+    await client.holdNextPage()
+    let more = Task { await viewModel.loadMore() }
+    await client.waitForHeldPage()
+    await viewModel.putBackAll()
+    await client.releasePage()
+    await more.value
+
+    #expect(viewModel.itemRows.isEmpty)
+    #expect(!viewModel.canPutBackAll)
+}
+
+@MainActor
+@Test
+func showMoreWhileAPageLoadsAsksOnce() async {
+    let client = ArchiveFixtureClient()
+    let store = ArchiveStore(client: client)
+    let viewModel = ArchiveViewModel(pair: docs(), store: store, agentConnected: true)
+    await viewModel.show(.b)
+
+    await client.holdNextPage()
+    let first = Task { await viewModel.loadMore() }
+    await client.waitForHeldPage()
+    await viewModel.loadMore()
+    await client.releasePage()
+    await first.value
+
+    #expect(viewModel.itemRows.map(\.path) == ["a", "b", "c"])
+    #expect(await client.pageRequests == 1)
 }

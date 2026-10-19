@@ -79,13 +79,15 @@ impl Service {
                 .parse::<PairId>()
                 .map_err(|error| RpcError::new(INVALID_PARAMS, error.to_string()))?;
             let token = review_token(params.review_token.as_deref())?;
-            return encode(self.jobs.items(
-                &self.engine,
-                id,
-                token,
-                params.after.as_deref(),
-                params.kind,
-            )?);
+            // Saves and snapshot writes can hold the engine for seconds;
+            // wait for it off the runtime so other requests still answer.
+            let (engine, jobs) = (Arc::clone(&self.engine), Arc::clone(&self.jobs));
+            let page = tokio::task::spawn_blocking(move || {
+                jobs.items(&engine, id, token, params.after.as_deref(), params.kind)
+            })
+            .await
+            .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))??;
+            return encode(page);
         }
         if matches!(
             request.method(),
@@ -2108,6 +2110,53 @@ mod tests {
             .handle(Request::call(6, SYNC_RESOLVE, Some(resolve)))
             .await
             .unwrap();
+    }
+
+    /// A held engine lock — a long pair save or snapshot write — must not
+    /// park the runtime: paging a preview waits off it, so other requests
+    /// still answer.
+    #[tokio::test]
+    async fn paging_items_waits_for_the_engine_off_the_runtime() {
+        let (directory, service) = fixture();
+        let created = service
+            .handle(Request::call(
+                1,
+                PAIR_CREATE,
+                Some(input(directory.path(), "Docs")),
+            ))
+            .await
+            .unwrap();
+
+        let engine = Arc::clone(&service.engine);
+        let (locked, held) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _engine = engine.lock().unwrap();
+            locked.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        });
+        held.recv().unwrap();
+
+        let started = std::time::Instant::now();
+        let query = json!({"id": created["id"], "review_token": "ab".repeat(32)});
+        let service = Arc::new(service);
+        let paging = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move {
+                service
+                    .handle(Request::call(2, SYNC_ITEMS, Some(query)))
+                    .await
+            }
+        });
+        // Let the paging request run first on this single-threaded runtime.
+        tokio::task::yield_now().await;
+        service
+            .handle(Request::call(3, DAEMON_STATUS, None))
+            .await
+            .unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+
+        assert!(paging.await.unwrap().is_err());
+        holder.join().unwrap();
     }
 
     #[tokio::test]

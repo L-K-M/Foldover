@@ -544,6 +544,59 @@ fn resolved_conflicts_keep_the_chosen_side_until_either_side_changes() {
     );
 }
 
+/// A folder deleted on one side while a file inside it changed on the
+/// other is one conflict at the folder; choosing a side settles the folder
+/// and everything in it.
+#[test]
+fn a_folder_choice_settles_the_whole_folder() {
+    for keep in [Side::Left, Side::Right] {
+        let mut pair = fixture(SyncMode::Sync);
+        fs::create_dir(pair.left.path().join("photos")).unwrap();
+        fs::write(pair.left.path().join("photos/a.jpg"), b"a").unwrap();
+        fs::write(pair.left.path().join("photos/b.jpg"), b"b").unwrap();
+        pair.sync();
+        fs::write(pair.left.path().join("photos/a.jpg"), b"edited").unwrap();
+        fs::remove_dir_all(pair.right.path().join("photos")).unwrap();
+
+        let preview = pair.prepare().preview();
+        let folder = preview
+            .items()
+            .iter()
+            .find(|item| item.path() == &path(b"photos"))
+            .unwrap();
+        assert_eq!(
+            folder.action(),
+            Action::Conflict(ConflictKind::DeletedVersusEdited)
+        );
+        let (left, right) = folder.versions();
+        pair.resolutions.insert(
+            path(b"photos"),
+            foldover_types::Resolution::new(keep, left, right),
+        );
+
+        let report = pair.sync();
+        assert!(report.conflicts().is_empty(), "{:?}", report.conflicts());
+        assert!(report.failures().is_empty(), "{:?}", report.failures());
+        match keep {
+            Side::Left => {
+                let photos = pair.right.path().join("photos");
+                assert_eq!(fs::read(photos.join("a.jpg")).unwrap(), b"edited");
+                assert_eq!(fs::read(photos.join("b.jpg")).unwrap(), b"b");
+            }
+            Side::Right => {
+                assert!(!pair.left.path().join("photos").exists());
+                let archive = pair
+                    .left
+                    .path()
+                    .join(".foldover/archive/1970-01-01T00-00-00.000Z/photos");
+                assert_eq!(fs::read(archive.join("a.jpg")).unwrap(), b"edited");
+                assert_eq!(fs::read(archive.join("b.jpg")).unwrap(), b"b");
+            }
+        }
+        assert!(pair.prepare().preview().items().is_empty());
+    }
+}
+
 #[test]
 fn earlier_snapshots_supply_versions_for_settled_unchanged_entries() {
     let pair = fixture(SyncMode::Sync);

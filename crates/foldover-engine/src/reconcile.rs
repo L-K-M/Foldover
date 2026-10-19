@@ -54,8 +54,8 @@ pub fn reconcile_entry(
 }
 
 /// Turn a conflict into the change a person chose. `None` when the choice no
-/// longer matches both sides, or involves a folder: folders are resolved
-/// through the entries inside them.
+/// longer matches both sides, or involves a folder: the planner settles a
+/// folder choice for the folder's whole branch.
 pub(crate) fn resolve(
     resolution: Resolution,
     left: Option<EntryVersion>,

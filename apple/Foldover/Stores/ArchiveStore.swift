@@ -81,7 +81,7 @@ private actor CoreArchiveClient: ArchiveClient {
 }
 
 /// Browses one side's archive at a time and puts items back. Responses
-/// for a pair, side or run the user has left are dropped.
+/// for a pair, side, run or item listing the user has left are dropped.
 @Observable
 @MainActor
 final class ArchiveStore {
@@ -99,6 +99,12 @@ final class ArchiveStore {
     private(set) var placed: Data?
     /// What the last whole-run put-back did.
     private(set) var restore: RunRestore?
+    /// Bumped whenever the item list starts over, so a page asked for
+    /// before, say, Put Back All never lands in the fresh list.
+    private var listing = 0
+    /// The listing a page is loading for; one page at a time, so a second
+    /// Show More cannot fetch the same page twice.
+    private var loadingListing: Int?
 
     init(client: any ArchiveClient = CoreArchiveClient()) {
         self.client = client
@@ -108,6 +114,7 @@ final class ArchiveStore {
     func open(_ pairID: String, side: FolderSide) async {
         self.pairID = pairID
         self.side = side
+        listing += 1
         runs = []
         hasOlderRuns = false
         run = nil
@@ -131,6 +138,7 @@ final class ArchiveStore {
 
     func select(_ run: String) async {
         self.run = run
+        listing += 1
         items = []
         hasMoreItems = false
         placed = nil
@@ -154,7 +162,7 @@ final class ArchiveStore {
     }
 
     func loadMore() async {
-        guard hasMoreItems, let last = items.last else { return }
+        guard hasMoreItems, loadingListing != listing, let last = items.last else { return }
         await loadItems(after: last.path)
     }
 
@@ -176,12 +184,19 @@ final class ArchiveStore {
     private func loadItems(after: Data?) async {
         guard let pairID, let run else { return }
         let side = side
+        let ticket = listing
+        loadingListing = ticket
         error = nil
         isLoading = true
-        defer { isLoading = false }
+        defer {
+            if loadingListing == ticket {
+                loadingListing = nil
+                isLoading = false
+            }
+        }
         do {
             let page = try await client.items(pairID, side: side, run: run, after: after)
-            guard self.pairID == pairID, self.side == side, self.run == run else { return }
+            guard ticket == listing else { return }
             items += page.items
             hasMoreItems = page.more
         } catch {
