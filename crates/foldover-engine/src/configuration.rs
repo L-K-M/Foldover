@@ -228,6 +228,11 @@ impl Engine {
                     .pairs
                     .update_base(id, revision, updates, JournalUpdate::Hold)?)
             }
+            Commit::Undid { run, seqs } => {
+                Ok(self
+                    .pairs
+                    .update_base(id, revision, &[], JournalUpdate::Undid { run, seqs })?)
+            }
             Commit::Undone { run, updates } => {
                 Ok(self
                     .pairs

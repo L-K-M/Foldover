@@ -120,6 +120,9 @@ pub enum Commit<'a> {
     /// An undo's base restorations for paths it is about to revert; the
     /// pair's automatic syncs are held from then on, so none redoes it.
     Undoing { updates: &'a [BaseUpdate] },
+    /// Entries of `run` an undo reverted, so undoing again after a cancel
+    /// or crash skips them.
+    Undid { run: &'a str, seqs: &'a [u64] },
     /// An undo of `run` finished: the last base restorations, and `run`'s
     /// journal is spent.
     Undone {

@@ -1841,6 +1841,25 @@ func aSyncThatChangedSomethingCanBeUndoneAndTheUndoExplainsItself() async {
     #expect(!viewModel.canUndo)
 }
 
+// Review: a cancelled undo read "Undone" in the status line and as a
+// complete undo in History.
+@MainActor
+@Test
+func stoppedUndosNeverReadAsComplete() async {
+    let stopped = UndoSummary(cancelled: true, removed: 1, restored: 2, beside: 0, notUndone: [],
+                              notUndoneCount: 0, archive: "2026-10-18T10-00-00.000Z")
+    let store = SyncStore(client: ScriptedSyncClient([.undone(stopped)]), pollInterval: .milliseconds(1))
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
+    await viewModel.refresh()
+    #expect(viewModel.shortStatus == "Undo stopped")
+
+    let started = Date(timeIntervalSince1970: 1_000)
+    let cancelled = RunRecord(started: started, finished: started, trigger: .undo, end: .cancelled,
+                              copied: 0, updated: 0, archived: 1, recovered: 2, conflicts: 0,
+                              failures: 0, message: nil)
+    #expect(PairSyncViewModel.summary(cancelled) == "Undo stopped: put back 2, archived 1.")
+}
+
 @MainActor
 @Test
 func syncsThatChangedNothingOfferNoUndo() async {

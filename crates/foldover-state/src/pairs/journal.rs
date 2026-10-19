@@ -61,6 +61,11 @@ pub enum JournalUpdate<'a> {
     /// An undo is changing files: hold the pair's automatic syncs, across
     /// restarts, until a person syncs it.
     Hold,
+    /// An undo reverted these entries of `run`; a retry skips them.
+    Undid {
+        run: &'a str,
+        seqs: &'a [u64],
+    },
     /// `run` was undone; its entries are spent.
     Spend {
         run: &'a str,
@@ -80,9 +85,18 @@ impl PairStore {
     ) -> Result<(), Error> {
         let revision = database_revision(revision)?;
         let rows: Vec<JournalRow>;
+        let undone: Vec<i64>;
         let change = match journal {
             JournalUpdate::None => JournalChange::None,
             JournalUpdate::Hold => JournalChange::Hold,
+            JournalUpdate::Undid { run, seqs } => {
+                undone = seqs
+                    .iter()
+                    .map(|seq| i64::try_from(*seq))
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| Error::InvalidStored("journal sequence"))?;
+                JournalChange::Undid { run, seqs: &undone }
+            }
             JournalUpdate::Spend { run } => JournalChange::Spend { run },
             JournalUpdate::Record { run, entries } => {
                 rows = entries.iter().map(row).collect::<Result<_, _>>()?;

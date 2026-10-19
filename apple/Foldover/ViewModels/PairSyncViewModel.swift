@@ -115,6 +115,7 @@ struct PairSyncViewModel {
         case .finished(let result) where result.conflicts > 0: String(localized: "\(result.conflicts) conflicts")
         case .finished(let result) where result.failureCount > 0: String(localized: "\(result.failureCount) failed")
         case .finished: String(localized: "In sync")
+        case .undone(let result) where result.cancelled: String(localized: "Undo stopped")
         case .undone(let result) where result.notUndoneCount > 0: String(localized: "Partly undone")
         case .undone: String(localized: "Undone")
         case .failed: String(localized: "Stopped")
@@ -383,9 +384,14 @@ struct PairSyncViewModel {
 
     static func summary(_ run: RunRecord) -> String {
         if run.trigger == .undo {
-            return run.end == .failed
-                ? String(localized: "Undo stopped: \(run.message ?? String(localized: "unknown error"))")
-                : String(localized: "Undo: put back \(run.recovered), archived \(run.archived).")
+            switch run.end {
+            case .failed:
+                return String(localized: "Undo stopped: \(run.message ?? String(localized: "unknown error"))")
+            case .cancelled:
+                return String(localized: "Undo stopped: put back \(run.recovered), archived \(run.archived).")
+            default:
+                return String(localized: "Undo: put back \(run.recovered), archived \(run.archived).")
+            }
         }
         switch run.end {
         case .cancelled:

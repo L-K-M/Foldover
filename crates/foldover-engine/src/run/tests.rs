@@ -101,6 +101,12 @@ impl Store<'_> {
                 updates
             }
             Commit::Undoing { updates } => updates,
+            Commit::Undid { run, seqs } => {
+                if let Some(journal) = self.journal.as_mut().filter(|journal| journal.run == run) {
+                    journal.entries.retain(|entry| !seqs.contains(&entry.seq));
+                }
+                return Ok(());
+            }
             Commit::Undone { run, updates } => {
                 if self
                     .journal
@@ -1271,6 +1277,56 @@ fn a_crash_after_an_undo_commits_its_base_plans_no_writes_and_undo_can_retry() {
     assert!(undo.not_undone().is_empty(), "{:?}", undo.not_undone());
     assert_eq!((undo.removed(), undo.restored()), (1, 2));
     assert_eq!(fs::read(right.join("edit.txt")).unwrap(), b"v1");
+}
+
+/// Review: a retried undo planned every entry again, so what a cancelled
+/// attempt had already put back was listed as no longer archived.
+#[test]
+fn undoing_again_after_a_cancel_picks_up_only_what_is_left() {
+    let mut pair = fixture(SyncMode::Sync);
+    let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+    let count = COMMIT_BATCH + 1;
+    fs::write(left.join("keep.txt"), b"k").unwrap();
+    for index in 0..count {
+        fs::write(left.join(format!("{index}.txt")), b"x").unwrap();
+    }
+    pair.sync();
+    let before = pair.base.clone();
+    for index in 0..count {
+        fs::remove_file(left.join(format!("{index}.txt"))).unwrap();
+    }
+    pair.ran(Approval::new(0, count as u64), at(1));
+
+    // Cancelled once the first batch is back.
+    let journal = pair.journal.clone().unwrap();
+    let prepared = pair.prepare();
+    let mut store = pair.store();
+    let mut checks = 0;
+    let undo = prepared
+        .undo(
+            journal,
+            at(2),
+            &mut |planned, commit| store.apply(planned, commit),
+            &mut || {
+                checks += 1;
+                if checks > 1 {
+                    ScanControl::Cancel
+                } else {
+                    ScanControl::Continue
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(undo.completion(), Completion::Cancelled);
+    assert_eq!(undo.restored(), COMMIT_BATCH as u64);
+
+    let undo = pair.undo_at(at(3));
+    assert!(undo.not_undone().is_empty(), "{:?}", undo.not_undone());
+    assert_eq!((undo.restored(), undo.beside()), (1, 0));
+    // Every file, keep.txt and .foldover.
+    assert_eq!(fs::read_dir(&right).unwrap().count(), count + 2);
+    assert_eq!(pair.base, before);
+    assert!(pair.journal.is_none());
 }
 
 /// Review: with only one identity recorded (the other root was changed),

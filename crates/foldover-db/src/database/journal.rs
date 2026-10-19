@@ -33,6 +33,11 @@ pub enum JournalChange<'a> {
     },
     /// Hold the pair's automatic syncs (`automation_hold`).
     Hold,
+    /// An undo reverted these entries of `run`; a retry skips them.
+    Undid {
+        run: &'a str,
+        seqs: &'a [i64],
+    },
     /// `run` was undone; its entries are spent.
     Spend {
         run: &'a str,
@@ -51,6 +56,14 @@ pub(super) fn apply(
                 "INSERT OR IGNORE INTO automation_hold (pair_id) VALUES (?1)",
                 params![pair],
             )?;
+            Ok(())
+        }
+        JournalChange::Undid { run, seqs } => {
+            let mut delete = transaction
+                .prepare("DELETE FROM run_journal WHERE pair_id=?1 AND run=?2 AND seq=?3")?;
+            for seq in seqs {
+                delete.execute(params![pair, run, seq])?;
+            }
             Ok(())
         }
         JournalChange::Spend { run } => {
@@ -175,6 +188,34 @@ mod tests {
         let (run, rows) = database.journal(&pair.id).unwrap().unwrap();
         assert_eq!(run, "2026-10-19T10-00-00.000Z");
         assert_eq!(rows, [first[0].clone(), first[1].clone(), more[0].clone()]);
+
+        // An undo drops the entries it reverted, and only from that run.
+        for run in ["2026-10-19T09-00-00.000Z", "2026-10-19T10-00-00.000Z"] {
+            database
+                .change_base(
+                    &pair.id,
+                    1,
+                    &[],
+                    JournalChange::Undid {
+                        run,
+                        seqs: &[first[1].seq],
+                    },
+                )
+                .unwrap();
+        }
+        let (_, rows) = database.journal(&pair.id).unwrap().unwrap();
+        assert_eq!(rows, [first[0].clone(), more[0].clone()]);
+        database
+            .change_base(
+                &pair.id,
+                1,
+                &[],
+                JournalChange::Record {
+                    run: "2026-10-19T10-00-00.000Z",
+                    rows: &first[1..],
+                },
+            )
+            .unwrap();
 
         // A later run that writes nothing keeps the journal; one that
         // writes replaces it.

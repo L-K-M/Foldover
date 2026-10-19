@@ -145,6 +145,7 @@ impl PairRun {
                 .map(|(entry, _)| restore(entry))
                 .collect();
             commit(revision, Commit::Undoing { updates: &restores }).map_err(RunError::Commit)?;
+            let mut undid = Vec::new();
             for (entry, step) in steps {
                 match self.undo_entry(entry, step, &journal.run, &scope, control) {
                     Ok(Placed::AtPath) if step == Step::Remove => report.removed += 1,
@@ -153,20 +154,39 @@ impl PairRun {
                         put_back.push((entry.side, entry.path.clone()));
                     }
                     Ok(Placed::Beside) => report.beside += 1,
-                    Err(message) => report.not_undone.push(Failure {
-                        path: entry.path.clone(),
-                        message,
-                    }),
+                    Err(message) => {
+                        report.not_undone.push(Failure {
+                            path: entry.path.clone(),
+                            message,
+                        });
+                        continue;
+                    }
                 }
+                undid.push(entry.seq);
             }
+            // Undoing again after a cancel or crash skips these; without
+            // this, a retry finds them back and lists each as changed or
+            // no longer archived.
+            let undid = Commit::Undid {
+                run: &journal.run,
+                seqs: &undid,
+            };
+            commit(revision, undid).map_err(RunError::Commit)?;
         }
 
         let mut refilled = Vec::new();
         if report.completion == Completion::Finished {
             for folder in folders {
-                if put_back
-                    .iter()
-                    .any(|(side, path)| *side == folder.side && folder.path.is_ancestor_of(path))
+                // An earlier, cancelled attempt may have refilled it.
+                let exists = self
+                    .observation(folder.side)
+                    .entries()
+                    .get(&folder.path)
+                    .is_some_and(|current| current.version().kind() == EntryKind::Directory);
+                if exists
+                    || put_back.iter().any(|(side, path)| {
+                        *side == folder.side && folder.path.is_ancestor_of(path)
+                    })
                 {
                     report.restored += 1;
                     refilled.push(restore(folder));
