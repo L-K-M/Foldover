@@ -39,8 +39,9 @@ A run that needs approval exits 3; failures and cancellations exit 1.
 
 The app's `SyncStore` keeps generated values inside one actor, starts jobs
 and polls every 500 ms while one works. A run that needs approval shows the
-deletion counts; confirming retries with exactly those counts. Declining
-keeps the preview visible.
+deletion counts; confirming retries with exactly those counts. The retry
+executes only while the plan still equals the preview being confirmed — a
+changed plan stops for review again. Declining keeps the preview visible.
 
 While the app runs, with or without its window, it checks every pair's
 status every 15 seconds. Outcomes of automatic runs that need a person

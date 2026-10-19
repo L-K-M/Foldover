@@ -1098,9 +1098,7 @@ mod tests {
             .await
             .unwrap();
         let key = json!({"id": created["id"]});
-        let run = |right_deletions| {
-            json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": right_deletions})
-        };
+        let run = |right_deletions| json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": right_deletions});
 
         // PLAN.md §3.6: a non-empty target needs explicit confirmation on the
         // first run, even below the deletion fuse. Nothing may be archived yet.
@@ -1127,6 +1125,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_first_mirror_run_that_overwrites_target_content_waits_for_review() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Photos");
+        input["mode"] = json!({"kind": "mirror", "source": "left"});
+        let left = directory.path().join("Photos-left");
+        let right = directory.path().join("Photos-right");
+        fs::write(left.join("shared"), b"new").unwrap();
+        fs::write(right.join("shared"), b"old").unwrap();
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+
+        // The first run replaces existing target content: a non-empty target
+        // needs explicit confirmation even when nothing is deleted (§3.6).
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run.clone())))
+            .await
+            .unwrap();
+        let stopped = settled(&service, &key).await;
+        assert_eq!(stopped["state"], "needsApproval", "{stopped}");
+        assert_eq!(fs::read(right.join("shared")).unwrap(), b"old");
+        assert!(!right.join(".foldover/archive").exists());
+
+        // A reviewed retry of the unchanged plan runs it.
+        service
+            .handle(Request::call(3, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        let finished = settled(&service, &key).await;
+        assert_eq!(finished["state"], "finished", "{finished}");
+        assert_eq!(fs::read(right.join("shared")).unwrap(), b"new");
+    }
+
+    #[tokio::test]
     async fn an_approval_does_not_authorize_a_changed_deletion_set() {
         let (directory, service) = fixture();
         let input = input(directory.path(), "Docs");
@@ -1140,9 +1175,7 @@ mod tests {
             .await
             .unwrap();
         let key = json!({"id": created["id"]});
-        let run = |right_deletions| {
-            json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": right_deletions})
-        };
+        let run = |right_deletions| json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": right_deletions});
         service
             .handle(Request::call(2, SYNC_RUN, Some(run(0))))
             .await
@@ -1196,9 +1229,7 @@ mod tests {
             .await
             .unwrap();
         let key = json!({"id": created["id"]});
-        let run = |right_deletions| {
-            json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": right_deletions})
-        };
+        let run = |right_deletions| json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": right_deletions});
         service
             .handle(Request::call(2, SYNC_RUN, Some(run(0))))
             .await

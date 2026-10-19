@@ -67,10 +67,26 @@ impl Conflicts {
     }
 }
 
+/// The plan a person last saw: conflict versions `sync.resolve` binds to,
+/// and the whole preview a nonzero approval must match (ADRs 0013, 0020).
+struct Reviewed {
+    conflicts: Conflicts,
+    plan: Preview,
+}
+
+impl Reviewed {
+    fn from(preview: &Preview) -> Self {
+        Self {
+            conflicts: Conflicts::from(preview),
+            plan: preview.clone(),
+        }
+    }
+}
+
 struct Job {
     status: SyncStatus,
     cancel: Arc<AtomicBool>,
-    conflicts: Option<Conflicts>,
+    reviewed: Option<Reviewed>,
 }
 
 #[derive(Default)]
@@ -126,9 +142,9 @@ impl Jobs {
                     "Wait for the current preview or sync to finish",
                 ));
             }
-            let conflicts = job.conflicts.as_ref().ok_or_else(stale)?;
-            let versions = *conflicts.versions.get(path).ok_or_else(stale)?;
-            (conflicts.revision, versions)
+            let reviewed = job.reviewed.as_ref().ok_or_else(stale)?;
+            let versions = *reviewed.conflicts.versions.get(path).ok_or_else(stale)?;
+            (reviewed.conflicts.revision, versions)
         };
         engine
             .lock()
@@ -152,9 +168,9 @@ impl Jobs {
         work: Work,
     ) -> Result<SyncStatus, RpcError> {
         let cancel = Arc::new(AtomicBool::new(false));
-        self.claim(id, work, &cancel)?;
+        let held = self.claim(id, work, &cancel)?;
         let engine = Arc::clone(engine);
-        self.spawn(id, move || perform(&engine, id, work, &cancel));
+        self.spawn(id, move || perform(&engine, id, work, &cancel, held));
         Ok(self.status(id))
     }
 
@@ -164,7 +180,7 @@ impl Jobs {
         self: &Arc<Self>,
         id: PairId,
         work: Work,
-        run: impl FnOnce() -> (SyncStatus, Option<Conflicts>) + Send + 'static,
+        run: impl FnOnce() -> (SyncStatus, Option<Reviewed>) + Send + 'static,
     ) -> Result<SyncStatus, RpcError> {
         self.claim(id, work, &Arc::new(AtomicBool::new(false)))?;
         self.spawn(id, run);
@@ -183,7 +199,7 @@ impl Jobs {
                 Job {
                     status,
                     cancel: Arc::new(AtomicBool::new(false)),
-                    conflicts: None,
+                    reviewed: None,
                 },
             );
     }
@@ -242,7 +258,12 @@ impl Jobs {
     /// Reserve the pair for `work` while a job runs. Unattended work never
     /// replaces a result waiting for a person (ADR 0022): a stopped run
     /// stays stopped until a manual preview or sync releases the pair.
-    fn claim(&self, id: PairId, work: Work, cancel: &Arc<AtomicBool>) -> Result<(), RpcError> {
+    fn claim(
+        &self,
+        id: PairId,
+        work: Work,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<Option<Preview>, RpcError> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let blocked = if state.mutating.contains(&id) {
             Some("The pair's configuration is changing")
@@ -264,18 +285,25 @@ impl Jobs {
         if let Some(message) = blocked {
             return Err(RpcError::new(SYNC_BUSY, message));
         }
-        state.jobs.insert(
-            id,
-            Job {
-                status: SyncStatus::Working {
-                    job: work.job(),
-                    cancelling: false,
+        // The replaced job's held review is spent by this attempt: it moves
+        // to the caller so a run can prove its plan is unchanged, and the
+        // job's own result replaces it when published.
+        let held = state
+            .jobs
+            .insert(
+                id,
+                Job {
+                    status: SyncStatus::Working {
+                        job: work.job(),
+                        cancelling: false,
+                    },
+                    cancel: Arc::clone(cancel),
+                    reviewed: None,
                 },
-                cancel: Arc::clone(cancel),
-                conflicts: None,
-            },
-        );
-        Ok(())
+            )
+            .and_then(|previous| previous.reviewed)
+            .map(|reviewed| reviewed.plan);
+        Ok(held)
     }
 
     /// Run `run` on the blocking pool and publish its result. A panic
@@ -284,7 +312,7 @@ impl Jobs {
     fn spawn(
         self: &Arc<Self>,
         id: PairId,
-        run: impl FnOnce() -> (SyncStatus, Option<Conflicts>) + Send + 'static,
+        run: impl FnOnce() -> (SyncStatus, Option<Reviewed>) + Send + 'static,
     ) {
         let jobs = Arc::clone(self);
         tokio::task::spawn_blocking(move || {
@@ -296,12 +324,12 @@ impl Jobs {
                     None,
                 )
             };
-            let (status, conflicts) =
+            let (status, reviewed) =
                 catch_unwind(AssertUnwindSafe(run)).unwrap_or_else(|_| crashed());
             let mut state = jobs.state.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(job) = state.jobs.get_mut(&id) {
                 job.status = status;
-                job.conflicts = conflicts;
+                job.reviewed = reviewed;
             }
         });
     }
@@ -329,7 +357,8 @@ fn perform(
     id: PairId,
     work: Work,
     cancel: &AtomicBool,
-) -> (SyncStatus, Option<Conflicts>) {
+    held: Option<Preview>,
+) -> (SyncStatus, Option<Reviewed>) {
     let failed = |message: String| (SyncStatus::Failed { message }, None);
     let inputs = match engine.lock() {
         Ok(engine) => engine.run_inputs(id),
@@ -366,9 +395,31 @@ fn perform(
             let status = SyncStatus::Previewed {
                 preview: preview(&planned),
             };
-            return (status, Some(Conflicts::from(&planned)));
+            return (status, Some(Reviewed::from(&planned)));
         }
-        Work::Run(approval) => (approval, RunContext::Interactive),
+        Work::Run(approval) => {
+            let planned = run.preview();
+            // ADR 0013: approval binds to the exact reviewed plan. One that
+            // accepts deletions without matching the held preview stops with
+            // the fresh plan instead of touching either folder.
+            let reviewed = held.as_ref() == Some(&planned);
+            if approval.approves_anything() && !reviewed {
+                return (
+                    SyncStatus::NeedsApproval {
+                        preview: preview(&planned),
+                    },
+                    Some(Reviewed::from(&planned)),
+                );
+            }
+            (
+                approval,
+                if reviewed {
+                    RunContext::Reviewed
+                } else {
+                    RunContext::Interactive
+                },
+            )
+        }
         Work::Scheduled => (Approval::default(), RunContext::Unattended),
     };
     // A panic elsewhere cannot leave a half-applied transaction, so a
@@ -396,7 +447,7 @@ fn perform(
             SyncStatus::NeedsApproval {
                 preview: preview(&planned),
             },
-            Some(Conflicts::from(&planned)),
+            Some(Reviewed::from(&planned)),
         ),
         Err(error) => failed(error.to_string()),
     }
@@ -505,7 +556,7 @@ mod tests {
                     cancelling: false,
                 },
                 cancel,
-                conflicts: None,
+                reviewed: None,
             },
         );
         assert_eq!(

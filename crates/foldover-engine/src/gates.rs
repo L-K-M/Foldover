@@ -6,6 +6,9 @@ const MAX_UNATTENDED_DELETION_PERCENT: u128 = 50;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunContext {
     Interactive,
+    /// Interactive and the run's plan equals the last one a person saw:
+    /// the caller proved the approval binds to this exact preview.
+    Reviewed,
     Unattended,
 }
 
@@ -51,13 +54,13 @@ impl DeletionCounts {
     }
 
     /// PLAN.md §3.6 uses separate interactive and unattended thresholds.
-    /// Confirmations must later be bound to the exact reviewed plan, not cached
-    /// as a pair-level override.
+    /// `Reviewed` takes the interactive threshold: the caller bound the
+    /// approval to this exact plan, but the counts still must cover it.
     pub fn review(self, context: RunContext) -> DeletionReview {
         let deletions = u128::from(self.deletions);
         let paths = u128::from(self.paths);
         match context {
-            RunContext::Interactive
+            RunContext::Interactive | RunContext::Reviewed
                 if self.deletions > MIN_INTERACTIVE_DELETIONS
                     && deletions * PERCENT_SCALE > paths * INTERACTIVE_DELETION_PERCENT =>
             {
