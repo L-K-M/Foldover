@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
 use foldover_endpoint::{
-    ApplyError, Endpoint, EndpointPair, Expected, Filter, InvalidFilter, Observation,
+    ApplyError, Endpoint, EndpointPair, Expected, Filter, InvalidFilter, Observation, ObserveStep,
     ObservedEntry, PairRootError, RunScope, ScanError, access_denied,
 };
 use foldover_state::{
@@ -129,6 +129,26 @@ pub enum Commit<'a> {
         run: &'a str,
         updates: &'a [BaseUpdate],
     },
+}
+
+/// Where a run reports how far it got, for the agent to show while it
+/// works. Calls come from the run's own thread; implementations keep
+/// counters other threads read.
+pub trait RunProgress {
+    fn observed(&self, side: Side, step: ObserveStep);
+    /// The plan is ready: the changes to make and the bytes they copy.
+    fn planned(&self, changes: u64, bytes: u64);
+    /// One planned change was handled, copying `bytes`.
+    fn applied(&self, bytes: u64);
+}
+
+/// For callers that show no progress.
+pub struct NoProgress;
+
+impl RunProgress for NoProgress {
+    fn observed(&self, _: Side, _: ObserveStep) {}
+    fn planned(&self, _: u64, _: u64) {}
+    fn applied(&self, _: u64) {}
 }
 
 /// What the user saw and accepted in a preview.
@@ -474,10 +494,11 @@ impl PairRun {
     pub fn prepare(
         inputs: RunInputs,
         control: &mut impl FnMut() -> ScanControl,
+        progress: &dyn RunProgress,
     ) -> Result<Self, RunError> {
         let draft = inputs.pair.draft();
         let endpoints = EndpointPair::open(draft.left(), draft.right())?;
-        Self::prepare_on(inputs, endpoints, control)
+        Self::prepare_on(inputs, endpoints, control, progress)
     }
 
     /// `prepare` on endpoints opened elsewhere.
@@ -485,6 +506,7 @@ impl PairRun {
         inputs: RunInputs,
         endpoints: EndpointPair,
         control: &mut impl FnMut() -> ScanControl,
+        progress: &dyn RunProgress,
     ) -> Result<Self, RunError> {
         let RunInputs {
             pair,
@@ -533,7 +555,9 @@ impl PairRun {
             };
             endpoints
                 .endpoint(side)
-                .observe_from(policy, &filter, previous, &mut || control())
+                .observe_from(policy, &filter, previous, &mut || control(), &mut |step| {
+                    progress.observed(side, step)
+                })
                 .map_err(|source| match source {
                     ScanError::Cancelled => RunError::Cancelled,
                     source => observe_error(side, source),
@@ -707,6 +731,7 @@ impl PairRun {
         started: SystemTime,
         commit: &mut impl FnMut(u64, Commit<'_>) -> Result<(), crate::Error>,
         control: &mut impl FnMut() -> ScanControl,
+        progress: &dyn RunProgress,
     ) -> Result<RunOutcome, RunError> {
         let options = self.pair.draft().options();
         // Full durability is a promise a generic SFTP server cannot
@@ -840,6 +865,12 @@ impl PairRun {
         }
 
         let rows = self.plan.rows();
+        let changes = rows.iter().filter(|row| writes(row.decision())).count();
+        progress.planned(
+            changes as u64,
+            self.bytes_to_copy(Side::Left)
+                .saturating_add(self.bytes_to_copy(Side::Right)),
+        );
         let forward = rows.iter().filter(|row| !is_archive(row.decision()));
         let reverse = rows.iter().rev().filter(|row| is_archive(row.decision()));
         for (index, row) in forward.chain(reverse).enumerate() {
@@ -859,6 +890,9 @@ impl PairRun {
                 return Err(error);
             }
             executor.apply(row.path(), row.decision(), control);
+            if writes(row.decision()) {
+                progress.applied(self.copied_bytes(row).map_or(0, |(_, bytes)| bytes));
+            }
             if executor.pending.len().max(executor.journal.len()) >= COMMIT_BATCH {
                 commit(&mut executor)?;
             }
@@ -964,6 +998,14 @@ fn require_space(side: Side, needed: u64, available: u64) -> Result<(), RunError
         });
     }
     Ok(())
+}
+
+/// Whether a planned row changes either folder.
+fn writes(decision: &CandidateDecision) -> bool {
+    matches!(
+        decision,
+        CandidateDecision::Entry(EntryDecision::Propagate { .. } | EntryDecision::Archive { .. })
+    )
 }
 
 fn is_archive(decision: &CandidateDecision) -> bool {

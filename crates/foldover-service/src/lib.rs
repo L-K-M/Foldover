@@ -385,6 +385,7 @@ async fn health(request: Request) -> Result<Value, RpcError> {
 mod tests {
     use super::*;
     use foldover_engine::Completion;
+    use foldover_proto::local::SyncProgress;
     use foldover_proto::local::{
         SyncCounts, SyncDeletions, SyncJob, SyncPreview, SyncResult, SyncStatus,
     };
@@ -1749,6 +1750,7 @@ mod tests {
             SyncStatus::Working {
                 job: SyncJob::Run,
                 cancelling: false,
+                progress: SyncProgress::default(),
             },
         ] {
             service.jobs.force_status(id, status.clone());
@@ -2385,6 +2387,7 @@ mod tests {
             SyncStatus::Working {
                 job: SyncJob::Run,
                 cancelling: false,
+                progress: SyncProgress::default(),
             },
         );
         assert_eq!(
@@ -2484,6 +2487,7 @@ mod tests {
             SyncStatus::Working {
                 job: SyncJob::Run,
                 cancelling: false,
+                progress: SyncProgress::default(),
             },
         );
         assert_eq!(
@@ -2595,6 +2599,7 @@ mod tests {
             SyncStatus::Working {
                 job: SyncJob::Run,
                 cancelling: false,
+                progress: SyncProgress::default(),
             },
         ] {
             service.jobs.force_status(id, status.clone());

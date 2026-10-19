@@ -151,9 +151,26 @@ enum SyncJob: Sendable {
     case undo
 }
 
+/// How far a working job has got (PLAN.md §3.2: live counters).
+/// `changes` and `bytes` stay 0 until the plan is ready. This is display
+/// data: two working states are the same state however far along, so new
+/// counts never look like a new result.
+struct WorkProgress: Equatable, Sendable {
+    var listed: UInt64 = 0
+    var checked: UInt64 = 0
+    var changes: UInt64 = 0
+    var applied: UInt64 = 0
+    var bytes: UInt64 = 0
+    var copied: UInt64 = 0
+
+    static let none = WorkProgress()
+
+    static func == (_: WorkProgress, _: WorkProgress) -> Bool { true }
+}
+
 enum PairSyncState: Equatable, Sendable {
     case idle
-    case working(SyncJob, cancelling: Bool)
+    case working(SyncJob, cancelling: Bool, progress: WorkProgress = .none)
     case previewed(PreviewSummary)
     /// Too many deletions for this run; nothing was written.
     case needsApproval(PreviewSummary)
@@ -288,7 +305,11 @@ private actor CoreSyncClient: SyncClient {
     private func state(_ state: SyncJobState) -> PairSyncState {
         switch state {
         case .idle: .idle
-        case .working(let job, let cancelling): .working(self.job(job), cancelling: cancelling)
+        case .working(let job, let cancelling, let progress):
+            .working(self.job(job), cancelling: cancelling, progress: WorkProgress(
+                listed: progress.listed, checked: progress.checked, changes: progress.changes,
+                applied: progress.applied, bytes: progress.bytes, copied: progress.copied
+            ))
         case .previewed(let preview): .previewed(summary(preview))
         case .needsApproval(let preview): .needsApproval(summary(preview))
         case .finished(let result): .finished(summary(result))

@@ -11,21 +11,22 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 
 use foldover_engine::{
-    Action, Approval, Commit, Completion, DeletionReview, Engine, KeepBothError, PairRun, Preview,
-    PreviewItem, RunContext, RunError, RunOutcome, RunReport, UndoReport, missing_side, reconnect,
+    Action, Approval, Commit, Completion, DeletionReview, Engine, KeepBothError, ObserveStep,
+    PairRun, Preview, PreviewItem, RunContext, RunError, RunOutcome, RunProgress, RunReport,
+    UndoReport, missing_side, reconnect,
 };
 use foldover_proto::local::RpcError;
 use foldover_proto::local::{
     INTERNAL_ERROR, INVALID_PARAMS, PREVIEW_REQUIRED, ROOT_UNAVAILABLE, SYNC_BUSY, SYNC_ITEM_LIMIT,
     SyncAction, SyncConflict, SyncCounts, SyncDeletions, SyncFailure, SyncItem, SyncItemKind,
-    SyncItemPage, SyncJob, SyncPreview, SyncResult, SyncStatus, UndoResult,
+    SyncItemPage, SyncJob, SyncPreview, SyncProgress, SyncResult, SyncStatus, UndoResult,
 };
 use foldover_types::{
     ChangeKind, ConflictKind, EntryVersion, PairId, Resolution, ReviewToken, ScanControl, Side,
@@ -89,6 +90,61 @@ struct Job {
     status: SyncStatus,
     cancel: Arc<AtomicBool>,
     reviewed: Option<Reviewed>,
+    /// The working job's counters; status requests read them live.
+    progress: Arc<Progress>,
+}
+
+/// How far a job has got, written by its run and read by status requests.
+#[derive(Default)]
+pub(crate) struct Progress {
+    listed: AtomicU64,
+    checked: AtomicU64,
+    changes: AtomicU64,
+    applied: AtomicU64,
+    bytes: AtomicU64,
+    copied: AtomicU64,
+}
+
+impl RunProgress for Progress {
+    fn observed(&self, _: Side, step: ObserveStep) {
+        let counter = match step {
+            ObserveStep::Listed => &self.listed,
+            ObserveStep::Checked => &self.checked,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn planned(&self, changes: u64, bytes: u64) {
+        self.changes.store(changes, Ordering::Relaxed);
+        self.bytes.store(bytes, Ordering::Relaxed);
+    }
+
+    fn applied(&self, bytes: u64) {
+        self.applied.fetch_add(1, Ordering::Relaxed);
+        self.copied.fetch_add(bytes, Ordering::Relaxed);
+    }
+}
+
+impl Progress {
+    fn wire(&self) -> SyncProgress {
+        let read = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+        SyncProgress {
+            listed: read(&self.listed),
+            checked: read(&self.checked),
+            changes: read(&self.changes),
+            applied: read(&self.applied),
+            bytes: read(&self.bytes),
+            copied: read(&self.copied),
+        }
+    }
+}
+
+/// What a job start hands its run.
+struct Claim {
+    /// The review the replaced job held.
+    held: Option<Reviewed>,
+    skips: BTreeMap<SyncPath, Skip>,
+    progress: Arc<Progress>,
 }
 
 #[derive(Default)]
@@ -119,6 +175,7 @@ impl Jobs {
             SyncStatus::Working { job: work, .. } => SyncStatus::Working {
                 job: *work,
                 cancelling: job.cancel.load(Ordering::Relaxed),
+                progress: job.progress.wire(),
             },
             status => status.clone(),
         }
@@ -336,6 +393,7 @@ impl Jobs {
                         status: waiting,
                         cancel: Arc::new(AtomicBool::new(false)),
                         reviewed: None,
+                        progress: Arc::default(),
                     },
                 );
             }
@@ -357,12 +415,16 @@ impl Jobs {
         work: Work,
     ) -> Result<SyncStatus, RpcError> {
         let cancel = Arc::new(AtomicBool::new(false));
-        let (held, skips) = self.claim(id, work, &cancel)?;
+        let Claim {
+            held,
+            skips,
+            progress,
+        } = self.claim(id, work, &cancel)?;
         let engine = Arc::clone(engine);
         let jobs = Arc::clone(self);
         self.spawn(id, move || {
             let started = SystemTime::now();
-            let (status, reviewed) = perform(&engine, id, work, &cancel, held, skips);
+            let (status, reviewed) = perform(&engine, id, work, &cancel, held, skips, &progress);
             crate::history::record(&engine, id, work, started, &status);
             // A skip lasts one executed run.
             if matches!(status, SyncStatus::Finished { .. }) {
@@ -399,6 +461,7 @@ impl Jobs {
                     status,
                     cancel: Arc::new(AtomicBool::new(false)),
                     reviewed: None,
+                    progress: Arc::default(),
                 },
             );
     }
@@ -457,12 +520,7 @@ impl Jobs {
     /// Reserve the pair for `work` while a job runs. Unattended work never
     /// replaces a result waiting for a person (ADR 0022): a stopped run
     /// stays stopped until a manual preview or sync releases the pair.
-    fn claim(
-        &self,
-        id: PairId,
-        work: Work,
-        cancel: &Arc<AtomicBool>,
-    ) -> Result<(Option<Reviewed>, BTreeMap<SyncPath, Skip>), RpcError> {
+    fn claim(&self, id: PairId, work: Work, cancel: &Arc<AtomicBool>) -> Result<Claim, RpcError> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let blocked = if state.mutating.contains(&id) {
             Some("The pair's configuration is changing")
@@ -486,6 +544,7 @@ impl Jobs {
         if let Some(message) = blocked {
             return Err(RpcError::new(SYNC_BUSY, message));
         }
+        let progress = Arc::new(Progress::default());
         // The replaced job's held review is spent by this attempt: it moves
         // to the caller so a run can prove its plan is unchanged, and the
         // job's own result replaces it when published.
@@ -497,14 +556,20 @@ impl Jobs {
                     status: SyncStatus::Working {
                         job: work.job(),
                         cancelling: false,
+                        progress: SyncProgress::default(),
                     },
                     cancel: Arc::clone(cancel),
                     reviewed: None,
+                    progress: Arc::clone(&progress),
                 },
             )
             .and_then(|previous| previous.reviewed);
         let skips = state.skips.get(&id).cloned().unwrap_or_default();
-        Ok((held, skips))
+        Ok(Claim {
+            held,
+            skips,
+            progress,
+        })
     }
 
     fn spend_skips(&self, id: PairId) {
@@ -568,6 +633,7 @@ fn perform(
     cancel: &AtomicBool,
     held: Option<Reviewed>,
     skips: BTreeMap<SyncPath, Skip>,
+    progress: &Progress,
 ) -> (SyncStatus, Option<Reviewed>) {
     let failed = |message: String| (SyncStatus::Failed { message }, None);
     let stored = match engine.lock() {
@@ -609,7 +675,7 @@ fn perform(
             ScanControl::Continue
         }
     };
-    let run = match PairRun::prepare(inputs, &mut control) {
+    let run = match PairRun::prepare(inputs, &mut control, progress) {
         Ok(run) => run,
         // Nothing was written yet.
         Err(RunError::Cancelled) => return (SyncStatus::Idle, None),
@@ -696,6 +762,7 @@ fn perform(
         SystemTime::now(),
         &mut commit,
         &mut control,
+        progress,
     ) {
         Ok(RunOutcome::Ran(report)) => {
             // A person's sync that ran ends a hold an undo left; one that
@@ -852,9 +919,11 @@ mod tests {
                 status: SyncStatus::Working {
                     job: SyncJob::Run,
                     cancelling: false,
+                    progress: SyncProgress::default(),
                 },
                 cancel,
                 reviewed: None,
+                progress: Arc::default(),
             },
         );
         assert_eq!(
@@ -866,7 +935,8 @@ mod tests {
             jobs.status(id),
             SyncStatus::Working {
                 job: SyncJob::Run,
-                cancelling: true
+                cancelling: true,
+                progress: SyncProgress::default(),
             }
         );
     }

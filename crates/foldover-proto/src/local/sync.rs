@@ -244,6 +244,24 @@ pub struct UndoResult {
     pub archive: String,
 }
 
+/// How far a working job has got (PLAN.md §3.2: live counters). Counts
+/// grow while it works; `changes` and `bytes` stay 0 until its plan is
+/// ready.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncProgress {
+    /// Entries found in both folders.
+    pub listed: u64,
+    /// Entries whose version is known.
+    pub checked: u64,
+    /// Planned changes, and those handled so far.
+    pub changes: u64,
+    pub applied: u64,
+    /// Bytes the changes copy, and those copied so far.
+    pub bytes: u64,
+    pub copied: u64,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SyncJob {
@@ -259,6 +277,7 @@ pub enum SyncStatus {
     Working {
         job: SyncJob,
         cancelling: bool,
+        progress: SyncProgress,
     },
     Previewed {
         preview: SyncPreview,

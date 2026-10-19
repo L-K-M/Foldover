@@ -404,6 +404,7 @@ fn copies_both_ways_keep_content_and_archive_what_they_replace() {
                 &Filter::none(),
                 &std::collections::BTreeMap::new(),
                 &mut proceed,
+                &mut |_| {},
             )
             .unwrap()
     };
@@ -533,6 +534,7 @@ fn identities_removals_and_pruning_follow_the_local_rules() {
             &Filter::none(),
             &std::collections::BTreeMap::new(),
             &mut proceed,
+            &mut |_| {},
         )
         .unwrap();
     for name in [b"gone".as_slice(), b"empty"] {
@@ -600,6 +602,7 @@ fn full_durability_is_rejected(remote: &Endpoint, root: &Path) {
                 &Filter::none(),
                 &std::collections::BTreeMap::new(),
                 &mut proceed,
+                &mut |_| {},
             )
             .unwrap()
     };

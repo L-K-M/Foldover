@@ -16,7 +16,7 @@ pub use foldover_proto::local::{
     AgentCapability, ArchiveItem, ArchiveItems, ArchiveRestored, ArchiveRun, ArchiveRuns,
     DaemonStatus, History, HistoryOutcome, HistoryRecord, HistoryTrigger, PairSide, SyncAction,
     SyncConflict, SyncCounts, SyncDeletions, SyncFailure, SyncItem, SyncJob, SyncPreview,
-    SyncResult, SyncStatus, UndoResult,
+    SyncProgress, SyncResult, SyncStatus, UndoResult,
 };
 pub use foldover_proto::local::{AutomationStatus, SyncItemKind, SyncItemPage};
 use foldover_proto::local::{

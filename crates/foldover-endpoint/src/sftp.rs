@@ -31,8 +31,8 @@ use crate::local::filter::{IGNORE_FILE, IGNORE_FILE_LIMIT, parse_ignore_file};
 use crate::local::version::{Observed, Payload, entry_version, metadata_version};
 use crate::local::{Fingerprint, TEMPORARY_PREFIX, child_path, protected, temporary};
 use crate::{
-    ApplyError, ArchivedItem, ArchivedRun, Filter, NodeKind, Observation, ObservedEntry, RunScope,
-    ScanError,
+    ApplyError, ArchivedItem, ArchivedRun, Filter, NodeKind, Observation, ObserveStep,
+    ObservedEntry, RunScope, ScanError,
 };
 
 /// Foldover's own folders and files.
@@ -228,8 +228,21 @@ impl SftpEndpoint {
         &self,
         policy: MetadataPolicy,
         filter: &Filter,
+        previous: &std::collections::BTreeMap<SyncPath, ObservedEntry>,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<Observation, ScanError> {
+        self.observe_reporting(policy, filter, previous, control, &mut |_| {})
+    }
+
+    /// `observe_from`, reporting each entry as it is found and again once
+    /// its version is known.
+    pub fn observe_reporting(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
         _previous: &std::collections::BTreeMap<SyncPath, ObservedEntry>,
         control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
     ) -> Result<Observation, ScanError> {
         let mut observation = Observation::default();
         let mut pending: Vec<Option<SyncPath>> = vec![None];
@@ -274,8 +287,10 @@ impl SftpEndpoint {
                 if kind == FileKind::Directory {
                     pending.push(Some(path.clone()));
                 }
+                progress(ObserveStep::Listed);
                 let entry = self.observe_entry(&path, &attributes, policy, control)?;
                 observation.entries.insert(path, entry);
+                progress(ObserveStep::Checked);
             }
         }
         Ok(observation)

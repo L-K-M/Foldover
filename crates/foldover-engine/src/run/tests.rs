@@ -187,7 +187,7 @@ impl Fixture {
     fn try_prepare(&self) -> Result<PairRun, RunError> {
         let inputs = self.inputs();
         if self.right_kind == RightKind::Local {
-            return PairRun::prepare(inputs, &mut proceed);
+            return PairRun::prepare(inputs, &mut proceed, &NoProgress);
         }
         let server = sftp_server().expect("callers check for sftp-server");
         let right = foldover_endpoint::SftpEndpoint::spawn(
@@ -201,7 +201,7 @@ impl Fixture {
             foldover_endpoint::Endpoint::Local(left),
             foldover_endpoint::Endpoint::Sftp(right),
         );
-        PairRun::prepare_on(inputs, endpoints, &mut proceed)
+        PairRun::prepare_on(inputs, endpoints, &mut proceed, &NoProgress)
     }
 
     /// Run with an in-memory base that applies commits like the state store.
@@ -224,6 +224,7 @@ impl Fixture {
                 started,
                 &mut |planned, commit| store.apply(planned, commit),
                 &mut proceed,
+                &NoProgress,
             )
             .unwrap()
     }
@@ -437,6 +438,7 @@ fn a_changed_pair_revision_stops_the_run() {
             }
         },
         &mut proceed,
+        &NoProgress,
     );
     assert!(matches!(
         result,
@@ -469,6 +471,7 @@ fn failed_folders_skip_their_contents_and_later_runs_recover_leftovers() {
                 Ok(())
             },
             &mut proceed,
+            &NoProgress,
         )
         .unwrap()
     else {
@@ -544,6 +547,7 @@ fn completed_runs_name_their_archive_and_prune_expired_runs() {
             started,
             &mut |_, _| Ok(()),
             &mut proceed,
+            &NoProgress,
         )
         .unwrap()
     else {
@@ -716,7 +720,7 @@ fn earlier_snapshots_supply_versions_for_settled_unchanged_entries() {
             .unwrap();
     let inputs = RunInputs::new(config, BTreeMap::new(), pair.identities, BTreeMap::new())
         .with_snapshots(left, BTreeMap::new());
-    let second = PairRun::prepare(inputs, &mut proceed).unwrap();
+    let second = PairRun::prepare(inputs, &mut proceed, &NoProgress).unwrap();
     let preview = second.preview();
     assert_eq!(preview.items()[0].versions().0, Some(stored));
 }
@@ -891,7 +895,7 @@ fn age_excluded_files_stay_in_the_snapshot_cache_for_reuse() {
     .into_iter()
     .collect();
     let inputs = pair.inputs().with_snapshots(left, BTreeMap::new());
-    let second = PairRun::prepare(inputs, &mut proceed).unwrap();
+    let second = PairRun::prepare(inputs, &mut proceed, &NoProgress).unwrap();
     assert!(second.preview().items().is_empty());
     assert_eq!(
         second
@@ -986,6 +990,7 @@ fn full_durability_rejects_a_run_with_an_sftp_side() {
             STARTED,
             &mut |_, _| panic!("nothing may commit"),
             &mut proceed,
+            &NoProgress,
         )
         .unwrap_err();
     assert!(
@@ -1091,6 +1096,7 @@ fn a_root_whose_identity_changes_mid_run_stops_at_the_next_batch() {
                 Ok(())
             },
             &mut control,
+            &NoProgress,
         )
         .unwrap_err();
     assert!(
@@ -1437,6 +1443,63 @@ fn a_skipped_change_and_everything_inside_it_waits_for_another_run() {
     assert!(right.join("folder/inner").exists());
 }
 
+/// Counts what a run reports, as the agent's status does.
+#[derive(Default)]
+struct Counts {
+    listed: std::cell::Cell<u64>,
+    checked: std::cell::Cell<u64>,
+    planned: std::cell::Cell<(u64, u64)>,
+    applied: std::cell::Cell<u64>,
+    copied: std::cell::Cell<u64>,
+}
+
+impl RunProgress for Counts {
+    fn observed(&self, _: Side, step: ObserveStep) {
+        let counter = match step {
+            ObserveStep::Listed => &self.listed,
+            ObserveStep::Checked => &self.checked,
+        };
+        counter.set(counter.get() + 1);
+    }
+
+    fn planned(&self, changes: u64, bytes: u64) {
+        self.planned.set((changes, bytes));
+    }
+
+    fn applied(&self, bytes: u64) {
+        self.applied.set(self.applied.get() + 1);
+        self.copied.set(self.copied.get() + bytes);
+    }
+}
+
+#[test]
+fn runs_report_what_they_observe_plan_and_apply() {
+    let pair = fixture(SyncMode::Sync);
+    fs::write(pair.left.path().join("a"), b"aaa").unwrap();
+    fs::create_dir(pair.left.path().join("dir")).unwrap();
+    fs::write(pair.left.path().join("dir/b"), b"bbbbb").unwrap();
+    fs::write(pair.right.path().join("c"), b"c").unwrap();
+
+    let counts = Counts::default();
+    let prepared = PairRun::prepare(pair.inputs(), &mut proceed, &counts).unwrap();
+    assert_eq!((counts.listed.get(), counts.checked.get()), (4, 4));
+
+    let outcome = prepared
+        .execute(
+            Approval::default(),
+            RunContext::Reviewed,
+            STARTED,
+            &mut |_, _| Ok(()),
+            &mut proceed,
+            &counts,
+        )
+        .unwrap();
+    assert!(matches!(outcome, RunOutcome::Ran(_)));
+    // Four changes: a, dir and dir/b to B; c to A. Folders copy no bytes.
+    assert_eq!(counts.planned.get(), (4, 9));
+    assert_eq!((counts.applied.get(), counts.copied.get()), (4, 9));
+}
+
 /// Review: with only one identity recorded (the other root was changed),
 /// the recorded side must still be checked, not adopted, before writes.
 #[test]
@@ -1462,6 +1525,7 @@ fn a_recorded_side_must_still_match_when_the_other_side_is_new() {
                 Ok(())
             },
             &mut proceed,
+            &NoProgress,
         )
         .unwrap_err();
     assert!(

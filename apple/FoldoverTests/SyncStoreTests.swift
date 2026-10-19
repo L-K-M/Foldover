@@ -1900,3 +1900,34 @@ func previewedChangesCanBeCopiedTheOtherWayOrSkippedOnce() async {
     #expect(await client.skipped == [Data("photos/a.jpg".utf8)])
     #expect(await client.skipTokens == [shown.reviewToken])
 }
+
+@MainActor
+@Test
+func workingJobsShowLiveCountsWithoutCountingAsNewStates() async {
+    let comparing = WorkProgress(listed: 200, checked: 50)
+    let applying = WorkProgress(listed: 200, checked: 200, changes: 4, applied: 1,
+                                bytes: 4_000_000, copied: 1_000_000)
+    let client = DeferredSyncClient()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
+
+    // The refresh keeps polling while the job works; each reply is held.
+    let refresh = Task { await viewModel.refresh() }
+    await client.waitForStatusCalls(1)
+    await client.reply(.working(.run, cancelling: false, progress: comparing))
+    await client.waitForStatusCalls(2)
+    #expect(viewModel.statusText == "Comparing folders… 50 of 200 items checked")
+    #expect(viewModel.progressFraction == 0.25)
+
+    await client.reply(.working(.run, cancelling: false, progress: applying))
+    await client.waitForStatusCalls(3)
+    #expect(viewModel.statusText.hasPrefix("Syncing… 1 of 4 changes · "))
+    #expect(viewModel.progressFraction == 0.25)
+    // New counts are the same state: no new history, listing or alert.
+    #expect(PairSyncState.working(.run, cancelling: false, progress: comparing)
+        == .working(.run, cancelling: false, progress: applying))
+
+    await client.reply(.idle)
+    await refresh.value
+    #expect(viewModel.progressFraction == nil)
+}

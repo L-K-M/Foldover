@@ -11,6 +11,9 @@ All notable changes to this project are documented here. The format follows
 - Guides: what each folder kind can do, setting up NAS shares and SFTP
   servers, and current limitations.
 
+- Live progress while comparing and syncing: items checked, changes made
+  and bytes copied, with a progress bar in the app.
+
 - Per-item overrides in a preview: copy a change the other way, restore an
   item a sync would archive, or skip a change for one sync.
 
