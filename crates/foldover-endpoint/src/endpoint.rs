@@ -156,7 +156,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.recover_leftover(leftover, run),
             Self::Sftp(endpoint) => endpoint.recover_leftover(leftover, run),
-            Self::Peer(_) => Err(PeerEndpoint::writes_pending()),
+            Self::Peer(endpoint) => endpoint.recover_leftover(leftover, run),
         }
     }
 
@@ -170,7 +170,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.remove(path, current, run, control),
             Self::Sftp(endpoint) => endpoint.remove(path, current, run, control),
-            Self::Peer(_) => Err(PeerEndpoint::writes_pending()),
+            Self::Peer(endpoint) => endpoint.remove(path, current, run),
         }
     }
 
@@ -188,7 +188,6 @@ impl Endpoint {
             (Self::Local(to), Self::Local(from_endpoint)) => {
                 to.copy_from(from_endpoint, path, from, current, run, control)
             }
-            (Self::Peer(_), _) | (_, Self::Peer(_)) => Err(PeerEndpoint::writes_pending()),
             _ => crate::sftp::copy(self, source, path, from, current, run, control),
         }
     }
@@ -207,7 +206,6 @@ impl Endpoint {
             (Self::Local(to), Self::Local(from_endpoint)) => {
                 to.update_metadata_from(from_endpoint, path, from, current, run, control)
             }
-            (Self::Peer(_), _) | (_, Self::Peer(_)) => Err(PeerEndpoint::writes_pending()),
             _ => crate::sftp::update_metadata(self, source, path, from, current, run, control),
         }
     }
@@ -216,7 +214,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.prune_archive(retention, now),
             Self::Sftp(endpoint) => endpoint.prune_archive(retention, now),
-            Self::Peer(_) => Err(PeerEndpoint::writes_pending()),
+            Self::Peer(endpoint) => endpoint.prune_archive(retention, now),
         }
     }
 
@@ -224,7 +222,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.archived_runs(),
             Self::Sftp(endpoint) => endpoint.archived_runs(),
-            Self::Peer(_) => Ok(Vec::new()),
+            Self::Peer(endpoint) => endpoint.archived_runs(),
         }
     }
 
@@ -237,7 +235,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.archived_items(run, after, limit),
             Self::Sftp(endpoint) => endpoint.archived_items(run, after, limit),
-            Self::Peer(_) => Err(ScanError::UnknownArchiveRun),
+            Self::Peer(endpoint) => endpoint.archived_items(run, after, limit),
         }
     }
 
@@ -250,7 +248,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.put_back(run, path, durability),
             Self::Sftp(endpoint) => endpoint.put_back(run, path),
-            Self::Peer(_) => Err(PeerEndpoint::writes_pending()),
+            Self::Peer(endpoint) => endpoint.put_back(run, path, durability),
         }
     }
 
@@ -265,7 +263,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.keep_copy(path, expected, from, options, control),
             Self::Sftp(endpoint) => endpoint.keep_copy(path, expected, from, options, control),
-            Self::Peer(_) => Err(PeerEndpoint::writes_pending()),
+            Self::Peer(endpoint) => endpoint.keep_copy(path, expected, from, options),
         }
     }
 

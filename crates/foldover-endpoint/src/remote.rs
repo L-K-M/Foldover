@@ -8,28 +8,34 @@
 //! ```
 //!
 //! Calls block: run them on blocking threads, never on the link's runtime
-//! workers. Writing into another Mac's folder comes in a later slice.
+//! workers. Copies stream data and carry mode and modification time, as
+//! with SFTP; the receiving Mac stages and verifies them.
 
+use std::cell::RefCell;
+use std::io;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
+use foldover_fs::{ForeignMetadata, WriteError};
 use foldover_proto::local::PairDurability;
-use foldover_proto::peer::{FolderOp, NameCase, NameUnicode, PeerCall, PeerReply, ScanSettings};
+use foldover_proto::peer::{
+    FolderOp, IncomingKind, NameCase, NameUnicode, PeerCall, PeerReply, ScanSettings,
+};
 use foldover_types::{
-    CaseMatching, Durability, EndpointId, MetadataPolicy, NameMatching, PeerRoot, ScanControl,
-    UnicodeMatching,
+    CaseMatching, Durability, EndpointId, EntryVersion, MetadataPolicy, NameMatching, PairOptions,
+    PeerRoot, ScanControl, SyncPath, UnicodeMatching,
 };
 
 use crate::link::{Exchange, Incoming, LinkError, PeerLink};
-use crate::{ApplyError, Filter, Observation, ObserveStep, RootRelation, ScanError};
+use crate::{
+    ApplyError, ArchivedItem, ArchivedRun, Expected, Filter, Observation, ObserveStep,
+    ObservedEntry, RootRelation, RunScope, ScanError,
+};
 
 mod serve;
 mod wire;
 
 pub use serve::{FolderCache, serve_folder};
-
-/// What another Mac's folder cannot do yet.
-const WRITES_PENDING: &str = "Changing files in another Mac's folder is not available yet";
 
 pub struct PeerEndpoint {
     link: Arc<PeerLink>,
@@ -76,10 +82,7 @@ impl PeerEndpoint {
     }
 
     pub fn ensure_identity(&self, durability: Durability) -> Result<EndpointId, ApplyError> {
-        let durability = match durability {
-            Durability::Standard => PairDurability::Standard,
-            Durability::Full => PairDurability::Full,
-        };
+        let durability = pair_durability(durability);
         match self.reply(FolderOp::EnsureIdentity { durability })? {
             PeerReply::Identity { id: Some(id) } => {
                 Ok(EndpointId::from_hex(id.as_bytes()).ok_or(ScanError::InvalidIdentity)?)
@@ -122,7 +125,7 @@ impl PeerEndpoint {
             permissions: policy.permissions().into(),
             rules: filter.texts().to_vec(),
             size_limit: filter.size_limit(),
-            cutoff_ms: filter.cutoff().map(milliseconds),
+            cutoff_ms: filter.cutoff().map(wire::milliseconds),
         };
         let mut exchange = self.ask(FolderOp::Observe { scan })?;
         let mut observation = Observation::default();
@@ -176,15 +179,221 @@ impl PeerEndpoint {
         }
     }
 
-    /// Writes are not served yet; report it instead of failing silently.
-    pub(crate) fn writes_pending() -> ApplyError {
-        ApplyError::Scan(ScanError::Peer(WRITES_PENDING.into()))
+    /// Prove `path` still holds `planned` there, and start reading it.
+    pub(crate) fn read(
+        &self,
+        path: &SyncPath,
+        planned: &ObservedEntry,
+        run: &RunScope,
+    ) -> Result<PeerSource, ApplyError> {
+        let mut exchange = self.ask(FolderOp::Read {
+            path: path.as_bytes().to_vec(),
+            entry: wire::entry_bytes(planned),
+            run: wire::run_wire(run),
+        })?;
+        let (metadata, target) = reading(exchange.reply().map_err(unreachable)?)?;
+        Ok(PeerSource {
+            exchange: RefCell::new(Some(exchange)),
+            metadata,
+            target,
+        })
+    }
+
+    /// Prove `path` still holds `planned`, for its metadata only.
+    pub(crate) fn source_metadata(
+        &self,
+        path: &SyncPath,
+        planned: &ObservedEntry,
+        run: &RunScope,
+    ) -> Result<ForeignMetadata, ApplyError> {
+        let reply = self.reply(FolderOp::Metadata {
+            path: path.as_bytes().to_vec(),
+            entry: wire::entry_bytes(planned),
+            run: wire::run_wire(run),
+        });
+        Ok(reading(reply_or_source_changed(reply, path)?)?.0)
+    }
+
+    /// Make `path` hold an entry of `kind`; `send` pushes a file's data.
+    pub(crate) fn receive(
+        &self,
+        path: &SyncPath,
+        current: Expected<'_>,
+        kind: IncomingKind,
+        metadata: ForeignMetadata,
+        run: &RunScope,
+        send: impl FnOnce(&mut dyn FnMut(&[u8]) -> io::Result<()>) -> io::Result<()>,
+    ) -> Result<EntryVersion, ApplyError> {
+        let file = matches!(kind, IncomingKind::File { .. });
+        let current = match current {
+            Expected::Absent => None,
+            Expected::Present(current) => Some(wire::entry_bytes(current)),
+        };
+        let mut exchange = self.ask(FolderOp::Receive {
+            path: path.as_bytes().to_vec(),
+            entry: foldover_proto::peer::Incoming {
+                kind,
+                current,
+                metadata: wire::metadata_wire(metadata),
+                run: wire::run_wire(run),
+            },
+        })?;
+        // The other Mac may refuse before reading the data, e.g. for a
+        // changed destination; its reply says why better than a broken
+        // stream.
+        let sent = if file {
+            send(&mut |chunk| exchange.send_data(chunk).map_err(io::Error::other))
+                .and_then(|()| exchange.end_data().map_err(io::Error::other))
+        } else {
+            Ok(())
+        };
+        match (exchange.reply(), sent) {
+            (Ok(PeerReply::Received { version }), Ok(())) => {
+                wire::version_from(&version).ok_or_else(|| unexpected().into())
+            }
+            (Ok(PeerReply::Failed { error }), _) => {
+                Err(wire::apply_error(error, ApplyError::DestinationChanged))
+            }
+            (Ok(PeerReply::Refused { reason }), _) => Err(ScanError::MacUnreachable(reason).into()),
+            (_, Err(source)) => Err(ApplyError::Write {
+                path: path.clone(),
+                source: WriteError::Io(source),
+            }),
+            (Ok(_), Ok(())) => Err(unexpected().into()),
+            (Err(error), Ok(())) => Err(unreachable(error).into()),
+        }
+    }
+
+    pub(crate) fn receive_metadata(
+        &self,
+        path: &SyncPath,
+        current: &ObservedEntry,
+        metadata: ForeignMetadata,
+        run: &RunScope,
+    ) -> Result<EntryVersion, ApplyError> {
+        let reply = self.reply(FolderOp::ReceiveMetadata {
+            path: path.as_bytes().to_vec(),
+            current: wire::entry_bytes(current),
+            metadata: wire::metadata_wire(metadata),
+            run: wire::run_wire(run),
+        });
+        match reply_or_destination_changed(reply, path)? {
+            PeerReply::Received { version } => {
+                wire::version_from(&version).ok_or_else(|| unexpected().into())
+            }
+            _ => Err(unexpected().into()),
+        }
+    }
+
+    /// Archive `path`, which must still hold `current`, for the run.
+    pub fn remove(
+        &self,
+        path: &SyncPath,
+        current: &ObservedEntry,
+        run: &RunScope,
+    ) -> Result<(), ApplyError> {
+        let reply = self.reply(FolderOp::Remove {
+            path: path.as_bytes().to_vec(),
+            current: wire::entry_bytes(current),
+            run: wire::run_wire(run),
+        });
+        done(reply_or_destination_changed(reply, path)?)
+    }
+
+    pub fn recover_leftover(&self, leftover: &SyncPath, run: &RunScope) -> Result<(), ApplyError> {
+        let reply = self.reply(FolderOp::RecoverLeftover {
+            path: leftover.as_bytes().to_vec(),
+            run: wire::run_wire(run),
+        });
+        done(reply_or_destination_changed(reply, leftover)?)
+    }
+
+    pub fn prune_archive(&self, retention: Duration, now: SystemTime) -> Result<u64, ApplyError> {
+        match self.reply(FolderOp::PruneArchive {
+            retention_seconds: retention.as_secs(),
+            now_ms: wire::milliseconds(now),
+        })? {
+            PeerReply::Pruned { count } => Ok(count),
+            _ => Err(unexpected().into()),
+        }
+    }
+
+    pub fn archived_runs(&self) -> Result<Vec<ArchivedRun>, ScanError> {
+        match self.reply(FolderOp::ArchivedRuns)? {
+            PeerReply::Runs { runs } => Ok(runs
+                .into_iter()
+                .map(|run| {
+                    ArchivedRun::new(
+                        run.name,
+                        SystemTime::UNIX_EPOCH + Duration::from_millis(run.started_ms),
+                    )
+                })
+                .collect()),
+            _ => Err(unexpected()),
+        }
+    }
+
+    pub fn archived_items(
+        &self,
+        run: &str,
+        after: Option<&SyncPath>,
+        limit: usize,
+    ) -> Result<(Vec<ArchivedItem>, bool), ScanError> {
+        match self.reply(FolderOp::ArchivedItems {
+            run: run.to_owned(),
+            after: after.map(|after| after.as_bytes().to_vec()),
+            limit: u64::try_from(limit).unwrap_or(u64::MAX),
+        })? {
+            PeerReply::Items { items, more } => Ok((
+                items
+                    .into_iter()
+                    .map(|item| {
+                        Ok(ArchivedItem::new(
+                            SyncPath::try_from(item.path.as_slice())?,
+                            item.size,
+                        ))
+                    })
+                    .collect::<Result<_, ScanError>>()?,
+                more,
+            )),
+            _ => Err(unexpected()),
+        }
+    }
+
+    pub fn put_back(
+        &self,
+        run: &str,
+        path: &SyncPath,
+        durability: Durability,
+    ) -> Result<SyncPath, ApplyError> {
+        let reply = self.reply(FolderOp::PutBack {
+            run: run.to_owned(),
+            path: path.as_bytes().to_vec(),
+            durability: pair_durability(durability),
+        });
+        placed(reply_or_destination_changed(reply, path)?)
+    }
+
+    pub fn keep_copy(
+        &self,
+        path: &SyncPath,
+        expected: EntryVersion,
+        from: &str,
+        options: &PairOptions,
+    ) -> Result<SyncPath, ApplyError> {
+        let reply = self.reply(FolderOp::KeepCopy {
+            path: path.as_bytes().to_vec(),
+            version: wire::version_bytes(expected),
+            from: from.to_owned(),
+            options: options.into(),
+        });
+        placed(reply_or_source_changed(reply, path)?)
     }
 
     fn ask(&self, op: FolderOp) -> Result<Exchange, ScanError> {
         let call = PeerCall::Folder {
             share: self.root.share().to_string(),
-            op,
+            op: Box::new(op),
         };
         self.link.ask(self.root.device(), call).map_err(unreachable)
     }
@@ -206,10 +415,105 @@ fn paths(paths: Vec<Vec<u8>>) -> Result<Vec<foldover_types::SyncPath>, ScanError
         .collect()
 }
 
-fn milliseconds(time: SystemTime) -> u64 {
-    time.duration_since(UNIX_EPOCH).map_or(0, |since| {
-        u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+/// An entry on the other Mac proven unchanged, as a copy's source.
+pub(crate) struct PeerSource {
+    /// The request still sending a file's data.
+    exchange: RefCell<Option<Exchange>>,
+    metadata: ForeignMetadata,
+    target: Option<Vec<u8>>,
+}
+
+impl PeerSource {
+    pub(crate) fn metadata(&self) -> ForeignMetadata {
+        self.metadata
+    }
+
+    pub(crate) fn link_target(&self) -> Option<&[u8]> {
+        self.target.as_deref()
+    }
+
+    /// Stream the file's data into `sink`, checking `control` per chunk.
+    pub(crate) fn push(
+        &self,
+        path: &SyncPath,
+        control: &mut impl FnMut() -> ScanControl,
+        sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    ) -> Result<(), ApplyError> {
+        let mut exchange = self.exchange.borrow_mut();
+        let exchange = exchange.as_mut().ok_or_else(unexpected)?;
+        loop {
+            if control() == ScanControl::Cancel {
+                return Err(ScanError::Cancelled.into());
+            }
+            match exchange.next().map_err(unreachable)? {
+                Incoming::Data(chunk) => sink(&chunk).map_err(|source| ApplyError::Write {
+                    path: path.clone(),
+                    source: WriteError::Io(source),
+                })?,
+                Incoming::End => break,
+                Incoming::Reply(_) => return Err(unexpected().into()),
+            }
+        }
+        match exchange.reply().map_err(unreachable)? {
+            PeerReply::Done => Ok(()),
+            PeerReply::Failed { error } => Err(wire::apply_error(error, ApplyError::SourceChanged)),
+            _ => Err(unexpected().into()),
+        }
+    }
+}
+
+fn reading(reply: PeerReply) -> Result<(ForeignMetadata, Option<Vec<u8>>), ApplyError> {
+    match reply {
+        PeerReply::Reading { metadata, target } => Ok((wire::metadata_from(metadata), target)),
+        PeerReply::Failed { error } => Err(wire::apply_error(error, ApplyError::SourceChanged)),
+        PeerReply::Refused { reason } => Err(ScanError::MacUnreachable(reason).into()),
+        _ => Err(unexpected().into()),
+    }
+}
+
+/// A reply, with a changed entry reported as the read side's change.
+fn reply_or_source_changed(
+    reply: Result<PeerReply, ScanError>,
+    path: &SyncPath,
+) -> Result<PeerReply, ApplyError> {
+    reply.map_err(|error| match error {
+        ScanError::Changed(_) => ApplyError::SourceChanged(path.clone()),
+        error => error.into(),
     })
+}
+
+/// A reply, with a changed entry reported as the written side's change.
+fn reply_or_destination_changed(
+    reply: Result<PeerReply, ScanError>,
+    path: &SyncPath,
+) -> Result<PeerReply, ApplyError> {
+    reply.map_err(|error| match error {
+        ScanError::Changed(_) => ApplyError::DestinationChanged(path.clone()),
+        error => error.into(),
+    })
+}
+
+fn done(reply: PeerReply) -> Result<(), ApplyError> {
+    match reply {
+        PeerReply::Done => Ok(()),
+        _ => Err(unexpected().into()),
+    }
+}
+
+fn placed(reply: PeerReply) -> Result<SyncPath, ApplyError> {
+    match reply {
+        PeerReply::Placed { path } => {
+            Ok(SyncPath::try_from(path.as_slice()).map_err(ScanError::from)?)
+        }
+        _ => Err(unexpected().into()),
+    }
+}
+
+fn pair_durability(durability: Durability) -> PairDurability {
+    match durability {
+        Durability::Standard => PairDurability::Standard,
+        Durability::Full => PairDurability::Full,
+    }
 }
 
 fn unreachable(error: LinkError) -> ScanError {

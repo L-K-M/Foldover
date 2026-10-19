@@ -1,11 +1,13 @@
-//! Copies where at least one side is an SFTP server. Data streams through
-//! Foldover; the target receives it under a temporary name, the content
-//! digest is checked against the plan, and only then is it placed.
+//! Copies where at least one side is an SFTP server or another Mac's
+//! folder. Data streams through Foldover; the target receives it under a
+//! temporary name, the content digest is checked against the plan, and
+//! only then is it placed.
 
 use std::cell::RefCell;
 use std::io;
 
 use foldover_net::sftp::{Attributes, FileKind};
+use foldover_proto::peer::IncomingKind;
 use foldover_types::{EntryContent, EntryKind, EntryVersion, ScanControl, SyncPath};
 
 use super::{DEFAULT_DIRECTORY, DEFAULT_FILE, PERMISSION_BITS, SftpEndpoint, write_error};
@@ -15,6 +17,7 @@ use crate::{ApplyError, Endpoint, Expected, ForeignMetadata, ObservedEntry, RunS
 enum Source<'a> {
     Local(&'a crate::LocalEndpoint, crate::LocalEntry),
     Sftp(&'a SftpEndpoint, Attributes),
+    Peer(crate::remote::PeerSource),
 }
 
 impl Source<'_> {
@@ -22,6 +25,7 @@ impl Source<'_> {
         match self {
             Self::Local(_, entry) => crate::LocalEndpoint::foreign_metadata(entry),
             Self::Sftp(_, attributes) => SftpEndpoint::foreign_metadata(attributes),
+            Self::Peer(source) => source.metadata(),
         }
     }
 
@@ -32,6 +36,10 @@ impl Source<'_> {
                 .map(<[u8]>::to_vec)
                 .ok_or_else(|| ApplyError::Unsupported(path.clone())),
             Self::Sftp(endpoint, _) => Ok(endpoint.read_link(path)?),
+            Self::Peer(source) => source
+                .link_target()
+                .map(<[u8]>::to_vec)
+                .ok_or_else(|| ApplyError::Unsupported(path.clone())),
         }
     }
 
@@ -55,6 +63,7 @@ impl Source<'_> {
                     ScanError::Changed(_) => ApplyError::SourceChanged(path.clone()),
                     source => ApplyError::Scan(source),
                 }),
+            Self::Peer(source) => source.push(path, control, sink),
         };
         pushed.map_err(|failure| {
             *error.borrow_mut() = Some(failure);
@@ -120,7 +129,25 @@ pub(crate) fn copy(
                 control,
             )
         }
-        Endpoint::Peer(_) => Err(crate::PeerEndpoint::writes_pending()),
+        Endpoint::Peer(remote) => {
+            let kind = match kind {
+                EntryKind::File => match expected {
+                    EntryContent::File(digest) => IncomingKind::File {
+                        content: digest.as_bytes().to_vec(),
+                    },
+                    _ => return Err(ApplyError::Unsupported(path.clone())),
+                },
+                EntryKind::Directory => IncomingKind::Folder,
+                EntryKind::Symlink => IncomingKind::Link {
+                    target: source.link_target(path)?,
+                },
+            };
+            let failure = RefCell::new(None);
+            let received = remote.receive(path, current, kind, source.metadata(), run, |sink| {
+                source.push(path, control, sink, &failure)
+            });
+            received.map_err(|error| failure.into_inner().unwrap_or(error))
+        }
     }
 }
 
@@ -140,9 +167,13 @@ pub(crate) fn update_metadata(
     if planned.version().content() != current.version().content() {
         return Err(ApplyError::Unsupported(path.clone()));
     }
-    let metadata = source(from, path, planned, run, control)?.metadata();
+    // Another Mac sends only the metadata, not the data with it.
+    let metadata = match from {
+        Endpoint::Peer(remote) => remote.source_metadata(path, planned, run)?,
+        _ => source(from, path, planned, run, control)?.metadata(),
+    };
     match to {
-        Endpoint::Peer(_) => Err(crate::PeerEndpoint::writes_pending()),
+        Endpoint::Peer(remote) => remote.receive_metadata(path, current, metadata, run),
         Endpoint::Local(local) => local.receive_metadata(path, current, metadata, run, control),
         Endpoint::Sftp(remote) => {
             let attributes = receiving(remote, path, Expected::Present(current), run, control)?
@@ -182,7 +213,7 @@ fn source<'a>(
                     error => error,
                 })?,
         ),
-        Endpoint::Peer(_) => return Err(crate::PeerEndpoint::writes_pending()),
+        Endpoint::Peer(remote) => Source::Peer(remote.read(path, planned, run)?),
     })
 }
 

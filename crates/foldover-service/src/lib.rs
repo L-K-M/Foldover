@@ -1345,9 +1345,9 @@ mod tests {
     }
 
     /// P5.2: a pair's side can be a folder another Mac shares; that Mac
-    /// observes it, and a preview shows what syncing would copy.
+    /// observes and writes it, archiving what syncs replace or remove.
     #[tokio::test]
-    async fn a_folder_another_mac_shares_is_previewed_through_it() {
+    async fn a_folder_another_mac_shares_syncs_through_it() {
         let ((a_directory, a), (_b_directory, b), a_device, b_device) = paired_agents().await;
         let shared = tempfile::tempdir().unwrap();
         fs::create_dir(shared.path().join("album")).unwrap();
@@ -1387,20 +1387,44 @@ mod tests {
                 .all(|item| item["action"] == json!({"kind": "copy", "to": "left"}))
         );
 
-        // Copying from another Mac comes next; until then each item says so.
+        // The first sync copies B's folder to A through B.
         let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0, "review_token": previewed["preview"]["review_token"]});
         a.handle(Request::call(5, SYNC_RUN, Some(run)))
             .await
             .unwrap();
         let ran = settled(&a, &key).await;
-        assert_eq!(ran["result"]["failure_count"], 3, "{ran}");
-        assert!(
-            ran["result"]["failures"][0]["message"]
-                .as_str()
-                .unwrap()
-                .contains("not available yet")
+        assert_eq!(ran["result"]["failure_count"], 0, "{ran}");
+        assert_eq!(ran["result"]["copied"], 3, "{ran}");
+        assert_eq!(fs::read(local.join("album/one.jpg")).unwrap(), b"one");
+        assert_eq!(fs::read(local.join("two.jpg")).unwrap(), b"two");
+
+        // Changes on A reach B's folder; a deletion is archived there.
+        fs::write(local.join("three.jpg"), b"three").unwrap();
+        fs::write(local.join("two.jpg"), b"two, edited").unwrap();
+        fs::remove_file(local.join("album/one.jpg")).unwrap();
+        a.handle(Request::call(6, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        let reviewed = settled(&a, &key).await;
+        assert_eq!(reviewed["preview"]["right"]["deletions"], 1, "{reviewed}");
+        let again = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 1, "review_token": reviewed["preview"]["review_token"]});
+        a.handle(Request::call(7, SYNC_RUN, Some(again)))
+            .await
+            .unwrap();
+        let ran = settled(&a, &key).await;
+        assert_eq!(ran["result"]["failure_count"], 0, "{ran}");
+        assert_eq!(fs::read(shared.path().join("three.jpg")).unwrap(), b"three");
+        assert_eq!(
+            fs::read(shared.path().join("two.jpg")).unwrap(),
+            b"two, edited"
         );
-        assert!(!local.join("two.jpg").exists());
+        assert!(!shared.path().join("album/one.jpg").exists());
+        let archive = shared
+            .path()
+            .join(".foldover/archive")
+            .join(ran["result"]["archive"].as_str().unwrap());
+        assert_eq!(fs::read(archive.join("album/one.jpg")).unwrap(), b"one");
+        assert_eq!(fs::read(archive.join("two.jpg")).unwrap(), b"two");
 
         // A folder not shared with A is refused by B.
         let mut other = input(a_directory.path(), "Other");

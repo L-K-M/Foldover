@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::local::{PairDurability, PairPropagation};
+use crate::local::{PairDurability, PairPropagation, PairSettings};
 
 /// The peer protocol version; agents of other versions do not pair.
 pub const PEER_PROTOCOL: u32 = 1;
@@ -39,7 +39,7 @@ pub enum PeerCall {
     Shares,
     /// One operation on a folder shared with the asking Mac; refused for
     /// any other folder.
-    Folder { share: String, op: FolderOp },
+    Folder { share: String, op: Box<FolderOp> },
 }
 
 /// What the asking Mac's endpoint needs from a shared folder. Each is
@@ -62,6 +62,104 @@ pub enum FolderOp {
     /// `progress` replies while scanning, entries as data frames, then
     /// `observed`.
     Observe { scan: ScanSettings },
+    /// Prove `path` still holds `entry`, then send it: `reading`, a file's
+    /// data frames and their end, then `done`.
+    Read {
+        path: Vec<u8>,
+        entry: Vec<u8>,
+        run: RunSettings,
+    },
+    /// `reading` alone, for a metadata update from this folder.
+    Metadata {
+        path: Vec<u8>,
+        entry: Vec<u8>,
+        run: RunSettings,
+    },
+    /// Make `path` hold what the asking Mac sends: a file's data frames
+    /// and their end follow the request. `received`.
+    Receive { path: Vec<u8>, entry: Incoming },
+    /// Give `path`, which must still hold `current`, new synced metadata.
+    /// `received`.
+    ReceiveMetadata {
+        path: Vec<u8>,
+        current: Vec<u8>,
+        metadata: WireMetadata,
+        run: RunSettings,
+    },
+    /// Archive `path`, which must still hold `current`. `done`.
+    Remove {
+        path: Vec<u8>,
+        current: Vec<u8>,
+        run: RunSettings,
+    },
+    /// Archive an interrupted run's temporary file. `done`.
+    RecoverLeftover { path: Vec<u8>, run: RunSettings },
+    /// `pruned`.
+    PruneArchive { retention_seconds: u64, now_ms: u64 },
+    /// `runs`, newest first.
+    ArchivedRuns,
+    /// `items` after `after`, and whether more follow.
+    ArchivedItems {
+        run: String,
+        after: Option<Vec<u8>>,
+        limit: u64,
+    },
+    /// `placed`.
+    PutBack {
+        run: String,
+        path: Vec<u8>,
+        durability: PairDurability,
+    },
+    /// Save `path`, which must still hold `version`, beside itself. `placed`.
+    KeepCopy {
+        path: Vec<u8>,
+        version: Vec<u8>,
+        from: String,
+        options: PairSettings,
+    },
+}
+
+/// What a write belongs to: the run's archive folder and the pair's
+/// options.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunSettings {
+    pub name: String,
+    pub options: PairSettings,
+}
+
+/// Permissions and modification time, as streamed copies carry them.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireMetadata {
+    pub permissions: u32,
+    /// Since the Unix epoch.
+    pub modified_seconds: i64,
+    pub modified_nanos: u32,
+}
+
+/// What a receiving folder gets.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Incoming {
+    pub kind: IncomingKind,
+    /// The entry the plan expects there now, if any.
+    pub current: Option<Vec<u8>>,
+    pub metadata: WireMetadata,
+    pub run: RunSettings,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum IncomingKind {
+    /// Data frames follow; their content must hash to `content`.
+    File {
+        content: Vec<u8>,
+    },
+    Folder,
+    Link {
+        target: Vec<u8>,
+    },
 }
 
 /// What an observation includes, from the asking Mac's pair options.
@@ -158,6 +256,43 @@ pub enum PeerReply {
         oversized: Vec<Vec<u8>>,
         old: Vec<Vec<u8>>,
     },
+    /// An entry being read: its metadata, and a link's target.
+    Reading {
+        metadata: WireMetadata,
+        target: Option<Vec<u8>>,
+    },
+    /// The version now stored.
+    Received {
+        version: Vec<u8>,
+    },
+    Pruned {
+        count: u64,
+    },
+    Runs {
+        runs: Vec<WireRun>,
+    },
+    Items {
+        items: Vec<WireItem>,
+        more: bool,
+    },
+    /// Where an entry was put.
+    Placed {
+        path: Vec<u8>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireRun {
+    pub name: String,
+    pub started_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireItem {
+    pub path: Vec<u8>,
+    pub size: u64,
 }
 
 /// A folder shared with the asking Mac. `id` is 32 hex digits.
