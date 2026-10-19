@@ -49,18 +49,15 @@ pub struct IdleSleepAssertion {
 
 impl IdleSleepAssertion {
     /// `reason` names the assertion in `pmset -g assertions`, e.g.
-    /// "Foldover is syncing Photos". Fails with `Unsupported` on systems
-    /// without power assertions.
-    pub fn take(reason: &str) -> io::Result<Self> {
+    /// "Foldover is syncing Photos". `None` on systems without power
+    /// assertions, so a failure where they exist is always an error.
+    pub fn take(reason: &str) -> io::Result<Option<Self>> {
         #[cfg(target_os = "macos")]
-        return power::Assertion::prevent_idle_sleep(reason).map(|held| Self { _held: held });
+        return power::Assertion::prevent_idle_sleep(reason).map(|held| Some(Self { _held: held }));
         #[cfg(not(target_os = "macos"))]
         {
             let _ = reason;
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Power assertions are not supported on this system",
-            ))
+            Ok(None)
         }
     }
 }

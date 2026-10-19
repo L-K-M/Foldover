@@ -28,10 +28,10 @@ use foldover_endpoint::{
     LeaseHolder, LeaseTiming, Observation, ObserveStep, ObservedEntry, PairRootError, Reach,
     RunScope, ScanError, access_denied,
 };
+use foldover_host::RunAwake;
 use foldover_state::{
     BaseUpdate, JournalAction, JournalEntry, MountSources, RecordedIdentities, SnapshotEntry,
 };
-use foldover_host::RunAwake;
 use foldover_types::{
     BaselineEntry, ChangeKind, ConflictKind, Durability, EndpointId, EntryContent, EntryDecision,
     EntryKind, EntryVersion, PairConfig, PairId, Resolution, ReviewToken, ScanControl, Side, Skip,
