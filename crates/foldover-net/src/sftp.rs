@@ -9,13 +9,19 @@
 
 mod wire;
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::ffi::OsStr;
+use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
+use std::os::fd::OwnedFd;
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
+use std::time::{Duration, Instant};
+
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
+use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 
 pub use wire::{Attributes, FileKind};
 use wire::{Reader, Writer};
@@ -31,6 +37,32 @@ const WINDOW: usize = 16;
 const MAX_PACKET: usize = 1024 * 1024;
 /// How much of ssh's error output is kept for messages.
 const STDERR_LIMIT: usize = 4 * 1024;
+/// The fallback deadline for connecting and the version handshake.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+/// The fallback deadline for one packet exchange.
+const IO_TIMEOUT: Duration = Duration::from_secs(60);
+/// Replies received ahead of their request's turn, bounded by the
+/// window: a server with more in flight is desynchronized.
+const MAX_STASHED: usize = WINDOW;
+
+/// Deadlines guarding every wait on the server; the defaults suit
+/// interactive SSH servers on real networks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Options {
+    /// Spawning, connecting and the version handshake may take this long.
+    pub connect_timeout: Duration,
+    /// Sending or receiving a single packet may take this long.
+    pub io_timeout: Duration,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            connect_timeout: CONNECT_TIMEOUT,
+            io_timeout: IO_TIMEOUT,
+        }
+    }
+}
 
 const POSIX_RENAME: &[u8] = b"posix-rename@openssh.com";
 const STATVFS: &[u8] = b"statvfs@openssh.com";
@@ -61,18 +93,30 @@ struct Extensions {
 }
 
 pub struct Session {
-    child: Child,
-    input: ChildStdin,
-    output: BufReader<ChildStdout>,
+    child: Option<Child>,
+    input: File,
+    output: BufReader<File>,
     errors: Arc<Mutex<Vec<u8>>>,
     next_id: u32,
     extensions: Extensions,
+    options: Options,
+    /// Requests sent whose replies have not been consumed.
+    inflight: HashSet<u32>,
+    /// Replies that arrived ahead of their request's turn.
+    stashed: VecDeque<(u32, Vec<u8>)>,
+    /// The wire failed or desynchronized; further requests are refused.
+    failed: bool,
 }
 
 impl Session {
     /// Connect with the user's OpenSSH configuration. Never prompts: keys
     /// and agents work, passwords do not.
     pub fn connect(target: &SshTarget) -> io::Result<Self> {
+        Self::connect_with(target, Options::default())
+    }
+
+    /// Connect with explicit deadlines.
+    pub fn connect_with(target: &SshTarget, options: Options) -> io::Result<Self> {
         let valid = |text: &str| {
             !text.is_empty() && !text.starts_with('-') && !text.contains(char::is_whitespace)
         };
@@ -91,6 +135,13 @@ impl Session {
             "-o",
             "ServerAliveCountMax=4",
         ]);
+        // A second bound inside ssh itself, so the TCP connect cannot
+        // outlive the deadline this process enforces on the handshake.
+        let seconds = options
+            .connect_timeout
+            .as_secs()
+            .clamp(1, u64::from(u32::MAX));
+        command.arg("-o").arg(format!("ConnectTimeout={seconds}"));
         if let Some(port) = target.port {
             command.arg("-p").arg(port.to_string());
         }
@@ -98,25 +149,30 @@ impl Session {
             command.arg("-l").arg(user);
         }
         command.args(["-s", "--", &target.host, "sftp"]);
-        Self::start(command)
+        Self::start(command, options)
     }
 
     /// Talk to an SFTP server program directly, e.g. OpenSSH's
     /// `sftp-server`, for tests.
     pub fn spawn(program: &Path, args: &[&OsStr]) -> io::Result<Self> {
-        let mut command = Command::new(program);
-        command.args(args);
-        Self::start(command)
+        Self::spawn_with(program, args, Options::default())
     }
 
-    fn start(mut command: Command) -> io::Result<Self> {
+    /// Spawn with explicit deadlines.
+    pub fn spawn_with(program: &Path, args: &[&OsStr], options: Options) -> io::Result<Self> {
+        let mut command = Command::new(program);
+        command.args(args);
+        Self::start(command, options)
+    }
+
+    fn start(mut command: Command, options: Options) -> io::Result<Self> {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
-        let input = child.stdin.take().expect("stdin is piped");
-        let output = BufReader::new(child.stdout.take().expect("stdout is piped"));
+        let input = File::from(OwnedFd::from(child.stdin.take().expect("stdin is piped")));
+        let output = File::from(OwnedFd::from(child.stdout.take().expect("stdout is piped")));
         let mut stderr = child.stderr.take().expect("stderr is piped");
         let errors = Arc::new(Mutex::new(Vec::new()));
         let collected = Arc::clone(&errors);
@@ -129,23 +185,46 @@ impl Session {
                 errors.drain(..excess);
             }
         });
+        Self::over(input, output, errors, options, Some(child))
+    }
+
+    /// A session on open streams; `child`, when any, is killed on drop.
+    fn over(
+        input: File,
+        output: File,
+        errors: Arc<Mutex<Vec<u8>>>,
+        options: Options,
+        mut child: Option<Child>,
+    ) -> io::Result<Self> {
+        if let Err(error) = nonblocking(&input).and_then(|()| nonblocking(&output)) {
+            if let Some(child) = &mut child {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            return Err(error);
+        }
         let mut session = Self {
             child,
             input,
-            output,
+            output: BufReader::new(output),
             errors,
             next_id: 0,
             extensions: Extensions::default(),
+            options,
+            inflight: HashSet::new(),
+            stashed: VecDeque::new(),
+            failed: false,
         };
+        let started = Instant::now();
         session
-            .handshake()
+            .handshake(started, options.connect_timeout)
             .map_err(|error| session.explain(error))?;
         Ok(session)
     }
 
-    fn handshake(&mut self) -> io::Result<()> {
-        self.send(Writer::init(PROTOCOL_VERSION).finish())?;
-        let body = self.receive()?;
+    fn handshake(&mut self, started: Instant, within: Duration) -> io::Result<()> {
+        self.send_until(&Writer::init(PROTOCOL_VERSION).finish(), started, within)?;
+        let body = self.receive_until(started, within)?;
         let mut reader = Reader::new(&body);
         if reader.u8()? != wire::VERSION || reader.u32()? != PROTOCOL_VERSION {
             return Err(io::Error::new(
@@ -245,11 +324,15 @@ impl Session {
     }
 
     /// Stream a whole file to `sink`, keeping several reads in flight.
+    /// On any error the replies already owed are drained so the wire
+    /// stays aligned; if that drain fails the session is marked
+    /// unusable rather than left desynchronized.
     pub fn read_all(
         &mut self,
         handle: &Handle,
         sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
     ) -> io::Result<()> {
+        self.check_alive()?;
         let mut offset = 0u64;
         loop {
             // Request a window of chunks, then take the answers in order.
@@ -257,19 +340,29 @@ impl Session {
             for index in 0..WINDOW {
                 let at = offset + (index * CHUNK) as u64;
                 let id = self.id();
-                self.send(
+                if let Err(error) = self.send_for(
+                    id,
                     Writer::new(wire::READ, id)
                         .bytes(&handle.0)
                         .u64(at)
                         .u32(CHUNK as u32)
                         .finish(),
-                )?;
+                ) {
+                    let _ = self.drain();
+                    return Err(error);
+                }
                 pending.push_back(id);
             }
             let mut finished = false;
             let mut short = false;
             while let Some(id) = pending.pop_front() {
-                let body = self.receive_for(id)?;
+                let body = match self.receive_for(id) {
+                    Ok(body) => body,
+                    Err(error) => {
+                        let _ = self.drain();
+                        return Err(error);
+                    }
+                };
                 if finished || short {
                     continue;
                 }
@@ -277,9 +370,28 @@ impl Session {
                     finished = true;
                     continue;
                 }
-                let mut reader = expect(&body, wire::DATA)?;
-                let data = reader.bytes()?;
-                sink(data)?;
+                let chunk = (|| -> io::Result<&[u8]> {
+                    let mut reader = expect(&body, wire::DATA)?;
+                    let data = reader.bytes()?;
+                    if data.is_empty() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "SFTP read made no progress",
+                        ));
+                    }
+                    Ok(data)
+                })();
+                let data = match chunk {
+                    Ok(data) => data,
+                    Err(error) => {
+                        let _ = self.drain();
+                        return Err(error);
+                    }
+                };
+                if let Err(error) = sink(data) {
+                    let _ = self.drain();
+                    return Err(error);
+                }
                 offset += data.len() as u64;
                 // Later answers would leave a gap; ask again from here.
                 short = data.len() < CHUNK;
@@ -306,50 +418,126 @@ impl Session {
 
     /// Write the chunks `produce` pushes from the start of the file,
     /// keeping several writes in flight. Returns the bytes written.
+    /// On any error the replies already owed are drained, like in
+    /// `read_all`.
     pub fn write_chunks(
         &mut self,
         handle: &Handle,
         produce: impl FnOnce(Chunks<'_>) -> io::Result<()>,
     ) -> io::Result<u64> {
+        self.check_alive()?;
         let mut offset = 0u64;
         let mut pending = VecDeque::new();
         let mut buffer = Vec::with_capacity(CHUNK);
-        let mut flush = |session: &mut Self, data: &[u8], offset: &mut u64| -> io::Result<()> {
-            let id = session.id();
-            session.send(
-                Writer::new(wire::WRITE, id)
-                    .bytes(&handle.0)
-                    .u64(*offset)
-                    .bytes(data)
-                    .finish(),
-            )?;
-            pending.push_back(id);
-            *offset += data.len() as u64;
-            if pending.len() >= WINDOW {
-                let id = pending.pop_front().expect("a write is pending");
-                status(&session.receive_for(id)?)?;
-            }
-            Ok(())
-        };
-        produce(&mut |mut chunk: &[u8]| {
+        let produced = produce(&mut |mut chunk: &[u8]| {
             while !chunk.is_empty() {
                 let taken = chunk.len().min(CHUNK - buffer.len());
                 buffer.extend_from_slice(&chunk[..taken]);
                 chunk = &chunk[taken..];
                 if buffer.len() == CHUNK {
-                    flush(self, &buffer, &mut offset)?;
+                    self.queue_write(&mut pending, handle, &buffer, &mut offset)?;
                     buffer.clear();
                 }
             }
             Ok(())
-        })?;
-        if !buffer.is_empty() {
-            flush(self, &buffer, &mut offset)?;
+        });
+        let finished = produced.and_then(|()| {
+            if !buffer.is_empty() {
+                self.queue_write(&mut pending, handle, &buffer, &mut offset)?;
+            }
+            while let Some(id) = pending.pop_front() {
+                status(&self.receive_for(id)?)?;
+            }
+            Ok(offset)
+        });
+        if finished.is_err() {
+            let _ = self.drain();
         }
-        while let Some(id) = pending.pop_front() {
-            status(&self.receive_for(id)?)?;
+        finished
+    }
+
+    /// Send one WRITE, collecting the oldest reply once the window is
+    /// full.
+    fn queue_write(
+        &mut self,
+        pending: &mut VecDeque<u32>,
+        handle: &Handle,
+        data: &[u8],
+        offset: &mut u64,
+    ) -> io::Result<()> {
+        let id = self.id();
+        self.send_for(
+            id,
+            Writer::new(wire::WRITE, id)
+                .bytes(&handle.0)
+                .u64(*offset)
+                .bytes(data)
+                .finish(),
+        )?;
+        pending.push_back(id);
+        *offset += data.len() as u64;
+        if pending.len() >= WINDOW {
+            let first = pending.pop_front().expect("a write is pending");
+            status(&self.receive_for(first)?)?;
         }
-        Ok(offset)
+        Ok(())
+    }
+
+    /// Copy `length` bytes from offset 0 of `source` into `target`, one
+    /// bounded request at a time so a single session cannot deadlock
+    /// against itself. `observe` sees each chunk, e.g. for hashing or a
+    /// cancel check. Returns the bytes copied, always `length` on
+    /// success; an early end of the source, an empty or oversized DATA
+    /// answer, or an observer error aborts the copy honestly.
+    pub fn copy_data(
+        &mut self,
+        source: &Handle,
+        target: &Handle,
+        length: u64,
+        observe: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<u64> {
+        self.check_alive()?;
+        let mut copied = 0u64;
+        while copied < length {
+            let wanted =
+                u32::try_from((length - copied).min(CHUNK as u64)).expect("a chunk fits u32");
+            let body = self.request(|id| {
+                Writer::new(wire::READ, id)
+                    .bytes(&source.0)
+                    .u64(copied)
+                    .u32(wanted)
+            })?;
+            if is_eof(&body) {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("SFTP source ended after {copied} of {length} bytes"),
+                ));
+            }
+            let mut reader = expect(&body, wire::DATA)?;
+            let data = reader.bytes()?;
+            if data.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "SFTP read made no progress",
+                ));
+            }
+            if data.len() > wanted as usize {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "SFTP server answered more than requested",
+                ));
+            }
+            observe(data)?;
+            let answer = self.request(|id| {
+                Writer::new(wire::WRITE, id)
+                    .bytes(&target.0)
+                    .u64(copied)
+                    .bytes(data)
+            })?;
+            status(&answer)?;
+            copied += data.len() as u64;
+        }
+        Ok(copied)
     }
 
     pub fn set_handle_attributes(
@@ -490,34 +678,152 @@ impl Session {
     /// One request and its answer's body.
     fn request(&mut self, build: impl FnOnce(u32) -> Writer) -> io::Result<Vec<u8>> {
         let id = self.id();
-        self.send(build(id).finish())?;
+        self.send_for(id, build(id).finish())?;
         self.receive_for(id)
     }
 
+    /// Send a request and register it as awaiting a reply.
+    fn send_for(&mut self, id: u32, packet: Vec<u8>) -> io::Result<()> {
+        self.check_alive()?;
+        self.send(packet)?;
+        self.inflight.insert(id);
+        Ok(())
+    }
+
     fn send(&mut self, packet: Vec<u8>) -> io::Result<()> {
-        self.input.write_all(&packet)?;
+        let started = Instant::now();
+        let result = self.send_until(&packet, started, self.options.io_timeout);
+        if result.is_err() {
+            self.fail();
+        }
+        result
+    }
+
+    /// Write the whole packet within `within` of `started`, waiting on
+    /// the pipe instead of blocking when it is full.
+    fn send_until(&mut self, packet: &[u8], started: Instant, within: Duration) -> io::Result<()> {
+        let mut sent = 0;
+        while sent < packet.len() {
+            match self.input.write(&packet[sent..]) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "The SFTP connection accepts no more data",
+                    ));
+                }
+                Ok(count) => sent += count,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    wait(&self.input, PollFlags::OUT, started, within)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
         self.input.flush()
     }
 
-    /// The next answer, which must belong to request `id`. Answers come
-    /// in request order from OpenSSH; others are refused.
+    /// The answer to request `id`. Answers that arrive ahead of it are
+    /// kept for their own requests, up to `MAX_STASHED`; a reply for a
+    /// request nobody sent desynchronizes the session. The whole wait
+    /// for `id` shares one deadline: each routed packet may arrive
+    /// inside the per-packet gap while the answer never does.
     fn receive_for(&mut self, id: u32) -> io::Result<Vec<u8>> {
-        let body = self.receive()?;
-        let mut reader = Reader::new(&body);
-        reader.u8()?;
-        if reader.u32()? != id {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "SFTP answer out of order",
-            ));
+        if let Some(index) = self.stashed.iter().position(|(reply, _)| *reply == id) {
+            let (_, body) = self.stashed.remove(index).expect("found above");
+            self.inflight.remove(&id);
+            return Ok(body);
         }
-        Ok(body)
+        let started = Instant::now();
+        loop {
+            let body = self.receive_within(started)?;
+            let reply = self.reply_id(&body)?;
+            if reply == id {
+                self.inflight.remove(&id);
+                return Ok(body);
+            }
+            let duplicate = self.stashed.iter().any(|(stashed, _)| *stashed == reply);
+            if duplicate || !self.inflight.contains(&reply) || self.stashed.len() >= MAX_STASHED {
+                self.fail();
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "SFTP answer out of order",
+                ));
+            }
+            self.stashed.push_back((reply, body));
+        }
     }
 
-    fn receive(&mut self) -> io::Result<Vec<u8>> {
+    /// The request id of a reply packet. A packet too short to carry
+    /// one marks the session unusable.
+    fn reply_id(&mut self, body: &[u8]) -> io::Result<u32> {
+        let mut reader = Reader::new(body);
+        match reader.u8().and_then(|_| reader.u32()) {
+            Ok(id) => Ok(id),
+            Err(error) => {
+                self.fail();
+                Err(error)
+            }
+        }
+    }
+
+    /// Consume the replies still owed for requests in flight, e.g. after
+    /// a sink failed mid-window, so the wire is aligned again. A drain
+    /// that cannot complete marks the session unusable.
+    fn drain(&mut self) -> io::Result<()> {
+        for (reply, _) in self.stashed.drain(..) {
+            self.inflight.remove(&reply);
+        }
+        let started = Instant::now();
+        while !self.inflight.is_empty() {
+            let body = self.receive_within(started)?;
+            let reply = self.reply_id(&body)?;
+            if !self.inflight.remove(&reply) {
+                self.fail();
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "SFTP answer out of order",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// A session that once desynchronized must not be trusted again.
+    fn check_alive(&self) -> io::Result<()> {
+        if self.failed {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "The SFTP session is unusable after an earlier failure",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Refuse further requests and stop the child, so nothing keeps
+    /// waiting on a desynchronized stream.
+    fn fail(&mut self) {
+        self.failed = true;
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+        }
+    }
+
+    /// The next packet within `io_timeout` of `started`, which the
+    /// caller keeps across a wait spanning several packets so the wait
+    /// is bounded once, not once per packet.
+    fn receive_within(&mut self, started: Instant) -> io::Result<Vec<u8>> {
+        let result = self.receive_until(started, self.options.io_timeout);
+        if result.is_err() {
+            self.fail();
+        }
+        result
+    }
+
+    /// The next packet's body within `within` of `started`, covering a
+    /// stalled or partial frame as well as a silent one.
+    fn receive_until(&mut self, started: Instant, within: Duration) -> io::Result<Vec<u8>> {
         let mut length = [0; 4];
-        self.output
-            .read_exact(&mut length)
+        self.read_exact(&mut length, started, within)
             .map_err(|error| match error.kind() {
                 io::ErrorKind::UnexpectedEof => self.explain(io::Error::new(
                     io::ErrorKind::ConnectionAborted,
@@ -530,15 +836,45 @@ impl Session {
             return Err(wire::malformed());
         }
         let mut body = vec![0; length];
-        self.output.read_exact(&mut body)?;
+        self.read_exact(&mut body, started, within)?;
         Ok(body)
+    }
+
+    /// Fill `buffer` within `within` of `started`, waiting on the pipe
+    /// instead of blocking when it is empty.
+    fn read_exact(
+        &mut self,
+        buffer: &mut [u8],
+        started: Instant,
+        within: Duration,
+    ) -> io::Result<()> {
+        let mut filled = 0;
+        while filled < buffer.len() {
+            match self.output.read(&mut buffer[filled..]) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "The SFTP connection closed",
+                    ));
+                }
+                Ok(count) => filled += count,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    wait(self.output.get_ref(), PollFlags::IN, started, within)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
@@ -592,6 +928,35 @@ fn unsupported(extension: &str) -> io::Error {
         io::ErrorKind::Unsupported,
         format!("The SFTP server lacks {extension}"),
     )
+}
+
+/// Reads and writes report `WouldBlock` instead of hanging, so `wait`
+/// can bound them.
+fn nonblocking(file: &File) -> io::Result<()> {
+    let flags = fcntl_getfl(file)?;
+    fcntl_setfl(file, flags | OFlags::NONBLOCK).map_err(io::Error::from)
+}
+
+/// Wait until `file` is ready or `within` has elapsed since `started`.
+fn wait(file: &File, events: PollFlags, started: Instant, within: Duration) -> io::Result<()> {
+    loop {
+        let remaining = within.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Timed out waiting for the SFTP server",
+            ));
+        }
+        let limit = Timespec::try_from(remaining)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid SFTP timeout"))?;
+        let mut polled = [PollFd::new(file, events)];
+        match poll(&mut polled, Some(&limit)) {
+            Ok(0) => {}
+            Ok(_) => return Ok(()),
+            Err(rustix::io::Errno::INTR) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 /// Fill `buffer` unless the source ends first.
