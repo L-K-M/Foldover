@@ -20,6 +20,15 @@ The macOS app requires macOS 27 and Apple silicon.
 > source of truth for scope and design; the research behind it lives in
 > [`docs/research`](docs/research/README.md).
 
+## Guides
+
+- [What each folder kind can do](docs/guide/capabilities.md): local
+  folders, mounted shares and SFTP folders side by side.
+- [NAS shares and SFTP servers](docs/guide/nas-and-sftp.md): mounting,
+  Keychain credentials, reconnect and SSH setup.
+- [Limitations](docs/guide/limitations.md): current limits and what is
+  not implemented yet.
+
 ## Planned highlights
 
 - **Preview first.** Every change is listed before it runs, with per-item
