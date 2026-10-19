@@ -822,3 +822,47 @@ func declinedApprovalsSurviveFailedJobAttempts() async {
     #expect(viewModel.approvalRequest == nil)
     #expect(await recorder.alerts.isEmpty)
 }
+
+// Regression for PR57 follow-up: while a start is pending, refresh and
+// checkAll must not issue a status request — the start's own reply is
+// fresher — and a reply requested before the start stays stale even when
+// it lands inside the pending window. A freshness gate that counts
+// writes but forgets the start's registration would let such a reply
+// retire the start's answer.
+@MainActor
+@Test
+func startsOwnThePairWhileTheirRequestIsInFlight() async {
+    let done = preview(archivesInA: 0, needsApproval: false)
+    let client = DeferredSyncClient()
+    await client.holdStartReplies()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+
+    // A refresh parks inside its status request before the start.
+    let refreshing = Task { await store.refresh(pair.id) }
+    await client.waitForStatusCalls(1)
+
+    // The start parks too; while it is unanswered no status read may run.
+    let starting = Task { await store.preview(pair.id) }
+    #expect(await client.waitForStartCalls(.preview, 1, timeout: .seconds(3)))
+    await store.refresh(pair.id)
+    await store.checkAll([pair])
+    #expect(await client.statusCalls == 1)
+
+    // The refresh's reply lands inside the pending window: requested
+    // before the start, it must not publish or retire the start's reply.
+    await client.reply(.idle)
+    await refreshing.value
+    await client.replyStart(.working(.preview, cancelling: false))
+    #expect(await eventually {
+        store.state(for: pair.id) == .working(.preview, cancelling: false)
+    })
+
+    // The accepted job polls to its real terminal result.
+    #expect(await client.waitForStatusCalls(2, timeout: .seconds(3)))
+    while await client.pendingStatusCalls > 0 {
+        await client.reply(.previewed(done))
+    }
+    await starting.value
+    #expect(store.state(for: pair.id) == .previewed(done))
+}

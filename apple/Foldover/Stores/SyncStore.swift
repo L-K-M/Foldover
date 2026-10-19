@@ -200,6 +200,10 @@ final class SyncStore {
     /// is stale and must not overwrite it, even if the state cycles back
     /// to the same value.
     private var generations: [String: Int] = [:]
+    /// Starts the agent has not answered yet. One counts as a local
+    /// write — replies requested before it are stale — keeps the pair
+    /// busy for `canStart`, and refuses a duplicate start.
+    private var pendingStarts: Set<String> = []
     /// Approval results the user declined; the same result stays declined
     /// until an explicit job or a different reviewable result.
     private var declined: [String: PreviewSummary] = [:]
@@ -223,7 +227,7 @@ final class SyncStore {
     /// outcomes that need a person become notifications. A pair's first
     /// observation never alerts, so launching the app does not replay them.
     func checkAll(_ pairs: [SyncPair]) async {
-        for pair in pairs where polling[pair.id] == nil {
+        for pair in pairs where polling[pair.id] == nil && !pendingStarts.contains(pair.id) {
             let previous = states[pair.id]
             let generation = generations[pair.id] ?? 0
             guard var state = try? await client.status(pair.id) else { continue }
@@ -258,29 +262,32 @@ final class SyncStore {
 
     func state(for id: String) -> PairSyncState { states[id] ?? .idle }
     func requestError(for id: String) -> String? { requestErrors[id] }
+    /// An explicit preview/run is on the wire and unanswered.
+    func isStarting(_ id: String) -> Bool { pendingStarts.contains(id) }
 
     func refresh(_ id: String) async {
+        // A pending start's own reply is fresher; asking again would race it.
+        guard !pendingStarts.contains(id) else { return }
         let client = client
-        await perform(id) { try await client.status(id) }
+        await perform(id, .other) { try await client.status(id) }
     }
 
     func preview(_ id: String) async {
+        guard beginStart(id) else { return }
         let client = client
-        // An explicit job re-arms approval requests for the pair.
-        declined[id] = nil
-        await perform(id) { try await client.preview(id) }
+        await perform(id, .start) { try await client.preview(id) }
     }
 
     /// Approvals are deletion counts the user accepted for each folder.
     func run(_ id: String, approvedA: UInt64 = 0, approvedB: UInt64 = 0) async {
+        guard beginStart(id) else { return }
         let client = client
-        declined[id] = nil
-        await perform(id) { try await client.run(id, approvedA: approvedA, approvedB: approvedB) }
+        await perform(id, .start) { try await client.run(id, approvedA: approvedA, approvedB: approvedB) }
     }
 
     func cancel(_ id: String) async {
         let client = client
-        await perform(id) { try await client.cancel(id) }
+        await perform(id, .other) { try await client.cancel(id) }
     }
 
     /// Keep one folder's version of a previewed conflict, then preview again
@@ -288,9 +295,11 @@ final class SyncStore {
     func resolve(_ id: String, path: Data, keep: FolderSide) async {
         let client = client
         requestErrors[id] = nil
+        let generation = generations[id] ?? 0
         do {
             _ = try await client.resolve(id, path: path, keep: keep)
         } catch {
+            guard !Task.isCancelled, (generations[id] ?? 0) == generation else { return }
             requestErrors[id] = PairStore.message(for: error)
             return
         }
@@ -305,14 +314,44 @@ final class SyncStore {
         set(id, .previewed(preview))
     }
 
-    private func perform(_ id: String, _ request: @Sendable () async throws -> PairSyncState) async {
+    /// Whether a foreground request is an explicit job start. A start's
+    /// answer releases the pair's pending start and — when its reply is
+    /// the newest — spends the declined approval, so the job resurfaces
+    /// reviewable results; every other request leaves both alone.
+    private enum RequestKind {
+        case start
+        case other
+    }
+
+    /// Registers a start the agent has not answered yet. Registration is
+    /// itself a local write, so replies requested before it go stale.
+    private func beginStart(_ id: String) -> Bool {
+        guard pendingStarts.insert(id).inserted else { return false }
+        generations[id, default: 0] += 1
+        return true
+    }
+
+    /// Runs one request and publishes its outcome. A reply or error that
+    /// a newer local write superseded — or that belongs to a cancelled
+    /// caller — is dropped instead of landing on the pair's current job.
+    private func perform(_ id: String, _ kind: RequestKind,
+                         _ request: @Sendable () async throws -> PairSyncState) async {
         requestErrors[id] = nil
+        let generation = generations[id] ?? 0
+        let reply: PairSyncState
         do {
-            set(id, normalized(id, try await request()))
+            reply = try await request()
         } catch {
+            if kind == .start { pendingStarts.remove(id) }
+            guard !Task.isCancelled, (generations[id] ?? 0) == generation else { return }
             requestErrors[id] = PairStore.message(for: error)
             return
         }
+        if kind == .start { pendingStarts.remove(id) }
+        guard !Task.isCancelled, (generations[id] ?? 0) == generation else { return }
+        // An explicit job that ran re-arms approval requests for the pair.
+        if kind == .start { declined[id] = nil }
+        set(id, normalized(id, reply))
         await pollWhileWorking(id)
     }
 
