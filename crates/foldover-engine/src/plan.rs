@@ -183,9 +183,10 @@ fn skip_branches(
 }
 
 /// Paths whose names one of the folders would store as one file are a
-/// conflict for a person to rename (PLAN.md §4.10) when that folder would
-/// be written: copying either spelling would fail against, or silently
-/// become, the other. A folder that keeps the spellings apart takes them
+/// conflict for a person to rename (PLAN.md §4.10) when they would meet
+/// there: two of them written, or one written beside another that stays.
+/// Copying either spelling would fail against, or silently become, the
+/// other. A folder that keeps the spellings apart takes them
 /// as they are, so a case-only rename on a Mac reaches a byte-exact server
 /// as an archive and a copy. Folders that clash block what is inside them,
 /// like any folder conflict.
@@ -198,6 +199,7 @@ fn skip_branches(
 /// ```
 fn mark_name_clashes(
     rows: &mut [PlanRow],
+    [left, right]: [&BTreeMap<SyncPath, EntryVersion>; 2],
     left_names: NameMatching,
     right_names: NameMatching,
     control: &mut impl FnMut() -> ScanControl,
@@ -215,7 +217,10 @@ fn mark_name_clashes(
     }
     let mut clashes = Vec::new();
     for group in keys.into_values().filter(|group| group.len() > 1) {
-        for (side, names) in [(Side::Left, left_names), (Side::Right, right_names)] {
+        for (side, names, present) in [
+            (Side::Left, left_names, left),
+            (Side::Right, right_names, right),
+        ] {
             // Spellings this folder stores as one file.
             let mut same: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
             for &index in &group {
@@ -224,11 +229,16 @@ fn mark_name_clashes(
                     .or_default()
                     .push(index);
             }
+            // One write is safe while no other spelling stays there; two
+            // writes, or a write beside a spelling that stays, meet.
             for spellings in same.into_values().filter(|spellings| spellings.len() > 1) {
-                if spellings
+                let (writes, untouched): (Vec<usize>, Vec<usize>) = spellings
                     .iter()
-                    .any(|&index| writes_on(&rows[index].decision, side))
-                {
+                    .partition(|&&index| writes_on(&rows[index].decision, side));
+                let stays = untouched
+                    .iter()
+                    .any(|&index| present.contains_key(&rows[index].path));
+                if writes.len() > 1 || (!writes.is_empty() && stays) {
                     clashes.extend(spellings);
                 }
             }
@@ -418,7 +428,7 @@ pub fn plan_resolved(
 
     settle_folder_choices(&mut rows, base, left, right, resolutions, control)?;
     skip_branches(&mut rows, left, right, skips, control)?;
-    mark_name_clashes(&mut rows, left_names, right_names, control)?;
+    mark_name_clashes(&mut rows, [left, right], left_names, right_names, control)?;
 
     // Ancestors precede descendants. Suppression therefore propagates an outer
     // conflict through the whole branch without recursive traversal.
@@ -975,6 +985,36 @@ mod tests {
         assert!(
             rows.iter().all(|(_, decision)| *decision == CLASH),
             "{rows:?}"
+        );
+    }
+
+    /// Review: a spelling deleted on a Mac and a new one created on a
+    /// byte-exact server never meet on either side, so they sync.
+    #[test]
+    fn a_write_meets_no_clash_where_the_other_spelling_is_gone() {
+        let insensitive = NameMatching::new(CaseMatching::Insensitive, UnicodeMatching::Normalized);
+        let base = BTreeMap::from([(
+            path(b"Report.txt"),
+            BaselineEntry::new(file(1), file(1)).unwrap(),
+        )]);
+        let left = tree(&[]);
+        let right = tree(&[(b"Report.txt", file(1)), (b"report.txt", file(2))]);
+        let rows = plan_between(&base, &left, &right, [insensitive, NameMatching::EXACT]);
+        assert_eq!(
+            rows,
+            [
+                (
+                    path(b"Report.txt"),
+                    CandidateDecision::Entry(EntryDecision::Archive { on: Side::Right })
+                ),
+                (
+                    path(b"report.txt"),
+                    CandidateDecision::Entry(EntryDecision::Propagate {
+                        from: Side::Right,
+                        change: ChangeKind::Create
+                    })
+                ),
+            ]
         );
     }
 

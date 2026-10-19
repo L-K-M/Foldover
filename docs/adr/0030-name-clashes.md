@@ -20,9 +20,10 @@ failed on every run, or would have stored two files where a person sees one.
 - Each path's key under a folder's rule is its name in composed Unicode
   (NFC) where normalization is ignored, lower case where case is; names
   that are not UTF-8 compare as bytes, with ASCII letters folded.
-- Paths that one folder keys alike are a `NameClash` conflict when the
-  plan would write or archive any of them in that folder, on every path
-  of the group, including one that is otherwise in sync. Nothing is
+- Paths that one folder keys alike are a `NameClash` conflict when they
+  would meet in that folder: the plan writes or archives two of them
+  there, or writes one while another stays. The conflict covers every
+  path of the group, including one that is otherwise in sync. Nothing is
   written for them; a clashing folder blocks what is inside it. Choosing a
   side, keeping both or skipping is refused: renaming one item resolves it.
 - A folder that keeps the spellings apart takes them as planned, so a
