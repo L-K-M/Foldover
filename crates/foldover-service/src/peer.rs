@@ -147,7 +147,7 @@ impl PeerHost for Host {
                         .flatten()
                 });
                 match root {
-                    Some(root) => foldover_engine::serve_folder(&root, op, &self.folders, answer),
+                    Some(root) => foldover_engine::serve_folder(&root, *op, &self.folders, answer),
                     None => {
                         let _ = answer.reply(&refused("That folder is not shared with this Mac"));
                     }

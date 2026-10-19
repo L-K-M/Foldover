@@ -1,7 +1,8 @@
 # ADR 0031: Mac-to-Mac sync
 
-Status: Device trust, pairing, discovery, shared-folder grants and the
-peer endpoint's reads implemented; its writes pending
+Status: Device trust, pairing, discovery, shared folders and the peer
+endpoint implemented; remote change hints and full metadata fidelity
+pending
 
 ## Context
 
@@ -101,16 +102,28 @@ Mac's local endpoint at the share root:
 | `nameMatching` | `names`: how its volume compares case and Unicode |
 | `space` | `space`: bytes free |
 | `observe` (`scan`: metadata policy, rules, size limit, cutoff) | `progress` every 200 ms while scanning; then entries as binary data frames (path, version, fingerprint); then `observed`: leftovers, oversized and old paths |
+| `read` (`path`, `entry`, `run`) | `reading`: metadata and a link's target, once `path` is proven to hold `entry`; a file's data frames and their end; then `done` |
+| `metadata` (`path`, `entry`, `run`) | `reading` alone, for a metadata update |
+| `receive` (`path`, `entry`: kind, expected current entry, metadata, run) | Data frames and their end follow a file's request; `received`: the version stored, after staging and verifying the content against the plan |
+| `receiveMetadata`, `remove`, `recoverLeftover` | `received` or `done`, each only while the path holds the expected entry |
+| `pruneArchive`, `archivedRuns`, `archivedItems`, `putBack`, `keepCopy` | The folder's archive, as on a local root: `pruned`, `runs`, `items`, `placed` |
 
 Failures come back as `failed` with a kind (missing, access denied,
 cancelled, changed, invalid, other), so the asking Mac waits for a
 missing folder as it waits for an unmounted disk. The sharing Mac keeps
 each folder's last observation in memory and rereads only changed
 files. The asking Mac cancels a scan by dropping the request; the next
-progress report then fails and the scan stops. Pair roots
-`peer://<device>/<share>` need schema v18. Until writes land, a run
-reports each change to or from another Mac's folder as not available
-yet.
+progress report then fails and the scan stops; a dropped copy stops
+its data the same way. Pair roots `peer://<device>/<share>` need schema
+v18.
+
+Writes run on the sharing Mac through its local endpoint, so the same
+staging, verification, archive and durability rules hold there, and
+every path is checked against the share root. A run named by the other
+Mac must be a single folder name, and a kept copy's label a short plain
+name. Copies carry data, permissions and modification time, as with
+SFTP; extended attributes and ACLs wait for slice 4. A copy between two
+Macs' folders relays through this Mac.
 
 ### Local API (protocol 9)
 

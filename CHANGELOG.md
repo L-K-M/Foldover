@@ -20,8 +20,9 @@ All notable changes to this project are documented here. The format follows
   (Settings › Mac-to-Mac, or `foldover peers`). Forgetting a Mac revokes
   it. Share a folder with a paired Mac (`foldover shares`), and list what
   a paired Mac shares with yours (`foldover peers shares`). A pair's
-  folder can be one a paired Mac shares (`peer://DEVICE/SHARE`): previews
-  compare it through that Mac. Syncing changes with it comes next.
+  folder can be one a paired Mac shares (`peer://DEVICE/SHARE`): syncs
+  run through that Mac, which stages, verifies and archives in its own
+  folder.
 
 - Names that one folder would store as one file, such as `Report.txt`
   and `report.txt` on a case-insensitive Mac volume, are a conflict to
