@@ -462,6 +462,93 @@ func staleLivePollRepliesCannotRetireANewerJob() async {
     #expect(store.state(for: pair.id) == .previewed(done))
 }
 
+// Regression for PR57 follow-up: navigating back to a pair refreshes
+// its status through perform, which cleared the declined marker, so
+// the same agent result resurrected the approval dialog. Refreshes and
+// live polls must keep the decline; only a new explicit preview/run
+// (or a changed approval result) re-arms it.
+@MainActor
+@Test
+func declinedApprovalsSurviveStatusRefreshesAndPolls() async {
+    let summary = preview(archivesInA: 60, needsApproval: true)
+    let expanded = preview(archivesInA: 61, needsApproval: true)
+    let client = StubSyncClient()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+    let viewModel = PairSyncViewModel(pair: pair, store: store, agentConnected: true)
+
+    await client.setStatusReply(.needsApproval(summary))
+    await store.checkAll([pair])
+    #expect(store.state(for: pair.id) == .needsApproval(summary))
+
+    store.declineApproval(pair.id)
+    #expect(store.state(for: pair.id) == .previewed(summary))
+    #expect(viewModel.approvalRequest == nil)
+
+    // The view's automatic refresh must not resurrect the decline.
+    await store.refresh(pair.id)
+    #expect(store.state(for: pair.id) == .previewed(summary))
+    #expect(viewModel.approvalRequest == nil)
+
+    // Neither does a live poll that meets the same declined result.
+    await client.setStatusReply(.working(.run, cancelling: false))
+    let refreshing = Task { await store.refresh(pair.id) }
+    #expect(await eventually {
+        store.state(for: pair.id) == .working(.run, cancelling: false)
+    })
+    await client.setStatusReply(.needsApproval(summary))
+    await refreshing.value
+    #expect(store.state(for: pair.id) == .previewed(summary))
+    #expect(viewModel.approvalRequest == nil)
+
+    // A changed approval result still resurfaces.
+    await client.setStatusReply(.needsApproval(expanded))
+    await store.refresh(pair.id)
+    #expect(store.state(for: pair.id) == .needsApproval(expanded))
+    #expect(viewModel.approvalRequest != nil)
+}
+
+// Regression for PR57 follow-up: when the caller Task is cancelled
+// while its poller has a status request in flight, a new job must
+// still get its own poller. The cancelled owner's late reply must not
+// overwrite the new job or strip the successor's ownership.
+@MainActor
+@Test
+func cancelledPollersYieldOwnershipToNewerJobs() async {
+    let stale = preview(archivesInA: 3, needsApproval: false)
+    let done = preview(archivesInA: 0, needsApproval: false)
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.working(.preview, cancelling: false))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+
+    let first = Task { await store.preview(pair.id) }
+    await client.waitForStatusCalls(1)
+    first.cancel()
+
+    // The new job's caller becomes the successor poller even though the
+    // cancelled one is still suspended on its status request.
+    let second = Task { await store.preview(pair.id) }
+    #expect(await eventually {
+        store.state(for: pair.id) == .working(.preview, cancelling: false)
+    })
+
+    // The stale reply belongs to the cancelled owner: drop it without
+    // clearing the successor's ownership.
+    await client.reply(.previewed(stale))
+    let keptPolling = await client.waitForStatusCalls(2, timeout: .seconds(3))
+    #expect(store.state(for: pair.id) == .working(.preview, cancelling: false))
+    #expect(keptPolling)
+
+    // Drain every outstanding request so buggy and fixed paths finish.
+    while await client.pendingStatusCalls > 0 {
+        await client.reply(.previewed(done))
+    }
+    await first.value
+    await second.value
+    #expect(store.state(for: pair.id) == .previewed(done))
+}
+
 // Regression for PR57 follow-up: the poller swallowed Task.sleep's
 // CancellationError, so a caller Task that was cancelled kept issuing
 // status requests with no delay while the job stayed .working. The
