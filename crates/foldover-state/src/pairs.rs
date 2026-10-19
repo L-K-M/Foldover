@@ -533,6 +533,50 @@ mod tests {
     }
 
     #[test]
+    fn sftp_roots_survive_creation_updates_and_reopening() {
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        let root = |bytes: &[u8]| PairRoot::from_bytes(bytes.to_vec()).unwrap();
+        let local = root(b"/local/\xff");
+        let remote = root(b"sftp://alice@nas:2222/~/photos/\xff");
+        let other = root(b"sftp://backup/srv/photos");
+        let mut saved = Vec::new();
+        for (left, right) in [
+            (remote.clone(), local.clone()),
+            (local, remote.clone()),
+            (remote, other.clone()),
+        ] {
+            let draft = PairDraft::new("Server".into(), left, right, SyncMode::Sync).unwrap();
+            saved.push(store.create(&draft).unwrap());
+        }
+
+        let original = &saved[0];
+        let replacement = PairDraft::new(
+            "Edited server".into(),
+            other,
+            original.draft().right().clone(),
+            SyncMode::Backup { source: Side::Left },
+        )
+        .unwrap();
+        let updated = store
+            .update(original.id(), original.revision(), &replacement)
+            .unwrap();
+        assert_eq!(updated.revision(), original.revision() + 1);
+        assert!(matches!(
+            store.update(original.id(), original.revision(), original.draft()),
+            Err(Error::StaleRevision)
+        ));
+        saved[0] = updated;
+
+        drop(store);
+        let store = PairStore::open(&location).unwrap();
+        assert_eq!(store.pairs().unwrap().len(), saved.len());
+        for pair in saved {
+            assert_eq!(store.pair(pair.id()).unwrap(), Some(pair));
+        }
+    }
+
+    #[test]
     fn stale_updates_do_not_replace_new_configuration() {
         let (_directory, location) = location();
         let mut store = PairStore::open(&location).unwrap();

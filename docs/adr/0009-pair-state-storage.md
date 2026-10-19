@@ -19,7 +19,8 @@ discarded with the base. Version 8 adds filter rules
 ([ADR 0024](0024-filters.md)). Version 11 adds the automation pause
 ([ADR 0022](0022-scheduled-runs.md)). Version 12 adds each side's network
 mount source ([ADR 0027](0027-share-reconnect.md)). Version 13 adds the
-age limit ([ADR 0024](0024-filters.md)). Secrets are not stored yet.
+age limit ([ADR 0024](0024-filters.md)). Version 14 permits SFTP locator bytes
+alongside absolute local roots ([ADR 0028](0028-sftp-endpoints.md)). Secrets are not stored yet.
 Configuration does not establish endpoint identity, overlap safety,
 permissions or readiness to sync.
 
@@ -53,6 +54,10 @@ same store. Startup failures are explicit. Configuration dispatch is covered by
   later step in one transaction. There is no destructive contraction or
   automatic downgrade. Restore decisions require stopping the writer and
   selecting a verified backup; this slice does not add a restore command.
+- Version 14 rebuilds the pair table without changing IDs, revisions or child
+  records. Foreign-key cascades are disabled before that transaction, references
+  are checked before commit, and enforcement is restored before serving requests.
+  Older readers refuse schema 14; its minimum reader is also 14.
 
 ## Pair updates
 

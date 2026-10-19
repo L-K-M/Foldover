@@ -24,9 +24,9 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 13] = [
+const MIGRATIONS: [&str; 14] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
-    SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13,
+    SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -135,6 +135,38 @@ ALTER TABLE pair ADD COLUMN right_mount TEXT CHECK(right_mount IS NULL OR length
 // Files unchanged for more than this many days in both folders are skipped.
 const SCHEMA_V13: &str = "
 ALTER TABLE pair ADD COLUMN age_limit INTEGER CHECK(age_limit IS NULL OR age_limit > 0);
+";
+// Preserve the parent and its references while allowing typed SFTP locators.
+const SCHEMA_V14: &str = "
+CREATE TABLE pair_next (
+    id BLOB PRIMARY KEY NOT NULL CHECK(length(id) = 16 AND id != zeroblob(16)),
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    name TEXT NOT NULL CHECK(length(trim(name)) > 0 AND instr(name, char(0)) = 0),
+    left_root BLOB NOT NULL CHECK(length(left_root) > 0 AND instr(left_root,x'00') = 0 AND
+        (substr(left_root,1,1) = x'2f' OR (length(left_root) > length('sftp://') AND substr(left_root,1,length('sftp://')) = CAST('sftp://' AS BLOB)))),
+    right_root BLOB NOT NULL CHECK(length(right_root) > 0 AND instr(right_root,x'00') = 0 AND
+        (substr(right_root,1,1) = x'2f' OR (length(right_root) > length('sftp://') AND substr(right_root,1,length('sftp://')) = CAST('sftp://' AS BLOB)))),
+    mode TEXT NOT NULL CHECK(mode IN ('sync','mirror-left','mirror-right','backup-left','backup-right')),
+    modification_times TEXT NOT NULL DEFAULT 'sync' CHECK(modification_times IN ('sync','ignore')),
+    extended_attributes TEXT NOT NULL DEFAULT 'sync' CHECK(extended_attributes IN ('sync','ignore')),
+    permissions TEXT NOT NULL DEFAULT 'ignore' CHECK(permissions IN ('sync','ignore')),
+    durability TEXT NOT NULL DEFAULT 'standard' CHECK(durability IN ('standard','full')),
+    left_identity BLOB CHECK(left_identity IS NULL OR length(left_identity) = 16),
+    right_identity BLOB CHECK(right_identity IS NULL OR length(right_identity) = 16),
+    schedule TEXT NOT NULL DEFAULT 'manual' CHECK(schedule IN ('manual','every','changes')),
+    schedule_minutes INTEGER CHECK(schedule_minutes IS NULL OR schedule_minutes BETWEEN 1 AND 10080),
+    filters TEXT NOT NULL DEFAULT '' CHECK(instr(filters, char(0)) = 0),
+    size_limit INTEGER CHECK(size_limit IS NULL OR size_limit > 0),
+    left_mount TEXT CHECK(left_mount IS NULL OR length(left_mount) > 0),
+    right_mount TEXT CHECK(right_mount IS NULL OR length(right_mount) > 0),
+    age_limit INTEGER CHECK(age_limit IS NULL OR age_limit > 0),
+    CHECK(left_root != right_root)
+) STRICT;
+INSERT INTO pair_next (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,left_identity,right_identity,schedule,schedule_minutes,filters,size_limit,left_mount,right_mount,age_limit)
+    SELECT id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,left_identity,right_identity,schedule,schedule_minutes,filters,size_limit,left_mount,right_mount,age_limit FROM pair;
+DROP TABLE pair;
+ALTER TABLE pair_next RENAME TO pair;
+UPDATE state_meta SET minimum_reader=max(minimum_reader,14) WHERE singleton=1;
 ";
 
 #[derive(Debug, thiserror::Error)]
@@ -818,9 +850,20 @@ fn backup(connection: &Connection, directory: &Path, schema: i64) -> Result<(), 
 /// database at its previous schema.
 fn migrate(connection: &mut Connection, from: i64, steps: &[&str]) -> Result<(), Error> {
     let from = usize::try_from(from).map_err(|_| Error::InvalidState("Negative schema version"))?;
+    // Rebuilding a parent must not cascade its children; open enables
+    // enforcement after the transaction has verified every reference.
+    connection.pragma_update(None, "foreign_keys", false)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     for statements in steps.get(from..).unwrap_or_default() {
         transaction.execute_batch(statements)?;
+    }
+    let broken: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
+        [],
+        |row| row.get(0),
+    )?;
+    if broken {
+        return Err(Error::InvalidState("Migration has invalid foreign keys"));
     }
     transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -1249,6 +1292,241 @@ pub(super) mod tests {
             })
             .count();
         assert_eq!(backups, 1);
+    }
+
+    fn stored_rows(connection: &Connection, table: &str) -> Vec<Vec<rusqlite::types::Value>> {
+        let mut statement = connection
+            .prepare(&format!("SELECT * FROM {table} ORDER BY 1,2"))
+            .unwrap();
+        let columns = statement.column_count();
+        statement
+            .query_map([], |row| {
+                (0..columns).map(|column| row.get(column)).collect()
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn sftp_migration_preserves_legacy_rows_backup_and_foreign_keys() {
+        const LOCAL_ROOT_SCHEMA: usize = 13;
+        let (directory, location) = location();
+        let path = directory.path().join(DATABASE_NAME);
+        drop(private_file(&path).unwrap());
+        let mut connection = Connection::open(&path).unwrap();
+        let transaction = connection.transaction().unwrap();
+        for statements in &MIGRATIONS[..LOCAL_ROOT_SCHEMA] {
+            transaction.execute_batch(statements).unwrap();
+        }
+        transaction
+            .pragma_update(None, "application_id", APPLICATION_ID)
+            .unwrap();
+        transaction
+            .pragma_update(None, "user_version", LOCAL_ROOT_SCHEMA as i64)
+            .unwrap();
+        transaction.commit().unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .unwrap();
+        let writer = private_file(&directory.path().join(WRITER_LOCK)).unwrap();
+        writer.try_lock().unwrap();
+        let mut legacy = Database {
+            connection,
+            _writer: writer,
+            directory: directory.path().to_owned(),
+        };
+        let mut input = values();
+        input.left_root = b"/left/\xff".to_vec();
+        input.modification_times = "ignore".into();
+        input.permissions = "sync".into();
+        input.durability = "full".into();
+        input.schedule = "every".into();
+        input.schedule_minutes = Some(37);
+        input.filters = "*.tmp\nprivate".into();
+        input.size_limit = Some(9876);
+        input.age_limit = Some(42);
+        let pair = legacy.create_pair(&input).unwrap();
+        input.name = "Preserved".into();
+        let pair = legacy.update_pair(&pair.id, pair.revision, &input).unwrap();
+        legacy
+            .record_identities(&pair.id, pair.revision, &[1; 16], &[2; 16])
+            .unwrap();
+        legacy
+            .record_mounts(
+                &pair.id,
+                pair.revision,
+                &MountRow {
+                    left: Some("smb://nas/left".into()),
+                    right: Some("smb://nas/right".into()),
+                },
+            )
+            .unwrap();
+        legacy
+            .change_base(&pair.id, pair.revision, &[put(b"kept", b"version")])
+            .unwrap();
+        legacy
+            .record_resolution(
+                &pair.id,
+                pair.revision,
+                &ResolutionRow {
+                    path: b"conflict".to_vec(),
+                    keep: "left".into(),
+                    left_version: Some(b"left".to_vec()),
+                    right_version: Some(b"right".to_vec()),
+                },
+            )
+            .unwrap();
+        legacy
+            .replace_snapshot(
+                &pair.id,
+                pair.revision,
+                "left",
+                &[SnapshotRow {
+                    path: b"kept".to_vec(),
+                    fingerprint: b"fingerprint".to_vec(),
+                    version: b"version".to_vec(),
+                }],
+            )
+            .unwrap();
+        legacy
+            .record_history(
+                &pair.id,
+                &HistoryRow {
+                    started_ms: 1,
+                    finished_ms: 2,
+                    trigger: "manual".into(),
+                    outcome: "completed".into(),
+                    copied: 3,
+                    updated: 4,
+                    archived: 5,
+                    recovered: 6,
+                    conflicts: 7,
+                    failures: 8,
+                    archive: Some("archive".into()),
+                    message: Some("Preserved history".into()),
+                },
+                100,
+            )
+            .unwrap();
+        legacy
+            .set_pause(Some(PauseRow {
+                until_ms: Some(123),
+            }))
+            .unwrap();
+        let before: Vec<_> = [
+            "pair",
+            "base_entry",
+            "resolution",
+            "snapshot_entry",
+            "run_history",
+            "automation_pause",
+        ]
+        .into_iter()
+        .map(|table| (table, stored_rows(&legacy.connection, table)))
+        .collect();
+        let minimum_reader = |connection: &Connection| {
+            connection
+                .query_row(
+                    "SELECT minimum_reader FROM state_meta WHERE singleton=1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        let legacy_reader = minimum_reader(&legacy.connection);
+
+        // A failure after rebuilding the parent must restore every child too.
+        let mut broken = MIGRATIONS.to_vec();
+        broken.push("INVALID SQL;");
+        assert!(migrate(&mut legacy.connection, LOCAL_ROOT_SCHEMA as i64, &broken).is_err());
+        for (table, expected) in &before {
+            assert_eq!(&stored_rows(&legacy.connection, table), expected, "{table}");
+        }
+        assert_eq!(
+            legacy
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            LOCAL_ROOT_SCHEMA as i64
+        );
+        assert_eq!(minimum_reader(&legacy.connection), legacy_reader);
+        drop(legacy);
+
+        let mut database = Database::open(&location).unwrap();
+        assert_eq!(
+            minimum_reader(&database.connection),
+            LOCAL_ROOT_SCHEMA as i64 + 1
+        );
+        assert_eq!(
+            database
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+        for (table, expected) in &before {
+            assert_eq!(
+                &stored_rows(&database.connection, table),
+                expected,
+                "{table}"
+            );
+        }
+        assert_eq!(
+            database
+                .connection
+                .pragma_query_value::<i64, _>(None, "foreign_keys", |row| row.get(0))
+                .unwrap(),
+            1
+        );
+        let violations: i64 = database
+            .connection
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(violations, 0);
+        let backup = fs::read_dir(directory.path())
+            .unwrap()
+            .map(Result::unwrap)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("state-before-v13-")
+            })
+            .unwrap();
+        let backup =
+            Connection::open_with_flags(backup.path(), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        for (table, expected) in &before {
+            assert_eq!(&stored_rows(&backup, table), expected, "backup {table}");
+        }
+        assert_eq!(
+            backup
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            LOCAL_ROOT_SCHEMA as i64
+        );
+        assert_eq!(minimum_reader(&backup), legacy_reader);
+
+        input.left_root = b"sftp://nas/srv/photos/\xff".to_vec();
+        database.create_pair(&input).unwrap();
+        for invalid in [
+            b"relative".as_slice(),
+            b"ftp://nas/path",
+            b"sftp://",
+            b"sftp://nas/\0bad",
+        ] {
+            input.left_root = invalid.to_vec();
+            assert!(database.create_pair(&input).is_err(), "{invalid:?}");
+        }
+        database.remove_pair(&pair.id, pair.revision).unwrap();
+        for table in ["base_entry", "resolution", "snapshot_entry", "run_history"] {
+            assert!(
+                stored_rows(&database.connection, table).is_empty(),
+                "{table}"
+            );
+        }
     }
 
     #[test]
