@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
-use foldover_engine::PairWatcher;
+use foldover_engine::{PairWatcher, Reach};
 use foldover_types::{PairConfig, PairId, Schedule, Side};
 
 use crate::Service;
@@ -43,7 +43,7 @@ enum Probe {
 }
 
 /// The folder presence check probes run, `missing_side` by default.
-type FolderCheck = dyn Fn(&PairConfig) -> Option<Side> + Send + Sync;
+type FolderCheck = dyn Fn(&PairConfig, &Reach) -> Option<Side> + Send + Sync;
 
 /// What a due pair may do this tick.
 enum Gate {
@@ -225,7 +225,7 @@ impl Scheduler {
     #[cfg(test)]
     pub(crate) fn set_probe(
         &self,
-        probe: impl Fn(&PairConfig) -> Option<Side> + Send + Sync + 'static,
+        probe: impl Fn(&PairConfig, &Reach) -> Option<Side> + Send + Sync + 'static,
     ) {
         *self.probe.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(probe);
     }
@@ -373,7 +373,12 @@ impl Service {
         let id = pair.id();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let check = self.scheduler.probe_check();
-            check(&pair).and_then(|side| {
+            let reach = self
+                .engine
+                .lock()
+                .map(|engine| engine.reach())
+                .unwrap_or_default();
+            check(&pair, &reach).and_then(|side| {
                 let source = self
                     .engine
                     .lock()
@@ -382,7 +387,7 @@ impl Service {
                     .and_then(|mounts| mounts.side(side).map(str::to_owned));
                 let back = source.is_some_and(|source| {
                     self.scheduler.may_reconnect(id, at)
-                        && foldover_engine::reconnect(&pair, side, &source)
+                        && foldover_engine::reconnect(&pair, side, &source, &reach)
                 });
                 if back { None } else { Some(side) }
             })

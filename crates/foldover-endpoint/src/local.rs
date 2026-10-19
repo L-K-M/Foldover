@@ -81,6 +81,12 @@ pub enum ScanError {
     /// An SFTP server could not be reached or refused the login.
     #[error("Cannot reach the SFTP server: {0}")]
     Unreachable(String),
+    /// A paired Mac could not be reached, or refused the folder.
+    #[error("Cannot reach the other Mac's folder: {0}")]
+    MacUnreachable(String),
+    /// The other Mac's folder failed in a way this Mac has no kind for.
+    #[error("The other Mac's folder failed: {0}")]
+    Peer(String),
 
     #[error("Extended metadata is unavailable at {path:?}: {source}")]
     Metadata {
@@ -240,6 +246,18 @@ impl ObservedEntry {
     /// Opaque bytes for a snapshot store.
     pub fn fingerprint_bytes(&self) -> Vec<u8> {
         self.fingerprint.to_bytes()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_tests(version: EntryVersion, size: u64) -> Self {
+        Self {
+            version,
+            fingerprint: Fingerprint {
+                key: vec![1, 2, 3],
+                size,
+                observed_at: SystemTime::UNIX_EPOCH,
+            },
+        }
     }
 
     /// Rebuild a stored entry; `None` if the bytes are not a fingerprint.

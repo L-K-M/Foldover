@@ -25,8 +25,12 @@ use foldover_net::peer::{
 };
 use foldover_proto::peer::{PEER_PROTOCOL, PairingMessage, PeerCall, PeerReply, PeerRequest};
 use foldover_types::DeviceId;
+use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+
+mod stream;
+pub use stream::{Answer, Exchange, Incoming};
 
 /// How long a person has to confirm a code once both Macs show it.
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -107,8 +111,9 @@ pub trait PeerHost: Send + Sync + 'static {
     /// next start.
     fn paired(&self, device: DeviceId, name: String) -> Result<(), NotRecorded>;
 
-    /// Answer a request from paired `device`.
-    fn serve(&self, device: DeviceId, call: PeerCall) -> PeerReply;
+    /// Answer a request from paired `device`: at least one reply, and any
+    /// data the call moves.
+    fn serve(&self, device: DeviceId, call: PeerCall, answer: &mut Answer);
 }
 
 pub struct PeerLink {
@@ -119,6 +124,8 @@ pub struct PeerLink {
     neighbourhood: Neighbourhood,
     state: Mutex<State>,
     host: Arc<dyn PeerHost>,
+    /// Where blocking callers run their streams.
+    runtime: Handle,
 }
 
 /// How this Mac finds, and is found by, others on the network.
@@ -193,6 +200,7 @@ impl PeerLink {
             neighbourhood,
             state: Mutex::default(),
             host,
+            runtime: Handle::current(),
         });
         link.announce();
         let answering = Arc::downgrade(&link);
@@ -387,13 +395,44 @@ impl PeerLink {
             protocol: PEER_PROTOCOL,
             call,
         };
-        let connection = self.connection(device).await?;
-        match exchange(&connection, &request).await {
-            Ok(reply) => Ok(reply),
+        let (mut send, mut recv) = self.open(device, &request).await?;
+        send.finish()?;
+        let reply = stream::receive_json(&mut recv).await?;
+        serde_json::from_slice(&reply).map_err(|_| LinkError::Protocol)
+    }
+
+    /// Send `call` to paired `device` on a new stream, for a blocking
+    /// caller to read the replies; never call it from the runtime's own
+    /// workers.
+    pub fn ask(&self, device: DeviceId, call: PeerCall) -> Result<Exchange, LinkError> {
+        if !self.is_paired(device) {
+            return Err(LinkError::NotPaired);
+        }
+        let request = PeerRequest {
+            protocol: PEER_PROTOCOL,
+            call,
+        };
+        let (send, recv) = self.runtime.block_on(self.open(device, &request))?;
+        Ok(Exchange::new(self.runtime.clone(), send, recv))
+    }
+
+    /// A stream to `device` carrying `request`. A connection that went
+    /// stale is replaced once.
+    async fn open(
+        &self,
+        device: DeviceId,
+        request: &PeerRequest,
+    ) -> Result<(PeerSendStream, PeerRecvStream), LinkError> {
+        let attempt = async |connection: PeerConnection| {
+            let (mut send, recv) = connection.open_bi().await?;
+            stream::send_json(&mut send, request).await?;
+            Ok::<_, LinkError>((send, recv))
+        };
+        match attempt(self.connection(device).await?).await {
+            Ok(streams) => Ok(streams),
             Err(_) => {
                 self.state().connections.remove(&device);
-                let connection = self.connection(device).await?;
-                exchange(&connection, &request).await
+                attempt(self.connection(device).await?).await
             }
         }
     }
@@ -617,19 +656,6 @@ async fn settle(
     link.drain();
 }
 
-/// Send one request and read its reply on a new stream.
-async fn exchange(
-    connection: &PeerConnection,
-    request: &PeerRequest,
-) -> Result<PeerReply, LinkError> {
-    let (mut send, mut recv) = connection.open_bi().await?;
-    let bytes = serde_json::to_vec(request).map_err(|_| LinkError::Protocol)?;
-    write_message(&mut send, &bytes).await?;
-    send.finish()?;
-    let reply = read_message(&mut recv).await?;
-    serde_json::from_slice(&reply).map_err(|_| LinkError::Protocol)
-}
-
 /// Answer each request a paired device sends on `connection`.
 async fn answer(link: Weak<PeerLink>, connection: PeerConnection) {
     let device = DeviceId::from_bytes(*connection.device().as_bytes());
@@ -644,29 +670,35 @@ async fn answer_one(
     mut send: PeerSendStream,
     mut recv: PeerRecvStream,
 ) {
-    let Ok(bytes) = read_message(&mut recv).await else {
+    let Ok(bytes) = stream::receive_json(&mut recv).await else {
         return;
     };
-    let refused = |reason: &str| PeerReply::Refused {
-        reason: reason.to_owned(),
-    };
-    let reply = match serde_json::from_slice::<PeerRequest>(&bytes) {
-        Ok(request) if request.protocol == PEER_PROTOCOL => {
-            let Some(host) = link.upgrade().map(|link| Arc::clone(&link.host)) else {
-                return;
-            };
-            match tokio::task::spawn_blocking(move || host.serve(device, request.call)).await {
-                Ok(reply) => reply,
-                Err(_) => refused("That Mac could not answer"),
-            }
-        }
+    let request = match serde_json::from_slice::<PeerRequest>(&bytes) {
+        Ok(request) if request.protocol == PEER_PROTOCOL => request,
         // A newer request, or another version's.
-        _ => refused("That Mac runs another Foldover version; update both Macs"),
+        _ => {
+            let refused = PeerReply::Refused {
+                reason: "That Mac runs another Foldover version; update both Macs".into(),
+            };
+            if stream::send_json(&mut send, &refused).await.is_ok() {
+                let _ = tokio::time::timeout(DELIVERY_TIMEOUT, send.finish_delivered()).await;
+            }
+            return;
+        }
     };
-    let Ok(bytes) = serde_json::to_vec(&reply) else {
+    let Some((host, runtime)) = link
+        .upgrade()
+        .map(|link| (Arc::clone(&link.host), link.runtime.clone()))
+    else {
         return;
     };
-    if write_message(&mut send, &bytes).await.is_ok() {
+    let answered = tokio::task::spawn_blocking(move || {
+        let mut answer = Answer::new(runtime, send, recv);
+        host.serve(device, request.call, &mut answer);
+        answer.into_send()
+    })
+    .await;
+    if let Ok(mut send) = answered {
         let _ = tokio::time::timeout(DELIVERY_TIMEOUT, send.finish_delivered()).await;
     }
 }

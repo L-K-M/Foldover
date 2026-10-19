@@ -249,12 +249,15 @@ impl Jobs {
                 "The pair changed since that preview; preview again",
             ));
         }
-        foldover_engine::keep_both(&pair, path, right, &mut || ScanControl::Continue).map_err(
-            |error| match error {
+        let reach = engine
+            .lock()
+            .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?
+            .reach();
+        foldover_engine::keep_both(&pair, &reach, path, right, &mut || ScanControl::Continue)
+            .map_err(|error| match error {
                 KeepBothError::Changed(_) => RpcError::new(PREVIEW_REQUIRED, error.to_string()),
                 error => RpcError::new(ROOT_UNAVAILABLE, error.to_string()),
-            },
-        )?;
+            })?;
         // The reservation is already held: resolve through it, not a
         // second `mutation` call, which would refuse its own marker.
         self.resolve_reviewed(engine, id, path, Side::Left, token)
@@ -670,10 +673,10 @@ fn perform(
     // Someone asked for this run: mount a share that went away. The
     // scheduler makes its own, rate-limited attempts.
     if !matches!(work, Work::Scheduled)
-        && let Some(side) = missing_side(&pair)
+        && let Some(side) = missing_side(&pair, inputs.reach())
         && let Some(source) = mounts.side(side)
     {
-        reconnect(&pair, side, source);
+        reconnect(&pair, side, source, inputs.reach());
     }
     let mut control = || {
         if cancel.load(Ordering::Relaxed) {

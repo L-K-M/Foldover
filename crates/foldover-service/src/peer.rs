@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, UNIX_EPOCH};
 
 use foldover_engine::{
-    Decision, Device, Engine, LinkError, NotRecorded, PeerHost, PeerIdentity, PeerLink,
-    PendingPairing, Presence,
+    Answer, Decision, Device, Engine, FolderCache, LinkError, NotRecorded, PeerHost, PeerIdentity,
+    PeerLink, PendingPairing, Presence,
 };
 use foldover_proto::local::{
     INTERNAL_ERROR, INVALID_PARAMS, MAX_PAIRING_MINUTES, PEER_CANCEL, PEER_CONFIRM, PEER_PAIR,
@@ -71,7 +71,7 @@ pub(crate) async fn open(
     presence: Presence,
 ) -> Result<Arc<PeerLink>, RpcError> {
     let paired = devices(engine).await?;
-    PeerLink::start(
+    let link = PeerLink::start(
         identity,
         foldover_engine::computer_name(),
         address,
@@ -79,15 +79,23 @@ pub(crate) async fn open(
         paired.iter().map(|device| device.id),
         Arc::new(Host {
             engine: Arc::clone(engine),
+            folders: FolderCache::default(),
         }),
     )
-    .map_err(unavailable)
+    .map_err(unavailable)?;
+    // Pairs with a folder on another Mac reach it through this link.
+    engine
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .reach_peers(&link);
+    Ok(link)
 }
 
 /// This agent's side of the link: it records pairings, and tells each
 /// paired Mac only what this Mac shares with it.
 struct Host {
     engine: Arc<Mutex<Engine>>,
+    folders: FolderCache,
 }
 
 impl PeerHost for Host {
@@ -102,23 +110,49 @@ impl PeerHost for Host {
             })
     }
 
-    fn serve(&self, device: DeviceId, call: PeerCall) -> PeerReply {
-        let engine = self.engine.lock().unwrap_or_else(PoisonError::into_inner);
+    fn serve(&self, device: DeviceId, call: PeerCall, answer: &mut Answer) {
+        let refused = |reason: &str| PeerReply::Refused {
+            reason: reason.to_owned(),
+        };
         match call {
-            PeerCall::Shares => match engine.shares_for(device) {
-                Ok(shares) => PeerReply::Shares {
-                    shares: shares
-                        .into_iter()
-                        .map(|share| OfferedShare {
-                            id: share.id.to_string(),
-                            name: share.name,
-                        })
-                        .collect(),
-                },
-                Err(_) => PeerReply::Refused {
-                    reason: "That Mac could not read its shared folders".into(),
-                },
-            },
+            PeerCall::Shares => {
+                let shares = self
+                    .engine
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .shares_for(device);
+                let reply = match shares {
+                    Ok(shares) => PeerReply::Shares {
+                        shares: shares
+                            .into_iter()
+                            .map(|share| OfferedShare {
+                                id: share.id.to_string(),
+                                name: share.name,
+                            })
+                            .collect(),
+                    },
+                    Err(_) => refused("That Mac could not read its shared folders"),
+                };
+                let _ = answer.reply(&reply);
+            }
+            PeerCall::Folder { share, op } => {
+                // Only what is shared with the asking Mac; the engine lock is
+                // released before the folder is touched.
+                let root = share.parse().ok().and_then(|share| {
+                    self.engine
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .shared_folder(device, share)
+                        .ok()
+                        .flatten()
+                });
+                match root {
+                    Some(root) => foldover_engine::serve_folder(&root, op, &self.folders, answer),
+                    None => {
+                        let _ = answer.reply(&refused("That folder is not shared with this Mac"));
+                    }
+                }
+            }
         }
     }
 }
@@ -188,6 +222,12 @@ pub(crate) async fn handle(
                 PeerReply::Shares { shares } => shares,
                 PeerReply::Refused { reason } => {
                     return Err(RpcError::new(PEER_UNAVAILABLE, reason));
+                }
+                _ => {
+                    return Err(RpcError::new(
+                        PEER_UNAVAILABLE,
+                        "That Mac answered out of order",
+                    ));
                 }
             };
             return encode(PeerShareList {

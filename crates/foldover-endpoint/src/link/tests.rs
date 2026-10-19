@@ -64,15 +64,19 @@ impl PeerHost for Host {
         }
     }
 
-    fn serve(&self, _device: DeviceId, call: PeerCall) -> PeerReply {
-        match call {
+    fn serve(&self, _device: DeviceId, call: PeerCall, answer: &mut Answer) {
+        let reply = match call {
             PeerCall::Shares => PeerReply::Shares {
                 shares: vec![foldover_proto::peer::OfferedShare {
                     id: "ab".repeat(16),
                     name: "Photos".into(),
                 }],
             },
-        }
+            PeerCall::Folder { .. } => PeerReply::Refused {
+                reason: "No folders here".into(),
+            },
+        };
+        let _ = answer.reply(&reply);
     }
 }
 

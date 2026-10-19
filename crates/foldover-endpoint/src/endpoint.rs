@@ -1,5 +1,5 @@
-//! One side of a pair: a local root or a folder on an SFTP server. The
-//! engine works through this type only. Copies between two local roots
+//! One side of a pair: a local root, a folder on an SFTP server, or one a
+//! paired Mac shares. The engine works through this type only. Copies between two local roots
 //! keep their native path (clones, resource forks, ACLs); every other
 //! combination streams data and carries mode and modification time.
 
@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime};
 
 use foldover_types::{
@@ -14,6 +15,8 @@ use foldover_types::{
     ScanControl, SyncPath,
 };
 
+use crate::link::PeerLink;
+use crate::remote::PeerEndpoint;
 use crate::sftp::SftpEndpoint;
 use crate::{
     ApplyError, ArchivedItem, ArchivedRun, Expected, Filter, LocalEndpoint, Observation,
@@ -32,11 +35,30 @@ pub enum ObserveStep {
 pub enum Endpoint {
     Local(LocalEndpoint),
     Sftp(SftpEndpoint),
+    Peer(PeerEndpoint),
+}
+
+/// What opening a root may need beyond its bytes: the running peer link,
+/// for folders on paired Macs. Opening those blocks on the link. It does
+/// not keep the link running: the agent owns it, and the link's host
+/// holds the engine, which holds this.
+#[derive(Clone, Default)]
+pub struct Reach {
+    link: Option<Weak<PeerLink>>,
+}
+
+impl Reach {
+    /// Folders on paired Macs, through `link`.
+    pub fn through(link: &Arc<PeerLink>) -> Self {
+        Self {
+            link: Some(Arc::downgrade(link)),
+        }
+    }
 }
 
 impl Endpoint {
     /// Open a root and read its first entry, so refused access shows here.
-    pub fn open(root: &PairRoot) -> Result<Self, ScanError> {
+    pub fn open(root: &PairRoot, reach: &Reach) -> Result<Self, ScanError> {
         match root {
             PairRoot::Local(root) => {
                 let endpoint = LocalEndpoint::open(Path::new(OsStr::from_bytes(root.as_bytes())))?;
@@ -48,6 +70,12 @@ impl Endpoint {
                 endpoint.probe_access()?;
                 Ok(Self::Sftp(endpoint))
             }
+            PairRoot::Peer(root) => {
+                let link = reach.link.as_ref().and_then(Weak::upgrade).ok_or_else(|| {
+                    ScanError::MacUnreachable("Mac-to-Mac is off; turn it on in Settings".into())
+                })?;
+                Ok(Self::Peer(PeerEndpoint::open(link, root)?))
+            }
         }
     }
 
@@ -55,6 +83,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.identity(),
             Self::Sftp(endpoint) => endpoint.identity(),
+            Self::Peer(endpoint) => endpoint.identity(),
         }
     }
 
@@ -62,6 +91,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.ensure_identity(durability),
             Self::Sftp(endpoint) => endpoint.ensure_identity(durability),
+            Self::Peer(endpoint) => endpoint.ensure_identity(durability),
         }
     }
 
@@ -69,6 +99,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.ignore_rules(),
             Self::Sftp(endpoint) => endpoint.ignore_rules(),
+            Self::Peer(endpoint) => endpoint.ignore_rules(),
         }
     }
 
@@ -89,6 +120,8 @@ impl Endpoint {
             Self::Sftp(endpoint) => {
                 endpoint.observe_reporting(policy, filter, previous, control, progress)
             }
+            // The other Mac keeps its own previous observation.
+            Self::Peer(endpoint) => endpoint.observe_reporting(policy, filter, control, progress),
         }
     }
 
@@ -98,6 +131,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.name_matching(),
             Self::Sftp(_) => NameMatching::EXACT,
+            Self::Peer(endpoint) => endpoint.name_matching(),
         }
     }
 
@@ -105,6 +139,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.available_space(),
             Self::Sftp(endpoint) => endpoint.available_space(),
+            Self::Peer(endpoint) => endpoint.available_space(),
         }
     }
 
@@ -113,7 +148,7 @@ impl Endpoint {
     pub fn network_source(&self) -> Result<Option<String>, ScanError> {
         match self {
             Self::Local(endpoint) => endpoint.network_source(),
-            Self::Sftp(_) => Ok(None),
+            Self::Sftp(_) | Self::Peer(_) => Ok(None),
         }
     }
 
@@ -121,6 +156,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.recover_leftover(leftover, run),
             Self::Sftp(endpoint) => endpoint.recover_leftover(leftover, run),
+            Self::Peer(_) => Err(PeerEndpoint::writes_pending()),
         }
     }
 
@@ -134,6 +170,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.remove(path, current, run, control),
             Self::Sftp(endpoint) => endpoint.remove(path, current, run, control),
+            Self::Peer(_) => Err(PeerEndpoint::writes_pending()),
         }
     }
 
@@ -151,6 +188,7 @@ impl Endpoint {
             (Self::Local(to), Self::Local(from_endpoint)) => {
                 to.copy_from(from_endpoint, path, from, current, run, control)
             }
+            (Self::Peer(_), _) | (_, Self::Peer(_)) => Err(PeerEndpoint::writes_pending()),
             _ => crate::sftp::copy(self, source, path, from, current, run, control),
         }
     }
@@ -169,6 +207,7 @@ impl Endpoint {
             (Self::Local(to), Self::Local(from_endpoint)) => {
                 to.update_metadata_from(from_endpoint, path, from, current, run, control)
             }
+            (Self::Peer(_), _) | (_, Self::Peer(_)) => Err(PeerEndpoint::writes_pending()),
             _ => crate::sftp::update_metadata(self, source, path, from, current, run, control),
         }
     }
@@ -177,6 +216,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.prune_archive(retention, now),
             Self::Sftp(endpoint) => endpoint.prune_archive(retention, now),
+            Self::Peer(_) => Err(PeerEndpoint::writes_pending()),
         }
     }
 
@@ -184,6 +224,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.archived_runs(),
             Self::Sftp(endpoint) => endpoint.archived_runs(),
+            Self::Peer(_) => Ok(Vec::new()),
         }
     }
 
@@ -196,6 +237,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.archived_items(run, after, limit),
             Self::Sftp(endpoint) => endpoint.archived_items(run, after, limit),
+            Self::Peer(_) => Err(ScanError::UnknownArchiveRun),
         }
     }
 
@@ -208,6 +250,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.put_back(run, path, durability),
             Self::Sftp(endpoint) => endpoint.put_back(run, path),
+            Self::Peer(_) => Err(PeerEndpoint::writes_pending()),
         }
     }
 
@@ -222,6 +265,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.keep_copy(path, expected, from, options, control),
             Self::Sftp(endpoint) => endpoint.keep_copy(path, expected, from, options, control),
+            Self::Peer(_) => Err(PeerEndpoint::writes_pending()),
         }
     }
 
@@ -231,6 +275,7 @@ impl Endpoint {
         match (self, other) {
             (Self::Local(endpoint), Self::Local(other)) => endpoint.relation_to(other),
             (Self::Sftp(endpoint), Self::Sftp(other)) => Ok(endpoint.relation_to(other)),
+            (Self::Peer(endpoint), Self::Peer(other)) => Ok(endpoint.relation_to(other)),
             _ => Ok(RootRelation::Disjoint),
         }
     }

@@ -1,7 +1,7 @@
 # ADR 0031: Mac-to-Mac sync
 
-Status: Device trust, pairing, discovery and shared-folder grants
-implemented; the peer endpoint pending
+Status: Device trust, pairing, discovery, shared-folder grants and the
+peer endpoint's reads implemented; its writes pending
 
 ## Context
 
@@ -87,6 +87,30 @@ tells each Mac only what is shared with it.
 | Call | Reply |
 |---|---|
 | `shares` | The folders the answering Mac shares with the asking one: `id`, `name` |
+| `folder` (`share`, `op`) | One operation on a folder shared with the asking Mac, refused for any other |
+
+A request's stream carries tagged frames: a JSON message, a data chunk,
+or the end of the data. Folder operations, each answered by the sharing
+Mac's local endpoint at the share root:
+
+| `op` | Reply |
+|---|---|
+| `probe` | `done` once the folder opens and its first entry reads |
+| `identity`, `ensureIdentity` | `identity`: the folder's `.foldover/id`, created by the second |
+| `ignoreRules` | `rules` from its `.foldoverignore` |
+| `nameMatching` | `names`: how its volume compares case and Unicode |
+| `space` | `space`: bytes free |
+| `observe` (`scan`: metadata policy, rules, size limit, cutoff) | `progress` every 200 ms while scanning; then entries as binary data frames (path, version, fingerprint); then `observed`: leftovers, oversized and old paths |
+
+Failures come back as `failed` with a kind (missing, access denied,
+cancelled, changed, invalid, other), so the asking Mac waits for a
+missing folder as it waits for an unmounted disk. The sharing Mac keeps
+each folder's last observation in memory and rereads only changed
+files. The asking Mac cancels a scan by dropping the request; the next
+progress report then fails and the scan stops. Pair roots
+`peer://<device>/<share>` need schema v18. Until writes land, a run
+reports each change to or from another Mac's folder as not available
+yet.
 
 ### Local API (protocol 9)
 
