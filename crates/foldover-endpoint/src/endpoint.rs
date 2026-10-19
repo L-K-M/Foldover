@@ -10,8 +10,8 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use foldover_types::{
-    Durability, EndpointId, EntryVersion, MetadataPolicy, PairOptions, PairRoot, ScanControl,
-    SyncPath,
+    Durability, EndpointId, EntryVersion, MetadataPolicy, NameMatching, PairOptions, PairRoot,
+    ScanControl, SyncPath,
 };
 
 use crate::sftp::SftpEndpoint;
@@ -89,6 +89,15 @@ impl Endpoint {
             Self::Sftp(endpoint) => {
                 endpoint.observe_reporting(policy, filter, previous, control, progress)
             }
+        }
+    }
+
+    /// How this folder's filesystem compares names. SFTP servers are
+    /// assumed to match names byte for byte, as Linux filesystems do.
+    pub fn name_matching(&self) -> NameMatching {
+        match self {
+            Self::Local(endpoint) => endpoint.name_matching(),
+            Self::Sftp(_) => NameMatching::EXACT,
         }
     }
 

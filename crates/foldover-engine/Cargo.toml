@@ -16,6 +16,7 @@ foldover-endpoint = { path = "../foldover-endpoint" }
 foldover-state = { path = "../foldover-state" }
 foldover-host = { path = "../foldover-host" }
 thiserror = "2"
+unicode-normalization = "0.1.26"
 
 [dev-dependencies]
 tempfile = "3"

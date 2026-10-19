@@ -11,6 +11,10 @@ All notable changes to this project are documented here. The format follows
 - Guides: what each folder kind can do, setting up NAS shares and SFTP
   servers, and current limitations.
 
+- Names that one folder would store as one file, such as `Report.txt`
+  and `report.txt` on a case-insensitive Mac volume, are a conflict to
+  rename instead of failing on every sync.
+
 - Live progress while comparing and syncing: items checked, changes made
   and bytes copied, with a progress bar in the app.
 

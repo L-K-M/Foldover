@@ -2788,6 +2788,7 @@ public enum SyncConflictKind: Equatable, Hashable {
     case deletedVersusEdited
     case typeMismatch
     case metadataOnly
+    case nameClash
 
 
 
@@ -2817,6 +2818,8 @@ public struct FfiConverterTypeSyncConflictKind: FfiConverterRustBuffer {
         
         case 4: return .metadataOnly
         
+        case 5: return .nameClash
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -2839,6 +2842,10 @@ public struct FfiConverterTypeSyncConflictKind: FfiConverterRustBuffer {
         
         case .metadataOnly:
             writeInt(&buf, Int32(4))
+        
+        
+        case .nameClash:
+            writeInt(&buf, Int32(5))
         
         }
     }

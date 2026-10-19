@@ -181,6 +181,9 @@ pub enum ConflictKind {
     DeletedVersusEdited,
     TypeMismatch,
     MetadataOnly,
+    /// Names that differ only in case or Unicode spelling, which one of
+    /// the folders would store as one file; renaming one resolves it.
+    NameClash,
 }
 
 /// Classification only. Tree ordering, gates, freshness checks and journaling

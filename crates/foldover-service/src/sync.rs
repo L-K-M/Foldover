@@ -315,6 +315,13 @@ impl Jobs {
                 "Resolve the conflict above this item first",
             ));
         }
+        // Keeping a side would only collide again; a rename resolves it.
+        if item.action() == Action::Conflict(ConflictKind::NameClash) {
+            return Err(RpcError::new(
+                INVALID_PARAMS,
+                "Rename one of the items whose names clash, then preview again",
+            ));
+        }
         Ok((reviewed.revision, item.action(), item.versions()))
     }
 
@@ -849,6 +856,7 @@ fn action(action: Action) -> SyncAction {
                 ConflictKind::DeletedVersusEdited => SyncConflict::DeletedVersusEdited,
                 ConflictKind::TypeMismatch => SyncConflict::TypeMismatch,
                 ConflictKind::MetadataOnly => SyncConflict::MetadataOnly,
+                ConflictKind::NameClash => SyncConflict::NameClash,
             },
         },
         Action::Blocked => SyncAction::Blocked,

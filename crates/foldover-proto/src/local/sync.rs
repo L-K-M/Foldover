@@ -78,6 +78,9 @@ pub enum SyncConflict {
     DeletedVersusEdited,
     TypeMismatch,
     MetadataOnly,
+    /// Names differing only in case or Unicode spelling that one folder
+    /// would store as one file; renaming one resolves it.
+    NameClash,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
