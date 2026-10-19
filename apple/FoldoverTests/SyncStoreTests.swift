@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import Foldover
 
-private enum SyncFixtureError: Error { case unreachable }
+private enum SyncFixtureError: Error { case unreachable, timedOut }
 
 /// Replies with scripted states: the start reply, then one per status poll.
 private actor ScriptedSyncClient: SyncClient {
@@ -72,6 +72,64 @@ private struct UnreachableSyncClient: SyncClient {
     }
     func keepBoth(_ id: String, path: Data) async throws -> PairSyncState {
         throw SyncFixtureError.unreachable
+    }
+}
+
+/// Holds every changes() call until the test answers it, in call order.
+private actor GatedChangesClient: SyncClient {
+    private let reply: PairSyncState
+    private(set) var filters: [ChangeFilter?] = []
+    private var pending: [CheckedContinuation<ChangePage, Error>?] = []
+
+    init(reply: PairSyncState) { self.reply = reply }
+
+    func preview(_ id: String) async throws -> PairSyncState { reply }
+    func run(_ id: String, approvedA: UInt64, approvedB: UInt64) async throws -> PairSyncState { reply }
+    func status(_ id: String) async throws -> PairSyncState { reply }
+    func cancel(_ id: String) async throws -> PairSyncState { .idle }
+    func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState { .idle }
+    func keepBoth(_ id: String, path: Data) async throws -> PairSyncState { .idle }
+    func history(_ id: String) async throws -> [RunRecord] { [] }
+
+    func changes(_ id: String, after: Data?, filter: ChangeFilter?) async throws -> ChangePage {
+        filters.append(filter)
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                pending.append($0)
+                if Task.isCancelled { fail(pending.count - 1, with: CancellationError()) }
+            }
+        } onCancel: {
+            Task { await self.releasePending() }
+        }
+    }
+
+    /// Bounded: a call that never arrives fails the test instead of
+    /// hanging the suite.
+    func waitForCalls(_ count: Int) async throws {
+        var attempts = 0
+        while filters.count < count, attempts < 10_000 {
+            attempts += 1
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        if filters.count < count { throw SyncFixtureError.timedOut }
+    }
+
+    func answer(_ index: Int, with page: ChangePage) {
+        let continuation = pending[index]
+        pending[index] = nil
+        continuation?.resume(returning: page)
+    }
+
+    func fail(_ index: Int, with error: Error) {
+        let continuation = pending[index]
+        pending[index] = nil
+        continuation?.resume(throwing: error)
+    }
+
+    /// Cancelling a task does not resume its checked continuation; free
+    /// any calls a failing test leaves behind so the tasks can finish.
+    private func releasePending() {
+        for index in pending.indices { fail(index, with: CancellationError()) }
     }
 }
 
@@ -360,4 +418,70 @@ func previewsListMoreChangesByKindAndResetOnTheNextPreview() async {
 
     await viewModel.refresh()
     #expect(store.listing(for: pair().id) == nil)
+}
+
+@MainActor
+@Test
+func theLastFilterTapWinsOverStaleResponses() async throws {
+    let summary = preview(archivesInA: 3, needsApproval: false)
+    let client = GatedChangesClient(reply: .previewed(summary))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
+    await viewModel.preview()
+
+    // Two rapid taps: the first request is still in flight when the
+    // second is sent.
+    async let stale = viewModel.showChanges(.copies)
+    try await client.waitForCalls(1)
+    async let latest = viewModel.showChanges(.archives)
+    try await client.waitForCalls(2)
+    #expect(await client.filters == [.copies, .archives])
+
+    // The newest tap answers first and is fully applied; only then does
+    // the stale response arrive.
+    let archived = ChangePage(changes: [
+        PlannedChange(path: Data("old.zip".utf8), action: .archive(on: .a)),
+    ], more: false)
+    let copied = ChangePage(changes: [
+        PlannedChange(path: Data("new.jpg".utf8), action: .copy(to: .b)),
+    ], more: false)
+    await client.answer(1, with: archived)
+    await latest
+    await client.answer(0, with: copied)
+    await stale
+
+    // Last tap wins: the earlier response must not move the selection.
+    #expect(viewModel.changeFilter == .archives)
+    #expect(viewModel.rows.map(\.path) == ["old.zip"])
+    #expect(viewModel.requestError == nil)
+}
+
+@MainActor
+@Test
+func aSupersededChangesRequestReportsNoError() async throws {
+    let summary = preview(archivesInA: 3, needsApproval: false)
+    let client = GatedChangesClient(reply: .previewed(summary))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
+    await viewModel.preview()
+
+    async let stale = viewModel.showChanges(.copies)
+    try await client.waitForCalls(1)
+    async let latest = viewModel.showChanges(.archives)
+    try await client.waitForCalls(2)
+
+    // The newest tap lands; the superseded request fails behind it.
+    let archived = ChangePage(changes: [
+        PlannedChange(path: Data("old.zip".utf8), action: .archive(on: .a)),
+    ], more: false)
+    await client.answer(1, with: archived)
+    await latest
+    await client.fail(0, with: SyncFixtureError.unreachable)
+    await stale
+
+    // A superseded request's failure belongs to a list nobody asked for
+    // anymore: the newest filter and rows stay and no error is reported.
+    #expect(viewModel.changeFilter == .archives)
+    #expect(viewModel.rows.map(\.path) == ["old.zip"])
+    #expect(viewModel.requestError == nil)
 }
