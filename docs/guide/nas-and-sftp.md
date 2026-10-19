@@ -55,6 +55,11 @@ name-handling fidelity as unverified
 ([ADR 0005](../adr/0005-metadata-fidelity.md),
 [ADR 0027](../adr/0027-share-reconnect.md)).
 
+macOS writes AppleDouble files (`._*`) beside files on volumes that cannot
+store its metadata, and these stop a scan. Add a `._*` rule to the pair's
+filters to skip them ([limitations](limitations.md),
+[ADR 0024](../adr/0024-filters.md)).
+
 ## An SFTP folder
 
 ### Set it up
@@ -68,9 +73,11 @@ name-handling fidelity as unverified
    `crates/foldover-net/src/sftp.rs`).
 2. Add the folder to the pair as a locator:
 
+   An absolute path, then one under the login's home folder:
+
    ```text
-   sftp://alice@nas.local:2222/srv/photos   absolute path
-   sftp://backup/~/photos                   under the login's home folder
+   sftp://alice@nas.local:2222/srv/photos
+   sftp://backup/~/photos
    ```
 
    The syntax is `sftp://[user@]host[:port]/path`; the path is required.
@@ -90,8 +97,9 @@ password fails with ssh's own message
 SFTP cannot pin the folder the way local roots do. Between Foldover's
 checks, a process on the server can swap a directory for a symlink and
 redirect reads and writes outside the selected folder. Use SFTP folders
-only with servers you trust; a jailed account or a server-side helper is
-not required ([ADR 0028](../adr/0028-sftp-endpoints.md),
+only with servers you trust. Foldover needs no server-side helper and
+works with an ordinary account; a jailed (chrooted) account still limits
+what such a swap can reach ([ADR 0028](../adr/0028-sftp-endpoints.md),
 [PLAN.md](../../PLAN.md) section 10 item 7). The app and the CLI show
 this warning when you configure an SFTP folder.
 

@@ -24,7 +24,7 @@ A pair joins two folders. Each side can be:
 | Empty folders | Created on the other side | Same | Same | [0019](../adr/0019-local-write-primitives.md), [0028](../adr/0028-sftp-endpoints.md) |
 | Archive and Put Back | Replaced and removed items go to `.foldover/archive/<run>/` for 30 days; Put Back restores without replacing | Same | Same | [0020](../adr/0020-run-execution.md), [0025](../adr/0025-archive-browser.md), [0028](../adr/0028-sftp-endpoints.md) |
 | Undo | Reverses the newest run that wrote; metadata-only changes are not undone | Same | Same | [0029](../adr/0029-undo.md) |
-| Change detection | FSEvents hints plus a full check every run; hourly verification on "When files change" | Same mechanism; other computers' writes are found by the hourly check or your interval | No notifications; hourly verification on "When files change" | [0002](../adr/0002-change-detection.md), [0022](../adr/0022-scheduled-runs.md), [0028](../adr/0028-sftp-endpoints.md) |
+| Change detection | FSEvents hints plus a full check every run; hourly verification on "When files change" | FSEvents reports only this Mac's writes; other computers' writes are found by the hourly check or your interval | No notifications; hourly verification on "When files change" | [0002](../adr/0002-change-detection.md), [0022](../adr/0022-scheduled-runs.md), [0028](../adr/0028-sftp-endpoints.md) |
 | Durability | Standard (`fsync`) or Full (`F_FULLFSYNC`, slower, also survives power loss) | Same settings; the guarantee is limited to what the mounted filesystem honors | Standard only; Full is rejected when you save the pair | [0019](../adr/0019-local-write-primitives.md), [0028](../adr/0028-sftp-endpoints.md) |
 | Identity checks | First sync writes `.foldover/id`; later runs stop if it is missing or different | Same | Same | [0020](../adr/0020-run-execution.md), [0028](../adr/0028-sftp-endpoints.md) |
 
@@ -45,7 +45,7 @@ A pair joins two folders. Each side can be:
   append-only flags, storage flags, and system-managed attributes such as
   `com.apple.provenance`. See [limitations](limitations.md)
   ([ADR 0018](../adr/0018-local-entry-versions.md)).
-- **Full durability is local only.** SFTP file sync cannot flush
+- **Full durability is not offered for SFTP.** SFTP file sync cannot flush
   namespace changes or the drive cache, so pairs containing an SFTP
   folder only offer Standard ([ADR 0028](../adr/0028-sftp-endpoints.md)).
 - **Watching is a hint, not the record.** An event only starts a full
