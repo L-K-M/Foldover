@@ -643,6 +643,7 @@ final class SyncStore {
                   (generations[id] ?? 0) == generation else { return }
             set(id, normalized(id, reply))
         }
+        if polling[id] == owner { polling[id] = nil }
         await refreshHistory(id)
     }
 
