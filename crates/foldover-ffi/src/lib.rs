@@ -14,6 +14,8 @@ mod automation;
 pub use automation::*;
 mod history;
 pub use history::*;
+mod peers;
+pub use peers::*;
 mod sync;
 pub use sync::*;
 

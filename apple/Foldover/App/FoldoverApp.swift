@@ -9,6 +9,7 @@ import SwiftUI
 struct FoldoverApp: App {
     @State private var viewModel: MainViewModel
     @State private var settings = SettingsStore()
+    @State private var macToMac = MacToMacStore()
 
     init() {
         let viewModel = MainViewModel(appInfo: AppInfoStore())
@@ -34,7 +35,8 @@ struct FoldoverApp: App {
         .menuBarExtraStyle(.window)
 
         Settings {
-            SettingsView(viewModel: SettingsViewModel(store: settings))
+            SettingsView(viewModel: SettingsViewModel(store: settings),
+                         macToMac: MacToMacViewModel(store: macToMac))
         }
     }
 }

@@ -1239,6 +1239,181 @@ public func FfiConverterTypeLocalPairOptions_lower(_ value: LocalPairOptions) ->
 }
 
 
+/**
+ * Mac-to-Mac on this Mac, as last reported.
+ */
+public struct MacToMac: Equatable, Hashable {
+    /**
+     * This Mac's device ID once Mac-to-Mac is on; None before.
+     */
+    public var device: String?
+    /**
+     * This Mac's name, as other Macs see it.
+     */
+    public var name: String
+    /**
+     * Whether other Macs can pair with this one now.
+     */
+    public var pairingOpen: Bool
+    /**
+     * Codes waiting for a person on this Mac to compare.
+     */
+    public var pending: [PairingCode]
+    public var paired: [PairedMac]
+    /**
+     * Other Macs running Foldover on this network.
+     */
+    public var nearby: [NearbyMac]
+    /**
+     * Why Macs on the network cannot be seen, if they cannot.
+     */
+    public var discoveryProblem: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * This Mac's device ID once Mac-to-Mac is on; None before.
+         */device: String?, 
+        /**
+         * This Mac's name, as other Macs see it.
+         */name: String, 
+        /**
+         * Whether other Macs can pair with this one now.
+         */pairingOpen: Bool, 
+        /**
+         * Codes waiting for a person on this Mac to compare.
+         */pending: [PairingCode], paired: [PairedMac], 
+        /**
+         * Other Macs running Foldover on this network.
+         */nearby: [NearbyMac], 
+        /**
+         * Why Macs on the network cannot be seen, if they cannot.
+         */discoveryProblem: String?) {
+        self.device = device
+        self.name = name
+        self.pairingOpen = pairingOpen
+        self.pending = pending
+        self.paired = paired
+        self.nearby = nearby
+        self.discoveryProblem = discoveryProblem
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension MacToMac: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMacToMac: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MacToMac {
+        return
+            try MacToMac(
+                device: FfiConverterOptionString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                pairingOpen: FfiConverterBool.read(from: &buf), 
+                pending: FfiConverterSequenceTypePairingCode.read(from: &buf), 
+                paired: FfiConverterSequenceTypePairedMac.read(from: &buf), 
+                nearby: FfiConverterSequenceTypeNearbyMac.read(from: &buf), 
+                discoveryProblem: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MacToMac, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.device, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterBool.write(value.pairingOpen, into: &buf)
+        FfiConverterSequenceTypePairingCode.write(value.pending, into: &buf)
+        FfiConverterSequenceTypePairedMac.write(value.paired, into: &buf)
+        FfiConverterSequenceTypeNearbyMac.write(value.nearby, into: &buf)
+        FfiConverterOptionString.write(value.discoveryProblem, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMacToMac_lift(_ buf: RustBuffer) throws -> MacToMac {
+    return try FfiConverterTypeMacToMac.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMacToMac_lower(_ value: MacToMac) -> RustBuffer {
+    return FfiConverterTypeMacToMac.lower(value)
+}
+
+
+public struct NearbyMac: Equatable, Hashable {
+    public var device: String
+    public var name: String
+    public var openForPairing: Bool
+    public var paired: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(device: String, name: String, openForPairing: Bool, paired: Bool) {
+        self.device = device
+        self.name = name
+        self.openForPairing = openForPairing
+        self.paired = paired
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NearbyMac: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNearbyMac: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NearbyMac {
+        return
+            try NearbyMac(
+                device: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                openForPairing: FfiConverterBool.read(from: &buf), 
+                paired: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NearbyMac, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.device, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterBool.write(value.openForPairing, into: &buf)
+        FfiConverterBool.write(value.paired, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNearbyMac_lift(_ buf: RustBuffer) throws -> NearbyMac {
+    return try FfiConverterTypeNearbyMac.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNearbyMac_lower(_ value: NearbyMac) -> RustBuffer {
+    return FfiConverterTypeNearbyMac.lower(value)
+}
+
+
 public struct PairConfigurationPage: Equatable, Hashable {
     public var pairs: [LocalPairConfiguration]
     public var next: String?
@@ -1290,6 +1465,131 @@ public func FfiConverterTypePairConfigurationPage_lift(_ buf: RustBuffer) throws
 #endif
 public func FfiConverterTypePairConfigurationPage_lower(_ value: PairConfigurationPage) -> RustBuffer {
     return FfiConverterTypePairConfigurationPage.lower(value)
+}
+
+
+public struct PairedMac: Equatable, Hashable {
+    public var device: String
+    public var name: String
+    /**
+     * Milliseconds since the Unix epoch.
+     */
+    public var pairedMs: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(device: String, name: String, 
+        /**
+         * Milliseconds since the Unix epoch.
+         */pairedMs: UInt64) {
+        self.device = device
+        self.name = name
+        self.pairedMs = pairedMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PairedMac: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePairedMac: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PairedMac {
+        return
+            try PairedMac(
+                device: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                pairedMs: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PairedMac, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.device, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterUInt64.write(value.pairedMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePairedMac_lift(_ buf: RustBuffer) throws -> PairedMac {
+    return try FfiConverterTypePairedMac.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePairedMac_lower(_ value: PairedMac) -> RustBuffer {
+    return FfiConverterTypePairedMac.lower(value)
+}
+
+
+/**
+ * A six-digit code both Macs show; show it with leading zeros.
+ */
+public struct PairingCode: Equatable, Hashable {
+    public var device: String
+    public var name: String
+    public var code: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(device: String, name: String, code: UInt32) {
+        self.device = device
+        self.name = name
+        self.code = code
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PairingCode: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePairingCode: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PairingCode {
+        return
+            try PairingCode(
+                device: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                code: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PairingCode, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.device, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterUInt32.write(value.code, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePairingCode_lift(_ buf: RustBuffer) throws -> PairingCode {
+    return try FfiConverterTypePairingCode.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePairingCode_lower(_ value: PairingCode) -> RustBuffer {
+    return FfiConverterTypePairingCode.lower(value)
 }
 
 
@@ -3441,6 +3741,81 @@ fileprivate struct FfiConverterSequenceTypeLocalPairConfiguration: FfiConverterR
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeNearbyMac: FfiConverterRustBuffer {
+    typealias SwiftType = [NearbyMac]
+
+    public static func write(_ value: [NearbyMac], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeNearbyMac.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [NearbyMac] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [NearbyMac]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeNearbyMac.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePairedMac: FfiConverterRustBuffer {
+    typealias SwiftType = [PairedMac]
+
+    public static func write(_ value: [PairedMac], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePairedMac.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PairedMac] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PairedMac]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePairedMac.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePairingCode: FfiConverterRustBuffer {
+    typealias SwiftType = [PairingCode]
+
+    public static func write(_ value: [PairingCode], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePairingCode.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PairingCode] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PairingCode]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePairingCode.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeRunHistoryEntry: FfiConverterRustBuffer {
     typealias SwiftType = [RunHistoryEntry]
 
@@ -3775,6 +4150,136 @@ public func pairHistory(id: String)async throws  -> [RunHistoryEntry]  {
             errorHandler: FfiConverterTypeAgentError_lift
         )
 }
+public func cancelMacPairing(device: String)async throws  -> MacToMac  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_cancel_mac_pairing(FfiConverterString.lower(device)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeMacToMac_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+public func closeMacPairing()async throws  -> MacToMac  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_close_mac_pairing(
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeMacToMac_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+/**
+ * The person saw the same code on both Macs.
+ */
+public func confirmMacPairing(device: String)async throws  -> MacToMac  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_confirm_mac_pairing(FfiConverterString.lower(device)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeMacToMac_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+/**
+ * Forget a paired Mac and close its connections.
+ */
+public func forgetMac(device: String)async throws  -> MacToMac  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_forget_mac(FfiConverterString.lower(device)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeMacToMac_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+/**
+ * Never turns Mac-to-Mac on, so it never shows the Local Network prompt.
+ */
+public func macToMacStatus()async throws  -> MacToMac  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_mac_to_mac_status(
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeMacToMac_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+/**
+ * Let other Macs pair with this one for `minutes` (10 when absent).
+ */
+public func openMacPairing(minutes: UInt32?)async throws  -> MacToMac  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_open_mac_pairing(FfiConverterOptionUInt32.lower(minutes)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeMacToMac_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+/**
+ * Start pairing with a nearby Mac that is open for pairing.
+ */
+public func pairWithMac(device: String)async throws  -> PairingCode  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_pair_with_mac(FfiConverterString.lower(device)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePairingCode_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+/**
+ * Turn Mac-to-Mac on: listen, and look for Macs on the network.
+ */
+public func startMacToMac()async throws  -> MacToMac  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_start_mac_to_mac(
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeMacToMac_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
 public func syncCancel(id: String)async throws  -> SyncJobState  {
     return
         try  await uniffiRustCallAsync(
@@ -3987,6 +4492,30 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_pair_history() != 62355) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_cancel_mac_pairing() != 19431) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_close_mac_pairing() != 983) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_confirm_mac_pairing() != 36375) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_forget_mac() != 64745) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_mac_to_mac_status() != 24201) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_open_mac_pairing() != 59773) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_pair_with_mac() != 20514) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_start_mac_to_mac() != 54810) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_sync_cancel() != 20891) {
