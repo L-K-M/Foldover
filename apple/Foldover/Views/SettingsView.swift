@@ -3,8 +3,17 @@ import SwiftUI
 /// The Settings window (⌘,).
 struct SettingsView: View {
     let viewModel: SettingsViewModel
+    let macToMac: MacToMacViewModel
 
     var body: some View {
+        TabView {
+            Tab("General", systemImage: "gearshape") { general }
+            Tab("Mac-to-Mac", systemImage: "laptopcomputer") { MacToMacView(viewModel: macToMac) }
+        }
+        .frame(width: 460)
+    }
+
+    private var general: some View {
         Form {
             Toggle("Open Foldover at login", isOn: Binding(
                 get: { viewModel.opensAtLogin },
@@ -20,7 +29,6 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 420)
         .onAppear { viewModel.refresh() }
     }
 }

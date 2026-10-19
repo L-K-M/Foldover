@@ -88,6 +88,15 @@ When the link cannot start (no Keychain access, no network), `peer.*`
 fails with `PEER_UNAVAILABLE` (-32010) and folder sync is unaffected.
 `foldover peers` exposes the same calls.
 
+### App
+
+Settings › Mac-to-Mac reads `peer.status` and, while off, explains the
+Local Network prompt next to a Turn On button that calls `peer.start`.
+Once on, it polls every second while open: Allow pairing opens a window,
+nearby Macs ready to pair offer Pair, each pending code shows in two
+groups of three digits with Confirm and Cancel, and paired Macs can be
+forgotten after a confirmation.
+
 ## Consequences
 
 - Only the Mac that owns a pair reconciles it; the other serves its
