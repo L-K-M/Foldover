@@ -18,6 +18,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
+use foldover_net::discovery::{Advert, Discovery};
 use foldover_net::peer::{
     DeviceId as NetDeviceId, Identity, Node, PeerConnection, PeerError, PeerMode, PeerRecvStream,
     PeerSendStream, TrustStore, read_message, write_message,
@@ -44,6 +45,33 @@ pub enum LinkError {
     Protocol,
     #[error("This Mac's identity for other Macs is unavailable: {0}")]
     Identity(String),
+    #[error(
+        "That Mac is not open for pairing on this network; open pairing on it, or give its address"
+    )]
+    NotNearby,
+    #[error("{0}")]
+    Discovery(String),
+}
+
+/// Whether this Mac announces itself to other Macs on the local network.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Presence {
+    /// Advertise and browse with multicast DNS.
+    Announced,
+    /// Reachable only at an address given by hand, e.g. in tests.
+    Unlisted,
+}
+
+/// Another Mac running Foldover on the local network.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NearbyMac {
+    pub device: DeviceId,
+    /// The name it announced, e.g. "Studio iMac".
+    pub name: String,
+    /// Where paired Macs reach it.
+    pub address: SocketAddr,
+    /// Where it accepts pairing, while a window is open.
+    pub pairing: Option<SocketAddr>,
 }
 
 /// What a person must compare on both Macs before confirming.
@@ -71,9 +99,18 @@ pub struct PeerLink {
     name: String,
     trust: Arc<TrustStore>,
     node: Arc<Node>,
+    neighbourhood: Neighbourhood,
     state: Mutex<State>,
     /// Records a device both people confirmed, e.g. in the state store.
     paired: Paired,
+}
+
+/// How this Mac finds, and is found by, others on the network.
+enum Neighbourhood {
+    Unlisted,
+    Browsing(Discovery),
+    /// Multicast DNS failed to start; pairing by address still works.
+    Unavailable(String),
 }
 
 #[derive(Default)]
@@ -106,6 +143,7 @@ impl PeerLink {
         identity: Identity,
         name: String,
         address: SocketAddr,
+        presence: Presence,
         paired: impl IntoIterator<Item = DeviceId>,
         on_paired: impl Fn(DeviceId, String) -> Result<(), ()> + Send + Sync + 'static,
     ) -> Result<Arc<Self>, LinkError> {
@@ -120,14 +158,23 @@ impl PeerLink {
             Arc::clone(&trust),
             PeerMode::Paired,
         )?);
+        let neighbourhood = match presence {
+            Presence::Unlisted => Neighbourhood::Unlisted,
+            Presence::Announced => match Discovery::start(identity.id()) {
+                Ok(discovery) => Neighbourhood::Browsing(discovery),
+                Err(error) => Neighbourhood::Unavailable(error.to_string()),
+            },
+        };
         let link = Arc::new(Self {
             identity,
             name,
             trust,
             node: Arc::clone(&node),
+            neighbourhood,
             state: Mutex::default(),
             paired: Box::new(on_paired),
         });
+        link.announce();
         // Shared folders arrive in the next slice; until then a paired
         // device's connection is accepted and closed.
         let accept = tokio::spawn(async move {
@@ -151,6 +198,27 @@ impl PeerLink {
 
     pub fn is_paired(&self, device: DeviceId) -> bool {
         self.trust.is_pinned(net_device(device))
+    }
+
+    /// Other Macs seen on the local network; none when unlisted.
+    pub fn nearby(&self) -> Result<Vec<NearbyMac>, LinkError> {
+        let discovery = match &self.neighbourhood {
+            Neighbourhood::Unlisted => return Ok(Vec::new()),
+            Neighbourhood::Unavailable(error) => return Err(LinkError::Discovery(error.clone())),
+            Neighbourhood::Browsing(discovery) => discovery,
+        };
+        Ok(discovery
+            .seen()
+            .into_iter()
+            .filter_map(|seen| {
+                Some(NearbyMac {
+                    device: DeviceId::from_bytes(*seen.device.as_bytes()),
+                    name: seen.name,
+                    address: *seen.addresses.first()?,
+                    pairing: seen.pairing.first().copied(),
+                })
+            })
+            .collect())
     }
 
     /// Let other Macs pair with this one for `open_for`; returns where.
@@ -203,6 +271,8 @@ impl PeerLink {
             node,
             tasks: vec![accept, expiry],
         });
+        drop(state);
+        self.announce();
         Ok(address)
     }
 
@@ -222,12 +292,22 @@ impl PeerLink {
     }
 
     /// Start pairing with `device`, whose pairing window listens at
-    /// `address`; returns the code both Macs now show.
+    /// `address`, or where the network says when None; returns the code
+    /// both Macs now show.
     pub async fn pair(
         self: &Arc<Self>,
         device: DeviceId,
-        address: SocketAddr,
+        address: Option<SocketAddr>,
     ) -> Result<PendingPairing, LinkError> {
+        let address = match address {
+            Some(address) => address,
+            None => self
+                .nearby()?
+                .into_iter()
+                .find(|nearby| nearby.device == device)
+                .and_then(|nearby| nearby.pairing)
+                .ok_or(LinkError::NotNearby)?,
+        };
         // Dialing an unpaired device needs a node in pairing mode.
         self.open_pairing(CONFIRM_TIMEOUT)?;
         let node = self
@@ -332,6 +412,8 @@ impl PeerLink {
         } else {
             state.draining.push(window.node);
         }
+        drop(state);
+        self.announce();
     }
 
     /// Close the nodes of closed windows once no code is left to settle.
@@ -346,6 +428,24 @@ impl PeerLink {
         for node in drained {
             node.close();
         }
+    }
+
+    /// Tell the network where this Mac listens, and whether it pairs.
+    fn announce(&self) {
+        let Neighbourhood::Browsing(discovery) = &self.neighbourhood else {
+            return;
+        };
+        let Ok(port) = self.address().map(|address| address.port()) else {
+            return;
+        };
+        let advert = Advert {
+            name: self.name.clone(),
+            port,
+            pairing: self.pairing_address().map(|address| address.port()),
+        };
+        // Best effort: an advert that fails to go out leaves pairing by
+        // address, and nearby() still reports what this Mac sees.
+        let _ = discovery.advertise(&advert);
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {

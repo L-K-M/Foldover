@@ -3,7 +3,10 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Never starts Mac-to-Mac, so it never triggers the Local Network prompt.
 pub const PEER_STATUS: &str = "peer.status";
+/// Start listening and looking for Macs on the network.
+pub const PEER_START: &str = "peer.start";
 pub const PEER_PAIRING_OPEN: &str = "peer.pairingOpen";
 pub const PEER_PAIRING_CLOSE: &str = "peer.pairingClose";
 pub const PEER_PAIR: &str = "peer.pair";
@@ -20,12 +23,13 @@ pub struct PeerPairingOpen {
     pub minutes: Option<u32>,
 }
 
-/// Start pairing with `device`, whose pairing window listens at `address`.
+/// Start pairing with `device`, whose pairing window listens at `address`,
+/// or where the local network says when absent.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PeerPair {
     pub device: String,
-    pub address: String,
+    pub address: Option<String>,
 }
 
 /// Name a device for confirm, cancel or revoke.
@@ -54,16 +58,33 @@ pub struct PeerDeviceRecord {
     pub paired_ms: u64,
 }
 
+/// Another Mac running Foldover on the local network.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerNearbyRecord {
+    pub device: String,
+    pub name: String,
+    pub address: String,
+    /// Where it accepts pairing, while a window is open.
+    pub pairing: Option<String>,
+    /// Whether this Mac has paired with it.
+    pub paired: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PeerStatus {
-    /// This Mac's device ID and name.
-    pub device: String,
+    /// This Mac's device ID once Mac-to-Mac is on; None before.
+    pub device: Option<String>,
     pub name: String,
-    /// Where paired Macs reach this one.
-    pub address: String,
+    /// Where paired Macs reach this one, once on.
+    pub address: Option<String>,
     /// Where an open pairing window listens.
     pub pairing: Option<String>,
     pub pending: Vec<PeerPendingRecord>,
     pub devices: Vec<PeerDeviceRecord>,
+    /// Macs seen on the local network, this one excluded.
+    pub nearby: Vec<PeerNearbyRecord>,
+    /// Why Macs on the network cannot be seen, if they cannot.
+    pub discovery: Option<String>,
 }

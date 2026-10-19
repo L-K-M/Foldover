@@ -30,7 +30,8 @@ pub use foldover_state::{
 };
 pub use gates::{DeletionCounts, DeletionReview, InvalidDeletionCounts, RunContext};
 pub use peers::{
-    Decision, LinkError, PeerIdentity, PeerLink, PendingPairing, computer_name, peer_identity,
+    Decision, LinkError, NearbyMac, PeerIdentity, PeerLink, PendingPairing, Presence,
+    computer_name, peer_identity,
 };
 pub use plan::{
     CandidateDecision, CandidatePlan, Choices, PlanError, PlanRow, TreeRole, plan_candidates,

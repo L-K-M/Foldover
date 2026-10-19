@@ -1,7 +1,9 @@
 //! Paired Macs (ADR 0031). The peer link runs outside the engine lock; the
 //! engine records the devices both people confirmed.
 
-pub use foldover_endpoint::{Decision, LinkError, PeerIdentity, PeerLink, PendingPairing};
+pub use foldover_endpoint::{
+    Decision, LinkError, NearbyMac, PeerIdentity, PeerLink, PendingPairing, Presence,
+};
 
 /// This Mac's identity for other Macs: the one in the Keychain on macOS,
 /// a fresh one per agent start elsewhere (no Mac-to-Mac outside macOS).
