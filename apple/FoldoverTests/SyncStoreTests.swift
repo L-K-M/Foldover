@@ -175,6 +175,7 @@ private actor DeferredSyncClient: SyncClient {
     private var holdStarts = false
     private var holdResolves = false
     private var previewReply: PairSyncState = .idle
+    private var terminalStatus: PairSyncState?
 
     func setPreviewReply(_ reply: PairSyncState) { previewReply = reply }
     /// Park preview/run requests until the test releases them.
@@ -192,6 +193,7 @@ private actor DeferredSyncClient: SyncClient {
         let ready = waiters.filter { statusCalls >= $0.count }
         waiters.removeAll { statusCalls >= $0.count }
         for waiter in ready { waiter.then.resume(returning: true) }
+        if let terminalStatus { return terminalStatus }
         return try await withCheckedThrowingContinuation { pending.append($0) }
     }
     func run(_ id: String, approvedA: UInt64, approvedB: UInt64) async throws -> PairSyncState {
@@ -233,6 +235,12 @@ private actor DeferredSyncClient: SyncClient {
     /// Resumes the newest unanswered status request.
     func replyLatest(_ state: PairSyncState) {
         pending.removeLast().resume(returning: state)
+    }
+
+    /// Cleanup must answer polls issued after the current queue drains too.
+    func finishPolling(_ state: PairSyncState) {
+        terminalStatus = state
+        while !pending.isEmpty { reply(state) }
     }
 
     /// Fails the oldest unanswered status request.
@@ -1272,9 +1280,7 @@ func dismissingDuringAPendingStartCannotAbandonTheAcceptedRun() async {
     })
     #expect(await client.waitForStatusCalls(1, timeout: .seconds(3)))
 
-    while await client.pendingStatusCalls > 0 {
-        await client.reply(.finished(finished))
-    }
+    await client.finishPolling(.finished(finished))
     await approving.value
     #expect(store.state(for: pair.id) == .finished(finished))
 }
@@ -1346,9 +1352,7 @@ func oldPollerRepliesCannotRetireAPendingStart() async {
     })
     #expect(await client.waitForStatusCalls(issuedBeforeReply + 1, timeout: .seconds(3)))
 
-    while await client.pendingStatusCalls > 0 {
-        await client.reply(.previewed(done))
-    }
+    await client.finishPolling(.previewed(done))
     await first.value
     await second.value
     #expect(store.state(for: pair.id) == .previewed(done))
@@ -1382,9 +1386,7 @@ func staleResolveRepliesCannotTriggerNewPreviews() async {
     let secondIssued = await client.waitForStartCalls(.preview, 2, timeout: .milliseconds(500))
     #expect(!secondIssued)
 
-    while await client.pendingStatusCalls > 0 {
-        await client.reply(.previewed(done))
-    }
+    await client.finishPolling(.previewed(done))
     while await client.pendingResolveCalls > 0 {
         await client.replyResolve(.idle)
     }
