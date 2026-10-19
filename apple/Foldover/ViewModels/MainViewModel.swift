@@ -182,7 +182,7 @@ final class MainViewModel {
         pairs.map { pair in
             let sync = sync(for: pair)
             return MenuPairRow(id: pair.id, name: pair.settings.name, status: sync.shortStatus,
-                               canSync: sync.canStart)
+                               canSync: sync.canSync)
         }
     }
 
@@ -206,8 +206,15 @@ final class MainViewModel {
             return pairError ?? agentStatusText
         }
         let before = sync(for: pair)
-        guard before.canStart else {
-            return before.isWorking ? before.statusText : agentStatusText
+        let allowed = switch action {
+        case .sync: before.canSync
+        case .preview: before.canStart
+        }
+        guard allowed else {
+            // A sync refused over an obsolete preview still explains
+            // itself; a disconnected pair explains the agent.
+            return before.canStart || before.isWorking || before.isResolving
+                ? before.statusText : agentStatusText
         }
         switch action {
         case .sync: await before.sync()
@@ -218,7 +225,7 @@ final class MainViewModel {
     }
 
     func syncAll() async {
-        for pair in pairs where sync(for: pair).canStart {
+        for pair in pairs where sync(for: pair).canSync {
             await sync(for: pair).sync()
         }
     }

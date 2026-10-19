@@ -272,8 +272,11 @@ final class PairStore {
     }
 
     /// Skip `path` from now on: add a rule matching exactly it to the
-    /// pair's filters. The base is kept, so nothing is deleted.
-    func skip(_ path: Data, inPairWithID id: String) async throws {
+    /// pair's filters. `expectedRevision` is the pair revision of the
+    /// preview the item was reviewed in, so the edit cannot silently
+    /// land on a pair that changed since. The base is kept, so nothing
+    /// is deleted.
+    func skip(_ path: Data, inPairWithID id: String, expectedRevision: UInt64) async throws {
         guard let rule = Self.skipRule(for: path) else { throw PairStoreError.unskippablePath }
         guard let pair = pairs.first(where: { $0.id == id }) else { throw PairStoreError.invalidPage }
         var options = pair.settings.options
@@ -281,7 +284,9 @@ final class PairStore {
         options.filters.append(rule)
         let settings = PairSettings(name: pair.settings.name, left: pair.settings.left,
                                     right: pair.settings.right, mode: pair.settings.mode, options: options)
-        _ = try await save(settings, editing: pair)
+        _ = try await save(settings, editing: SyncPair(
+            id: pair.id, revision: expectedRevision, settings: pair.settings
+        ))
     }
 
     /// An anchored gitignore rule for exactly `path`: `docs/a*.txt`

@@ -4,13 +4,21 @@ import Testing
 
 private enum SyncFixtureError: Error { case unreachable, timedOut }
 
+/// Canonical 64-hex review tokens the test fixtures can distinguish.
+private let reviewTokenA = String(repeating: "a", count: 64)
+private let reviewTokenB = String(repeating: "b", count: 64)
+
 /// Replies with scripted states: the start reply, then one per status poll.
 private actor ScriptedSyncClient: SyncClient {
     private var replies: [PairSyncState]
-    private(set) var approvals: [(UInt64, UInt64)] = []
+    /// (approvedA, approvedB, reviewToken) per run call.
+    private(set) var approvals: [(UInt64, UInt64, String?)] = []
     private(set) var cancelled = false
     private(set) var kept: [FolderSide] = []
+    private(set) var keptTokens: [String] = []
     private(set) var keptBoth: [Data] = []
+    private(set) var keptBothTokens: [String] = []
+    private(set) var changeTokens: [String] = []
     private let runs: [RunRecord]
 
     init(_ replies: [PairSyncState], history: [RunRecord] = []) {
@@ -21,23 +29,27 @@ private actor ScriptedSyncClient: SyncClient {
     func history(_ id: String) async throws -> [RunRecord] { runs }
 
     /// Two pages of copies after the status's first page.
-    func changes(_ id: String, after: Data?, filter: ChangeFilter?) async throws -> ChangePage {
+    func changes(_ id: String, after: Data?, filter: ChangeFilter?,
+                 reviewToken: String) async throws -> ChangePage {
+        changeTokens.append(reviewToken)
         let all = (0..<4).map { PlannedChange(path: Data("p\($0)".utf8), action: .copy(to: .b)) }
         let rest = all.filter { change in after.map { $0.lexicographicallyPrecedes(change.path) } ?? true }
         let kept = filter == .archives ? [] : rest
         return ChangePage(changes: Array(kept.prefix(2)), more: kept.count > 2)
     }
 
-    func keepBoth(_ id: String, path: Data) async throws -> PairSyncState {
+    func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState {
         keptBoth.append(path)
+        keptBothTokens.append(reviewToken)
         return next()
     }
 
     func preview(_ id: String) async throws -> PairSyncState { next() }
     func status(_ id: String) async throws -> PairSyncState { next() }
 
-    func run(_ id: String, approvedA: UInt64, approvedB: UInt64) async throws -> PairSyncState {
-        approvals.append((approvedA, approvedB))
+    func run(_ id: String, approvedA: UInt64, approvedB: UInt64,
+             reviewToken: String?) async throws -> PairSyncState {
+        approvals.append((approvedA, approvedB, reviewToken))
         return next()
     }
 
@@ -46,8 +58,10 @@ private actor ScriptedSyncClient: SyncClient {
         return next()
     }
 
-    func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState {
+    func resolve(_ id: String, path: Data, keep: FolderSide,
+                 reviewToken: String) async throws -> PairSyncState {
         kept.append(keep)
+        keptTokens.append(reviewToken)
         return next()
     }
 
@@ -58,19 +72,22 @@ private actor ScriptedSyncClient: SyncClient {
 
 private struct UnreachableSyncClient: SyncClient {
     func preview(_ id: String) async throws -> PairSyncState { throw SyncFixtureError.unreachable }
-    func run(_ id: String, approvedA: UInt64, approvedB: UInt64) async throws -> PairSyncState {
+    func run(_ id: String, approvedA: UInt64, approvedB: UInt64,
+             reviewToken: String?) async throws -> PairSyncState {
         throw SyncFixtureError.unreachable
     }
     func status(_ id: String) async throws -> PairSyncState { throw SyncFixtureError.unreachable }
     func cancel(_ id: String) async throws -> PairSyncState { throw SyncFixtureError.unreachable }
-    func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState {
+    func resolve(_ id: String, path: Data, keep: FolderSide,
+                 reviewToken: String) async throws -> PairSyncState {
         throw SyncFixtureError.unreachable
     }
     func history(_ id: String) async throws -> [RunRecord] { throw SyncFixtureError.unreachable }
-    func changes(_ id: String, after: Data?, filter: ChangeFilter?) async throws -> ChangePage {
+    func changes(_ id: String, after: Data?, filter: ChangeFilter?,
+                 reviewToken: String) async throws -> ChangePage {
         throw SyncFixtureError.unreachable
     }
-    func keepBoth(_ id: String, path: Data) async throws -> PairSyncState {
+    func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState {
         throw SyncFixtureError.unreachable
     }
 }
@@ -84,14 +101,17 @@ private actor GatedChangesClient: SyncClient {
     init(reply: PairSyncState) { self.reply = reply }
 
     func preview(_ id: String) async throws -> PairSyncState { reply }
-    func run(_ id: String, approvedA: UInt64, approvedB: UInt64) async throws -> PairSyncState { reply }
+    func run(_ id: String, approvedA: UInt64, approvedB: UInt64,
+             reviewToken: String?) async throws -> PairSyncState { reply }
     func status(_ id: String) async throws -> PairSyncState { reply }
     func cancel(_ id: String) async throws -> PairSyncState { .idle }
-    func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState { .idle }
-    func keepBoth(_ id: String, path: Data) async throws -> PairSyncState { .idle }
+    func resolve(_ id: String, path: Data, keep: FolderSide,
+                 reviewToken: String) async throws -> PairSyncState { .idle }
+    func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
     func history(_ id: String) async throws -> [RunRecord] { [] }
 
-    func changes(_ id: String, after: Data?, filter: ChangeFilter?) async throws -> ChangePage {
+    func changes(_ id: String, after: Data?, filter: ChangeFilter?,
+                 reviewToken: String) async throws -> ChangePage {
         filters.append(filter)
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation {
@@ -148,12 +168,15 @@ private actor StubSyncClient: SyncClient {
         return previewReply
     }
     func status(_ id: String) async throws -> PairSyncState { statusReply }
-    func run(_ id: String, approvedA: UInt64, approvedB: UInt64) async throws -> PairSyncState { .idle }
+    func run(_ id: String, approvedA: UInt64, approvedB: UInt64,
+             reviewToken: String?) async throws -> PairSyncState { .idle }
     func cancel(_ id: String) async throws -> PairSyncState { .idle }
-    func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState { .idle }
-    func keepBoth(_ id: String, path: Data) async throws -> PairSyncState { .idle }
+    func resolve(_ id: String, path: Data, keep: FolderSide,
+                 reviewToken: String) async throws -> PairSyncState { .idle }
+    func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
     func history(_ id: String) async throws -> [RunRecord] { [] }
-    func changes(_ id: String, after: Data?, filter: ChangeFilter?) async throws -> ChangePage {
+    func changes(_ id: String, after: Data?, filter: ChangeFilter?,
+                 reviewToken: String) async throws -> ChangePage {
         ChangePage(changes: [], more: false)
     }
 }
@@ -165,23 +188,31 @@ private actor DeferredSyncClient: SyncClient {
     private(set) var previewCalls = 0
     private(set) var runCalls = 0
     private(set) var resolveCalls = 0
+    private(set) var historyCalls = 0
     private(set) var cancelled = false
+    private(set) var runTokens: [String?] = []
+    private(set) var resolved: [(path: Data, keep: FolderSide, token: String)] = []
     private var pending: [CheckedContinuation<PairSyncState, any Error>] = []
     private var waiters: [(id: UUID, count: Int, then: CheckedContinuation<Bool, Never>)] = []
     private var pendingStarts: [CheckedContinuation<PairSyncState, any Error>] = []
     private var pendingResolves: [CheckedContinuation<PairSyncState, any Error>] = []
+    private var pendingHistory: [CheckedContinuation<[RunRecord], any Error>] = []
     private var startWaiters: [(id: UUID, job: SyncJob, count: Int,
                                then: CheckedContinuation<Bool, Never>)] = []
     private var holdStarts = false
     private var holdResolves = false
+    private var holdHistory = false
     private var previewReply: PairSyncState = .idle
     private var terminalStatus: PairSyncState?
+    private var terminalHistory: [RunRecord]?
 
     func setPreviewReply(_ reply: PairSyncState) { previewReply = reply }
     /// Park preview/run requests until the test releases them.
     func holdStartReplies() { holdStarts = true }
     /// Park resolve requests until the test releases them.
     func holdResolveReplies() { holdResolves = true }
+    /// Park history requests until the test releases them.
+    func holdHistoryReplies() { holdHistory = true }
 
     func preview(_ id: String) async throws -> PairSyncState {
         started(.preview)
@@ -196,8 +227,10 @@ private actor DeferredSyncClient: SyncClient {
         if let terminalStatus { return terminalStatus }
         return try await withCheckedThrowingContinuation { pending.append($0) }
     }
-    func run(_ id: String, approvedA: UInt64, approvedB: UInt64) async throws -> PairSyncState {
+    func run(_ id: String, approvedA: UInt64, approvedB: UInt64,
+             reviewToken: String?) async throws -> PairSyncState {
         started(.run)
+        runTokens.append(reviewToken)
         guard holdStarts else { return .idle }
         return try await withCheckedThrowingContinuation { pendingStarts.append($0) }
     }
@@ -205,14 +238,22 @@ private actor DeferredSyncClient: SyncClient {
         cancelled = true
         return .idle
     }
-    func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState {
+    func resolve(_ id: String, path: Data, keep: FolderSide,
+                 reviewToken: String) async throws -> PairSyncState {
         resolveCalls += 1
+        resolved.append((path: path, keep: keep, token: reviewToken))
         guard holdResolves else { return .idle }
         return try await withCheckedThrowingContinuation { pendingResolves.append($0) }
     }
-    func keepBoth(_ id: String, path: Data) async throws -> PairSyncState { .idle }
-    func history(_ id: String) async throws -> [RunRecord] { [] }
-    func changes(_ id: String, after: Data?, filter: ChangeFilter?) async throws -> ChangePage {
+    func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
+    func history(_ id: String) async throws -> [RunRecord] {
+        historyCalls += 1
+        if let terminalHistory { return terminalHistory }
+        guard holdHistory else { return [] }
+        return try await withCheckedThrowingContinuation { pendingHistory.append($0) }
+    }
+    func changes(_ id: String, after: Data?, filter: ChangeFilter?,
+                 reviewToken: String) async throws -> ChangePage {
         ChangePage(changes: [], more: false)
     }
 
@@ -270,9 +311,22 @@ private actor DeferredSyncClient: SyncClient {
         pendingResolves.removeFirst().resume(returning: state)
     }
 
+    /// Resumes the oldest parked history request.
+    func replyHistory(_ runs: [RunRecord] = []) {
+        pendingHistory.removeFirst().resume(returning: runs)
+    }
+
+    /// Cleanup must answer history issued after the queue drains too.
+    func finishHistory(_ runs: [RunRecord] = []) {
+        holdHistory = false
+        terminalHistory = runs
+        while !pendingHistory.isEmpty { replyHistory(runs) }
+    }
+
     var pendingStatusCalls: Int { pending.count }
     var pendingStartCalls: Int { pendingStarts.count }
     var pendingResolveCalls: Int { pendingResolves.count }
+    var pendingHistoryCalls: Int { pendingHistory.count }
 
     /// Suspends until at least `count` status requests are in flight.
     func waitForStatusCalls(_ count: Int) async {
@@ -310,6 +364,18 @@ private actor DeferredSyncClient: SyncClient {
         }
     }
 
+    /// Bounded wait on history requests, so a call a bug suppresses
+    /// fails instead of hanging the test.
+    @discardableResult
+    func waitForHistoryCalls(_ count: Int, timeout: Duration) async -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        while historyCalls < count {
+            if ContinuousClock.now >= deadline { return false }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        return true
+    }
+
     /// Bounded wait on resolve requests, so a call a bug suppresses
     /// fails instead of hanging the test.
     @discardableResult
@@ -333,19 +399,24 @@ private actor DeferredSyncClient: SyncClient {
     }
 }
 
-private func preview(archivesInA: UInt64, needsApproval: Bool) -> PreviewSummary {
+private func preview(archivesInA: UInt64, needsApproval: Bool,
+                     reviewToken: String = reviewTokenA,
+                     pairRevision: UInt64 = 1) -> PreviewSummary {
     PreviewSummary(
         changes: [PlannedChange(path: Data("photos/a.jpg".utf8), action: .copy(to: .b), bytes: 2_000_000),
                   PlannedChange(path: Data([0x6f, 0xff]), action: .archive(on: .a))],
         copies: 1, updates: 0, archives: archivesInA, conflicts: 0, blocked: 0, kept: 0,
         a: DeletionCheck(deletions: archivesInA, paths: 100, needsApproval: needsApproval),
-        b: DeletionCheck(deletions: 0, paths: 100, needsApproval: false), copyBytes: 2_000_000
+        b: DeletionCheck(deletions: 0, paths: 100, needsApproval: false), copyBytes: 2_000_000,
+        reviewToken: reviewToken, pairRevision: pairRevision
     )
 }
 
-/// Holds the test pair and records saved settings.
+/// Holds the test pair and records saved settings and the revisions
+/// their updates were conditioned on.
 private actor CatalogClient: PairClient {
     private(set) var saved: [PairSettings] = []
+    private(set) var savedRevisions: [UInt64] = []
 
     func page(after: String?) async throws -> PairCatalogPage {
         PairCatalogPage(pairs: after == nil ? [pair()] : [], next: nil)
@@ -353,6 +424,7 @@ private actor CatalogClient: PairClient {
     func create(_ settings: PairSettings) async throws -> SyncPair { pair() }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair {
         saved.append(settings)
+        savedRevisions.append(pair.revision)
         return SyncPair(id: pair.id, revision: pair.revision + 1, settings: settings)
     }
     func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
@@ -402,14 +474,19 @@ func runsNeedingApprovalRetryWithTheReviewedCountsOrKeepThePreview() async throw
     let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
 
     await viewModel.sync()
-    #expect(viewModel.approvalRequest?.contains("60") == true)
-    let approval = try #require(viewModel.approval)
-    // Dismissing the dialog declines; the captured approval still runs.
+    let request = try #require(viewModel.approvalRequest)
+    #expect(request.message.contains("60"))
+    #expect(request.pairID == pair().id)
+    #expect(request.pairRevision == summary.pairRevision)
+    #expect(request.reviewToken == summary.reviewToken)
+    // Dismissing the dialog declines; the captured request still runs
+    // and presents the token of the preview it was taken from.
     viewModel.declineApproval()
-    await viewModel.approve(approval)
+    await viewModel.approve(request)
     let approvals = await client.approvals
     #expect(approvals.map(\.0) == [0, 60])
     #expect(approvals.map(\.1) == [0, 0])
+    #expect(approvals.map(\.2) == [nil, summary.reviewToken])
     #expect(viewModel.statusText.contains("archived 60"))
     #expect(viewModel.archiveNote?.contains("2026-10-18T09-30-00.123Z") == true)
 
@@ -454,7 +531,8 @@ func keepingASideResolvesThenPreviewsAgain() async throws {
                   PlannedChange(path: Data("folder".utf8), action: .conflict(.typeMismatch))],
         copies: 0, updates: 0, archives: 0, conflicts: 2, blocked: 0, kept: 0,
         a: DeletionCheck(deletions: 0, paths: 2, needsApproval: false),
-        b: DeletionCheck(deletions: 0, paths: 2, needsApproval: false)
+        b: DeletionCheck(deletions: 0, paths: 2, needsApproval: false),
+        reviewToken: reviewTokenA, pairRevision: 1
     )
     let resolved = preview(archivesInA: 0, needsApproval: false)
     let client = ScriptedSyncClient([.previewed(conflicted), .previewed(conflicted), .previewed(resolved)])
@@ -467,6 +545,8 @@ func keepingASideResolvesThenPreviewsAgain() async throws {
 
     await viewModel.keep(.b, for: rows[0])
     #expect(await client.kept == [.b])
+    // The choice echoes the fingerprint of the preview it was made from.
+    #expect(await client.keptTokens == [conflicted.reviewToken])
     #expect(store.state(for: pair().id) == .previewed(resolved))
 }
 
@@ -478,7 +558,8 @@ func keepBothIsOfferedOnlyForFilesChangedInBothFolders() async {
                   PlannedChange(path: Data("gone.txt".utf8), action: .conflict(.deletedVersusEdited))],
         copies: 0, updates: 0, archives: 0, conflicts: 2, blocked: 0, kept: 0,
         a: DeletionCheck(deletions: 0, paths: 2, needsApproval: false),
-        b: DeletionCheck(deletions: 0, paths: 2, needsApproval: false)
+        b: DeletionCheck(deletions: 0, paths: 2, needsApproval: false),
+        reviewToken: reviewTokenA, pairRevision: 1
     )
     let client = ScriptedSyncClient([.previewed(conflicted), .previewed(conflicted), .previewed(conflicted)])
     let store = SyncStore(client: client, pollInterval: .milliseconds(1))
@@ -490,6 +571,7 @@ func keepBothIsOfferedOnlyForFilesChangedInBothFolders() async {
     await viewModel.keepBoth(for: rows[1])
     await viewModel.keepBoth(for: rows[0])
     #expect(await client.keptBoth == [Data("notes.txt".utf8)])
+    #expect(await client.keptBothTokens == [conflicted.reviewToken])
 }
 
 private actor AlertRecorder {
@@ -593,6 +675,9 @@ func alwaysSkipAddsAFilterRuleThenPreviewsAgain() async throws {
 
     await viewModel.skipAlways(row)
     #expect(await pairs.saved.map(\.options.filters) == [["/photos/a.jpg"]])
+    // The filter edit is conditioned on the revision the preview was
+    // made for, so a pair that changed since rejects it.
+    #expect(await pairs.savedRevisions == [summary.pairRevision])
     #expect(viewModel.requestError == nil)
 }
 
@@ -615,6 +700,8 @@ func previewsListMoreChangesByKindAndResetOnTheNextPreview() async {
     await viewModel.showChanges(.archives)
     #expect(viewModel.changeFilter == .archives)
     #expect(viewModel.rows.isEmpty)
+    // Every page echoes the token of the preview it lists.
+    #expect(await client.changeTokens == [summary.reviewToken, summary.reviewToken, summary.reviewToken])
 
     await viewModel.refresh()
     #expect(store.listing(for: pair().id) == nil)
@@ -1159,6 +1246,8 @@ func pendingApprovedRunsHideTheApprovalDialog() async {
     await client.holdStartReplies()
     let approving = Task { await store.run(pair.id) }
     #expect(await client.waitForStartCalls(.run, 1, timeout: .seconds(3)))
+    // An unreviewed run presents no token; approval flows echo one.
+    #expect(await client.runTokens == [nil])
     #expect(viewModel.approvalRequest == nil)
 
     await client.replyStart(.idle)
@@ -1238,7 +1327,7 @@ func overwriteOnlyApprovalsExplainThePendingCopy() async {
     let summary = PreviewSummary(
         changes: [PlannedChange(path: Data("note".utf8), action: .copy(to: .b))],
         copies: 1, updates: 0, archives: 0, conflicts: 0, blocked: 0, kept: 0,
-        a: check, b: check
+        a: check, b: check, reviewToken: reviewTokenA, pairRevision: 1
     )
     let store = SyncStore(client: ScriptedSyncClient([.needsApproval(summary)]))
     let pair = pair()
@@ -1246,7 +1335,7 @@ func overwriteOnlyApprovalsExplainThePendingCopy() async {
     await store.preview(pair.id)
 
     // First-run overwrites need review even with no standalone deletions.
-    let request = viewModel.approvalRequest?.lowercased()
+    let request = viewModel.approvalRequest?.message.lowercased()
     #expect(request?.contains("copy") == true)
     #expect(request?.contains("1") == true)
     #expect(!viewModel.statusText.contains("more items"))
@@ -1365,40 +1454,53 @@ func oldPollerRepliesCannotRetireAPendingStart() async {
     #expect(store.state(for: pair.id) == .previewed(done))
 }
 
-// Regression for PR57 follow-up: resolve always previews again once its
-// request answers, even when a newer action took over the pair while it
-// was in flight — the re-preview belongs to the old conflict-resolution
-// flow and must not issue against the pair's new job.
+// Regression for PR57 follow-up, reshaped for the review-token
+// contract: a conflict choice can only be made from a preview the app
+// shows, and while it is pending the pair is owned — reads skip it and
+// new commands are refused, so nothing newer can supersede it. The one
+// stale path left is a cancelled caller: its answer must release the
+// pair, report nothing, and never issue the follow-up preview.
 @MainActor
 @Test
-func staleResolveRepliesCannotTriggerNewPreviews() async {
-    let done = preview(archivesInA: 0, needsApproval: false)
+func cancelledChoicesReleaseThePairWithoutANewPreview() async {
+    let conflicted = PreviewSummary(
+        changes: [PlannedChange(path: Data("notes.txt".utf8), action: .conflict(.bothChanged))],
+        copies: 0, updates: 0, archives: 0, conflicts: 1, blocked: 0, kept: 0,
+        a: DeletionCheck(deletions: 0, paths: 1, needsApproval: false),
+        b: DeletionCheck(deletions: 0, paths: 1, needsApproval: false),
+        reviewToken: reviewTokenA, pairRevision: 1
+    )
+    let resolved = preview(archivesInA: 0, needsApproval: false)
     let client = DeferredSyncClient()
+    await client.setPreviewReply(.previewed(conflicted))
     await client.holdResolveReplies()
-    await client.setPreviewReply(.working(.preview, cancelling: false))
     let store = SyncStore(client: client, pollInterval: .milliseconds(1))
     let pair = pair()
+    await store.preview(pair.id)
 
-    let resolving = Task { await store.resolve(pair.id, path: Data("a".utf8), keep: .a) }
+    let resolving = Task {
+        await store.resolve(pair.id, path: Data("notes.txt".utf8), keep: .a,
+                            reviewToken: conflicted.reviewToken)
+    }
     #expect(await client.waitForResolveCalls(1, timeout: .seconds(3)))
 
-    // A newer action owns the pair before the resolve answers.
-    let manual = Task { await store.preview(pair.id) }
-    #expect(await eventually {
-        store.state(for: pair.id) == .working(.preview, cancelling: false)
-    })
-
-    // The stale resolve's answer must not start another preview.
+    // A cancelled caller's late answer must not start the re-preview.
+    resolving.cancel()
     await client.replyResolve(.idle)
-    let secondIssued = await client.waitForStartCalls(.preview, 2, timeout: .milliseconds(500))
-    #expect(!secondIssued)
+    await resolving.value
+    let issued = await client.waitForStartCalls(.preview, 2, timeout: .milliseconds(500))
+    #expect(!issued)
+    #expect(store.requestError(for: pair.id) == nil)
+    #expect(store.state(for: pair.id) == .previewed(conflicted))
 
-    await client.finishPolling(.previewed(done))
+    // The released pair accepts the next explicit command normally.
+    await client.setPreviewReply(.previewed(resolved))
+    await store.preview(pair.id)
+    #expect(store.state(for: pair.id) == .previewed(resolved))
+
     while await client.pendingResolveCalls > 0 {
         await client.replyResolve(.idle)
     }
-    await resolving.value
-    await manual.value
 }
 
 // Regression for PR57 follow-up: a conflict choice in flight owns the
@@ -1414,7 +1516,8 @@ func checkAllRepliesCannotRetireAPendingChoice() async {
                   PlannedChange(path: Data("folder".utf8), action: .conflict(.typeMismatch))],
         copies: 0, updates: 0, archives: 0, conflicts: 2, blocked: 0, kept: 0,
         a: DeletionCheck(deletions: 0, paths: 2, needsApproval: false),
-        b: DeletionCheck(deletions: 0, paths: 2, needsApproval: false)
+        b: DeletionCheck(deletions: 0, paths: 2, needsApproval: false),
+        reviewToken: reviewTokenA, pairRevision: 1
     )
     let resolved = preview(archivesInA: 0, needsApproval: false)
     let client = DeferredSyncClient()
@@ -1424,7 +1527,10 @@ func checkAllRepliesCannotRetireAPendingChoice() async {
     let pair = pair()
     await store.preview(pair.id)
 
-    let resolving = Task { await store.resolve(pair.id, path: Data("notes.txt".utf8), keep: .a) }
+    let resolving = Task {
+        await store.resolve(pair.id, path: Data("notes.txt".utf8), keep: .a,
+                            reviewToken: conflicted.reviewToken)
+    }
     #expect(await client.waitForResolveCalls(1, timeout: .seconds(3)))
 
     // The agent reports the same cached preview while the choice is on
@@ -1455,7 +1561,8 @@ func newStartsCannotRetireAPendingChoice() async {
                   PlannedChange(path: Data("folder".utf8), action: .conflict(.typeMismatch))],
         copies: 0, updates: 0, archives: 0, conflicts: 2, blocked: 0, kept: 0,
         a: DeletionCheck(deletions: 0, paths: 2, needsApproval: false),
-        b: DeletionCheck(deletions: 0, paths: 2, needsApproval: false)
+        b: DeletionCheck(deletions: 0, paths: 2, needsApproval: false),
+        reviewToken: reviewTokenA, pairRevision: 1
     )
     let resolved = preview(archivesInA: 0, needsApproval: false)
     let client = DeferredSyncClient()
@@ -1465,11 +1572,20 @@ func newStartsCannotRetireAPendingChoice() async {
     let pair = pair()
     await store.preview(pair.id)
 
-    let resolving = Task { await store.resolve(pair.id, path: Data("notes.txt".utf8), keep: .a) }
+    let resolving = Task {
+        await store.resolve(pair.id, path: Data("notes.txt".utf8), keep: .a,
+                            reviewToken: conflicted.reviewToken)
+    }
     #expect(await client.waitForResolveCalls(1, timeout: .seconds(3)))
+    #expect(await client.resolved.map(\.token) == [conflicted.reviewToken])
 
     let viewModel = PairSyncViewModel(pair: pair, store: store, pairs: catalog(), agentConnected: true)
     #expect(!viewModel.canStart)
+    // A pending choice is busy work, not a job: it gets the honest
+    // label and no Cancel it could not honour.
+    #expect(viewModel.isResolving)
+    #expect(!viewModel.canCancel)
+    #expect(viewModel.statusText == "Resolving the conflict…")
 
     // A user start during the choice must not reach the client; if the
     // bug lets it through, the agent's busy rejection follows.
@@ -1480,7 +1596,10 @@ func newStartsCannotRetireAPendingChoice() async {
     if issued { await client.replyStartError(SyncFixtureError.unreachable) }
 
     // A second choice is a duplicate, not a new command.
-    let second = Task { await store.resolve(pair.id, path: Data("notes.txt".utf8), keep: .b) }
+    let second = Task {
+        await store.resolve(pair.id, path: Data("notes.txt".utf8), keep: .b,
+                            reviewToken: conflicted.reviewToken)
+    }
     let secondIssued = await client.waitForResolveCalls(2, timeout: .milliseconds(500))
     #expect(!secondIssued)
 
@@ -1500,4 +1619,183 @@ func newStartsCannotRetireAPendingChoice() async {
     await second.value
     await resolving.value
     #expect(store.requestError(for: pair.id) == nil)
+}
+
+// Regression for PR57 follow-up: a job that polls to a terminal preview
+// keeps its poller's owner token through the post-run history refresh.
+// While that informational read is slow the pair still counts as owned,
+// so the conflict buttons it shows silently refuse and the choice never
+// reaches the agent.
+@MainActor
+@Test
+func readyChoicesReachTheClientWhileHistoryIsPending() async {
+    let conflicted = PreviewSummary(
+        changes: [PlannedChange(path: Data("notes.txt".utf8), action: .conflict(.bothChanged))],
+        copies: 0, updates: 0, archives: 0, conflicts: 1, blocked: 0, kept: 0,
+        a: DeletionCheck(deletions: 0, paths: 1, needsApproval: false),
+        b: DeletionCheck(deletions: 0, paths: 1, needsApproval: false),
+        reviewToken: reviewTokenA, pairRevision: 1
+    )
+    let resolved = preview(archivesInA: 0, needsApproval: false)
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.working(.preview, cancelling: false))
+    await client.holdHistoryReplies()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+    let starting = Task { await store.preview(pair.id) }
+    await client.finishPolling(.previewed(conflicted))
+
+    // The run is done; its history is still loading. The pair shows the
+    // conflict and offers the choice normally.
+    #expect(await client.waitForHistoryCalls(1, timeout: .seconds(3)))
+    #expect(await eventually { store.state(for: pair.id) == .previewed(conflicted) })
+    let viewModel = PairSyncViewModel(pair: pair, store: store, pairs: catalog(), agentConnected: true)
+    #expect(viewModel.canStart)
+    #expect(viewModel.rows.contains { $0.resolvable != nil })
+    #expect(!viewModel.isResolving)
+
+    // The tap's command must reach the agent even though the terminal
+    // run's history request has not answered.
+    let resolving = Task {
+        await store.resolve(pair.id, path: Data("notes.txt".utf8), keep: .a,
+                            reviewToken: conflicted.reviewToken)
+    }
+    #expect(await client.waitForResolveCalls(1, timeout: .seconds(3)))
+
+    // The accepted choice's own fresh preview lands on the pair.
+    await client.resumeStarts(replying: .previewed(resolved))
+    while await client.pendingResolveCalls > 0 {
+        await client.replyResolve(.idle)
+    }
+    #expect(await eventually { store.state(for: pair.id) == .previewed(resolved) })
+
+    await client.finishHistory()
+    await client.finishPolling(.idle)
+    while await client.pendingResolveCalls > 0 {
+        await client.replyResolve(.idle)
+    }
+    while await client.pendingStartCalls > 0 {
+        await client.replyStart(.idle)
+    }
+    await resolving.value
+    await starting.value
+}
+
+// The approval dialog acts on the request captured when it was
+// presented: the pair, the plan's fingerprint, the counts and the
+// wording. A state that moves on afterwards cannot redirect the tap to
+// a plan the user never saw; the agent decides whether the presented
+// plan is still current.
+@MainActor
+@Test
+func approvalRequestsActOnThePlanTheyPresented() async throws {
+    let first = preview(archivesInA: 60, needsApproval: true)
+    let second = preview(archivesInA: 5, needsApproval: true, reviewToken: reviewTokenB)
+    let client = ScriptedSyncClient([.needsApproval(first), .previewed(second), .idle])
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+    let viewModel = PairSyncViewModel(pair: pair, store: store, pairs: catalog(), agentConnected: true)
+
+    await store.preview(pair.id)
+    let request = try #require(viewModel.approvalRequest)
+    #expect(request.pairID == pair.id)
+    #expect(request.pairRevision == first.pairRevision)
+    #expect(request.reviewToken == first.reviewToken)
+    #expect(request.approvedA == 60)
+    #expect(request.approvedB == 0)
+
+    // A different preview lands before the presented request is
+    // approved; the tap still acts on the plan it showed.
+    await store.checkAll([pair])
+    #expect(store.state(for: pair.id) == .previewed(second))
+    await viewModel.approve(request)
+    #expect(await client.approvals.map(\.0) == [60])
+    #expect(await client.approvals.map(\.2) == [first.reviewToken])
+}
+
+// A conflict row keeps the review context of the preview it was built
+// from: after a newer preview lands, a choice made on the old row still
+// presents the old plan's token, which the agent can then reject as
+// stale instead of applying it to a plan the user never reviewed.
+@MainActor
+@Test
+func conflictRowsKeepTheTokenOfThePreviewTheyCameFrom() async throws {
+    let first = PreviewSummary(
+        changes: [PlannedChange(path: Data("notes.txt".utf8), action: .conflict(.bothChanged))],
+        copies: 0, updates: 0, archives: 0, conflicts: 1, blocked: 0, kept: 0,
+        a: DeletionCheck(deletions: 0, paths: 1, needsApproval: false),
+        b: DeletionCheck(deletions: 0, paths: 1, needsApproval: false),
+        reviewToken: reviewTokenA, pairRevision: 1
+    )
+    let second = preview(archivesInA: 0, needsApproval: false, reviewToken: reviewTokenB)
+    let client = ScriptedSyncClient([.previewed(first), .previewed(second), .previewed(second)])
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+    let viewModel = PairSyncViewModel(pair: pair, store: store, pairs: catalog(), agentConnected: true)
+
+    await store.preview(pair.id)
+    let row = try #require(viewModel.rows.first)
+    #expect(row.review?.token == first.reviewToken)
+    #expect(row.review?.pairRevision == first.pairRevision)
+
+    // The pair previews into a different plan; the captured row still
+    // names the plan it came from, not the one now shown.
+    await store.preview(pair.id)
+    #expect(store.state(for: pair.id) == .previewed(second))
+    await viewModel.keep(.a, for: row)
+    #expect(await client.keptTokens == [first.reviewToken])
+}
+
+// A preview published for a pair revision the catalog no longer has is
+// obsolete: its plan may name roots that changed since, so the UI shows
+// it as information only — no approval, no resolvable rows, no alert —
+// while a fresh preview stays available.
+@MainActor
+@Test
+func outdatedPreviewsOfferNoReviewActions() async {
+    let stale = preview(archivesInA: 60, needsApproval: true, pairRevision: 0)
+    let conflicted = PreviewSummary(
+        changes: [PlannedChange(path: Data("notes.txt".utf8), action: .conflict(.bothChanged))],
+        copies: 0, updates: 0, archives: 0, conflicts: 1, blocked: 0, kept: 0,
+        a: DeletionCheck(deletions: 0, paths: 1, needsApproval: false),
+        b: DeletionCheck(deletions: 0, paths: 1, needsApproval: false),
+        reviewToken: reviewTokenA, pairRevision: 0
+    )
+    let current = preview(archivesInA: 2, needsApproval: false,
+                          reviewToken: reviewTokenB, pairRevision: 1)
+    let pair = pair()
+    #expect(pair.revision == 1)
+    #expect(SyncStore.alert(for: pair, state: .needsApproval(stale)) == nil)
+
+    let client = ScriptedSyncClient([.needsApproval(stale), .previewed(conflicted),
+                                     .previewed(current)])
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let viewModel = PairSyncViewModel(pair: pair, store: store, pairs: catalog(), agentConnected: true)
+
+    await store.preview(pair.id)
+    #expect(viewModel.approvalRequest == nil)
+    #expect(viewModel.statusText == "The pair changed since that preview; preview again.")
+    #expect(viewModel.canStart)
+
+    // An obsolete plan cannot fall back to an unreviewed run of the
+    // changed pair: Sync stays off and the tap issues nothing.
+    #expect(!viewModel.canSync)
+    await viewModel.sync()
+    #expect(await client.approvals.isEmpty)
+
+    // An outdated previewed plan is shown without actions either.
+    await store.preview(pair.id)
+    #expect(viewModel.rows.isEmpty)
+    #expect(!viewModel.showsChangeFilter)
+    #expect(viewModel.shortStatus == "Preview again")
+    #expect(!viewModel.canSync)
+    await viewModel.sync()
+    #expect(await client.approvals.isEmpty)
+
+    // From a current preview Sync is the reviewed run: it echoes that
+    // plan's token rather than going out unreviewed.
+    await store.preview(pair.id)
+    #expect(viewModel.canSync)
+    await viewModel.sync()
+    #expect(await client.approvals.map(\.2) == [current.reviewToken])
 }

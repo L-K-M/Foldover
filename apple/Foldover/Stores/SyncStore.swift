@@ -50,6 +50,12 @@ struct PreviewSummary: Equatable, Sendable {
     let b: DeletionCheck
     /// File data all copies move.
     var copyBytes: UInt64 = 0
+    /// Fingerprint of the exact plan shown; approvals, conflict choices
+    /// and change pages present it back to the agent.
+    let reviewToken: String
+    /// The pair revision this plan was made for; a different current
+    /// revision makes the plan obsolete.
+    let pairRevision: UInt64
 
     var total: UInt64 { copies + updates + archives + conflicts + blocked + kept }
 }
@@ -139,16 +145,24 @@ enum PairSyncState: Equatable, Sendable {
 
 protocol SyncClient: Sendable {
     func preview(_ id: String) async throws -> PairSyncState
-    func run(_ id: String, approvedA: UInt64, approvedB: UInt64) async throws -> PairSyncState
+    /// `reviewToken` names the preview a person approved; nil only for
+    /// runs that need no review.
+    func run(_ id: String, approvedA: UInt64, approvedB: UInt64,
+             reviewToken: String?) async throws -> PairSyncState
     func status(_ id: String) async throws -> PairSyncState
     func cancel(_ id: String) async throws -> PairSyncState
-    func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState
+    /// `reviewToken` must be the token of the preview the choice was
+    /// made from.
+    func resolve(_ id: String, path: Data, keep: FolderSide,
+                 reviewToken: String) async throws -> PairSyncState
     /// Save B's version of a both-changed conflict beside it; A's wins.
-    func keepBoth(_ id: String, path: Data) async throws -> PairSyncState
+    func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState
     /// Finished runs, newest first.
     func history(_ id: String) async throws -> [RunRecord]
     /// A page of the latest preview's changes after `after`.
-    func changes(_ id: String, after: Data?, filter: ChangeFilter?) async throws -> ChangePage
+    /// `reviewToken` must be that preview's.
+    func changes(_ id: String, after: Data?, filter: ChangeFilter?,
+                 reviewToken: String) async throws -> ChangePage
 }
 
 // Keep generated async values inside one actor; only native Sendable records leave it.
@@ -157,9 +171,11 @@ private actor CoreSyncClient: SyncClient {
         state(try await FoldoverCore.syncPreview(id: id))
     }
 
-    func run(_ id: String, approvedA: UInt64, approvedB: UInt64) async throws -> PairSyncState {
+    func run(_ id: String, approvedA: UInt64, approvedB: UInt64,
+             reviewToken: String?) async throws -> PairSyncState {
         state(try await FoldoverCore.syncRun(
-            id: id, approvedLeftDeletions: approvedA, approvedRightDeletions: approvedB
+            id: id, approvedLeftDeletions: approvedA, approvedRightDeletions: approvedB,
+            reviewToken: reviewToken
         ))
     }
 
@@ -171,15 +187,19 @@ private actor CoreSyncClient: SyncClient {
         state(try await FoldoverCore.syncCancel(id: id))
     }
 
-    func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState {
-        state(try await FoldoverCore.syncResolve(id: id, path: path, keep: keep == .a ? .left : .right))
+    func resolve(_ id: String, path: Data, keep: FolderSide,
+                 reviewToken: String) async throws -> PairSyncState {
+        state(try await FoldoverCore.syncResolve(
+            id: id, path: path, keep: keep == .a ? .left : .right, reviewToken: reviewToken
+        ))
     }
 
-    func keepBoth(_ id: String, path: Data) async throws -> PairSyncState {
-        state(try await FoldoverCore.syncKeepBoth(id: id, path: path))
+    func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState {
+        state(try await FoldoverCore.syncKeepBoth(id: id, path: path, reviewToken: reviewToken))
     }
 
-    func changes(_ id: String, after: Data?, filter: ChangeFilter?) async throws -> ChangePage {
+    func changes(_ id: String, after: Data?, filter: ChangeFilter?,
+                 reviewToken: String) async throws -> ChangePage {
         let core: SyncChangeFilter? = switch filter {
         case .copies: .copy
         case .updates: .update
@@ -187,7 +207,9 @@ private actor CoreSyncClient: SyncClient {
         case .conflicts: .conflict
         case nil: nil
         }
-        let page = try await FoldoverCore.syncChanges(id: id, after: after, filter: core)
+        let page = try await FoldoverCore.syncChanges(
+            id: id, after: after, filter: core, reviewToken: reviewToken
+        )
         return ChangePage(
             changes: page.changes.map { PlannedChange(path: $0.path, action: action($0.kind), bytes: $0.bytes) },
             more: page.more
@@ -237,7 +259,8 @@ private actor CoreSyncClient: SyncClient {
             },
             copies: preview.copies, updates: preview.updates, archives: preview.archives,
             conflicts: preview.conflicts, blocked: preview.blocked, kept: preview.kept,
-            a: check(preview.left), b: check(preview.right), copyBytes: preview.copyBytes
+            a: check(preview.left), b: check(preview.right), copyBytes: preview.copyBytes,
+            reviewToken: preview.reviewToken, pairRevision: preview.pairRevision
         )
     }
 
@@ -307,10 +330,18 @@ final class SyncStore {
     /// is stale and must not overwrite it, even if the state cycles back
     /// to the same value.
     private var generations: [String: Int] = [:]
-    /// Starts the agent has not answered yet. One counts as a local
-    /// write — replies requested before it are stale — keeps the pair
-    /// busy for `canStart`, and refuses a duplicate start.
-    private var pendingStarts: Set<String> = []
+    /// A foreground command the agent has not answered yet. One counts
+    /// as a local write — replies requested before it are stale — keeps
+    /// the pair busy for `canStart`, and refuses a second command
+    /// without touching the accepted one's freshness.
+    private enum PendingOperation {
+        /// An explicit preview or run.
+        case start
+        /// A conflict choice; an accepted answer hands the pair to its
+        /// own fresh preview without releasing ownership in between.
+        case choice
+    }
+    private var pendingOperations: [String: PendingOperation] = [:]
     /// Approval results the user declined; the same result stays declined
     /// until an explicit job or a different reviewable result.
     private var declined: [String: PreviewSummary] = [:]
@@ -342,7 +373,7 @@ final class SyncStore {
     /// outcomes that need a person become notifications. A pair's first
     /// observation never alerts, so launching the app does not replay them.
     func checkAll(_ pairs: [SyncPair]) async {
-        for pair in pairs where polling[pair.id] == nil && !pendingStarts.contains(pair.id) {
+        for pair in pairs where polling[pair.id] == nil && pendingOperations[pair.id] == nil {
             let previous = states[pair.id]
             let generation = generations[pair.id] ?? 0
             guard var state = try? await client.status(pair.id) else { continue }
@@ -363,6 +394,9 @@ final class SyncStore {
         let body: String
         switch state {
         case .needsApproval(let preview):
+            // A plan made for another pair revision is obsolete; the
+            // next preview reports what the pair actually needs.
+            guard preview.pairRevision == pair.revision else { return nil }
             body = String(localized: "An automatic sync stopped before archiving \(preview.archives) items. Open Foldover to review and approve it.")
         case .failed(let message):
             body = String(localized: "An automatic sync stopped: \(message)")
@@ -393,12 +427,16 @@ final class SyncStore {
     /// retired the list in `set` — drops this request's page and error
     /// instead of letting the last response to arrive overwrite them.
     private func loadChanges(_ id: String, after: Data?, filter: ChangeFilter?) async {
+        // Pages echo the fingerprint of the preview they list; a state
+        // without one has no review the agent could page.
+        guard let reviewToken = reviewToken(for: id) else { return }
         listingSequence += 1
         let ticket = listingSequence
         listingRequests[id] = ticket
         requestErrors[id] = nil
         do {
-            let page = try await client.changes(id, after: after, filter: filter)
+            let page = try await client.changes(
+                id, after: after, filter: filter, reviewToken: reviewToken)
             guard listingRequests[id] == ticket, !Task.isCancelled else { return }
             var listing = after == nil ? ChangeListing(filter: filter, changes: [], more: false) : listings[id]
             listing?.changes += page.changes
@@ -410,14 +448,26 @@ final class SyncStore {
         }
     }
 
+    /// The review token of the preview the pair currently shows.
+    private func reviewToken(for id: String) -> String? {
+        switch states[id] {
+        case .previewed(let preview), .needsApproval(let preview): preview.reviewToken
+        default: nil
+        }
+    }
+
     func history(for id: String) -> [RunRecord] { histories[id] ?? [] }
     func requestError(for id: String) -> String? { requestErrors[id] }
-    /// An explicit preview/run is on the wire and unanswered.
-    func isStarting(_ id: String) -> Bool { pendingStarts.contains(id) }
+    /// A foreground command, a job start or a conflict choice, is on
+    /// the wire and unanswered.
+    func isBusy(_ id: String) -> Bool { pendingOperations[id] != nil }
+    /// A conflict choice specifically is on the wire and unanswered.
+    func isResolving(_ id: String) -> Bool { pendingOperations[id] == .choice }
 
     func refresh(_ id: String) async {
-        // A pending start's own reply is fresher; asking again would race it.
-        guard !pendingStarts.contains(id) else { return }
+        // A pending command's own reply is fresher; asking again would
+        // race it.
+        guard pendingOperations[id] == nil else { return }
         let client = client
         await perform(id, .other) { try await client.status(id) }
         await refreshHistory(id)
@@ -430,50 +480,72 @@ final class SyncStore {
     }
 
     func preview(_ id: String) async {
-        guard beginStart(id) else { return }
+        guard beginOperation(id, .start) else { return }
         let client = client
         await perform(id, .start) { try await client.preview(id) }
     }
 
-    /// Approvals are deletion counts the user accepted for each folder.
-    func run(_ id: String, approvedA: UInt64 = 0, approvedB: UInt64 = 0) async {
-        guard beginStart(id) else { return }
+    /// Approvals are deletion counts the user accepted for each folder;
+    /// `reviewToken` names the preview they were read from.
+    func run(_ id: String, approvedA: UInt64 = 0, approvedB: UInt64 = 0,
+             reviewToken: String? = nil) async {
+        guard beginOperation(id, .start) else { return }
         let client = client
-        await perform(id, .start) { try await client.run(id, approvedA: approvedA, approvedB: approvedB) }
+        await perform(id, .start) {
+            try await client.run(id, approvedA: approvedA, approvedB: approvedB,
+                                 reviewToken: reviewToken)
+        }
     }
 
     func cancel(_ id: String) async {
+        // A pending command's answer is fresher than anything cancel
+        // could ask for; the job to stop appears when it lands.
+        guard pendingOperations[id] == nil else { return }
         let client = client
         await perform(id, .other) { try await client.cancel(id) }
     }
 
     /// Keep one folder's version of a previewed conflict, then preview again
-    /// so the list shows what the choice will do.
-    func resolve(_ id: String, path: Data, keep: FolderSide) async {
+    /// so the list shows what the choice will do. `reviewToken` names the
+    /// preview the choice was made from.
+    func resolve(_ id: String, path: Data, keep: FolderSide, reviewToken: String) async {
         let client = client
-        await choose(id) { _ = try await client.resolve(id, path: path, keep: keep) }
+        await choose(id) {
+            try await client.resolve(id, path: path, keep: keep, reviewToken: reviewToken)
+        }
     }
 
     /// Keep both versions: Folder B's is saved beside the item and Folder
     /// A's wins; the next sync copies both. Previews again afterwards.
-    func keepBoth(_ id: String, path: Data) async {
+    func keepBoth(_ id: String, path: Data, reviewToken: String) async {
         let client = client
-        await choose(id) { _ = try await client.keepBoth(id, path: path) }
+        await choose(id) { try await client.keepBoth(id, path: path, reviewToken: reviewToken) }
     }
 
-    private func choose(_ id: String, _ request: @Sendable () async throws -> Void) async {
+    /// A conflict choice owns the pair like a start does: reads and
+    /// declines skip it, a second command is refused, and its accepted
+    /// answer keeps ownership for its own fresh preview.
+    private func choose(_ id: String, _ request: @Sendable () async throws -> PairSyncState) async {
+        guard beginOperation(id, .choice) else { return }
         requestErrors[id] = nil
         let generation = generations[id] ?? 0
         do {
-            try await request()
+            _ = try await request()
         } catch {
+            pendingOperations[id] = nil
             guard !Task.isCancelled, (generations[id] ?? 0) == generation else { return }
             requestErrors[id] = PairStore.message(for: error)
             return
         }
-        // A stale resolution must not preview over a newer job.
-        guard !Task.isCancelled, (generations[id] ?? 0) == generation else { return }
-        await preview(id)
+        // A cancelled or superseded choice releases the pair instead of
+        // previewing over whatever came next.
+        guard !Task.isCancelled, (generations[id] ?? 0) == generation else {
+            pendingOperations[id] = nil
+            return
+        }
+        pendingOperations[id] = .start
+        let client = client
+        await perform(id, .start) { try await client.preview(id) }
     }
 
     /// Show a failed request made elsewhere for this pair, e.g. a skip rule.
@@ -483,16 +555,16 @@ final class SyncStore {
 
     /// Keep the reviewed changes visible after declining an approval.
     /// The decline holds for that result until an explicit job runs.
-    /// Hiding a pending start's dialog is not a new decline.
+    /// Hiding a pending command's dialog is not a new decline.
     func declineApproval(_ id: String) {
-        guard !pendingStarts.contains(id),
+        guard pendingOperations[id] == nil,
               case .needsApproval(let preview) = states[id] else { return }
         declined[id] = preview
         set(id, .previewed(preview))
     }
 
     /// Whether a foreground request is an explicit job start. A start's
-    /// answer releases the pair's pending start and — when its reply is
+    /// answer releases the pair's pending command and — when its reply is
     /// the newest — spends the declined approval, so the job resurfaces
     /// reviewable results; every other request leaves both alone.
     private enum RequestKind {
@@ -500,9 +572,14 @@ final class SyncStore {
         case other
     }
 
-    /// Registration invalidates older replies and relinquishes the old poller.
-    private func beginStart(_ id: String) -> Bool {
-        guard pendingStarts.insert(id).inserted else { return false }
+    /// Registration invalidates older replies and relinquishes the old
+    /// poller. A refused command changes nothing: it cannot retire the
+    /// operation the pair already accepted. A choice reviews a shown
+    /// plan, so a job the agent is still working supersedes it.
+    private func beginOperation(_ id: String, _ operation: PendingOperation) -> Bool {
+        guard pendingOperations[id] == nil else { return false }
+        if operation == .choice, polling[id] != nil { return false }
+        pendingOperations[id] = operation
         generations[id, default: 0] += 1
         polling[id] = nil
         return true
@@ -519,12 +596,12 @@ final class SyncStore {
         do {
             reply = try await request()
         } catch {
-            if kind == .start { pendingStarts.remove(id) }
+            if kind == .start { pendingOperations[id] = nil }
             guard !Task.isCancelled, (generations[id] ?? 0) == generation else { return }
             requestErrors[id] = PairStore.message(for: error)
             return
         }
-        if kind == .start { pendingStarts.remove(id) }
+        if kind == .start { pendingOperations[id] = nil }
         guard !Task.isCancelled, (generations[id] ?? 0) == generation else { return }
         // An explicit job that ran re-arms approval requests for the pair.
         if kind == .start { declined[id] = nil }

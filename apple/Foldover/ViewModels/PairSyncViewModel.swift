@@ -1,5 +1,13 @@
 import Foundation
 
+/// The preview a change row belongs to. Review choices echo its token
+/// to the agent, and edits that must not outrun it compare its pair
+/// revision.
+struct ReviewContext: Equatable, Sendable {
+    let token: String
+    let pairRevision: UInt64
+}
+
 /// One planned or failed change, ready to render.
 struct ChangeRow: Identifiable, Equatable {
     let id: Int
@@ -11,6 +19,9 @@ struct ChangeRow: Identifiable, Equatable {
     var keepsBoth = false
     /// Raw path bytes, for skipping this item from now on.
     var skippable: Data?
+    /// The preview the row came from; nil for run results, which no
+    /// review can act on.
+    var review: ReviewContext?
 }
 
 /// One finished run, ready to render.
@@ -20,10 +31,18 @@ struct HistoryRow: Identifiable, Equatable {
     let summary: String
 }
 
-/// Deletion counts the user accepted for each folder.
-struct DeletionApproval: Equatable, Sendable {
-    let a: UInt64
-    let b: UInt64
+/// Everything the approval dialog was presented with: which pair, which
+/// exact plan the deletion counts belong to, and the wording shown.
+/// Approving sends this capture back, so a state change between
+/// presentation and tap can never approve a different plan.
+struct ApprovalRequest: Equatable, Sendable, Identifiable {
+    let pairID: String
+    let pairRevision: UInt64
+    let reviewToken: String
+    let approvedA: UInt64
+    let approvedB: UInt64
+    let message: String
+    var id: String { "\(pairID)-\(reviewToken)" }
 }
 
 /// Preview and run controls for the selected pair: strings and actions only.
@@ -36,11 +55,36 @@ struct PairSyncViewModel {
 
     private var state: PairSyncState { store.state(for: pair.id) }
 
+    /// The shown plan still describes this pair's configuration. An
+    /// older preview is information, not something to review: its folder
+    /// labels and review tokens would act on roots that changed since.
+    private var reviewable: PreviewSummary? {
+        switch state {
+        case .previewed(let preview), .needsApproval(let preview):
+            preview.pairRevision == pair.revision ? preview : nil
+        default: nil
+        }
+    }
+
     var isWorking: Bool {
         if case .working = state { return true }
         return false
     }
-    var canStart: Bool { agentConnected && !isWorking && !store.isStarting(pair.id) }
+    /// A conflict choice is on the wire; the pair is busy but the agent
+    /// runs no job a Cancel button could stop.
+    var isResolving: Bool { store.isResolving(pair.id) }
+    var canStart: Bool { agentConnected && !isWorking && !store.isBusy(pair.id) }
+    /// Whether Sync Now can go. From a shown preview it is the reviewed
+    /// run of that plan, so the preview must still match the pair's
+    /// revision; an obsolete one must be previewed again. No preview at
+    /// all is a deliberate unreviewed run under the approval fuse.
+    var canSync: Bool {
+        guard canStart else { return false }
+        switch state {
+        case .previewed, .needsApproval: return reviewable != nil
+        default: return true
+        }
+    }
     var canCancel: Bool {
         if case .working(_, let cancelling) = state { return !cancelling }
         return false
@@ -49,13 +93,16 @@ struct PairSyncViewModel {
 
     /// One or two words for the menu bar.
     var shortStatus: String {
-        switch state {
+        if isResolving { return String(localized: "Resolving") }
+        return switch state {
         case .idle: String(localized: "Ready")
         case .working(.preview, _): String(localized: "Comparing…")
         case .working(.run, _): String(localized: "Syncing…")
         case .previewed(let preview):
-            preview.total == 0 ? String(localized: "In sync") : String(localized: "\(preview.total) changes")
-        case .needsApproval: String(localized: "Needs approval")
+            reviewable == nil ? String(localized: "Preview again")
+                : preview.total == 0 ? String(localized: "In sync") : String(localized: "\(preview.total) changes")
+        case .needsApproval:
+            reviewable == nil ? String(localized: "Preview again") : String(localized: "Needs approval")
         case .finished(let result) where result.cancelled: String(localized: "Cancelled")
         case .finished(let result) where result.conflicts > 0: String(localized: "\(result.conflicts) conflicts")
         case .finished(let result) where result.failureCount > 0: String(localized: "\(result.failureCount) failed")
@@ -66,65 +113,65 @@ struct PairSyncViewModel {
     }
 
     var statusText: String {
+        if isResolving { return String(localized: "Resolving the conflict…") }
         switch state {
         case .idle:
-            String(localized: "Preview to see what a sync would change. Nothing is written until you sync.")
+            return String(localized: "Preview to see what a sync would change. Nothing is written until you sync.")
         case .working(_, cancelling: true):
-            String(localized: "Stopping…")
+            return String(localized: "Stopping…")
         case .working(.preview, _):
-            String(localized: "Comparing folders…")
+            return String(localized: "Comparing folders…")
         case .working(.run, _):
-            String(localized: "Syncing…")
+            return String(localized: "Syncing…")
         case .previewed(let preview):
-            preview.total == 0
+            guard reviewable != nil else { return Self.outdated }
+            return preview.total == 0
                 ? String(localized: "Folders are in sync.")
                 : Self.summary(preview)
         case .needsApproval(let preview):
-            String(localized: "Nothing was changed. This sync needs approval before it replaces or removes items:")
+            guard reviewable != nil else { return Self.outdated }
+            return String(localized: "Nothing was changed. Review this sync's changes before it runs:")
                 + " " + Self.summary(preview)
                 + " " + Self.archiveCounts(preview)
         case .finished(let result):
-            Self.summary(result)
+            return Self.summary(result)
         case .failed(let message):
-            String(localized: "Sync stopped: \(message)")
+            return String(localized: "Sync stopped: \(message)")
         case .waiting(let side):
-            String(localized: "\(Self.folderName(side)) is not connected. Automatic syncs resume when its disk or share is back.")
+            return String(localized: "\(Self.folderName(side)) is not connected. Automatic syncs resume when its disk or share is back.")
         }
     }
 
-    /// What approving the current request would allow. Read it when the user
-    /// confirms: dismissing the dialog declines the request.
-    var approval: DeletionApproval? {
-        guard case .needsApproval(let preview) = state else { return nil }
-        return DeletionApproval(a: preview.a.deletions, b: preview.b.deletions)
+    /// A plan made for another pair revision is shown as information,
+    /// never offered for review.
+    private static var outdated: String {
+        String(localized: "The pair changed since that preview; preview again.")
     }
 
-    /// The approval to request when a run needs review. Hidden while the
-    /// approving start is in flight, so the dialog cannot re-present.
-    var approvalRequest: String? {
+    /// The approval to request when a run needs review, captured with
+    /// the plan it names. Hidden while any command is in flight, so the
+    /// dialog cannot re-present, and when the plan's pair revision is
+    /// obsolete.
+    var approvalRequest: ApprovalRequest? {
         guard case .needsApproval(let preview) = state,
-              !store.isStarting(pair.id) else { return nil }
-        return String(localized: "Approve this sync?")
-            + " " + Self.summary(preview)
-            + " " + Self.archiveCounts(preview)
-            + " " + String(localized: "Archived items stay in .foldover/archive for 30 days.")
+              preview.pairRevision == pair.revision,
+              !store.isBusy(pair.id) else { return nil }
+        return ApprovalRequest(
+            pairID: pair.id, pairRevision: preview.pairRevision,
+            reviewToken: preview.reviewToken,
+            approvedA: preview.a.deletions, approvedB: preview.b.deletions,
+            message: String(localized: "Approve this sync?")
+                + " " + Self.summary(preview)
+                + " " + Self.archiveCounts(preview)
+                + " " + String(localized: "Archived items stay in .foldover/archive for 30 days.")
+        )
     }
 
     /// The kind of changes listed; nil lists all.
     var changeFilter: ChangeFilter? { store.listing(for: pair.id)?.filter }
-    var showsChangeFilter: Bool {
-        switch state {
-        case .previewed(let preview), .needsApproval(let preview): preview.total > 0
-        default: false
-        }
-    }
-    var canLoadMoreChanges: Bool { store.listing(for: pair.id)?.more ?? (hiddenRowsText != nil && isPreview) }
-
-    private var isPreview: Bool {
-        switch state {
-        case .previewed, .needsApproval: true
-        default: false
-        }
+    var showsChangeFilter: Bool { reviewable.map { $0.total > 0 } ?? false }
+    var canLoadMoreChanges: Bool {
+        store.listing(for: pair.id)?.more ?? (hiddenRowsText != nil && reviewable != nil)
     }
 
     func showChanges(_ filter: ChangeFilter?) async { await store.showChanges(pair.id, filter: filter) }
@@ -147,23 +194,26 @@ struct PairSyncViewModel {
     }
 
     var rows: [ChangeRow] {
-        switch state {
-        case .previewed(let preview), .needsApproval(let preview):
-            (store.listing(for: pair.id)?.changes ?? preview.changes).enumerated().map { index, change in
-                ChangeRow(id: index, path: Self.pathText(change.path),
-                          description: Self.description(change),
-                          resolvable: Self.resolvable(change.action) ? change.path : nil,
-                          keepsBoth: change.action == .conflict(.bothChanged),
-                          skippable: PairStore.skipRule(for: change.path) == nil ? nil : change.path)
-            }
-        case .finished(let result):
-            result.failures.enumerated().map { index, failure in
+        if let preview = reviewable {
+            let review = ReviewContext(token: preview.reviewToken,
+                                       pairRevision: preview.pairRevision)
+            return (store.listing(for: pair.id)?.changes ?? preview.changes)
+                .enumerated().map { index, change in
+                    ChangeRow(id: index, path: Self.pathText(change.path),
+                              description: Self.description(change),
+                              resolvable: Self.resolvable(change.action) ? change.path : nil,
+                              keepsBoth: change.action == .conflict(.bothChanged),
+                              skippable: PairStore.skipRule(for: change.path) == nil ? nil : change.path,
+                              review: review)
+                }
+        }
+        if case .finished(let result) = state {
+            return result.failures.enumerated().map { index, failure in
                 ChangeRow(id: index, path: Self.pathText(failure.path), description: failure.message,
                           resolvable: nil)
             }
-        default:
-            []
         }
+        return []
     }
 
     /// Rows not shown because responses carry only the first changes.
@@ -171,10 +221,13 @@ struct PairSyncViewModel {
         if let listing = store.listing(for: pair.id) {
             return listing.more ? String(localized: "More changes follow") : nil
         }
-        let hidden: UInt64 = switch state {
-        case .previewed(let preview), .needsApproval(let preview): preview.total - UInt64(preview.changes.count)
-        case .finished(let result): result.failureCount - UInt64(result.failures.count)
-        default: 0
+        let hidden: UInt64
+        if let preview = reviewable {
+            hidden = preview.total - UInt64(preview.changes.count)
+        } else if case .finished(let result) = state {
+            hidden = result.failureCount - UInt64(result.failures.count)
+        } else {
+            hidden = 0
         }
         return hidden == 0 ? nil : String(localized: "and \(hidden) more")
     }
@@ -196,28 +249,40 @@ struct PairSyncViewModel {
     }
 
     func preview() async { await store.preview(pair.id) }
-    func sync() async { await store.run(pair.id) }
+    /// Run the shown plan, or an unreviewed sync when none is shown. A
+    /// preview made for another pair revision never falls back to a run
+    /// the changed pair did not ask for; preview again first.
+    func sync() async {
+        guard canSync else { return }
+        await store.run(pair.id, reviewToken: reviewable?.reviewToken)
+    }
     func cancel() async { await store.cancel(pair.id) }
     func refresh() async { await store.refresh(pair.id) }
 
-    func approve(_ approval: DeletionApproval) async {
-        await store.run(pair.id, approvedA: approval.a, approvedB: approval.b)
+    /// Approve the request the dialog was presented with: its pair, its
+    /// plan's fingerprint and the deletion counts reviewed then.
+    func approve(_ request: ApprovalRequest) async {
+        await store.run(request.pairID, approvedA: request.approvedA,
+                        approvedB: request.approvedB, reviewToken: request.reviewToken)
     }
 
     func declineApproval() { store.declineApproval(pair.id) }
 
     /// Keep this folder's version; the other is archived by the next sync.
+    /// The choice echoes the token of the preview the row came from.
     func keep(_ side: FolderSide, for row: ChangeRow) async {
-        guard let path = row.resolvable else { return }
-        await store.resolve(pair.id, path: path, keep: side)
+        guard let path = row.resolvable, let review = row.review else { return }
+        await store.resolve(pair.id, path: path, keep: side, reviewToken: review.token)
     }
 
     /// Skip this item from now on with a rule in the pair's filters, then
-    /// preview again.
+    /// preview again. The edit applies only if the pair still has the
+    /// revision the preview was made for.
     func skipAlways(_ row: ChangeRow) async {
-        guard let path = row.skippable else { return }
+        guard let path = row.skippable, let review = row.review else { return }
         do {
-            try await pairs.skip(path, inPairWithID: pair.id)
+            try await pairs.skip(path, inPairWithID: pair.id,
+                                 expectedRevision: review.pairRevision)
         } catch {
             store.report(PairStore.message(for: error), for: pair.id)
             return
@@ -227,8 +292,8 @@ struct PairSyncViewModel {
 
     /// Keep both versions; Folder B's is saved beside the item.
     func keepBoth(for row: ChangeRow) async {
-        guard row.keepsBoth, let path = row.resolvable else { return }
-        await store.keepBoth(pair.id, path: path)
+        guard row.keepsBoth, let path = row.resolvable, let review = row.review else { return }
+        await store.keepBoth(pair.id, path: path, reviewToken: review.token)
     }
 
     /// A file or link conflict; a file-versus-folder clash needs manual repair.

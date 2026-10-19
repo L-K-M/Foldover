@@ -40,15 +40,18 @@ private struct FinishingSyncClient: SyncClient {
                                     conflicts: 0, failures: [], failureCount: 0, archive: "run")
 
     func preview(_ id: String) async throws -> PairSyncState { .idle }
-    func run(_ id: String, approvedA: UInt64, approvedB: UInt64) async throws -> PairSyncState {
+    func run(_ id: String, approvedA: UInt64, approvedB: UInt64,
+             reviewToken: String?) async throws -> PairSyncState {
         .finished(result)
     }
     func status(_ id: String) async throws -> PairSyncState { .finished(result) }
     func cancel(_ id: String) async throws -> PairSyncState { .idle }
-    func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState { .idle }
-    func keepBoth(_ id: String, path: Data) async throws -> PairSyncState { .idle }
+    func resolve(_ id: String, path: Data, keep: FolderSide,
+                 reviewToken: String) async throws -> PairSyncState { .idle }
+    func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
     func history(_ id: String) async throws -> [RunRecord] { [] }
-    func changes(_ id: String, after: Data?, filter: ChangeFilter?) async throws -> ChangePage {
+    func changes(_ id: String, after: Data?, filter: ChangeFilter?,
+                 reviewToken: String) async throws -> ChangePage {
         ChangePage(changes: [], more: false)
     }
 }
@@ -195,12 +198,15 @@ private actor SyncProbe: SyncClient {
         return .idle
     }
     func preview(_ id: String) async throws -> PairSyncState { .idle }
-    func run(_ id: String, approvedA: UInt64, approvedB: UInt64) async throws -> PairSyncState { .idle }
+    func run(_ id: String, approvedA: UInt64, approvedB: UInt64,
+             reviewToken: String?) async throws -> PairSyncState { .idle }
     func cancel(_ id: String) async throws -> PairSyncState { .idle }
-    func resolve(_ id: String, path: Data, keep: FolderSide) async throws -> PairSyncState { .idle }
-    func keepBoth(_ id: String, path: Data) async throws -> PairSyncState { .idle }
+    func resolve(_ id: String, path: Data, keep: FolderSide,
+                 reviewToken: String) async throws -> PairSyncState { .idle }
+    func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
     func history(_ id: String) async throws -> [RunRecord] { [] }
-    func changes(_ id: String, after: Data?, filter: ChangeFilter?) async throws -> ChangePage {
+    func changes(_ id: String, after: Data?, filter: ChangeFilter?,
+                 reviewToken: String) async throws -> ChangePage {
         ChangePage(changes: [], more: false)
     }
 

@@ -11,9 +11,11 @@ struct PairSyncView: View {
                     .disabled(!viewModel.canStart)
                 Button("Sync Now") { Task { await viewModel.sync() } }
                     .keyboardShortcut("s")
-                    .disabled(!viewModel.canStart)
-                if viewModel.isWorking {
+                    .disabled(!viewModel.canSync)
+                if viewModel.isWorking || viewModel.isResolving {
                     ProgressView().controlSize(.small)
+                }
+                if viewModel.isWorking {
                     Button("Cancel") { Task { await viewModel.cancel() } }
                         .disabled(!viewModel.canCancel)
                 }
@@ -88,16 +90,18 @@ struct PairSyncView: View {
                 }
             }
         }
-        .confirmationDialog("Archive Many Items?", isPresented: Binding(
-            get: { viewModel.approvalRequest != nil }, set: { _ in viewModel.declineApproval() }
-        )) {
+        // The dialog acts on the request captured when it was presented,
+        // so a state change cannot redirect the tap to another plan.
+        .confirmationDialog("Approve Sync?", isPresented: Binding(
+            get: { viewModel.approvalRequest != nil },
+            set: { if !$0 { viewModel.declineApproval() } }
+        ), presenting: viewModel.approvalRequest) { request in
             Button("Archive and Sync", role: .destructive) {
-                guard let approval = viewModel.approval else { return }
-                Task { await viewModel.approve(approval) }
+                Task { await viewModel.approve(request) }
             }
             Button("Cancel", role: .cancel) { viewModel.declineApproval() }
-        } message: {
-            Text(viewModel.approvalRequest ?? "")
+        } message: { request in
+            Text(request.message)
         }
         .task(id: viewModel.pair.id) { await viewModel.refresh() }
     }
