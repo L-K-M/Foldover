@@ -8,6 +8,15 @@
 
 // Adapted from L-K-M/Sweetbriar.
 
+mod archive;
+pub use archive::*;
+mod automation;
+pub use automation::*;
+mod history;
+pub use history::*;
+mod sync;
+pub use sync::*;
+
 /// `coreVersion()` in Swift: the workspace version, via the client.
 #[uniffi::export]
 pub fn core_version() -> String {
@@ -18,6 +27,7 @@ pub fn core_version() -> String {
 pub enum AgentCapability {
     HealthOnly,
     PairConfiguration,
+    Sync,
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -63,6 +73,7 @@ pub async fn agent_status() -> Result<AgentHealth, AgentError> {
             foldover_client::AgentCapability::PairConfiguration => {
                 AgentCapability::PairConfiguration
             }
+            foldover_client::AgentCapability::Sync => AgentCapability::Sync,
         },
     })
 }
@@ -110,12 +121,134 @@ impl From<foldover_client::SyncMode> for PairMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum MetadataSync {
+    Sync,
+    Ignore,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum WriteDurability {
+    /// Survives app and system crashes.
+    Standard,
+    /// Also survives power loss; slower per file.
+    Full,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct LocalPairOptions {
+    pub modification_times: MetadataSync,
+    pub extended_attributes: MetadataSync,
+    pub permissions: MetadataSync,
+    pub durability: WriteDurability,
+    pub schedule: PairSchedule,
+    /// Gitignore-style exclusion rules, one per entry.
+    pub filters: Vec<String>,
+    /// Files larger than this many bytes are skipped in both folders.
+    pub size_limit: Option<u64>,
+    /// Files unchanged for more than this many days in both folders are
+    /// skipped.
+    pub age_limit: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum PairSchedule {
+    Manual,
+    /// Unattended syncs at this interval, after the first manual sync.
+    Every {
+        minutes: u32,
+    },
+    /// Unattended syncs after files change, and hourly.
+    OnChange,
+}
+
+impl From<foldover_client::Propagation> for MetadataSync {
+    fn from(value: foldover_client::Propagation) -> Self {
+        match value {
+            foldover_client::Propagation::Sync => Self::Sync,
+            foldover_client::Propagation::Ignore => Self::Ignore,
+        }
+    }
+}
+
+impl From<MetadataSync> for foldover_client::Propagation {
+    fn from(value: MetadataSync) -> Self {
+        match value {
+            MetadataSync::Sync => Self::Sync,
+            MetadataSync::Ignore => Self::Ignore,
+        }
+    }
+}
+
+impl From<&foldover_client::PairOptions> for LocalPairOptions {
+    fn from(options: &foldover_client::PairOptions) -> Self {
+        let metadata = options.metadata();
+        Self {
+            modification_times: metadata.modification_times().into(),
+            extended_attributes: metadata.extended_attributes().into(),
+            permissions: metadata.permissions().into(),
+            durability: match options.durability() {
+                foldover_client::Durability::Standard => WriteDurability::Standard,
+                foldover_client::Durability::Full => WriteDurability::Full,
+            },
+            schedule: match options.schedule() {
+                foldover_client::Schedule::Manual => PairSchedule::Manual,
+                foldover_client::Schedule::Every(interval) => PairSchedule::Every {
+                    minutes: interval.minutes(),
+                },
+                foldover_client::Schedule::OnChange => PairSchedule::OnChange,
+            },
+            filters: options.filters().rules().to_vec(),
+            size_limit: options.filters().size_limit(),
+            age_limit: options.filters().age_limit(),
+        }
+    }
+}
+
+impl TryFrom<LocalPairOptions> for foldover_client::PairOptions {
+    type Error = foldover_client::InvalidPair;
+
+    fn try_from(options: LocalPairOptions) -> Result<Self, Self::Error> {
+        let schedule = match options.schedule {
+            PairSchedule::Manual => foldover_client::Schedule::Manual,
+            PairSchedule::Every { minutes } => foldover_client::Schedule::Every(
+                foldover_client::ScheduleInterval::from_minutes(minutes)?,
+            ),
+            PairSchedule::OnChange => foldover_client::Schedule::OnChange,
+        };
+        Ok(Self::new(
+            foldover_client::MetadataPolicy::new(
+                options.modification_times.into(),
+                options.extended_attributes.into(),
+                options.permissions.into(),
+            ),
+            match options.durability {
+                WriteDurability::Standard => foldover_client::Durability::Standard,
+                WriteDurability::Full => foldover_client::Durability::Full,
+            },
+        )
+        .with_schedule(schedule)
+        .with_filters(
+            foldover_client::Filters::new(options.filters)?
+                .with_size_limit(options.size_limit)?
+                .with_age_limit(options.age_limit)?,
+        ))
+    }
+}
+
+/// The engine's defaults, so the app never restates them.
+#[uniffi::export]
+pub fn default_pair_options() -> LocalPairOptions {
+    (&foldover_client::PairOptions::default()).into()
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct LocalPairDraft {
     pub name: String,
     pub left_root: Vec<u8>,
     pub right_root: Vec<u8>,
     pub mode: PairMode,
+    pub options: LocalPairOptions,
 }
 
 impl From<&foldover_client::PairDraft> for LocalPairDraft {
@@ -125,6 +258,7 @@ impl From<&foldover_client::PairDraft> for LocalPairDraft {
             left_root: draft.left().as_bytes().to_vec(),
             right_root: draft.right().as_bytes().to_vec(),
             mode: draft.mode().into(),
+            options: draft.options().into(),
         }
     }
 }
@@ -133,12 +267,13 @@ impl TryFrom<LocalPairDraft> for foldover_client::PairDraft {
     type Error = foldover_client::InvalidPair;
 
     fn try_from(draft: LocalPairDraft) -> Result<Self, Self::Error> {
-        Self::new(
+        Ok(Self::new(
             draft.name,
-            foldover_client::LocalRoot::from_bytes(draft.left_root)?,
-            foldover_client::LocalRoot::from_bytes(draft.right_root)?,
+            foldover_client::PairRoot::from_bytes(draft.left_root)?,
+            foldover_client::PairRoot::from_bytes(draft.right_root)?,
             draft.mode.into(),
-        )
+        )?
+        .with_options(draft.options.try_into()?))
     }
 }
 
@@ -249,6 +384,16 @@ mod tests {
                 left_root: b"/a/\xff".to_vec(),
                 right_root: b"/b".to_vec(),
                 mode,
+                options: LocalPairOptions {
+                    modification_times: MetadataSync::Ignore,
+                    extended_attributes: MetadataSync::Sync,
+                    permissions: MetadataSync::Sync,
+                    durability: WriteDurability::Full,
+                    schedule: PairSchedule::OnChange,
+                    filters: vec!["*.tmp".into(), "build/".into()],
+                    size_limit: Some(1_000_000),
+                    age_limit: Some(365),
+                },
             };
             let domain = foldover_client::PairDraft::try_from(draft.clone()).unwrap();
             assert_eq!(LocalPairDraft::from(&domain), draft);
@@ -258,6 +403,7 @@ mod tests {
             left_root: b"relative".to_vec(),
             right_root: b"/b".to_vec(),
             mode: PairMode::Sync,
+            options: default_pair_options(),
         };
         assert!(foldover_client::PairDraft::try_from(invalid).is_err());
     }

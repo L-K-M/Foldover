@@ -6,16 +6,29 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
+mod history;
+mod mounts;
+mod pause;
+pub use history::HistoryRow;
+pub use mounts::MountRow;
+pub use pause::PauseRow;
+
 const APPLICATION_ID: i64 = 0x464f4c44; // FOLD
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 const DIRECTORY_MODE: u32 = 0o700;
 const FILE_MODE: u32 = 0o600;
 const PERMISSION_BITS: u32 = 0o777;
 const DATABASE_NAME: &str = "state.db";
 const WRITER_LOCK: &str = "writer.lock";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode";
-const SCHEMA: &str = "
+const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit";
+// Step N upgrades schema N-1 to N. Steps are append-only: never edit one
+// that has shipped, because existing databases already ran it.
+const MIGRATIONS: [&str; 14] = [
+    SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
+    SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14,
+];
+const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     minimum_reader INTEGER NOT NULL CHECK(minimum_reader > 0)
@@ -30,6 +43,130 @@ CREATE TABLE pair (
     mode TEXT NOT NULL CHECK(mode IN ('sync','mirror-left','mirror-right','backup-left','backup-right')),
     CHECK(left_root != right_root)
 ) STRICT;
+";
+// Last-synced versions per pair and path; see foldover-state for encoding.
+const SCHEMA_V2: &str = "
+CREATE TABLE base_entry (
+    pair_id BLOB NOT NULL REFERENCES pair(id) ON DELETE CASCADE,
+    path BLOB NOT NULL CHECK(length(path) > 0 AND substr(path,1,1) != x'2f' AND instr(path,x'00') = 0),
+    left_version BLOB NOT NULL,
+    right_version BLOB NOT NULL,
+    PRIMARY KEY (pair_id, path)
+) STRICT, WITHOUT ROWID;
+";
+// Per-pair options; existing pairs get the defaults.
+const SCHEMA_V3: &str = "
+ALTER TABLE pair ADD COLUMN modification_times TEXT NOT NULL DEFAULT 'sync' CHECK(modification_times IN ('sync','ignore'));
+ALTER TABLE pair ADD COLUMN extended_attributes TEXT NOT NULL DEFAULT 'sync' CHECK(extended_attributes IN ('sync','ignore'));
+ALTER TABLE pair ADD COLUMN permissions TEXT NOT NULL DEFAULT 'ignore' CHECK(permissions IN ('sync','ignore'));
+ALTER TABLE pair ADD COLUMN durability TEXT NOT NULL DEFAULT 'standard' CHECK(durability IN ('standard','full'));
+";
+// Endpoint identities recorded on a pair's first sync; unknown until then.
+const SCHEMA_V4: &str = "
+ALTER TABLE pair ADD COLUMN left_identity BLOB CHECK(left_identity IS NULL OR length(left_identity) = 16);
+ALTER TABLE pair ADD COLUMN right_identity BLOB CHECK(right_identity IS NULL OR length(right_identity) = 16);
+";
+// Unattended sync interval in minutes; NULL syncs only when asked.
+const SCHEMA_V5: &str = "
+ALTER TABLE pair ADD COLUMN schedule TEXT NOT NULL DEFAULT 'manual' CHECK(schedule IN ('manual','every','changes'));
+ALTER TABLE pair ADD COLUMN schedule_minutes INTEGER CHECK(schedule_minutes IS NULL OR schedule_minutes BETWEEN 1 AND 10080);
+";
+// Conflict choices bound to the versions a person saw; NULL means absent.
+const SCHEMA_V6: &str = "
+CREATE TABLE resolution (
+    pair_id BLOB NOT NULL REFERENCES pair(id) ON DELETE CASCADE,
+    path BLOB NOT NULL CHECK(length(path) > 0 AND substr(path,1,1) != x'2f' AND instr(path,x'00') = 0),
+    keep TEXT NOT NULL CHECK(keep IN ('left','right')),
+    left_version BLOB,
+    right_version BLOB,
+    PRIMARY KEY (pair_id, path)
+) STRICT, WITHOUT ROWID;
+";
+// Each side's last observation, to skip rereading unchanged entries.
+const SCHEMA_V7: &str = "
+CREATE TABLE snapshot_entry (
+    pair_id BLOB NOT NULL REFERENCES pair(id) ON DELETE CASCADE,
+    side TEXT NOT NULL CHECK(side IN ('left','right')),
+    path BLOB NOT NULL CHECK(length(path) > 0 AND substr(path,1,1) != x'2f' AND instr(path,x'00') = 0),
+    fingerprint BLOB NOT NULL,
+    version BLOB NOT NULL,
+    PRIMARY KEY (pair_id, side, path)
+) STRICT, WITHOUT ROWID;
+";
+// Exclusion rules, one per line.
+const SCHEMA_V8: &str = "
+ALTER TABLE pair ADD COLUMN filters TEXT NOT NULL DEFAULT '' CHECK(instr(filters, char(0)) = 0);
+";
+// Finished runs; times are milliseconds since the Unix epoch.
+const SCHEMA_V9: &str = "
+CREATE TABLE run_history (
+    pair_id BLOB NOT NULL REFERENCES pair(id) ON DELETE CASCADE,
+    started_ms INTEGER NOT NULL CHECK(started_ms >= 0),
+    finished_ms INTEGER NOT NULL CHECK(finished_ms >= started_ms),
+    trigger TEXT NOT NULL CHECK(trigger IN ('manual','scheduled')),
+    outcome TEXT NOT NULL CHECK(outcome IN ('completed','cancelled','needs_approval','failed')),
+    copied INTEGER NOT NULL CHECK(copied >= 0),
+    updated INTEGER NOT NULL CHECK(updated >= 0),
+    archived INTEGER NOT NULL CHECK(archived >= 0),
+    recovered INTEGER NOT NULL CHECK(recovered >= 0),
+    conflicts INTEGER NOT NULL CHECK(conflicts >= 0),
+    failures INTEGER NOT NULL CHECK(failures >= 0),
+    archive TEXT,
+    message TEXT,
+    PRIMARY KEY (pair_id, started_ms)
+) STRICT, WITHOUT ROWID;
+";
+// Files larger than this many bytes are skipped; NULL means no limit.
+const SCHEMA_V10: &str = "
+ALTER TABLE pair ADD COLUMN size_limit INTEGER CHECK(size_limit IS NULL OR size_limit > 0);
+";
+// Automatic syncs are paused while the row exists; NULL pauses until resumed.
+const SCHEMA_V11: &str = "
+CREATE TABLE automation_pause (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    until_ms INTEGER CHECK(until_ms IS NULL OR until_ms >= 0)
+) STRICT;
+";
+// Where each side's network share is mounted from, e.g. smb://nas/Photos.
+const SCHEMA_V12: &str = "
+ALTER TABLE pair ADD COLUMN left_mount TEXT CHECK(left_mount IS NULL OR length(left_mount) > 0);
+ALTER TABLE pair ADD COLUMN right_mount TEXT CHECK(right_mount IS NULL OR length(right_mount) > 0);
+";
+// Files unchanged for more than this many days in both folders are skipped.
+const SCHEMA_V13: &str = "
+ALTER TABLE pair ADD COLUMN age_limit INTEGER CHECK(age_limit IS NULL OR age_limit > 0);
+";
+// Preserve the parent and its references while allowing typed SFTP locators.
+const SCHEMA_V14: &str = "
+CREATE TABLE pair_next (
+    id BLOB PRIMARY KEY NOT NULL CHECK(length(id) = 16 AND id != zeroblob(16)),
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    name TEXT NOT NULL CHECK(length(trim(name)) > 0 AND instr(name, char(0)) = 0),
+    left_root BLOB NOT NULL CHECK(length(left_root) > 0 AND instr(left_root,x'00') = 0 AND
+        (substr(left_root,1,1) = x'2f' OR (length(left_root) > length('sftp://') AND substr(left_root,1,length('sftp://')) = CAST('sftp://' AS BLOB)))),
+    right_root BLOB NOT NULL CHECK(length(right_root) > 0 AND instr(right_root,x'00') = 0 AND
+        (substr(right_root,1,1) = x'2f' OR (length(right_root) > length('sftp://') AND substr(right_root,1,length('sftp://')) = CAST('sftp://' AS BLOB)))),
+    mode TEXT NOT NULL CHECK(mode IN ('sync','mirror-left','mirror-right','backup-left','backup-right')),
+    modification_times TEXT NOT NULL DEFAULT 'sync' CHECK(modification_times IN ('sync','ignore')),
+    extended_attributes TEXT NOT NULL DEFAULT 'sync' CHECK(extended_attributes IN ('sync','ignore')),
+    permissions TEXT NOT NULL DEFAULT 'ignore' CHECK(permissions IN ('sync','ignore')),
+    durability TEXT NOT NULL DEFAULT 'standard' CHECK(durability IN ('standard','full')),
+    left_identity BLOB CHECK(left_identity IS NULL OR length(left_identity) = 16),
+    right_identity BLOB CHECK(right_identity IS NULL OR length(right_identity) = 16),
+    schedule TEXT NOT NULL DEFAULT 'manual' CHECK(schedule IN ('manual','every','changes')),
+    schedule_minutes INTEGER CHECK(schedule_minutes IS NULL OR schedule_minutes BETWEEN 1 AND 10080),
+    filters TEXT NOT NULL DEFAULT '' CHECK(instr(filters, char(0)) = 0),
+    size_limit INTEGER CHECK(size_limit IS NULL OR size_limit > 0),
+    left_mount TEXT CHECK(left_mount IS NULL OR length(left_mount) > 0),
+    right_mount TEXT CHECK(right_mount IS NULL OR length(right_mount) > 0),
+    age_limit INTEGER CHECK(age_limit IS NULL OR age_limit > 0),
+    CHECK(left_root != right_root)
+) STRICT;
+INSERT INTO pair_next (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,left_identity,right_identity,schedule,schedule_minutes,filters,size_limit,left_mount,right_mount,age_limit)
+    SELECT id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,left_identity,right_identity,schedule,schedule_minutes,filters,size_limit,left_mount,right_mount,age_limit FROM pair;
+DROP TABLE pair;
+ALTER TABLE pair_next RENAME TO pair;
+UPDATE state_meta SET minimum_reader=max(minimum_reader,14) WHERE singleton=1;
 ";
 
 #[derive(Debug, thiserror::Error)]
@@ -54,6 +191,50 @@ pub enum Error {
     PairNotFound,
     #[error("Pair configuration changed; refresh before updating it")]
     StaleRevision,
+}
+
+/// Endpoint identity bytes, unknown until a pair's first sync.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct IdentityRow {
+    pub left: Option<Vec<u8>>,
+    pub right: Option<Vec<u8>>,
+}
+
+/// One stored conflict choice. Version bytes are opaque to this driver.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolutionRow {
+    pub path: Vec<u8>,
+    pub keep: String,
+    pub left_version: Option<Vec<u8>>,
+    pub right_version: Option<Vec<u8>>,
+}
+
+/// One side's stored observation of a path. Bytes are opaque to this driver.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SnapshotRow {
+    pub path: Vec<u8>,
+    pub fingerprint: Vec<u8>,
+    pub version: Vec<u8>,
+}
+
+/// One stored base row. Version bytes are opaque to this driver.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BaseRow {
+    pub path: Vec<u8>,
+    pub left_version: Vec<u8>,
+    pub right_version: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BaseChange<'a> {
+    Put {
+        path: &'a [u8],
+        left_version: &'a [u8],
+        right_version: &'a [u8],
+    },
+    Remove {
+        path: &'a [u8],
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -97,6 +278,15 @@ pub struct PairValues {
     pub left_root: Vec<u8>,
     pub right_root: Vec<u8>,
     pub mode: String,
+    pub modification_times: String,
+    pub extended_attributes: String,
+    pub permissions: String,
+    pub durability: String,
+    pub schedule: String,
+    pub schedule_minutes: Option<i64>,
+    pub filters: String,
+    pub size_limit: Option<i64>,
+    pub age_limit: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -168,7 +358,7 @@ impl Database {
             if matches!(shape, FileShape::Existing) {
                 backup(&connection, &directory, schema)?;
             }
-            migrate(&mut connection, SCHEMA)?;
+            migrate(&mut connection, schema, &MIGRATIONS)?;
         }
         connection.pragma_update(None, "foreign_keys", true)?;
         connection.pragma_update(None, "synchronous", "FULL")?;
@@ -191,8 +381,23 @@ impl Database {
     pub fn create_pair(&mut self, values: &PairValues) -> Result<PairRow, Error> {
         let id = uuid::Uuid::new_v4().into_bytes();
         self.connection.execute(
-            "INSERT INTO pair (id,revision,name,left_root,right_root,mode) VALUES (?1,1,?2,?3,?4,?5)",
-            params![id.as_slice(), values.name, values.left_root, values.right_root, values.mode],
+            "INSERT INTO pair (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,schedule,schedule_minutes,filters,size_limit,age_limit) VALUES (?1,1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+            params![
+                id.as_slice(),
+                values.name,
+                values.left_root,
+                values.right_root,
+                values.mode,
+                values.modification_times,
+                values.extended_attributes,
+                values.permissions,
+                values.durability,
+                values.schedule,
+                values.schedule_minutes,
+                values.filters,
+                values.size_limit,
+                values.age_limit
+            ],
         )?;
         self.pair(&id)?
             .ok_or(Error::InvalidState("Inserted pair disappeared"))
@@ -238,9 +443,42 @@ impl Database {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // A base and conflict choices hold versions of these roots under
+        // these metadata categories; changing either invalidates them.
+        for table in ["base_entry", "resolution", "snapshot_entry"] {
+            transaction.execute(
+                &format!("DELETE FROM {table} WHERE pair_id=?1 AND EXISTS (SELECT 1 FROM pair WHERE id=?1 AND revision=?2 AND (left_root!=?3 OR right_root!=?4 OR modification_times!=?5 OR extended_attributes!=?6 OR permissions!=?7))"),
+                params![
+                    id,
+                    revision,
+                    values.left_root,
+                    values.right_root,
+                    values.modification_times,
+                    values.extended_attributes,
+                    values.permissions
+                ],
+            )?;
+        }
         let changed = transaction.execute(
-            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6 WHERE id=?1 AND revision=?2",
-            params![id, revision, values.name, values.left_root, values.right_root, values.mode],
+            // A changed root is a different endpoint; forget its identity.
+            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,schedule=?11,schedule_minutes=?12,filters=?13,size_limit=?14,age_limit=?15,left_identity=CASE WHEN left_root=?4 THEN left_identity END,right_identity=CASE WHEN right_root=?5 THEN right_identity END,left_mount=CASE WHEN left_root=?4 THEN left_mount END,right_mount=CASE WHEN right_root=?5 THEN right_mount END WHERE id=?1 AND revision=?2",
+            params![
+                id,
+                revision,
+                values.name,
+                values.left_root,
+                values.right_root,
+                values.mode,
+                values.modification_times,
+                values.extended_attributes,
+                values.permissions,
+                values.durability,
+                values.schedule,
+                values.schedule_minutes,
+                values.filters,
+                values.size_limit,
+                values.age_limit
+            ],
         )?;
         if changed == 0 {
             return Err(revision_error(&transaction, id)?);
@@ -252,6 +490,208 @@ impl Database {
         )?;
         transaction.commit()?;
         Ok(row)
+    }
+
+    /// The pair's recorded endpoint identities.
+    pub fn identities(&self, pair: &[u8]) -> Result<IdentityRow, Error> {
+        self.connection
+            .query_row(
+                "SELECT left_identity,right_identity FROM pair WHERE id=?1",
+                [pair],
+                |row| {
+                    Ok(IdentityRow {
+                        left: row.get(0)?,
+                        right: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or(Error::PairNotFound)
+    }
+
+    /// Record identities, only while the pair keeps `revision`.
+    pub fn record_identities(
+        &mut self,
+        pair: &[u8],
+        revision: i64,
+        left: &[u8],
+        right: &[u8],
+    ) -> Result<(), Error> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if transaction.execute(
+            "UPDATE pair SET left_identity=?3,right_identity=?4 WHERE id=?1 AND revision=?2",
+            params![pair, revision, left, right],
+        )? == 0
+        {
+            return Err(revision_error(&transaction, pair)?);
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// One side's stored observation, ordered by path.
+    pub fn snapshot(&self, pair: &[u8], side: &str) -> Result<Vec<SnapshotRow>, Error> {
+        let mut statement = self.connection.prepare(
+            "SELECT path,fingerprint,version FROM snapshot_entry WHERE pair_id=?1 AND side=?2 ORDER BY path",
+        )?;
+        let rows = statement.query_map(params![pair, side], |row| {
+            Ok(SnapshotRow {
+                path: row.get(0)?,
+                fingerprint: row.get(1)?,
+                version: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Replace one side's observation, only while the pair keeps `revision`.
+    pub fn replace_snapshot(
+        &mut self,
+        pair: &[u8],
+        revision: i64,
+        side: &str,
+        rows: &[SnapshotRow],
+    ) -> Result<(), Error> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<i64> = transaction
+            .query_row("SELECT revision FROM pair WHERE id=?1", [pair], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        match current {
+            None => return Err(Error::PairNotFound),
+            Some(current) if current != revision => return Err(Error::StaleRevision),
+            Some(_) => {}
+        }
+        transaction.execute(
+            "DELETE FROM snapshot_entry WHERE pair_id=?1 AND side=?2",
+            params![pair, side],
+        )?;
+        {
+            let mut insert = transaction.prepare(
+                "INSERT INTO snapshot_entry (pair_id,side,path,fingerprint,version) VALUES (?1,?2,?3,?4,?5)",
+            )?;
+            for row in rows {
+                insert.execute(params![pair, side, row.path, row.fingerprint, row.version])?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn resolutions(&self, pair: &[u8]) -> Result<Vec<ResolutionRow>, Error> {
+        let mut statement = self.connection.prepare(
+            "SELECT path,keep,left_version,right_version FROM resolution WHERE pair_id=?1 ORDER BY path",
+        )?;
+        let rows = statement.query_map([pair], |row| {
+            Ok(ResolutionRow {
+                path: row.get(0)?,
+                keep: row.get(1)?,
+                left_version: row.get(2)?,
+                right_version: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Store or replace a conflict choice, only while the pair keeps `revision`.
+    pub fn record_resolution(
+        &mut self,
+        pair: &[u8],
+        revision: i64,
+        row: &ResolutionRow,
+    ) -> Result<(), Error> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<i64> = transaction
+            .query_row("SELECT revision FROM pair WHERE id=?1", [pair], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        match current {
+            None => return Err(Error::PairNotFound),
+            Some(current) if current != revision => return Err(Error::StaleRevision),
+            Some(_) => {}
+        }
+        transaction.execute(
+            "INSERT INTO resolution (pair_id,path,keep,left_version,right_version) VALUES (?1,?2,?3,?4,?5)
+             ON CONFLICT(pair_id,path) DO UPDATE SET keep=excluded.keep,left_version=excluded.left_version,right_version=excluded.right_version",
+            params![pair, row.path, row.keep, row.left_version, row.right_version],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Every base row of a pair, ordered by raw path bytes.
+    pub fn base_rows(&self, pair: &[u8]) -> Result<Vec<BaseRow>, Error> {
+        let mut statement = self.connection.prepare(
+            "SELECT path,left_version,right_version FROM base_entry WHERE pair_id=?1 ORDER BY path",
+        )?;
+        let rows = statement.query_map([pair], |row| {
+            Ok(BaseRow {
+                path: row.get(0)?,
+                left_version: row.get(1)?,
+                right_version: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Apply base changes atomically, only while the pair keeps `revision`.
+    /// A stale revision means the plan was built for other roots or mode.
+    pub fn change_base(
+        &mut self,
+        pair: &[u8],
+        revision: i64,
+        changes: &[BaseChange<'_>],
+    ) -> Result<(), Error> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<i64> = transaction
+            .query_row("SELECT revision FROM pair WHERE id=?1", [pair], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        match current {
+            None => return Err(Error::PairNotFound),
+            Some(current) if current != revision => return Err(Error::StaleRevision),
+            Some(_) => {}
+        }
+        {
+            let mut put = transaction.prepare(
+                "INSERT INTO base_entry (pair_id,path,left_version,right_version) VALUES (?1,?2,?3,?4)
+                 ON CONFLICT(pair_id,path) DO UPDATE SET left_version=excluded.left_version,right_version=excluded.right_version",
+            )?;
+            let mut remove =
+                transaction.prepare("DELETE FROM base_entry WHERE pair_id=?1 AND path=?2")?;
+            // A synced path's conflict choice is spent.
+            let mut resolved =
+                transaction.prepare("DELETE FROM resolution WHERE pair_id=?1 AND path=?2")?;
+            for change in changes {
+                match *change {
+                    BaseChange::Put {
+                        path,
+                        left_version,
+                        right_version,
+                    } => {
+                        put.execute(params![pair, path, left_version, right_version])?;
+                        resolved.execute(params![pair, path])?;
+                    }
+                    BaseChange::Remove { path } => {
+                        remove.execute(params![pair, path])?;
+                        resolved.execute(params![pair, path])?;
+                    }
+                }
+            }
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn remove_pair(&mut self, id: &[u8], revision: i64) -> Result<(), Error> {
@@ -357,7 +797,7 @@ fn inspect(connection: &Connection, shape: FileShape) -> Result<i64, Error> {
             supported: SCHEMA_VERSION,
         });
     }
-    if schema == SCHEMA_VERSION {
+    if schema > 0 {
         if application != APPLICATION_ID {
             return Err(Error::ForeignDatabase);
         }
@@ -406,9 +846,25 @@ fn backup(connection: &Connection, directory: &Path, schema: i64) -> Result<(), 
     Ok(())
 }
 
-fn migrate(connection: &mut Connection, statements: &str) -> Result<(), Error> {
+/// Run every step after `from` in one transaction, so a failure leaves the
+/// database at its previous schema.
+fn migrate(connection: &mut Connection, from: i64, steps: &[&str]) -> Result<(), Error> {
+    let from = usize::try_from(from).map_err(|_| Error::InvalidState("Negative schema version"))?;
+    // Rebuilding a parent must not cascade its children; open enables
+    // enforcement after the transaction has verified every reference.
+    connection.pragma_update(None, "foreign_keys", false)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    transaction.execute_batch(statements)?;
+    for statements in steps.get(from..).unwrap_or_default() {
+        transaction.execute_batch(statements)?;
+    }
+    let broken: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
+        [],
+        |row| row.get(0),
+    )?;
+    if broken {
+        return Err(Error::InvalidState("Migration has invalid foreign keys"));
+    }
     transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     transaction.commit()?;
@@ -424,16 +880,25 @@ fn pair_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairRow> {
             left_root: row.get(3)?,
             right_root: row.get(4)?,
             mode: row.get(5)?,
+            modification_times: row.get(6)?,
+            extended_attributes: row.get(7)?,
+            permissions: row.get(8)?,
+            durability: row.get(9)?,
+            schedule: row.get(10)?,
+            schedule_minutes: row.get(11)?,
+            filters: row.get(12)?,
+            size_limit: row.get(13)?,
+            age_limit: row.get(14)?,
         },
     })
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
 
-    fn location() -> (tempfile::TempDir, StateLocation) {
+    pub(super) fn location() -> (tempfile::TempDir, StateLocation) {
         let directory = tempfile::Builder::new()
             .permissions(fs::Permissions::from_mode(DIRECTORY_MODE))
             .tempdir()
@@ -442,12 +907,21 @@ mod tests {
         (directory, location)
     }
 
-    fn values() -> PairValues {
+    pub(super) fn values() -> PairValues {
         PairValues {
             name: "pair".into(),
             left_root: b"/left".to_vec(),
             right_root: b"/right".to_vec(),
             mode: "sync".into(),
+            modification_times: "sync".into(),
+            extended_attributes: "sync".into(),
+            permissions: "ignore".into(),
+            durability: "standard".into(),
+            schedule: "manual".into(),
+            schedule_minutes: None,
+            filters: String::new(),
+            size_limit: None,
+            age_limit: None,
         }
     }
 
@@ -618,15 +1092,11 @@ mod tests {
                 > 0
         );
         backup(&database.connection, directory.path(), SCHEMA_VERSION).unwrap();
+        let prefix = format!("state-before-v{SCHEMA_VERSION}-");
         let entry = fs::read_dir(directory.path())
             .unwrap()
             .map(Result::unwrap)
-            .find(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("state-before-v1-")
-            })
+            .find(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
             .unwrap();
         let copy =
             Connection::open_with_flags(entry.path(), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
@@ -647,7 +1117,14 @@ mod tests {
         connection
             .pragma_update(None, "application_id", APPLICATION_ID)
             .unwrap();
-        assert!(migrate(&mut connection, "CREATE TABLE partial(value); INVALID SQL;").is_err());
+        assert!(
+            migrate(
+                &mut connection,
+                0,
+                &[SCHEMA_V1, "CREATE TABLE partial(value); INVALID SQL;"]
+            )
+            .is_err()
+        );
         let partial: i64 = connection
             .query_row(
                 "SELECT count(*) FROM sqlite_schema WHERE name='partial'",
@@ -679,5 +1156,499 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    fn put<'a>(path: &'a [u8], version: &'a [u8]) -> BaseChange<'a> {
+        BaseChange::Put {
+            path,
+            left_version: version,
+            right_version: version,
+        }
+    }
+
+    #[test]
+    fn base_changes_are_atomic_revision_bound_and_ordered() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        database
+            .change_base(&pair.id, 1, &[put(b"b", b"2"), put(b"a", b"1")])
+            .unwrap();
+        let paths: Vec<_> = database
+            .base_rows(&pair.id)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.path)
+            .collect();
+        assert_eq!(paths, [b"a".to_vec(), b"b".to_vec()]);
+
+        database
+            .change_base(
+                &pair.id,
+                1,
+                &[put(b"a", b"3"), BaseChange::Remove { path: b"b" }],
+            )
+            .unwrap();
+        assert_eq!(
+            database.base_rows(&pair.id).unwrap(),
+            [BaseRow {
+                path: b"a".to_vec(),
+                left_version: b"3".to_vec(),
+                right_version: b"3".to_vec(),
+            }]
+        );
+
+        // An invalid row rolls back the whole change.
+        assert!(
+            database
+                .change_base(&pair.id, 1, &[put(b"c", b"4"), put(b"/absolute", b"5")])
+                .is_err()
+        );
+        assert_eq!(database.base_rows(&pair.id).unwrap().len(), 1);
+
+        assert!(matches!(
+            database.change_base(&pair.id, 2, &[put(b"c", b"4")]),
+            Err(Error::StaleRevision)
+        ));
+        assert!(matches!(
+            database.change_base(&[7; 16], 1, &[put(b"c", b"4")]),
+            Err(Error::PairNotFound)
+        ));
+        assert_eq!(database.base_rows(&pair.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn root_changes_and_removal_discard_the_base_but_renames_keep_it() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        database
+            .change_base(&pair.id, 1, &[put(b"a", b"1")])
+            .unwrap();
+
+        let mut renamed = values();
+        renamed.name = "renamed".into();
+        renamed.mode = "mirror-left".into();
+        database.update_pair(&pair.id, 1, &renamed).unwrap();
+        assert_eq!(database.base_rows(&pair.id).unwrap().len(), 1);
+
+        // A stale update changes nothing, including the base.
+        let mut moved = renamed.clone();
+        moved.right_root = b"/elsewhere".to_vec();
+        assert!(matches!(
+            database.update_pair(&pair.id, 1, &moved),
+            Err(Error::StaleRevision)
+        ));
+        assert_eq!(database.base_rows(&pair.id).unwrap().len(), 1);
+
+        database.update_pair(&pair.id, 2, &moved).unwrap();
+        assert!(database.base_rows(&pair.id).unwrap().is_empty());
+
+        database
+            .change_base(&pair.id, 3, &[put(b"a", b"1")])
+            .unwrap();
+        database.remove_pair(&pair.id, 3).unwrap();
+        let orphans: i64 = database
+            .connection
+            .query_row("SELECT count(*) FROM base_entry", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(orphans, 0);
+    }
+
+    #[test]
+    fn version_one_state_migrates_with_a_backup_and_keeps_pairs() {
+        let (directory, location) = location();
+        let path = directory.path().join(DATABASE_NAME);
+        drop(private_file(&path).unwrap());
+        let mut connection = Connection::open(&path).unwrap();
+        connection
+            .pragma_update(None, "application_id", APPLICATION_ID)
+            .unwrap();
+        let transaction = connection.transaction().unwrap();
+        transaction.execute_batch(SCHEMA_V1).unwrap();
+        transaction.pragma_update(None, "user_version", 1).unwrap();
+        transaction.commit().unwrap();
+        connection
+            .execute(
+                "INSERT INTO pair (id,revision,name,left_root,right_root,mode) VALUES (?1,1,'old',x'2f6c',x'2f72','sync')",
+                [[9_u8; 16].as_slice()],
+            )
+            .unwrap();
+        drop(connection);
+
+        let mut database = Database::open(&location).unwrap();
+        assert_eq!(database.pairs().unwrap()[0].values.name, "old");
+        database
+            .change_base(&[9; 16], 1, &[put(b"a", b"1")])
+            .unwrap();
+        let backups = fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("state-before-v1-")
+            })
+            .count();
+        assert_eq!(backups, 1);
+    }
+
+    fn stored_rows(connection: &Connection, table: &str) -> Vec<Vec<rusqlite::types::Value>> {
+        let mut statement = connection
+            .prepare(&format!("SELECT * FROM {table} ORDER BY 1,2"))
+            .unwrap();
+        let columns = statement.column_count();
+        statement
+            .query_map([], |row| {
+                (0..columns).map(|column| row.get(column)).collect()
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn sftp_migration_preserves_legacy_rows_backup_and_foreign_keys() {
+        const LOCAL_ROOT_SCHEMA: usize = 13;
+        let (directory, location) = location();
+        let path = directory.path().join(DATABASE_NAME);
+        drop(private_file(&path).unwrap());
+        let mut connection = Connection::open(&path).unwrap();
+        let transaction = connection.transaction().unwrap();
+        for statements in &MIGRATIONS[..LOCAL_ROOT_SCHEMA] {
+            transaction.execute_batch(statements).unwrap();
+        }
+        transaction
+            .pragma_update(None, "application_id", APPLICATION_ID)
+            .unwrap();
+        transaction
+            .pragma_update(None, "user_version", LOCAL_ROOT_SCHEMA as i64)
+            .unwrap();
+        transaction.commit().unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .unwrap();
+        let writer = private_file(&directory.path().join(WRITER_LOCK)).unwrap();
+        writer.try_lock().unwrap();
+        let mut legacy = Database {
+            connection,
+            _writer: writer,
+            directory: directory.path().to_owned(),
+        };
+        let mut input = values();
+        input.left_root = b"/left/\xff".to_vec();
+        input.modification_times = "ignore".into();
+        input.permissions = "sync".into();
+        input.durability = "full".into();
+        input.schedule = "every".into();
+        input.schedule_minutes = Some(37);
+        input.filters = "*.tmp\nprivate".into();
+        input.size_limit = Some(9876);
+        input.age_limit = Some(42);
+        let pair = legacy.create_pair(&input).unwrap();
+        input.name = "Preserved".into();
+        let pair = legacy.update_pair(&pair.id, pair.revision, &input).unwrap();
+        legacy
+            .record_identities(&pair.id, pair.revision, &[1; 16], &[2; 16])
+            .unwrap();
+        legacy
+            .record_mounts(
+                &pair.id,
+                pair.revision,
+                &MountRow {
+                    left: Some("smb://nas/left".into()),
+                    right: Some("smb://nas/right".into()),
+                },
+            )
+            .unwrap();
+        legacy
+            .change_base(&pair.id, pair.revision, &[put(b"kept", b"version")])
+            .unwrap();
+        legacy
+            .record_resolution(
+                &pair.id,
+                pair.revision,
+                &ResolutionRow {
+                    path: b"conflict".to_vec(),
+                    keep: "left".into(),
+                    left_version: Some(b"left".to_vec()),
+                    right_version: Some(b"right".to_vec()),
+                },
+            )
+            .unwrap();
+        legacy
+            .replace_snapshot(
+                &pair.id,
+                pair.revision,
+                "left",
+                &[SnapshotRow {
+                    path: b"kept".to_vec(),
+                    fingerprint: b"fingerprint".to_vec(),
+                    version: b"version".to_vec(),
+                }],
+            )
+            .unwrap();
+        legacy
+            .record_history(
+                &pair.id,
+                &HistoryRow {
+                    started_ms: 1,
+                    finished_ms: 2,
+                    trigger: "manual".into(),
+                    outcome: "completed".into(),
+                    copied: 3,
+                    updated: 4,
+                    archived: 5,
+                    recovered: 6,
+                    conflicts: 7,
+                    failures: 8,
+                    archive: Some("archive".into()),
+                    message: Some("Preserved history".into()),
+                },
+                100,
+            )
+            .unwrap();
+        legacy
+            .set_pause(Some(PauseRow {
+                until_ms: Some(123),
+            }))
+            .unwrap();
+        let before: Vec<_> = [
+            "pair",
+            "base_entry",
+            "resolution",
+            "snapshot_entry",
+            "run_history",
+            "automation_pause",
+        ]
+        .into_iter()
+        .map(|table| (table, stored_rows(&legacy.connection, table)))
+        .collect();
+        let minimum_reader = |connection: &Connection| {
+            connection
+                .query_row(
+                    "SELECT minimum_reader FROM state_meta WHERE singleton=1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        let legacy_reader = minimum_reader(&legacy.connection);
+
+        // A failure after rebuilding the parent must restore every child too.
+        let mut broken = MIGRATIONS.to_vec();
+        broken.push("INVALID SQL;");
+        assert!(migrate(&mut legacy.connection, LOCAL_ROOT_SCHEMA as i64, &broken).is_err());
+        for (table, expected) in &before {
+            assert_eq!(&stored_rows(&legacy.connection, table), expected, "{table}");
+        }
+        assert_eq!(
+            legacy
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            LOCAL_ROOT_SCHEMA as i64
+        );
+        assert_eq!(minimum_reader(&legacy.connection), legacy_reader);
+        drop(legacy);
+
+        let mut database = Database::open(&location).unwrap();
+        assert_eq!(
+            minimum_reader(&database.connection),
+            LOCAL_ROOT_SCHEMA as i64 + 1
+        );
+        assert_eq!(
+            database
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+        for (table, expected) in &before {
+            assert_eq!(
+                &stored_rows(&database.connection, table),
+                expected,
+                "{table}"
+            );
+        }
+        assert_eq!(
+            database
+                .connection
+                .pragma_query_value::<i64, _>(None, "foreign_keys", |row| row.get(0))
+                .unwrap(),
+            1
+        );
+        let violations: i64 = database
+            .connection
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(violations, 0);
+        let backup = fs::read_dir(directory.path())
+            .unwrap()
+            .map(Result::unwrap)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("state-before-v13-")
+            })
+            .unwrap();
+        let backup =
+            Connection::open_with_flags(backup.path(), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        for (table, expected) in &before {
+            assert_eq!(&stored_rows(&backup, table), expected, "backup {table}");
+        }
+        assert_eq!(
+            backup
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            LOCAL_ROOT_SCHEMA as i64
+        );
+        assert_eq!(minimum_reader(&backup), legacy_reader);
+
+        input.left_root = b"sftp://nas/srv/photos/\xff".to_vec();
+        database.create_pair(&input).unwrap();
+        for invalid in [
+            b"relative".as_slice(),
+            b"ftp://nas/path",
+            b"sftp://",
+            b"sftp://nas/\0bad",
+        ] {
+            input.left_root = invalid.to_vec();
+            assert!(database.create_pair(&input).is_err(), "{invalid:?}");
+        }
+        database.remove_pair(&pair.id, pair.revision).unwrap();
+        for table in ["base_entry", "resolution", "snapshot_entry", "run_history"] {
+            assert!(
+                stored_rows(&database.connection, table).is_empty(),
+                "{table}"
+            );
+        }
+    }
+
+    #[test]
+    fn identities_are_revision_bound_and_forgotten_per_changed_root() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        assert_eq!(
+            database.identities(&pair.id).unwrap(),
+            IdentityRow::default()
+        );
+        assert!(matches!(
+            database.record_identities(&pair.id, 2, &[1; 16], &[2; 16]),
+            Err(Error::StaleRevision)
+        ));
+        assert!(
+            database
+                .record_identities(&pair.id, 1, &[1; 15], &[2; 16])
+                .is_err()
+        );
+        database
+            .record_identities(&pair.id, 1, &[1; 16], &[2; 16])
+            .unwrap();
+
+        let mut renamed = values();
+        renamed.name = "renamed".into();
+        database.update_pair(&pair.id, 1, &renamed).unwrap();
+        assert_eq!(
+            database.identities(&pair.id).unwrap(),
+            IdentityRow {
+                left: Some(vec![1; 16]),
+                right: Some(vec![2; 16])
+            }
+        );
+        let mut moved = renamed.clone();
+        moved.right_root = b"/elsewhere".to_vec();
+        database.update_pair(&pair.id, 2, &moved).unwrap();
+        assert_eq!(
+            database.identities(&pair.id).unwrap(),
+            IdentityRow {
+                left: Some(vec![1; 16]),
+                right: None
+            }
+        );
+        assert!(matches!(
+            database.identities(&[9; 16]),
+            Err(Error::PairNotFound)
+        ));
+    }
+
+    #[test]
+    fn resolutions_are_revision_bound_and_spent_by_base_changes() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        let row = |path: &[u8]| ResolutionRow {
+            path: path.to_vec(),
+            keep: "left".into(),
+            left_version: Some(b"l".to_vec()),
+            right_version: None,
+        };
+        assert!(matches!(
+            database.record_resolution(&pair.id, 2, &row(b"a")),
+            Err(Error::StaleRevision)
+        ));
+        database.record_resolution(&pair.id, 1, &row(b"a")).unwrap();
+        database.record_resolution(&pair.id, 1, &row(b"b")).unwrap();
+        assert_eq!(
+            database.resolutions(&pair.id).unwrap(),
+            [row(b"a"), row(b"b")]
+        );
+
+        database
+            .change_base(&pair.id, 1, &[put(b"a", b"1")])
+            .unwrap();
+        assert_eq!(database.resolutions(&pair.id).unwrap(), [row(b"b")]);
+
+        let mut moved = values();
+        moved.left_root = b"/moved".to_vec();
+        database.update_pair(&pair.id, 1, &moved).unwrap();
+        assert!(database.resolutions(&pair.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn snapshots_replace_whole_sides_and_follow_the_base_rules() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        let row = |path: &[u8]| SnapshotRow {
+            path: path.to_vec(),
+            fingerprint: b"f".to_vec(),
+            version: b"v".to_vec(),
+        };
+        database
+            .replace_snapshot(&pair.id, 1, "left", &[row(b"a"), row(b"b")])
+            .unwrap();
+        database
+            .replace_snapshot(&pair.id, 1, "right", &[row(b"c")])
+            .unwrap();
+        database
+            .replace_snapshot(&pair.id, 1, "left", &[row(b"b")])
+            .unwrap();
+        assert_eq!(database.snapshot(&pair.id, "left").unwrap(), [row(b"b")]);
+        assert_eq!(database.snapshot(&pair.id, "right").unwrap(), [row(b"c")]);
+        assert!(
+            database
+                .replace_snapshot(&pair.id, 1, "middle", &[row(b"d")])
+                .is_err()
+        );
+        assert!(matches!(
+            database.replace_snapshot(&pair.id, 2, "left", &[]),
+            Err(Error::StaleRevision)
+        ));
+
+        let mut renamed = values();
+        renamed.name = "renamed".into();
+        database.update_pair(&pair.id, 1, &renamed).unwrap();
+        assert_eq!(database.snapshot(&pair.id, "left").unwrap().len(), 1);
+        let mut ignoring = renamed.clone();
+        ignoring.modification_times = "ignore".into();
+        database.update_pair(&pair.id, 2, &ignoring).unwrap();
+        assert!(database.snapshot(&pair.id, "left").unwrap().is_empty());
+        assert!(database.snapshot(&pair.id, "right").unwrap().is_empty());
     }
 }

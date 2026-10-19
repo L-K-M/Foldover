@@ -6,4 +6,7 @@
 mod database;
 
 #[cfg(unix)]
-pub use database::{Database, Error, PairRow, PairValues, StateLocation};
+pub use database::{
+    BaseChange, BaseRow, Database, Error, HistoryRow, IdentityRow, MountRow, PairRow, PairValues,
+    PauseRow, ResolutionRow, SnapshotRow, StateLocation,
+};

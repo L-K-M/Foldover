@@ -1,11 +1,26 @@
 use std::collections::BTreeMap;
 
 use foldover_types::{
-    BaselineEntry, ConflictKind, EntryDecision, EntryKind, EntryVersion, ScanControl, Side,
-    SyncMode, SyncPath,
+    BaselineEntry, ConflictKind, EntryDecision, EntryKind, EntryVersion, Resolution, ScanControl,
+    Side, SyncMode, SyncPath,
 };
 
+use crate::reconcile::resolve;
 use crate::{DeletionCounts, DeletionReview, InvalidDeletionCounts, RunContext, reconcile_entry};
+
+fn decide(
+    decision: EntryDecision,
+    resolution: Option<&Resolution>,
+    left: Option<EntryVersion>,
+    right: Option<EntryVersion>,
+) -> EntryDecision {
+    match (decision, resolution) {
+        (EntryDecision::Conflict(_), Some(resolution)) => {
+            resolve(*resolution, left, right).unwrap_or(decision)
+        }
+        _ => decision,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TreeRole {
@@ -74,12 +89,85 @@ impl CandidatePlan {
     }
 
     pub fn deletion_review(&self, target: Side, context: RunContext) -> DeletionReview {
+        self.deletions(target).review(context)
+    }
+
+    pub fn deletions(&self, target: Side) -> DeletionCounts {
         match target {
             Side::Left => self.left_deletions,
             Side::Right => self.right_deletions,
         }
-        .review(context)
     }
+}
+
+/// A choice made for a folder conflict — a folder deleted on one side while
+/// something inside it changed on the other — covers the folder and
+/// everything in it: the kept side wins each entry, as in a mirror from it.
+/// `resolve` cannot do this per entry, because a folder's own versions do
+/// not change when its contents do; without this the conflict would block
+/// its branch forever.
+///
+/// ```text
+/// photos/        deleted on B, kept A   ─▶ create on B
+/// photos/a.jpg   edited on A            ─▶ create on B
+/// photos/b.jpg   unchanged on A         ─▶ create on B   (kept B: all archived on A)
+/// ```
+fn settle_folder_choices(
+    rows: &mut [PlanRow],
+    base: &BTreeMap<SyncPath, BaselineEntry>,
+    left: &BTreeMap<SyncPath, EntryVersion>,
+    right: &BTreeMap<SyncPath, EntryVersion>,
+    resolutions: &BTreeMap<SyncPath, Resolution>,
+    control: &mut impl FnMut() -> ScanControl,
+) -> Result<(), PlanError> {
+    let mut branches: BTreeMap<SyncPath, Side> = BTreeMap::new();
+    for row in rows.iter_mut() {
+        check_control(control)?;
+        let (left, right) = (left.get(&row.path).copied(), right.get(&row.path).copied());
+        let mut keep = None;
+        let mut parent = row.path.parent();
+        while let Some(path) = parent {
+            if let Some(side) = branches.get(&path) {
+                keep = Some(*side);
+            }
+            parent = path.parent();
+        }
+        if keep.is_none() {
+            keep = folder_choice(row, resolutions.get(&row.path), left, right);
+            if let Some(side) = keep {
+                branches.insert(row.path.clone(), side);
+            }
+        }
+        let Some(keep) = keep else {
+            continue;
+        };
+        row.decision = CandidateDecision::Entry(reconcile_entry(
+            SyncMode::Mirror { source: keep },
+            base.get(&row.path).copied(),
+            left,
+            right,
+        ));
+    }
+    Ok(())
+}
+
+/// The side a person chose for this folder conflict, while both sides still
+/// match what they saw.
+fn folder_choice(
+    row: &PlanRow,
+    resolution: Option<&Resolution>,
+    left: Option<EntryVersion>,
+    right: Option<EntryVersion>,
+) -> Option<Side> {
+    let resolution = resolution?;
+    let folder = [left, right]
+        .into_iter()
+        .flatten()
+        .any(|version| version.kind() == EntryKind::Directory);
+    let current = (left, right) == (resolution.left(), resolution.right());
+    let conflicted = row.decision
+        == CandidateDecision::Entry(EntryDecision::Conflict(ConflictKind::DeletedVersusEdited));
+    (folder && current && conflicted).then_some(resolution.keep())
 }
 
 /// Merge complete logical trees in exact byte-path order. Incomplete scans,
@@ -91,6 +179,19 @@ pub fn plan_candidates(
     base: &BTreeMap<SyncPath, BaselineEntry>,
     left: &BTreeMap<SyncPath, EntryVersion>,
     right: &BTreeMap<SyncPath, EntryVersion>,
+    control: &mut impl FnMut() -> ScanControl,
+) -> Result<CandidatePlan, PlanError> {
+    plan_resolved(mode, base, left, right, &BTreeMap::new(), control)
+}
+
+/// `plan_candidates`, with conflicts a person resolved turned into the
+/// chosen change while both sides still match what they saw.
+pub fn plan_resolved(
+    mode: SyncMode,
+    base: &BTreeMap<SyncPath, BaselineEntry>,
+    left: &BTreeMap<SyncPath, EntryVersion>,
+    right: &BTreeMap<SyncPath, EntryVersion>,
+    resolutions: &BTreeMap<SyncPath, Resolution>,
     control: &mut impl FnMut() -> ScanControl,
 ) -> Result<CandidatePlan, PlanError> {
     validate_tree(base, TreeRole::Base, |entry| entry.left().kind(), control)?;
@@ -133,7 +234,12 @@ pub fn plan_candidates(
         }
         rows.push(PlanRow {
             path: path.clone(),
-            decision: CandidateDecision::Entry(reconcile_entry(mode, baseline, left, right)),
+            decision: CandidateDecision::Entry(decide(
+                reconcile_entry(mode, baseline, left, right),
+                resolutions.get(&path),
+                left,
+                right,
+            )),
         });
 
         if mode != SyncMode::Sync {
@@ -163,6 +269,8 @@ pub fn plan_candidates(
             }
         }
     }
+
+    settle_folder_choices(&mut rows, base, left, right, resolutions, control)?;
 
     // Ancestors precede descendants. Suppression therefore propagates an outer
     // conflict through the whole branch without recursive traversal.

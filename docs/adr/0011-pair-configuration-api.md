@@ -10,7 +10,7 @@ reactor. Validation, catalog checks and persistence share that command. Its
 permit survives a client disconnect until the command finishes. Health requests
 do not acquire the configuration queue or access pair state.
 
-IPC protocol version 2 requires successful `session.hello` negotiation before
+IPC protocol version 4 requires successful `session.hello` negotiation before
 private dispatch. A failed renegotiation closes private access on that connection.
 Installed-code authentication precedes every private request; typed clients
 also authenticate the agent before their handshake and recheck before sending
@@ -23,7 +23,9 @@ bundle. Process smoke inspects signed app/helper entitlements before private cal
 
 ## Methods and representation
 
-- `pair.create`: validated local roots, name and explicit mode/source.
+- `pair.create`: validated local roots, name, explicit mode/source and
+  explicit options (modification times, extended attributes and permissions
+  `sync`/`ignore`; durability `standard`/`full`). Version 3 added options.
 - `pair.get`: an existing pair ID.
 - `pair.update`: ID, expected positive revision and replacement configuration.
 - `pair.remove`: ID and expected revision; returns the removed configuration.
@@ -39,6 +41,10 @@ queries, not multi-request snapshots; refresh to observe concurrent insertions
 behind the cursor. Clients reject malformed, unordered or nonadvancing pages.
 Missing pairs, stale revisions, unavailable roots and overlap have distinct
 errors. There is no implicit retry.
+
+Changing roots or any metadata category discards the pair's base
+([ADR 0009](0009-pair-state-storage.md)): stored versions describe those
+roots under those categories. Durability, name and mode changes keep it.
 
 Removal changes only configuration and performs no endpoint probes or deletion.
 This permits removal of an offline pair that otherwise blocks catalog checks.

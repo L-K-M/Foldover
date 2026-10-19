@@ -391,6 +391,9 @@ fidelity warnings.
 Filesystem support and driver operation fidelity are separate probes:
 [ADR 0005](docs/adr/0005-metadata-fidelity.md) records the local baseline's
 symlink, sparse-copy and exFAT Unicode failures.
+Held-volume filesystem declarations are available below the agent API;
+[ADR 0017](docs/adr/0017-filesystem-feature-declarations.md) records validity
+handling and the remaining operation/readiness gates.
 
 Endpoint-layer rules, not filters:
 - `.foldover/` and temp files are never reported by `scan`.
@@ -410,7 +413,7 @@ Endpoint-layer rules, not filters:
 - Pair configuration and initial writer/format guards:
   [ADR 0009](docs/adr/0009-pair-state-storage.md). The agent owns this store
   before serving requests. Authenticated create/read/update/remove APIs and the CLI
-  are implemented; the remaining state tables are pending.
+  are implemented, as is the per-path base; the remaining state tables are pending.
 - Lives in `~/Library/Application Support/Foldover/state.db`: local disk,
   because WAL does not work on network file systems. The directory is
   excluded from Time Machine; the search index uses a `.noindex` suffix.
@@ -455,8 +458,9 @@ Endpoint-layer rules, not filters:
 | v | — | — | drop from base |
 
 Entry classification and per-side baselines: [ADR 0007](docs/adr/0007-entry-reconciliation.md).
+Local entry versions (content and tracked metadata): [ADR 0018](docs/adr/0018-local-entry-versions.md).
 Pure deletion-review thresholds: [ADR 0013](docs/adr/0013-deletion-review-fuse.md).
-Plan-bound confirmations and execution-time gates remain pending.
+Run execution, approvals and journal-free recovery: [ADR 0020](docs/adr/0020-run-execution.md).
 Hierarchy-aware candidate generation is implemented below the agent API;
 [ADR 0014](docs/adr/0014-tree-plan-candidates.md) records tree validation,
 conflicted-branch suppression and remaining executable-plan gates.
@@ -599,8 +603,11 @@ endpoint remain P5 work.
 3. Every op is idempotent; after a crash the journal drains and the replicas
    converge.
 4. The base updates only after both sides reach the recorded state.
-5. Nothing is read or written outside a root, via symlinks or a remounted
-   path. `.foldover/` and temp files never propagate.
+5. Local and peer access stays inside the held root, including across symlinks
+   and remounts. Standard SFTP uses path checks on a trusted server; its protocol
+   cannot atomically prevent server-side directory/symlink races from escaping
+   a selected folder. The app and CLI warn before remote writes. `.foldover/`
+   and temp files never propagate.
 6. All gates run before any destructive op is journaled.
 7. Both versions of a conflict stay recoverable (archive or conflict
    copy).
@@ -744,3 +751,7 @@ Resolved by the owner, 2026-10-17:
     Developer ID or notarization.
 6. **Unsafe OS bindings:** small audited macOS driver modules are permitted,
    behind safe interfaces and native tests. Other layers retain the prohibition.
+7. **SFTP root safety** (2026-10-19): support ordinary SFTP writes on trusted
+   servers, with checks and a visible warning about server-side symlink races.
+   This qualifies the strict root-isolation guarantee for SFTP only; a jailed
+   account or Foldover helper is not required.

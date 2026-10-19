@@ -117,6 +117,33 @@ impl fmt::Display for BaselineMismatch {
 
 impl std::error::Error for BaselineMismatch {}
 
+/// A person's choice for one conflict. It applies only while both sides
+/// still hold exactly the versions that person saw.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Resolution {
+    keep: Side,
+    left: Option<EntryVersion>,
+    right: Option<EntryVersion>,
+}
+
+impl Resolution {
+    pub const fn new(keep: Side, left: Option<EntryVersion>, right: Option<EntryVersion>) -> Self {
+        Self { keep, left, right }
+    }
+
+    pub const fn keep(self) -> Side {
+        self.keep
+    }
+
+    pub const fn left(self) -> Option<EntryVersion> {
+        self.left
+    }
+
+    pub const fn right(self) -> Option<EntryVersion> {
+        self.right
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChangeKind {
     Create,

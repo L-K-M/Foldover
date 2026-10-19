@@ -224,3 +224,181 @@ func rejectedRemovalKeepsTheCachedPair() async {
         #expect(!store.isSaving)
     }
 }
+
+@Test
+func pairOptionDefaultsComeFromTheEngine() {
+    let defaults = PairOptions.defaults
+    #expect(defaults.syncModificationTimes)
+    #expect(defaults.syncExtendedAttributes)
+    #expect(!defaults.syncPermissions)
+    #expect(defaults.durability == .standard)
+    #expect(defaults.schedule == .manual)
+}
+
+@MainActor
+@Test
+func scheduleChoicesKeepAnIntervalSetElsewhere() {
+    let store = PairStore(client: PairFixtureClient())
+    let editor = PairEditorViewModel(store: store)
+    #expect(editor.scheduleChoices.count == 6)
+    editor.options.schedule = .every(minutes: 30)
+    #expect(editor.scheduleChoices.last == .every(minutes: 30))
+    #expect(PairEditorViewModel.scheduleTitle(.manual) == "Only when I click Sync Now")
+    #expect(PairEditorViewModel.scheduleTitle(.onChange) == "When files change")
+    #expect(PairEditorViewModel.scheduleTitle(.every(minutes: 30)) == "Every 30 minutes")
+}
+
+@MainActor
+@Test
+func editedOptionsAreSavedAndOnlyMetadataChangesResetHistory() async {
+    let original = pairFixture()
+    let client = PairFixtureClient(catalog: [original])
+    let store = PairStore(client: client)
+    await store.refresh()
+    let editor = PairEditorViewModel(store: store, editing: original)
+    #expect(!editor.resetsSyncHistory)
+    editor.options.durability = .full
+    #expect(!editor.resetsSyncHistory)
+    editor.options.syncPermissions.toggle()
+    #expect(editor.resetsSyncHistory)
+    #expect(await editor.save())
+    #expect(await client.savedSettings?.options == editor.options)
+}
+
+@MainActor
+@Test
+func filterTextKeepsOneRulePerLine() {
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()))
+    #expect(editor.filterText.isEmpty)
+    editor.filterText = "*.tmp\nbuild/"
+    #expect(editor.options.filters == ["*.tmp", "build/"])
+    #expect(editor.filterText == "*.tmp\nbuild/")
+}
+
+@MainActor
+@Test
+func sizeLimitsAreWholeMegabytes() {
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()))
+    #expect(!editor.limitsSize)
+    editor.limitsSize = true
+    #expect(editor.options.sizeLimit == 1_000_000_000)
+    editor.sizeLimitMegabytes = 0
+    #expect(editor.options.sizeLimit == 1_000_000)
+    editor.sizeLimitMegabytes = 250
+    #expect(editor.sizeLimitMegabytes == 250)
+    editor.sizeLimitMegabytes = .max
+    #expect(editor.options.sizeLimit! > 0)
+    editor.limitsSize = false
+    #expect(editor.options.sizeLimit == nil)
+}
+
+@MainActor
+@Test
+func ageLimitsAreWholeDaysUpToACentury() {
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()))
+    #expect(!editor.limitsAge)
+    editor.limitsAge = true
+    #expect(editor.options.ageLimit == 365)
+    editor.ageLimitDays = 0
+    #expect(editor.options.ageLimit == 1)
+    editor.ageLimitDays = .max
+    #expect(editor.options.ageLimit == 36_500)
+    editor.limitsAge = false
+    #expect(editor.options.ageLimit == nil)
+}
+
+@MainActor
+@Test
+func sftpFoldersAreWrittenAsLocators() {
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()))
+    editor.chooseServer("  sftp://alice@nas.local/~/Photos ", side: .right)
+    #expect(editor.folderText(.right) == "sftp://alice@nas.local/~/Photos")
+    #expect(editor.errorMessage == nil)
+    editor.chooseServer("nas.local:/Photos", side: .left)
+    #expect(editor.errorMessage != nil)
+    #expect(editor.folderText(.left) == "Choose a folder")
+}
+
+@MainActor
+@Test
+func serverWarningShowsForEitherSideAndFollowsFolderChanges() {
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()))
+    #expect(editor.serverWarning == nil)
+    #expect(!editor.usesServerFolder)
+    editor.chooseServer("sftp://nas.local/~/Photos", side: .left)
+    #expect(editor.serverWarning != nil)
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/a")]), side: .left)
+    #expect(editor.serverWarning == nil)
+    editor.chooseServer("sftp://nas.local/srv/photos", side: .right)
+    #expect(editor.serverWarning != nil)
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/b")]), side: .right)
+    #expect(editor.serverWarning == nil)
+}
+
+@MainActor
+@Test
+func editingAServerPairShowsTheWarning() {
+    let serverPair = SyncPair(id: "33333333333333333333333333333333", revision: 1,
+                              settings: PairSettings(
+                                name: "Photos", left: SelectedFolder(bytes: Data("/a".utf8)),
+                                right: SelectedFolder(bytes: Data("sftp://nas.local/~/Photos".utf8)),
+                                mode: .backupLeft))
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()), editing: serverPair)
+    #expect(editor.usesServerFolder)
+    #expect(editor.serverWarning != nil)
+}
+
+@MainActor
+@Test
+func serverPairsExplainTheirMetadataWithoutChangingOptions() {
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()))
+    #expect(editor.metadataNote.contains("Resource forks always sync"))
+    let options = editor.options
+    editor.chooseServer("sftp://nas.local/~/Photos", side: .right)
+    #expect(!editor.metadataNote.contains("always sync"))
+    #expect(editor.metadataNote.contains("resource-fork"))
+    #expect(editor.options == options)
+}
+
+@MainActor
+@Test
+func serverFoldersOfferOnlyStandardDurability() {
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()))
+    #expect(editor.durabilityChoices == PairDurability.allCases)
+    editor.options.durability = .full
+    #expect(editor.durabilityWarning == nil)
+    #expect(editor.durabilityExplanation == PairDurability.full.explanation)
+    editor.chooseServer("sftp://nas.local/~/Photos", side: .right)
+    // The stored Full keeps its picker tag until the user repairs it.
+    #expect(editor.durabilityChoices == PairDurability.allCases)
+    #expect(editor.durabilityExplanation.contains("server"))
+    #expect(editor.durabilityWarning != nil)
+    #expect(editor.options.durability == .full)
+    editor.options.durability = .standard
+    #expect(editor.durabilityChoices == [.standard])
+    #expect(editor.durabilityWarning == nil)
+}
+
+@MainActor
+@Test
+func anExistingFullPairGainingAServerRootMustChooseStandard() {
+    var options = PairOptions.defaults
+    options.durability = .full
+    let fullPair = SyncPair(id: "44444444444444444444444444444444", revision: 1,
+                            settings: PairSettings(
+                                name: "Photos", left: SelectedFolder(bytes: Data("/a".utf8)),
+                                right: SelectedFolder(bytes: Data("/b".utf8)),
+                                mode: .backupLeft, options: options))
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()), editing: fullPair)
+    #expect(editor.durabilityWarning == nil)
+    #expect(editor.canSave)
+    editor.chooseServer("sftp://nas.local/srv/photos", side: .right)
+    #expect(editor.durabilityWarning != nil)
+    #expect(editor.durabilityChoices.contains(.full))
+    #expect(editor.options.durability == .full)
+    #expect(!editor.canSave)
+    editor.options.durability = .standard
+    #expect(editor.durabilityWarning == nil)
+    #expect(editor.durabilityChoices == [.standard])
+    #expect(editor.canSave)
+}

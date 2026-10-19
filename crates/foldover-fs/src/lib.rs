@@ -3,6 +3,10 @@
 //! file metadata. Calls the OS directly and uses shared vocabulary.
 //! See PLAN.md §4.4.
 
+#[forbid(unsafe_code)]
+mod features;
+pub use features::{DeclaredSupport, FilesystemFeature, FilesystemFeatures};
+
 #[cfg(unix)]
 #[forbid(unsafe_code)]
 mod root;
@@ -29,6 +33,7 @@ fn prevent_materialization() -> std::io::Result<()> {
 
 #[cfg(unix)]
 pub use root::{
-    AccessControl, DataResidency, DirectoryEntry, DirectoryScope, EntryMetadata, ExtendedAttribute,
-    ExtendedMetadata, FileIdentity, HashError, MetadataReadError, NodeKind, Root, RootRelation,
+    AccessControl, AttributeRole, Chunks, DataResidency, DirectoryEntry, DirectoryScope, Displaced,
+    EntryMetadata, ExtendedAttribute, ExtendedMetadata, FileIdentity, ForeignMetadata, HashError,
+    MetadataReadError, NodeKind, Placement, Root, RootRelation, Staged, StagedFile, WriteError,
 };

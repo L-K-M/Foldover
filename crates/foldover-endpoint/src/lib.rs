@@ -7,7 +7,7 @@
 mod local;
 
 #[cfg(unix)]
-mod local_pair;
+mod endpoint;
 
 mod peer_identity;
 
@@ -15,13 +15,39 @@ pub use foldover_net::peer::Identity as PeerIdentity;
 pub use peer_identity::{PeerIdentityError, load_peer_identity};
 
 #[cfg(unix)]
-pub use local::{LocalEndpoint, LocalEntry, ScanControl, ScanError, ScanStats};
+mod pair;
+
+#[cfg(unix)]
+mod sftp;
+
+#[cfg(unix)]
+mod watch;
+
+mod share;
+pub use share::mount_share;
+
+#[cfg(unix)]
+pub use watch::RootWatcher;
+
+#[cfg(unix)]
+pub use local::{
+    ApplyError, ArchivedItem, ArchivedRun, Expected, Filter, InvalidFilter, LocalEndpoint,
+    LocalEntry, Observation, ObservedEntry, RunScope, ScanControl, ScanError, ScanStats,
+    archive_name,
+};
 
 #[cfg(unix)]
 pub use foldover_fs::{
-    AccessControl, EntryMetadata, ExtendedAttribute, ExtendedMetadata, FileIdentity,
+    AccessControl, AttributeRole, DeclaredSupport, EntryMetadata, ExtendedAttribute,
+    ExtendedMetadata, FileIdentity, FilesystemFeature, FilesystemFeatures, ForeignMetadata,
     MetadataReadError, NodeKind, RootRelation,
 };
 
 #[cfg(unix)]
-pub use local_pair::{LocalPair, PairRootError};
+pub use endpoint::Endpoint;
+
+#[cfg(unix)]
+pub use pair::{EndpointPair, PairRootError, access_denied};
+
+#[cfg(unix)]
+pub use sftp::SftpEndpoint;

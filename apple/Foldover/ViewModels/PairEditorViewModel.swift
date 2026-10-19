@@ -1,6 +1,9 @@
 import Foundation
 import Observation
 
+/// The locator prefix `PairRoot` uses to detect an SFTP folder.
+private let sftpScheme = "sftp://"
+
 enum PairFolderSide: Equatable {
     case left
     case right
@@ -14,6 +17,7 @@ final class PairEditorViewModel: Identifiable {
     private let editing: SyncPair?
     var name: String
     var mode: PairMode
+    var options: PairOptions
     private(set) var left: SelectedFolder?
     private(set) var right: SelectedFolder?
     private(set) var isSaving = false
@@ -25,12 +29,124 @@ final class PairEditorViewModel: Identifiable {
         self.editing = editing
         name = editing?.settings.name ?? ""
         mode = editing?.settings.mode ?? .sync
+        options = editing?.settings.options ?? .defaults
         left = editing?.settings.left
         right = editing?.settings.right
     }
 
     var title: String { editing == nil ? String(localized: "New Pair") : String(localized: "Edit Pair") }
-    var canSave: Bool { !isSaving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && left != nil && right != nil }
+    var canSave: Bool { !isSaving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && left != nil && right != nil && durabilityWarning == nil }
+
+    /// Exclusion rules as editable text, one per line.
+    var filterText: String {
+        get { options.filters.joined(separator: "\n") }
+        set {
+            options.filters = newValue.split(separator: "\n", omittingEmptySubsequences: false)
+                .map(String.init)
+        }
+    }
+
+    /// Sizes in whole decimal megabytes, as Finder shows them.
+    private static let bytesPerMegabyte: UInt64 = 1_000_000
+    private static let suggestedLimitMegabytes: UInt64 = 1_000
+
+    var limitsSize: Bool {
+        get { options.sizeLimit != nil }
+        set {
+            options.sizeLimit = newValue
+                ? options.sizeLimit ?? Self.suggestedLimitMegabytes * Self.bytesPerMegabyte
+                : nil
+        }
+    }
+
+    var sizeLimitMegabytes: Int {
+        get { Int(clamping: (options.sizeLimit ?? 0) / Self.bytesPerMegabyte) }
+        set {
+            let megabytes = min(UInt64(max(1, newValue)), UInt64.max / Self.bytesPerMegabyte)
+            options.sizeLimit = megabytes * Self.bytesPerMegabyte
+        }
+    }
+
+    private static let suggestedAgeDays: UInt32 = 365
+    private static let maxAgeDays: UInt32 = 36_500
+
+    var limitsAge: Bool {
+        get { options.ageLimit != nil }
+        set { options.ageLimit = newValue ? options.ageLimit ?? Self.suggestedAgeDays : nil }
+    }
+
+    var ageLimitDays: Int {
+        get { Int(options.ageLimit ?? 0) }
+        set { options.ageLimit = UInt32(min(max(1, newValue), Int(Self.maxAgeDays))) }
+    }
+
+    /// Fixed choices, plus a stored interval set elsewhere (e.g. the CLI).
+    var scheduleChoices: [SyncSchedule] {
+        var choices: [SyncSchedule] = [.manual, .onChange, .every(minutes: 5), .every(minutes: 15),
+                                       .every(minutes: 60), .every(minutes: 24 * 60)]
+        if !choices.contains(options.schedule) { choices.append(options.schedule) }
+        return choices
+    }
+
+    static func scheduleTitle(_ schedule: SyncSchedule) -> String {
+        switch schedule {
+        case .manual: String(localized: "Only when I click Sync Now")
+        case .onChange: String(localized: "When files change")
+        case .every(60): String(localized: "Every hour")
+        case .every(1440): String(localized: "Every day")
+        case .every(let minutes): String(localized: "Every \(minutes) minutes")
+        }
+    }
+
+    /// Versions depend on synced metadata, so changing it resets sync history.
+    var resetsSyncHistory: Bool {
+        guard let editing else { return false }
+        return !options.syncsSameMetadata(as: editing.settings.options)
+    }
+
+    /// Either side is a folder on an SFTP server.
+    var usesServerFolder: Bool {
+        left?.isServerFolder == true || right?.isServerFolder == true
+    }
+
+    /// Standard SFTP cannot atomically confine server-side link changes.
+    var serverWarning: String? {
+        usesServerFolder ? String(localized: "Use SFTP only with trusted servers. Folder or link changes there can redirect access outside your chosen folder.") : nil
+    }
+
+    /// What metadata each side keeps. A server carries file contents,
+    /// permissions and whole-second dates, not the rest (ADR 0028).
+    var metadataNote: String {
+        if usesServerFolder {
+            String(localized: "SFTP keeps file data, mode bits and whole-second modification times. Extended attributes and ACLs are omitted; resource-fork files cannot be copied.")
+        } else {
+            String(localized: "Resource forks always sync. Without permissions, a file's executable bit still syncs.")
+        }
+    }
+
+    /// Power-loss-safe writes need the local endpoint's rename and
+    /// drive-flush contract; SFTP offers only per-file fsync (ADR 0028).
+    /// A stored "Survive power loss" keeps its picker tag until the
+    /// user chooses Standard, so the invalid selection stays visible.
+    var durabilityChoices: [PairDurability] {
+        usesServerFolder && options.durability == .standard ? [.standard] : PairDurability.allCases
+    }
+
+    /// A stored "Survive power loss" choice conflicts with a server
+    /// folder; the user must choose Standard before the pair can save.
+    var durabilityWarning: String? {
+        guard usesServerFolder, options.durability == .full else { return nil }
+        return String(localized: "Survive power loss isn't available for SFTP: syncing a file can't promise the server's drive cache is flushed. Choose Standard.")
+    }
+
+    /// On a server, writes follow its acknowledged-write policy.
+    var durabilityExplanation: String {
+        if usesServerFolder {
+            String(localized: "Writes follow the server's own durability; SFTP can't make it flush its drive cache.")
+        } else {
+            options.durability.explanation
+        }
+    }
 
     func folderText(_ side: PairFolderSide) -> String {
         let folder = side == .left ? left : right
@@ -51,13 +167,31 @@ final class PairEditorViewModel: Identifiable {
         }
     }
 
+    /// Use a folder on an SFTP server, `sftp://[user@]host[:port]/path`.
+    /// The agent checks the rest and connects when the pair is saved.
+    func chooseServer(_ locator: String, side: PairFolderSide) {
+        let locator = locator.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard locator.hasPrefix(sftpScheme), locator.dropFirst(sftpScheme.count).contains("/") else {
+            errorMessage = String(localized: "Write the folder as sftp://host/path, for example sftp://nas.local/~/Photos.")
+            return
+        }
+        let folder = SelectedFolder(bytes: Data(locator.utf8))
+        switch side {
+        case .left: left = folder
+        case .right: right = folder
+        }
+        errorMessage = nil
+    }
+
     func save() async -> Bool {
         guard canSave, let left, let right else { return false }
         isSaving = true
         errorMessage = nil
         defer { isSaving = false }
         do {
-            let saved = try await store.save(PairSettings(name: name, left: left, right: right, mode: mode), editing: editing)
+            let saved = try await store.save(PairSettings(
+                name: name, left: left, right: right, mode: mode, options: options
+            ), editing: editing)
             savedPairID = saved.id
             return true
         } catch {
@@ -68,6 +202,14 @@ final class PairEditorViewModel: Identifiable {
 
     static func pathText(_ folder: SelectedFolder) -> String {
         String(data: folder.bytes, encoding: .utf8) ?? String(localized: "Path contains non-UTF-8 bytes")
+    }
+}
+
+extension SelectedFolder {
+    /// A folder on an SFTP server, kept as an `sftp://…` locator;
+    /// the same byte test `PairRoot` applies.
+    var isServerFolder: Bool {
+        bytes.starts(with: Data(sftpScheme.utf8))
     }
 }
 
@@ -89,6 +231,22 @@ extension PairMode {
         case .mirrorRight: String(localized: "Folder A is made identical to B. Replaced and removed files are archived for 30 days.")
         case .backupLeft: String(localized: "New and changed files are copied from A to B. Nothing in B is deleted.")
         case .backupRight: String(localized: "New and changed files are copied from B to A. Nothing in A is deleted.")
+        }
+    }
+}
+
+extension PairDurability {
+    var title: String {
+        switch self {
+        case .standard: String(localized: "Standard")
+        case .full: String(localized: "Survive power loss")
+        }
+    }
+
+    var explanation: String {
+        switch self {
+        case .standard: String(localized: "Written files survive app and system crashes.")
+        case .full: String(localized: "Also flushes the drive's cache. Slower: about 10–30 ms more per file.")
         }
     }
 }

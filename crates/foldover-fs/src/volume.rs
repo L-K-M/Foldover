@@ -4,6 +4,9 @@ use std::os::fd::{AsFd, AsRawFd};
 
 use uuid::Uuid;
 
+mod features;
+pub(super) use features::filesystem_features;
+
 #[repr(C)]
 struct DeviceReply {
     length: u32,

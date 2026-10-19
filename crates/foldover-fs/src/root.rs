@@ -12,18 +12,28 @@ use foldover_types::SyncPath;
 use nix::fcntl::AtFlags;
 use nix::sys::stat::{FileStat, SFlag, fstat, fstatat};
 
-use crate::prevent_materialization;
+use crate::{FilesystemFeatures, prevent_materialization};
 
 mod content;
 pub use content::HashError;
 
 mod extended;
-pub use extended::{AccessControl, ExtendedAttribute, ExtendedMetadata, MetadataReadError};
+pub use extended::{
+    AccessControl, AttributeRole, ExtendedAttribute, ExtendedMetadata, MetadataReadError,
+};
+
+mod write;
+pub use write::{Chunks, Displaced, ForeignMetadata, Placement, Staged, StagedFile, WriteError};
 
 const MAX_ROOT_ANCESTORS: usize = 4096;
 // Darwin sys/stat.h defines this synthetic, read-only flag; libc omits it.
 #[cfg(target_os = "macos")]
 const SF_DATALESS: u32 = 0x4000_0000;
+// Owner-set flags that describe the entry, not its storage or protection.
+// Lock and append-only flags are local choices that would block later sync
+// writes; compression, tracking and data-vault state are storage.
+#[cfg(target_os = "macos")]
+const USER_FLAGS: u32 = libc::UF_NODUMP | libc::UF_HIDDEN;
 
 /// An opened root directory, independent of later changes to its ambient path.
 /// This read-only surface does not establish mount availability, volume UUIDs
@@ -149,6 +159,52 @@ impl EntryMetadata {
         self.created
     }
 
+    /// Every observed field in a stable byte form, so equal keys mean equal
+    /// observations across processes. Persisted to skip unchanged entries.
+    pub fn stat_key(&self) -> Vec<u8> {
+        let mut key = Vec::with_capacity(STAT_KEY_BYTES);
+        key.push(match self.kind {
+            NodeKind::File => 1,
+            NodeKind::Directory => 2,
+            NodeKind::Symlink => 3,
+            NodeKind::Other => 4,
+        });
+        key.extend_from_slice(&self.size.to_le_bytes());
+        push_time(&mut key, Some(self.modified));
+        key.extend_from_slice(&self.changed.0.to_le_bytes());
+        key.extend_from_slice(&self.changed.1.to_le_bytes());
+        key.extend_from_slice(&self.identity.device.to_le_bytes());
+        key.extend_from_slice(&self.identity.inode.to_le_bytes());
+        key.push(match self.residency {
+            DataResidency::Materialized => 1,
+            DataResidency::Dataless => 2,
+            DataResidency::NotReported => 3,
+        });
+        key.extend_from_slice(&self.permissions.to_le_bytes());
+        key.extend_from_slice(&self.owner.to_le_bytes());
+        key.extend_from_slice(&self.group.to_le_bytes());
+        key.extend_from_slice(&self.links.to_le_bytes());
+        match self.flags {
+            None => key.push(0),
+            Some(flags) => {
+                key.push(1);
+                key.extend_from_slice(&flags.to_le_bytes());
+            }
+        }
+        push_time(&mut key, self.created);
+        key
+    }
+
+    /// Flags an owner sets on the entry itself; `None` when flags are unreported.
+    pub fn user_flags(&self) -> Option<u32> {
+        self.flags.map(user_flags)
+    }
+
+    /// Transparently compressed: compression xattrs then hold storage, not data.
+    pub fn is_compressed(&self) -> bool {
+        self.flags.is_some_and(compressed)
+    }
+
     fn from_file(file: &impl AsFd) -> io::Result<Self> {
         Self::from_stat(fstat(file)?)
     }
@@ -207,6 +263,24 @@ fn modified_time(seconds: i64, nanoseconds: i64) -> io::Result<SystemTime> {
         .ok_or_else(invalid_metadata)
 }
 
+/// Upper bound of `stat_key`'s length, to avoid reallocation.
+const STAT_KEY_BYTES: usize = 128;
+
+/// Absent, or a signed seconds/nanoseconds pair, so pre-1970 times stay exact.
+fn push_time(key: &mut Vec<u8>, time: Option<SystemTime>) {
+    let Some(time) = time else {
+        key.push(0);
+        return;
+    };
+    let (sign, duration) = match time.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(after) => (1, after),
+        Err(before) => (2, before.duration()),
+    };
+    key.push(sign);
+    key.extend_from_slice(&duration.as_secs().to_le_bytes());
+    key.extend_from_slice(&duration.subsec_nanos().to_le_bytes());
+}
+
 fn invalid_metadata() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "Invalid filesystem metadata")
 }
@@ -219,6 +293,27 @@ fn file_flags(stat: &FileStat) -> Option<u32> {
 #[cfg(not(target_os = "macos"))]
 fn file_flags(_: &FileStat) -> Option<u32> {
     None
+}
+
+#[cfg(target_os = "macos")]
+fn user_flags(flags: u32) -> u32 {
+    flags & USER_FLAGS
+}
+
+// Only Darwin reports flags, so these are unreachable elsewhere.
+#[cfg(not(target_os = "macos"))]
+fn user_flags(flags: u32) -> u32 {
+    flags
+}
+
+#[cfg(target_os = "macos")]
+fn compressed(flags: u32) -> bool {
+    flags & libc::UF_COMPRESSED != 0
+}
+
+#[cfg(not(target_os = "macos"))]
+fn compressed(_: u32) -> bool {
+    false
 }
 
 #[cfg(target_os = "macos")]
@@ -290,6 +385,22 @@ impl DirectoryEntry {
     }
 }
 
+/// A network volume's mount source as a URL: SMB and AFP report
+/// `//user@server/share`, NFS `server:/export`, WebDAV a URL already.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn source_url(filesystem: &str, from: &str) -> Option<String> {
+    match filesystem {
+        "smbfs" => Some(format!("smb:{from}")),
+        "afpfs" => Some(format!("afp:{from}")),
+        "webdav" => Some(from.to_owned()),
+        "nfs" => {
+            let (server, export) = from.split_once(':')?;
+            Some(format!("nfs://{server}{export}"))
+        }
+        _ => None,
+    }
+}
+
 impl Root {
     /// Ambient authority is used only to select the root, never for descendants.
     pub fn open(path: &Path) -> io::Result<Self> {
@@ -297,6 +408,36 @@ impl Root {
         Ok(Self {
             directory: Dir::open_ambient_dir(path, cap_std::ambient_authority())?,
         })
+    }
+
+    /// Where the held root's volume is mounted from, as a URL, when it is a
+    /// network share: `smb://alice@nas.local/Photos`. `None` for local
+    /// volumes, and on systems that do not report it.
+    pub fn network_source(&self) -> io::Result<Option<String>> {
+        #[cfg(target_os = "macos")]
+        {
+            let stat = rustix::fs::fstatfs(&self.directory)?;
+            let text = |field: &[std::ffi::c_char]| {
+                let bytes: Vec<u8> = field
+                    .iter()
+                    .take_while(|byte| **byte != 0)
+                    .map(|byte| byte.to_ne_bytes()[0])
+                    .collect();
+                String::from_utf8_lossy(&bytes).into_owned()
+            };
+            Ok(source_url(
+                &text(&stat.f_fstypename),
+                &text(&stat.f_mntfromname),
+            ))
+        }
+        #[cfg(not(target_os = "macos"))]
+        Ok(None)
+    }
+
+    /// Bytes an unprivileged writer can still use on the held root's volume.
+    pub fn available_space(&self) -> io::Result<u64> {
+        let stat = rustix::fs::fstatvfs(&self.directory)?;
+        Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
     }
 
     pub fn root_metadata(&self) -> io::Result<EntryMetadata> {
@@ -317,40 +458,59 @@ impl Root {
         prevent_materialization()?;
         #[cfg(target_os = "macos")]
         {
-            let device = crate::volume::real_device(&self.directory)?;
-            let mut directory = self.directory.try_clone()?;
-            let mut visited = HashSet::new();
-            for _ in 0..MAX_ROOT_ANCESTORS {
-                let identity = FileIdentity::from_cap(&directory.dir_metadata()?);
-                if !visited.insert(identity) {
-                    return Err(io::Error::other(
-                        "Volume ancestry changed or contains a cycle",
-                    ));
-                }
-                let parent = directory.open_parent_dir(cap_std::ambient_authority())?;
-                let parent_device = crate::volume::real_device(&parent)?;
-                let parent_identity = FileIdentity::from_cap(&parent.dir_metadata()?);
-                if parent_device != device || parent_identity == identity {
-                    // Volume attributes require the physical mount root. Real
-                    // device IDs prevent APFS volume groups from hiding its edge.
-                    let uuid = crate::volume::uuid(&directory)?;
-                    if crate::volume::real_device(&self.directory)? != device {
-                        return Err(io::Error::other(
-                            "Root volume changed during identity lookup",
-                        ));
-                    }
-                    return Ok(uuid);
-                }
-                directory = parent;
-            }
-            Err(io::Error::other(
-                "Volume ancestry exceeds the verification limit",
-            ))
+            self.inspect_volume(crate::volume::uuid)
         }
         #[cfg(not(target_os = "macos"))]
         {
             Ok(None)
         }
+    }
+
+    /// Read the held volume's declarations. Missing declarations are unknown;
+    /// this does not test copy/rename fidelity or authorize filesystem writes.
+    pub fn filesystem_features(&self) -> io::Result<FilesystemFeatures> {
+        prevent_materialization()?;
+        #[cfg(target_os = "macos")]
+        {
+            self.inspect_volume(crate::volume::filesystem_features)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(FilesystemFeatures::default())
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn inspect_volume<T>(&self, inspect: impl FnOnce(&Dir) -> io::Result<T>) -> io::Result<T> {
+        let device = crate::volume::real_device(&self.directory)?;
+        let mut directory = self.directory.try_clone()?;
+        let mut visited = HashSet::new();
+        for _ in 0..MAX_ROOT_ANCESTORS {
+            let identity = FileIdentity::from_cap(&directory.dir_metadata()?);
+            if !visited.insert(identity) {
+                return Err(io::Error::other(
+                    "Volume ancestry changed or contains a cycle",
+                ));
+            }
+            let parent = directory.open_parent_dir(cap_std::ambient_authority())?;
+            let parent_device = crate::volume::real_device(&parent)?;
+            let parent_identity = FileIdentity::from_cap(&parent.dir_metadata()?);
+            if parent_device != device || parent_identity == identity {
+                // Volume attributes require the physical mount root. Real
+                // device IDs prevent APFS volume groups from hiding its edge.
+                let observation = inspect(&directory)?;
+                if crate::volume::real_device(&self.directory)? != device {
+                    return Err(io::Error::other(
+                        "Root volume changed during identity lookup",
+                    ));
+                }
+                return Ok(observation);
+            }
+            directory = parent;
+        }
+        Err(io::Error::other(
+            "Volume ancestry exceeds the verification limit",
+        ))
     }
 
     /// Compare held directories, including selected symlink/case aliases.
@@ -464,6 +624,23 @@ mod tests {
 
     fn path(bytes: &[u8]) -> SyncPath {
         SyncPath::try_from(bytes).unwrap()
+    }
+
+    #[test]
+    fn network_volumes_report_where_they_are_mounted_from() {
+        assert_eq!(
+            source_url("smbfs", "//alice@nas.local/Photos").as_deref(),
+            Some("smb://alice@nas.local/Photos")
+        );
+        assert_eq!(
+            source_url("nfs", "nas:/export/media").as_deref(),
+            Some("nfs://nas/export/media")
+        );
+        assert_eq!(source_url("apfs", "/dev/disk3s1"), None);
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = Root::open(temporary.path()).unwrap();
+        assert_eq!(root.network_source().unwrap(), None);
     }
 
     #[test]
@@ -643,6 +820,17 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn an_unimplemented_volume_probe_keeps_all_features_unreported() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = Root::open(temporary.path()).unwrap();
+        assert_eq!(
+            root.filesystem_features().unwrap(),
+            FilesystemFeatures::default()
+        );
+    }
+
     #[test]
     fn case_aliases_use_filesystem_identity() {
         let temporary = tempfile::tempdir().unwrap();
@@ -775,5 +963,33 @@ mod tests {
             .unwrap();
         assert_eq!(entry.name(), b"\xff");
         assert_eq!(root.metadata(&path(b"\xff")).unwrap().size(), 4);
+    }
+
+    #[test]
+    fn stat_keys_change_with_any_observed_field() {
+        let temporary = tempfile::tempdir().unwrap();
+        let file = temporary.path().join("file");
+        fs::write(&file, b"abc").unwrap();
+        let root = Root::open(temporary.path()).unwrap();
+        let first = root.metadata(&path(b"file")).unwrap();
+        assert_eq!(
+            first.stat_key(),
+            root.metadata(&path(b"file")).unwrap().stat_key()
+        );
+        assert!(first.stat_key().len() <= STAT_KEY_BYTES);
+
+        // Same size and mtime, new ctime from the permission change.
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(first.modified())
+            .unwrap();
+        let second = root.metadata(&path(b"file")).unwrap();
+        assert_eq!(second.size(), first.size());
+        assert_eq!(second.modified(), first.modified());
+        assert_ne!(second.stat_key(), first.stat_key());
     }
 }

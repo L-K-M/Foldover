@@ -1,0 +1,60 @@
+# ADR 0023: Conflict resolution
+
+Status: Implemented for files and links
+
+## Decision
+
+A person resolves a conflict from a preview by keeping one side. The agent
+stores the choice with the versions both sides held in that preview (state
+schema v6). The planner applies a choice only while both sides still hold
+exactly those versions; otherwise the conflict is reported again.
+
+| Kept side | Other side | Next run |
+|---|---|---|
+| Present | Present, other content | Copy the kept version; the other is archived |
+| Present | Present, same content | Copy the kept metadata |
+| Present | Absent | Copy the kept version |
+| Absent | Present | Archive the other version |
+
+- Nothing is deleted: a replaced or removed version goes to the run's
+  archive ([ADR 0020](0020-run-execution.md)).
+- A choice for a folder conflict (a folder deleted in one folder while
+  something inside it changed in the other) covers the whole folder: the
+  kept side wins every entry inside it, as a mirror from that side would.
+  Keeping the folder copies it back with its contents; keeping the
+  deletion archives it with its contents. The choice applies while the
+  folder itself is unchanged; a later edit inside the folder follows the
+  choice and is archived, never lost. Type mismatches between a file and
+  a folder are still resolved by hand. Limit: if copying a kept folder back
+  fails partway, an unchanged file not yet copied looks deleted on the
+  next run and is archived after that run's preview; the run journal
+  (PLAN.md §4.7) is meant to close this.
+- `sync.resolve` (`id`, `path`, `keep`, `review_token`) needs the pair's
+  latest preview to contain the conflict, and the token must name that
+  preview — a choice cannot follow a plan another client published after
+  it, and a pair update makes the held preview obsolete before keep-both
+  copies anything. Otherwise it fails with `PREVIEW_REQUIRED` (-32008).
+  Applying a choice spends it, and changing the pair's roots or metadata
+  categories discards all choices.
+- The app shows Keep A and Keep B on conflicts and previews again
+  after a choice. The CLI uses `--keep-left PATH` and `--keep-right PATH`.
+
+**Keep both** (`keep: "both"`, for files changed in both folders): the
+agent first copies B's version, after checking it is still the previewed
+one, to a free name beside it in B, then records "keep A".
+
+```text
+docs/report.txt  →  docs/report (from Folder B, 2026-10-18).txt
+```
+
+The date is the copied version's modification day (UTC); `2`, `3` and so
+on are appended when the name is taken. The next run replaces B's
+version with A's, archiving it as usual, and copies the new file to A.
+The app shows Keep Both on such conflicts; the CLI uses `--keep-both PATH`.
+
+## Consequences
+
+- A choice made from an old preview cannot overwrite a newer edit.
+- Keep both always keeps A's version at the original path.
+- Keep both writes before the next run: the copy stays even if the choice
+  is later discarded.

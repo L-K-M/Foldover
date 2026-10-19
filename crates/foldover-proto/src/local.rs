@@ -1,14 +1,38 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+mod archive;
+pub use archive::{
+    ARCHIVE_ITEM_LIMIT, ARCHIVE_ITEMS, ARCHIVE_PUT_BACK, ARCHIVE_PUT_BACK_ALL, ARCHIVE_RUN_LIMIT,
+    ARCHIVE_RUNS, ArchiveItem, ArchiveItemQuery, ArchiveItems, ArchiveKey, ArchivePlaced,
+    ArchivePutBack, ArchiveRestored, ArchiveRun, ArchiveRunKey, ArchiveRuns,
+};
+
+mod automation;
+pub use automation::{
+    AUTOMATION_PAUSE, AUTOMATION_RESUME, AUTOMATION_STATUS, AutomationPause, AutomationStatus,
+    MAX_PAUSE_MINUTES,
+};
+
+mod history;
+pub use history::{HISTORY_LIST, History, HistoryOutcome, HistoryRecord, HistoryTrigger};
+
+mod sync;
+pub use sync::{
+    ConflictKeep, SYNC_CANCEL, SYNC_ITEM_LIMIT, SYNC_ITEMS, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN,
+    SYNC_STATUS, SyncAction, SyncConflict, SyncCounts, SyncDeletions, SyncFailure, SyncItem,
+    SyncItemKind, SyncItemPage, SyncItemQuery, SyncJob, SyncKey, SyncPreview, SyncResolve,
+    SyncResult, SyncRun, SyncStatus,
+};
+
 mod pair;
 pub use pair::{
     PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_REMOVE, PAIR_UPDATE, PairInput, PairKey,
-    PairList, PairMode, PairPage, PairRecord, PairRevision, PairSide, PairUpdate,
+    PairList, PairMode, PairPage, PairRecord, PairRevision, PairSchedule, PairSide, PairUpdate,
 };
 
 pub const JSON_RPC_VERSION: &str = "2.0";
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 4;
 pub const SESSION_HELLO: &str = "session.hello";
 pub const DAEMON_STATUS: &str = "daemon.status";
 pub const PARSE_ERROR: i32 = -32700;
@@ -22,6 +46,12 @@ pub const PAIR_NOT_FOUND: i32 = -32003;
 pub const STALE_REVISION: i32 = -32004;
 pub const ROOT_UNAVAILABLE: i32 = -32005;
 pub const ROOT_OVERLAP: i32 = -32006;
+/// The pair already has a preview or run in progress.
+pub const SYNC_BUSY: i32 = -32007;
+/// A conflict choice needs a current preview that contains the conflict.
+pub const PREVIEW_REQUIRED: i32 = -32008;
+/// The archived run or item does not exist, e.g. it was put back already.
+pub const ARCHIVE_NOT_FOUND: i32 = -32009;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Hello {
@@ -34,6 +64,8 @@ pub struct Hello {
 pub enum AgentCapability {
     HealthOnly,
     PairConfiguration,
+    /// Pair configuration plus previews and runs.
+    Sync,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

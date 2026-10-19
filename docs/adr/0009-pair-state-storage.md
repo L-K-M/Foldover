@@ -4,9 +4,23 @@ Status: Implemented initial store and agent ownership
 
 ## Scope
 
-The first state format stores local pair configuration only: opaque
-identity, revision, name, selected root bytes, mode and source direction.
-It does not store file snapshots, bases, journal entries or secrets yet.
+Version 1 stores local pair configuration: opaque identity, revision,
+name, selected root bytes, mode and source direction. Version 2 adds the
+per-path base. Version 3 adds per-pair options: three metadata categories
+and durability; existing pairs get the defaults. Version 4 adds each side's
+endpoint identity, recorded on the first sync and forgotten when that side's
+root changes ([ADR 0020](0020-run-execution.md)). Version 5 adds the
+schedule ([ADR 0022](0022-scheduled-runs.md)). Version 6 adds conflict
+choices ([ADR 0023](0023-conflict-resolution.md)). Version 7 adds each
+side's last observation ([ADR 0018](0018-local-entry-versions.md)), a cache
+discarded with the base. Version 8 adds filter rules
+([ADR 0024](0024-filters.md)). Version 9 adds run history
+([ADR 0026](0026-run-history.md)). Version 10 adds the file size limit
+([ADR 0024](0024-filters.md)). Version 11 adds the automation pause
+([ADR 0022](0022-scheduled-runs.md)). Version 12 adds each side's network
+mount source ([ADR 0027](0027-share-reconnect.md)). Version 13 adds the
+age limit ([ADR 0024](0024-filters.md)). Version 14 permits SFTP locator bytes
+alongside absolute local roots ([ADR 0028](0028-sftp-endpoints.md)). Secrets are not stored yet.
 Configuration does not establish endpoint identity, overlap safety,
 permissions or readiness to sync.
 
@@ -36,9 +50,14 @@ same store. Startup failures are explicit. Configuration dispatch is covered by
 - Existing supported containers get a unique SQLite online backup before
   migration. Backup file and directory metadata are flushed. Migration runs
   in one transaction; failure rolls back while retaining the backup.
-- The initial format is version 1. There is no destructive contraction or
+- Migrations are append-only steps; opening an older database runs every
+  later step in one transaction. There is no destructive contraction or
   automatic downgrade. Restore decisions require stopping the writer and
   selecting a verified backup; this slice does not add a restore command.
+- Version 14 rebuilds the pair table without changing IDs, revisions or child
+  records. Foreign-key cascades are disabled before that transaction, references
+  are checked before commit, and enforcement is restored before serving requests.
+  Older readers refuse schema 14; its minimum reader is also 14.
 
 ## Pair updates
 
@@ -52,12 +71,32 @@ configuration unchanged. Missing pairs and invalid stored values are errors,
 never silently omitted rows. Removal requires the current revision and leaves
 endpoint data in place; its API scope is in [ADR 0011](0011-pair-configuration-api.md).
 
+## Base
+
+`base_entry` holds one row per pair and path: raw path bytes and each
+side's 65-byte version (kind, content digest, metadata digest). Removing a
+pair cascades to its base. Changing either root or any metadata category
+deletes the base in the same transaction; renames, mode and durability
+changes keep it. Base updates are
+atomic and require the pair's current revision, so a run planned for other
+roots or another mode cannot commit. Stored rows whose sides disagree on
+content, or whose kind or length is invalid, are errors.
+
+## Observation cache
+
+Snapshot versions and fingerprints only avoid rereading unchanged files.
+A malformed cached version is a cache miss, so the next full observation
+can replace it. Invalid snapshot paths and database failures still stop the
+read. Authoritative base versions, identities, pair configuration and
+conflict choices retain their strict validation.
+
 ## Verification
 
 Driver tests cover reopen durability, single-writer ownership, SQL/schema
 constraints, stale updates, foreign/future refusal with unchanged database
 bytes, minimum-reader refusal, symlink/permission rejection, migration
-rollback and committed-WAL backup contents. State tests cover every mode,
+rollback, committed-WAL backup contents, v1→v2 migration with a backup,
+base ordering, atomic rollback, revision binding and cascades. State tests cover every mode,
 raw paths, stale revisions and invalid domain records.
 
 Linux checks pass locally. macOS filesystem/backup behavior is checked by CI.

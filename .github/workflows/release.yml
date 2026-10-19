@@ -1,0 +1,58 @@
+name: release
+
+# A version tag (vX.Y.Z, from scripts/release.sh --push) publishes the
+# ad-hoc-signed app as a GitHub release. Sparkle updates arrive later.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: xcode-27
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The tag, the app's MARKETING_VERSION and the Cargo workspace must agree.
+      - name: Check the version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          grep -Fx "    MARKETING_VERSION: \"$version\"" apple/project.yml
+          grep -Fx "version = \"$version\"" Cargo.toml
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Build the XCFramework
+        run: cargo xtask ffi
+
+      - name: Install XcodeGen
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/xcodegen.zip" \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
+          echo "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  $RUNNER_TEMP/xcodegen.zip" \
+            | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP"
+
+      - name: Generate the Xcode project
+        run: "$RUNNER_TEMP/xcodegen/bin/xcodegen generate --spec apple/project.yml"
+
+      - name: Build, verify and zip the app
+        run: bash scripts/package-app.sh "$RUNNER_TEMP/Foldover-$VERSION.zip" "$RUNNER_TEMP/DerivedData"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release-notes.py "$VERSION" > "$RUNNER_TEMP/notes.md" &&
+          gh release create "$GITHUB_REF_NAME" "$RUNNER_TEMP/Foldover-$VERSION.zip"
+          --title "Foldover $VERSION" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag

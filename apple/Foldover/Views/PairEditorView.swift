@@ -6,6 +6,8 @@ struct PairEditorView: View {
     @Bindable var viewModel: PairEditorViewModel
     @State private var choosingSide = PairFolderSide.left
     @State private var choosingFolder = false
+    @State private var enteringServer: PairFolderSide?
+    @State private var serverText = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -15,18 +17,80 @@ struct PairEditorView: View {
                 LabeledContent("Folder A") {
                     Text(viewModel.folderText(.left)).lineLimit(2).textSelection(.enabled)
                     Button("Choose A…") { choosingSide = .left; choosingFolder = true }
+                    Button("SFTP…") { enteringServer = .left }
                 }
                 LabeledContent("Folder B") {
                     Text(viewModel.folderText(.right)).lineLimit(2).textSelection(.enabled)
                     Button("Choose B…") { choosingSide = .right; choosingFolder = true }
+                    Button("SFTP…") { enteringServer = .right }
+                }
+                if let warning = viewModel.serverWarning {
+                    Text(warning)
+                        .font(.callout).foregroundStyle(.orange)
+                        .textSelection(.enabled)
                 }
                 Picker("Mode", selection: $viewModel.mode) {
                     ForEach(PairMode.allCases, id: \.self) { mode in Text(mode.title).tag(mode) }
                 }
                 Text(viewModel.mode.explanation).foregroundStyle(.secondary)
+                Section("Metadata") {
+                    Toggle("Modification dates", isOn: $viewModel.options.syncModificationTimes)
+                    Toggle("Tags, Finder info and other extended attributes",
+                           isOn: $viewModel.options.syncExtendedAttributes)
+                    Toggle("Permissions and access lists", isOn: $viewModel.options.syncPermissions)
+                    Text(viewModel.metadataNote)
+                        .font(.callout).foregroundStyle(.secondary)
+                    if viewModel.resetsSyncHistory {
+                        Text("Changing metadata settings resets this pair's sync history. The next preview compares both folders from scratch.")
+                            .font(.callout).foregroundStyle(.orange)
+                    }
+                }
+                Section("Skip") {
+                    TextEditor(text: $viewModel.filterText)
+                        .font(.body.monospaced())
+                        .frame(minHeight: 60)
+                        .accessibilityLabel("Rules for files to skip")
+                    Text("One rule per line, like .gitignore: *.tmp skips temporary files, build/ skips folders named build. Rules apply to both folders; a .foldoverignore file in either folder adds more.")
+                        .font(.callout).foregroundStyle(.secondary)
+                    Toggle("Skip large files", isOn: $viewModel.limitsSize)
+                    if viewModel.limitsSize {
+                        TextField("Larger than (MB)", value: $viewModel.sizeLimitMegabytes, format: .number)
+                        Text("A file this large in either folder is skipped in both, so it is never copied or deleted.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                    Toggle("Skip old files", isOn: $viewModel.limitsAge)
+                    if viewModel.limitsAge {
+                        TextField("Unchanged for more than (days)", value: $viewModel.ageLimitDays, format: .number)
+                        Text("Skipped only while unchanged in both folders; editing one makes it sync again.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                }
+                Section("Schedule") {
+                    Picker("Sync automatically", selection: $viewModel.options.schedule) {
+                        ForEach(viewModel.scheduleChoices, id: \.self) { schedule in
+                            Text(PairEditorViewModel.scheduleTitle(schedule)).tag(schedule)
+                        }
+                    }
+                    Text("Automatic syncs start after the first sync you run yourself. They stop instead of asking when they would archive many items.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                Section("Durability") {
+                    Picker("Write safety", selection: $viewModel.options.durability) {
+                        ForEach(viewModel.durabilityChoices, id: \.self) { durability in
+                            Text(durability.title).tag(durability)
+                                .disabled(viewModel.usesServerFolder && durability == .full)
+                        }
+                    }
+                    if let warning = viewModel.durabilityWarning {
+                        Text(warning)
+                            .font(.callout).foregroundStyle(.orange)
+                            .textSelection(.enabled)
+                    }
+                    Text(viewModel.durabilityExplanation).foregroundStyle(.secondary)
+                }
             }
             .disabled(viewModel.isSaving)
-            Text("Saving configures the pair. Preview and sync are not available yet.")
+            Text("Saving configures the pair. Nothing is copied until you preview and sync.")
                 .font(.callout).foregroundStyle(.secondary)
             if let message = viewModel.errorMessage {
                 Text(message).foregroundStyle(.red).textSelection(.enabled)
@@ -46,6 +110,17 @@ struct PairEditorView: View {
         .padding(24)
         .frame(width: 600)
         .interactiveDismissDisabled(viewModel.isSaving)
+        .alert("Folder on an SFTP Server", isPresented: Binding(
+            get: { enteringServer != nil }, set: { if !$0 { enteringServer = nil } }
+        )) {
+            TextField("sftp://user@host/path", text: $serverText)
+            Button("Use") {
+                if let side = enteringServer { viewModel.chooseServer(serverText, side: side) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Foldover connects with your SSH keys, agent and ~/.ssh/config, like the ssh command; it cannot ask for a password. Use ~ for the home folder, for example sftp://nas.local/~/Photos. Use only trusted servers: changes on the server can redirect Foldover's access outside the folder you choose.")
+        }
         .fileImporter(isPresented: $choosingFolder, allowedContentTypes: [.folder], allowsMultipleSelection: false) {
             viewModel.chooseFolder($0, side: choosingSide)
         }

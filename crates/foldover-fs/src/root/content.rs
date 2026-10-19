@@ -1,3 +1,4 @@
+use std::fs::File;
 use std::io::{self, Read};
 
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
@@ -34,6 +35,18 @@ impl Root {
         expected: &EntryMetadata,
         control: &mut impl FnMut(u64) -> ScanControl,
     ) -> Result<Digest, HashError> {
+        let mut file = self.open_observed_file(path, expected, control)?;
+        self.stream_observed_file(path, &mut file, expected, control, &mut |_| Ok(()))
+    }
+
+    /// Open the observed regular file without following links. The descriptor
+    /// must still match `expected`.
+    pub(super) fn open_observed_file(
+        &self,
+        path: &SyncPath,
+        expected: &EntryMetadata,
+        control: &mut impl FnMut(u64) -> ScanControl,
+    ) -> Result<File, HashError> {
         check_control(control, 0)?;
         if expected.kind() != NodeKind::File {
             return Err(HashError::NotRegular);
@@ -56,17 +69,43 @@ impl Root {
         options.read(true).follow(FollowSymlinks::No);
         // A file swapped to a FIFO between stat/open must not block the worker.
         options.custom_flags(libc::O_NONBLOCK);
-        let mut file = parent.open_with(&name, &options)?.into_std();
+        let file = parent.open_with(&name, &options)?.into_std();
         if EntryMetadata::from_file(&file)? != before {
             return Err(HashError::Changed);
         }
+        Ok(file)
+    }
+
+    /// Stream exactly the observed size through `sink` and hash it. The file
+    /// and its root-relative binding must be unchanged afterwards.
+    /// Push an observed regular file's data to `sink` and return its digest.
+    /// The file must still match `expected` throughout.
+    pub fn read_observed(
+        &self,
+        path: &SyncPath,
+        expected: &EntryMetadata,
+        control: &mut impl FnMut(u64) -> ScanControl,
+        sink: &mut impl FnMut(&[u8]) -> io::Result<()>,
+    ) -> Result<Digest, HashError> {
+        let mut file = self.open_observed_file(path, expected, control)?;
+        self.stream_observed_file(path, &mut file, expected, control, sink)
+    }
+
+    pub(super) fn stream_observed_file(
+        &self,
+        path: &SyncPath,
+        file: &mut File,
+        expected: &EntryMetadata,
+        control: &mut impl FnMut(u64) -> ScanControl,
+        sink: &mut impl FnMut(&[u8]) -> io::Result<()>,
+    ) -> Result<Digest, HashError> {
         let mut hasher = blake3::Hasher::new();
         let mut buffer = [0; HASH_BUFFER_BYTES];
         let mut total = 0;
-        while total < before.size() {
+        while total < expected.size() {
             check_control(control, total)?;
             prevent_materialization()?;
-            let remaining = usize::try_from(before.size() - total).unwrap_or(usize::MAX);
+            let remaining = usize::try_from(expected.size() - total).unwrap_or(usize::MAX);
             let requested = remaining.min(buffer.len());
             let count = match file.read(&mut buffer[..requested]) {
                 Ok(0) => return Err(HashError::Changed),
@@ -75,14 +114,15 @@ impl Root {
                 Err(error) => return Err(error.into()),
             };
             hasher.update(&buffer[..count]);
+            sink(&buffer[..count])?;
             total += count as u64;
         }
         check_control(control, total)?;
         prevent_materialization()?;
         let mut extra = [0];
         if file.read(&mut extra)? != 0
-            || EntryMetadata::from_file(&file)? != before
-            || self.metadata(path)? != before
+            || EntryMetadata::from_file(file)? != *expected
+            || self.metadata(path)? != *expected
         {
             return Err(HashError::Changed);
         }

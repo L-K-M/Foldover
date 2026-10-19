@@ -4,14 +4,35 @@
 //! foldover-ipc. See PLAN.md §4.4.
 
 pub use foldover_ipc::{Error, SocketLocation};
-pub use foldover_proto::local::{AgentCapability, DaemonStatus};
+use foldover_proto::local::{
+    ARCHIVE_ITEMS, ARCHIVE_PUT_BACK, ARCHIVE_PUT_BACK_ALL, ARCHIVE_RUNS, ArchiveItemQuery,
+    ArchiveKey, ArchivePlaced, ArchivePutBack, ArchiveRunKey,
+};
+use foldover_proto::local::{
+    AUTOMATION_PAUSE, AUTOMATION_RESUME, AUTOMATION_STATUS, AutomationPause, HISTORY_LIST,
+    PAIR_REMOVE, PairRevision,
+};
+pub use foldover_proto::local::{
+    AgentCapability, ArchiveItem, ArchiveItems, ArchiveRestored, ArchiveRun, ArchiveRuns,
+    DaemonStatus, History, HistoryOutcome, HistoryRecord, HistoryTrigger, PairSide, SyncAction,
+    SyncConflict, SyncCounts, SyncDeletions, SyncFailure, SyncItem, SyncJob, SyncPreview,
+    SyncResult, SyncStatus,
+};
+pub use foldover_proto::local::{AutomationStatus, SyncItemKind, SyncItemPage};
+use foldover_proto::local::{
+    ConflictKeep, SYNC_CANCEL, SYNC_ITEMS, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS,
+    SyncItemQuery, SyncKey, SyncResolve, SyncRun,
+};
 use foldover_proto::local::{DAEMON_STATUS, Hello, PROTOCOL_VERSION, Request, SESSION_HELLO};
 use foldover_proto::local::{
     PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_UPDATE, PairInput, PairKey, PairList,
     PairRecord, PairUpdate,
 };
-use foldover_proto::local::{PAIR_REMOVE, PairRevision};
-pub use foldover_types::{InvalidPair, LocalRoot, PairConfig, PairDraft, PairId, Side, SyncMode};
+pub use foldover_types::{
+    Durability, Filters, InvalidPair, InvalidReviewToken, LocalRoot, MetadataPolicy, PairConfig,
+    PairDraft, PairId, PairOptions, PairRoot, Propagation, ReviewToken, Schedule, ScheduleInterval,
+    Side, SyncMode,
+};
 use serde_json::Value;
 use serde_json::json;
 
@@ -23,6 +44,226 @@ pub fn version() -> &'static str {
 pub async fn agent_status(location: &SocketLocation) -> Result<DaemonStatus, Error> {
     Ok(serde_json::from_value(
         call(location, DAEMON_STATUS, None).await?,
+    )?)
+}
+
+/// Start a background preview; poll `sync_status` for its result.
+pub async fn start_preview(location: &SocketLocation, id: PairId) -> Result<SyncStatus, Error> {
+    sync_call(location, SYNC_PREVIEW, id).await
+}
+
+/// Start a background run that may make at most the approved deletions on
+/// each side beyond the automatic limits. `review_token` names the
+/// `SyncPreview` a person saw; any approval or presented token that does
+/// not match the held and freshly planned preview stops for review again.
+pub async fn start_run(
+    location: &SocketLocation,
+    id: PairId,
+    approved_left_deletions: u64,
+    approved_right_deletions: u64,
+    review_token: Option<ReviewToken>,
+) -> Result<SyncStatus, Error> {
+    let params = SyncRun {
+        id: id.to_string(),
+        approved_left_deletions,
+        approved_right_deletions,
+        review_token: review_token.map(|token| token.to_string()),
+    };
+    Ok(serde_json::from_value(
+        call(location, SYNC_RUN, Some(serde_json::to_value(params)?)).await?,
+    )?)
+}
+
+pub async fn sync_status(location: &SocketLocation, id: PairId) -> Result<SyncStatus, Error> {
+    sync_call(location, SYNC_STATUS, id).await
+}
+
+/// Keep one side's version of a conflict in the pair's latest preview.
+/// `review_token` must be that preview's; a stale one fails.
+pub async fn resolve_conflict(
+    location: &SocketLocation,
+    id: PairId,
+    path: &[u8],
+    keep: Side,
+    review_token: ReviewToken,
+) -> Result<SyncStatus, Error> {
+    let params = SyncResolve {
+        id: id.to_string(),
+        path: path.to_vec(),
+        keep: keep.into(),
+        review_token: Some(review_token.to_string()),
+    };
+    Ok(serde_json::from_value(
+        call(location, SYNC_RESOLVE, Some(serde_json::to_value(params)?)).await?,
+    )?)
+}
+
+/// A page of the latest preview's items after `after`, optionally of one
+/// kind. `review_token` must be that preview's; a stale one fails.
+pub async fn sync_items(
+    location: &SocketLocation,
+    id: PairId,
+    review_token: ReviewToken,
+    after: Option<&[u8]>,
+    kind: Option<SyncItemKind>,
+) -> Result<SyncItemPage, Error> {
+    let params = SyncItemQuery {
+        id: id.to_string(),
+        after: after.map(<[u8]>::to_vec),
+        kind,
+        review_token: Some(review_token.to_string()),
+    };
+    Ok(serde_json::from_value(
+        call(location, SYNC_ITEMS, Some(serde_json::to_value(params)?)).await?,
+    )?)
+}
+
+/// Keep both versions of a both-changed conflict in the latest preview:
+/// the right side's is saved beside the entry, the left side's wins.
+/// `review_token` must be that preview's; a stale one fails.
+pub async fn keep_both(
+    location: &SocketLocation,
+    id: PairId,
+    path: &[u8],
+    review_token: ReviewToken,
+) -> Result<SyncStatus, Error> {
+    let params = SyncResolve {
+        id: id.to_string(),
+        path: path.to_vec(),
+        keep: ConflictKeep::Both,
+        review_token: Some(review_token.to_string()),
+    };
+    Ok(serde_json::from_value(
+        call(location, SYNC_RESOLVE, Some(serde_json::to_value(params)?)).await?,
+    )?)
+}
+
+pub async fn cancel_sync(location: &SocketLocation, id: PairId) -> Result<SyncStatus, Error> {
+    sync_call(location, SYNC_CANCEL, id).await
+}
+
+/// Whether automatic syncs are paused.
+pub async fn automation_status(location: &SocketLocation) -> Result<AutomationStatus, Error> {
+    Ok(serde_json::from_value(
+        call(location, AUTOMATION_STATUS, None).await?,
+    )?)
+}
+
+/// Pause automatic syncs for `minutes`, or until resumed.
+pub async fn pause_automation(
+    location: &SocketLocation,
+    minutes: Option<u32>,
+) -> Result<AutomationStatus, Error> {
+    let params = serde_json::to_value(AutomationPause { minutes })?;
+    Ok(serde_json::from_value(
+        call(location, AUTOMATION_PAUSE, Some(params)).await?,
+    )?)
+}
+
+pub async fn resume_automation(location: &SocketLocation) -> Result<AutomationStatus, Error> {
+    Ok(serde_json::from_value(
+        call(location, AUTOMATION_RESUME, None).await?,
+    )?)
+}
+
+/// The pair's finished runs, newest first.
+pub async fn history(location: &SocketLocation, id: PairId) -> Result<History, Error> {
+    let params = serde_json::to_value(SyncKey { id: id.to_string() })?;
+    Ok(serde_json::from_value(
+        call(location, HISTORY_LIST, Some(params)).await?,
+    )?)
+}
+
+/// One side's archived runs, newest first.
+pub async fn archive_runs(
+    location: &SocketLocation,
+    id: PairId,
+    side: Side,
+) -> Result<ArchiveRuns, Error> {
+    let params = ArchiveKey {
+        id: id.to_string(),
+        side: side.into(),
+    };
+    Ok(serde_json::from_value(
+        call(location, ARCHIVE_RUNS, Some(serde_json::to_value(params)?)).await?,
+    )?)
+}
+
+/// A page of one archived run's items, in path order after `after`.
+pub async fn archive_items(
+    location: &SocketLocation,
+    id: PairId,
+    side: Side,
+    run: &str,
+    after: Option<&[u8]>,
+) -> Result<ArchiveItems, Error> {
+    let params = ArchiveItemQuery {
+        id: id.to_string(),
+        side: side.into(),
+        run: run.to_owned(),
+        after: after.map(<[u8]>::to_vec),
+    };
+    Ok(serde_json::from_value(
+        call(location, ARCHIVE_ITEMS, Some(serde_json::to_value(params)?)).await?,
+    )?)
+}
+
+/// Put an archived item back and return the path it went to: the original
+/// one, or a `(restored)` name beside it when that was taken.
+pub async fn put_back(
+    location: &SocketLocation,
+    id: PairId,
+    side: Side,
+    run: &str,
+    path: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let params = ArchivePutBack {
+        id: id.to_string(),
+        side: side.into(),
+        run: run.to_owned(),
+        path: path.to_vec(),
+    };
+    let placed: ArchivePlaced = serde_json::from_value(
+        call(
+            location,
+            ARCHIVE_PUT_BACK,
+            Some(serde_json::to_value(params)?),
+        )
+        .await?,
+    )?;
+    Ok(placed.path)
+}
+
+/// Put back everything one run archived on one side.
+pub async fn put_back_all(
+    location: &SocketLocation,
+    id: PairId,
+    side: Side,
+    run: &str,
+) -> Result<ArchiveRestored, Error> {
+    let params = ArchiveRunKey {
+        id: id.to_string(),
+        side: side.into(),
+        run: run.to_owned(),
+    };
+    Ok(serde_json::from_value(
+        call(
+            location,
+            ARCHIVE_PUT_BACK_ALL,
+            Some(serde_json::to_value(params)?),
+        )
+        .await?,
+    )?)
+}
+
+async fn sync_call(
+    location: &SocketLocation,
+    method: &str,
+    id: PairId,
+) -> Result<SyncStatus, Error> {
+    let params = serde_json::to_value(SyncKey { id: id.to_string() })?;
+    Ok(serde_json::from_value(
+        call(location, method, Some(params)).await?,
     )?)
 }
 

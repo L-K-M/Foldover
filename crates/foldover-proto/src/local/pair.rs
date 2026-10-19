@@ -1,4 +1,7 @@
-use foldover_types::{InvalidPair, LocalRoot, PairConfig, PairDraft, Side, SyncMode};
+use foldover_types::{
+    Durability, Filters, InvalidPair, MetadataPolicy, PairConfig, PairDraft, PairOptions, PairRoot,
+    Propagation, Schedule, ScheduleInterval, Side, SyncMode,
+};
 use serde::{Deserialize, Serialize};
 
 pub const PAIR_LIST: &str = "pair.list";
@@ -70,6 +73,119 @@ impl From<PairMode> for SyncMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PairPropagation {
+    Sync,
+    Ignore,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PairDurability {
+    Standard,
+    Full,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PairSettings {
+    pub modification_times: PairPropagation,
+    pub extended_attributes: PairPropagation,
+    pub permissions: PairPropagation,
+    pub durability: PairDurability,
+    pub schedule: PairSchedule,
+    /// Gitignore-style exclusion rules, one per entry.
+    pub filters: Vec<String>,
+    /// Files larger than this many bytes are skipped in both folders.
+    pub size_limit: Option<u64>,
+    /// Files unchanged for more than this many days in both folders are
+    /// skipped.
+    pub age_limit: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum PairSchedule {
+    Manual,
+    Every { minutes: u32 },
+    OnChange,
+}
+
+impl From<Propagation> for PairPropagation {
+    fn from(value: Propagation) -> Self {
+        match value {
+            Propagation::Sync => Self::Sync,
+            Propagation::Ignore => Self::Ignore,
+        }
+    }
+}
+
+impl From<PairPropagation> for Propagation {
+    fn from(value: PairPropagation) -> Self {
+        match value {
+            PairPropagation::Sync => Self::Sync,
+            PairPropagation::Ignore => Self::Ignore,
+        }
+    }
+}
+
+impl From<&PairOptions> for PairSettings {
+    fn from(options: &PairOptions) -> Self {
+        let metadata = options.metadata();
+        Self {
+            modification_times: metadata.modification_times().into(),
+            extended_attributes: metadata.extended_attributes().into(),
+            permissions: metadata.permissions().into(),
+            durability: match options.durability() {
+                Durability::Standard => PairDurability::Standard,
+                Durability::Full => PairDurability::Full,
+            },
+            schedule: match options.schedule() {
+                Schedule::Manual => PairSchedule::Manual,
+                Schedule::Every(interval) => PairSchedule::Every {
+                    minutes: interval.minutes(),
+                },
+                Schedule::OnChange => PairSchedule::OnChange,
+            },
+            filters: options.filters().rules().to_vec(),
+            size_limit: options.filters().size_limit(),
+            age_limit: options.filters().age_limit(),
+        }
+    }
+}
+
+impl TryFrom<PairSettings> for PairOptions {
+    type Error = InvalidPair;
+
+    fn try_from(settings: PairSettings) -> Result<Self, Self::Error> {
+        let schedule = match settings.schedule {
+            PairSchedule::Manual => Schedule::Manual,
+            PairSchedule::Every { minutes } => {
+                Schedule::Every(ScheduleInterval::from_minutes(minutes)?)
+            }
+            PairSchedule::OnChange => Schedule::OnChange,
+        };
+        Ok(Self::new(
+            MetadataPolicy::new(
+                settings.modification_times.into(),
+                settings.extended_attributes.into(),
+                settings.permissions.into(),
+            ),
+            match settings.durability {
+                PairDurability::Standard => Durability::Standard,
+                PairDurability::Full => Durability::Full,
+            },
+        )
+        .with_schedule(schedule)
+        .with_filters(
+            Filters::new(settings.filters)?
+                .with_size_limit(settings.size_limit)?
+                .with_age_limit(settings.age_limit)?,
+        ))
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairInput {
@@ -77,6 +193,7 @@ pub struct PairInput {
     pub left_root: Vec<u8>,
     pub right_root: Vec<u8>,
     pub mode: PairMode,
+    pub options: PairSettings,
 }
 
 impl From<&PairDraft> for PairInput {
@@ -86,6 +203,7 @@ impl From<&PairDraft> for PairInput {
             left_root: draft.left().as_bytes().to_vec(),
             right_root: draft.right().as_bytes().to_vec(),
             mode: draft.mode().into(),
+            options: draft.options().into(),
         }
     }
 }
@@ -94,12 +212,13 @@ impl TryFrom<PairInput> for PairDraft {
     type Error = InvalidPair;
 
     fn try_from(input: PairInput) -> Result<Self, Self::Error> {
-        Self::new(
+        Ok(Self::new(
             input.name,
-            LocalRoot::from_bytes(input.left_root)?,
-            LocalRoot::from_bytes(input.right_root)?,
+            PairRoot::from_bytes(input.left_root)?,
+            PairRoot::from_bytes(input.right_root)?,
             input.mode.into(),
-        )
+        )?
+        .with_options(input.options.try_into()?))
     }
 }
 
@@ -170,7 +289,7 @@ pub struct PairPage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use foldover_types::{MAX_LOCAL_ROOT_BYTES, MAX_PAIR_NAME_BYTES, PairId};
+    use foldover_types::{LocalRoot, MAX_LOCAL_ROOT_BYTES, MAX_PAIR_NAME_BYTES, PairId};
     use serde_json::json;
 
     #[test]
@@ -186,13 +305,19 @@ mod tests {
                 source: Side::Right,
             },
         ] {
+            let options = PairOptions::new(
+                MetadataPolicy::new(Propagation::Ignore, Propagation::Sync, Propagation::Sync),
+                Durability::Full,
+            )
+            .with_schedule(Schedule::Every(ScheduleInterval::from_minutes(30).unwrap()));
             let draft = PairDraft::new(
                 "Photos".into(),
                 LocalRoot::from_bytes(b"/a/\xff".to_vec()).unwrap(),
                 LocalRoot::from_bytes(b"/b".to_vec()).unwrap(),
                 mode,
             )
-            .unwrap();
+            .unwrap()
+            .with_options(options);
             let pair =
                 PairConfig::from_stored(PairId::from_bytes([1; 16]).unwrap(), 1, draft).unwrap();
             let json = serde_json::to_value(PairRecord::from(&pair)).unwrap();

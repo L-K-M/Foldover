@@ -13,6 +13,82 @@ All notable changes to this project are documented here. The format follows
   exclusive creation and explicit storage failures; agent integration is pending.
 - Peer transport driver: pinned QUIC/TLS connections, six-digit pairing
   codes and live-connection revocation. Mac-to-Mac sync integration is pending.
+- SFTP folders: either side of a pair can be `sftp://host/path`, reached
+  with your SSH keys and configuration, with the same staging, archive and
+  conflict rules as local folders.
+- NAS shares that went away are mounted again before a sync, with the
+  password saved in the Keychain and no dialog.
+- Pause automatic syncs for an hour, four hours or until resumed, from the
+  menu bar, Shortcuts or `foldover pause`; the pause survives restarts.
+- Every previewed change can be listed, 100 at a time, and filtered to
+  copies, updates, archives or conflicts.
+- Skip large files: a size limit per pair, in the editor and as
+  `--max-size MEGABYTES`; a file over it in either folder is skipped in both.
+- Skip old files: an age limit per pair, in the editor and as
+  `--max-age DAYS`; a file is skipped while unchanged that long in both
+  folders, and syncs again once edited.
+- First-run guide: turn on the agent, create a pair, preview and sync.
+- A folder macOS refuses to share (Documents, external volumes) now says
+  to allow Foldover in Full Disk Access; Settings opens that list.
+- Always Skip on a preview row adds a filter rule for exactly that path.
+- Previews show how much data a sync copies, in total and per file.
+- Shortcuts actions: Sync Pair and Preview Pair, answered with what changed.
+- Settings window with "Open Foldover at login", so the menu bar icon and
+  notifications are there after a restart.
+- Keep Both for files changed in both folders: Folder B's version is
+  saved beside the file as "name (from Folder B, date)".
+- Automatic syncs wait for a disconnected disk or share instead of failing,
+  and resume once it is back.
+- Run history: each pair's last 100 syncs with their outcome and counts,
+  shown in the app and printed by `foldover history`.
+- Archive browser: list each folder's archived syncs and put items back,
+  one at a time or a whole sync at once, beside the current version when
+  the original path is taken.
+- Free-space gate: a sync stops before writing when a folder's disk cannot
+  hold the files copied to it plus a 256 MiB reserve.
+- Releases: pushing a version tag publishes the ad-hoc-signed app as a GitHub
+  release with install instructions.
+- Menu bar: every pair's status with Sync and Sync All; notifications when an
+  automatic sync needs approval, fails, or leaves conflicts.
+- Filters: gitignore-style rules per pair and in `.foldoverignore` files,
+  applied to both folders so excluded files are never deleted.
+- Sync when files change: pairs set to "When files change" watch both
+  folders and sync after 5 seconds of quiet, plus hourly.
+- Faster repeat syncs: files whose complete stat is unchanged since the last
+  observation are not reread.
+- Conflict resolution: keep A or keep B for a previewed file conflict; the
+  other version is archived, and choices expire if either side changes again.
+- Automatic sync on an interval, set per pair in the app or with
+  `--schedule`; it starts after the first manual sync and stops instead of
+  asking when deletions need approval.
+- 30-day archive retention: archive folders are named by run start time,
+  and runs older than 30 days are deleted after each completed sync.
+- Preview and Sync Now in the app, with the change list, results, cancellation
+  and a confirmation before archiving many items.
+- Sync from the command line: `foldover sync ID` previews and runs as agent
+  background jobs, with deletion approval and cancellation.
+- Folder identity check: the first sync writes `.foldover/id` into both
+  folders, and later runs stop if either is missing or different, such as an
+  empty folder left at the path of an unmounted disk.
+- Sync runs in the engine: observe, plan, gate deletions, copy and archive in
+  safe order, and commit the base in revision-bound batches; previews list
+  every change, conflict and blocked path.
+- Endpoint operations that execute one planned change: copy, metadata update
+  and removal, each verifying both sides against the preview first and
+  returning the stored version; leftover temporaries are reported and archived.
+- Local write primitives: staged copies placed by atomic no-replace or
+  exchange renames, archive-by-rename, metadata applied per pair policy and
+  durability; nothing is unlinked except empty folders and unplaced copies.
+- Per-pair options in the app, CLI and agent API: sync modification times,
+  extended attributes and permissions independently, and choose standard or
+  power-loss-safe durability. IPC protocol version 3.
+- Per-pair base storage (state schema v2) with revision-bound atomic updates;
+  root changes and pair removal discard it.
+- Canonical local entry versions: content (data plus resource fork, or link
+  target) and a digest of the metadata categories a pair syncs (modification
+  times, extended attributes, permissions), observed for whole trees.
+- Held-volume filesystem feature declarations, with explicit supported,
+  unsupported and unreported states; operation fidelity remains separately gated.
 - Bounded held-root xattr/resource-fork digests, native ACL observations and
   stat fidelity fields, with cancellation and explicit unsupported metadata errors.
 - Revision-checked pair removal in the app and CLI, including offline pairs,

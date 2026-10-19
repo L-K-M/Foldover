@@ -1,0 +1,96 @@
+import Foundation
+
+struct ArchiveRunRow: Identifiable, Equatable {
+    let id: String
+    let title: String
+}
+
+struct ArchiveItemRow: Identifiable, Equatable {
+    let id: Data
+    let path: String
+    let size: String
+}
+
+/// The archive browser for one pair: strings and actions only.
+@MainActor
+struct ArchiveViewModel {
+    let pair: SyncPair
+    let store: ArchiveStore
+    let agentConnected: Bool
+
+    var title: String { String(localized: "Archive of \(pair.settings.name)") }
+    var explanation: String {
+        String(localized: "Items a sync replaced or removed stay in each folder's archive for 30 days. Put Back returns one to where it was; if something is there now, it goes beside it with \"(restored)\" in its name. The next sync copies it to the other folder.")
+    }
+
+    var side: FolderSide { store.side }
+    var selectedRun: String? { store.run }
+    var isLoading: Bool { store.isLoading }
+    var canPutBack: Bool { agentConnected && !store.isLoading }
+    var canLoadMore: Bool { store.hasMoreItems && !store.isLoading }
+    var error: String? { store.error }
+
+    var runRows: [ArchiveRunRow] {
+        store.runs.map {
+            ArchiveRunRow(id: $0.name, title: $0.started.formatted(date: .abbreviated, time: .standard))
+        }
+    }
+
+    var itemRows: [ArchiveItemRow] {
+        store.items.map {
+            ArchiveItemRow(id: $0.path, path: PairSyncViewModel.pathText($0.path),
+                           size: PairSyncViewModel.byteText($0.size))
+        }
+    }
+
+    /// Why a list is empty, once loading finished.
+    var emptyText: String? {
+        guard !store.isLoading, store.error == nil else { return nil }
+        if store.runs.isEmpty {
+            return String(localized: "\(PairSyncViewModel.folderName(store.side)) has nothing archived.")
+        }
+        if store.run != nil, store.items.isEmpty {
+            return String(localized: "Nothing from this sync is left in the archive.")
+        }
+        return nil
+    }
+
+    var olderRunsNote: String? {
+        store.hasOlderRuns ? String(localized: "Older syncs are not listed.") : nil
+    }
+
+    var canPutBackAll: Bool { canPutBack && !store.items.isEmpty }
+
+    var putBackAllQuestion: String {
+        String(localized: "Put back everything this sync archived in \(PairSyncViewModel.folderName(store.side))? Nothing is replaced: items whose place is taken go beside it with \"(restored)\" in their name.")
+    }
+
+    var restoreText: String? {
+        guard let restore = store.restore else { return nil }
+        var text = String(localized: "Put back \(restore.restored + restore.beside) items.")
+        if restore.beside > 0 {
+            text += " " + String(localized: "\(restore.beside) went beside newer versions.")
+        }
+        if restore.failures > 0 {
+            text += " " + String(localized: "\(restore.failures) could not be put back and stay in the archive.")
+        }
+        return text
+    }
+
+    func putBackAll() async { await store.putBackAll() }
+
+    var placedText: String? {
+        guard let placed = store.placed else { return nil }
+        return String(localized: "Put back as \(PairSyncViewModel.pathText(placed)). The next sync copies it to the other folder.")
+    }
+
+    func load() async { await store.open(pair.id, side: store.side) }
+    func show(_ side: FolderSide) async { await store.open(pair.id, side: side) }
+    func select(_ run: String) async { await store.select(run) }
+    func loadMore() async { await store.loadMore() }
+
+    func putBack(_ row: ArchiveItemRow) async {
+        guard let item = store.items.first(where: { $0.path == row.id }) else { return }
+        await store.putBack(item)
+    }
+}

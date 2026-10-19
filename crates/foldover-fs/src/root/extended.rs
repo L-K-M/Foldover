@@ -59,6 +59,62 @@ impl ExtendedAttribute {
     }
 }
 
+/// What an xattr means to sync. Classification is platform knowledge, so
+/// versions and copies share this one source.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttributeRole {
+    /// A file's classic resource fork: part of its content.
+    ResourceFork,
+    /// Transparent-compression storage; decompressed reads cover the data.
+    CompressionStorage,
+    /// Maintained by the system per Mac or per access; never synced.
+    SystemManaged,
+    /// User metadata such as tags, Finder info and comments.
+    Synced,
+}
+
+// Maintained by macOS: last-open time (changes on every open), per-Mac app
+// access grants, provenance of files from downloaded apps, and SIP state.
+#[cfg(target_os = "macos")]
+const SYSTEM_MANAGED: &[&[u8]] = &[
+    b"com.apple.lastuseddate#PS",
+    b"com.apple.macl",
+    b"com.apple.provenance",
+    b"com.apple.rootless",
+];
+#[cfg(target_os = "macos")]
+const COMPRESSION: &[u8] = b"com.apple.decmpfs";
+// Other Linux namespaces hold ACLs, security labels and kernel state that
+// need privileges to write.
+#[cfg(not(target_os = "macos"))]
+const USER_NAMESPACE: &[u8] = b"user.";
+
+impl EntryMetadata {
+    #[cfg(target_os = "macos")]
+    pub fn attribute_role(&self, name: &[u8]) -> AttributeRole {
+        if SYSTEM_MANAGED.contains(&name) {
+            return AttributeRole::SystemManaged;
+        }
+        let fork = name == RESOURCE_FORK.to_bytes();
+        if name == COMPRESSION || (fork && self.is_compressed()) {
+            return AttributeRole::CompressionStorage;
+        }
+        // A directory's fork is ordinary metadata.
+        if fork && self.kind() == NodeKind::File {
+            return AttributeRole::ResourceFork;
+        }
+        AttributeRole::Synced
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn attribute_role(&self, name: &[u8]) -> AttributeRole {
+        if name.starts_with(USER_NAMESPACE) {
+            return AttributeRole::Synced;
+        }
+        AttributeRole::SystemManaged
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AccessControl {
     /// Darwin's big-endian external ACL encoding, including ordered entries.
@@ -175,6 +231,19 @@ impl Root {
         }
         Ok(result)
     }
+}
+
+/// Capture through an already-open descriptor the caller owns, such as a
+/// staged temporary that has no observed path yet.
+pub(super) fn capture_file(
+    file: &impl AsFd,
+    control: &mut impl FnMut(u64) -> ScanControl,
+) -> Result<ExtendedMetadata, MetadataReadError> {
+    let mut progress = Progress { control, bytes: 0 };
+    progress.checkpoint()?;
+    let result = capture(file, &mut progress)?;
+    progress.checkpoint()?;
+    Ok(result)
 }
 
 fn validate_entry(expected: &EntryMetadata) -> Result<(), MetadataReadError> {

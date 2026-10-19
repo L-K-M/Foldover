@@ -1,5 +1,6 @@
 use foldover_types::{
-    BaselineEntry, ChangeKind, ConflictKind, EntryDecision, EntryVersion, Side, SyncMode,
+    BaselineEntry, ChangeKind, ConflictKind, EntryDecision, EntryKind, EntryVersion, Resolution,
+    Side, SyncMode,
 };
 
 /// Classify one fully observed path (PLAN.md §4.7). Absence must mean a
@@ -49,6 +50,47 @@ pub fn reconcile_entry(
             }
             reconcile_one_way(source, left, right, MissingSource::Retain)
         }
+    }
+}
+
+/// Turn a conflict into the change a person chose. `None` when the choice no
+/// longer matches both sides, or involves a folder: the planner settles a
+/// folder choice for the folder's whole branch.
+pub(crate) fn resolve(
+    resolution: Resolution,
+    left: Option<EntryVersion>,
+    right: Option<EntryVersion>,
+) -> Option<EntryDecision> {
+    if (left, right) != (resolution.left(), resolution.right()) {
+        return None;
+    }
+    let keep = resolution.keep();
+    let (kept, replaced) = match keep {
+        Side::Left => (left, right),
+        Side::Right => (right, left),
+    };
+    if [kept, replaced]
+        .into_iter()
+        .flatten()
+        .any(|version| version.kind() == EntryKind::Directory)
+    {
+        return None;
+    }
+    match (kept, replaced) {
+        (Some(kept), Some(replaced)) => Some(EntryDecision::Propagate {
+            from: keep,
+            change: if kept.content() == replaced.content() {
+                ChangeKind::UpdateMetadata
+            } else {
+                ChangeKind::ReplaceContent
+            },
+        }),
+        (Some(_), None) => Some(EntryDecision::Propagate {
+            from: keep,
+            change: ChangeKind::Create,
+        }),
+        (None, Some(_)) => Some(EntryDecision::Archive { on: keep.other() }),
+        (None, None) => None,
     }
 }
 

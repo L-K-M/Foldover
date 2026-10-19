@@ -8,6 +8,8 @@ use crate::prevent_materialization;
 // Darwin sys/acl.h. Native tests compare this with the installed SDK.
 const ACL_TYPE_EXTENDED: c_int = 0x0000_0100;
 const MAX_ACL_BYTES: usize = 64 * 1024;
+const FORK_CHUNK_BYTES: usize = 1024 * 1024;
+const RESOURCE_FORK: &CStr = c"com.apple.ResourceFork";
 
 // SAFETY: Darwin's acl_t is an opaque owned pointer. All signatures match
 // sys/acl.h; ACL buffers are private, synchronous and freed with acl_free.
@@ -117,6 +119,77 @@ pub(super) fn access_control(file: &impl AsFd) -> io::Result<Option<Vec<u8>>> {
         ));
     }
     Ok(Some(bytes))
+}
+
+/// Copy only the ACL between open descriptors. Data, xattrs, mode and times
+/// follow the pair's policy elsewhere.
+pub(super) fn copy_access_control(source: &impl AsFd, target: &impl AsFd) -> io::Result<()> {
+    prevent_materialization()?;
+    // SAFETY: both descriptors are live for the call. A null state is the
+    // documented stateless form; fcopyfile retains no pointers afterwards.
+    let result = unsafe {
+        libc::fcopyfile(
+            source.as_fd().as_raw_fd(),
+            target.as_fd().as_raw_fd(),
+            std::ptr::null_mut(),
+            libc::COPYFILE_ACL,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+pub(super) fn set_flags(file: &impl AsFd, flags: u32) -> io::Result<()> {
+    // SAFETY: the borrowed descriptor is live; fchflags takes plain values.
+    let result = unsafe { libc::fchflags(file.as_fd().as_raw_fd(), flags) };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Stream a resource fork in positional chunks, so forks up to Darwin's
+/// 32-bit limit never need one allocation.
+pub(super) fn copy_resource_fork(source: &impl AsFd, target: &impl AsFd) -> io::Result<()> {
+    let size = u32::try_from(attribute_value(source, RESOURCE_FORK, 0, &mut [])?)
+        .map_err(|_| io::Error::other("Resource fork exceeds Darwin's positional limit"))?;
+    let mut buffer = vec![0; FORK_CHUNK_BYTES.min(size as usize)];
+    let mut offset: u32 = 0;
+    loop {
+        let count = attribute_value(source, RESOURCE_FORK, offset, &mut buffer)?;
+        set_attribute(target, RESOURCE_FORK, offset, &buffer[..count])?;
+        offset = offset
+            .checked_add(u32::try_from(count).map_err(|_| io::Error::other("Oversized read"))?)
+            .ok_or_else(|| io::Error::other("Resource fork exceeds Darwin's positional limit"))?;
+        if offset >= size {
+            return Ok(());
+        }
+        if count == 0 {
+            return Err(io::Error::other("Resource fork shrank while copying"));
+        }
+    }
+}
+
+fn set_attribute(file: &impl AsFd, name: &CStr, position: u32, bytes: &[u8]) -> io::Result<()> {
+    prevent_materialization()?;
+    // SAFETY: name is NUL terminated; the borrowed descriptor and initialized
+    // buffer stay live. Only resource forks receive a nonzero position.
+    let result = unsafe {
+        libc::fsetxattr(
+            file.as_fd().as_raw_fd(),
+            name.as_ptr(),
+            bytes.as_ptr().cast(),
+            bytes.len(),
+            position,
+            0,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn checked_count(count: libc::ssize_t) -> io::Result<usize> {

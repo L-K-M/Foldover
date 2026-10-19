@@ -6,9 +6,9 @@ runs in a background agent; each platform gets a native UI (SwiftUI now,
 GTK4 later). [`PLAN.md`](PLAN.md) is the source of truth for scope and
 design; [`docs/research`](docs/research/README.md) holds the evidence.
 
-**Status:** P1/P2/P3 foundations. Native spikes, reconciliation, held-root
-metadata access and an authenticated pair-configuration agent/client path exist;
-nothing syncs yet.
+**Status:** P2–P4 implementation. Agent-backed local/SFTP previews, gated runs,
+archives, conflict choices, watchers and scheduling exist. Peer integration
+and reliability/release qualification remain pending.
 Measurements and limits live in `docs/adr/`.
 The roadmap is PLAN.md §7.
 
@@ -37,7 +37,8 @@ The roadmap is PLAN.md §7.
 | Dependency licenses and advisories | `cargo deny check` |
 | Generate the Xcode project | `xcodegen generate --spec apple/project.yml` |
 | Build everything this host can → `dist/` | `scripts/build.sh [core] [app] [--debug] [--clean] [--check]` |
-| Release (macOS, X.Y.Z only; publishing arrives with S6) | `scripts/release.sh X.Y.Z [--push]` |
+| Release (macOS, X.Y.Z only; the pushed tag publishes the app zip) | `scripts/release.sh X.Y.Z [--push]` |
+| Package the ad-hoc-signed app zip (macOS) | `bash scripts/package-app.sh OUT.zip DERIVED_DATA` |
 | Doc links, anchors, fences, tables | `python3 tools/doccheck/checkdocs.py .` |
 | Mermaid diagrams | `npm --prefix tools/doccheck install --no-save mermaid@11 jsdom@25` once, then `node tools/doccheck/mmdcheck.mjs .` |
 
@@ -53,7 +54,7 @@ tests, builds the XCFramework, and runs `xcodebuild build test`.
 | `xtask/` | Task runner: `ci`, `check-layers`, `ffi`, `check-ffi` |
 | `layers.toml` | The allowed dependency graph `check-layers` enforces |
 | `apple/project.yml` | XcodeGen spec for the app and its tests |
-| `apple/Foldover/` | The SwiftUI app: `App/`, `Views/`, `ViewModels/`, `Stores/` |
+| `apple/Foldover/` | The SwiftUI app: `App/`, `Intents/`, `Views/`, `ViewModels/`, `Stores/` |
 | `apple/FoldoverCore/` | Swift package over the Rust core (generated bindings) |
 | `apple/FoldoverSystem/` | Native service-registration boundary, imported only by stores |
 | `scripts/` | Build/release orchestration, agent embedding and process smoke |

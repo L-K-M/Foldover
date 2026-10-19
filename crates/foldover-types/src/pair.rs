@@ -1,6 +1,6 @@
 use std::{fmt, str::FromStr};
 
-use crate::SyncMode;
+use crate::{PairOptions, PairRoot, SyncMode};
 
 pub const MAX_PAIR_NAME_BYTES: usize = 1024;
 pub const MAX_LOCAL_ROOT_BYTES: usize = 4096;
@@ -78,18 +78,20 @@ impl LocalRoot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PairDraft {
     name: String,
-    left: LocalRoot,
-    right: LocalRoot,
+    left: PairRoot,
+    right: PairRoot,
     mode: SyncMode,
+    options: PairOptions,
 }
 
 impl PairDraft {
     pub fn new(
         name: String,
-        left: LocalRoot,
-        right: LocalRoot,
+        left: impl Into<PairRoot>,
+        right: impl Into<PairRoot>,
         mode: SyncMode,
     ) -> Result<Self, InvalidPair> {
+        let (left, right) = (left.into(), right.into());
         if name.trim().is_empty() || name.contains('\0') || name.len() > MAX_PAIR_NAME_BYTES {
             return Err(InvalidPair::Name);
         }
@@ -101,20 +103,28 @@ impl PairDraft {
             left,
             right,
             mode,
+            options: PairOptions::default(),
         })
+    }
+
+    pub fn with_options(self, options: PairOptions) -> Self {
+        Self { options, ..self }
     }
 
     pub fn name(&self) -> &str {
         &self.name
     }
-    pub fn left(&self) -> &LocalRoot {
+    pub fn left(&self) -> &PairRoot {
         &self.left
     }
-    pub fn right(&self) -> &LocalRoot {
+    pub fn right(&self) -> &PairRoot {
         &self.right
     }
     pub fn mode(&self) -> SyncMode {
         self.mode
+    }
+    pub fn options(&self) -> &PairOptions {
+        &self.options
     }
 }
 
@@ -155,6 +165,8 @@ pub enum InvalidPair {
     Root,
     IdenticalRoots,
     Revision,
+    Schedule,
+    Filters,
 }
 
 impl fmt::Display for InvalidPair {
@@ -162,9 +174,14 @@ impl fmt::Display for InvalidPair {
         formatter.write_str(match self {
             Self::Identity => "Pair identity must be 32 lowercase hex digits and not all zero",
             Self::Name => "Pair name needs text, no NUL characters and at most 1024 bytes",
-            Self::Root => "Local root must be absolute, without NUL bytes, and at most 4096 bytes",
+            Self::Root => {
+                "A folder must be an absolute path or sftp://[user@]host[:port]/path, without NUL \
+                 bytes, and at most 4096 bytes"
+            }
             Self::IdenticalRoots => "A pair needs two different selected roots",
             Self::Revision => "Pair revision is outside the supported range",
+            Self::Schedule => "A sync interval must be from 1 minute to 1 week",
+            Self::Filters => "Filters allow at most 256 single-line rules of at most 1024 bytes",
         })
     }
 }

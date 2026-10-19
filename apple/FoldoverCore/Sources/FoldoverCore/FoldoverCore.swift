@@ -465,6 +465,22 @@ fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
+    typealias FfiType = UInt32
+    typealias SwiftType = UInt32
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt32 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
     typealias FfiType = UInt64
     typealias SwiftType = UInt64
@@ -474,6 +490,30 @@ fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
     }
 
     public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterBool : FfiConverter {
+    typealias FfiType = Int8
+    typealias SwiftType = Bool
+
+    public static func lift(_ value: Int8) throws -> Bool {
+        return value != 0
+    }
+
+    public static func lower(_ value: Bool) -> Int8 {
+        return value ? 1 : 0
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Bool {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Bool, into buf: inout [UInt8]) {
         writeInt(&buf, lower(value))
     }
 }
@@ -597,6 +637,386 @@ public func FfiConverterTypeAgentHealth_lower(_ value: AgentHealth) -> RustBuffe
 }
 
 
+public struct ArchiveRestoreSummary: Equatable, Hashable {
+    public var restored: UInt64
+    /**
+     * Put beside a newer entry as `(restored)`.
+     */
+    public var beside: UInt64
+    /**
+     * The first failures; `failure_count` counts all of them.
+     */
+    public var failures: [SyncFailureItem]
+    public var failureCount: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(restored: UInt64, 
+        /**
+         * Put beside a newer entry as `(restored)`.
+         */beside: UInt64, 
+        /**
+         * The first failures; `failure_count` counts all of them.
+         */failures: [SyncFailureItem], failureCount: UInt64) {
+        self.restored = restored
+        self.beside = beside
+        self.failures = failures
+        self.failureCount = failureCount
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ArchiveRestoreSummary: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeArchiveRestoreSummary: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ArchiveRestoreSummary {
+        return
+            try ArchiveRestoreSummary(
+                restored: FfiConverterUInt64.read(from: &buf), 
+                beside: FfiConverterUInt64.read(from: &buf), 
+                failures: FfiConverterSequenceTypeSyncFailureItem.read(from: &buf), 
+                failureCount: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ArchiveRestoreSummary, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.restored, into: &buf)
+        FfiConverterUInt64.write(value.beside, into: &buf)
+        FfiConverterSequenceTypeSyncFailureItem.write(value.failures, into: &buf)
+        FfiConverterUInt64.write(value.failureCount, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeArchiveRestoreSummary_lift(_ buf: RustBuffer) throws -> ArchiveRestoreSummary {
+    return try FfiConverterTypeArchiveRestoreSummary.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeArchiveRestoreSummary_lower(_ value: ArchiveRestoreSummary) -> RustBuffer {
+    return FfiConverterTypeArchiveRestoreSummary.lower(value)
+}
+
+
+public struct ArchivedItemPage: Equatable, Hashable {
+    /**
+     * In path order.
+     */
+    public var items: [ArchivedItemRecord]
+    public var more: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * In path order.
+         */items: [ArchivedItemRecord], more: Bool) {
+        self.items = items
+        self.more = more
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ArchivedItemPage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeArchivedItemPage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ArchivedItemPage {
+        return
+            try ArchivedItemPage(
+                items: FfiConverterSequenceTypeArchivedItemRecord.read(from: &buf), 
+                more: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ArchivedItemPage, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeArchivedItemRecord.write(value.items, into: &buf)
+        FfiConverterBool.write(value.more, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeArchivedItemPage_lift(_ buf: RustBuffer) throws -> ArchivedItemPage {
+    return try FfiConverterTypeArchivedItemPage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeArchivedItemPage_lower(_ value: ArchivedItemPage) -> RustBuffer {
+    return FfiConverterTypeArchivedItemPage.lower(value)
+}
+
+
+public struct ArchivedItemRecord: Equatable, Hashable {
+    /**
+     * The original path in the synced folder.
+     */
+    public var path: Data
+    public var size: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The original path in the synced folder.
+         */path: Data, size: UInt64) {
+        self.path = path
+        self.size = size
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ArchivedItemRecord: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeArchivedItemRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ArchivedItemRecord {
+        return
+            try ArchivedItemRecord(
+                path: FfiConverterData.read(from: &buf), 
+                size: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ArchivedItemRecord, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.path, into: &buf)
+        FfiConverterUInt64.write(value.size, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeArchivedItemRecord_lift(_ buf: RustBuffer) throws -> ArchivedItemRecord {
+    return try FfiConverterTypeArchivedItemRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeArchivedItemRecord_lower(_ value: ArchivedItemRecord) -> RustBuffer {
+    return FfiConverterTypeArchivedItemRecord.lower(value)
+}
+
+
+public struct ArchivedRunList: Equatable, Hashable {
+    /**
+     * Newest first.
+     */
+    public var runs: [ArchivedRunRecord]
+    public var more: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Newest first.
+         */runs: [ArchivedRunRecord], more: Bool) {
+        self.runs = runs
+        self.more = more
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ArchivedRunList: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeArchivedRunList: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ArchivedRunList {
+        return
+            try ArchivedRunList(
+                runs: FfiConverterSequenceTypeArchivedRunRecord.read(from: &buf), 
+                more: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ArchivedRunList, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeArchivedRunRecord.write(value.runs, into: &buf)
+        FfiConverterBool.write(value.more, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeArchivedRunList_lift(_ buf: RustBuffer) throws -> ArchivedRunList {
+    return try FfiConverterTypeArchivedRunList.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeArchivedRunList_lower(_ value: ArchivedRunList) -> RustBuffer {
+    return FfiConverterTypeArchivedRunList.lower(value)
+}
+
+
+public struct ArchivedRunRecord: Equatable, Hashable {
+    /**
+     * The run's folder name, e.g. `2026-10-18T09-30-00.000Z`.
+     */
+    public var name: String
+    /**
+     * Milliseconds since the Unix epoch.
+     */
+    public var startedMs: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The run's folder name, e.g. `2026-10-18T09-30-00.000Z`.
+         */name: String, 
+        /**
+         * Milliseconds since the Unix epoch.
+         */startedMs: UInt64) {
+        self.name = name
+        self.startedMs = startedMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ArchivedRunRecord: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeArchivedRunRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ArchivedRunRecord {
+        return
+            try ArchivedRunRecord(
+                name: FfiConverterString.read(from: &buf), 
+                startedMs: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ArchivedRunRecord, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterUInt64.write(value.startedMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeArchivedRunRecord_lift(_ buf: RustBuffer) throws -> ArchivedRunRecord {
+    return try FfiConverterTypeArchivedRunRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeArchivedRunRecord_lower(_ value: ArchivedRunRecord) -> RustBuffer {
+    return FfiConverterTypeArchivedRunRecord.lower(value)
+}
+
+
+public struct AutomationState: Equatable, Hashable {
+    public var paused: Bool
+    /**
+     * When a timed pause ends, in milliseconds since the Unix epoch.
+     */
+    public var untilMs: UInt64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(paused: Bool, 
+        /**
+         * When a timed pause ends, in milliseconds since the Unix epoch.
+         */untilMs: UInt64?) {
+        self.paused = paused
+        self.untilMs = untilMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension AutomationState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAutomationState: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationState {
+        return
+            try AutomationState(
+                paused: FfiConverterBool.read(from: &buf), 
+                untilMs: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AutomationState, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.paused, into: &buf)
+        FfiConverterOptionUInt64.write(value.untilMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationState_lift(_ buf: RustBuffer) throws -> AutomationState {
+    return try FfiConverterTypeAutomationState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationState_lower(_ value: AutomationState) -> RustBuffer {
+    return FfiConverterTypeAutomationState.lower(value)
+}
+
+
 public struct LocalPairConfiguration: Equatable, Hashable {
     public var id: String
     public var revision: UInt64
@@ -660,14 +1080,16 @@ public struct LocalPairDraft: Equatable, Hashable {
     public var leftRoot: Data
     public var rightRoot: Data
     public var mode: PairMode
+    public var options: LocalPairOptions
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(name: String, leftRoot: Data, rightRoot: Data, mode: PairMode) {
+    public init(name: String, leftRoot: Data, rightRoot: Data, mode: PairMode, options: LocalPairOptions) {
         self.name = name
         self.leftRoot = leftRoot
         self.rightRoot = rightRoot
         self.mode = mode
+        self.options = options
     }
 
     
@@ -689,7 +1111,8 @@ public struct FfiConverterTypeLocalPairDraft: FfiConverterRustBuffer {
                 name: FfiConverterString.read(from: &buf), 
                 leftRoot: FfiConverterData.read(from: &buf), 
                 rightRoot: FfiConverterData.read(from: &buf), 
-                mode: FfiConverterTypePairMode.read(from: &buf)
+                mode: FfiConverterTypePairMode.read(from: &buf), 
+                options: FfiConverterTypeLocalPairOptions.read(from: &buf)
         )
     }
 
@@ -698,6 +1121,7 @@ public struct FfiConverterTypeLocalPairDraft: FfiConverterRustBuffer {
         FfiConverterData.write(value.leftRoot, into: &buf)
         FfiConverterData.write(value.rightRoot, into: &buf)
         FfiConverterTypePairMode.write(value.mode, into: &buf)
+        FfiConverterTypeLocalPairOptions.write(value.options, into: &buf)
     }
 }
 
@@ -714,6 +1138,104 @@ public func FfiConverterTypeLocalPairDraft_lift(_ buf: RustBuffer) throws -> Loc
 #endif
 public func FfiConverterTypeLocalPairDraft_lower(_ value: LocalPairDraft) -> RustBuffer {
     return FfiConverterTypeLocalPairDraft.lower(value)
+}
+
+
+public struct LocalPairOptions: Equatable, Hashable {
+    public var modificationTimes: MetadataSync
+    public var extendedAttributes: MetadataSync
+    public var permissions: MetadataSync
+    public var durability: WriteDurability
+    public var schedule: PairSchedule
+    /**
+     * Gitignore-style exclusion rules, one per entry.
+     */
+    public var filters: [String]
+    /**
+     * Files larger than this many bytes are skipped in both folders.
+     */
+    public var sizeLimit: UInt64?
+    /**
+     * Files unchanged for more than this many days in both folders are
+     * skipped.
+     */
+    public var ageLimit: UInt32?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(modificationTimes: MetadataSync, extendedAttributes: MetadataSync, permissions: MetadataSync, durability: WriteDurability, schedule: PairSchedule, 
+        /**
+         * Gitignore-style exclusion rules, one per entry.
+         */filters: [String], 
+        /**
+         * Files larger than this many bytes are skipped in both folders.
+         */sizeLimit: UInt64?, 
+        /**
+         * Files unchanged for more than this many days in both folders are
+         * skipped.
+         */ageLimit: UInt32?) {
+        self.modificationTimes = modificationTimes
+        self.extendedAttributes = extendedAttributes
+        self.permissions = permissions
+        self.durability = durability
+        self.schedule = schedule
+        self.filters = filters
+        self.sizeLimit = sizeLimit
+        self.ageLimit = ageLimit
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension LocalPairOptions: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLocalPairOptions: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LocalPairOptions {
+        return
+            try LocalPairOptions(
+                modificationTimes: FfiConverterTypeMetadataSync.read(from: &buf), 
+                extendedAttributes: FfiConverterTypeMetadataSync.read(from: &buf), 
+                permissions: FfiConverterTypeMetadataSync.read(from: &buf), 
+                durability: FfiConverterTypeWriteDurability.read(from: &buf), 
+                schedule: FfiConverterTypePairSchedule.read(from: &buf), 
+                filters: FfiConverterSequenceString.read(from: &buf), 
+                sizeLimit: FfiConverterOptionUInt64.read(from: &buf), 
+                ageLimit: FfiConverterOptionUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: LocalPairOptions, into buf: inout [UInt8]) {
+        FfiConverterTypeMetadataSync.write(value.modificationTimes, into: &buf)
+        FfiConverterTypeMetadataSync.write(value.extendedAttributes, into: &buf)
+        FfiConverterTypeMetadataSync.write(value.permissions, into: &buf)
+        FfiConverterTypeWriteDurability.write(value.durability, into: &buf)
+        FfiConverterTypePairSchedule.write(value.schedule, into: &buf)
+        FfiConverterSequenceString.write(value.filters, into: &buf)
+        FfiConverterOptionUInt64.write(value.sizeLimit, into: &buf)
+        FfiConverterOptionUInt32.write(value.ageLimit, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLocalPairOptions_lift(_ buf: RustBuffer) throws -> LocalPairOptions {
+    return try FfiConverterTypeLocalPairOptions.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLocalPairOptions_lower(_ value: LocalPairOptions) -> RustBuffer {
+    return FfiConverterTypeLocalPairOptions.lower(value)
 }
 
 
@@ -771,11 +1293,560 @@ public func FfiConverterTypePairConfigurationPage_lower(_ value: PairConfigurati
 }
 
 
+public struct RunHistoryEntry: Equatable, Hashable {
+    /**
+     * Milliseconds since the Unix epoch.
+     */
+    public var startedMs: UInt64
+    public var finishedMs: UInt64
+    public var trigger: RunTriggerKind
+    public var outcome: RunOutcomeKind
+    public var copied: UInt64
+    public var updated: UInt64
+    public var archived: UInt64
+    public var recovered: UInt64
+    public var conflicts: UInt64
+    public var failures: UInt64
+    /**
+     * The run's folder under `.foldover/archive`.
+     */
+    public var archive: String?
+    public var message: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Milliseconds since the Unix epoch.
+         */startedMs: UInt64, finishedMs: UInt64, trigger: RunTriggerKind, outcome: RunOutcomeKind, copied: UInt64, updated: UInt64, archived: UInt64, recovered: UInt64, conflicts: UInt64, failures: UInt64, 
+        /**
+         * The run's folder under `.foldover/archive`.
+         */archive: String?, message: String?) {
+        self.startedMs = startedMs
+        self.finishedMs = finishedMs
+        self.trigger = trigger
+        self.outcome = outcome
+        self.copied = copied
+        self.updated = updated
+        self.archived = archived
+        self.recovered = recovered
+        self.conflicts = conflicts
+        self.failures = failures
+        self.archive = archive
+        self.message = message
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension RunHistoryEntry: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRunHistoryEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RunHistoryEntry {
+        return
+            try RunHistoryEntry(
+                startedMs: FfiConverterUInt64.read(from: &buf), 
+                finishedMs: FfiConverterUInt64.read(from: &buf), 
+                trigger: FfiConverterTypeRunTriggerKind.read(from: &buf), 
+                outcome: FfiConverterTypeRunOutcomeKind.read(from: &buf), 
+                copied: FfiConverterUInt64.read(from: &buf), 
+                updated: FfiConverterUInt64.read(from: &buf), 
+                archived: FfiConverterUInt64.read(from: &buf), 
+                recovered: FfiConverterUInt64.read(from: &buf), 
+                conflicts: FfiConverterUInt64.read(from: &buf), 
+                failures: FfiConverterUInt64.read(from: &buf), 
+                archive: FfiConverterOptionString.read(from: &buf), 
+                message: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RunHistoryEntry, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.startedMs, into: &buf)
+        FfiConverterUInt64.write(value.finishedMs, into: &buf)
+        FfiConverterTypeRunTriggerKind.write(value.trigger, into: &buf)
+        FfiConverterTypeRunOutcomeKind.write(value.outcome, into: &buf)
+        FfiConverterUInt64.write(value.copied, into: &buf)
+        FfiConverterUInt64.write(value.updated, into: &buf)
+        FfiConverterUInt64.write(value.archived, into: &buf)
+        FfiConverterUInt64.write(value.recovered, into: &buf)
+        FfiConverterUInt64.write(value.conflicts, into: &buf)
+        FfiConverterUInt64.write(value.failures, into: &buf)
+        FfiConverterOptionString.write(value.archive, into: &buf)
+        FfiConverterOptionString.write(value.message, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRunHistoryEntry_lift(_ buf: RustBuffer) throws -> RunHistoryEntry {
+    return try FfiConverterTypeRunHistoryEntry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRunHistoryEntry_lower(_ value: RunHistoryEntry) -> RustBuffer {
+    return FfiConverterTypeRunHistoryEntry.lower(value)
+}
+
+
+public struct SyncChange: Equatable, Hashable {
+    public var path: Data
+    public var kind: SyncChangeKind
+    /**
+     * File data the change copies; 0 for everything else.
+     */
+    public var bytes: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(path: Data, kind: SyncChangeKind, 
+        /**
+         * File data the change copies; 0 for everything else.
+         */bytes: UInt64) {
+        self.path = path
+        self.kind = kind
+        self.bytes = bytes
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SyncChange: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSyncChange: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SyncChange {
+        return
+            try SyncChange(
+                path: FfiConverterData.read(from: &buf), 
+                kind: FfiConverterTypeSyncChangeKind.read(from: &buf), 
+                bytes: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SyncChange, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.path, into: &buf)
+        FfiConverterTypeSyncChangeKind.write(value.kind, into: &buf)
+        FfiConverterUInt64.write(value.bytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncChange_lift(_ buf: RustBuffer) throws -> SyncChange {
+    return try FfiConverterTypeSyncChange.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncChange_lower(_ value: SyncChange) -> RustBuffer {
+    return FfiConverterTypeSyncChange.lower(value)
+}
+
+
+public struct SyncChangePage: Equatable, Hashable {
+    /**
+     * In path order.
+     */
+    public var changes: [SyncChange]
+    public var more: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * In path order.
+         */changes: [SyncChange], more: Bool) {
+        self.changes = changes
+        self.more = more
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SyncChangePage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSyncChangePage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SyncChangePage {
+        return
+            try SyncChangePage(
+                changes: FfiConverterSequenceTypeSyncChange.read(from: &buf), 
+                more: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SyncChangePage, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeSyncChange.write(value.changes, into: &buf)
+        FfiConverterBool.write(value.more, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncChangePage_lift(_ buf: RustBuffer) throws -> SyncChangePage {
+    return try FfiConverterTypeSyncChangePage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncChangePage_lower(_ value: SyncChangePage) -> RustBuffer {
+    return FfiConverterTypeSyncChangePage.lower(value)
+}
+
+
+public struct SyncFailureItem: Equatable, Hashable {
+    public var path: Data
+    public var message: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(path: Data, message: String) {
+        self.path = path
+        self.message = message
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SyncFailureItem: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSyncFailureItem: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SyncFailureItem {
+        return
+            try SyncFailureItem(
+                path: FfiConverterData.read(from: &buf), 
+                message: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SyncFailureItem, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.path, into: &buf)
+        FfiConverterString.write(value.message, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncFailureItem_lift(_ buf: RustBuffer) throws -> SyncFailureItem {
+    return try FfiConverterTypeSyncFailureItem.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncFailureItem_lower(_ value: SyncFailureItem) -> RustBuffer {
+    return FfiConverterTypeSyncFailureItem.lower(value)
+}
+
+
+public struct SyncPreviewSummary: Equatable, Hashable {
+    /**
+     * The first changes in path order; the counts cover all of them.
+     */
+    public var changes: [SyncChange]
+    /**
+     * File data all copies move, in bytes.
+     */
+    public var copyBytes: UInt64
+    public var copies: UInt64
+    public var updates: UInt64
+    public var archives: UInt64
+    public var conflicts: UInt64
+    public var blocked: UInt64
+    public var kept: UInt64
+    public var left: SyncSideDeletions
+    public var right: SyncSideDeletions
+    /**
+     * Fingerprint of the exact preview shown. Capture it with this
+     * summary and present it back to approve, resolve or page — a plan
+     * that changed since stops the call for a fresh review.
+     */
+    public var reviewToken: String
+    /**
+     * The pair revision this preview was planned for; a higher stored
+     * revision means the preview is obsolete.
+     */
+    public var pairRevision: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The first changes in path order; the counts cover all of them.
+         */changes: [SyncChange], 
+        /**
+         * File data all copies move, in bytes.
+         */copyBytes: UInt64, copies: UInt64, updates: UInt64, archives: UInt64, conflicts: UInt64, blocked: UInt64, kept: UInt64, left: SyncSideDeletions, right: SyncSideDeletions, 
+        /**
+         * Fingerprint of the exact preview shown. Capture it with this
+         * summary and present it back to approve, resolve or page — a plan
+         * that changed since stops the call for a fresh review.
+         */reviewToken: String, 
+        /**
+         * The pair revision this preview was planned for; a higher stored
+         * revision means the preview is obsolete.
+         */pairRevision: UInt64) {
+        self.changes = changes
+        self.copyBytes = copyBytes
+        self.copies = copies
+        self.updates = updates
+        self.archives = archives
+        self.conflicts = conflicts
+        self.blocked = blocked
+        self.kept = kept
+        self.left = left
+        self.right = right
+        self.reviewToken = reviewToken
+        self.pairRevision = pairRevision
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SyncPreviewSummary: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSyncPreviewSummary: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SyncPreviewSummary {
+        return
+            try SyncPreviewSummary(
+                changes: FfiConverterSequenceTypeSyncChange.read(from: &buf), 
+                copyBytes: FfiConverterUInt64.read(from: &buf), 
+                copies: FfiConverterUInt64.read(from: &buf), 
+                updates: FfiConverterUInt64.read(from: &buf), 
+                archives: FfiConverterUInt64.read(from: &buf), 
+                conflicts: FfiConverterUInt64.read(from: &buf), 
+                blocked: FfiConverterUInt64.read(from: &buf), 
+                kept: FfiConverterUInt64.read(from: &buf), 
+                left: FfiConverterTypeSyncSideDeletions.read(from: &buf), 
+                right: FfiConverterTypeSyncSideDeletions.read(from: &buf), 
+                reviewToken: FfiConverterString.read(from: &buf), 
+                pairRevision: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SyncPreviewSummary, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeSyncChange.write(value.changes, into: &buf)
+        FfiConverterUInt64.write(value.copyBytes, into: &buf)
+        FfiConverterUInt64.write(value.copies, into: &buf)
+        FfiConverterUInt64.write(value.updates, into: &buf)
+        FfiConverterUInt64.write(value.archives, into: &buf)
+        FfiConverterUInt64.write(value.conflicts, into: &buf)
+        FfiConverterUInt64.write(value.blocked, into: &buf)
+        FfiConverterUInt64.write(value.kept, into: &buf)
+        FfiConverterTypeSyncSideDeletions.write(value.left, into: &buf)
+        FfiConverterTypeSyncSideDeletions.write(value.right, into: &buf)
+        FfiConverterString.write(value.reviewToken, into: &buf)
+        FfiConverterUInt64.write(value.pairRevision, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncPreviewSummary_lift(_ buf: RustBuffer) throws -> SyncPreviewSummary {
+    return try FfiConverterTypeSyncPreviewSummary.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncPreviewSummary_lower(_ value: SyncPreviewSummary) -> RustBuffer {
+    return FfiConverterTypeSyncPreviewSummary.lower(value)
+}
+
+
+public struct SyncRunSummary: Equatable, Hashable {
+    public var cancelled: Bool
+    public var copied: UInt64
+    public var updated: UInt64
+    public var archived: UInt64
+    public var recovered: UInt64
+    public var conflicts: UInt64
+    public var failures: [SyncFailureItem]
+    public var failureCount: UInt64
+    public var archive: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(cancelled: Bool, copied: UInt64, updated: UInt64, archived: UInt64, recovered: UInt64, conflicts: UInt64, failures: [SyncFailureItem], failureCount: UInt64, archive: String) {
+        self.cancelled = cancelled
+        self.copied = copied
+        self.updated = updated
+        self.archived = archived
+        self.recovered = recovered
+        self.conflicts = conflicts
+        self.failures = failures
+        self.failureCount = failureCount
+        self.archive = archive
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SyncRunSummary: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSyncRunSummary: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SyncRunSummary {
+        return
+            try SyncRunSummary(
+                cancelled: FfiConverterBool.read(from: &buf), 
+                copied: FfiConverterUInt64.read(from: &buf), 
+                updated: FfiConverterUInt64.read(from: &buf), 
+                archived: FfiConverterUInt64.read(from: &buf), 
+                recovered: FfiConverterUInt64.read(from: &buf), 
+                conflicts: FfiConverterUInt64.read(from: &buf), 
+                failures: FfiConverterSequenceTypeSyncFailureItem.read(from: &buf), 
+                failureCount: FfiConverterUInt64.read(from: &buf), 
+                archive: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SyncRunSummary, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.cancelled, into: &buf)
+        FfiConverterUInt64.write(value.copied, into: &buf)
+        FfiConverterUInt64.write(value.updated, into: &buf)
+        FfiConverterUInt64.write(value.archived, into: &buf)
+        FfiConverterUInt64.write(value.recovered, into: &buf)
+        FfiConverterUInt64.write(value.conflicts, into: &buf)
+        FfiConverterSequenceTypeSyncFailureItem.write(value.failures, into: &buf)
+        FfiConverterUInt64.write(value.failureCount, into: &buf)
+        FfiConverterString.write(value.archive, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncRunSummary_lift(_ buf: RustBuffer) throws -> SyncRunSummary {
+    return try FfiConverterTypeSyncRunSummary.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncRunSummary_lower(_ value: SyncRunSummary) -> RustBuffer {
+    return FfiConverterTypeSyncRunSummary.lower(value)
+}
+
+
+public struct SyncSideDeletions: Equatable, Hashable {
+    public var deletions: UInt64
+    public var paths: UInt64
+    public var needsApproval: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(deletions: UInt64, paths: UInt64, needsApproval: Bool) {
+        self.deletions = deletions
+        self.paths = paths
+        self.needsApproval = needsApproval
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SyncSideDeletions: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSyncSideDeletions: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SyncSideDeletions {
+        return
+            try SyncSideDeletions(
+                deletions: FfiConverterUInt64.read(from: &buf), 
+                paths: FfiConverterUInt64.read(from: &buf), 
+                needsApproval: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SyncSideDeletions, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.deletions, into: &buf)
+        FfiConverterUInt64.write(value.paths, into: &buf)
+        FfiConverterBool.write(value.needsApproval, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncSideDeletions_lift(_ buf: RustBuffer) throws -> SyncSideDeletions {
+    return try FfiConverterTypeSyncSideDeletions.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncSideDeletions_lower(_ value: SyncSideDeletions) -> RustBuffer {
+    return FfiConverterTypeSyncSideDeletions.lower(value)
+}
+
+
 
 public enum AgentCapability: Equatable, Hashable {
     
     case healthOnly
     case pairConfiguration
+    case sync
 
 
 
@@ -801,6 +1872,8 @@ public struct FfiConverterTypeAgentCapability: FfiConverterRustBuffer {
         
         case 2: return .pairConfiguration
         
+        case 3: return .sync
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -815,6 +1888,10 @@ public struct FfiConverterTypeAgentCapability: FfiConverterRustBuffer {
         
         case .pairConfiguration:
             writeInt(&buf, Int32(2))
+        
+        
+        case .sync:
+            writeInt(&buf, Int32(3))
         
         }
     }
@@ -933,6 +2010,72 @@ public func FfiConverterTypeAgentError_lower(_ value: AgentError) -> RustBuffer 
 
 
 
+public enum MetadataSync: Equatable, Hashable {
+    
+    case sync
+    case ignore
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MetadataSync: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMetadataSync: FfiConverterRustBuffer {
+    typealias SwiftType = MetadataSync
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MetadataSync {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .sync
+        
+        case 2: return .ignore
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: MetadataSync, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .sync:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .ignore:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMetadataSync_lift(_ buf: RustBuffer) throws -> MetadataSync {
+    return try FfiConverterTypeMetadataSync.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMetadataSync_lower(_ value: MetadataSync) -> RustBuffer {
+    return FfiConverterTypeMetadataSync.lower(value)
+}
+
+
+
+
 public enum PairMode: Equatable, Hashable {
     
     case sync
@@ -1018,6 +2161,898 @@ public func FfiConverterTypePairMode_lower(_ value: PairMode) -> RustBuffer {
 }
 
 
+
+
+public enum PairSchedule: Equatable, Hashable {
+    
+    case manual
+    /**
+     * Unattended syncs at this interval, after the first manual sync.
+     */
+    case every(minutes: UInt32
+    )
+    /**
+     * Unattended syncs after files change, and hourly.
+     */
+    case onChange
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PairSchedule: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePairSchedule: FfiConverterRustBuffer {
+    typealias SwiftType = PairSchedule
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PairSchedule {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .manual
+        
+        case 2: return .every(minutes: try FfiConverterUInt32.read(from: &buf)
+        )
+        
+        case 3: return .onChange
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PairSchedule, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .manual:
+            writeInt(&buf, Int32(1))
+        
+        
+        case let .every(minutes):
+            writeInt(&buf, Int32(2))
+            FfiConverterUInt32.write(minutes, into: &buf)
+            
+        
+        case .onChange:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePairSchedule_lift(_ buf: RustBuffer) throws -> PairSchedule {
+    return try FfiConverterTypePairSchedule.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePairSchedule_lower(_ value: PairSchedule) -> RustBuffer {
+    return FfiConverterTypePairSchedule.lower(value)
+}
+
+
+
+
+public enum RunOutcomeKind: Equatable, Hashable {
+    
+    case completed
+    case cancelled
+    /**
+     * Stopped before writing: too many deletions to make without asking.
+     */
+    case needsApproval
+    case failed
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RunOutcomeKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRunOutcomeKind: FfiConverterRustBuffer {
+    typealias SwiftType = RunOutcomeKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RunOutcomeKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .completed
+        
+        case 2: return .cancelled
+        
+        case 3: return .needsApproval
+        
+        case 4: return .failed
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RunOutcomeKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .completed:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .cancelled:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .needsApproval:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .failed:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRunOutcomeKind_lift(_ buf: RustBuffer) throws -> RunOutcomeKind {
+    return try FfiConverterTypeRunOutcomeKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRunOutcomeKind_lower(_ value: RunOutcomeKind) -> RustBuffer {
+    return FfiConverterTypeRunOutcomeKind.lower(value)
+}
+
+
+
+
+public enum RunTriggerKind: Equatable, Hashable {
+    
+    case manual
+    case scheduled
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RunTriggerKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRunTriggerKind: FfiConverterRustBuffer {
+    typealias SwiftType = RunTriggerKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RunTriggerKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .manual
+        
+        case 2: return .scheduled
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RunTriggerKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .manual:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .scheduled:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRunTriggerKind_lift(_ buf: RustBuffer) throws -> RunTriggerKind {
+    return try FfiConverterTypeRunTriggerKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRunTriggerKind_lower(_ value: RunTriggerKind) -> RustBuffer {
+    return FfiConverterTypeRunTriggerKind.lower(value)
+}
+
+
+
+/**
+ * What a change does, for listing one kind at a time.
+ */
+
+public enum SyncChangeFilter: Equatable, Hashable {
+    
+    case copy
+    case update
+    case archive
+    case conflict
+    case blocked
+    case keep
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SyncChangeFilter: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSyncChangeFilter: FfiConverterRustBuffer {
+    typealias SwiftType = SyncChangeFilter
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SyncChangeFilter {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .copy
+        
+        case 2: return .update
+        
+        case 3: return .archive
+        
+        case 4: return .conflict
+        
+        case 5: return .blocked
+        
+        case 6: return .keep
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SyncChangeFilter, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .copy:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .update:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .archive:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .conflict:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .blocked:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .keep:
+            writeInt(&buf, Int32(6))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncChangeFilter_lift(_ buf: RustBuffer) throws -> SyncChangeFilter {
+    return try FfiConverterTypeSyncChangeFilter.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncChangeFilter_lower(_ value: SyncChangeFilter) -> RustBuffer {
+    return FfiConverterTypeSyncChangeFilter.lower(value)
+}
+
+
+
+
+public enum SyncChangeKind: Equatable, Hashable {
+    
+    case copy(to: SyncSide
+    )
+    case update(to: SyncSide
+    )
+    case archive(on: SyncSide
+    )
+    case conflict(kind: SyncConflictKind
+    )
+    case blocked
+    case keep
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SyncChangeKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSyncChangeKind: FfiConverterRustBuffer {
+    typealias SwiftType = SyncChangeKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SyncChangeKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .copy(to: try FfiConverterTypeSyncSide.read(from: &buf)
+        )
+        
+        case 2: return .update(to: try FfiConverterTypeSyncSide.read(from: &buf)
+        )
+        
+        case 3: return .archive(on: try FfiConverterTypeSyncSide.read(from: &buf)
+        )
+        
+        case 4: return .conflict(kind: try FfiConverterTypeSyncConflictKind.read(from: &buf)
+        )
+        
+        case 5: return .blocked
+        
+        case 6: return .keep
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SyncChangeKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .copy(to):
+            writeInt(&buf, Int32(1))
+            FfiConverterTypeSyncSide.write(to, into: &buf)
+            
+        
+        case let .update(to):
+            writeInt(&buf, Int32(2))
+            FfiConverterTypeSyncSide.write(to, into: &buf)
+            
+        
+        case let .archive(on):
+            writeInt(&buf, Int32(3))
+            FfiConverterTypeSyncSide.write(on, into: &buf)
+            
+        
+        case let .conflict(kind):
+            writeInt(&buf, Int32(4))
+            FfiConverterTypeSyncConflictKind.write(kind, into: &buf)
+            
+        
+        case .blocked:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .keep:
+            writeInt(&buf, Int32(6))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncChangeKind_lift(_ buf: RustBuffer) throws -> SyncChangeKind {
+    return try FfiConverterTypeSyncChangeKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncChangeKind_lower(_ value: SyncChangeKind) -> RustBuffer {
+    return FfiConverterTypeSyncChangeKind.lower(value)
+}
+
+
+
+
+public enum SyncConflictKind: Equatable, Hashable {
+    
+    case bothChanged
+    case deletedVersusEdited
+    case typeMismatch
+    case metadataOnly
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SyncConflictKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSyncConflictKind: FfiConverterRustBuffer {
+    typealias SwiftType = SyncConflictKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SyncConflictKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .bothChanged
+        
+        case 2: return .deletedVersusEdited
+        
+        case 3: return .typeMismatch
+        
+        case 4: return .metadataOnly
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SyncConflictKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .bothChanged:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .deletedVersusEdited:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .typeMismatch:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .metadataOnly:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncConflictKind_lift(_ buf: RustBuffer) throws -> SyncConflictKind {
+    return try FfiConverterTypeSyncConflictKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncConflictKind_lower(_ value: SyncConflictKind) -> RustBuffer {
+    return FfiConverterTypeSyncConflictKind.lower(value)
+}
+
+
+
+
+public enum SyncJobKind: Equatable, Hashable {
+    
+    case preview
+    case run
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SyncJobKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSyncJobKind: FfiConverterRustBuffer {
+    typealias SwiftType = SyncJobKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SyncJobKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .preview
+        
+        case 2: return .run
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SyncJobKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .preview:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .run:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncJobKind_lift(_ buf: RustBuffer) throws -> SyncJobKind {
+    return try FfiConverterTypeSyncJobKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncJobKind_lower(_ value: SyncJobKind) -> RustBuffer {
+    return FfiConverterTypeSyncJobKind.lower(value)
+}
+
+
+
+
+public enum SyncJobState: Equatable, Hashable {
+    
+    case idle
+    case working(job: SyncJobKind, cancelling: Bool
+    )
+    case previewed(preview: SyncPreviewSummary
+    )
+    /**
+     * Too many deletions for this run; nothing was written.
+     */
+    case needsApproval(preview: SyncPreviewSummary
+    )
+    case finished(result: SyncRunSummary
+    )
+    case failed(message: String
+    )
+    /**
+     * An automatic run waits for this folder, e.g. an unmounted disk.
+     */
+    case waiting(side: SyncSide
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SyncJobState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSyncJobState: FfiConverterRustBuffer {
+    typealias SwiftType = SyncJobState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SyncJobState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .idle
+        
+        case 2: return .working(job: try FfiConverterTypeSyncJobKind.read(from: &buf), cancelling: try FfiConverterBool.read(from: &buf)
+        )
+        
+        case 3: return .previewed(preview: try FfiConverterTypeSyncPreviewSummary.read(from: &buf)
+        )
+        
+        case 4: return .needsApproval(preview: try FfiConverterTypeSyncPreviewSummary.read(from: &buf)
+        )
+        
+        case 5: return .finished(result: try FfiConverterTypeSyncRunSummary.read(from: &buf)
+        )
+        
+        case 6: return .failed(message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 7: return .waiting(side: try FfiConverterTypeSyncSide.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SyncJobState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .idle:
+            writeInt(&buf, Int32(1))
+        
+        
+        case let .working(job,cancelling):
+            writeInt(&buf, Int32(2))
+            FfiConverterTypeSyncJobKind.write(job, into: &buf)
+            FfiConverterBool.write(cancelling, into: &buf)
+            
+        
+        case let .previewed(preview):
+            writeInt(&buf, Int32(3))
+            FfiConverterTypeSyncPreviewSummary.write(preview, into: &buf)
+            
+        
+        case let .needsApproval(preview):
+            writeInt(&buf, Int32(4))
+            FfiConverterTypeSyncPreviewSummary.write(preview, into: &buf)
+            
+        
+        case let .finished(result):
+            writeInt(&buf, Int32(5))
+            FfiConverterTypeSyncRunSummary.write(result, into: &buf)
+            
+        
+        case let .failed(message):
+            writeInt(&buf, Int32(6))
+            FfiConverterString.write(message, into: &buf)
+            
+        
+        case let .waiting(side):
+            writeInt(&buf, Int32(7))
+            FfiConverterTypeSyncSide.write(side, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncJobState_lift(_ buf: RustBuffer) throws -> SyncJobState {
+    return try FfiConverterTypeSyncJobState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncJobState_lower(_ value: SyncJobState) -> RustBuffer {
+    return FfiConverterTypeSyncJobState.lower(value)
+}
+
+
+
+
+public enum SyncSide: Equatable, Hashable {
+    
+    case left
+    case right
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SyncSide: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSyncSide: FfiConverterRustBuffer {
+    typealias SwiftType = SyncSide
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SyncSide {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .left
+        
+        case 2: return .right
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SyncSide, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .left:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .right:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncSide_lift(_ buf: RustBuffer) throws -> SyncSide {
+    return try FfiConverterTypeSyncSide.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncSide_lower(_ value: SyncSide) -> RustBuffer {
+    return FfiConverterTypeSyncSide.lower(value)
+}
+
+
+
+
+public enum WriteDurability: Equatable, Hashable {
+    
+    /**
+     * Survives app and system crashes.
+     */
+    case standard
+    /**
+     * Also survives power loss; slower per file.
+     */
+    case full
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WriteDurability: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWriteDurability: FfiConverterRustBuffer {
+    typealias SwiftType = WriteDurability
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WriteDurability {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .standard
+        
+        case 2: return .full
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WriteDurability, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .standard:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .full:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWriteDurability_lift(_ buf: RustBuffer) throws -> WriteDurability {
+    return try FfiConverterTypeWriteDurability.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWriteDurability_lower(_ value: WriteDurability) -> RustBuffer {
+    return FfiConverterTypeWriteDurability.lower(value)
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = UInt32?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt32.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt32.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
+    typealias SwiftType = UInt64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -1045,6 +3080,129 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
+    typealias SwiftType = Data?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterData.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterData.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeSyncChangeFilter: FfiConverterRustBuffer {
+    typealias SwiftType = SyncChangeFilter?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeSyncChangeFilter.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeSyncChangeFilter.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]
+
+    public static func write(_ value: [String], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterString.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [String]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeArchivedItemRecord: FfiConverterRustBuffer {
+    typealias SwiftType = [ArchivedItemRecord]
+
+    public static func write(_ value: [ArchivedItemRecord], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeArchivedItemRecord.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ArchivedItemRecord] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ArchivedItemRecord]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeArchivedItemRecord.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeArchivedRunRecord: FfiConverterRustBuffer {
+    typealias SwiftType = [ArchivedRunRecord]
+
+    public static func write(_ value: [ArchivedRunRecord], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeArchivedRunRecord.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ArchivedRunRecord] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ArchivedRunRecord]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeArchivedRunRecord.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeLocalPairConfiguration: FfiConverterRustBuffer {
     typealias SwiftType = [LocalPairConfiguration]
 
@@ -1062,6 +3220,81 @@ fileprivate struct FfiConverterSequenceTypeLocalPairConfiguration: FfiConverterR
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeLocalPairConfiguration.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeRunHistoryEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [RunHistoryEntry]
+
+    public static func write(_ value: [RunHistoryEntry], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeRunHistoryEntry.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [RunHistoryEntry] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [RunHistoryEntry]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeRunHistoryEntry.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeSyncChange: FfiConverterRustBuffer {
+    typealias SwiftType = [SyncChange]
+
+    public static func write(_ value: [SyncChange], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSyncChange.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SyncChange] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SyncChange]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSyncChange.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeSyncFailureItem: FfiConverterRustBuffer {
+    typealias SwiftType = [SyncFailureItem]
+
+    public static func write(_ value: [SyncFailureItem], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSyncFailureItem.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SyncFailureItem] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SyncFailureItem]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSyncFailureItem.read(from: &buf))
         }
         return seq
     }
@@ -1138,6 +3371,16 @@ public func coreVersion() -> String  {
     )
 })
 }
+/**
+ * The engine's defaults, so the app never restates them.
+ */
+public func defaultPairOptions() -> LocalPairOptions  {
+    return try!  FfiConverterTypeLocalPairOptions_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_foldover_ffi_fn_func_default_pair_options(uniffiCallStatus
+    )
+})
+}
 public func pairCreate(configuration: LocalPairDraft)async throws  -> LocalPairConfiguration  {
     return
         try  await uniffiRustCallAsync(
@@ -1194,6 +3437,248 @@ public func pairUpdate(id: String, revision: UInt64, configuration: LocalPairDra
             errorHandler: FfiConverterTypeAgentError_lift
         )
 }
+/**
+ * A page of a run's items after `after`, the last path of the previous page.
+ */
+public func archiveItems(id: String, side: SyncSide, run: String, after: Data?)async throws  -> ArchivedItemPage  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_archive_items(FfiConverterString.lower(id),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run),FfiConverterOptionData.lower(after)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeArchivedItemPage_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+/**
+ * Put an item back; returns its path, which gains ` (restored)` when the
+ * original path is taken.
+ */
+public func archivePutBack(id: String, side: SyncSide, run: String, path: Data)async throws  -> Data  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_archive_put_back(FfiConverterString.lower(id),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run),FfiConverterData.lower(path)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterData.lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+/**
+ * Put back everything one run archived on one side.
+ */
+public func archivePutBackAll(id: String, side: SyncSide, run: String)async throws  -> ArchiveRestoreSummary  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_archive_put_back_all(FfiConverterString.lower(id),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeArchiveRestoreSummary_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+public func archiveRuns(id: String, side: SyncSide)async throws  -> ArchivedRunList  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_archive_runs(FfiConverterString.lower(id),FfiConverterTypeSyncSide_lower(side)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeArchivedRunList_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+public func automationState()async throws  -> AutomationState  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_automation_state(
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeAutomationState_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+/**
+ * Pause automatic syncs for `minutes`, or until resumed when absent.
+ */
+public func pauseAutomation(minutes: UInt32?)async throws  -> AutomationState  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_pause_automation(FfiConverterOptionUInt32.lower(minutes)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeAutomationState_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+public func resumeAutomation()async throws  -> AutomationState  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_resume_automation(
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeAutomationState_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+public func pairHistory(id: String)async throws  -> [RunHistoryEntry]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_pair_history(FfiConverterString.lower(id)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeRunHistoryEntry.lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+public func syncCancel(id: String)async throws  -> SyncJobState  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_sync_cancel(FfiConverterString.lower(id)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeSyncJobState_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+/**
+ * A page of the latest preview's changes after `after`, the last path of
+ * the previous page; `filter` keeps one kind. `review_token` must be the
+ * token of the preview being paged.
+ */
+public func syncChanges(id: String, after: Data?, filter: SyncChangeFilter?, reviewToken: String)async throws  -> SyncChangePage  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_sync_changes(FfiConverterString.lower(id),FfiConverterOptionData.lower(after),FfiConverterOptionTypeSyncChangeFilter.lower(filter),FfiConverterString.lower(reviewToken)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeSyncChangePage_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+/**
+ * Keep both versions of a both-changed conflict: Folder B's is saved
+ * beside the entry and Folder A's wins at its path. `review_token` must
+ * be the token of the preview the choice was made from.
+ */
+public func syncKeepBoth(id: String, path: Data, reviewToken: String)async throws  -> SyncJobState  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_sync_keep_both(FfiConverterString.lower(id),FfiConverterData.lower(path),FfiConverterString.lower(reviewToken)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeSyncJobState_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+public func syncPreview(id: String)async throws  -> SyncJobState  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_sync_preview(FfiConverterString.lower(id)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeSyncJobState_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+/**
+ * Keep one side's version of a conflict from the pair's latest preview.
+ * `review_token` must be the token of the preview the choice was made
+ * from.
+ */
+public func syncResolve(id: String, path: Data, keep: SyncSide, reviewToken: String)async throws  -> SyncJobState  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_sync_resolve(FfiConverterString.lower(id),FfiConverterData.lower(path),FfiConverterTypeSyncSide_lower(keep),FfiConverterString.lower(reviewToken)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeSyncJobState_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+/**
+ * `review_token` is the `SyncPreviewSummary.review_token` captured with
+ * the approval being confirmed; `None` only for runs that need no review.
+ */
+public func syncRun(id: String, approvedLeftDeletions: UInt64, approvedRightDeletions: UInt64, reviewToken: String?)async throws  -> SyncJobState  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_sync_run(FfiConverterString.lower(id),FfiConverterUInt64.lower(approvedLeftDeletions),FfiConverterUInt64.lower(approvedRightDeletions),FfiConverterOptionString.lower(reviewToken)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeSyncJobState_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+public func syncStatus(id: String)async throws  -> SyncJobState  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_sync_status(FfiConverterString.lower(id)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeSyncJobState_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
 
 private enum InitializationResult {
     case ok
@@ -1216,6 +3701,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_foldover_ffi_checksum_func_core_version() != 27554) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_foldover_ffi_checksum_func_default_pair_options() != 6735) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_foldover_ffi_checksum_func_pair_create() != 28129) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1226,6 +3714,51 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_pair_update() != 2038) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_archive_items() != 55648) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_archive_put_back() != 6455) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_archive_put_back_all() != 35866) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_archive_runs() != 43046) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_automation_state() != 127) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_pause_automation() != 17605) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_resume_automation() != 13518) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_pair_history() != 62355) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_sync_cancel() != 20891) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_sync_changes() != 62446) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_sync_keep_both() != 21402) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_sync_preview() != 51120) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_sync_resolve() != 11556) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_sync_run() != 43269) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_sync_status() != 35739) {
         return InitializationResult.apiChecksumMismatch
     }
 

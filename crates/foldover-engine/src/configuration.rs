@@ -2,9 +2,18 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use foldover_endpoint::{LocalEndpoint, LocalPair, PairRootError, RootRelation, ScanError};
-use foldover_state::{PairStore, StateLocation};
-use foldover_types::{PairConfig, PairDraft, PairId, Side};
+use std::collections::BTreeMap;
+
+use foldover_endpoint::{
+    Endpoint, EndpointPair, Filter, InvalidFilter, LocalEndpoint, ObservedEntry, PairRootError,
+    RootRelation, ScanError,
+};
+use foldover_state::{HistoryEntry, MountSources, PairStore, Pause, SnapshotEntry, StateLocation};
+use foldover_types::{
+    Durability, PairConfig, PairDraft, PairId, PairRoot, Resolution, Side, SyncPath,
+};
+
+use crate::{Commit, RunInputs};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -24,6 +33,10 @@ pub enum Error {
     CatalogUnavailable { pair: PairId, source: PairRootError },
     #[error("Selected root overlaps the agent's state directory")]
     StateOverlap,
+    #[error("SFTP folders cannot guarantee full durability; choose standard durability")]
+    DurabilityUnsupported,
+    #[error(transparent)]
+    Filter(#[from] InvalidFilter),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,6 +46,7 @@ pub enum ErrorKind {
     Changed,
     Unavailable,
     Overlap,
+    Invalid,
 }
 
 impl Error {
@@ -44,6 +58,7 @@ impl Error {
             Self::Roots(PairRootError::Overlap(_))
             | Self::CatalogOverlap(_)
             | Self::StateOverlap => ErrorKind::Overlap,
+            Self::Filter(_) | Self::DurabilityUnsupported => ErrorKind::Invalid,
             Self::Roots(_) | Self::Endpoint(_) | Self::CatalogUnavailable { .. } => {
                 ErrorKind::Unavailable
             }
@@ -65,14 +80,16 @@ impl From<foldover_state::Error> for Error {
 /// share one serialized command, so concurrent clients cannot reserve the same roots.
 pub struct Engine {
     pairs: PairStore,
-    state_root: LocalEndpoint,
+    state_root: Endpoint,
 }
 
 impl Engine {
     pub fn open(location: &StateLocation) -> Result<Self, Error> {
         let pairs = PairStore::open(location)?;
         let root = pairs.root()?;
-        let state_root = LocalEndpoint::open(Path::new(OsStr::from_bytes(root.as_bytes())))?;
+        let state_root = Endpoint::Local(LocalEndpoint::open(Path::new(OsStr::from_bytes(
+            root.as_bytes(),
+        )))?);
         Ok(Self { pairs, state_root })
     }
 
@@ -84,11 +101,17 @@ impl Engine {
         Ok(self.pairs.pairs_after(after, limit)?)
     }
 
+    /// The whole catalog, for agent-internal work such as scheduling.
+    pub fn pairs(&self) -> Result<Vec<PairConfig>, Error> {
+        Ok(self.pairs.pairs()?)
+    }
+
     pub fn pair(&self, id: PairId) -> Result<PairConfig, Error> {
         self.pairs.pair(id)?.ok_or(Error::PairNotFound)
     }
 
     pub fn create_pair(&mut self, draft: &PairDraft) -> Result<PairConfig, Error> {
+        validate_options(draft)?;
         self.validate_roots(draft, None)?;
         Ok(self.pairs.create(draft)?)
     }
@@ -102,17 +125,121 @@ impl Engine {
         if self.pair(id)?.revision() != revision {
             return Err(Error::StaleRevision);
         }
+        validate_options(draft)?;
         self.validate_roots(draft, Some(id))?;
         Ok(self.pairs.update(id, revision, draft)?)
     }
 
+    /// What a run reads from state, for work outside the engine lock.
+    pub fn run_inputs(&self, id: PairId) -> Result<RunInputs, Error> {
+        // Malformed cached fingerprints or versions only cost a reread.
+        let snapshot = |side| -> Result<BTreeMap<_, _>, Error> {
+            Ok(self
+                .pairs
+                .snapshot(id, side)?
+                .into_iter()
+                .filter_map(|entry| {
+                    let observed = ObservedEntry::restore(entry.version, &entry.fingerprint)?;
+                    Some((entry.path, observed))
+                })
+                .collect())
+        };
+        Ok(RunInputs::new(
+            self.pair(id)?,
+            self.pairs.base(id)?,
+            self.pairs.identities(id)?,
+            self.pairs.resolutions(id)?,
+        )
+        .with_snapshots(snapshot(Side::Left)?, snapshot(Side::Right)?))
+    }
+
+    /// Store a fresh observation of one side for the next run to reuse.
+    pub fn store_snapshot(
+        &mut self,
+        id: PairId,
+        revision: u64,
+        side: Side,
+        entries: &[SnapshotEntry],
+    ) -> Result<(), Error> {
+        Ok(self.pairs.replace_snapshot(id, revision, side, entries)?)
+    }
+
+    /// Store a person's conflict choice for the pair revision they previewed.
+    pub fn record_resolution(
+        &mut self,
+        id: PairId,
+        revision: u64,
+        path: &SyncPath,
+        resolution: Resolution,
+    ) -> Result<(), Error> {
+        Ok(self
+            .pairs
+            .record_resolution(id, revision, path, resolution)?)
+    }
+
+    /// Whether the pair has completed a first sync, which records identities.
+    pub fn first_synced(&self, id: PairId) -> Result<bool, Error> {
+        let identities = self.pairs.identities(id)?;
+        Ok(identities.side(Side::Left).is_some() && identities.side(Side::Right).is_some())
+    }
+
+    /// Store a run's progress, only while the pair keeps `revision`.
+    pub fn commit_run(
+        &mut self,
+        id: PairId,
+        revision: u64,
+        commit: Commit<'_>,
+    ) -> Result<(), Error> {
+        match commit {
+            Commit::Identities { left, right } => {
+                Ok(self.pairs.record_identities(id, revision, left, right)?)
+            }
+            Commit::Base(updates) => Ok(self.pairs.update_base(id, revision, updates)?),
+        }
+    }
+
+    /// Store a finished run; the pair keeps its newest runs.
+    pub fn record_history(&mut self, id: PairId, entry: &HistoryEntry) -> Result<(), Error> {
+        Ok(self.pairs.record_history(id, entry)?)
+    }
+
+    /// The pair's newest runs first, at most `limit`.
+    pub fn history(&self, id: PairId, limit: usize) -> Result<Vec<HistoryEntry>, Error> {
+        Ok(self.pairs.history(id, limit)?)
+    }
+
+    /// Where each side's network share was last mounted from.
+    pub fn mounts(&self, id: PairId) -> Result<MountSources, Error> {
+        Ok(self.pairs.mounts(id)?)
+    }
+
+    /// Record mount sources a run observed, only while the pair keeps
+    /// `revision`.
+    pub fn record_mounts(
+        &mut self,
+        id: PairId,
+        revision: u64,
+        sources: &MountSources,
+    ) -> Result<(), Error> {
+        Ok(self.pairs.record_mounts(id, revision, sources)?)
+    }
+
+    /// Whether automatic syncs are paused, for every pair.
+    pub fn pause(&self) -> Result<Pause, Error> {
+        Ok(self.pairs.pause()?)
+    }
+
+    pub fn set_pause(&mut self, pause: Pause) -> Result<(), Error> {
+        Ok(self.pairs.set_pause(pause)?)
+    }
+
     pub fn remove_pair(&mut self, id: PairId, revision: u64) -> Result<PairConfig, Error> {
-        // shortcut: no run state exists yet; require idle/recovery guards when execution lands.
+        // The caller reserves this pair against active or starting jobs.
         Ok(self.pairs.remove(id, revision)?)
     }
 
     fn validate_roots(&self, draft: &PairDraft, replacing: Option<PairId>) -> Result<(), Error> {
-        let selected = LocalPair::open(draft.left(), draft.right())?;
+        let selected = EndpointPair::open(draft.left(), draft.right())?;
         for side in [Side::Left, Side::Right] {
             if selected.endpoint(side).relation_to(&self.state_root)? != RootRelation::Disjoint {
                 return Err(Error::StateOverlap);
@@ -131,26 +258,60 @@ impl Engine {
                 if Some(pair.id()) == replacing {
                     continue;
                 }
-                let existing = LocalPair::open(pair.draft().left(), pair.draft().right()).map_err(
-                    |source| Error::CatalogUnavailable {
-                        pair: pair.id(),
-                        source,
-                    },
-                )?;
-                for selected_side in [Side::Left, Side::Right] {
-                    for existing_side in [Side::Left, Side::Right] {
-                        if selected
-                            .endpoint(selected_side)
-                            .relation_to(existing.endpoint(existing_side))?
-                            != RootRelation::Disjoint
-                        {
-                            return Err(Error::CatalogOverlap(pair.id()));
+                // Local roots are compared on disk; SFTP roots by locator, so
+                // changing the catalog never waits on a server.
+                for existing in [pair.draft().left(), pair.draft().right()] {
+                    let overlapping = match existing {
+                        PairRoot::Local(_) => {
+                            let existing = Endpoint::open(existing).map_err(|source| {
+                                Error::CatalogUnavailable {
+                                    pair: pair.id(),
+                                    source: PairRootError::Endpoint(source),
+                                }
+                            })?;
+                            let mut overlapping = false;
+                            for side in [Side::Left, Side::Right] {
+                                overlapping |= selected.endpoint(side).relation_to(&existing)?
+                                    != RootRelation::Disjoint;
+                            }
+                            overlapping
                         }
+                        PairRoot::Sftp(existing) => {
+                            [draft.left(), draft.right()]
+                                .into_iter()
+                                .any(|selected| match selected {
+                                    PairRoot::Sftp(selected) => selected.overlaps(existing),
+                                    PairRoot::Local(_) => false,
+                                })
+                        }
+                    };
+                    if overlapping {
+                        return Err(Error::CatalogOverlap(pair.id()));
                     }
                 }
             }
         }
     }
+}
+
+/// Options the chosen folders cannot keep are refused before any root
+/// is opened, so an unreachable server cannot hide the rejection.
+fn validate_options(draft: &PairDraft) -> Result<(), Error> {
+    // SFTP has no flush for namespace changes, so full durability can
+    // never be promised to or from it.
+    let remote = |root: &PairRoot| matches!(root, PairRoot::Sftp(_));
+    if draft.options().durability() == Durability::Full
+        && (remote(draft.left()) || remote(draft.right()))
+    {
+        return Err(Error::DurabilityUnsupported);
+    }
+    validate_filters(draft)
+}
+
+/// Rules are checked when saved, so a run never meets an invalid one.
+fn validate_filters(draft: &PairDraft) -> Result<(), Error> {
+    Filter::new(draft.options().filters().rules().iter().map(String::as_str))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -226,6 +387,70 @@ mod tests {
         drop(engine);
         let engine = Engine::open(&location).unwrap();
         assert_eq!(engine.pair(saved.id()).unwrap(), updated);
+    }
+
+    /// Full durability cannot be promised on SFTP: the check precedes
+    /// root validation, so an unreachable server cannot hide it.
+    #[test]
+    fn sftp_pairs_reject_full_durability_before_any_root_check() {
+        let temporary = tempfile::tempdir().unwrap();
+        let location = StateLocation::Directory(temporary.path().join("state"));
+        let mut engine = Engine::open(&location).unwrap();
+        let right = temporary.path().join("right");
+        fs::create_dir(&right).unwrap();
+        let sftp = PairRoot::from_bytes(b"sftp://nas/srv".to_vec()).unwrap();
+        let full = foldover_types::PairOptions::new(
+            foldover_types::MetadataPolicy::default(),
+            foldover_types::Durability::Full,
+        );
+        for (left, right_root) in [
+            (sftp.clone(), PairRoot::from(root(&right))),
+            (PairRoot::from(root(&right)), sftp.clone()),
+        ] {
+            let draft = PairDraft::new("Pair".into(), left, right_root, SyncMode::Sync)
+                .unwrap()
+                .with_options(full.clone());
+            let error = engine.create_pair(&draft).unwrap_err();
+            assert!(matches!(error, Error::DurabilityUnsupported), "{error:?}");
+            assert_eq!(error.kind(), ErrorKind::Invalid);
+        }
+        assert!(engine.pairs().unwrap().is_empty());
+        drop(engine);
+
+        // A draft with Full over SFTP still decodes from stored bytes:
+        // the rejection lives in the save path, not the data model.
+        let draft = PairDraft::new("Pair".into(), sftp.clone(), root(&right), SyncMode::Sync)
+            .unwrap()
+            .with_options(full.clone());
+        let stored =
+            PairConfig::from_stored(PairId::from_bytes([7; PairId::BYTE_LEN]).unwrap(), 1, draft)
+                .unwrap();
+        assert_eq!(
+            stored.draft().options().durability(),
+            foldover_types::Durability::Full
+        );
+
+        // An existing full-durability pair stays editable as long as
+        // the saved draft remains one the folders can keep.
+        let left = temporary.path().join("left");
+        fs::create_dir(&left).unwrap();
+        let draft = PairDraft::new("Pair".into(), root(&left), root(&right), SyncMode::Sync)
+            .unwrap()
+            .with_options(full.clone());
+        let mut engine = Engine::open(&location).unwrap();
+        let pair = engine.create_pair(&draft).unwrap();
+        let revision = engine
+            .update_pair(pair.id(), pair.revision(), pair.draft())
+            .unwrap()
+            .revision();
+        // The same pair gains an SFTP root: re-saving it is refused.
+        let remote = PairDraft::new("Pair".into(), root(&left), sftp, SyncMode::Sync)
+            .unwrap()
+            .with_options(full);
+        assert!(matches!(
+            engine.update_pair(pair.id(), revision, &remote),
+            Err(Error::DurabilityUnsupported)
+        ));
     }
 
     #[test]
