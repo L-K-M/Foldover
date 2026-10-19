@@ -17,6 +17,13 @@ pub use automation::{
 mod history;
 pub use history::{HISTORY_LIST, History, HistoryOutcome, HistoryRecord, HistoryTrigger};
 
+mod peer;
+pub use peer::{
+    MAX_PAIRING_MINUTES, PEER_CANCEL, PEER_CONFIRM, PEER_PAIR, PEER_PAIRING_CLOSE,
+    PEER_PAIRING_OPEN, PEER_REVOKE, PEER_STATUS, PeerDeviceRecord, PeerKey, PeerPair,
+    PeerPairingOpen, PeerPendingRecord, PeerStatus,
+};
+
 mod sync;
 pub use sync::{
     ConflictKeep, SYNC_CANCEL, SYNC_ITEM_LIMIT, SYNC_ITEMS, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN,
@@ -32,7 +39,7 @@ pub use pair::{
 };
 
 pub const JSON_RPC_VERSION: &str = "2.0";
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 pub const SESSION_HELLO: &str = "session.hello";
 pub const DAEMON_STATUS: &str = "daemon.status";
 pub const PARSE_ERROR: i32 = -32700;
@@ -52,6 +59,8 @@ pub const SYNC_BUSY: i32 = -32007;
 pub const PREVIEW_REQUIRED: i32 = -32008;
 /// The archived run or item does not exist, e.g. it was put back already.
 pub const ARCHIVE_NOT_FOUND: i32 = -32009;
+/// Mac-to-Mac is unavailable, or the other Mac could not be reached.
+pub const PEER_UNAVAILABLE: i32 = -32010;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Hello {

@@ -5,6 +5,7 @@
 mod archive;
 mod automation;
 mod history;
+mod peer;
 mod schedule;
 mod sync;
 
@@ -13,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use foldover_engine::{Approval, Engine, ErrorKind, StateLocation};
 use foldover_proto::local::{
     ARCHIVE_ITEMS, ARCHIVE_PUT_BACK, ARCHIVE_PUT_BACK_ALL, ARCHIVE_RUNS, AUTOMATION_PAUSE,
-    AUTOMATION_RESUME, AUTOMATION_STATUS, HISTORY_LIST, PAIR_REMOVE, PairRevision,
+    AUTOMATION_RESUME, AUTOMATION_STATUS, HISTORY_LIST, PAIR_REMOVE, PEER_CANCEL, PEER_CONFIRM,
+    PEER_PAIR, PEER_PAIRING_CLOSE, PEER_PAIRING_OPEN, PEER_REVOKE, PEER_STATUS, PairRevision,
 };
 use foldover_proto::local::{
     AgentCapability, DAEMON_STATUS, DaemonStatus, Hello, INTERNAL_ERROR, INVALID_PARAMS,
@@ -46,6 +48,7 @@ pub struct Service {
     commands: Arc<Semaphore>,
     jobs: Arc<Jobs>,
     scheduler: Arc<Scheduler>,
+    peers: peer::Peers,
 }
 
 impl Service {
@@ -59,7 +62,14 @@ impl Service {
             commands: Arc::new(Semaphore::new(1)),
             jobs: Arc::new(Jobs::default()),
             scheduler: Arc::new(Scheduler::new(std::time::Instant::now())),
+            peers: Arc::default(),
         }
+    }
+
+    /// Listen for paired Macs (ADR 0031), if this Mac has any. Otherwise
+    /// the first `peer.*` request starts listening.
+    pub async fn start_peers(&self) -> Result<(), RpcError> {
+        peer::start_if_paired(&self.engine, &self.peers).await
     }
 
     pub async fn handle(&self, request: Request) -> Result<Value, RpcError> {
@@ -100,6 +110,18 @@ impl Service {
             AUTOMATION_STATUS | AUTOMATION_PAUSE | AUTOMATION_RESUME
         ) {
             return automation::handle(&self.engine, &request).await;
+        }
+        if matches!(
+            request.method(),
+            PEER_STATUS
+                | PEER_PAIRING_OPEN
+                | PEER_PAIRING_CLOSE
+                | PEER_PAIR
+                | PEER_CONFIRM
+                | PEER_CANCEL
+                | PEER_REVOKE
+        ) {
+            return peer::handle(&self.engine, &self.peers, &request).await;
         }
         if request.method() == HISTORY_LIST {
             return history::handle(&self.engine, &request).await;
@@ -1257,6 +1279,100 @@ mod tests {
             .unwrap();
         assert_eq!(settled(&service, &key).await["result"]["copied"], 1);
         assert!(right.join("later").exists());
+    }
+
+    /// Two agents pair over loopback; the pin survives a restart and
+    /// revoking forgets it.
+    #[tokio::test]
+    async fn two_agents_pair_only_after_both_people_confirm() {
+        let loopback = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+        let (a_directory, a) = fixture();
+        let (_b_directory, b) = fixture();
+        // Each agent gets its own identity; the Keychain's is shared.
+        let a_identity = foldover_engine::PeerIdentity::generate().unwrap();
+        let a_secret = a_identity.to_secret_bytes().unwrap();
+        let start = |service: &Service, identity| {
+            let service = service.clone();
+            async move {
+                let link = peer::open(&service.engine, identity, loopback)
+                    .await
+                    .unwrap();
+                assert!(service.peers.set(link).is_ok());
+            }
+        };
+        start(&a, a_identity).await;
+        start(&b, foldover_engine::PeerIdentity::generate().unwrap()).await;
+        let call = |service: &Service, method: &'static str, params: Option<Value>| {
+            let service = service.clone();
+            async move { service.handle(Request::call(1, method, params)).await }
+        };
+
+        let b_status = call(&b, PEER_PAIRING_OPEN, Some(json!({"minutes": 5})))
+            .await
+            .unwrap();
+        let window = b_status["pairing"].as_str().unwrap().to_owned();
+        let a_device = call(&a, PEER_STATUS, None).await.unwrap()["device"].clone();
+        let b_device = b_status["device"].clone();
+        let shown = call(
+            &a,
+            PEER_PAIR,
+            Some(json!({"device": b_device, "address": window})),
+        )
+        .await
+        .unwrap();
+
+        let mut waiting = Value::Null;
+        for _ in 0..1_000 {
+            waiting = call(&b, PEER_STATUS, None).await.unwrap()["pending"][0].clone();
+            if !waiting.is_null() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(waiting["code"], shown["code"]);
+        assert_eq!(waiting["device"], a_device);
+
+        call(&a, PEER_CONFIRM, Some(json!({"device": b_device})))
+            .await
+            .unwrap();
+        call(&b, PEER_CONFIRM, Some(json!({"device": a_device})))
+            .await
+            .unwrap();
+        let mut devices = Value::Null;
+        for _ in 0..1_000 {
+            devices = call(&a, PEER_STATUS, None).await.unwrap()["devices"].clone();
+            if devices
+                .as_array()
+                .is_some_and(|devices| !devices.is_empty())
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(devices[0]["device"], b_device);
+
+        // A restarted agent still knows the device.
+        drop(a);
+        let engine =
+            Engine::open(&StateLocation::Directory(a_directory.path().join("state"))).unwrap();
+        let a = Service::new(engine);
+        start(
+            &a,
+            foldover_engine::PeerIdentity::from_secret_bytes(&a_secret).unwrap(),
+        )
+        .await;
+        let status = call(&a, PEER_STATUS, None).await.unwrap();
+        assert_eq!(status["device"], a_device);
+        assert_eq!(status["devices"][0]["device"], b_device);
+
+        let revoked = call(&a, PEER_REVOKE, Some(json!({"device": b_device})))
+            .await
+            .unwrap();
+        assert_eq!(revoked["devices"], json!([]));
+        let unknown = call(&a, PEER_CONFIRM, Some(json!({"device": b_device})))
+            .await
+            .unwrap_err();
+        assert_eq!(unknown.code(), INVALID_PARAMS);
     }
 
     #[tokio::test]

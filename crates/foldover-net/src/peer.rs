@@ -614,6 +614,14 @@ impl PeerSendStream {
     pub fn finish(&mut self) -> Result<(), PeerError> {
         self.stream.finish().map_err(connection_error)
     }
+
+    /// Finish, then wait until the other Mac has received everything, so
+    /// closing the connection right after cannot discard the last message.
+    pub async fn finish_delivered(&mut self) -> Result<(), PeerError> {
+        self.finish()?;
+        self.stream.stopped().await.map_err(connection_error)?;
+        Ok(())
+    }
 }
 
 /// The receiving half of a stream, retaining its session for revocation.

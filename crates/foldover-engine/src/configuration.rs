@@ -9,11 +9,11 @@ use foldover_endpoint::{
     RootRelation, ScanError,
 };
 use foldover_state::{
-    HistoryEntry, Journal, JournalUpdate, MountSources, PairStore, Pause, SnapshotEntry,
+    Device, HistoryEntry, Journal, JournalUpdate, MountSources, PairStore, Pause, SnapshotEntry,
     StateLocation,
 };
 use foldover_types::{
-    Durability, PairConfig, PairDraft, PairId, PairRoot, Resolution, Side, SyncPath,
+    DeviceId, Durability, PairConfig, PairDraft, PairId, PairRoot, Resolution, Side, SyncPath,
 };
 
 use crate::{Commit, RunInputs};
@@ -186,6 +186,25 @@ impl Engine {
 
     pub fn automation_held(&self, id: PairId) -> Result<bool, Error> {
         Ok(self.pairs.automation_held(id)?)
+    }
+
+    /// Paired Macs (ADR 0031), by name.
+    pub fn devices(&self) -> Result<Vec<Device>, Error> {
+        Ok(self.pairs.devices()?)
+    }
+
+    /// Record a device both people confirmed, as paired now.
+    pub fn add_device(&mut self, id: DeviceId, name: String) -> Result<(), Error> {
+        Ok(self.pairs.put_device(&Device {
+            id,
+            name,
+            paired: std::time::SystemTime::now(),
+        })?)
+    }
+
+    /// Forget a device; whether it was paired.
+    pub fn remove_device(&mut self, id: DeviceId) -> Result<bool, Error> {
+        Ok(self.pairs.remove_device(id)?)
     }
 
     /// The pair's newest writing run, while it can still be undone.
