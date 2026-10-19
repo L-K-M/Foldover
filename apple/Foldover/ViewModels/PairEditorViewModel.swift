@@ -1,6 +1,9 @@
 import Foundation
 import Observation
 
+/// The locator prefix `PairRoot` uses to detect an SFTP folder.
+private let sftpScheme = "sftp://"
+
 enum PairFolderSide: Equatable {
     case left
     case right
@@ -32,7 +35,7 @@ final class PairEditorViewModel: Identifiable {
     }
 
     var title: String { editing == nil ? String(localized: "New Pair") : String(localized: "Edit Pair") }
-    var canSave: Bool { !isSaving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && left != nil && right != nil }
+    var canSave: Bool { !isSaving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && left != nil && right != nil && durabilityWarning == nil }
 
     /// Exclusion rules as editable text, one per line.
     var filterText: String {
@@ -101,6 +104,50 @@ final class PairEditorViewModel: Identifiable {
         return !options.syncsSameMetadata(as: editing.settings.options)
     }
 
+    /// Either side is a folder on an SFTP server.
+    var usesServerFolder: Bool {
+        left?.isServerFolder == true || right?.isServerFolder == true
+    }
+
+    /// Standard SFTP cannot atomically confine server-side link changes.
+    var serverWarning: String? {
+        usesServerFolder ? String(localized: "Use SFTP only with trusted servers. Folder or link changes there can redirect access outside your chosen folder.") : nil
+    }
+
+    /// What metadata each side keeps. A server carries file contents,
+    /// permissions and whole-second dates, not the rest (ADR 0028).
+    var metadataNote: String {
+        if usesServerFolder {
+            String(localized: "SFTP keeps file data, mode bits and whole-second modification times. Extended attributes and ACLs are omitted; resource-fork files cannot be copied.")
+        } else {
+            String(localized: "Resource forks always sync. Without permissions, a file's executable bit still syncs.")
+        }
+    }
+
+    /// Power-loss-safe writes need the local endpoint's rename and
+    /// drive-flush contract; SFTP offers only per-file fsync (ADR 0028).
+    /// A stored "Survive power loss" keeps its picker tag until the
+    /// user chooses Standard, so the invalid selection stays visible.
+    var durabilityChoices: [PairDurability] {
+        usesServerFolder && options.durability == .standard ? [.standard] : PairDurability.allCases
+    }
+
+    /// A stored "Survive power loss" choice conflicts with a server
+    /// folder; the user must choose Standard before the pair can save.
+    var durabilityWarning: String? {
+        guard usesServerFolder, options.durability == .full else { return nil }
+        return String(localized: "Survive power loss isn't available for SFTP: syncing a file can't promise the server's drive cache is flushed. Choose Standard.")
+    }
+
+    /// On a server, writes follow its acknowledged-write policy.
+    var durabilityExplanation: String {
+        if usesServerFolder {
+            String(localized: "Writes follow the server's own durability; SFTP can't make it flush its drive cache.")
+        } else {
+            options.durability.explanation
+        }
+    }
+
     func folderText(_ side: PairFolderSide) -> String {
         let folder = side == .left ? left : right
         return folder.map(Self.pathText) ?? String(localized: "Choose a folder")
@@ -124,7 +171,7 @@ final class PairEditorViewModel: Identifiable {
     /// The agent checks the rest and connects when the pair is saved.
     func chooseServer(_ locator: String, side: PairFolderSide) {
         let locator = locator.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard locator.hasPrefix(Self.sftpScheme), locator.dropFirst(Self.sftpScheme.count).contains("/") else {
+        guard locator.hasPrefix(sftpScheme), locator.dropFirst(sftpScheme.count).contains("/") else {
             errorMessage = String(localized: "Write the folder as sftp://host/path, for example sftp://nas.local/~/Photos.")
             return
         }
@@ -135,8 +182,6 @@ final class PairEditorViewModel: Identifiable {
         }
         errorMessage = nil
     }
-
-    private static let sftpScheme = "sftp://"
 
     func save() async -> Bool {
         guard canSave, let left, let right else { return false }
@@ -157,6 +202,14 @@ final class PairEditorViewModel: Identifiable {
 
     static func pathText(_ folder: SelectedFolder) -> String {
         String(data: folder.bytes, encoding: .utf8) ?? String(localized: "Path contains non-UTF-8 bytes")
+    }
+}
+
+extension SelectedFolder {
+    /// A folder on an SFTP server, kept as an `sftp://…` locator;
+    /// the same byte test `PairRoot` applies.
+    var isServerFolder: Bool {
+        bytes.starts(with: Data(sftpScheme.utf8))
     }
 }
 

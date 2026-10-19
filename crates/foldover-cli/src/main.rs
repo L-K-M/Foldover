@@ -21,6 +21,12 @@ const USAGE_EXIT: u8 = 2;
 /// A run stopped for deletion approval; nothing was written.
 const APPROVAL_EXIT: u8 = 3;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+const SFTP_WARNING: &str = concat!(
+    "SFTP assumes a trusted server; server-side folder changes can redirect access ",
+    "outside the selected root. Extended attributes and ACLs are omitted; files ",
+    "with resource forks cannot be copied. Power-loss-safe mode is unavailable; ",
+    "Standard follows server durability."
+);
 
 enum Request {
     /// `--version`: print `foldover <version>` and exit 0.
@@ -442,6 +448,7 @@ async fn pairs(
         }
         PairCommand::Show(id) => print_pair(&foldover_client::pair(location, id).await?),
         PairCommand::Add(draft) => {
+            warn_sftp([draft.left(), draft.right()]);
             print_pair(&foldover_client::create_pair(location, &draft).await?)
         }
         PairCommand::Update {
@@ -453,6 +460,7 @@ async fn pairs(
             // A stale read is harmless: the revision check rejects the update.
             let current = foldover_client::pair(location, id).await?;
             let draft = draft.with_options(options.apply(current.draft().options().clone()));
+            warn_sftp([draft.left(), draft.right()]);
             print_pair(&foldover_client::update_pair(location, id, revision, &draft).await?)
         }
         PairCommand::Remove { id, revision } => {
@@ -467,6 +475,12 @@ async fn sync(
     id: PairId,
     command: SyncCommand,
 ) -> Result<ExitCode, foldover_client::Error> {
+    // Cancellation must keep bypassing the configuration queue, even when
+    // another request is waiting on a disconnected server.
+    if !matches!(&command, SyncCommand::Cancel) {
+        let pair = foldover_client::pair(location, id).await?;
+        warn_sftp([pair.draft().left(), pair.draft().right()]);
+    }
     let mut status = match command {
         SyncCommand::Preview => foldover_client::start_preview(location, id).await?,
         SyncCommand::Run { left, right } => {
@@ -532,6 +546,17 @@ async fn archive(
     side: Side,
     command: ArchiveCommand,
 ) -> Result<(), foldover_client::Error> {
+    if matches!(
+        &command,
+        ArchiveCommand::PutBack { .. } | ArchiveCommand::PutBackAll(_)
+    ) {
+        let pair = foldover_client::pair(location, id).await?;
+        let root = match side {
+            Side::Left => pair.draft().left(),
+            Side::Right => pair.draft().right(),
+        };
+        warn_sftp([root]);
+    }
     match command {
         ArchiveCommand::Runs => {
             let runs = foldover_client::archive_runs(location, id, side).await?;
@@ -575,6 +600,19 @@ fn print_pair(pair: &PairConfig) -> Result<(), foldover_client::Error> {
     Ok(())
 }
 
+fn sftp_warning<'a>(roots: impl IntoIterator<Item = &'a PairRoot>) -> Option<&'static str> {
+    roots
+        .into_iter()
+        .any(|root| matches!(root, PairRoot::Sftp(_)))
+        .then_some(SFTP_WARNING)
+}
+
+fn warn_sftp<'a>(roots: impl IntoIterator<Item = &'a PairRoot>) {
+    if let Some(warning) = sftp_warning(roots) {
+        eprintln!("foldover: warning: {warning}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -586,6 +624,19 @@ mod tests {
     #[test]
     fn version_flag_selects_version() {
         assert!(matches!(req(&["--version"]), Request::Version));
+    }
+
+    #[test]
+    fn remote_warnings_apply_only_to_selected_sftp_roots() {
+        let root = |text: &str| PairRoot::from_bytes(text.as_bytes().to_vec()).unwrap();
+        let local_a = root("/left");
+        let local_b = root("/right");
+        let remote = root("sftp://nas/photos");
+        assert_eq!(sftp_warning([&local_a, &local_b]), None);
+        assert_eq!(sftp_warning([&remote, &local_b]), Some(SFTP_WARNING));
+        assert_eq!(sftp_warning([&local_a, &remote]), Some(SFTP_WARNING));
+        assert_eq!(sftp_warning([&remote]), Some(SFTP_WARNING));
+        assert_eq!(sftp_warning([&local_a]), None);
     }
 
     #[test]

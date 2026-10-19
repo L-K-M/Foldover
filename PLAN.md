@@ -603,8 +603,11 @@ endpoint remain P5 work.
 3. Every op is idempotent; after a crash the journal drains and the replicas
    converge.
 4. The base updates only after both sides reach the recorded state.
-5. Nothing is read or written outside a root, via symlinks or a remounted
-   path. `.foldover/` and temp files never propagate.
+5. Local and peer access stays inside the held root, including across symlinks
+   and remounts. Standard SFTP uses path checks on a trusted server; its protocol
+   cannot atomically prevent server-side directory/symlink races from escaping
+   a selected folder. The app and CLI warn before remote writes. `.foldover/`
+   and temp files never propagate.
 6. All gates run before any destructive op is journaled.
 7. Both versions of a conflict stay recoverable (archive or conflict
    copy).
@@ -748,3 +751,7 @@ Resolved by the owner, 2026-10-17:
     Developer ID or notarization.
 6. **Unsafe OS bindings:** small audited macOS driver modules are permitted,
    behind safe interfaces and native tests. Other layers retain the prohibition.
+7. **SFTP root safety** (2026-10-19): support ordinary SFTP writes on trusted
+   servers, with checks and a visible warning about server-side symlink races.
+   This qualifies the strict root-isolation guarantee for SFTP only; a jailed
+   account or Foldover helper is not required.

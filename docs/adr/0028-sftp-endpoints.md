@@ -3,6 +3,15 @@
 Status: Implemented; tested against OpenSSH's `sftp-server`, not yet
 against other servers
 
+## Root-safety decision
+
+Owner decision, 2026-10-19: support standard SFTP writes on trusted servers.
+Path validation and version checks remain mandatory, but SFTP has no dirfd or
+atomic no-follow operation: another server process can swap an intermediate
+directory for a symlink between checks. The app and CLI must warn before writes.
+A server-side jail or Foldover helper is not required. Local and peer roots keep
+their held-root isolation contract.
+
 ## Decision
 
 Either side of a pair can be a folder on an SFTP server, written as a
@@ -41,13 +50,17 @@ writes keep 16 requests of 32 KiB in flight.
 | Unchanged-stat proof | full stat incl. inode | size, time, mode, owner |
 | Change notifications | FSEvents / inotify | none; hourly verification on "When files change" |
 | Free space | `fstatvfs` | `statvfs@openssh.com`, else unchecked |
-| Durability "Full" | `F_FULLFSYNC` | `fsync@openssh.com` where offered |
+| Durability "Full" | `F_FULLFSYNC` | unsupported: file fsync cannot flush namespace changes or guarantee drive-cache flush |
 
 Versions are computed the same way, so content compares across kinds; a
 local file with a resource fork cannot be stored on a server and fails
 with "did not store the content exactly". Copies between two local roots
 keep their native path; any copy touching a server streams through
 Foldover.
+
+SFTP Standard uses the server's acknowledged-write policy. Full is rejected
+before writes: `fsync@openssh.com` only applies to files, so it cannot provide
+the local endpoint's power-loss-safe rename and directory-flush contract.
 
 **Availability.** An unreachable server, or one refusing the login, is
 waited for like an unmounted disk on automatic runs (ADR 0022) and fails

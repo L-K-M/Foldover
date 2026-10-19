@@ -24,6 +24,11 @@ struct PairEditorView: View {
                     Button("Choose B…") { choosingSide = .right; choosingFolder = true }
                     Button("SFTP…") { enteringServer = .right }
                 }
+                if let warning = viewModel.serverWarning {
+                    Text(warning)
+                        .font(.callout).foregroundStyle(.orange)
+                        .textSelection(.enabled)
+                }
                 Picker("Mode", selection: $viewModel.mode) {
                     ForEach(PairMode.allCases, id: \.self) { mode in Text(mode.title).tag(mode) }
                 }
@@ -33,7 +38,7 @@ struct PairEditorView: View {
                     Toggle("Tags, Finder info and other extended attributes",
                            isOn: $viewModel.options.syncExtendedAttributes)
                     Toggle("Permissions and access lists", isOn: $viewModel.options.syncPermissions)
-                    Text("Resource forks always sync. Without permissions, a file's executable bit still syncs.")
+                    Text(viewModel.metadataNote)
                         .font(.callout).foregroundStyle(.secondary)
                     if viewModel.resetsSyncHistory {
                         Text("Changing metadata settings resets this pair's sync history. The next preview compares both folders from scratch.")
@@ -71,11 +76,17 @@ struct PairEditorView: View {
                 }
                 Section("Durability") {
                     Picker("Write safety", selection: $viewModel.options.durability) {
-                        ForEach(PairDurability.allCases, id: \.self) { durability in
+                        ForEach(viewModel.durabilityChoices, id: \.self) { durability in
                             Text(durability.title).tag(durability)
+                                .disabled(viewModel.usesServerFolder && durability == .full)
                         }
                     }
-                    Text(viewModel.options.durability.explanation).foregroundStyle(.secondary)
+                    if let warning = viewModel.durabilityWarning {
+                        Text(warning)
+                            .font(.callout).foregroundStyle(.orange)
+                            .textSelection(.enabled)
+                    }
+                    Text(viewModel.durabilityExplanation).foregroundStyle(.secondary)
                 }
             }
             .disabled(viewModel.isSaving)
@@ -108,7 +119,7 @@ struct PairEditorView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Foldover connects with your SSH keys, agent and ~/.ssh/config, like the ssh command; it cannot ask for a password. Use ~ for the home folder, for example sftp://nas.local/~/Photos.")
+            Text("Foldover connects with your SSH keys, agent and ~/.ssh/config, like the ssh command; it cannot ask for a password. Use ~ for the home folder, for example sftp://nas.local/~/Photos. Use only trusted servers: changes on the server can redirect Foldover's access outside the folder you choose.")
         }
         .fileImporter(isPresented: $choosingFolder, allowedContentTypes: [.folder], allowsMultipleSelection: false) {
             viewModel.chooseFolder($0, side: choosingSide)
