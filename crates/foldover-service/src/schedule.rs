@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 use foldover_engine::PairWatcher;
-use foldover_types::{PairConfig, PairId, Schedule};
+use foldover_types::{PairConfig, PairId, Schedule, Side};
 
 use crate::Service;
 use crate::sync::Work;
@@ -22,7 +22,40 @@ const QUIET: Duration = Duration::from_secs(5);
 const VERIFY: Duration = Duration::from_secs(60 * 60);
 /// A share that went away is mounted again at most this often.
 const RECONNECT: Duration = Duration::from_secs(5 * 60);
+/// A due pair's folders are checked at most this often.
+pub(crate) const PROBE: Duration = Duration::from_secs(30);
 const SECONDS_PER_MINUTE: u64 = 60;
+
+/// A due pair's folder check: at most one runs at a time and results
+/// expire after `PROBE`, so a dead server is not hammered and a parked
+/// check cannot hold the pairs behind it.
+enum Probe {
+    /// On the blocking pool; the pair waits for it.
+    Running,
+    /// The check blew up; retry on the cadence, not every tick.
+    Failed { at: Instant },
+    /// The check finished; the first tick to see it stamps the result.
+    Done(Option<Side>),
+    /// Both folders were present at `at`.
+    Ready { at: Instant },
+    /// A folder was missing at `at`.
+    Missing { side: Side, at: Instant },
+}
+
+/// The folder presence check probes run, `missing_side` by default.
+type FolderCheck = dyn Fn(&PairConfig) -> Option<Side> + Send + Sync;
+
+/// What a due pair may do this tick.
+enum Gate {
+    /// Folders were recently present: the pair may run.
+    Start,
+    /// A folder is missing; check again after `PROBE`.
+    Wait(Side),
+    /// No fresh result: check the folders off the tick.
+    Probe,
+    /// A check is in flight; do not block on it.
+    Parked,
+}
 
 pub(crate) struct Scheduler {
     started: Instant,
@@ -33,6 +66,10 @@ pub(crate) struct Scheduler {
     /// Pairs with a folder that could not be watched, retried every tick.
     unwatchable: Mutex<HashSet<PairId>>,
     reconnected: Mutex<HashMap<PairId, Instant>>,
+    /// Per-pair folder checks, kept off the tick.
+    probes: Mutex<HashMap<PairId, Probe>>,
+    /// The folder check probes run; tests replace it.
+    probe: Mutex<Arc<FolderCheck>>,
 }
 
 impl Scheduler {
@@ -45,6 +82,8 @@ impl Scheduler {
             watched: Mutex::default(),
             unwatchable: Mutex::default(),
             reconnected: Mutex::default(),
+            probes: Mutex::default(),
+            probe: Mutex::new(Arc::new(foldover_engine::missing_side)),
         }
     }
 
@@ -114,6 +153,91 @@ impl Scheduler {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&id);
+    }
+
+    /// What a due pair may do now. A parked check is left alone: waiting
+    /// for it would let one dead server hold every pair behind it. A
+    /// result is stamped with the tick that first sees it, so pool queue
+    /// time and a slow check cannot expire it on arrival.
+    fn gate(&self, id: PairId, now: Instant) -> Gate {
+        let mut probes = self.probes.lock().unwrap_or_else(PoisonError::into_inner);
+        match probes.get(&id) {
+            Some(Probe::Running) => Gate::Parked,
+            Some(Probe::Failed { at }) if now.saturating_duration_since(*at) < PROBE => {
+                Gate::Parked
+            }
+            Some(Probe::Done(missing)) => {
+                let missing = *missing;
+                probes.insert(
+                    id,
+                    match missing {
+                        Some(side) => Probe::Missing { side, at: now },
+                        None => Probe::Ready { at: now },
+                    },
+                );
+                match missing {
+                    Some(side) => Gate::Wait(side),
+                    None => Gate::Start,
+                }
+            }
+            Some(Probe::Ready { at }) if now.saturating_duration_since(*at) < PROBE => Gate::Start,
+            Some(Probe::Missing { side, at }) if now.saturating_duration_since(*at) < PROBE => {
+                Gate::Wait(*side)
+            }
+            _ => Gate::Probe,
+        }
+    }
+
+    fn probe_started(&self, id: PairId) {
+        self.probes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, Probe::Running);
+    }
+
+    /// The check finished; carries no timestamp — the first tick to see
+    /// the result stamps it fresh against that tick's clock.
+    fn probe_done(&self, id: PairId, missing: Option<Side>) {
+        self.probes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, Probe::Done(missing));
+    }
+
+    /// The check panicked on the blocking pool; `at` is the tick that
+    /// asked, so a retry waits out the cadence instead of crashing
+    /// every tick.
+    fn probe_failed(&self, id: PairId, at: Instant) {
+        self.probes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, Probe::Failed { at });
+    }
+
+    /// The folder check the probes run, `missing_side` unless replaced.
+    fn probe_check(&self) -> Arc<FolderCheck> {
+        self.probe
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_probe(
+        &self,
+        probe: impl Fn(&PairConfig) -> Option<Side> + Send + Sync + 'static,
+    ) {
+        *self.probe.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(probe);
+    }
+
+    /// Test hook: no folder check is still on the blocking pool.
+    #[cfg(test)]
+    pub(crate) fn probes_settled(&self) -> bool {
+        self.probes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .all(|probe| !matches!(probe, Probe::Running))
     }
 
     /// Watch exactly the folders of these pairs, if a watcher runs.
@@ -203,22 +327,25 @@ impl Service {
             if !self.scheduler.due(&pair, now) {
                 continue;
             }
-            // An unmounted disk or share is waited for, not reported as a
-            // failure; the pair stays due and runs once the folder is back.
-            // A share is mounted again from where it last came from.
-            if let Some(side) = foldover_engine::missing_side(&pair) {
-                let source = self
-                    .engine
-                    .lock()
-                    .ok()
-                    .and_then(|engine| engine.mounts(pair.id()).ok())
-                    .and_then(|mounts| mounts.side(side).map(str::to_owned));
-                let back = source.is_some_and(|source| {
-                    self.scheduler.may_reconnect(pair.id(), now)
-                        && foldover_engine::reconnect(&pair, side, &source)
-                });
-                if !back {
+            match self.scheduler.gate(pair.id(), now) {
+                Gate::Parked => continue,
+                Gate::Wait(side) => {
                     self.jobs.wait_for(pair.id(), side);
+                    continue;
+                }
+                Gate::Start => {}
+                Gate::Probe => {
+                    self.scheduler.probe_started(pair.id());
+                    let service = self.clone();
+                    // Folder checks touch disks and networks; a parked or
+                    // dead-end one must not hold the pairs behind it, so
+                    // they run on the blocking pool, never on the tick or
+                    // the runtime's executor threads.
+                    if tokio::runtime::Handle::try_current().is_ok() {
+                        tokio::task::spawn_blocking(move || service.probe(pair, now));
+                    } else {
+                        service.probe(pair, now);
+                    }
                     continue;
                 }
             }
@@ -233,6 +360,42 @@ impl Service {
             }
         }
         started
+    }
+
+    /// Check one due pair's folders on the blocking pool and record the
+    /// result for the next tick. An unmounted disk or share is waited
+    /// for, not reported as a failure; the pair stays due and runs once
+    /// the folder is back. A share is mounted again from where it last
+    /// came from.
+    fn probe(&self, pair: PairConfig, at: Instant) {
+        let id = pair.id();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let check = self.scheduler.probe_check();
+            check(&pair).and_then(|side| {
+                let source = self
+                    .engine
+                    .lock()
+                    .ok()
+                    .and_then(|engine| engine.mounts(id).ok())
+                    .and_then(|mounts| mounts.side(side).map(str::to_owned));
+                let back = source.is_some_and(|source| {
+                    self.scheduler.may_reconnect(id, at)
+                        && foldover_engine::reconnect(&pair, side, &source)
+                });
+                if back { None } else { Some(side) }
+            })
+        }));
+        match outcome {
+            Ok(missing) => {
+                self.scheduler.probe_done(id, missing);
+                if let Some(side) = missing {
+                    self.jobs.wait_for(id, side);
+                }
+            }
+            // Without this a panic would wedge the pair on `Running`
+            // forever; the panic hook already logged it.
+            Err(_) => self.scheduler.probe_failed(id, at),
+        }
     }
 
     #[cfg(test)]
@@ -288,5 +451,43 @@ mod tests {
         assert!(scheduler.may_reconnect(id, start));
         assert!(!scheduler.may_reconnect(id, start + Duration::from_secs(60)));
         assert!(scheduler.may_reconnect(id, start + RECONNECT));
+    }
+
+    #[test]
+    fn a_due_pairs_folders_are_checked_once_and_rechecked_on_a_cadence() {
+        let start = Instant::now();
+        let scheduler = Scheduler::new(start);
+        let id = PairId::from_bytes([3; PairId::BYTE_LEN]).unwrap();
+        let at = |seconds| start + Duration::from_secs(seconds);
+
+        assert!(matches!(scheduler.gate(id, at(0)), Gate::Probe));
+        scheduler.probe_started(id);
+        assert!(matches!(scheduler.gate(id, at(1)), Gate::Parked));
+        scheduler.probe_done(id, Some(Side::Left));
+        assert!(matches!(scheduler.gate(id, at(2)), Gate::Wait(Side::Left)));
+        assert!(matches!(scheduler.gate(id, at(2) + PROBE), Gate::Probe));
+        scheduler.probe_started(id);
+        scheduler.probe_done(id, None);
+        assert!(matches!(scheduler.gate(id, at(3) + PROBE), Gate::Start));
+        assert!(matches!(
+            scheduler.gate(id, at(3) + PROBE + PROBE),
+            Gate::Probe
+        ));
+
+        // A crashed check is retried on the cadence, not every tick.
+        scheduler.probe_failed(id, at(4) + PROBE + PROBE);
+        assert!(matches!(
+            scheduler.gate(id, at(5) + PROBE + PROBE),
+            Gate::Parked
+        ));
+        assert!(matches!(
+            scheduler.gate(id, at(4) + PROBE + PROBE + PROBE),
+            Gate::Probe
+        ));
+
+        // A result carries no timestamp: it is fresh whenever a tick
+        // first sees it, however long the check itself took.
+        scheduler.probe_done(id, None);
+        assert!(matches!(scheduler.gate(id, at(500)), Gate::Start));
     }
 }

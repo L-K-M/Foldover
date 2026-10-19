@@ -659,6 +659,26 @@ mod tests {
         panic!("The sync job did not finish");
     }
 
+    /// Wait for every readiness probe the last tick dispatched.
+    async fn probes_idle(service: &Service) {
+        for _ in 0..3_000 {
+            if service.scheduler.probes_settled() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("A readiness probe did not finish");
+    }
+
+    /// Tick, wait for the probes it dispatched, and tick again so their
+    /// results can start runs; returns every pair started.
+    async fn run_due_started(service: &Service, at: std::time::Instant) -> Vec<PairId> {
+        let mut started = service.run_due(at);
+        probes_idle(service).await;
+        started.extend(service.run_due(at));
+        started
+    }
+
     #[tokio::test]
     async fn previews_and_runs_execute_as_background_jobs() {
         let (directory, service) = fixture();
@@ -770,11 +790,11 @@ mod tests {
 
         fs::write(left.join("b"), b"b").unwrap();
         assert!(service.run_due(at(30)).is_empty());
-        assert_eq!(service.run_due(at(61)).len(), 1);
+        assert_eq!(run_due_started(&service, at(61)).await.len(), 1);
         let finished = settled(&service, &key).await;
         assert_eq!(finished["result"]["copied"], 1, "{finished}");
         assert!(service.run_due(at(90)).is_empty());
-        assert_eq!(service.run_due(at(122)).len(), 1);
+        assert_eq!(run_due_started(&service, at(122)).await.len(), 1);
         settled(&service, &key).await;
     }
 
@@ -865,10 +885,10 @@ mod tests {
         assert!(service.run_due(at(10)).is_empty());
         service.mark_changed(id, at(20));
         assert!(service.run_due(at(22)).is_empty());
-        assert_eq!(service.run_due(at(26)), [id]);
+        assert_eq!(run_due_started(&service, at(26)).await, [id]);
         settled(&service, &key).await;
         assert!(service.run_due(at(40)).is_empty());
-        assert_eq!(service.run_due(at(26 + 3_600)), [id]);
+        assert_eq!(run_due_started(&service, at(26 + 3_600)).await, [id]);
         settled(&service, &key).await;
     }
 
@@ -1020,6 +1040,7 @@ mod tests {
         let unmounted = directory.path().join("unmounted");
         fs::rename(&right, &unmounted).unwrap();
         assert!(service.run_due(at(61)).is_empty());
+        probes_idle(&service).await;
         let status = service
             .handle(Request::call(3, SYNC_STATUS, Some(key.clone())))
             .await
@@ -1027,13 +1048,207 @@ mod tests {
         assert_eq!(status, json!({"state": "waiting", "side": "right"}));
 
         fs::rename(&unmounted, &right).unwrap();
-        assert_eq!(service.run_due(at(66)).len(), 1);
+        // A missing folder is rechecked a cadence after its result was
+        // first seen, not every tick.
+        assert!(service.run_due(at(66)).is_empty());
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        assert_eq!(
+            run_due_started(&service, at(66 + crate::schedule::PROBE.as_secs())).await,
+            [id]
+        );
         assert_eq!(settled(&service, &key).await["state"], "finished");
         let history = service
             .handle(Request::call(4, HISTORY_LIST, Some(key)))
             .await
             .unwrap();
         assert_eq!(history["runs"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_missing_folder_is_probed_again_on_a_cadence_not_every_tick() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Away");
+        input["options"]["schedule"] = json!({"kind": "every", "minutes": 1});
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        settled(&service, &key).await;
+
+        let probes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        service.scheduler.set_probe({
+            let probes = std::sync::Arc::clone(&probes);
+            move |_| {
+                probes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Some(Side::Left)
+            }
+        });
+        let start = service.scheduler.started();
+        let at = |seconds| start + std::time::Duration::from_secs(seconds);
+
+        assert!(service.run_due(at(61)).is_empty());
+        probes_idle(&service).await;
+        assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // The result is stamped when the next tick first sees it, so the
+        // cadence counts from there, not from dispatch.
+        assert!(service.run_due(at(66)).is_empty());
+        assert!(service.run_due(at(90)).is_empty());
+        assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            service
+                .run_due(at(66 + crate::schedule::PROBE.as_secs()))
+                .is_empty()
+        );
+        probes_idle(&service).await;
+        assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_parked_folder_check_does_not_hold_another_pair() {
+        let (directory, service) = fixture();
+        let mut ids = Vec::new();
+        for name in ["Parked", "Ready"] {
+            let mut input = input(directory.path(), name);
+            input["options"]["schedule"] = json!({"kind": "every", "minutes": 1});
+            let created = service
+                .handle(Request::call(1, PAIR_CREATE, Some(input)))
+                .await
+                .unwrap();
+            let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+            service
+                .handle(Request::call(2, SYNC_RUN, Some(run)))
+                .await
+                .unwrap();
+            let key = json!({"id": created["id"]});
+            settled(&service, &key).await;
+            ids.push(created["id"].as_str().unwrap().parse::<PairId>().unwrap());
+        }
+        let (parked_id, ready_id) = (ids[0], ids[1]);
+
+        let entered = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let release =
+            std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        service.scheduler.set_probe({
+            let entered = std::sync::Arc::clone(&entered);
+            let release = std::sync::Arc::clone(&release);
+            move |pair| {
+                if pair.id() != parked_id {
+                    return None;
+                }
+                entered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Park until released, like a server that never answers.
+                let (lock, changed) = &*release;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = changed.wait(released).unwrap();
+                }
+                Some(Side::Left)
+            }
+        });
+        let start = service.scheduler.started();
+        let at = |seconds| start + std::time::Duration::from_secs(seconds);
+
+        assert!(service.run_due(at(61)).is_empty());
+        // Wait until the first pair's check is parked on the blocking pool.
+        for _ in 0..3_000 {
+            if entered.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(entered.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // The other pair schedules while the first's check is parked.
+        let mut started = Vec::new();
+        for _ in 0..3_000 {
+            started = service.run_due(at(62));
+            if !started.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(started, [ready_id]);
+        assert_eq!(entered.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let key = json!({"id": ready_id.to_string()});
+        assert_eq!(settled(&service, &key).await["state"], "finished");
+
+        // The parked check ran once; releasing it shows the missing side.
+        let (lock, changed) = &*release;
+        *lock.lock().unwrap() = true;
+        changed.notify_all();
+        probes_idle(&service).await;
+        let status = service
+            .handle(Request::call(
+                3,
+                SYNC_STATUS,
+                Some(json!({"id": parked_id.to_string()})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(status, json!({"state": "waiting", "side": "left"}));
+    }
+
+    #[tokio::test]
+    async fn a_slow_folder_check_still_starts_the_pair_once_it_lands() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Slow");
+        input["options"]["schedule"] = json!({"kind": "every", "minutes": 1});
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        settled(&service, &key).await;
+        let id = created["id"].as_str().unwrap().parse::<PairId>().unwrap();
+
+        let entered = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let release =
+            std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        service.scheduler.set_probe({
+            let entered = std::sync::Arc::clone(&entered);
+            let release = std::sync::Arc::clone(&release);
+            move |_| {
+                entered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let (lock, changed) = &*release;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = changed.wait(released).unwrap();
+                }
+                None
+            }
+        });
+        let start = service.scheduler.started();
+        let at = |seconds| start + std::time::Duration::from_secs(seconds);
+
+        assert!(service.run_due(at(61)).is_empty());
+        for _ in 0..3_000 {
+            if entered.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // Between pool queueing and a slow server the result lands over a
+        // cadence after its tick — it must still count, not be born stale.
+        let (lock, changed) = &*release;
+        *lock.lock().unwrap() = true;
+        changed.notify_all();
+        probes_idle(&service).await;
+
+        let started =
+            service.run_due(at(61) + crate::schedule::PROBE + std::time::Duration::from_secs(5));
+        assert_eq!(started, [id]);
+        assert_eq!(entered.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1199,7 +1414,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resumed["paused"], false);
-        assert_eq!(service.run_due(at(62)).len(), 1);
+        assert_eq!(run_due_started(&service, at(62)).await.len(), 1);
         settled(&service, &key).await;
 
         let timed = service
