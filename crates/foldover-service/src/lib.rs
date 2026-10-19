@@ -636,7 +636,16 @@ mod tests {
     }
 
     async fn settled(service: &Service, key: &Value) -> Value {
-        for _ in 0..1_000 {
+        settle(service, key, 1_000).await
+    }
+
+    /// Runs that copy or archive dozens of entries take longer to finish.
+    async fn settled_slow(service: &Service, key: &Value) -> Value {
+        settle(service, key, 10_000).await
+    }
+
+    async fn settle(service: &Service, key: &Value, polls: usize) -> Value {
+        for _ in 0..polls {
             let status = service
                 .handle(Request::call(9, SYNC_STATUS, Some(key.clone())))
                 .await
@@ -1075,6 +1084,145 @@ mod tests {
         assert_eq!(settled(&service, &key).await["state"], "finished");
         assert_eq!(service.run_due(at(661)), [id]);
         settled(&service, &key).await;
+    }
+
+    #[tokio::test]
+    async fn a_first_mirror_run_on_a_nonempty_target_waits_for_review() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Photos");
+        input["mode"] = json!({"kind": "mirror", "source": "left"});
+        let right = directory.path().join("Photos-right");
+        fs::write(right.join("extra"), b"keep me").unwrap();
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let run = |right_deletions| {
+            json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": right_deletions})
+        };
+
+        // PLAN.md §3.6: a non-empty target needs explicit confirmation on the
+        // first run, even below the deletion fuse. Nothing may be archived yet.
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run(0))))
+            .await
+            .unwrap();
+        let stopped = settled_slow(&service, &key).await;
+        assert_eq!(stopped["state"], "needsApproval", "{stopped}");
+        assert_eq!(stopped["preview"]["right"]["deletions"], 1);
+        assert_eq!(fs::read(right.join("extra")).unwrap(), b"keep me");
+        assert!(!right.join(".foldover/archive").exists());
+
+        // Approving the held, reviewed result runs it.
+        service
+            .handle(Request::call(3, SYNC_RUN, Some(run(1))))
+            .await
+            .unwrap();
+        let finished = settled_slow(&service, &key).await;
+        assert_eq!(finished["state"], "finished", "{finished}");
+        assert_eq!(finished["result"]["archived"], 1);
+        assert!(!right.join("extra").exists());
+        assert!(right.join(".foldover/archive").exists());
+    }
+
+    #[tokio::test]
+    async fn an_approval_does_not_authorize_a_changed_deletion_set() {
+        let (directory, service) = fixture();
+        let input = input(directory.path(), "Docs");
+        let left = directory.path().join("Docs-left");
+        let right = directory.path().join("Docs-right");
+        for index in 1..=102_u32 {
+            fs::write(left.join(format!("file{index:03}")), b"data").unwrap();
+        }
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let run = |right_deletions| {
+            json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": right_deletions})
+        };
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run(0))))
+            .await
+            .unwrap();
+        assert_eq!(settled_slow(&service, &key).await["state"], "finished");
+
+        // The reviewed plan deletes file001..file051 from the right folder.
+        for index in 1..=51_u32 {
+            fs::remove_file(left.join(format!("file{index:03}"))).unwrap();
+        }
+        service
+            .handle(Request::call(3, SYNC_RUN, Some(run(0))))
+            .await
+            .unwrap();
+        let stopped = settled_slow(&service, &key).await;
+        assert_eq!(stopped["state"], "needsApproval", "{stopped}");
+        assert_eq!(stopped["preview"]["right"]["deletions"], 51);
+
+        // The same count now covers a different set: file052..file102.
+        for index in 1..=51_u32 {
+            fs::write(left.join(format!("file{index:03}")), b"data").unwrap();
+            fs::remove_file(left.join(format!("file{:03}", index + 51))).unwrap();
+        }
+        service
+            .handle(Request::call(4, SYNC_RUN, Some(run(51))))
+            .await
+            .unwrap();
+        let stopped = settled_slow(&service, &key).await;
+        assert_eq!(stopped["state"], "needsApproval", "{stopped}");
+        // The unreviewed set must be untouched: nothing was archived.
+        for index in 52..=102_u32 {
+            assert_eq!(
+                fs::read(right.join(format!("file{index:03}"))).unwrap(),
+                b"data"
+            );
+        }
+        assert!(!right.join(".foldover/archive").exists());
+    }
+
+    #[tokio::test]
+    async fn a_run_cannot_approve_deletions_it_never_reviewed() {
+        let (directory, service) = fixture();
+        let input = input(directory.path(), "Docs");
+        let left = directory.path().join("Docs-left");
+        let right = directory.path().join("Docs-right");
+        for index in 1..=60_u32 {
+            fs::write(left.join(format!("file{index:03}")), b"data").unwrap();
+        }
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let run = |right_deletions| {
+            json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": right_deletions})
+        };
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run(0))))
+            .await
+            .unwrap();
+        assert_eq!(settled_slow(&service, &key).await["state"], "finished");
+
+        // Deleting 51 of 60 trips the fuse; approving without ever holding
+        // the reviewed plan must not authorize it.
+        for index in 1..=51_u32 {
+            fs::remove_file(left.join(format!("file{index:03}"))).unwrap();
+        }
+        service
+            .handle(Request::call(3, SYNC_RUN, Some(run(51))))
+            .await
+            .unwrap();
+        let stopped = settled_slow(&service, &key).await;
+        assert_eq!(stopped["state"], "needsApproval", "{stopped}");
+        for index in 1..=60_u32 {
+            assert_eq!(
+                fs::read(right.join(format!("file{index:03}"))).unwrap(),
+                b"data"
+            );
+        }
+        assert!(!right.join(".foldover/archive").exists());
     }
 
     #[tokio::test]
