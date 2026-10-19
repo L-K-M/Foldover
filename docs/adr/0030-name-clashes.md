@@ -17,18 +17,24 @@ failed on every run, or would have stored two files where a person sees one.
   normalization, and ignores case unless its volume declares case-sensitive
   names (an unreported answer counts as ignoring case, which flags more
   clashes, never fewer). SFTP folders and Linux roots match bytes exactly.
-- A pair uses the looser rule of its two folders. Each path's key is its
-  name in composed Unicode (NFC) where normalization is ignored, lower
-  case where case is; names that are not UTF-8 compare as bytes, with
-  ASCII letters folded.
-- Paths that differ but share a key are a `NameClash` conflict, on every
-  path of the group, including one that is otherwise in sync. Nothing is
+- Each path's key under a folder's rule is its name in composed Unicode
+  (NFC) where normalization is ignored, lower case where case is; names
+  that are not UTF-8 compare as bytes, with ASCII letters folded.
+- Paths that one folder keys alike are a `NameClash` conflict when the
+  plan would write or archive any of them in that folder, on every path
+  of the group, including one that is otherwise in sync. Nothing is
   written for them; a clashing folder blocks what is inside it. Choosing a
   side, keeping both or skipping is refused: renaming one item resolves it.
+- A folder that keeps the spellings apart takes them as planned, so a
+  case-only rename on a Mac reaches an SFTP server as an archive of the
+  old spelling and a copy of the new one.
 
 ```text
-A (APFS):  Report.txt      key "report.txt" ─┐
-B (SFTP):  report.txt      key "report.txt" ─┴─▶ NameClash on both rows
+A (APFS):  Report.txt   B (SFTP): report.txt   both would be copied to A,
+                                               which keys them alike:
+                                               NameClash on both rows
+A renames Report.txt → report.txt              B archives Report.txt and
+                                               copies report.txt
 ```
 
 ## Consequences

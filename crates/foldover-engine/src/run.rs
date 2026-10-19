@@ -605,14 +605,11 @@ impl PairRun {
         for path in &skipped {
             base.remove(path);
         }
-        let names = endpoints
-            .endpoint(Side::Left)
-            .name_matching()
-            .either(endpoints.endpoint(Side::Right).name_matching());
         let choices = Choices {
             resolutions: &resolutions,
             skips: &skips,
-            names,
+            left_names: endpoints.endpoint(Side::Left).name_matching(),
+            right_names: endpoints.endpoint(Side::Right).name_matching(),
         };
         let plan = plan_resolved(
             draft.mode(),

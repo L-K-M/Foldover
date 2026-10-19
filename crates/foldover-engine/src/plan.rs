@@ -183,36 +183,71 @@ fn skip_branches(
 }
 
 /// Paths whose names one of the folders would store as one file are a
-/// conflict for a person to rename (PLAN.md §4.10): copying either would
-/// fail against, or silently become, the other. Folders that clash block
-/// what is inside them, like any folder conflict.
+/// conflict for a person to rename (PLAN.md §4.10) when that folder would
+/// be written: copying either spelling would fail against, or silently
+/// become, the other. A folder that keeps the spellings apart takes them
+/// as they are, so a case-only rename on a Mac reaches a byte-exact server
+/// as an archive and a copy. Folders that clash block what is inside them,
+/// like any folder conflict.
 ///
 /// ```text
-/// A: Report.txt          case-insensitive pair: both keyed "report.txt"
-/// B: report.txt          ─▶ NameClash on both rows; nothing is copied
+/// A ignores case, B keeps spellings apart
+/// A: Report.txt  B: report.txt  each would be copied to A as one file: conflict
+/// A: report.txt  B: Report.txt  A renamed it: B archives Report.txt, copies
+///                               report.txt
 /// ```
 fn mark_name_clashes(
     rows: &mut [PlanRow],
-    names: NameMatching,
+    left_names: NameMatching,
+    right_names: NameMatching,
     control: &mut impl FnMut() -> ScanControl,
 ) -> Result<(), PlanError> {
-    if names == NameMatching::EXACT {
+    let loose = left_names.either(right_names);
+    if loose == NameMatching::EXACT {
         return Ok(());
     }
     let mut keys: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
     for (index, row) in rows.iter().enumerate() {
         check_control(control)?;
-        keys.entry(name_key(row.path.as_bytes(), names))
+        keys.entry(name_key(row.path.as_bytes(), loose))
             .or_default()
             .push(index);
     }
-    for indices in keys.into_values().filter(|indices| indices.len() > 1) {
-        for index in indices {
-            rows[index].decision =
-                CandidateDecision::Entry(EntryDecision::Conflict(ConflictKind::NameClash));
+    let mut clashes = Vec::new();
+    for group in keys.into_values().filter(|group| group.len() > 1) {
+        for (side, names) in [(Side::Left, left_names), (Side::Right, right_names)] {
+            // Spellings this folder stores as one file.
+            let mut same: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
+            for &index in &group {
+                check_control(control)?;
+                same.entry(name_key(rows[index].path.as_bytes(), names))
+                    .or_default()
+                    .push(index);
+            }
+            for spellings in same.into_values().filter(|spellings| spellings.len() > 1) {
+                if spellings
+                    .iter()
+                    .any(|&index| writes_on(&rows[index].decision, side))
+                {
+                    clashes.extend(spellings);
+                }
+            }
         }
     }
+    for index in clashes {
+        rows[index].decision =
+            CandidateDecision::Entry(EntryDecision::Conflict(ConflictKind::NameClash));
+    }
     Ok(())
+}
+
+/// Whether `decision` writes or archives on `side`.
+fn writes_on(decision: &CandidateDecision, side: Side) -> bool {
+    match decision {
+        CandidateDecision::Entry(EntryDecision::Propagate { from, .. }) => from.other() == side,
+        CandidateDecision::Entry(EntryDecision::Archive { on }) => *on == side,
+        _ => false,
+    }
 }
 
 /// The bytes two names share when `names` treats them as one: composed
@@ -274,15 +309,17 @@ pub struct Choices<'a> {
     pub resolutions: &'a BTreeMap<SyncPath, Resolution>,
     /// Changes left alone in this run.
     pub skips: &'a BTreeMap<SyncPath, Skip>,
-    /// The looser of the two folders' name matching.
-    pub names: NameMatching,
+    /// How each folder compares names.
+    pub left_names: NameMatching,
+    pub right_names: NameMatching,
 }
 
 impl Choices<'static> {
     const NONE: Self = Self {
         resolutions: &BTreeMap::new(),
         skips: &BTreeMap::new(),
-        names: NameMatching::EXACT,
+        left_names: NameMatching::EXACT,
+        right_names: NameMatching::EXACT,
     };
 }
 
@@ -300,7 +337,8 @@ pub fn plan_resolved(
     let Choices {
         resolutions,
         skips,
-        names,
+        left_names,
+        right_names,
     } = *choices;
     validate_tree(base, TreeRole::Base, |entry| entry.left().kind(), control)?;
     validate_tree(left, TreeRole::Left, |entry| entry.kind(), control)?;
@@ -380,7 +418,7 @@ pub fn plan_resolved(
 
     settle_folder_choices(&mut rows, base, left, right, resolutions, control)?;
     skip_branches(&mut rows, left, right, skips, control)?;
-    mark_name_clashes(&mut rows, names, control)?;
+    mark_name_clashes(&mut rows, left_names, right_names, control)?;
 
     // Ancestors precede descendants. Suppression therefore propagates an outer
     // conflict through the whole branch without recursive traversal.
@@ -817,24 +855,30 @@ mod tests {
         eprintln!("500,000 candidate paths in {elapsed:?}");
     }
 
+    /// Both folders compare names as `names`.
     fn plan_with_names(
         left: &BTreeMap<SyncPath, EntryVersion>,
         right: &BTreeMap<SyncPath, EntryVersion>,
         names: NameMatching,
     ) -> Vec<(SyncPath, CandidateDecision)> {
+        plan_between(&BTreeMap::new(), left, right, [names, names])
+    }
+
+    fn plan_between(
+        base: &BTreeMap<SyncPath, BaselineEntry>,
+        left: &BTreeMap<SyncPath, EntryVersion>,
+        right: &BTreeMap<SyncPath, EntryVersion>,
+        [left_names, right_names]: [NameMatching; 2],
+    ) -> Vec<(SyncPath, CandidateDecision)> {
         let choices = Choices {
             resolutions: &BTreeMap::new(),
             skips: &BTreeMap::new(),
-            names,
+            left_names,
+            right_names,
         };
-        plan_resolved(
-            SyncMode::Sync,
-            &BTreeMap::new(),
-            left,
-            right,
-            &choices,
-            &mut || ScanControl::Continue,
-        )
+        plan_resolved(SyncMode::Sync, base, left, right, &choices, &mut || {
+            ScanControl::Continue
+        })
         .unwrap()
         .rows()
         .iter()
@@ -886,6 +930,51 @@ mod tests {
         assert_eq!(
             decision(b"photos/b"),
             CandidateDecision::BlockedByAncestor(path(b"photos"))
+        );
+    }
+
+    /// Review: a case-only rename on a Mac wedged its pair with a server
+    /// that keeps both spellings apart, though that server can take the
+    /// rename as an archive and a copy.
+    #[test]
+    fn a_case_only_rename_syncs_where_the_target_keeps_spellings_apart() {
+        let insensitive = NameMatching::new(CaseMatching::Insensitive, UnicodeMatching::Normalized);
+        let base = BTreeMap::from([(
+            path(b"Report.txt"),
+            BaselineEntry::new(file(1), file(1)).unwrap(),
+        )]);
+        let left = tree(&[(b"report.txt", file(1))]);
+        let right = tree(&[(b"Report.txt", file(1))]);
+        let rows = plan_between(&base, &left, &right, [insensitive, NameMatching::EXACT]);
+        assert_eq!(
+            rows,
+            [
+                (
+                    path(b"Report.txt"),
+                    CandidateDecision::Entry(EntryDecision::Archive { on: Side::Right })
+                ),
+                (
+                    path(b"report.txt"),
+                    CandidateDecision::Entry(EntryDecision::Propagate {
+                        from: Side::Left,
+                        change: ChangeKind::Create
+                    })
+                ),
+            ]
+        );
+
+        // Two Macs: the copy would land on the file being archived.
+        let rows = plan_between(&base, &left, &right, [insensitive, insensitive]);
+        assert!(
+            rows.iter().all(|(_, decision)| *decision == CLASH),
+            "{rows:?}"
+        );
+
+        // Renamed on the server instead: the Mac would be written.
+        let rows = plan_between(&base, &left, &right, [NameMatching::EXACT, insensitive]);
+        assert!(
+            rows.iter().all(|(_, decision)| *decision == CLASH),
+            "{rows:?}"
         );
     }
 
