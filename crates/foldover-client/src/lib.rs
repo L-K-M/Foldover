@@ -32,10 +32,12 @@ use foldover_proto::local::{
     PEER_CANCEL, PEER_CONFIRM, PEER_PAIR, PEER_PAIRING_CLOSE, PEER_PAIRING_OPEN, PEER_REVOKE,
     PEER_START, PEER_STATUS, PeerKey, PeerPair, PeerPairingOpen,
 };
+use foldover_proto::local::{PEER_SHARES, SHARE_ADD, SHARE_LIST, SHARE_REMOVE, ShareAdd, ShareKey};
 pub use foldover_proto::local::{
     PeerDeviceRecord, PeerNearbyRecord, PeerPendingRecord, PeerStatus,
 };
-pub use foldover_types::DeviceId;
+pub use foldover_proto::local::{PeerShareList, PeerShareRecord, ShareList, ShareRecord};
+pub use foldover_types::{DeviceId, ShareId};
 pub use foldover_types::{
     Durability, Filters, InvalidPair, InvalidReviewToken, LocalRoot, MetadataPolicy, PairConfig,
     PairDraft, PairId, PairOptions, PairRoot, Propagation, ReviewToken, Schedule, ScheduleInterval,
@@ -459,6 +461,51 @@ pub async fn revoke_device(
     device: DeviceId,
 ) -> Result<PeerStatus, Error> {
     peer_call(location, PEER_REVOKE, device).await
+}
+
+/// Folders this Mac shares with paired Macs.
+pub async fn shares(location: &SocketLocation) -> Result<ShareList, Error> {
+    Ok(serde_json::from_value(
+        call(location, SHARE_LIST, None).await?,
+    )?)
+}
+
+/// Share the folder at `root` with paired `device`, which shows it as
+/// `name`.
+pub async fn add_share(
+    location: &SocketLocation,
+    device: DeviceId,
+    root: &[u8],
+    name: &str,
+) -> Result<ShareRecord, Error> {
+    let params = serde_json::to_value(ShareAdd {
+        device: device.to_string(),
+        root: root.to_vec(),
+        name: name.to_owned(),
+    })?;
+    Ok(serde_json::from_value(
+        call(location, SHARE_ADD, Some(params)).await?,
+    )?)
+}
+
+pub async fn remove_share(location: &SocketLocation, id: ShareId) -> Result<ShareList, Error> {
+    let params = serde_json::to_value(ShareKey { id: id.to_string() })?;
+    Ok(serde_json::from_value(
+        call(location, SHARE_REMOVE, Some(params)).await?,
+    )?)
+}
+
+/// The folders paired `device` shares with this Mac; asks that Mac.
+pub async fn peer_shares(
+    location: &SocketLocation,
+    device: DeviceId,
+) -> Result<PeerShareList, Error> {
+    let params = serde_json::to_value(PeerKey {
+        device: device.to_string(),
+    })?;
+    Ok(serde_json::from_value(
+        call(location, PEER_SHARES, Some(params)).await?,
+    )?)
 }
 
 async fn peer_call(

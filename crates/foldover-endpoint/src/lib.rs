@@ -47,7 +47,9 @@ pub use foldover_fs::{
 pub use endpoint::{Endpoint, ObserveStep};
 
 mod link;
-pub use link::{Decision, LinkError, NearbyMac, PeerLink, PendingPairing, Presence};
+pub use link::{
+    Decision, LinkError, NearbyMac, NotRecorded, PeerHost, PeerLink, PendingPairing, Presence,
+};
 
 #[cfg(unix)]
 pub use pair::{EndpointPair, PairRootError, access_denied};

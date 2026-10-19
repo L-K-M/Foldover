@@ -43,16 +43,37 @@ fn link_at(
         address,
         presence,
         [],
-        move |device, name| {
-            let _ = recorded.send((device, name));
-            match store {
-                Store::Working => Ok(()),
-                Store::Failing => Err(()),
-            }
-        },
+        Arc::new(Host { recorded, store }),
     )
     .unwrap();
     (link, paired)
+}
+
+/// Records pairings; shares "Photos" with every paired Mac.
+struct Host {
+    recorded: mpsc::UnboundedSender<(DeviceId, String)>,
+    store: Store,
+}
+
+impl PeerHost for Host {
+    fn paired(&self, device: DeviceId, name: String) -> Result<(), NotRecorded> {
+        let _ = self.recorded.send((device, name));
+        match self.store {
+            Store::Working => Ok(()),
+            Store::Failing => Err(NotRecorded),
+        }
+    }
+
+    fn serve(&self, _device: DeviceId, call: PeerCall) -> PeerReply {
+        match call {
+            PeerCall::Shares => PeerReply::Shares {
+                shares: vec![foldover_proto::peer::OfferedShare {
+                    id: "ab".repeat(16),
+                    name: "Photos".into(),
+                }],
+            },
+        }
+    }
 }
 
 async fn pending_on(link: &PeerLink, device: DeviceId) -> PendingPairing {
@@ -101,8 +122,20 @@ async fn both_confirmations_pin_both_macs_and_one_pins_nothing() {
     assert!(a.is_paired(b.device()) && b.is_paired(a.device()));
     assert!(a.pending().is_empty() && b.pending().is_empty());
 
+    // Paired Macs answer each other's requests.
+    a.reach(b.device(), b.address().unwrap());
+    let reply = tokio::time::timeout(WAIT, a.request(b.device(), PeerCall::Shares))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(reply, PeerReply::Shares { shares } if shares[0].name == "Photos"));
+
     a.revoke(b.device());
     assert!(!a.is_paired(b.device()));
+    assert!(matches!(
+        a.request(b.device(), PeerCall::Shares).await,
+        Err(LinkError::NotPaired)
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread")]

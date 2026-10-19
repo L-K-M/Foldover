@@ -7,6 +7,7 @@ mod automation;
 mod history;
 mod peer;
 mod schedule;
+mod share;
 mod sync;
 
 use std::sync::{Arc, Mutex};
@@ -15,8 +16,8 @@ use foldover_engine::{Approval, Engine, ErrorKind, StateLocation};
 use foldover_proto::local::{
     ARCHIVE_ITEMS, ARCHIVE_PUT_BACK, ARCHIVE_PUT_BACK_ALL, ARCHIVE_RUNS, AUTOMATION_PAUSE,
     AUTOMATION_RESUME, AUTOMATION_STATUS, HISTORY_LIST, PAIR_REMOVE, PEER_CANCEL, PEER_CONFIRM,
-    PEER_PAIR, PEER_PAIRING_CLOSE, PEER_PAIRING_OPEN, PEER_REVOKE, PEER_START, PEER_STATUS,
-    PairRevision,
+    PEER_PAIR, PEER_PAIRING_CLOSE, PEER_PAIRING_OPEN, PEER_REVOKE, PEER_SHARES, PEER_START,
+    PEER_STATUS, PairRevision, SHARE_ADD, SHARE_LIST, SHARE_REMOVE,
 };
 use foldover_proto::local::{
     AgentCapability, DAEMON_STATUS, DaemonStatus, Hello, INTERNAL_ERROR, INVALID_PARAMS,
@@ -122,8 +123,12 @@ impl Service {
                 | PEER_CONFIRM
                 | PEER_CANCEL
                 | PEER_REVOKE
+                | PEER_SHARES
         ) {
             return peer::handle(&self.engine, &self.peers, &request).await;
+        }
+        if matches!(request.method(), SHARE_LIST | SHARE_ADD | SHARE_REMOVE) {
+            return share::handle(&self.engine, &request).await;
         }
         if request.method() == HISTORY_LIST {
             return history::handle(&self.engine, &request).await;
@@ -1371,6 +1376,46 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert_eq!(devices[0]["device"], b_device);
+
+        // B shares a folder with A only; A sees it by asking B.
+        let photos = tempfile::tempdir().unwrap();
+        let root = photos.path().as_os_str().as_bytes().to_vec();
+        let shared = call(
+            &b,
+            SHARE_ADD,
+            Some(json!({"device": a_device, "root": root, "name": " Photos "})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(shared["name"], "Photos");
+        let stranger = "ab".repeat(32);
+        let refused = call(
+            &b,
+            SHARE_ADD,
+            Some(json!({"device": stranger, "root": root, "name": "Photos"})),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.code(), PAIR_NOT_FOUND);
+        let b_link = b.peers.get().unwrap();
+        a.peers.get().unwrap().reach(
+            b_device.as_str().unwrap().parse().unwrap(),
+            b_link.address().unwrap(),
+        );
+        let offered = call(&a, PEER_SHARES, Some(json!({"device": b_device})))
+            .await
+            .unwrap();
+        assert_eq!(
+            offered["shares"],
+            json!([{"id": shared["id"], "name": "Photos"}])
+        );
+
+        // Forgetting A ends what B shared with it.
+        call(&b, PEER_REVOKE, Some(json!({"device": a_device})))
+            .await
+            .unwrap();
+        let listed = call(&b, SHARE_LIST, None).await.unwrap();
+        assert_eq!(listed["shares"], json!([]));
 
         // A restarted agent still knows the device.
         drop(a);

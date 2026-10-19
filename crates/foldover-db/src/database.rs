@@ -12,11 +12,13 @@ mod hold;
 mod journal;
 mod mounts;
 mod pause;
+mod share;
 pub use device::DeviceRow;
 pub use history::HistoryRow;
 pub use journal::{JournalChange, JournalRow};
 pub use mounts::MountRow;
 pub use pause::PauseRow;
+pub use share::ShareRow;
 
 const APPLICATION_ID: i64 = 0x464f4c44; // FOLD
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
@@ -29,9 +31,10 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 16] = [
+const MIGRATIONS: [&str; 17] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
     SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, SCHEMA_V15, SCHEMA_V16,
+    SCHEMA_V17,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -223,6 +226,19 @@ CREATE TABLE device (
     name TEXT NOT NULL CHECK(length(trim(name)) > 0 AND instr(name, char(0)) = 0),
     paired_ms INTEGER NOT NULL CHECK(paired_ms >= 0)
 ) STRICT, WITHOUT ROWID;
+";
+
+/// Folders this Mac shares, each with one paired device (ADR 0031);
+/// forgetting the device ends its shares.
+const SCHEMA_V17: &str = "
+CREATE TABLE share (
+    id BLOB PRIMARY KEY NOT NULL CHECK(length(id) = 16 AND id != zeroblob(16)),
+    device BLOB NOT NULL REFERENCES device(id) ON DELETE CASCADE,
+    root BLOB NOT NULL CHECK(length(root) > 0 AND substr(root,1,1) = x'2f' AND instr(root,x'00') = 0),
+    name TEXT NOT NULL CHECK(length(trim(name)) > 0 AND instr(name, char(0)) = 0),
+    created_ms INTEGER NOT NULL CHECK(created_ms >= 0)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX share_device ON share(device);
 ";
 
 #[derive(Debug, thiserror::Error)]
