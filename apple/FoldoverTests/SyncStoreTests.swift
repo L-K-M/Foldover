@@ -789,9 +789,7 @@ func staleCheckAllRepliesCannotOverwriteManuallyStartedJobs() async {
     #expect(store.state(for: pair.id) == .working(.preview, cancelling: false))
 
     // The live poll still owns the pair and lands the real result.
-    while await client.pendingStatusCalls > 0 {
-        await client.reply(.previewed(summary))
-    }
+    await client.finishPolling(.previewed(summary))
     await manual.value
     #expect(store.state(for: pair.id) == .previewed(summary))
 }
@@ -877,9 +875,7 @@ func staleLivePollRepliesCannotRetireANewerJob() async {
     #expect(keptPolling)
 
     // Drain every outstanding request so buggy and fixed paths finish.
-    while await client.pendingStatusCalls > 0 {
-        await client.reply(.previewed(done))
-    }
+    await client.finishPolling(.previewed(done))
     await first.value
     await second.value
     #expect(store.state(for: pair.id) == .previewed(done))
@@ -964,9 +960,7 @@ func cancelledPollersYieldOwnershipToNewerJobs() async {
     #expect(keptPolling)
 
     // Drain every outstanding request so buggy and fixed paths finish.
-    while await client.pendingStatusCalls > 0 {
-        await client.reply(.previewed(done))
-    }
+    await client.finishPolling(.previewed(done))
     await first.value
     await second.value
     #expect(store.state(for: pair.id) == .previewed(done))
@@ -998,9 +992,7 @@ func cancellingTheCallerStopsPollingWithoutCancellingTheJob() async {
     #expect(store.state(for: pair.id) == .working(.preview, cancelling: false))
 
     // A terminal reply ends any poller the buggy path left running.
-    while await client.pendingStatusCalls > 0 {
-        await client.reply(.previewed(done))
-    }
+    await client.finishPolling(.previewed(done))
     await job.value
 }
 
@@ -1037,9 +1029,7 @@ func staleRefreshRepliesCannotOverwriteManuallyStartedJobs() async {
     #expect(keptPolling)
 
     // Drain every outstanding request so buggy and fixed paths finish.
-    while await client.pendingStatusCalls > 0 {
-        await client.reply(.previewed(done))
-    }
+    await client.finishPolling(.previewed(done))
     await manual.value
     #expect(store.state(for: pair.id) == .previewed(done))
 }
@@ -1071,9 +1061,7 @@ func staleRefreshErrorsCannotLandOnANewerJob() async {
     #expect(store.requestError(for: pair.id) == nil)
     #expect(store.state(for: pair.id) == .working(.preview, cancelling: false))
 
-    while await client.pendingStatusCalls > 0 {
-        await client.reply(.previewed(done))
-    }
+    await client.finishPolling(.previewed(done))
     await manual.value
     #expect(store.state(for: pair.id) == .previewed(done))
 }
@@ -1219,9 +1207,7 @@ func startsOwnThePairWhileTheirRequestIsInFlight() async {
 
     // The accepted job polls to its real terminal result.
     #expect(await client.waitForStatusCalls(2, timeout: .seconds(3)))
-    while await client.pendingStatusCalls > 0 {
-        await client.reply(.previewed(done))
-    }
+    await client.finishPolling(.previewed(done))
     await starting.value
     #expect(store.state(for: pair.id) == .previewed(done))
 }
