@@ -37,6 +37,7 @@ private actor CoreAutomationClient: AutomationClient {
 @MainActor
 final class AutomationStore {
     private let client: any AutomationClient
+    private var generation = 0
     private(set) var state: AutomationState = .running
     private(set) var error: String?
 
@@ -46,9 +47,13 @@ final class AutomationStore {
 
     /// A status read is informational: it keeps the last state on
     /// failure and never touches `error`, so a failed pause or resume
-    /// stays reported until the next request answers.
+    /// stays reported until the next request answers. A reply only
+    /// applies when no pause or resume overlapped the read.
     func refresh() async {
-        if let current = try? await client.state() { state = current }
+        generation += 1
+        let request = generation
+        guard let current = try? await client.state(), generation == request else { return }
+        state = current
     }
 
     func pause(minutes: UInt32?) async {
@@ -60,6 +65,10 @@ final class AutomationStore {
     }
 
     private func perform(_ request: @Sendable (any AutomationClient) async throws -> AutomationState) async {
+        generation += 1
+        // Completing an action invalidates reads issued while it was
+        // on the wire, so they cannot overwrite this reply.
+        defer { generation += 1 }
         error = nil
         do {
             state = try await request(client)
