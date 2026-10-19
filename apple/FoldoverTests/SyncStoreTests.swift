@@ -1640,6 +1640,7 @@ func readyChoicesReachTheClientWhileHistoryIsPending() async {
     let client = DeferredSyncClient()
     await client.setPreviewReply(.working(.preview, cancelling: false))
     await client.holdHistoryReplies()
+    await client.holdResolveReplies()
     let store = SyncStore(client: client, pollInterval: .milliseconds(1))
     let pair = pair()
     let starting = Task { await store.preview(pair.id) }
