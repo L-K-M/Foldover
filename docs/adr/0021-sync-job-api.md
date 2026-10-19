@@ -20,10 +20,10 @@ Idle ─start─▶ Working ─▶ Previewed | NeedsApproval | Finished | Failed
 | Method | Parameters | Effect |
 |---|---|---|
 | `sync.preview` | `id` | Start a preview |
-| `sync.run` | `id`, approved deletions per side | Start an interactive run |
+| `sync.run` | `id`, approved deletions per side, optional `review_token` | Start an interactive run |
 | `sync.status` | `id` | Current status; `idle` if none |
 | `sync.cancel` | `id` | Ask the job to stop at the next check |
-| `sync.items` | `id`, `after` path, optional `kind` | The next 100 items of the latest preview, in path order |
+| `sync.items` | `id`, `review_token`, `after` path, optional `kind` | The next 100 items of the latest preview, in path order |
 
 - Starting a job while one is working fails with `SYNC_BUSY` (-32007).
 - Jobs bypass the configuration queue. They lock the engine only to read
@@ -33,19 +33,32 @@ Idle ─start─▶ Working ─▶ Previewed | NeedsApproval | Finished | Failed
   `sync.items` pages through all of a preview's items, optionally of one
   kind (`copy`, `update`, `archive`, `conflict`, `blocked`, `keep`); it
   fails with `PREVIEW_REQUIRED` when the pair has no preview.
+- Every preview carries a `review_token` and the `pair_revision` it was
+  planned for. The token is a deterministic fingerprint of the whole
+  plan — pair, revision, counts and every item — not just the listed
+  page. `sync.run` re-stops with a fresh `NeedsApproval` when a nonzero
+  approval or a presented token does not name the held preview; a
+  matching token with an unchanged plan marks the run reviewed.
+  `sync.resolve` and `sync.items` need the token too and fail with
+  `PREVIEW_REQUIRED` when it is missing or stale, or when the pair's
+  revision moved since the preview.
 - Results stay in agent memory until the pair's next job; an agent restart
   forgets them.
 - `daemon.status` reports the `sync` capability.
 
 The CLI starts a job, polls every 250 ms and prints the final status as one
-JSON line: `foldover sync ID [--preview | --cancel | --approve LEFT RIGHT]`.
-A run that needs approval exits 3; failures and cancellations exit 1.
+JSON line: `foldover sync ID [--preview | --cancel | --approve LEFT RIGHT
+--review TOKEN]`. `--review` is the preview's `review_token`, echoed by a
+stopped run's hint; it is never looked up implicitly. A run that needs
+approval exits 3; failures and cancellations exit 1.
 
 The app's `SyncStore` keeps generated values inside one actor, starts jobs
 and polls every 500 ms while one works. A run that needs approval shows the
-deletion counts; confirming retries with exactly those counts. The retry
-executes only while the plan still equals the preview being confirmed — a
-changed plan stops for review again. Declining keeps the preview visible.
+deletion counts; confirming retries with those counts and the `reviewToken`
+captured with the presented preview — never a token fetched after the user
+confirms. The retry executes only while the plan still equals the preview
+being confirmed — a changed or superseded plan stops for review again.
+Declining keeps the preview visible.
 
 While the app runs, with or without its window, it checks every pair's
 status every 15 seconds. Outcomes of automatic runs that need a person

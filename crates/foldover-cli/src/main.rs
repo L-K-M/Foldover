@@ -4,7 +4,7 @@
 use foldover_client::SyncStatus;
 use foldover_client::{
     Durability, Filters, MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions, PairRoot,
-    Propagation, Schedule, ScheduleInterval, Side, SocketLocation, SyncMode,
+    Propagation, ReviewToken, Schedule, ScheduleInterval, Side, SocketLocation, SyncMode,
 };
 use foldover_proto::local::PairRecord;
 use std::env;
@@ -51,19 +51,25 @@ enum ArchiveCommand {
 
 enum SyncCommand {
     Preview,
-    /// Deletions approved per side beyond the automatic limits.
+    /// Deletions approved per side beyond the automatic limits; `review`
+    /// names the preview being approved.
     Run {
         left: u64,
         right: u64,
+        review: Option<ReviewToken>,
     },
     Cancel,
-    /// Keep one side of a conflict from the latest preview.
+    /// Keep one side of a conflict from the preview `review` names.
     Keep {
         side: Side,
         path: Vec<u8>,
+        review: ReviewToken,
     },
     /// Save B's version of a both-changed conflict beside it; A's wins.
-    KeepBoth(Vec<u8>),
+    KeepBoth {
+        path: Vec<u8>,
+        review: ReviewToken,
+    },
 }
 
 enum PairCommand {
@@ -179,7 +185,7 @@ async fn main() -> ExitCode {
         },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT | --keep-left PATH | --keep-right PATH | --keep-both PATH] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\nLEFT, RIGHT: an absolute path, or sftp://[user@]host[:port]/path\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\nLEFT, RIGHT: an absolute path, or sftp://[user@]host[:port]/path\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -299,11 +305,19 @@ fn pair_command(args: &[OsString]) -> Option<PairCommand> {
 
 fn sync_command(args: &[OsString]) -> Option<SyncCommand> {
     let count = |value: &OsString| value.to_str()?.parse().ok();
+    let review = |args: &[OsString]| match args {
+        [flag, token] if flag == "--review" => token.to_str()?.parse().ok(),
+        _ => None,
+    };
     match args {
-        [] => Some(SyncCommand::Run { left: 0, right: 0 }),
+        [] => Some(SyncCommand::Run {
+            left: 0,
+            right: 0,
+            review: None,
+        }),
         [flag] if flag == "--preview" => Some(SyncCommand::Preview),
         [flag] if flag == "--cancel" => Some(SyncCommand::Cancel),
-        [flag, path] if flag == "--keep-left" || flag == "--keep-right" => {
+        [flag, path, rest @ ..] if flag == "--keep-left" || flag == "--keep-right" => {
             Some(SyncCommand::Keep {
                 side: if flag == "--keep-left" {
                     Side::Left
@@ -311,14 +325,19 @@ fn sync_command(args: &[OsString]) -> Option<SyncCommand> {
                     Side::Right
                 },
                 path: path.as_bytes().to_vec(),
+                review: review(rest)?,
             })
         }
-        [flag, path] if flag == "--keep-both" => {
-            Some(SyncCommand::KeepBoth(path.as_bytes().to_vec()))
-        }
-        [flag, left, right] if flag == "--approve" => Some(SyncCommand::Run {
+        [flag, path, rest @ ..] if flag == "--keep-both" => Some(SyncCommand::KeepBoth {
+            path: path.as_bytes().to_vec(),
+            review: review(rest)?,
+        }),
+        // Approval counts are meaningless without the preview they were
+        // read from: `--review` is required, never looked up implicitly.
+        [flag, left, right, rest @ ..] if flag == "--approve" => Some(SyncCommand::Run {
             left: count(left)?,
             right: count(right)?,
+            review: Some(review(rest)?),
         }),
         _ => None,
     }
@@ -483,14 +502,18 @@ async fn sync(
     }
     let mut status = match command {
         SyncCommand::Preview => foldover_client::start_preview(location, id).await?,
-        SyncCommand::Run { left, right } => {
-            foldover_client::start_run(location, id, left, right).await?
-        }
+        SyncCommand::Run {
+            left,
+            right,
+            review,
+        } => foldover_client::start_run(location, id, left, right, review).await?,
         SyncCommand::Cancel => foldover_client::cancel_sync(location, id).await?,
-        SyncCommand::Keep { side, path } => {
-            foldover_client::resolve_conflict(location, id, &path, side).await?
+        SyncCommand::Keep { side, path, review } => {
+            foldover_client::resolve_conflict(location, id, &path, side, review).await?
         }
-        SyncCommand::KeepBoth(path) => foldover_client::keep_both(location, id, &path).await?,
+        SyncCommand::KeepBoth { path, review } => {
+            foldover_client::keep_both(location, id, &path, review).await?
+        }
     };
     while matches!(status, SyncStatus::Working { .. }) {
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -504,8 +527,8 @@ async fn sync(
         }
         SyncStatus::NeedsApproval { preview } => {
             eprintln!(
-                "foldover: too many deletions to proceed without approval; rerun with --approve {} {}",
-                preview.left.deletions, preview.right.deletions
+                "foldover: review these changes; rerun with --approve {} {} --review {}",
+                preview.left.deletions, preview.right.deletions, preview.review_token
             );
             ExitCode::from(APPROVAL_EXIT)
         }
@@ -731,7 +754,15 @@ mod tests {
         let id = "01010101010101010101010101010101";
         assert!(matches!(
             req(&["sync", id]),
-            Request::Sync(_, _, SyncCommand::Run { left: 0, right: 0 })
+            Request::Sync(
+                _,
+                _,
+                SyncCommand::Run {
+                    left: 0,
+                    right: 0,
+                    review: None
+                }
+            )
         ));
         assert!(matches!(
             req(&["sync", id, "--preview", "--socket", "/tmp/s"]),
@@ -741,23 +772,38 @@ mod tests {
             req(&["sync", id, "--cancel"]),
             Request::Sync(_, _, SyncCommand::Cancel)
         ));
+        let token = "ab".repeat(32);
         assert!(matches!(
-            req(&["sync", id, "--keep-right", "docs/a.txt"]),
-            Request::Sync(_, _, SyncCommand::Keep { side: Side::Right, ref path }) if path == b"docs/a.txt"
+            req(&["sync", id, "--keep-right", "docs/a.txt", "--review", &token]),
+            Request::Sync(_, _, SyncCommand::Keep { side: Side::Right, ref path, .. }) if path == b"docs/a.txt"
         ));
         assert!(matches!(
-            req(&["sync", id, "--keep-both", "a.txt"]),
-            Request::Sync(_, _, SyncCommand::KeepBoth(ref path)) if path == b"a.txt"
+            req(&["sync", id, "--keep-both", "a.txt", "--review", &token]),
+            Request::Sync(_, _, SyncCommand::KeepBoth { ref path, .. }) if path == b"a.txt"
         ));
         assert!(matches!(
-            req(&["sync", id, "--approve", "60", "0"]),
-            Request::Sync(_, _, SyncCommand::Run { left: 60, right: 0 })
+            req(&["sync", id, "--approve", "60", "0", "--review", &token]),
+            Request::Sync(
+                _,
+                _,
+                SyncCommand::Run {
+                    left: 60,
+                    right: 0,
+                    review: Some(_)
+                }
+            )
         ));
+        // An approval or conflict choice without its preview's token is a
+        // usage error: the CLI never looks a token up itself.
         for args in [
             vec!["sync"],
             vec!["sync", "bad"],
             vec!["sync", id, "--approve", "60"],
-            vec!["sync", id, "--approve", "-1", "0"],
+            vec!["sync", id, "--approve", "60", "0"],
+            vec!["sync", id, "--approve", "60", "0", "--review", "zz"],
+            vec!["sync", id, "--approve", "-1", "0", "--review", &token],
+            vec!["sync", id, "--keep-both", "a.txt"],
+            vec!["sync", id, "--keep-left", "a.txt", "--review"],
             vec!["sync", id, "--preview", "--cancel"],
         ] {
             assert!(matches!(req(&args), Request::Usage), "{args:?}");

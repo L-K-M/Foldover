@@ -19,13 +19,20 @@ pub struct SyncKey {
     pub id: String,
 }
 
-/// Deletions the user accepted after a preview, per side.
+/// Deletions the user accepted after a preview, per side. Approving any
+/// deletion — or reviewing a first run that rewrites a target — needs
+/// `review_token` from the `SyncPreview` a person saw (ADR 0013).
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SyncRun {
     pub id: String,
     pub approved_left_deletions: u64,
     pub approved_right_deletions: u64,
+    /// The `review_token` of the preview being approved. An omitted token
+    /// runs only plans that need no review; a stale or foreign one stops
+    /// the run with a fresh `NeedsApproval`.
+    #[serde(default)]
+    pub review_token: Option<String>,
 }
 
 /// Keep one side's version of a conflict from the latest preview; the
@@ -37,6 +44,10 @@ pub struct SyncResolve {
     pub id: String,
     pub path: Vec<u8>,
     pub keep: ConflictKeep,
+    /// The `review_token` of the preview the choice was made from.
+    /// Missing or stale fails with `PREVIEW_REQUIRED`.
+    #[serde(default)]
+    pub review_token: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -130,6 +141,11 @@ pub struct SyncItemQuery {
     pub id: String,
     pub after: Option<Vec<u8>>,
     pub kind: Option<SyncItemKind>,
+    /// The `review_token` of the preview being paged: items are shown only
+    /// for the plan a client holds. Missing or stale fails with
+    /// `PREVIEW_REQUIRED`.
+    #[serde(default)]
+    pub review_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -170,6 +186,14 @@ pub struct SyncPreview {
     pub counts: SyncCounts,
     pub left: SyncDeletions,
     pub right: SyncDeletions,
+    /// Opaque fingerprint of the whole plan — pair, revision and every
+    /// item, not just the listed page. `sync.run`, `sync.resolve` and
+    /// `sync.items` present it back to bind to this exact preview.
+    pub review_token: String,
+    /// The pair revision the plan was built for, so clients can tell a
+    /// preview is obsolete after a configuration change without parsing
+    /// the token.
+    pub pair_revision: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -261,6 +285,8 @@ mod tests {
                 paths: 0,
                 needs_approval: false,
             },
+            review_token: "ab".repeat(32),
+            pair_revision: 1,
         };
         let status = SyncStatus::NeedsApproval { preview };
         assert!(serde_json::to_vec(&status).unwrap().len() < 1024 * 1024);

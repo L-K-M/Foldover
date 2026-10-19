@@ -30,11 +30,14 @@ execute: deletion gate ─▶ archive leftovers
   runs above their limit always stop. A stopped run writes nothing and
   returns the preview.
 - **Confirmation binds to the plan:** the agent keeps each pair's latest
-  preview — its revision and every item's action and versions. A run with
-  a nonzero approval executes only when its freshly planned preview equals
-  that held one; otherwise it stops with the fresh `NeedsApproval` preview,
-  so an approval can never authorize deletions a person did not see.
-  A matching review also marks the run `RunContext::Reviewed`.
+  preview — its revision and every item's action and versions — with the
+  `review_token` fingerprint the wire publishes. A run with a nonzero
+  approval or a presented token executes only when that token names the
+  held preview *and* its freshly planned preview still equals it;
+  otherwise it stops with the fresh `NeedsApproval` preview, so an
+  approval can never authorize deletions a person did not see, even when
+  another client's preview replaced the held plan. A matching review also
+  marks the run `RunContext::Reviewed`.
 - **First run:** while either root lacks a recorded identity, a plan that
   archives or replaces content the target already holds stops for review
   even below the fuse — a non-empty target gets explicit confirmation
@@ -66,8 +69,9 @@ atomic exchange may still need one.
 ## Consequences
 
 - A preview and its run are separate observations. The run re-plans and
-  re-gates; approvals stay counts on the wire, but the service binds them
-  to the held preview by exact equality — a changed plan needs new review.
+  re-gates; approvals stay counts plus an opaque `review_token` on the
+  wire, and the service binds them to the held preview by token and exact
+  equality — a changed or superseded plan needs new review.
 - A first run that only creates files still runs without a prior preview:
   the non-empty-target confirmation covers archiving and overwriting, not
   copies into empty space. Requiring a preview step before every first run

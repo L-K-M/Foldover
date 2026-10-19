@@ -105,8 +105,8 @@ sync you run yourself. `--exclude PATTERN` (repeatable) sets gitignore-style
 rules for files to skip in both folders; a `.foldoverignore` file in either
 folder adds more. `--max-size MEGABYTES` skips larger files in both folders
 and `--max-age DAYS` files unchanged for longer in both (`none` removes
-either limit). Resource forks always
-sync. Changing roots or metadata options resets the pair's sync history.
+either limit). Resource forks are content; SFTP copies fail when they cannot
+preserve them. Changing roots or metadata options resets the pair's sync history.
 `pairs show ID` reads one pair;
 `pairs update ID REVISION NAME LEFT RIGHT MODE [OPTIONS]` requires its current
 revision and keeps options you do not name.
@@ -122,9 +122,9 @@ client does not cancel a committing configuration change.
 ```sh
 foldover sync ID --preview       # list changes; writes nothing
 foldover sync ID                 # run
-foldover sync ID --approve 60 0  # accept up to 60 deletions in A, 0 in B
-foldover sync ID --keep-right PATH  # resolve a previewed conflict with B's version
-foldover sync ID --keep-both PATH   # keep A's version; save B's beside it
+foldover sync ID --approve 60 0 --review TOKEN  # approve the reviewed deletions
+foldover sync ID --keep-right PATH --review TOKEN  # keep B's reviewed version
+foldover sync ID --keep-both PATH --review TOKEN   # keep both reviewed versions
 foldover history ID              # finished runs, newest first
 foldover pause [MINUTES]         # hold automatic syncs; `foldover resume` ends it
 foldover archive ID left         # archived runs in folder A, newest first
@@ -135,7 +135,9 @@ foldover archive ID left RUN --put-back-all
 
 Each command waits for its job and prints the final status as JSON. A run
 stops before writing when it would delete more than the automatic limits
-allow and exits with status 3; rerun with `--approve`. Replaced and removed
+allow and exits with status 3; rerun with `--approve` and the preview's
+`review_token` as `--review TOKEN`. Choices also echo that token. A changed plan
+or configuration requires a fresh review. Replaced and removed
 files go to `.foldover/archive/<run>/` inside the folder where they were
 for 30 days. Put back returns one to its path, or beside it as
 `name (restored).ext` when that path is taken; the next sync copies it

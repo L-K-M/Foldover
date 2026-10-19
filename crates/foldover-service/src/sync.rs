@@ -28,13 +28,15 @@ use foldover_proto::local::{
     SyncItemPage, SyncJob, SyncPreview, SyncResult, SyncStatus,
 };
 use foldover_types::{
-    ChangeKind, ConflictKind, EntryVersion, PairId, Resolution, ScanControl, Side, SyncPath,
+    ChangeKind, ConflictKind, EntryVersion, PairId, Resolution, ReviewToken, ScanControl, Side,
+    SyncPath,
 };
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Work {
     Preview,
-    Run(Approval),
+    /// Interactive run; `ReviewToken` proves which preview the caller saw.
+    Run(Approval, Option<ReviewToken>),
     /// Unattended: stops instead of asking when deletions need approval.
     Scheduled,
 }
@@ -43,7 +45,7 @@ impl Work {
     fn job(self) -> SyncJob {
         match self {
             Self::Preview => SyncJob::Preview,
-            Self::Run(_) | Self::Scheduled => SyncJob::Run,
+            Self::Run(..) | Self::Scheduled => SyncJob::Run,
         }
     }
 }
@@ -56,6 +58,8 @@ type ConflictVersions = (Option<EntryVersion>, Option<EntryVersion>);
 /// approval must match (ADRs 0013, 0020).
 struct Reviewed {
     revision: u64,
+    /// Fingerprint of `plan`; clients present it to bind to this preview.
+    token: ReviewToken,
     versions: HashMap<SyncPath, (ConflictKind, ConflictVersions)>,
     items: Vec<SyncItem>,
     plan: Preview,
@@ -65,6 +69,7 @@ impl Reviewed {
     fn from(preview: &Preview) -> Self {
         Self {
             revision: preview.revision(),
+            token: preview.token(),
             versions: preview
                 .items()
                 .iter()
@@ -124,11 +129,12 @@ impl Jobs {
         id: PairId,
         path: &SyncPath,
         keep: Side,
+        token: Option<ReviewToken>,
     ) -> Result<(), RpcError> {
         let _mutation = self.mutation(id)?;
         #[cfg(test)]
         self.wait_mutation_gate();
-        self.resolve_reviewed(engine, id, path, keep)
+        self.resolve_reviewed(engine, id, path, keep, token)
     }
 
     /// `resolve` with the pair's mutation reservation already held.
@@ -138,8 +144,9 @@ impl Jobs {
         id: PairId,
         path: &SyncPath,
         keep: Side,
+        token: Option<ReviewToken>,
     ) -> Result<(), RpcError> {
-        let (revision, _, (left, right)) = self.conflict(id, path)?;
+        let (revision, _, (left, right)) = self.conflict(id, path, token)?;
         engine
             .lock()
             .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?
@@ -154,11 +161,12 @@ impl Jobs {
         engine: &Mutex<Engine>,
         id: PairId,
         path: &SyncPath,
+        token: Option<ReviewToken>,
     ) -> Result<(), RpcError> {
         let _mutation = self.mutation(id)?;
         #[cfg(test)]
         self.wait_mutation_gate();
-        let (_, kind, (_, right)) = self.conflict(id, path)?;
+        let (revision, kind, (_, right)) = self.conflict(id, path, token)?;
         let (ConflictKind::BothChanged, Some(right)) = (kind, right) else {
             return Err(RpcError::new(
                 INVALID_PARAMS,
@@ -170,6 +178,16 @@ impl Jobs {
             .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?
             .pair(id)
             .map_err(crate::engine_error)?;
+        // The token still matches the held preview after a configuration
+        // change — the review is kept until the next job — so the revision
+        // must be checked before keep-both writes into the new roots. The
+        // reservation already held stops a change racing this copy.
+        if pair.revision() != revision {
+            return Err(RpcError::new(
+                PREVIEW_REQUIRED,
+                "The pair changed since that preview; preview again",
+            ));
+        }
         foldover_engine::keep_both(&pair, path, right, &mut || ScanControl::Continue).map_err(
             |error| match error {
                 KeepBothError::Changed(_) => RpcError::new(PREVIEW_REQUIRED, error.to_string()),
@@ -178,14 +196,17 @@ impl Jobs {
         )?;
         // The reservation is already held: resolve through it, not a
         // second `mutation` call, which would refuse its own marker.
-        self.resolve_reviewed(engine, id, path, Side::Left)
+        self.resolve_reviewed(engine, id, path, Side::Left, token)
     }
 
     /// A conflict from the pair's latest preview, while no job works.
+    /// `token` must name that preview, so a choice cannot follow a newer
+    /// plan the caller never saw.
     fn conflict(
         &self,
         id: PairId,
         path: &SyncPath,
+        token: Option<ReviewToken>,
     ) -> Result<(u64, ConflictKind, ConflictVersions), RpcError> {
         let stale = || {
             RpcError::new(
@@ -202,24 +223,44 @@ impl Jobs {
             ));
         }
         let reviewed = job.reviewed.as_ref().ok_or_else(stale)?;
+        if token != Some(reviewed.token) {
+            return Err(stale());
+        }
         let (kind, versions) = *reviewed.versions.get(path).ok_or_else(stale)?;
         Ok((reviewed.revision, kind, versions))
     }
 
     /// A page of the latest preview's items after `after`, optionally of
-    /// one kind.
+    /// one kind. `token` must name that preview, and the preview must be
+    /// for the pair's current revision; the engine lock is taken before
+    /// the jobs lock, never inside it.
     pub(crate) fn items(
         &self,
+        engine: &Mutex<Engine>,
         id: PairId,
+        token: Option<ReviewToken>,
         after: Option<&[u8]>,
         kind: Option<SyncItemKind>,
     ) -> Result<SyncItemPage, RpcError> {
+        let stale = || RpcError::new(PREVIEW_REQUIRED, "Preview the pair first");
+        let revision = engine
+            .lock()
+            .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?
+            .pair(id)
+            .map_err(crate::engine_error)?
+            .revision();
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let reviewed = state
             .jobs
             .get(&id)
             .and_then(|job| job.reviewed.as_ref())
-            .ok_or_else(|| RpcError::new(PREVIEW_REQUIRED, "Preview the pair first"))?;
+            .ok_or_else(stale)?;
+        if token != Some(reviewed.token) || reviewed.revision != revision {
+            return Err(RpcError::new(
+                PREVIEW_REQUIRED,
+                "The pair changed since that preview; preview again",
+            ));
+        }
         // Items are in path order, so the cursor is a binary search.
         let start = after.map_or(0, |after| {
             reviewed
@@ -384,7 +425,7 @@ impl Jobs {
         id: PairId,
         work: Work,
         cancel: &Arc<AtomicBool>,
-    ) -> Result<Option<Preview>, RpcError> {
+    ) -> Result<Option<Reviewed>, RpcError> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let blocked = if state.mutating.contains(&id) {
             Some("The pair's configuration is changing")
@@ -422,8 +463,7 @@ impl Jobs {
                     reviewed: None,
                 },
             )
-            .and_then(|previous| previous.reviewed)
-            .map(|reviewed| reviewed.plan);
+            .and_then(|previous| previous.reviewed);
         Ok(held)
     }
 
@@ -478,7 +518,7 @@ fn perform(
     id: PairId,
     work: Work,
     cancel: &AtomicBool,
-    held: Option<Preview>,
+    held: Option<Reviewed>,
 ) -> (SyncStatus, Option<Reviewed>) {
     let failed = |message: String| (SyncStatus::Failed { message }, None);
     let stored = match engine.lock() {
@@ -536,13 +576,17 @@ fn perform(
             };
             return (status, Some(Reviewed::from(&planned)));
         }
-        Work::Run(approval) => {
+        Work::Run(approval, token) => {
             let planned = run.preview();
-            // ADR 0013: approval binds to the exact reviewed plan. One that
-            // accepts deletions without matching the held preview stops with
-            // the fresh plan instead of touching either folder.
-            let reviewed = held.as_ref() == Some(&planned);
-            if approval.approves_anything() && !reviewed {
+            // ADR 0013: approval binds to the exact reviewed plan. A run is
+            // reviewed only when the presented token names the held preview
+            // and that plan still equals the fresh one. Any presented token
+            // or nonzero approval without both stops with the fresh plan
+            // instead of touching either folder.
+            let reviewed = held.as_ref().is_some_and(|held| {
+                held.plan == planned && token.is_some_and(|token| token == held.token)
+            });
+            if !reviewed && (token.is_some() || approval.approves_anything()) {
                 return (
                     SyncStatus::NeedsApproval {
                         preview: preview(&planned),
@@ -624,6 +668,8 @@ fn preview(preview: &Preview) -> SyncPreview {
         counts,
         left: deletions(Side::Left),
         right: deletions(Side::Right),
+        review_token: preview.token().to_string(),
+        pair_revision: preview.revision(),
     }
 }
 

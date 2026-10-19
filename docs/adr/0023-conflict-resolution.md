@@ -20,10 +20,13 @@ exactly those versions; otherwise the conflict is reported again.
   archive ([ADR 0020](0020-run-execution.md)).
 - Choices involving a folder are not applied: a folder conflict is
   resolved through the entries inside it, or by hand.
-- `sync.resolve` (`id`, `path`, `keep`) needs the pair's latest preview to
-  contain the conflict; otherwise it fails with `PREVIEW_REQUIRED`
-  (-32008). Applying a choice spends it, and changing the pair's roots or
-  metadata categories discards all choices.
+- `sync.resolve` (`id`, `path`, `keep`, `review_token`) needs the pair's
+  latest preview to contain the conflict, and the token must name that
+  preview — a choice cannot follow a plan another client published after
+  it, and a pair update makes the held preview obsolete before keep-both
+  copies anything. Otherwise it fails with `PREVIEW_REQUIRED` (-32008).
+  Applying a choice spends it, and changing the pair's roots or metadata
+  categories discards all choices.
 - The app shows Keep A and Keep B on file conflicts and previews again
   after a choice. The CLI uses `--keep-left PATH` and `--keep-right PATH`.
 

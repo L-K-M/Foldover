@@ -21,8 +21,8 @@ use foldover_endpoint::{
 };
 use foldover_state::{BaseUpdate, MountSources, RecordedIdentities, SnapshotEntry};
 use foldover_types::{
-    BaselineEntry, ChangeKind, ConflictKind, Durability, EndpointId, EntryDecision, EntryVersion,
-    PairConfig, Resolution, ScanControl, Side, SyncPath,
+    BaselineEntry, ChangeKind, ConflictKind, Durability, EndpointId, EntryContent, EntryDecision,
+    EntryVersion, PairConfig, PairId, Resolution, ReviewToken, ScanControl, Side, SyncPath,
 };
 
 use crate::{
@@ -178,6 +178,7 @@ impl PreviewItem {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Preview {
+    pair: PairId,
     revision: u64,
     items: Vec<PreviewItem>,
     left_deletions: DeletionCounts,
@@ -185,6 +186,11 @@ pub struct Preview {
 }
 
 impl Preview {
+    /// The pair this preview was planned for.
+    pub fn pair(&self) -> PairId {
+        self.pair
+    }
+
     /// The pair revision this preview was planned for.
     pub fn revision(&self) -> u64 {
         self.revision
@@ -200,6 +206,84 @@ impl Preview {
             Side::Left => self.left_deletions,
             Side::Right => self.right_deletions,
         }
+    }
+
+    /// A deterministic fingerprint a client presents back to prove it
+    /// reviewed this exact plan (ADR 0013): the pair, its revision, the
+    /// deletion counts and every item's path, action, both versions and
+    /// bytes — including items beyond a response page. The encoding is
+    /// length-prefixed, so distinct plans cannot collide structurally.
+    pub fn token(&self) -> ReviewToken {
+        fn version(hasher: &mut blake3::Hasher, version: Option<EntryVersion>) {
+            match version {
+                None => {
+                    hasher.update(&[0]);
+                }
+                Some(version) => {
+                    hasher.update(&[1]);
+                    match version.content() {
+                        EntryContent::File(digest) => {
+                            hasher.update(&[0]).update(digest.as_bytes());
+                        }
+                        EntryContent::Directory => {
+                            hasher.update(&[1]);
+                        }
+                        EntryContent::Symlink(digest) => {
+                            hasher.update(&[2]).update(digest.as_bytes());
+                        }
+                    }
+                    hasher.update(version.metadata().as_bytes());
+                }
+            };
+        }
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"foldover:sync-preview:v1\0");
+        hasher.update(self.pair.as_bytes());
+        hasher.update(&self.revision.to_le_bytes());
+        for counts in [self.left_deletions, self.right_deletions] {
+            hasher.update(&counts.paths().to_le_bytes());
+            hasher.update(&counts.deletions().to_le_bytes());
+        }
+        hasher.update(&(self.items.len() as u64).to_le_bytes());
+        for item in &self.items {
+            hasher.update(&(item.path.as_bytes().len() as u64).to_le_bytes());
+            hasher.update(item.path.as_bytes());
+            match item.action {
+                Action::Copy { to, change } => {
+                    hasher.update(&[0]);
+                    hasher.update(&[to as u8]);
+                    hasher.update(&[match change {
+                        ChangeKind::Create => 0,
+                        ChangeKind::ReplaceContent => 1,
+                        ChangeKind::UpdateMetadata => 2,
+                    }]);
+                }
+                Action::Archive { on } => {
+                    hasher.update(&[1]);
+                    hasher.update(&[on as u8]);
+                }
+                Action::Conflict(kind) => {
+                    hasher.update(&[2]);
+                    hasher.update(&[match kind {
+                        ConflictKind::BothChanged => 0,
+                        ConflictKind::DeletedVersusEdited => 1,
+                        ConflictKind::TypeMismatch => 2,
+                        ConflictKind::MetadataOnly => 3,
+                    }]);
+                }
+                Action::Blocked => {
+                    hasher.update(&[3]);
+                }
+                Action::KeepTarget => {
+                    hasher.update(&[4]);
+                }
+            }
+            version(&mut hasher, item.left);
+            version(&mut hasher, item.right);
+            hasher.update(&item.bytes.to_le_bytes());
+        }
+        ReviewToken::from_bytes(*hasher.finalize().as_bytes())
+            .expect("a BLAKE3 digest is not all zero")
     }
 }
 
@@ -549,6 +633,7 @@ impl PairRun {
             })
             .collect();
         Preview {
+            pair: self.pair.id(),
             revision: self.pair.revision(),
             items,
             left_deletions: self.plan.deletions(Side::Left),

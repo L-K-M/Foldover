@@ -562,6 +562,7 @@ dependencies = [
 name = "foldover-engine"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "foldover-endpoint",
  "foldover-host",
  "foldover-state",

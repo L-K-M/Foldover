@@ -29,8 +29,9 @@ use foldover_proto::local::{
     PairRecord, PairUpdate,
 };
 pub use foldover_types::{
-    Durability, Filters, InvalidPair, LocalRoot, MetadataPolicy, PairConfig, PairDraft, PairId,
-    PairOptions, PairRoot, Propagation, Schedule, ScheduleInterval, Side, SyncMode,
+    Durability, Filters, InvalidPair, InvalidReviewToken, LocalRoot, MetadataPolicy, PairConfig,
+    PairDraft, PairId, PairOptions, PairRoot, Propagation, ReviewToken, Schedule, ScheduleInterval,
+    Side, SyncMode,
 };
 use serde_json::Value;
 use serde_json::json;
@@ -52,17 +53,21 @@ pub async fn start_preview(location: &SocketLocation, id: PairId) -> Result<Sync
 }
 
 /// Start a background run that may make at most the approved deletions on
-/// each side beyond the automatic limits.
+/// each side beyond the automatic limits. `review_token` names the
+/// `SyncPreview` a person saw; any approval or presented token that does
+/// not match the held and freshly planned preview stops for review again.
 pub async fn start_run(
     location: &SocketLocation,
     id: PairId,
     approved_left_deletions: u64,
     approved_right_deletions: u64,
+    review_token: Option<ReviewToken>,
 ) -> Result<SyncStatus, Error> {
     let params = SyncRun {
         id: id.to_string(),
         approved_left_deletions,
         approved_right_deletions,
+        review_token: review_token.map(|token| token.to_string()),
     };
     Ok(serde_json::from_value(
         call(location, SYNC_RUN, Some(serde_json::to_value(params)?)).await?,
@@ -74,16 +79,19 @@ pub async fn sync_status(location: &SocketLocation, id: PairId) -> Result<SyncSt
 }
 
 /// Keep one side's version of a conflict in the pair's latest preview.
+/// `review_token` must be that preview's; a stale one fails.
 pub async fn resolve_conflict(
     location: &SocketLocation,
     id: PairId,
     path: &[u8],
     keep: Side,
+    review_token: ReviewToken,
 ) -> Result<SyncStatus, Error> {
     let params = SyncResolve {
         id: id.to_string(),
         path: path.to_vec(),
         keep: keep.into(),
+        review_token: Some(review_token.to_string()),
     };
     Ok(serde_json::from_value(
         call(location, SYNC_RESOLVE, Some(serde_json::to_value(params)?)).await?,
@@ -91,10 +99,11 @@ pub async fn resolve_conflict(
 }
 
 /// A page of the latest preview's items after `after`, optionally of one
-/// kind.
+/// kind. `review_token` must be that preview's; a stale one fails.
 pub async fn sync_items(
     location: &SocketLocation,
     id: PairId,
+    review_token: ReviewToken,
     after: Option<&[u8]>,
     kind: Option<SyncItemKind>,
 ) -> Result<SyncItemPage, Error> {
@@ -102,6 +111,7 @@ pub async fn sync_items(
         id: id.to_string(),
         after: after.map(<[u8]>::to_vec),
         kind,
+        review_token: Some(review_token.to_string()),
     };
     Ok(serde_json::from_value(
         call(location, SYNC_ITEMS, Some(serde_json::to_value(params)?)).await?,
@@ -110,15 +120,18 @@ pub async fn sync_items(
 
 /// Keep both versions of a both-changed conflict in the latest preview:
 /// the right side's is saved beside the entry, the left side's wins.
+/// `review_token` must be that preview's; a stale one fails.
 pub async fn keep_both(
     location: &SocketLocation,
     id: PairId,
     path: &[u8],
+    review_token: ReviewToken,
 ) -> Result<SyncStatus, Error> {
     let params = SyncResolve {
         id: id.to_string(),
         path: path.to_vec(),
         keep: ConflictKeep::Both,
+        review_token: Some(review_token.to_string()),
     };
     Ok(serde_json::from_value(
         call(location, SYNC_RESOLVE, Some(serde_json::to_value(params)?)).await?,

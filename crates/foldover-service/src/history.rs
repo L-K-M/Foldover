@@ -52,7 +52,7 @@ pub(crate) fn record(
 ) {
     let trigger = match work {
         Work::Preview => return,
-        Work::Run(_) => RunTrigger::Manual,
+        Work::Run(..) => RunTrigger::Manual,
         Work::Scheduled => RunTrigger::Scheduled,
     };
     let unwritten = |outcome, message| HistoryEntry {

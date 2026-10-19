@@ -330,12 +330,12 @@ uint64_t uniffi_foldover_ffi_fn_func_sync_cancel(RustBuffer id
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_CHANGES
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_CHANGES
-uint64_t uniffi_foldover_ffi_fn_func_sync_changes(RustBuffer id, RustBuffer after, RustBuffer filter
+uint64_t uniffi_foldover_ffi_fn_func_sync_changes(RustBuffer id, RustBuffer after, RustBuffer filter, RustBuffer review_token
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_KEEP_BOTH
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_KEEP_BOTH
-uint64_t uniffi_foldover_ffi_fn_func_sync_keep_both(RustBuffer id, RustBuffer path
+uint64_t uniffi_foldover_ffi_fn_func_sync_keep_both(RustBuffer id, RustBuffer path, RustBuffer review_token
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_PREVIEW
@@ -345,12 +345,12 @@ uint64_t uniffi_foldover_ffi_fn_func_sync_preview(RustBuffer id
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_RESOLVE
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_RESOLVE
-uint64_t uniffi_foldover_ffi_fn_func_sync_resolve(RustBuffer id, RustBuffer path, RustBuffer keep
+uint64_t uniffi_foldover_ffi_fn_func_sync_resolve(RustBuffer id, RustBuffer path, RustBuffer keep, RustBuffer review_token
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_RUN
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_RUN
-uint64_t uniffi_foldover_ffi_fn_func_sync_run(RustBuffer id, uint64_t approved_left_deletions, uint64_t approved_right_deletions
+uint64_t uniffi_foldover_ffi_fn_func_sync_run(RustBuffer id, uint64_t approved_left_deletions, uint64_t approved_right_deletions, RustBuffer review_token
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_STATUS

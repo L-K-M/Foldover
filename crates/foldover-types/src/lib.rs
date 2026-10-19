@@ -7,6 +7,7 @@ mod metadata_policy;
 mod options;
 mod pair;
 mod reconcile;
+mod review;
 mod root;
 mod sync_path;
 
@@ -18,6 +19,7 @@ pub use pair::{
 pub use endpoint_id::EndpointId;
 pub use metadata_policy::{MetadataPolicy, Propagation};
 pub use options::{Durability, Filters, PairOptions, Schedule, ScheduleInterval};
+pub use review::{InvalidReviewToken, ReviewToken};
 pub use root::{PairRoot, SftpRoot};
 
 pub use reconcile::{

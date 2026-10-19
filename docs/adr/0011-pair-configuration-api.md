@@ -10,7 +10,7 @@ reactor. Validation, catalog checks and persistence share that command. Its
 permit survives a client disconnect until the command finishes. Health requests
 do not acquire the configuration queue or access pair state.
 
-IPC protocol version 3 requires successful `session.hello` negotiation before
+IPC protocol version 4 requires successful `session.hello` negotiation before
 private dispatch. A failed renegotiation closes private access on that connection.
 Installed-code authentication precedes every private request; typed clients
 also authenticate the agent before their handshake and recheck before sending

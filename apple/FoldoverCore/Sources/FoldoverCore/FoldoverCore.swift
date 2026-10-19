@@ -1594,6 +1594,17 @@ public struct SyncPreviewSummary: Equatable, Hashable {
     public var kept: UInt64
     public var left: SyncSideDeletions
     public var right: SyncSideDeletions
+    /**
+     * Fingerprint of the exact preview shown. Capture it with this
+     * summary and present it back to approve, resolve or page — a plan
+     * that changed since stops the call for a fresh review.
+     */
+    public var reviewToken: String
+    /**
+     * The pair revision this preview was planned for; a higher stored
+     * revision means the preview is obsolete.
+     */
+    public var pairRevision: UInt64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1603,7 +1614,16 @@ public struct SyncPreviewSummary: Equatable, Hashable {
          */changes: [SyncChange], 
         /**
          * File data all copies move, in bytes.
-         */copyBytes: UInt64, copies: UInt64, updates: UInt64, archives: UInt64, conflicts: UInt64, blocked: UInt64, kept: UInt64, left: SyncSideDeletions, right: SyncSideDeletions) {
+         */copyBytes: UInt64, copies: UInt64, updates: UInt64, archives: UInt64, conflicts: UInt64, blocked: UInt64, kept: UInt64, left: SyncSideDeletions, right: SyncSideDeletions, 
+        /**
+         * Fingerprint of the exact preview shown. Capture it with this
+         * summary and present it back to approve, resolve or page — a plan
+         * that changed since stops the call for a fresh review.
+         */reviewToken: String, 
+        /**
+         * The pair revision this preview was planned for; a higher stored
+         * revision means the preview is obsolete.
+         */pairRevision: UInt64) {
         self.changes = changes
         self.copyBytes = copyBytes
         self.copies = copies
@@ -1614,6 +1634,8 @@ public struct SyncPreviewSummary: Equatable, Hashable {
         self.kept = kept
         self.left = left
         self.right = right
+        self.reviewToken = reviewToken
+        self.pairRevision = pairRevision
     }
 
     
@@ -1641,7 +1663,9 @@ public struct FfiConverterTypeSyncPreviewSummary: FfiConverterRustBuffer {
                 blocked: FfiConverterUInt64.read(from: &buf), 
                 kept: FfiConverterUInt64.read(from: &buf), 
                 left: FfiConverterTypeSyncSideDeletions.read(from: &buf), 
-                right: FfiConverterTypeSyncSideDeletions.read(from: &buf)
+                right: FfiConverterTypeSyncSideDeletions.read(from: &buf), 
+                reviewToken: FfiConverterString.read(from: &buf), 
+                pairRevision: FfiConverterUInt64.read(from: &buf)
         )
     }
 
@@ -1656,6 +1680,8 @@ public struct FfiConverterTypeSyncPreviewSummary: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.kept, into: &buf)
         FfiConverterTypeSyncSideDeletions.write(value.left, into: &buf)
         FfiConverterTypeSyncSideDeletions.write(value.right, into: &buf)
+        FfiConverterString.write(value.reviewToken, into: &buf)
+        FfiConverterUInt64.write(value.pairRevision, into: &buf)
     }
 }
 
@@ -3552,13 +3578,14 @@ public func syncCancel(id: String)async throws  -> SyncJobState  {
 }
 /**
  * A page of the latest preview's changes after `after`, the last path of
- * the previous page; `filter` keeps one kind.
+ * the previous page; `filter` keeps one kind. `review_token` must be the
+ * token of the preview being paged.
  */
-public func syncChanges(id: String, after: Data?, filter: SyncChangeFilter?)async throws  -> SyncChangePage  {
+public func syncChanges(id: String, after: Data?, filter: SyncChangeFilter?, reviewToken: String)async throws  -> SyncChangePage  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_foldover_ffi_fn_func_sync_changes(FfiConverterString.lower(id),FfiConverterOptionData.lower(after),FfiConverterOptionTypeSyncChangeFilter.lower(filter)
+                uniffi_foldover_ffi_fn_func_sync_changes(FfiConverterString.lower(id),FfiConverterOptionData.lower(after),FfiConverterOptionTypeSyncChangeFilter.lower(filter),FfiConverterString.lower(reviewToken)
                 )
             },
             pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
@@ -3570,13 +3597,14 @@ public func syncChanges(id: String, after: Data?, filter: SyncChangeFilter?)asyn
 }
 /**
  * Keep both versions of a both-changed conflict: Folder B's is saved
- * beside the entry and Folder A's wins at its path.
+ * beside the entry and Folder A's wins at its path. `review_token` must
+ * be the token of the preview the choice was made from.
  */
-public func syncKeepBoth(id: String, path: Data)async throws  -> SyncJobState  {
+public func syncKeepBoth(id: String, path: Data, reviewToken: String)async throws  -> SyncJobState  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_foldover_ffi_fn_func_sync_keep_both(FfiConverterString.lower(id),FfiConverterData.lower(path)
+                uniffi_foldover_ffi_fn_func_sync_keep_both(FfiConverterString.lower(id),FfiConverterData.lower(path),FfiConverterString.lower(reviewToken)
                 )
             },
             pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
@@ -3602,12 +3630,14 @@ public func syncPreview(id: String)async throws  -> SyncJobState  {
 }
 /**
  * Keep one side's version of a conflict from the pair's latest preview.
+ * `review_token` must be the token of the preview the choice was made
+ * from.
  */
-public func syncResolve(id: String, path: Data, keep: SyncSide)async throws  -> SyncJobState  {
+public func syncResolve(id: String, path: Data, keep: SyncSide, reviewToken: String)async throws  -> SyncJobState  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_foldover_ffi_fn_func_sync_resolve(FfiConverterString.lower(id),FfiConverterData.lower(path),FfiConverterTypeSyncSide_lower(keep)
+                uniffi_foldover_ffi_fn_func_sync_resolve(FfiConverterString.lower(id),FfiConverterData.lower(path),FfiConverterTypeSyncSide_lower(keep),FfiConverterString.lower(reviewToken)
                 )
             },
             pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
@@ -3617,11 +3647,15 @@ public func syncResolve(id: String, path: Data, keep: SyncSide)async throws  -> 
             errorHandler: FfiConverterTypeAgentError_lift
         )
 }
-public func syncRun(id: String, approvedLeftDeletions: UInt64, approvedRightDeletions: UInt64)async throws  -> SyncJobState  {
+/**
+ * `review_token` is the `SyncPreviewSummary.review_token` captured with
+ * the approval being confirmed; `None` only for runs that need no review.
+ */
+public func syncRun(id: String, approvedLeftDeletions: UInt64, approvedRightDeletions: UInt64, reviewToken: String?)async throws  -> SyncJobState  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_foldover_ffi_fn_func_sync_run(FfiConverterString.lower(id),FfiConverterUInt64.lower(approvedLeftDeletions),FfiConverterUInt64.lower(approvedRightDeletions)
+                uniffi_foldover_ffi_fn_func_sync_run(FfiConverterString.lower(id),FfiConverterUInt64.lower(approvedLeftDeletions),FfiConverterUInt64.lower(approvedRightDeletions),FfiConverterOptionString.lower(reviewToken)
                 )
             },
             pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
@@ -3709,19 +3743,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_foldover_ffi_checksum_func_sync_cancel() != 20891) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_foldover_ffi_checksum_func_sync_changes() != 48334) {
+    if (uniffi_foldover_ffi_checksum_func_sync_changes() != 62446) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_foldover_ffi_checksum_func_sync_keep_both() != 39119) {
+    if (uniffi_foldover_ffi_checksum_func_sync_keep_both() != 21402) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_sync_preview() != 51120) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_foldover_ffi_checksum_func_sync_resolve() != 3994) {
+    if (uniffi_foldover_ffi_checksum_func_sync_resolve() != 11556) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_foldover_ffi_checksum_func_sync_run() != 11862) {
+    if (uniffi_foldover_ffi_checksum_func_sync_run() != 43269) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_sync_status() != 35739) {

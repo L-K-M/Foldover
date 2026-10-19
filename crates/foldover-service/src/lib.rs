@@ -26,7 +26,7 @@ use foldover_proto::local::{
     ConflictKeep, SYNC_CANCEL, SYNC_ITEMS, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS,
     SyncItemQuery, SyncKey, SyncResolve, SyncRun,
 };
-use foldover_types::{PairDraft, PairId, Side};
+use foldover_types::{PairDraft, PairId, ReviewToken, Side};
 use schedule::Scheduler;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -78,7 +78,14 @@ impl Service {
                 .id
                 .parse::<PairId>()
                 .map_err(|error| RpcError::new(INVALID_PARAMS, error.to_string()))?;
-            return encode(self.jobs.items(id, params.after.as_deref(), params.kind)?);
+            let token = review_token(params.review_token.as_deref())?;
+            return encode(self.jobs.items(
+                &self.engine,
+                id,
+                token,
+                params.after.as_deref(),
+                params.kind,
+            )?);
         }
         if matches!(
             request.method(),
@@ -141,13 +148,14 @@ impl Service {
                 let id = pair(&params.id)?;
                 let path = foldover_types::SyncPath::try_from(params.path)
                     .map_err(|error| RpcError::new(INVALID_PARAMS, error.to_string()))?;
+                let token = review_token(params.review_token.as_deref())?;
                 let (jobs, engine) = (Arc::clone(&self.jobs), Arc::clone(&self.engine));
                 // Resolutions record to the engine and keep-both copies
                 // files; keep them off the runtime.
                 tokio::task::spawn_blocking(move || match params.keep {
-                    ConflictKeep::Left => jobs.resolve(&engine, id, &path, Side::Left),
-                    ConflictKeep::Right => jobs.resolve(&engine, id, &path, Side::Right),
-                    ConflictKeep::Both => jobs.keep_both(&engine, id, &path),
+                    ConflictKeep::Left => jobs.resolve(&engine, id, &path, Side::Left, token),
+                    ConflictKeep::Right => jobs.resolve(&engine, id, &path, Side::Right, token),
+                    ConflictKeep::Both => jobs.keep_both(&engine, id, &path, token),
                 })
                 .await
                 .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))??;
@@ -155,12 +163,13 @@ impl Service {
             }
             SYNC_RUN => {
                 let params: SyncRun = parameters(request)?;
+                let token = review_token(params.review_token.as_deref())?;
                 let approval = Approval::new(
                     params.approved_left_deletions,
                     params.approved_right_deletions,
                 );
                 self.jobs
-                    .start(&self.engine, pair(&params.id)?, Work::Run(approval))?
+                    .start(&self.engine, pair(&params.id)?, Work::Run(approval, token))?
             }
             method => {
                 let id = pair(&parameters::<SyncKey>(request)?.id)?;
@@ -288,6 +297,15 @@ fn expected_revision(revision: u64) -> Result<u64, RpcError> {
         ));
     }
     Ok(revision)
+}
+
+/// Parse a presented review token; a malformed one is a parameter error
+/// before any job or engine work, while `None` is handled by the callee.
+fn review_token(value: Option<&str>) -> Result<Option<ReviewToken>, RpcError> {
+    value
+        .map(|token| token.parse::<ReviewToken>())
+        .transpose()
+        .map_err(|error| RpcError::new(INVALID_PARAMS, error.to_string()))
 }
 
 fn parameters<T: DeserializeOwned>(request: &Request) -> Result<T, RpcError> {
@@ -863,10 +881,11 @@ mod tests {
             .handle(Request::call(4, SYNC_PREVIEW, Some(key.clone())))
             .await
             .unwrap();
-        assert_eq!(
-            settled(&service, &key).await["preview"]["counts"]["conflicts"],
-            1
-        );
+        let previewed = settled(&service, &key).await;
+        assert_eq!(previewed["preview"]["counts"]["conflicts"], 1);
+        // The choice must name the preview it was made from.
+        let mut resolve = resolve.clone();
+        resolve["review_token"] = previewed["preview"]["review_token"].clone();
         service
             .handle(Request::call(5, SYNC_RESOLVE, Some(resolve)))
             .await
@@ -1309,9 +1328,9 @@ mod tests {
             .handle(Request::call(3, SYNC_PREVIEW, Some(key.clone())))
             .await
             .unwrap();
-        settled(&service, &key).await;
+        let previewed = settled(&service, &key).await;
 
-        let both = json!({"id": created["id"], "path": b"text.md", "keep": "both"});
+        let both = json!({"id": created["id"], "path": b"text.md", "keep": "both", "review_token": previewed["preview"]["review_token"]});
         service
             .handle(Request::call(4, SYNC_RESOLVE, Some(both)))
             .await
@@ -1351,14 +1370,13 @@ mod tests {
             fs::write(left.join(format!("file{index:03}")), b"x").unwrap();
         }
         let key = json!({"id": created["id"]});
-        let query =
-            |after: Value, kind: Value| json!({"id": created["id"], "after": after, "kind": kind});
+        let query = |token: &Value, after: Value, kind: Value| json!({"id": created["id"], "after": after, "kind": kind, "review_token": token});
         assert_eq!(
             service
                 .handle(Request::call(
                     2,
                     SYNC_ITEMS,
-                    Some(query(Value::Null, Value::Null))
+                    Some(query(&Value::Null, Value::Null, Value::Null))
                 ))
                 .await
                 .unwrap_err()
@@ -1369,13 +1387,28 @@ mod tests {
             .handle(Request::call(3, SYNC_PREVIEW, Some(key.clone())))
             .await
             .unwrap();
-        settled(&service, &key).await;
+        let previewed = settled(&service, &key).await;
+        let token = previewed["preview"]["review_token"].clone();
+
+        // Paging without the held preview's token is refused.
+        assert_eq!(
+            service
+                .handle(Request::call(
+                    3,
+                    SYNC_ITEMS,
+                    Some(json!({"id": created["id"], "after": null, "kind": null}))
+                ))
+                .await
+                .unwrap_err()
+                .code(),
+            foldover_proto::local::PREVIEW_REQUIRED
+        );
 
         let first = service
             .handle(Request::call(
                 4,
                 SYNC_ITEMS,
-                Some(query(Value::Null, json!("copy"))),
+                Some(query(&token, Value::Null, json!("copy"))),
             ))
             .await
             .unwrap();
@@ -1383,7 +1416,11 @@ mod tests {
         assert_eq!((items.len(), first["more"].clone()), (100, json!(true)));
         let last = items[99]["path"].clone();
         let rest = service
-            .handle(Request::call(5, SYNC_ITEMS, Some(query(last, Value::Null))))
+            .handle(Request::call(
+                5,
+                SYNC_ITEMS,
+                Some(query(&token, last, Value::Null)),
+            ))
             .await
             .unwrap();
         assert_eq!(rest["items"].as_array().unwrap().len(), 50);
@@ -1393,11 +1430,32 @@ mod tests {
             .handle(Request::call(
                 6,
                 SYNC_ITEMS,
-                Some(query(Value::Null, json!("archive"))),
+                Some(query(&token, Value::Null, json!("archive"))),
             ))
             .await
             .unwrap();
         assert_eq!(archives, json!({"items": [], "more": false}));
+
+        // A newer preview of a changed plan replaces the held plan; the
+        // old token pages nothing anymore.
+        fs::write(left.join("file150"), b"x").unwrap();
+        service
+            .handle(Request::call(7, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        settled(&service, &key).await;
+        assert_eq!(
+            service
+                .handle(Request::call(
+                    8,
+                    SYNC_ITEMS,
+                    Some(query(&token, Value::Null, Value::Null))
+                ))
+                .await
+                .unwrap_err()
+                .code(),
+            foldover_proto::local::PREVIEW_REQUIRED
+        );
     }
 
     #[tokio::test]
@@ -1475,6 +1533,8 @@ mod tests {
             counts: SyncCounts::default(),
             left: deletions(),
             right: deletions(),
+            review_token: "ab".repeat(32),
+            pair_revision: 1,
         }
     }
 
@@ -1585,8 +1645,9 @@ mod tests {
             ));
         }
 
-        // A person's run releases the latch and the schedule resumes.
-        let approved = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 10});
+        // A person's run releases the latch and the schedule resumes; the
+        // approval echoes the stopped preview's token.
+        let approved = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 10, "review_token": stopped["preview"]["review_token"]});
         service
             .handle(Request::call(3, SYNC_RUN, Some(approved)))
             .await
@@ -1622,9 +1683,12 @@ mod tests {
         assert_eq!(fs::read(right.join("extra")).unwrap(), b"keep me");
         assert!(!right.join(".foldover/archive").exists());
 
-        // Approving the held, reviewed result runs it.
+        // Approving the held, reviewed result runs it; the token names the
+        // preview the approval was read from.
+        let mut approved = run(1);
+        approved["review_token"] = stopped["preview"]["review_token"].clone();
         service
-            .handle(Request::call(3, SYNC_RUN, Some(run(1))))
+            .handle(Request::call(3, SYNC_RUN, Some(approved)))
             .await
             .unwrap();
         let finished = settled_slow(&service, &key).await;
@@ -1661,9 +1725,12 @@ mod tests {
         assert_eq!(fs::read(right.join("shared")).unwrap(), b"old");
         assert!(!right.join(".foldover/archive").exists());
 
-        // A reviewed retry of the unchanged plan runs it.
+        // A reviewed retry of the unchanged plan runs it; the token from
+        // the presented preview is what makes it reviewed, even at 0/0.
+        let mut reviewed = run.clone();
+        reviewed["review_token"] = stopped["preview"]["review_token"].clone();
         service
-            .handle(Request::call(3, SYNC_RUN, Some(run)))
+            .handle(Request::call(3, SYNC_RUN, Some(reviewed)))
             .await
             .unwrap();
         let finished = settled(&service, &key).await;
@@ -1709,8 +1776,10 @@ mod tests {
             fs::write(left.join(format!("file{index:03}")), b"data").unwrap();
             fs::remove_file(left.join(format!("file{:03}", index + 51))).unwrap();
         }
+        let mut approved = run(51);
+        approved["review_token"] = stopped["preview"]["review_token"].clone();
         service
-            .handle(Request::call(4, SYNC_RUN, Some(run(51))))
+            .handle(Request::call(4, SYNC_RUN, Some(approved)))
             .await
             .unwrap();
         let stopped = settled_slow(&service, &key).await;
@@ -1723,6 +1792,357 @@ mod tests {
             );
         }
         assert!(!right.join(".foldover/archive").exists());
+    }
+
+    #[tokio::test]
+    async fn an_approval_does_not_follow_a_newer_preview() {
+        let (directory, service) = fixture();
+        let input = input(directory.path(), "Docs");
+        let left = directory.path().join("Docs-left");
+        let right = directory.path().join("Docs-right");
+        for index in 1..=102_u32 {
+            fs::write(left.join(format!("file{index:03}")), b"data").unwrap();
+        }
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let run = |right_deletions| json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": right_deletions});
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run(0))))
+            .await
+            .unwrap();
+        assert_eq!(settled_slow(&service, &key).await["state"], "finished");
+
+        // The reviewed plan deletes file001..file051 from the right folder.
+        for index in 1..=51_u32 {
+            fs::remove_file(left.join(format!("file{index:03}"))).unwrap();
+        }
+        service
+            .handle(Request::call(3, SYNC_RUN, Some(run(0))))
+            .await
+            .unwrap();
+        let stopped = settled_slow(&service, &key).await;
+        assert_eq!(stopped["state"], "needsApproval", "{stopped}");
+        assert_eq!(stopped["preview"]["right"]["deletions"], 51);
+
+        // The same count now covers a different set: file052..file102.
+        for index in 1..=51_u32 {
+            fs::write(left.join(format!("file{index:03}")), b"data").unwrap();
+            fs::remove_file(left.join(format!("file{:03}", index + 51))).unwrap();
+        }
+        // A second client's preview replaces the held plan with the new set.
+        service
+            .handle(Request::call(4, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        let previewed = settled_slow(&service, &key).await;
+        assert_eq!(previewed["state"], "previewed", "{previewed}");
+        assert_eq!(previewed["preview"]["right"]["deletions"], 51);
+        // Equal plans have one token; A and B differ, so each client's
+        // token names the plan it actually reviewed.
+        assert_ne!(
+            previewed["preview"]["review_token"],
+            stopped["preview"]["review_token"]
+        );
+
+        // The first client's approval names preview A: it must not follow
+        // the newer preview it never saw, equal deletion counts or not.
+        let mut approved = run(51);
+        approved["review_token"] = stopped["preview"]["review_token"].clone();
+        service
+            .handle(Request::call(5, SYNC_RUN, Some(approved)))
+            .await
+            .unwrap();
+        let stopped = settled_slow(&service, &key).await;
+        assert_eq!(stopped["state"], "needsApproval", "{stopped}");
+        // The unreviewed set must be untouched: nothing was archived.
+        for index in 52..=102_u32 {
+            assert_eq!(
+                fs::read(right.join(format!("file{index:03}"))).unwrap(),
+                b"data"
+            );
+        }
+        assert!(!right.join(".foldover/archive").exists());
+    }
+
+    #[tokio::test]
+    async fn a_review_token_binds_to_its_pair_and_revision() {
+        let (directory, service) = fixture();
+        let first = input(directory.path(), "Docs");
+        let second = input(directory.path(), "Other");
+        let left = directory.path().join("Docs-left");
+        for index in 1..=60_u32 {
+            fs::write(left.join(format!("file{index:03}")), b"data").unwrap();
+        }
+        fs::write(directory.path().join("Other-left/file"), b"data").unwrap();
+        let first_pair = service
+            .handle(Request::call(1, PAIR_CREATE, Some(first.clone())))
+            .await
+            .unwrap();
+        let second_pair = service
+            .handle(Request::call(2, PAIR_CREATE, Some(second)))
+            .await
+            .unwrap();
+        let first_key = json!({"id": first_pair["id"]});
+        let second_key = json!({"id": second_pair["id"]});
+        let run = |id: &Value, right_deletions: u64, token: &Value| json!({"id": id, "approved_left_deletions": 0, "approved_right_deletions": right_deletions, "review_token": token});
+        service
+            .handle(Request::call(
+                3,
+                SYNC_RUN,
+                Some(run(&second_pair["id"], 0, &Value::Null)),
+            ))
+            .await
+            .unwrap();
+        settled(&service, &second_key).await;
+        service
+            .handle(Request::call(
+                3,
+                SYNC_RUN,
+                Some(run(&first_pair["id"], 0, &Value::Null)),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            settled_slow(&service, &first_key).await["state"],
+            "finished"
+        );
+
+        // Deleting 51 of 60 trips the fuse; the stopped run's token names
+        // exactly this pair's reviewed plan.
+        for index in 1..=51_u32 {
+            fs::remove_file(left.join(format!("file{index:03}"))).unwrap();
+        }
+        service
+            .handle(Request::call(
+                4,
+                SYNC_RUN,
+                Some(run(&first_pair["id"], 0, &Value::Null)),
+            ))
+            .await
+            .unwrap();
+        let stopped = settled_slow(&service, &first_key).await;
+        assert_eq!(stopped["state"], "needsApproval", "{stopped}");
+        let token = stopped["preview"]["review_token"].clone();
+        assert_eq!(token.as_str().unwrap().len(), 64);
+
+        // The first pair's token is meaningless for the second pair.
+        service
+            .handle(Request::call(
+                5,
+                SYNC_RUN,
+                Some(run(&second_pair["id"], 0, &token)),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            settled(&service, &second_key).await["state"],
+            "needsApproval"
+        );
+        assert_eq!(
+            fs::read(directory.path().join("Other-right/file")).unwrap(),
+            b"data"
+        );
+
+        // A configuration change makes the held preview obsolete: its token
+        // commits to the revision, so the retry stops for a fresh review.
+        let mut renamed = first.clone();
+        renamed["name"] = json!("Renamed");
+        service
+            .handle(Request::call(
+                6,
+                PAIR_UPDATE,
+                Some(json!({"id": first_pair["id"], "revision": 1, "configuration": renamed})),
+            ))
+            .await
+            .unwrap();
+        service
+            .handle(Request::call(
+                7,
+                SYNC_RUN,
+                Some(run(&first_pair["id"], 51, &token)),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            settled_slow(&service, &first_key).await["state"],
+            "needsApproval"
+        );
+        assert!(
+            !directory
+                .path()
+                .join("Docs-right/.foldover/archive")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_review_tokens_fail_before_any_job_or_page() {
+        let (directory, service) = fixture();
+        let created = service
+            .handle(Request::call(
+                1,
+                PAIR_CREATE,
+                Some(input(directory.path(), "Docs")),
+            ))
+            .await
+            .unwrap();
+        for (method, params) in [
+            (
+                SYNC_RUN,
+                json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 1, "review_token": "nothex"}),
+            ),
+            (
+                SYNC_RUN,
+                json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0, "review_token": "AB".repeat(32)}),
+            ),
+            (
+                SYNC_RESOLVE,
+                json!({"id": created["id"], "path": b"text", "keep": "left", "review_token": "00"}),
+            ),
+            (
+                SYNC_ITEMS,
+                json!({"id": created["id"], "review_token": &"0".repeat(63)}),
+            ),
+        ] {
+            assert_eq!(
+                service
+                    .handle(Request::call(2, method, Some(params)))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                INVALID_PARAMS,
+                "{method}"
+            );
+        }
+    }
+
+    /// Copy a folder's files preserving mtimes, so a pair update can point
+    /// a root at it while its entries keep the previewed versions.
+    fn clone_root(source: &Path, target: &Path) {
+        fs::create_dir(target).unwrap();
+        for entry in fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                continue;
+            }
+            let destination = target.join(entry.file_name());
+            fs::copy(entry.path(), &destination).unwrap();
+            let modified = entry.metadata().unwrap().modified().unwrap();
+            fs::File::open(&destination)
+                .unwrap()
+                .set_modified(modified)
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_keep_both_after_a_configuration_change_writes_nothing() {
+        let (directory, service) = fixture();
+        let (created, token) = conflicted_pair(directory.path(), &service).await;
+        let right = directory.path().join("Both-right");
+        // The new right root holds the same versions: only the revision
+        // check, not the content one, can stop the stale choice.
+        let fresh = directory.path().join("Both-fresh");
+        clone_root(&right, &fresh);
+        let mut moved = input(directory.path(), "Temp");
+        moved["name"] = json!("Both");
+        moved["left_root"] = json!(directory.path().join("Both-left").as_os_str().as_bytes());
+        moved["right_root"] = json!(fresh.as_os_str().as_bytes());
+        service
+            .handle(Request::call(
+                2,
+                PAIR_UPDATE,
+                Some(json!({"id": created["id"], "revision": 1, "configuration": moved})),
+            ))
+            .await
+            .unwrap();
+
+        let both =
+            json!({"id": created["id"], "path": b"text.md", "keep": "both", "review_token": token});
+        assert_eq!(
+            service
+                .handle(Request::call(3, SYNC_RESOLVE, Some(both)))
+                .await
+                .unwrap_err()
+                .code(),
+            foldover_proto::local::PREVIEW_REQUIRED
+        );
+        // Nothing may have been written into the new root.
+        let names: Vec<_> = fs::read_dir(&fresh)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["text.md"], "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn a_resolution_cannot_follow_a_newer_preview() {
+        let (directory, service) = fixture();
+        let (created, token) = conflicted_pair(directory.path(), &service).await;
+        let key = json!({"id": created["id"]});
+        // A second client previews a changed plan; its conflicts differ.
+        fs::write(directory.path().join("Both-right/more"), b"new").unwrap();
+        service
+            .handle(Request::call(4, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        let previewed = settled(&service, &key).await;
+        assert_ne!(previewed["preview"]["review_token"], token);
+
+        let resolve =
+            json!({"id": created["id"], "path": b"text.md", "keep": "left", "review_token": token});
+        assert_eq!(
+            service
+                .handle(Request::call(5, SYNC_RESOLVE, Some(resolve)))
+                .await
+                .unwrap_err()
+                .code(),
+            foldover_proto::local::PREVIEW_REQUIRED
+        );
+        // The newer preview's own token resolves its conflict.
+        let resolve = json!({"id": created["id"], "path": b"text.md", "keep": "left", "review_token": previewed["preview"]["review_token"]});
+        service
+            .handle(Request::call(6, SYNC_RESOLVE, Some(resolve)))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_preview_token_covers_items_beyond_the_first_page() {
+        let (directory, service) = fixture();
+        let pair_input = input(directory.path(), "Many");
+        let left = directory.path().join("Many-left");
+        for index in 0..150_u32 {
+            fs::write(left.join(format!("file{index:03}")), b"x").unwrap();
+        }
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(pair_input)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        service
+            .handle(Request::call(2, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        let first = settled_slow(&service, &key).await;
+        assert_eq!(first["preview"]["items"].as_array().unwrap().len(), 100);
+
+        // A change beyond the response's 100-item page must change the
+        // token: approval cannot bind to a truncated view of the plan.
+        fs::write(left.join("file149"), b"edited").unwrap();
+        service
+            .handle(Request::call(3, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        let second = settled_slow(&service, &key).await;
+        assert_eq!(first["preview"]["items"], second["preview"]["items"]);
+        assert_ne!(
+            first["preview"]["review_token"],
+            second["preview"]["review_token"]
+        );
     }
 
     #[tokio::test]
@@ -2179,7 +2599,8 @@ mod tests {
 
     /// Create a pair, sync `text.md`, edit it on both sides and preview,
     /// leaving a both-changed conflict in the pair's latest preview.
-    async fn conflicted_pair(directory: &Path, service: &Service) -> Value {
+    /// Returns the created pair and the preview's review token.
+    async fn conflicted_pair(directory: &Path, service: &Service) -> (Value, Value) {
         let created = service
             .handle(Request::call(
                 1,
@@ -2203,19 +2624,27 @@ mod tests {
             .handle(Request::call(3, SYNC_PREVIEW, Some(key)))
             .await
             .unwrap();
-        settled(service, &json!({"id": created["id"]})).await;
-        created
+        let previewed = settled(service, &json!({"id": created["id"]})).await;
+        let token = previewed["preview"]["review_token"].clone();
+        (created, token)
     }
 
     // A resolution that passed its conflict check and parks before writing
     // must still own the pair: a claim landing in that window is refused.
-    async fn claim_during_resolution(service: &Service, created: &Value, keep: &str) -> Value {
+    async fn claim_during_resolution(
+        service: &Service,
+        created: &Value,
+        keep: &str,
+        token: &Value,
+    ) -> Value {
         let (reached, release) = service.jobs.gate_mutation();
         let resolving = service.clone();
         let request = Request::call(
             4,
             SYNC_RESOLVE,
-            Some(json!({"id": created["id"], "path": b"text.md", "keep": keep})),
+            Some(
+                json!({"id": created["id"], "path": b"text.md", "keep": keep, "review_token": token}),
+            ),
         );
         let resolver = tokio::spawn(async move { resolving.handle(request).await });
         tokio::task::spawn_blocking(move || reached.recv().unwrap())
@@ -2241,16 +2670,16 @@ mod tests {
     #[tokio::test]
     async fn a_keep_both_in_progress_rejects_new_job_claims() {
         let (directory, service) = fixture();
-        let created = conflicted_pair(directory.path(), &service).await;
-        let status = claim_during_resolution(&service, &created, "both").await;
+        let (created, token) = conflicted_pair(directory.path(), &service).await;
+        let status = claim_during_resolution(&service, &created, "both", &token).await;
         assert_eq!(status["state"], "previewed");
     }
 
     #[tokio::test]
     async fn a_resolve_in_progress_rejects_new_job_claims() {
         let (directory, service) = fixture();
-        let created = conflicted_pair(directory.path(), &service).await;
-        let status = claim_during_resolution(&service, &created, "left").await;
+        let (created, token) = conflicted_pair(directory.path(), &service).await;
+        let status = claim_during_resolution(&service, &created, "left", &token).await;
         assert_eq!(status["state"], "previewed");
     }
 }

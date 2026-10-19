@@ -1,11 +1,19 @@
 //! Sync jobs for Swift: start a preview or run, then poll its state.
 
 use foldover_client::{
-    PairSide, SocketLocation, SyncAction, SyncConflict, SyncDeletions, SyncItemKind, SyncItemPage,
-    SyncJob, SyncPreview, SyncResult, SyncStatus,
+    PairSide, ReviewToken, SocketLocation, SyncAction, SyncConflict, SyncDeletions, SyncItemKind,
+    SyncItemPage, SyncJob, SyncPreview, SyncResult, SyncStatus,
 };
 
 use crate::{AgentError, invalid_configuration};
+
+/// A review token is the hex fingerprint from a `SyncPreviewSummary`;
+/// presenting a malformed one fails before the agent is asked.
+fn parse_review_token(token: &str) -> Result<ReviewToken, AgentError> {
+    token.parse().map_err(|_| AgentError::Request {
+        message: "The review token is not the one shown with a preview".into(),
+    })
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
 pub enum SyncSide {
@@ -60,6 +68,13 @@ pub struct SyncPreviewSummary {
     pub kept: u64,
     pub left: SyncSideDeletions,
     pub right: SyncSideDeletions,
+    /// Fingerprint of the exact preview shown. Capture it with this
+    /// summary and present it back to approve, resolve or page — a plan
+    /// that changed since stops the call for a fresh review.
+    pub review_token: String,
+    /// The pair revision this preview was planned for; a higher stored
+    /// revision means the preview is obsolete.
+    pub pair_revision: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
@@ -119,19 +134,27 @@ pub async fn sync_preview(id: String) -> Result<SyncJobState, AgentError> {
     state(foldover_client::start_preview(&SocketLocation::Default, id).await)
 }
 
+/// `review_token` is the `SyncPreviewSummary.review_token` captured with
+/// the approval being confirmed; `None` only for runs that need no review.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn sync_run(
     id: String,
     approved_left_deletions: u64,
     approved_right_deletions: u64,
+    review_token: Option<String>,
 ) -> Result<SyncJobState, AgentError> {
     let id = id.parse().map_err(invalid_configuration)?;
+    let token = review_token
+        .as_deref()
+        .map(parse_review_token)
+        .transpose()?;
     state(
         foldover_client::start_run(
             &SocketLocation::Default,
             id,
             approved_left_deletions,
             approved_right_deletions,
+            token,
         )
         .await,
     )
@@ -144,14 +167,21 @@ pub async fn sync_status(id: String) -> Result<SyncJobState, AgentError> {
 }
 
 /// Keep one side's version of a conflict from the pair's latest preview.
+/// `review_token` must be the token of the preview the choice was made
+/// from.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn sync_resolve(
     id: String,
     path: Vec<u8>,
     keep: SyncSide,
+    review_token: String,
 ) -> Result<SyncJobState, AgentError> {
     let id = id.parse().map_err(invalid_configuration)?;
-    state(foldover_client::resolve_conflict(&SocketLocation::Default, id, &path, keep.into()).await)
+    let token = parse_review_token(&review_token)?;
+    state(
+        foldover_client::resolve_conflict(&SocketLocation::Default, id, &path, keep.into(), token)
+            .await,
+    )
 }
 
 /// What a change does, for listing one kind at a time.
@@ -173,14 +203,17 @@ pub struct SyncChangePage {
 }
 
 /// A page of the latest preview's changes after `after`, the last path of
-/// the previous page; `filter` keeps one kind.
+/// the previous page; `filter` keeps one kind. `review_token` must be the
+/// token of the preview being paged.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn sync_changes(
     id: String,
     after: Option<Vec<u8>>,
     filter: Option<SyncChangeFilter>,
+    review_token: String,
 ) -> Result<SyncChangePage, AgentError> {
     let id = id.parse().map_err(invalid_configuration)?;
+    let token = parse_review_token(&review_token)?;
     let kind = filter.map(|filter| match filter {
         SyncChangeFilter::Copy => SyncItemKind::Copy,
         SyncChangeFilter::Update => SyncItemKind::Update,
@@ -189,9 +222,10 @@ pub async fn sync_changes(
         SyncChangeFilter::Blocked => SyncItemKind::Blocked,
         SyncChangeFilter::Keep => SyncItemKind::Keep,
     });
-    let page = foldover_client::sync_items(&SocketLocation::Default, id, after.as_deref(), kind)
-        .await
-        .map_err(AgentError::from)?;
+    let page =
+        foldover_client::sync_items(&SocketLocation::Default, id, token, after.as_deref(), kind)
+            .await
+            .map_err(AgentError::from)?;
     Ok(page.into())
 }
 
@@ -213,11 +247,17 @@ impl From<SyncItemPage> for SyncChangePage {
 }
 
 /// Keep both versions of a both-changed conflict: Folder B's is saved
-/// beside the entry and Folder A's wins at its path.
+/// beside the entry and Folder A's wins at its path. `review_token` must
+/// be the token of the preview the choice was made from.
 #[uniffi::export(async_runtime = "tokio")]
-pub async fn sync_keep_both(id: String, path: Vec<u8>) -> Result<SyncJobState, AgentError> {
+pub async fn sync_keep_both(
+    id: String,
+    path: Vec<u8>,
+    review_token: String,
+) -> Result<SyncJobState, AgentError> {
     let id = id.parse().map_err(invalid_configuration)?;
-    state(foldover_client::keep_both(&SocketLocation::Default, id, &path).await)
+    let token = parse_review_token(&review_token)?;
+    state(foldover_client::keep_both(&SocketLocation::Default, id, &path, token).await)
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -279,6 +319,8 @@ impl From<SyncPreview> for SyncPreviewSummary {
             kept: preview.counts.kept,
             left: preview.left.into(),
             right: preview.right.into(),
+            review_token: preview.review_token,
+            pair_revision: preview.pair_revision,
         }
     }
 }
@@ -385,6 +427,8 @@ mod tests {
                 paths: 1,
                 needs_approval: false,
             },
+            review_token: "ab".repeat(32),
+            pair_revision: 7,
         };
         let SyncJobState::NeedsApproval { preview } = SyncStatus::NeedsApproval { preview }.into()
         else {
