@@ -32,8 +32,8 @@ use crate::local::filter::{IGNORE_FILE, IGNORE_FILE_LIMIT, parse_ignore_file};
 use crate::local::version::{Observed, Payload, entry_version, metadata_version};
 use crate::local::{Fingerprint, TEMPORARY_PREFIX, child_path, protected, temporary};
 use crate::{
-    ApplyError, ArchivedItem, ArchivedRun, Filter, NodeKind, Observation, ObserveStep,
-    ObservedEntry, RunScope, ScanError,
+    ApplyError, ArchivedItem, ArchivedRun, Filter, ListedEntry, ListedKind, NodeKind, Observation,
+    ObserveStep, ObservedEntry, RunScope, ScanError,
 };
 
 /// Foldover's own folders and files.
@@ -214,6 +214,52 @@ impl SftpEndpoint {
             .read_dir(&self.root)
             .map(|_| ())
             .map_err(io_error)
+    }
+
+    /// One directory's entries for a quick change check; `None` once the
+    /// directory is gone.
+    pub fn list(
+        &self,
+        directory: Option<&SyncPath>,
+        filter: &Filter,
+    ) -> Result<Option<Vec<ListedEntry>>, ScanError> {
+        let remote = match directory {
+            None => self.root.clone(),
+            Some(path) => self.remote(path.as_bytes()),
+        };
+        let entries = match self.session().read_dir(&remote) {
+            Ok(entries) => entries,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(source) => return Err(at(directory, source)),
+        };
+        let listed = entries
+            .into_iter()
+            .filter(|(name, _)| !protected(name))
+            .filter_map(|(name, attributes)| {
+                let kind = match attributes.kind() {
+                    FileKind::Directory => ListedKind::Directory,
+                    _ => ListedKind::Other,
+                };
+                ListedEntry::kept(
+                    directory,
+                    filter,
+                    name,
+                    kind,
+                    attributes.size.unwrap_or(0),
+                    attributes
+                        .modified()
+                        .map(|seconds| UNIX_EPOCH + Duration::from_secs(u64::from(seconds))),
+                )
+            })
+            .collect();
+        Ok(Some(listed))
     }
 
     /// The identity this root carries, or `None` before its first sync.

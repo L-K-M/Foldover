@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
+mod cursor;
 mod device;
 mod history;
 mod hold;
@@ -14,6 +15,7 @@ mod mounts;
 mod pause;
 mod settings;
 mod share;
+pub use cursor::WatchCursorRow;
 pub use device::DeviceRow;
 pub use history::HistoryRow;
 pub use journal::{JournalChange, JournalRow};
@@ -33,10 +35,10 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary, schedule_time, schedule_days";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 21] = [
+const MIGRATIONS: [&str; 22] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
     SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, SCHEMA_V15, SCHEMA_V16,
-    SCHEMA_V17, SCHEMA_V18, SCHEMA_V19, SCHEMA_V20, SCHEMA_V21,
+    SCHEMA_V17, SCHEMA_V18, SCHEMA_V19, SCHEMA_V20, SCHEMA_V21, SCHEMA_V22,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -330,6 +332,18 @@ INSERT INTO pair_next (id,revision,name,left_root,right_root,mode,modification_t
 DROP TABLE pair;
 ALTER TABLE pair_next RENAME TO pair;
 UPDATE state_meta SET minimum_reader=max(minimum_reader,21) WHERE singleton=1;
+";
+// The file event each pair side's folder had no unsynced change before,
+// for replay when the agent starts (ADR 0002). Older readers ignore it.
+const SCHEMA_V22: &str = "
+CREATE TABLE watch_cursor (
+    pair_id BLOB NOT NULL REFERENCES pair(id) ON DELETE CASCADE,
+    side TEXT NOT NULL CHECK(side IN ('left','right')),
+    root BLOB NOT NULL CHECK(length(root) > 0 AND substr(root,1,1) = x'2f' AND instr(root,x'00') = 0),
+    history TEXT NOT NULL CHECK(length(history) > 0),
+    event INTEGER NOT NULL CHECK(event >= 0),
+    PRIMARY KEY (pair_id, side)
+) STRICT;
 ";
 
 #[derive(Debug, thiserror::Error)]
@@ -1714,7 +1728,8 @@ pub(super) mod tests {
         assert_eq!(minimum_reader(&legacy.connection), legacy_reader);
         drop(legacy);
 
-        // v21, the newest step, raised the floor last.
+        // v21 raised the floor last; v22 only adds a table older readers
+        // ignore.
         let mut database = Database::open(&location).unwrap();
         assert_eq!(minimum_reader(&database.connection), 21);
         assert_eq!(

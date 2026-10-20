@@ -854,6 +854,16 @@ mod tests {
         panic!("A readiness probe did not finish");
     }
 
+    async fn caught_up(service: &Service) {
+        for _ in 0..3_000 {
+            if service.scheduler.caught_up() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("A start-up replay did not finish");
+    }
+
     /// Tick, wait for the probes it dispatched, and tick again so their
     /// results can start runs; returns every pair started.
     async fn run_due_started(service: &Service, at: std::time::Instant) -> Vec<PairId> {
@@ -1151,7 +1161,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changed_pairs_run_once_quiet_and_hourly_without_changes() {
+    async fn changed_pairs_catch_up_then_run_once_quiet_and_hourly() {
         let (directory, service) = fixture();
         let mut input = input(directory.path(), "Live");
         input["options"]["schedule"] = json!({"kind": "onChange"});
@@ -1166,14 +1176,51 @@ mod tests {
         let start = service.scheduler.started();
         let at = |seconds| start + std::time::Duration::from_secs(seconds);
 
+        // Nothing watched the folders before the first tick. Without a
+        // volume history to replay, that counts as a change; the pair runs
+        // once it has been quiet for 10 s.
         assert!(service.run_due(at(10)).is_empty());
-        service.mark_changed(id, at(20));
-        assert!(service.run_due(at(22)).is_empty());
-        assert_eq!(run_due_started(&service, at(26)).await, [id]);
+        caught_up(&service).await;
+        assert_eq!(run_due_started(&service, at(20)).await, [id]);
         settled(&service, &key).await;
+        service.mark_changed(id, at(30));
+        assert!(service.run_due(at(32)).is_empty());
+        assert_eq!(run_due_started(&service, at(40)).await, [id]);
+        settled(&service, &key).await;
+        assert!(service.run_due(at(50)).is_empty());
+        assert_eq!(run_due_started(&service, at(40 + 3_600)).await, [id]);
+        settled(&service, &key).await;
+    }
+
+    #[tokio::test]
+    async fn a_replay_that_finds_nothing_starts_no_run() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Quiet");
+        input["options"]["schedule"] = json!({"kind": "onChange"});
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        let key = json!({"id": created["id"]});
+        first_sync(&service, &key).await;
+        let replayed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        service.scheduler.set_away({
+            let replayed = std::sync::Arc::clone(&replayed);
+            move |pair, _| {
+                assert_eq!(pair.id(), id);
+                replayed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                false
+            }
+        });
+        let start = service.scheduler.started();
+        let at = |seconds| start + std::time::Duration::from_secs(seconds);
+
+        assert!(service.run_due(at(10)).is_empty());
+        caught_up(&service).await;
+        assert!(run_due_started(&service, at(30)).await.is_empty());
         assert!(service.run_due(at(40)).is_empty());
-        assert_eq!(run_due_started(&service, at(26 + 3_600)).await, [id]);
-        settled(&service, &key).await;
+        assert_eq!(replayed.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

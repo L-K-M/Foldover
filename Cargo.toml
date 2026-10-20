@@ -31,7 +31,8 @@ publish = false
 rust-version = "1.99"
 
 # Crates inherit this prohibition except audited macOS bindings in
-# foldover-fs/foldover-os and generated UniFFI in foldover-ffi.
+# foldover-fs/foldover-os/foldover-watch and generated UniFFI in
+# foldover-ffi.
 # Their manifests document the narrower exceptions.
 [workspace.lints.rust]
 unsafe_code = "forbid"

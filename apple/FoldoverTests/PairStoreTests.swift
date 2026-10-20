@@ -264,6 +264,16 @@ func scheduleChoicesKeepAnIntervalSetElsewhere() {
 
 @MainActor
 @Test
+func onlyChangeTriggeredSchedulesSayHowChangesAreNoticed() {
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()))
+    editor.options.schedule = .every(minutes: 30)
+    #expect(editor.scheduleNote == nil)
+    editor.options.schedule = .onChange
+    #expect(editor.scheduleNote?.contains("every 5 minutes") == true)
+}
+
+@MainActor
+@Test
 func dailyScheduleIsEditableInPlace() {
     let store = PairStore(client: PairFixtureClient())
     let editor = PairEditorViewModel(store: store)

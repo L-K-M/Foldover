@@ -104,6 +104,10 @@ struct PairEditorView: View {
                             Text(PairEditorViewModel.scheduleTitle(schedule)).tag(schedule)
                         }
                     }
+                    if let note = viewModel.scheduleNote {
+                        Text(note)
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
                     if viewModel.showsDailySettings {
                         DatePicker("At", selection: $viewModel.dailyTime, displayedComponents: .hourAndMinute)
                         LabeledContent("On") {

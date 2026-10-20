@@ -8,6 +8,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use foldover_types::LocalRoot;
 use foldover_watch::{Change, Watcher};
@@ -89,6 +90,27 @@ impl<K: Clone + Eq + Send + 'static> RootWatcher<K> {
         *self.roots.lock().unwrap_or_else(PoisonError::into_inner) = watched;
         failures
     }
+}
+
+/// Where the system's file event history stands now; `None` where there
+/// is no history.
+pub fn event_now() -> Option<u64> {
+    foldover_watch::current_event()
+}
+
+/// The ID of the event history kept for `root`'s volume; `None` when the
+/// volume keeps none. A saved event is replayed only while this matches.
+pub fn event_history(root: &LocalRoot) -> io::Result<Option<String>> {
+    foldover_watch::history_id(Path::new(OsStr::from_bytes(root.as_bytes())))
+}
+
+/// Whether anything but Foldover's own bookkeeping changed in `root`
+/// after event `since`, by its volume's history. Fails when the history
+/// cannot tell, as on systems without one.
+pub fn changed_since_event(root: &LocalRoot, since: u64, timeout: Duration) -> io::Result<bool> {
+    // Events carry resolved paths, e.g. /private/var for /var.
+    let path = Path::new(OsStr::from_bytes(root.as_bytes())).canonicalize()?;
+    foldover_watch::changed_since(&path, since, timeout, |changed| relevant(&path, changed))
 }
 
 /// A change inside `root` that is not Foldover's own bookkeeping. Scanning

@@ -6,10 +6,14 @@
 //! Events are hints, never truth (PLAN.md §4.8): a change only prompts a
 //! full observation, so a dropped or duplicated event costs time, not data.
 
+mod history;
+
 use std::io;
 use std::path::{Path, PathBuf};
 
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher as _};
+
+pub use history::{changed_since, current_event, history_id};
 
 /// What changed below the watched folders.
 #[derive(Clone, Debug, Eq, PartialEq)]
