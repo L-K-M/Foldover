@@ -9,6 +9,14 @@ Two ways to sync with storage that is not directly attached to your Mac:
 
 ## A network share
 
+### Find a server
+
+The pair editor lists the SMB servers Bonjour finds on your local
+network under "Servers nearby", so you do not need to know an address.
+Connect there opens the server in Finder's Connect to Server; choose a
+shared folder, then pick it under `/Volumes` as below. The same list
+prints as JSON lines with `foldover servers`.
+
 ### Set it up
 
 1. Mount the share in Finder: Go > Connect to Server, for example

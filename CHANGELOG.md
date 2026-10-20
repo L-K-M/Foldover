@@ -18,6 +18,11 @@ All notable changes to this project are documented here. The format follows
 - Guides: what each folder kind can do, setting up NAS shares and SFTP
   servers, and current limitations.
 
+- Servers nearby: the pair editor lists the SMB file servers Bonjour
+  finds on your local network, and Connect opens one in Finder's
+  Connect to Server so you can mount a share and pick it. The same list
+  prints as JSON lines with `foldover servers`.
+
 - Pair two Macs: open pairing on one, connect from the other, and
   confirm the same six-digit code on both (`foldover peers`). Revoking a
   Mac forgets it. Syncing folders between paired Macs comes next.

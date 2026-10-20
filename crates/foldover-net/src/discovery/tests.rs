@@ -66,6 +66,98 @@ fn other_versions_and_malformed_adverts_are_ignored() {
     );
 }
 
+#[test]
+fn a_server_advert_names_the_instance_and_where_smb_connects() {
+    let nas = file_server("NAS._smb._tcp.local.", "nas.local.", 445).unwrap();
+    assert_eq!(
+        nas,
+        FileServer {
+            name: "NAS".into(),
+            host: "nas.local".into(),
+            port: 445,
+        }
+    );
+    // Control characters never reach a display name.
+    let tidy = file_server("Stu\u{1b}[2Jdio._smb._tcp.local.", "studio.local.", 139).unwrap();
+    assert_eq!(tidy.name, "Stu[2Jdio");
+    assert_eq!((tidy.host.as_str(), tidy.port), ("studio.local", 139));
+}
+
+#[test]
+fn malformed_server_adverts_are_ignored() {
+    for (fullname, host, port) in [
+        ("NAS._afpovertcp._tcp.local.", "nas.local.", 445),
+        ("NAS._smb._tcp.local.", "", 445),
+        ("NAS._smb._tcp.local.", "nas.local.", 0),
+        ("._smb._tcp.local.", "nas.local.", 445),
+    ] {
+        assert_eq!(
+            file_server(fullname, host, port),
+            None,
+            "{fullname} {host} {port}"
+        );
+    }
+}
+
+#[test]
+fn servers_replace_stale_resolutions_and_sort_by_name() {
+    let mut seen = BTreeMap::new();
+    record_server(&mut seen, "Zeta._smb._tcp.local.", "zeta.local.", 445);
+    record_server(&mut seen, "Alpha._smb._tcp.local.", "alpha.local.", 445);
+    record_server(&mut seen, "Zeta._smb._tcp.local.", "zeta-two.local.", 139);
+    let servers: Vec<_> = seen.into_values().collect();
+    assert_eq!(
+        servers,
+        [
+            FileServer {
+                name: "Alpha".into(),
+                host: "alpha.local".into(),
+                port: 445,
+            },
+            FileServer {
+                name: "Zeta".into(),
+                host: "zeta-two.local".into(),
+                port: 139,
+            },
+        ]
+    );
+}
+
+/// Live multicast on this host; set FOLDOVER_MDNS_TESTS=1 to run it.
+#[test]
+fn an_advertised_smb_service_is_found() {
+    if std::env::var_os("FOLDOVER_MDNS_TESTS").is_none() {
+        return;
+    }
+    let advertiser = ServiceDaemon::new().unwrap();
+    let service = ServiceInfo::new(
+        SMB_SERVICE,
+        "Foldover Test NAS",
+        "foldover-test-nas.local.",
+        "",
+        445,
+        &[] as &[(&str, &str)],
+    )
+    .unwrap()
+    .enable_addr_auto();
+    advertiser.register(service).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let servers = file_servers(Duration::from_secs(2)).unwrap();
+        if let Some(server) = servers
+            .iter()
+            .find(|server| server.name == "Foldover Test NAS")
+        {
+            assert_eq!(server.host, "foldover-test-nas.local");
+            assert_eq!(server.port, 445);
+            break;
+        }
+        assert!(Instant::now() < deadline, "never seen");
+    }
+    advertiser.shutdown().unwrap();
+}
+
 /// Live multicast on this host; set FOLDOVER_MDNS_TESTS=1 to run it.
 #[test]
 fn two_agents_on_one_network_see_each_other_and_pairing_windows() {

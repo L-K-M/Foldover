@@ -465,6 +465,22 @@ fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
+    typealias FfiType = UInt16
+    typealias SwiftType = UInt16
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt16 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
     typealias FfiType = UInt32
     typealias SwiftType = UInt32
@@ -1437,6 +1453,79 @@ public func FfiConverterTypeNearbyMac_lift(_ buf: RustBuffer) throws -> NearbyMa
 #endif
 public func FfiConverterTypeNearbyMac_lower(_ value: NearbyMac) -> RustBuffer {
     return FfiConverterTypeNearbyMac.lower(value)
+}
+
+
+/**
+ * An SMB file server seen on the local network.
+ */
+public struct NearbyServer: Equatable, Hashable {
+    /**
+     * The server's display name, e.g. "NAS".
+     */
+    public var name: String
+    /**
+     * Where SMB connects, e.g. "nas.local".
+     */
+    public var host: String
+    public var port: UInt16
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The server's display name, e.g. "NAS".
+         */name: String, 
+        /**
+         * Where SMB connects, e.g. "nas.local".
+         */host: String, port: UInt16) {
+        self.name = name
+        self.host = host
+        self.port = port
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NearbyServer: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNearbyServer: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NearbyServer {
+        return
+            try NearbyServer(
+                name: FfiConverterString.read(from: &buf), 
+                host: FfiConverterString.read(from: &buf), 
+                port: FfiConverterUInt16.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NearbyServer, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.host, into: &buf)
+        FfiConverterUInt16.write(value.port, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNearbyServer_lift(_ buf: RustBuffer) throws -> NearbyServer {
+    return try FfiConverterTypeNearbyServer.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNearbyServer_lower(_ value: NearbyServer) -> RustBuffer {
+    return FfiConverterTypeNearbyServer.lower(value)
 }
 
 
@@ -4378,6 +4467,31 @@ fileprivate struct FfiConverterSequenceTypeNearbyMac: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeNearbyServer: FfiConverterRustBuffer {
+    typealias SwiftType = [NearbyServer]
+
+    public static func write(_ value: [NearbyServer], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeNearbyServer.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [NearbyServer] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [NearbyServer]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeNearbyServer.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeOfferedFolder: FfiConverterRustBuffer {
     typealias SwiftType = [OfferedFolder]
 
@@ -5089,6 +5203,24 @@ public func stopSharing(id: String)async throws  -> [SharedFolder]  {
             errorHandler: FfiConverterTypeAgentError_lift
         )
 }
+/**
+ * SMB file servers seen nearby; waits about two seconds while the
+ * agent browses.
+ */
+public func nearbyFileServers()async throws  -> [NearbyServer]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_nearby_file_servers(
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeNearbyServer.lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
 public func syncCancel(id: String)async throws  -> SyncJobState  {
     return
         try  await uniffiRustCallAsync(
@@ -5343,6 +5475,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_stop_sharing() != 48617) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_nearby_file_servers() != 31171) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_sync_cancel() != 20891) {

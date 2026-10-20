@@ -17,6 +17,9 @@ pub use automation::{
 mod history;
 pub use history::{HISTORY_LIST, History, HistoryOutcome, HistoryRecord, HistoryTrigger};
 
+mod network;
+pub use network::{NETWORK_SERVERS, NetworkServer, NetworkServers};
+
 mod peer;
 pub use peer::{
     MAX_PAIRING_MINUTES, PEER_CANCEL, PEER_CONFIRM, PEER_PAIR, PEER_PAIRING_CLOSE,
@@ -47,7 +50,7 @@ pub use pair::{
 };
 
 pub const JSON_RPC_VERSION: &str = "2.0";
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 15;
 pub const SESSION_HELLO: &str = "session.hello";
 pub const DAEMON_STATUS: &str = "daemon.status";
 pub const PARSE_ERROR: i32 = -32700;

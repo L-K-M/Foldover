@@ -456,6 +456,7 @@ private actor CatalogClient: PairClient {
     }
     func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
     func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { [] }
+    func servers() async throws -> [NearbyServer] { [] }
 }
 
 @MainActor

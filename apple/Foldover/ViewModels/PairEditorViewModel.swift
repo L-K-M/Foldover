@@ -36,8 +36,12 @@ final class PairEditorViewModel: Identifiable {
     /// What the agent says will not work as expected with the picked
     /// folders (PLAN.md §3.6); warnings never block saving.
     private(set) var readinessWarnings: [String] = []
+    /// SMB servers found on the local network (PLAN.md §3.8); empty
+    /// until the browse answers.
+    private(set) var nearbyServers: [NearbyServer] = []
     private var checkTask: Task<Void, Never>?
     private var checkGeneration = 0
+    private var serversTask: Task<Void, Never>?
 
     init(store: PairStore, editing: SyncPair? = nil, macs: MacToMacStore? = nil) {
         self.store = store
@@ -49,6 +53,7 @@ final class PairEditorViewModel: Identifiable {
         left = editing?.settings.left
         right = editing?.settings.right
         queueReadinessCheck()
+        serversTask = Task { await refreshNearbyServers() }
     }
 
     var title: String { editing == nil ? String(localized: "New Pair") : String(localized: "Edit Pair") }
@@ -428,6 +433,31 @@ final class PairEditorViewModel: Identifiable {
         }
         errorMessage = nil
         queueReadinessCheck()
+    }
+
+    /// Look for file servers on the local network; the browse waits
+    /// about two seconds. A failed one keeps the last answer: the list
+    /// is advisory, and the SFTP path stays available regardless.
+    func refreshNearbyServers() async {
+        guard let servers = try? await store.nearbyServers() else { return }
+        nearbyServers = servers
+    }
+
+    /// Wait for the browse the editor queued; tests use it.
+    func awaitNearbyServers() async {
+        await serversTask?.value
+    }
+
+    /// SMB's well-known port; Finder's `smb://` URLs omit it.
+    private static let smbDefaultPort: UInt16 = 445
+
+    /// Where Connect takes `server` in Finder: `smb://host`, with the
+    /// port only when it is not the SMB default.
+    func serverURL(_ server: NearbyServer) -> URL? {
+        if server.port == Self.smbDefaultPort {
+            return URL(string: "smb://\(server.host)")
+        }
+        return URL(string: "smb://\(server.host):\(server.port)")
     }
 
     /// Ask the agent what will not work as expected with the picked

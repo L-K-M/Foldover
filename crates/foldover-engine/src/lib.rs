@@ -34,8 +34,9 @@ pub use foldover_state::{
 };
 pub use gates::{DeletionCounts, DeletionReview, InvalidDeletionCounts, RunContext};
 pub use peers::{
-    Answer, Decision, FolderCache, LinkError, NearbyMac, NotRecorded, PeerHost, PeerIdentity,
-    PeerLink, PendingPairing, Presence, computer_name, peer_identity, serve_folder,
+    Answer, Decision, FileServer, FolderCache, LinkError, NearbyMac, NotRecorded, PeerHost,
+    PeerIdentity, PeerLink, PendingPairing, Presence, computer_name, nearby_file_servers,
+    peer_identity, serve_folder,
 };
 pub use plan::{
     CandidateDecision, CandidatePlan, Choices, PlanError, PlanRow, TreeRole, plan_candidates,

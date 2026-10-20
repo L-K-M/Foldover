@@ -30,6 +30,7 @@ use foldover_proto::local::{
     ConflictKeep, SYNC_CANCEL, SYNC_ITEMS, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS,
     SYNC_UNDO, SyncItemQuery, SyncKey, SyncResolve, SyncRun,
 };
+use foldover_proto::local::{NETWORK_SERVERS, NetworkServer, NetworkServers, PEER_UNAVAILABLE};
 use foldover_types::{PairDraft, PairId, ReviewToken, Side};
 use schedule::Scheduler;
 use serde::{Serialize, de::DeserializeOwned};
@@ -100,6 +101,23 @@ impl Service {
             .await
             .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))??;
             return encode(page);
+        }
+        if request.method() == NETWORK_SERVERS {
+            // Browsing takes about two seconds; wait for it off the runtime.
+            let servers = tokio::task::spawn_blocking(foldover_engine::nearby_file_servers)
+                .await
+                .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?
+                .map_err(|error| RpcError::new(PEER_UNAVAILABLE, error.to_string()))?;
+            return encode(NetworkServers {
+                servers: servers
+                    .into_iter()
+                    .map(|server| NetworkServer {
+                        name: server.name,
+                        host: server.host,
+                        port: server.port,
+                    })
+                    .collect(),
+            });
         }
         if matches!(
             request.method(),
@@ -777,6 +795,22 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(hello["core_version"], version());
+    }
+
+    #[tokio::test]
+    async fn network_servers_lists_what_the_network_shows() {
+        // Live multicast on this host; set FOLDOVER_MDNS_TESTS=1 to run it.
+        if std::env::var_os("FOLDOVER_MDNS_TESTS").is_none() {
+            return;
+        }
+        let (_directory, service) = fixture();
+        // Browsing waits about two seconds, and an empty list is the
+        // ordinary answer on a CI network.
+        let listed = service
+            .handle(Request::call(1, NETWORK_SERVERS, None))
+            .await
+            .unwrap();
+        assert!(listed["servers"].is_array(), "{listed}");
     }
 
     #[test]

@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 struct PairEditorView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
     @Bindable var viewModel: PairEditorViewModel
     @State private var choosingSide = PairFolderSide.left
     @State private var choosingFolder = false
@@ -40,6 +41,19 @@ struct PairEditorView: View {
                     Text(warning)
                         .font(.callout).foregroundStyle(.orange)
                         .textSelection(.enabled)
+                }
+                if !viewModel.nearbyServers.isEmpty {
+                    Section("Servers nearby") {
+                        ForEach(viewModel.nearbyServers) { server in
+                            LabeledContent(server.name) {
+                                Button("Connect") {
+                                    if let url = viewModel.serverURL(server) { openURL(url) }
+                                }
+                            }
+                        }
+                        Text("Connect, choose a shared folder in Finder, then pick it here.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
                 }
                 Picker("Mode", selection: $viewModel.mode) {
                     ForEach(PairMode.allCases, id: \.self) { mode in Text(mode.title).tag(mode) }

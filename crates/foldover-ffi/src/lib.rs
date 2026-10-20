@@ -16,6 +16,8 @@ mod history;
 pub use history::*;
 mod peers;
 pub use peers::*;
+mod servers;
+pub use servers::*;
 mod sync;
 pub use sync::*;
 
