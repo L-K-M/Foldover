@@ -560,6 +560,7 @@ dependencies = [
  "foldover-types",
  "foldover-watch",
  "ignore",
+ "proptest",
  "rustix",
  "serde",
  "serde_json",
@@ -667,6 +668,7 @@ name = "foldover-proto"
 version = "0.1.0"
 dependencies = [
  "foldover-types",
+ "proptest",
  "serde",
  "serde_json",
 ]
@@ -705,6 +707,9 @@ dependencies = [
 [[package]]
 name = "foldover-types"
 version = "0.1.0"
+dependencies = [
+ "proptest",
+]
 
 [[package]]
 name = "foldover-watch"

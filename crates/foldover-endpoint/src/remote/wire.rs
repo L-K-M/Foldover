@@ -262,7 +262,28 @@ pub(super) fn scan_error(error: FolderError) -> ScanError {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+
+    proptest! {
+        /// Batches and entries from another Mac never panic the decoder,
+        /// and whatever decodes encodes back to the same bytes.
+        #[test]
+        fn fuzz_entry_batches(bytes in prop::collection::vec(any::<u8>(), 0..1024)) {
+            if let Some(entries) = entries(&bytes) {
+                let mut again = Vec::new();
+                for (path, entry) in &entries {
+                    put_entry(&mut again, path, entry);
+                }
+                prop_assert_eq!(again, bytes.clone());
+            }
+            let _ = entry_from(&bytes);
+            if let Some(version) = version_from(&bytes) {
+                prop_assert_eq!(version_bytes(version), bytes);
+            }
+        }
+    }
 
     #[test]
     fn entry_batches_round_trip_and_reject_truncation() {
