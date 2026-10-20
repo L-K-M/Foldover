@@ -32,6 +32,12 @@ const PERMISSION_BITS: u32 = 0o777;
 const DATABASE_NAME: &str = "state.db";
 const WRITER_LOCK: &str = "writer.lock";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(target_os = "macos")]
+const BACKUP_EXCLUSION: &str = "com.apple.metadata:com_apple_backup_excludeItem";
+/// The binary property list of the string "com.apple.backupd", as
+/// `tmutil addexclusion` writes it.
+#[cfg(target_os = "macos")]
+const EXCLUDED_BY_BACKUPD: &[u8] = b"bplist00_\x10\x11com.apple.backupd\x08\0\0\0\0\0\0\x01\x01\0\0\0\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x1c";
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary, schedule_time, schedule_days";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
@@ -504,7 +510,9 @@ impl Database {
         }
         // SQLite NOFOLLOW also rejects system parent aliases such as macOS /var.
         let directory = fs::canonicalize(directory)?;
-        require_local(&File::open(&directory)?)?;
+        let held = File::open(&directory)?;
+        require_local(&held)?;
+        exclude_from_backups(&held);
         let writer = private_file(&directory.join(WRITER_LOCK))?;
         writer
             .try_lock()
@@ -934,6 +942,28 @@ fn private_file(path: &Path) -> Result<File, Error> {
     Ok(file)
 }
 
+/// Keep Time Machine away from the state (PLAN.md §4.7): a restored
+/// base older than the folders could read their newer files as changes
+/// and their removed ones as deletions to carry over. This is the sticky
+/// exclusion `tmutil addexclusion` sets, so it moves with the folder.
+/// Best effort: the state works either way, so a volume that refuses the
+/// mark does not keep the agent from starting.
+#[cfg(target_os = "macos")]
+fn exclude_from_backups(directory: &File) {
+    if rustix::fs::fgetxattr(directory, BACKUP_EXCLUSION, &mut [0_u8; 0][..]).is_ok() {
+        return;
+    }
+    let _ = rustix::fs::fsetxattr(
+        directory,
+        BACKUP_EXCLUSION,
+        EXCLUDED_BY_BACKUPD,
+        rustix::fs::XattrFlags::empty(),
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+fn exclude_from_backups(_: &File) {}
+
 fn require_local(file: &File) -> Result<(), Error> {
     let filesystem = rustix::fs::fstatfs(file).map_err(io::Error::from)?;
     #[cfg(target_os = "macos")]
@@ -1140,6 +1170,24 @@ pub(super) mod tests {
             database.pair(&saved.id).unwrap().unwrap().values.name,
             "pair"
         );
+    }
+
+    /// PLAN.md §4.7: Time Machine skips the state, by the same mark
+    /// `tmutil addexclusion` leaves.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_state_directory_is_excluded_from_backups() {
+        let (_directory, location) = location();
+        let database = Database::open(&location).unwrap();
+        let held = File::open(database.directory()).unwrap();
+        let mut value = [0_u8; 128];
+        let size = rustix::fs::fgetxattr(&held, BACKUP_EXCLUSION, &mut value).unwrap();
+        assert_eq!(&value[..size], EXCLUDED_BY_BACKUPD);
+        drop(database);
+        // Opening again keeps it.
+        Database::open(&location).unwrap();
+        let size = rustix::fs::fgetxattr(&held, BACKUP_EXCLUSION, &mut value).unwrap();
+        assert_eq!(&value[..size], EXCLUDED_BY_BACKUPD);
     }
 
     #[test]

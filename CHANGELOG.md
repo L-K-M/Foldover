@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Time Machine no longer backs up Foldover's state on this Mac: a
+  restored, older state could carry stale deletions over. A Mac set up
+  from a backup starts without pairs.
+
 ### Added
 
 - "When files change" catches up on changes made while the agent was
