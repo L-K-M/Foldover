@@ -16,6 +16,15 @@
 #   scripts/build.sh --debug        # debug/Debug builds instead of release
 #   scripts/build.sh --clean        # wipe build output first
 #   scripts/build.sh --check        # print resolved config; build nothing
+#   scripts/build.sh --install      # also install what this run built
+#
+# --install replaces /Applications/Foldover.app with the app this run
+# built. A running Foldover is quit first and reopened afterwards, and a
+# loaded background agent is restarted: both pin the installed code at
+# launch and refuse the changed bundle until they restart (ADR 0006).
+# FOLDOVER_APPLICATIONS_DIR installs elsewhere, e.g. ~/Applications.
+# core installs nothing: the app embeds its own agent and CLI, and Linux
+# has no installer yet.
 #
 # Every produced artifact is copied into dist/ at the repo root (one
 # folder with the final outputs), and on macOS dist/ is opened in the
@@ -39,6 +48,7 @@ cd "$ROOT" || exit 1
 PROFILE="release"
 CLEAN=false
 CHECK=false
+INSTALL=false
 declare -a REQUESTED=()
 EXPLICIT=0
 
@@ -54,6 +64,7 @@ while [[ $# -gt 0 ]]; do
     --debug) PROFILE="debug"; shift ;;
     --clean) CLEAN=true; shift ;;
     --check) CHECK=true; shift ;;
+    --install) INSTALL=true; shift ;;
     core|app) REQUESTED+=("$1"); EXPLICIT=1; shift ;;
     all) REQUESTED=(core app); EXPLICIT=1; shift ;;
     *) echo "unknown argument: $1" >&2; usage 1 ;;
@@ -93,6 +104,8 @@ record() { RESULTS+=("$1"); }
 
 DIST="$ROOT/dist"
 STAGED=0
+# Targets this run built, in order; --install acts on these only.
+declare -a BUILT=()
 stage() {
   local src="$1"
   local name="${2:-$(basename "$1")}"
@@ -173,6 +186,7 @@ build_core() {
       record "core: FAILED (staging)"; return 1
     fi
   done
+  BUILT+=(core)
   record "core: built ($PROFILE) -> dist/foldoverd, dist/foldover"
 }
 
@@ -193,6 +207,7 @@ build_app() {
     echo "-- would run: xcodegen generate --spec apple/project.yml"
     echo "-- would run: xcodebuild -project apple/Foldover.xcodeproj -scheme Foldover -configuration $config -derivedDataPath $derived CODE_SIGN_IDENTITY=- build"
     echo "-- would stage: dist/Foldover.app"
+    $INSTALL && echo "-- would install: $APPLICATIONS_DIR/Foldover.app"
     record "app: checked (would build $config)"
     return 0
   fi
@@ -246,7 +261,94 @@ build_app() {
     echo "!! app: failed to stage $built as dist/Foldover.app" >&2
     record "app: FAILED (staging)"; return 1
   fi
+  BUILT+=(app)
   record "app: built ($config) -> dist/Foldover.app"
+}
+
+# ---------------------------------------------------------------------------
+APPLICATIONS_DIR="${FOLDOVER_APPLICATIONS_DIR:-/Applications}"
+AGENT_LABEL="ch.lkmc.foldover.agent"
+APP_QUIT_SECONDS=10
+
+# Wait for the processes matching $1 to exit; non-zero on timeout.
+wait_for_exit() {
+  local pattern="$1" waited=0
+  while pgrep -f "$pattern" >/dev/null; do
+    if [[ $waited -ge $APP_QUIT_SECONDS ]]; then return 1; fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+}
+
+# Replace the installed app with dist/Foldover.app. The copy lands next
+# to the destination first, so the swap is two renames on one volume and
+# a failed copy leaves the installed app untouched.
+install_app() {
+  local dest="$APPLICATIONS_DIR/Foldover.app"
+  local incoming="$APPLICATIONS_DIR/.Foldover.app.incoming"
+  local outgoing="$APPLICATIONS_DIR/.Foldover.app.outgoing"
+  local running="^$dest/Contents/MacOS/Foldover"
+  local agent
+  agent="gui/$(id -u)/$AGENT_LABEL"
+  echo "==> install app"
+
+  echo "-- copying dist/Foldover.app next to $dest"
+  if ! rm -rf "$incoming" "$outgoing" || ! ditto "$DIST/Foldover.app" "$incoming"; then
+    rm -rf "$incoming"
+    echo "!! install app: cannot write $APPLICATIONS_DIR" >&2
+    record "install app: FAILED (cannot write $APPLICATIONS_DIR; FOLDOVER_APPLICATIONS_DIR=~/Applications installs there)"
+    return 1
+  fi
+
+  local reopen=false
+  if pgrep -f "$running" >/dev/null; then
+    echo "-- quitting Foldover"
+    reopen=true
+    pkill -TERM -f "$running"
+    if ! wait_for_exit "$running"; then
+      rm -rf "$incoming"
+      echo "!! install app: Foldover did not quit within ${APP_QUIT_SECONDS}s" >&2
+      record "install app: FAILED (Foldover did not quit; quit it and rerun)"
+      return 1
+    fi
+  fi
+
+  if [[ -e "$dest" ]] && ! mv "$dest" "$outgoing"; then
+    rm -rf "$incoming"
+    record "install app: FAILED (cannot move the installed app aside)"
+    return 1
+  fi
+  if ! mv "$incoming" "$dest"; then
+    [[ -e "$outgoing" ]] && mv "$outgoing" "$dest"
+    record "install app: FAILED (cannot move the new app into place)"
+    return 1
+  fi
+  rm -rf "$outgoing"
+  echo "-- installed $dest"
+
+  # Only an agent the user enabled is restarted; enabling stays a choice
+  # made in the app.
+  if launchctl print "$agent" >/dev/null 2>&1; then
+    echo "-- restarting the background agent"
+    if ! launchctl kickstart -k "$agent"; then
+      echo "!! install app: the background agent did not restart" >&2
+      record "install app: FAILED (installed $dest, but the agent did not restart; choose Enable Background Agent in Foldover)"
+      return 1
+    fi
+  fi
+
+  if $reopen; then
+    echo "-- reopening Foldover"
+    open "$dest"
+  fi
+  record "install app: ok ($dest)"
+}
+
+install_core() {
+  local reason="Foldover.app embeds its own agent and CLI"
+  [[ "$HOST" == "macos" ]] || reason="no $HOST installer yet; run dist/foldoverd and dist/foldover"
+  echo ".. install core: skipped - $reason"
+  record "install core: skipped ($reason)"
 }
 
 # ---------------------------------------------------------------------------
@@ -258,6 +360,16 @@ for target in "${REQUESTED[@]}"; do
   esac
   echo
 done
+
+if $INSTALL; then
+  for target in ${BUILT[@]+"${BUILT[@]}"}; do
+    case "$target" in
+      core) install_core ;;
+      app) install_app || FAILED=1 ;;
+    esac
+    echo
+  done
+fi
 
 echo "Summary"
 for line in "${RESULTS[@]}"; do echo "  $line"; done

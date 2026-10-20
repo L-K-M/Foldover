@@ -81,6 +81,9 @@ jobs:
       - name: shellcheck scripts/*.sh
         run: shellcheck scripts/*.sh
 
+      - name: build.sh --install against a fake macOS toolchain
+        run: bash scripts/test-build-install.sh
+
   # Links, anchors, fences and tables in every tracked Markdown file, plus
   # every Mermaid diagram (tools/doccheck).
   docs:
