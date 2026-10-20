@@ -127,7 +127,7 @@ impl Drop for Borrowed<'_> {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -142,7 +142,7 @@ mod tests {
             .find(|path| path.exists())
     }
 
-    fn spawn(server: &PathBuf) -> io::Result<Session> {
+    fn spawn(server: &Path) -> io::Result<Session> {
         Session::spawn(server, &[OsStr::new("-d"), OsStr::new("/")])
     }
 
