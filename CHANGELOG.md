@@ -15,6 +15,13 @@ All notable changes to this project are documented here. The format follows
   confirm the same six-digit code on both (`foldover peers`). Revoking a
   Mac forgets it. Syncing folders between paired Macs comes next.
 
+- Readiness warnings while you edit a pair (also `foldover pairs
+  check`): a folder another sync engine manages (iCloud Drive, Desktop &
+  Documents in iCloud, or a provider folder such as Dropbox), a side
+  that cannot keep the extended attributes you chose to sync, and two
+  sides that compare names differently, one ignoring case and one exact.
+  Warnings never block saving.
+
 - Pair two Macs: open pairing on one, pick it on the other from the Macs
   found on your network, and confirm the same six-digit code on both
   (Settings › Mac-to-Mac, or `foldover peers`). Share folders with a

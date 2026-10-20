@@ -32,6 +32,7 @@ private actor OnePairClient: PairClient {
     func create(_ settings: PairSettings) async throws -> SyncPair { pair }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { pair }
     func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
+    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { [] }
 }
 
 /// Every run finishes at once having copied two files.
@@ -98,6 +99,7 @@ private actor EmptyCatalogClient: PairClient {
     }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { pair }
     func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
+    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { [] }
 }
 
 private enum MonitorFixtureError: Error { case unreachable }
@@ -187,6 +189,7 @@ private actor CatalogProbe: PairClient {
     func remove(_ pair: SyncPair) async throws -> SyncPair {
         throw MonitorFixtureError.unreachable
     }
+    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { [] }
 
     func calls() async -> Int { await probe.count }
 }

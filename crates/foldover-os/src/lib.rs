@@ -1,10 +1,12 @@
 //! `foldover-os` — driver layer. Host facilities: power assertions,
-//! network path (expensive/constrained), Keychain and Secret Service.
-//! Calls the OS directly; depends on no other Foldover crate. See
-//! PLAN.md §4.4.
+//! network path (expensive/constrained), Keychain and Secret Service,
+//! cloud-managed folder detection. Calls the OS directly; depends on no
+//! other Foldover crate. See PLAN.md §4.4.
 
+mod cloud;
 mod peer_identity;
 
+pub use cloud::{CloudProvider, cloud_provider, current_cloud_provider};
 pub use peer_identity::{IdentityStoreError, PeerIdentityStore};
 
 #[cfg(target_os = "macos")]

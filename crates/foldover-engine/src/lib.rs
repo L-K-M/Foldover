@@ -41,7 +41,7 @@ pub use plan::{
     CandidateDecision, CandidatePlan, Choices, PlanError, PlanRow, TreeRole, plan_candidates,
     plan_resolved,
 };
-pub use readiness::{missing_side, reconnect};
+pub use readiness::{ReadinessWarning, missing_side, reconnect};
 pub use reconcile::reconcile_entry;
 pub use run::{
     Action, Approval, Commit, Completion, Failure, NoProgress, PairRun, Preview, PreviewItem,
