@@ -1,0 +1,177 @@
+//! Names in another Unicode normalization (PLAN.md §4.10). SFTP servers
+//! match names byte for byte, so Foldover writes new names there composed
+//! (NFC), as Linux and Windows expect, and finds an entry by any spelling
+//! that composes alike, as macOS volumes do. The folder therefore counts
+//! as ignoring normalization, and the engine maps the spelling it reads
+//! back to the one the pair knows (ADR 0030).
+//!
+//! ```text
+//! pair path   café (decomposed, from an HFS+ disk)
+//! written     café (composed)
+//! looked up   as given ──missing──▶ each component as given, composed
+//!                                   or decomposed, whichever exists
+//! ```
+//!
+//! A name with a single spelling, such as any ASCII name, is looked up
+//! once, as before.
+
+use std::io;
+
+use foldover_net::sftp::Attributes;
+use foldover_types::SyncPath;
+use unicode_normalization::UnicodeNormalization;
+
+use super::SftpEndpoint;
+use crate::ScanError;
+
+impl SftpEndpoint {
+    /// Run `op` on where `path` is stored: as given, or in another
+    /// spelling when that is missing.
+    pub(super) fn on_stored<T>(
+        &self,
+        path: &[u8],
+        op: impl Fn(&[u8]) -> io::Result<T>,
+    ) -> io::Result<T> {
+        let given = self.remote(path);
+        match op(&given) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound && respellable(path) => {
+                match self.respelled(path) {
+                    Some(stored) => op(&stored),
+                    None => Err(error),
+                }
+            }
+            result => result,
+        }
+    }
+
+    /// The entry at `path` and where it is stored, or `None`.
+    pub(super) fn lookup(
+        &self,
+        path: &SyncPath,
+    ) -> Result<Option<(Vec<u8>, Attributes)>, ScanError> {
+        let found = self.on_stored(path.as_bytes(), |remote| {
+            self.session()
+                .lstat(remote)
+                .map(|attributes| (remote.to_vec(), attributes))
+        });
+        match found {
+            Ok(found) => Ok(Some(found)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(super::at(Some(path), error)),
+        }
+    }
+
+    /// Where a new entry at `path` goes: in its parent as stored, under
+    /// its composed name.
+    pub(super) fn fresh(&self, path: &[u8]) -> Vec<u8> {
+        let (parent, name) = split(path);
+        join(&self.directory(parent), &compose(name))
+    }
+
+    /// A new temporary's server path in `path`'s parent as stored.
+    pub(super) fn beside(&self, path: &[u8]) -> Vec<u8> {
+        let (parent, _) = split(path);
+        join(&self.directory(parent), &super::temporary_name())
+    }
+
+    /// The folder `parent` as stored; the root for `None`. A folder
+    /// missing in every spelling keeps the spelling given.
+    fn directory(&self, parent: Option<&[u8]>) -> Vec<u8> {
+        let Some(parent) = parent else {
+            return self.root.clone();
+        };
+        if !respellable(parent) {
+            return self.remote(parent);
+        }
+        self.on_stored(parent, |remote| {
+            self.session().lstat(remote).map(|_| remote.to_vec())
+        })
+        .unwrap_or_else(|_| self.remote(parent))
+    }
+
+    /// `path` with each component in the spelling that exists, or `None`
+    /// when one exists in none or the result is `path` itself.
+    fn respelled(&self, path: &[u8]) -> Option<Vec<u8>> {
+        let mut session = self.session();
+        let mut stored = self.root.clone();
+        for component in path.split(|byte| *byte == b'/') {
+            stored = spellings(component)
+                .into_iter()
+                .map(|spelling| join(&stored, &spelling))
+                .find(|candidate| session.lstat(candidate).is_ok())?;
+        }
+        (stored != self.remote(path)).then_some(stored)
+    }
+}
+
+/// Whether `path` has a spelling in another normalization.
+fn respellable(path: &[u8]) -> bool {
+    if path.is_ascii() {
+        return false;
+    }
+    let Ok(text) = std::str::from_utf8(path) else {
+        return false;
+    };
+    !unicode_normalization::is_nfc(text) || !unicode_normalization::is_nfd(text)
+}
+
+/// `name` composed; bytes that are not UTF-8 stay as they are.
+pub(super) fn compose(name: &[u8]) -> Vec<u8> {
+    match std::str::from_utf8(name) {
+        Ok(text) => text.nfc().collect::<String>().into_bytes(),
+        Err(_) => name.to_vec(),
+    }
+}
+
+/// `component` as given, composed and decomposed, without repeats.
+fn spellings(component: &[u8]) -> Vec<Vec<u8>> {
+    let mut spellings = vec![component.to_vec()];
+    if let Ok(text) = std::str::from_utf8(component) {
+        for spelling in [
+            text.nfc().collect::<String>(),
+            text.nfd().collect::<String>(),
+        ] {
+            if !spellings.contains(&spelling.as_bytes().to_vec()) {
+                spellings.push(spelling.into_bytes());
+            }
+        }
+    }
+    spellings
+}
+
+fn split(path: &[u8]) -> (Option<&[u8]>, &[u8]) {
+    match path.iter().rposition(|byte| *byte == b'/') {
+        Some(slash) => (Some(&path[..slash]), &path[slash + 1..]),
+        None => (None, path),
+    }
+}
+
+/// `name` inside the server folder `directory`.
+fn join(directory: &[u8], name: &[u8]) -> Vec<u8> {
+    if directory.ends_with(b"/") {
+        return [directory, name].concat();
+    }
+    [directory, b"/".as_slice(), name].concat()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_names_with_another_normalization_are_respelled() {
+        assert!(!respellable(b"docs/report.txt"));
+        assert!(!respellable(b"\xff"));
+        assert!(respellable("caf\u{e9}".as_bytes()));
+        assert!(respellable("cafe\u{301}".as_bytes()));
+        // A character without a decomposition has one spelling.
+        assert!(!respellable("\u{4e2d}".as_bytes()));
+        assert_eq!(compose("cafe\u{301}".as_bytes()), "caf\u{e9}".as_bytes());
+        assert_eq!(
+            spellings("cafe\u{301}".as_bytes()),
+            ["cafe\u{301}".as_bytes(), "caf\u{e9}".as_bytes()]
+        );
+        assert_eq!(join(b"/", b"a"), b"/a");
+        assert_eq!(join(b"/srv", b"a"), b"/srv/a");
+    }
+}

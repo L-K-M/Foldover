@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Names reach SFTP servers in composed Unicode (NFC), as Linux and
+  Windows expect, even from a disk that stores them decomposed, and
+  Foldover finds a server's file in either spelling.
+
 - A Backup can go to a folder that cannot hold Foldover's `.foldover`
   folder, such as a share that refuses names starting with a dot, once
   you choose to keep nothing there: files replaced in it are deleted,

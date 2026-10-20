@@ -2,7 +2,8 @@
 //! fast enough for many thousands of seeded histories, and able to act
 //! like the file systems Foldover meets. Quirks a folder can have:
 //!
-//! - names that ignore case, or that it stores decomposed (NFD);
+//! - names that ignore case, or that it stores decomposed (NFD), or
+//!   composed (NFC) as Foldover writes to SFTP servers;
 //! - modification times kept only to a coarse resolution, as on FAT;
 //! - replacing a file in two steps (old out, new in) instead of one swap,
 //!   as on plain SFTP servers;
@@ -83,6 +84,8 @@ pub enum NameStorage {
     AsGiven,
     /// Unicode decomposed, as HFS+ does.
     Decomposed,
+    /// Unicode composed, as Foldover writes to SFTP servers.
+    Composed,
 }
 
 /// How a folder replaces an existing file.
@@ -856,6 +859,10 @@ impl Folder {
             NameStorage::AsGiven => name.to_vec(),
             NameStorage::Decomposed => match std::str::from_utf8(name) {
                 Ok(text) => text.nfd().collect::<String>().into_bytes(),
+                Err(_) => name.to_vec(),
+            },
+            NameStorage::Composed => match std::str::from_utf8(name) {
+                Ok(text) => text.nfc().collect::<String>().into_bytes(),
                 Err(_) => name.to_vec(),
             },
         };

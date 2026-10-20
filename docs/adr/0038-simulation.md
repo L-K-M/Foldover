@@ -42,7 +42,7 @@ on. Each simulated folder draws its file system:
 
 | Quirk | Choices |
 |---|---|
-| Names | byte-exact; case ignored (APFS); case ignored and stored decomposed (HFS+) |
+| Names | byte-exact; case ignored (APFS); case ignored and stored decomposed (HFS+); case kept and stored composed (SFTP, ADR 0041) |
 | Modification times | exact; 2-second resolution (FAT) |
 | Replace | one swap; two steps, old out before new in (plain SFTP) |
 | Size | unlimited; a capacity in a dedicated test |

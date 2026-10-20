@@ -11,8 +11,8 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime};
 
 use foldover_types::{
-    Durability, EndpointId, EntryVersion, MetadataPolicy, NameMatching, PairOptions, PairRoot,
-    ScanControl, SyncPath,
+    CaseMatching, Durability, EndpointId, EntryVersion, MetadataPolicy, NameMatching, PairOptions,
+    PairRoot, ScanControl, SyncPath, UnicodeMatching,
 };
 
 use crate::lease::LockFile;
@@ -204,12 +204,14 @@ impl Endpoint {
         }
     }
 
-    /// How this folder's filesystem compares names. SFTP servers are
-    /// assumed to match names byte for byte, as Linux filesystems do.
+    /// How this folder's filesystem compares names. SFTP servers match
+    /// bytes, as Linux filesystems do, but Foldover writes new names there
+    /// composed and finds an entry in any spelling (PLAN.md §4.10): case
+    /// counts there, normalization does not.
     pub fn name_matching(&self) -> NameMatching {
         match self {
             Self::Local(endpoint) => endpoint.name_matching(),
-            Self::Sftp(_) => NameMatching::EXACT,
+            Self::Sftp(_) => NameMatching::new(CaseMatching::Exact, UnicodeMatching::Normalized),
             Self::Peer(endpoint) => endpoint.name_matching(),
             #[cfg(feature = "simulation")]
             Self::Memory(endpoint) => endpoint.name_matching(),

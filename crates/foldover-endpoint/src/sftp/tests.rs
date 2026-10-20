@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use foldover_net::sftp::Session;
-use foldover_types::{Durability, PairOptions};
+use foldover_types::{CaseMatching, Durability, NameMatching, PairOptions, UnicodeMatching};
 
 use super::*;
 use crate::{Endpoint, Expected, Filter, LocalEndpoint};
@@ -533,6 +533,110 @@ fn copies_both_ways_keep_content_and_archive_what_they_replace() {
         fs::read(remote_directory.path().join("docs/a.txt")).unwrap(),
         b"edited meanwhile"
     );
+}
+
+/// PLAN.md §4.10: names reach the server composed, and entries are
+/// found by any spelling, whichever the server holds.
+#[test]
+fn decomposed_names_are_written_composed_and_found_in_either_spelling() {
+    let local_directory = tempfile::tempdir().unwrap();
+    let remote_directory = tempfile::tempdir().unwrap();
+    let Some(remote) = remote(remote_directory.path()) else {
+        return;
+    };
+    assert_eq!(
+        remote.name_matching(),
+        NameMatching::new(CaseMatching::Exact, UnicodeMatching::Normalized)
+    );
+    let local = Endpoint::Local(LocalEndpoint::open(local_directory.path()).unwrap());
+    let options = PairOptions::default();
+    let policy = options.metadata();
+    let run = RunScope::new(UNIX_EPOCH, options.clone());
+    let observe = |endpoint: &Endpoint| {
+        endpoint
+            .observe_from(
+                policy,
+                &Filter::none(),
+                &std::collections::BTreeMap::new(),
+                &mut proceed,
+                &mut |_| {},
+            )
+            .unwrap()
+    };
+    let (folder, file) = ("cafe\u{301}", "cafe\u{301}/re\u{301}sume\u{301}.txt");
+    let composed_file = "caf\u{e9}/r\u{e9}sum\u{e9}.txt";
+    fs::create_dir(local_directory.path().join(folder)).unwrap();
+    fs::write(local_directory.path().join(file), b"first").unwrap();
+
+    let here = observe(&local);
+    for name in [folder, file] {
+        let name = path(name.as_bytes());
+        remote
+            .copy_from(
+                &local,
+                &name,
+                &here.entries()[&name],
+                Expected::Absent,
+                &run,
+                &mut proceed,
+            )
+            .unwrap();
+    }
+    let names = |directory: &Path| {
+        let mut names: Vec<String> = fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(names(remote_directory.path()), ["caf\u{e9}"]);
+    assert_eq!(
+        fs::read(remote_directory.path().join(composed_file)).unwrap(),
+        b"first"
+    );
+
+    // The pair's decomposed name replaces and removes the composed file.
+    fs::write(local_directory.path().join(file), b"second").unwrap();
+    let here = observe(&local);
+    let there = observe(&remote);
+    let name = path(file.as_bytes());
+    let stored = &there.entries()[&path(composed_file.as_bytes())];
+    remote
+        .copy_from(
+            &local,
+            &name,
+            &here.entries()[&name],
+            Expected::Present(stored),
+            &run,
+            &mut proceed,
+        )
+        .unwrap();
+    assert_eq!(
+        names(&remote_directory.path().join("caf\u{e9}")),
+        ["r\u{e9}sum\u{e9}.txt"]
+    );
+    assert_eq!(
+        fs::read(remote_directory.path().join(composed_file)).unwrap(),
+        b"second"
+    );
+    let there = observe(&remote);
+    let stored = &there.entries()[&path(composed_file.as_bytes())];
+    let later = RunScope::new(UNIX_EPOCH + Duration::from_secs(1), options.clone());
+    remote.remove(&name, stored, &later, &mut proceed).unwrap();
+    assert!(names(&remote_directory.path().join("caf\u{e9}")).is_empty());
+
+    // A name the server holds decomposed is found by its composed form.
+    fs::write(remote_directory.path().join("nai\u{308}ve.txt"), b"x").unwrap();
+    let Endpoint::Sftp(sftp) = &remote else {
+        unreachable!()
+    };
+    assert!(
+        sftp.attributes(&path("na\u{ef}ve.txt".as_bytes()))
+            .unwrap()
+            .is_some()
+    );
+    assert!(sftp.attributes(&path(b"naive.txt")).unwrap().is_none());
 }
 
 #[test]
