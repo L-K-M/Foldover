@@ -62,7 +62,9 @@ pub enum Decision {
     Cancel,
 }
 
-type Paired = Box<dyn Fn(DeviceId, String) + Send + Sync>;
+/// Records a confirmed device; a device it could not record is not
+/// trusted, as it would be forgotten at the next start.
+type Paired = Box<dyn Fn(DeviceId, String) -> Result<(), ()> + Send + Sync>;
 
 pub struct PeerLink {
     identity: Arc<Identity>,
@@ -80,6 +82,8 @@ struct State {
     /// Bumped per window, so a late expiry never closes a newer one.
     windows: u64,
     pending: BTreeMap<DeviceId, Pending>,
+    /// Nodes of closed windows, kept until the codes they showed settle.
+    draining: Vec<Arc<Node>>,
     accept: Option<JoinHandle<()>>,
 }
 
@@ -103,7 +107,7 @@ impl PeerLink {
         name: String,
         address: SocketAddr,
         paired: impl IntoIterator<Item = DeviceId>,
-        on_paired: impl Fn(DeviceId, String) + Send + Sync + 'static,
+        on_paired: impl Fn(DeviceId, String) -> Result<(), ()> + Send + Sync + 'static,
     ) -> Result<Arc<Self>, LinkError> {
         let identity = Arc::new(identity);
         let trust = Arc::new(TrustStore::default());
@@ -163,6 +167,16 @@ impl PeerLink {
             PeerMode::Pairing,
         )?);
         let address = node.address()?;
+        let mut state = self.state();
+        // Another caller may have opened one while this node was bound.
+        if let Some(existing) = state
+            .window
+            .as_ref()
+            .and_then(|window| window.node.address().ok())
+        {
+            node.close();
+            return Ok(existing);
+        }
         let link = Arc::downgrade(self);
         let listening = Arc::clone(&node);
         let accept = tokio::spawn(async move {
@@ -175,7 +189,6 @@ impl PeerLink {
                 });
             }
         });
-        let mut state = self.state();
         state.windows += 1;
         let generation = state.windows;
         let link = Arc::downgrade(self);
@@ -306,11 +319,32 @@ impl PeerLink {
         if state.window.as_ref().map(|window| window.generation) != Some(generation) {
             return;
         }
-        if let Some(window) = state.window.take() {
+        let Some(window) = state.window.take() else {
+            return;
+        };
+        for task in window.tasks {
+            task.abort();
+        }
+        // Codes already shown still settle over the node's connections.
+        window.node.stop_accepting();
+        if state.pending.is_empty() {
             window.node.close();
-            for task in window.tasks {
-                task.abort();
+        } else {
+            state.draining.push(window.node);
+        }
+    }
+
+    /// Close the nodes of closed windows once no code is left to settle.
+    fn drain(&self) {
+        let drained = {
+            let mut state = self.state();
+            if !state.pending.is_empty() {
+                return;
             }
+            std::mem::take(&mut state.draining)
+        };
+        for node in drained {
+            node.close();
         }
     }
 
@@ -327,6 +361,9 @@ impl Drop for PeerLink {
             for task in window.tasks {
                 task.abort();
             }
+        }
+        for node in state.draining.drain(..) {
+            node.close();
         }
         if let Some(accept) = state.accept.take() {
             accept.abort();
@@ -397,13 +434,16 @@ async fn settle(
         return;
     };
     let pending = link.state().pending.remove(&device);
-    if confirmed && let Some(pending) = pending {
+    if confirmed
+        && let Some(pending) = pending
+        && (link.paired)(device, pending.name).is_ok()
+    {
         link.trust.pin(net_device(device));
-        (link.paired)(device, pending.name);
     }
     // The decision just sent must reach the other Mac before the close.
     let _ = tokio::time::timeout(DELIVERY_TIMEOUT, send.finish_delivered()).await;
     connection.close();
+    link.drain();
 }
 
 async fn send_message(

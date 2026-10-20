@@ -712,8 +712,8 @@ fn print_peers(status: &PeerStatus) -> Result<(), foldover_client::Error> {
     println!("{}", serde_json::to_string(status)?);
     for pending in &status.pending {
         eprintln!(
-            "foldover: {:?} wants to pair with code {:06}; compare it, then run `foldover peers confirm {}` or `cancel`",
-            pending.name, pending.code, pending.device
+            "foldover: {:?} wants to pair with code {:06}; compare it, then run `foldover peers confirm {}` or `foldover peers cancel {}`",
+            pending.name, pending.code, pending.device, pending.device
         );
     }
     Ok(())
