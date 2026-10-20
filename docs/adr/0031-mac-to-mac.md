@@ -144,7 +144,10 @@ relays through this Mac.
 ACLs stay on each Mac. Their entries name accounts by identifiers each
 Mac assigns itself, so another Mac's ACL would grant or deny access to
 accounts that do not exist here, or to the wrong ones. A folder's own
-ACLs, set by its owner on that Mac, are left as they are.
+ACLs, set by its owner on that Mac, are left as they are. A new entry
+gets what the receiving folder gives new files, including ACL entries
+the folder marks for inheritance; its mode bits travel only when the
+pair syncs permissions.
 
 ### Local API (protocol 9)
 
