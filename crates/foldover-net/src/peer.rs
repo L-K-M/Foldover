@@ -503,6 +503,11 @@ impl Node {
         )
     }
 
+    /// Refuse new connections; established ones carry on.
+    pub fn stop_accepting(&self) {
+        self.endpoint.set_server_config(None);
+    }
+
     pub fn close(&self) {
         self.endpoint.close(VarInt::from_u32(0), b"closed");
     }

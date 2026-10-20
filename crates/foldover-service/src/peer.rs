@@ -74,10 +74,13 @@ pub(crate) async fn open(
         address,
         paired.iter().map(|device| device.id),
         move |device, name| {
-            let _ = recording
+            recording
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .add_device(device, name);
+                .add_device(device, name)
+                .map_err(|error| {
+                    eprintln!("foldoverd: could not record the paired Mac {device}: {error}");
+                })
         },
     )
     .map_err(unavailable)
