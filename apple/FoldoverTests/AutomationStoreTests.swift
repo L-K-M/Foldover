@@ -6,24 +6,33 @@ private enum AutomationFixtureError: Error { case unreachable }
 
 /// Remembers the last pause like the agent does.
 private actor AutomationFixtureClient: AutomationClient {
-    private var current: AutomationState = .running
+    private var current = AutomationStatus(state: .running)
     private var failure: Error?
     private(set) var requested: [UInt32?] = []
 
-    func state() async throws -> AutomationState { current }
+    func state() async throws -> AutomationStatus { current }
 
-    func pause(minutes: UInt32?) async throws -> AutomationState {
+    func pause(minutes: UInt32?) async throws -> AutomationStatus {
         requested.append(minutes)
         if let failure { throw failure }
-        current = .paused(until: minutes.map { Date(timeIntervalSince1970: Double($0) * 60) })
+        current.state = .paused(until: minutes.map { Date(timeIntervalSince1970: Double($0) * 60) })
         return current
     }
 
-    func resume() async throws -> AutomationState {
+    func resume() async throws -> AutomationStatus {
         if let failure { throw failure }
-        current = .running
+        current.state = .running
         return current
     }
+
+    func setLowPower(_ syncs: LowPowerSyncs) async throws -> AutomationStatus {
+        if let failure { throw failure }
+        current.lowPower = syncs
+        return current
+    }
+
+    /// What the agent would report the environment holding now.
+    func setHeldBy(_ hold: AutomationHold?) { current.heldBy = hold }
 
     func rejectRequests() { failure = AutomationFixtureError.unreachable }
     func acceptRequests() { failure = nil }
@@ -101,39 +110,50 @@ private actor DeferredAutomationClient: AutomationClient {
     private(set) var parkedReads = 0
     private(set) var parkedActions = 0
     private var actionsHeld = false
-    private var standingRead: AutomationState?
-    private var pendingReads: [CheckedContinuation<AutomationState, Never>?] = []
-    private var pendingActions: [CheckedContinuation<AutomationState, Never>?] = []
+    private var standingRead: AutomationStatus?
+    private var pendingReads: [CheckedContinuation<AutomationStatus, Never>?] = []
+    private var pendingActions: [CheckedContinuation<AutomationStatus, Never>?] = []
 
-    func state() async throws -> AutomationState {
+    func state() async throws -> AutomationStatus {
         if let standingRead { return standingRead }
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 pendingReads.append(continuation)
                 parkedReads += 1
-                if Task.isCancelled { answer(&pendingReads, at: pendingReads.count - 1, .running) }
+                if Task.isCancelled {
+                    answer(&pendingReads, at: pendingReads.count - 1, AutomationStatus(state: .running))
+                }
             }
         } onCancel: {
-            Task { await self.finishReads(.running) }
+            Task { await self.finishReads(AutomationStatus(state: .running)) }
         }
     }
 
-    func pause(minutes: UInt32?) async throws -> AutomationState {
-        await act(.paused(until: minutes.map { Date(timeIntervalSince1970: Double($0) * 60) }))
+    func pause(minutes: UInt32?) async throws -> AutomationStatus {
+        await act(AutomationStatus(
+            state: .paused(until: minutes.map { Date(timeIntervalSince1970: Double($0) * 60) })))
     }
 
-    func resume() async throws -> AutomationState { await act(.running) }
+    func resume() async throws -> AutomationStatus {
+        await act(AutomationStatus(state: .running))
+    }
 
-    private func act(_ reply: AutomationState) async -> AutomationState {
+    func setLowPower(_ syncs: LowPowerSyncs) async throws -> AutomationStatus {
+        await act(AutomationStatus(state: .running, lowPower: syncs))
+    }
+
+    private func act(_ reply: AutomationStatus) async -> AutomationStatus {
         guard actionsHeld else { return reply }
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 pendingActions.append(continuation)
                 parkedActions += 1
-                if Task.isCancelled { answer(&pendingActions, at: pendingActions.count - 1, .running) }
+                if Task.isCancelled {
+                    answer(&pendingActions, at: pendingActions.count - 1, AutomationStatus(state: .running))
+                }
             }
         } onCancel: {
-            Task { await self.finishActions(.running) }
+            Task { await self.finishActions(AutomationStatus(state: .running)) }
         }
     }
 
@@ -141,21 +161,21 @@ private actor DeferredAutomationClient: AutomationClient {
     func holdActions() { actionsHeld = true }
 
     /// Answers the oldest queued read, if one is parked.
-    func answerRead(_ state: AutomationState) {
+    func answerRead(_ state: AutomationStatus) {
         if let index = pendingReads.firstIndex(where: { $0 != nil }) {
             answer(&pendingReads, at: index, state)
         }
     }
 
     /// Answers the oldest queued action request, if one is parked.
-    func answerAction(_ state: AutomationState) {
+    func answerAction(_ state: AutomationStatus) {
         if let index = pendingActions.firstIndex(where: { $0 != nil }) {
             answer(&pendingActions, at: index, state)
         }
     }
 
     /// Answers every queued read and every read issued afterwards.
-    func finishReads(_ state: AutomationState) {
+    func finishReads(_ state: AutomationStatus) {
         standingRead = state
         while let index = pendingReads.firstIndex(where: { $0 != nil }) {
             answer(&pendingReads, at: index, state)
@@ -163,15 +183,15 @@ private actor DeferredAutomationClient: AutomationClient {
     }
 
     /// Stops holding actions and answers every queued one.
-    func finishActions(_ state: AutomationState) {
+    func finishActions(_ state: AutomationStatus) {
         actionsHeld = false
         while let index = pendingActions.firstIndex(where: { $0 != nil }) {
             answer(&pendingActions, at: index, state)
         }
     }
 
-    private func answer(_ queue: inout [CheckedContinuation<AutomationState, Never>?],
-                        at index: Int, _ state: AutomationState) {
+    private func answer(_ queue: inout [CheckedContinuation<AutomationStatus, Never>?],
+                        at index: Int, _ state: AutomationStatus) {
         guard queue.indices.contains(index), let continuation = queue[index] else { return }
         queue[index] = nil
         continuation.resume(returning: state)
@@ -228,8 +248,9 @@ private func aStatusReadDeliveredAfterAnActionCannotOverwriteItsReply(
     // Lift a pause first so resume also has an accepted change to keep.
     if command == .resume { await store.pause(minutes: nil) }
     // What a read issued now would report: the state before the action.
-    let stale = store.state
-    let accepted: AutomationState = command == .pause ? .paused(until: nil) : .running
+    let stale = AutomationStatus(state: store.state, lowPower: store.lowPower, heldBy: store.heldBy)
+    let accepted = AutomationStatus(
+        state: command == .pause ? .paused(until: nil) : .running)
 
     switch timing {
     case .beforeAction:
@@ -249,12 +270,66 @@ private func aStatusReadDeliveredAfterAnActionCannotOverwriteItsReply(
         // also correct; only a parked read gets the stale answer.
         _ = await client.waitForParkedReads(1, timeout: .milliseconds(500))
         await client.answerAction(accepted)
-        await client.finishActions(.running)
+        await client.finishActions(AutomationStatus(state: .running))
         await action.value
         await client.answerRead(stale)
         await client.finishReads(accepted)
         await read.value
     }
-    await client.finishActions(.running)
-    #expect(store.state == accepted)
+    await client.finishActions(AutomationStatus(state: .running))
+    #expect(store.state == accepted.state)
+}
+
+/// The environment policy (PLAN.md §3.5): the Low Power Mode choice and
+/// the current hold ride every status report, and the hold feeds the
+/// menu text.
+@MainActor
+@Test
+func lowPowerChoiceAndEnvironmentHoldsReachTheStatusText() async {
+    let client = AutomationFixtureClient()
+    let automation = AutomationStore(client: client)
+    let viewModel = MainViewModel(appInfo: AppInfoStore(), automation: automation)
+
+    await automation.refresh()
+    #expect(automation.lowPower == .pause)
+    #expect(automation.heldBy == nil)
+    #expect(viewModel.holdText == nil)
+
+    await client.setHeldBy(.lowPowerMode)
+    await automation.refresh()
+    #expect(viewModel.holdText == "Automatic syncs wait while Low Power Mode is on.")
+
+    await automation.setLowPower(.run)
+    #expect(automation.lowPower == .run)
+    #expect(automation.error == nil)
+
+    await client.setHeldBy(.expensiveNetwork)
+    await automation.refresh()
+    #expect(viewModel.holdText == "Automatic syncs over the network wait while this Mac's network is expensive.")
+    await client.setHeldBy(.constrainedNetwork)
+    await automation.refresh()
+    #expect(viewModel.holdText == "Automatic syncs over the network wait while Low Data Mode is on.")
+    await client.setHeldBy(nil)
+    await automation.refresh()
+    #expect(viewModel.holdText == nil)
+
+    // A pause's own text takes the status slot a hold would use.
+    await client.setHeldBy(.lowPowerMode)
+    await viewModel.pause(.untilResumed)
+    #expect(viewModel.pauseText == "Automatic syncs are paused.")
+    #expect(viewModel.holdText == nil)
+}
+
+@MainActor
+@Test
+func aFailedLowPowerChangeKeepsTheChoiceAndReportsTheError() async {
+    let client = AutomationFixtureClient()
+    let automation = AutomationStore(client: client)
+    await automation.setLowPower(.run)
+    #expect(automation.lowPower == .run)
+
+    await client.rejectRequests()
+    await automation.setLowPower(.pause)
+    #expect(automation.lowPower == .run)
+    #expect(automation.error != nil)
 }

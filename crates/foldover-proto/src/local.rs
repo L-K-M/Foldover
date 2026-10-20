@@ -10,8 +10,8 @@ pub use archive::{
 
 mod automation;
 pub use automation::{
-    AUTOMATION_PAUSE, AUTOMATION_RESUME, AUTOMATION_STATUS, AutomationPause, AutomationStatus,
-    MAX_PAUSE_MINUTES,
+    AUTOMATION_PAUSE, AUTOMATION_RESUME, AUTOMATION_SETTINGS, AUTOMATION_STATUS, AutomationHold,
+    AutomationPause, AutomationSettings, AutomationStatus, LowPowerSyncs, MAX_PAUSE_MINUTES,
 };
 
 mod history;
@@ -46,7 +46,7 @@ pub use pair::{
 };
 
 pub const JSON_RPC_VERSION: &str = "2.0";
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 pub const SESSION_HELLO: &str = "session.hello";
 pub const DAEMON_STATUS: &str = "daemon.status";
 pub const PARSE_ERROR: i32 = -32700;

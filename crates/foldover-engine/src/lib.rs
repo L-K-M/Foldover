@@ -24,6 +24,9 @@ pub use configuration::{Engine, Error, ErrorKind};
 pub use conflict::{KeepBothError, keep_both};
 pub use foldover_endpoint::ObserveStep;
 pub use foldover_endpoint::Reach;
+pub use foldover_host::{
+    Environment, EnvironmentHold, LowPowerSyncs, NetworkCost, NetworkUse, PowerMode,
+};
 pub use foldover_state::RecordedIdentities;
 pub use foldover_state::StateLocation;
 pub use foldover_state::{

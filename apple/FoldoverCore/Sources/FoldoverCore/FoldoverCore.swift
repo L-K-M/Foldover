@@ -963,15 +963,25 @@ public struct AutomationState: Equatable, Hashable {
      * When a timed pause ends, in milliseconds since the Unix epoch.
      */
     public var untilMs: UInt64?
+    public var lowPower: LowPowerSyncs
+    /**
+     * Why an automatic sync would wait now, if one would.
+     */
+    public var heldBy: AutomationHold?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(paused: Bool, 
         /**
          * When a timed pause ends, in milliseconds since the Unix epoch.
-         */untilMs: UInt64?) {
+         */untilMs: UInt64?, lowPower: LowPowerSyncs, 
+        /**
+         * Why an automatic sync would wait now, if one would.
+         */heldBy: AutomationHold?) {
         self.paused = paused
         self.untilMs = untilMs
+        self.lowPower = lowPower
+        self.heldBy = heldBy
     }
 
     
@@ -991,13 +1001,17 @@ public struct FfiConverterTypeAutomationState: FfiConverterRustBuffer {
         return
             try AutomationState(
                 paused: FfiConverterBool.read(from: &buf), 
-                untilMs: FfiConverterOptionUInt64.read(from: &buf)
+                untilMs: FfiConverterOptionUInt64.read(from: &buf), 
+                lowPower: FfiConverterTypeLowPowerSyncs.read(from: &buf), 
+                heldBy: FfiConverterOptionTypeAutomationHold.read(from: &buf)
         )
     }
 
     public static func write(_ value: AutomationState, into buf: inout [UInt8]) {
         FfiConverterBool.write(value.paused, into: &buf)
         FfiConverterOptionUInt64.write(value.untilMs, into: &buf)
+        FfiConverterTypeLowPowerSyncs.write(value.lowPower, into: &buf)
+        FfiConverterOptionTypeAutomationHold.write(value.heldBy, into: &buf)
     }
 }
 
@@ -2645,6 +2659,151 @@ public func FfiConverterTypeAgentError_lower(_ value: AgentError) -> RustBuffer 
 }
 
 
+/**
+ * Why automatic syncs wait right now (PLAN.md §3.5).
+ */
+
+public enum AutomationHold: Equatable, Hashable {
+    
+    case lowPowerMode
+    case expensiveNetwork
+    case constrainedNetwork
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AutomationHold: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAutomationHold: FfiConverterRustBuffer {
+    typealias SwiftType = AutomationHold
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationHold {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .lowPowerMode
+        
+        case 2: return .expensiveNetwork
+        
+        case 3: return .constrainedNetwork
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AutomationHold, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .lowPowerMode:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .expensiveNetwork:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .constrainedNetwork:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationHold_lift(_ buf: RustBuffer) throws -> AutomationHold {
+    return try FfiConverterTypeAutomationHold.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationHold_lower(_ value: AutomationHold) -> RustBuffer {
+    return FfiConverterTypeAutomationHold.lower(value)
+}
+
+
+
+/**
+ * The person's choice for automatic syncs in Low Power Mode.
+ */
+
+public enum LowPowerSyncs: Equatable, Hashable {
+    
+    case pause
+    case run
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension LowPowerSyncs: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLowPowerSyncs: FfiConverterRustBuffer {
+    typealias SwiftType = LowPowerSyncs
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LowPowerSyncs {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .pause
+        
+        case 2: return .run
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: LowPowerSyncs, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .pause:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .run:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLowPowerSyncs_lift(_ buf: RustBuffer) throws -> LowPowerSyncs {
+    return try FfiConverterTypeLowPowerSyncs.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLowPowerSyncs_lower(_ value: LowPowerSyncs) -> RustBuffer {
+    return FfiConverterTypeLowPowerSyncs.lower(value)
+}
+
+
+
 
 public enum MetadataSync: Equatable, Hashable {
     
@@ -3779,6 +3938,30 @@ fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeAutomationHold: FfiConverterRustBuffer {
+    typealias SwiftType = AutomationHold?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeAutomationHold.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeAutomationHold.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeSyncChangeFilter: FfiConverterRustBuffer {
     typealias SwiftType = SyncChangeFilter?
 
@@ -4348,6 +4531,23 @@ public func resumeAutomation()async throws  -> AutomationState  {
             errorHandler: FfiConverterTypeAgentError_lift
         )
 }
+/**
+ * Set the person's choice for automatic syncs in Low Power Mode.
+ */
+public func setLowPowerSyncs(syncs: LowPowerSyncs)async throws  -> AutomationState  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_set_low_power_syncs(FfiConverterTypeLowPowerSyncs_lower(syncs)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeAutomationState_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
 public func pairHistory(id: String)async throws  -> [RunHistoryEntry]  {
     return
         try  await uniffiRustCallAsync(
@@ -4763,6 +4963,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_resume_automation() != 13518) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_set_low_power_syncs() != 45223) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_pair_history() != 62355) {

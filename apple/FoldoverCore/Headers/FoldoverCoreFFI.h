@@ -318,6 +318,11 @@ uint64_t uniffi_foldover_ffi_fn_func_resume_automation(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SET_LOW_POWER_SYNCS
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SET_LOW_POWER_SYNCS
+uint64_t uniffi_foldover_ffi_fn_func_set_low_power_syncs(RustBuffer syncs
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_PAIR_HISTORY
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_PAIR_HISTORY
 uint64_t uniffi_foldover_ffi_fn_func_pair_history(RustBuffer id
@@ -773,6 +778,12 @@ uint16_t uniffi_foldover_ffi_checksum_func_pause_automation(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_RESUME_AUTOMATION
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_RESUME_AUTOMATION
 uint16_t uniffi_foldover_ffi_checksum_func_resume_automation(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_SET_LOW_POWER_SYNCS
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_SET_LOW_POWER_SYNCS
+uint16_t uniffi_foldover_ffi_checksum_func_set_low_power_syncs(void
     
 );
 #endif

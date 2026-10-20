@@ -12,12 +12,14 @@ mod hold;
 mod journal;
 mod mounts;
 mod pause;
+mod settings;
 mod share;
 pub use device::DeviceRow;
 pub use history::HistoryRow;
 pub use journal::{JournalChange, JournalRow};
 pub use mounts::MountRow;
 pub use pause::PauseRow;
+pub use settings::AutomationSettingRow;
 pub use share::ShareRow;
 
 const APPLICATION_ID: i64 = 0x464f4c44; // FOLD
@@ -31,10 +33,10 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 19] = [
+const MIGRATIONS: [&str; 20] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
     SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, SCHEMA_V15, SCHEMA_V16,
-    SCHEMA_V17, SCHEMA_V18, SCHEMA_V19,
+    SCHEMA_V17, SCHEMA_V18, SCHEMA_V19, SCHEMA_V20,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -280,6 +282,15 @@ CREATE INDEX share_device ON share(device);
 // Per-pair canary path; older readers ignore the column.
 const SCHEMA_V19: &str = "
 ALTER TABLE pair ADD COLUMN canary BLOB CHECK(canary IS NULL OR length(canary) > 0);
+";
+
+// The person's automation choices (ADR 0036); no row means every
+// setting's default. Older agents ignore the table.
+const SCHEMA_V20: &str = "
+CREATE TABLE automation_setting (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    low_power TEXT NOT NULL CHECK(low_power IN ('pause', 'run'))
+) STRICT;
 ";
 
 #[derive(Debug, thiserror::Error)]
