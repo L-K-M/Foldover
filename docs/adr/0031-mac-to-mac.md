@@ -2,7 +2,8 @@
 
 Status: Device trust, pairing, discovery, shared folders, the peer
 endpoint, change reports, extended attributes and resumed transfers
-([ADR 0034](0034-resumed-transfers.md)) implemented; ACLs pending
+([ADR 0034](0034-resumed-transfers.md)) implemented; ACLs stay on each
+Mac (decision below)
 
 ## Context
 
@@ -41,7 +42,7 @@ Slices, in order:
    control message, then raw data frames for file contents. Mac B
    answers through its local endpoint, so staging, verification and the
    archive work as on a local root. Mac B then streams change hints.
-4. **Fidelity and resume.** Extended attributes, ACLs and flags travel
+4. **Fidelity and resume.** Extended attributes and flags travel
    with file data; large transfers resume after what arrived.
 
 ### Pairing
@@ -137,8 +138,13 @@ flags (up to 2 MiB of attributes per entry, sent in its message). The
 receiving Mac sets only names it would sync itself, so another Mac
 cannot plant system state, and replaces an entry's attributes only when
 the source carries them: a source without any, such as an SFTP server,
-leaves the receiving entry's own. ACLs do not travel yet. A copy between
-two Macs' folders relays through this Mac.
+leaves the receiving entry's own. A copy between two Macs' folders
+relays through this Mac.
+
+ACLs stay on each Mac. Their entries name accounts by identifiers each
+Mac assigns itself, so another Mac's ACL would grant or deny access to
+accounts that do not exist here, or to the wrong ones. A folder's own
+ACLs, set by its owner on that Mac, are left as they are.
 
 ### Local API (protocol 9)
 
