@@ -228,6 +228,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Syncing to disks formatted HFS+ (Mac OS Extended), exFAT or FAT32
+  works: every copy to them failed with "Operation not supported".
+
 - A copy to another Mac whose source changed partway no longer waits
   forever for that Mac; asking another Mac gives up after 30 seconds.
 - Stopping a share asks first, since pairs on the other Mac that use it

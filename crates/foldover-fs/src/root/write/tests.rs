@@ -662,3 +662,128 @@ fn native_metadata_travels_with_streamed_copies() {
             .is_empty()
     );
 }
+
+/// Device matrix: HFS+, exFAT and FAT answer `ENOTSUP` to exclusive
+/// renames and swaps, so every copy to them failed. Placing, archiving
+/// and private files keep their guarantees there without the flags.
+#[test]
+fn volumes_without_exclusive_renames_or_swaps_place_and_archive_alike() {
+    rename::without_rename_flags(|| {
+        let roots = roots();
+        let target = roots.target_directory.path();
+        let source = roots._source_directory.path();
+        let file = path(b"file");
+
+        // A new file lands, and never over one that appeared meanwhile.
+        fs::write(source.join("file"), b"new").unwrap();
+        let observed = roots.source.metadata(&file).unwrap();
+        let stage = || {
+            roots
+                .target
+                .stage_file(&file, &roots.source, &observed, &ALL, &mut proceed)
+                .unwrap()
+                .into_staged()
+        };
+        roots
+            .target
+            .place(stage(), &file, Placement::Create, STANDARD)
+            .unwrap();
+        assert_eq!(fs::read(target.join("file")).unwrap(), b"new");
+        assert!(matches!(
+            roots
+                .target
+                .place(stage(), &file, Placement::Create, STANDARD),
+            Err(WriteError::Exists)
+        ));
+        assert_eq!(names(target), [b"file".to_vec()]);
+
+        // A replacement displaces the old entry for archiving.
+        fs::write(target.join("file"), b"old").unwrap();
+        let old = roots.target.metadata(&file).unwrap();
+        let displaced = roots
+            .target
+            .place(stage(), &file, Placement::Replace, STANDARD)
+            .unwrap()
+            .unwrap();
+        assert_eq!(fs::read(target.join("file")).unwrap(), b"new");
+        assert_eq!(displaced.metadata().unwrap().identity(), old.identity());
+        let archived = path(b".foldover/archive/run/file");
+        roots
+            .target
+            .archive_displaced(displaced, &archived, STANDARD)
+            .unwrap();
+        assert_eq!(
+            fs::read(target.join(".foldover/archive/run/file")).unwrap(),
+            b"old"
+        );
+        assert_eq!(names(target), [b".foldover".to_vec(), b"file".to_vec()]);
+
+        // Replacing what is gone changes nothing.
+        fs::remove_file(target.join("file")).unwrap();
+        assert!(matches!(
+            roots
+                .target
+                .place(stage(), &file, Placement::Replace, STANDARD),
+            Err(WriteError::Changed)
+        ));
+        assert_eq!(names(target), [b".foldover".to_vec()]);
+
+        // Archives never overwrite, and neither do private files.
+        fs::write(target.join("file"), b"again").unwrap();
+        let again = roots.target.metadata(&file).unwrap();
+        assert!(matches!(
+            roots.target.archive(&file, &again, &archived, STANDARD),
+            Err(WriteError::Exists)
+        ));
+        assert_eq!(fs::read(target.join("file")).unwrap(), b"again");
+        let id = path(b".foldover/id");
+        roots
+            .target
+            .create_private_file(&id, b"one", STANDARD)
+            .unwrap();
+        assert!(matches!(
+            roots.target.create_private_file(&id, b"two", STANDARD),
+            Err(WriteError::Exists)
+        ));
+        assert_eq!(
+            roots.target.read_private_file(&id, 64).unwrap().unwrap(),
+            b"one"
+        );
+        assert_eq!(
+            names(&target.join(".foldover")),
+            [b"archive".to_vec(), b"id".to_vec()]
+        );
+    });
+}
+
+/// Without exclusive renames, a folder moves only where nothing is.
+#[test]
+fn folders_move_exclusively_without_rename_flags() {
+    rename::without_rename_flags(|| {
+        let roots = roots();
+        let target = roots.target_directory.path();
+        fs::create_dir_all(target.join("docs/inner")).unwrap();
+        fs::write(target.join("docs/inner/note"), b"n").unwrap();
+        let docs = path(b"docs");
+        let observed = roots.target.metadata(&docs).unwrap();
+        let archived = path(b".foldover/archive/run/docs");
+        roots
+            .target
+            .archive(&docs, &observed, &archived, STANDARD)
+            .unwrap();
+        assert_eq!(
+            fs::read(target.join(".foldover/archive/run/docs/inner/note")).unwrap(),
+            b"n"
+        );
+        fs::create_dir(target.join("docs")).unwrap();
+        roots
+            .target
+            .restore(&archived, &docs, STANDARD)
+            .unwrap_err();
+        assert!(
+            target
+                .join(".foldover/archive/run/docs/inner/note")
+                .exists()
+        );
+    });
+}

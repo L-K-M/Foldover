@@ -29,6 +29,15 @@ archive:  name ──rename(no-replace)──▶ .foldover/archive/…/name
   user data and is never removed automatically.
 - **Archiving:** a no-replace rename into private (0700) directories under
   `.foldover/archive/`, only while the entry still matches its observation.
+- **Volumes without the rename flags:** HFS+, exFAT and FAT answer
+  `ENOTSUP` to both (found by the device matrix, ADR 0038). A no-replace
+  rename becomes an exclusive placeholder of the entry's kind at the
+  destination, which a plain rename then replaces; the refusal holds. An
+  exchange becomes PLAN.md §4.7's two steps: the old entry moves aside
+  under a temporary name, then the staged one moves in, and a failure in
+  between moves the old one back. An agent that dies between the steps
+  leaves both under temporary names, which the next run archives: nothing
+  is lost, but the path stays empty until a run fills it.
 - **Directories:** created with `mkdirat`; removed only when empty.
 - **Nothing is unlinked** except empty directories and unplaced temporaries.
 
