@@ -37,8 +37,10 @@ jobs:
         run: cargo test --locked --release --workspace -- fuzz_
 
   # The engine against random edits and interrupted runs (PLAN.md §5.2),
-  # far longer than the per-PR suite's handful of cases. A failure prints
-  # the minimal sequence of edits and runs it found.
+  # far longer than the per-PR suite's handful of cases: on real folders,
+  # and 100,000 histories on in-memory folders with file system quirks,
+  # the 1.0 gate's nightly count. A failure prints the minimal sequence
+  # of edits and runs it found.
   simulate:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
@@ -46,6 +48,7 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
       FOLDOVER_SIMULATION_CASES: "5000"
+      FOLDOVER_MEMORY_SIMULATION_CASES: "100000"
       CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: "true"
       CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS: "true"
     steps:

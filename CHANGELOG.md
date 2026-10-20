@@ -13,6 +13,11 @@ All notable changes to this project are documented here. The format follows
   shares and SFTP servers for other computers' changes every 5 minutes.
   It now waits for 10 seconds of quiet instead of 5.
 
+- Simulation over in-memory folders that act like the file systems
+  Foldover meets: names that ignore case or are stored decomposed,
+  2-second times, two-step replaces, a full disk, and writes that start
+  failing mid-run. Each night it runs 100,000 random histories.
+
 - At start, "When files change" replays each local folder's file event
   history from when the pair was last quiet, and syncs only folders
   that changed while the agent was not running.
@@ -236,6 +241,14 @@ All notable changes to this project are documented here. The format follows
   scripts, CI.
 
 ### Fixed
+
+- A file copied to a folder that stores names decomposed, such as an
+  HFS+ disk, no longer makes the next sync rename it on the other
+  folder.
+
+- A name in conflict now blocks copying its other Unicode or case
+  spelling into a folder that stores both as one file; the copy landed
+  on the conflicted file.
 
 - Folders on exFAT and FAT disks no longer stop with an AppleDouble
   error: the `._` files macOS keeps there for extended attributes are

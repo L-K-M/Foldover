@@ -24,6 +24,8 @@ name = "plan"
 harness = false
 
 [dev-dependencies]
+# In-memory folders for the simulation (ADR 0038).
+foldover-sim = { path = "../foldover-sim" }
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 tempfile = "3"
 proptest = { version = "1", default-features = false, features = ["std"] }

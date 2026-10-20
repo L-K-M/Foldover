@@ -1,6 +1,6 @@
 # ADR 0030: Name clashes
 
-Status: Implemented as conflicts; name mapping between spellings pending
+Status: Implemented as conflicts; normalization respellings mapped
 
 ## Context
 
@@ -22,7 +22,8 @@ failed on every run, or would have stored two files where a person sees one.
   that are not UTF-8 compare as bytes, with ASCII letters folded.
 - Paths that one folder keys alike are a `NameClash` conflict when they
   would meet in that folder: the plan writes or archives two of them
-  there, or writes one while another stays. The conflict covers every
+  there, or writes one while another stays, there or in a conflict
+  whose resolution may write it there. The conflict covers every
   path of the group, including one that is otherwise in sync. Nothing is
   written for them; a clashing folder blocks what is inside it. Choosing a
   side, keeping both or skipping is refused: renaming one item resolves it.
@@ -38,12 +39,21 @@ A renames Report.txt → report.txt              B archives Report.txt and
                                                copies report.txt
 ```
 
+- A folder that ignores normalization may store a name in another one
+  than it was given: HFS+ decomposes. An entry the base knows in one
+  spelling, observed there only in another that composes alike, counts
+  as the base's spelling, so the respelling is no change; the folder
+  finds the file by either. Case is never mapped: a case-only rename is
+  a person's, and syncs as one. The simulation found the respelling,
+  and a spelling copied beside another in conflict
+  ([ADR 0038](0038-simulation.md)).
+
 ## Consequences
 
 - Two macOS folders whose files differ only in Unicode spelling (one from
   an old HFS+ disk, one created later) show conflicts until one is
-  renamed; mapping one spelling onto the other, and writing new files in
-  NFC on foreign filesystems, remain PLAN.md §4.10 work.
+  renamed; writing new files in NFC on foreign filesystems remains
+  PLAN.md §4.10 work.
 - Case folding uses Unicode lower-casing, which approximates but does not
   equal each filesystem's own folding tables.
 - Pairs whose folders both match names exactly skip the check entirely.

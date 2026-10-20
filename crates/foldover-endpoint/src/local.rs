@@ -324,6 +324,19 @@ impl Observation {
         &self.old
     }
 
+    /// Report the entry at `from` under `to`: the same file, spelled as
+    /// the pair knows it.
+    pub fn respell(&mut self, from: &SyncPath, to: SyncPath) {
+        if let Some(entry) = self.entries.remove(from) {
+            self.entries.insert(to.clone(), entry);
+        }
+        for listed in self.oversized.iter_mut().chain(&mut self.old) {
+            if listed == from {
+                *listed = to.clone();
+            }
+        }
+    }
+
     /// Drop paths the other folder skipped, so both skip them.
     pub fn exclude(&mut self, paths: &[SyncPath]) {
         for path in paths {
