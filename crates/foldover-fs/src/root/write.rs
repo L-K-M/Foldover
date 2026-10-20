@@ -23,13 +23,14 @@ use cap_std::fs::Dir;
 use foldover_types::{
     Digest, Durability, MetadataPolicy, PairOptions, Propagation, ScanControl, SyncPath,
 };
-use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags};
+use rustix::fs::{AtFlags, Mode, OFlags};
 use rustix::io::Errno;
 
 use super::{EntryMetadata, HashError, NodeKind, Root};
 
 mod metadata;
 mod partial;
+mod rename;
 use metadata::Destination;
 pub use partial::{PARTIAL_MIN_BYTES, Resume};
 
@@ -286,27 +287,33 @@ impl Root {
         if directory_identity(&parent)? != directory_identity(&staged.parent)? {
             return Err(WriteError::Changed);
         }
-        let flags = match placement {
-            Placement::Create => RenameFlags::NOREPLACE,
-            Placement::Replace => RenameFlags::EXCHANGE,
+        let renamed = match placement {
+            Placement::Create => {
+                rename::rename_exclusive(&staged.parent, &staged.name, &parent, &name)
+                    .map(|()| None)
+            }
+            Placement::Replace => {
+                rename::swap(&staged.parent, &staged.name, &parent, &name).map(Some)
+            }
         };
-        match rustix::fs::renameat_with(&staged.parent, &staged.name, &parent, &name, flags) {
-            Ok(()) => {}
+        let swapped = match renamed {
+            Ok(swapped) => swapped,
             Err(Errno::EXIST) => return Err(WriteError::Exists),
             Err(Errno::NOENT) if placement == Placement::Replace => {
                 return Err(WriteError::Changed);
             }
             Err(error) => return Err(error.into()),
-        }
-        // From here the temporary name refers to the displaced entry, if any.
+        };
+        // The staged name now holds the displaced entry, if any, or nothing.
         staged.placed = true;
         sync_directory(&parent, durability)?;
-        Ok(match placement {
-            Placement::Create => None,
-            Placement::Replace => Some(Displaced {
+        Ok(match swapped {
+            None => None,
+            Some(rename::Swapped::InPlace) => Some(Displaced {
                 parent: staged.parent.try_clone()?,
                 name: staged.name.clone(),
             }),
+            Some(rename::Swapped::Aside(name)) => Some(Displaced { parent, name }),
         })
     }
 
@@ -488,13 +495,7 @@ impl Root {
         durability: Durability,
     ) -> Result<(), WriteError> {
         let (archive, archive_name) = self.create_parents(destination, Parents::Private)?;
-        match rustix::fs::renameat_with(
-            parent,
-            name,
-            &archive,
-            &archive_name,
-            RenameFlags::NOREPLACE,
-        ) {
+        match rename::rename_exclusive(parent, name, &archive, &archive_name) {
             Ok(()) => {}
             Err(Errno::EXIST) => return Err(WriteError::Exists),
             Err(error) => return Err(error.into()),
@@ -522,13 +523,7 @@ impl Root {
     ) -> Result<(), WriteError> {
         let (parent, name) = self.parent_of(archived)?;
         let (target, target_name) = self.create_parents(destination, Parents::Default)?;
-        match rustix::fs::renameat_with(
-            &parent,
-            &name,
-            &target,
-            &target_name,
-            RenameFlags::NOREPLACE,
-        ) {
+        match rename::rename_exclusive(&parent, &name, &target, &target_name) {
             Ok(()) => {}
             Err(Errno::EXIST) => return Err(WriteError::Exists),
             Err(error) => return Err(error.into()),
@@ -550,13 +545,7 @@ impl Root {
         let (mut staged, mut file) = create_temporary_file(parent, PRIVATE_FILE_MODE)?;
         file.write_all(content)?;
         flush(&file, durability)?;
-        match rustix::fs::renameat_with(
-            &staged.parent,
-            &staged.name,
-            &staged.parent,
-            &name,
-            RenameFlags::NOREPLACE,
-        ) {
+        match rename::rename_exclusive(&staged.parent, &staged.name, &staged.parent, &name) {
             Ok(()) => {}
             Err(Errno::EXIST) => return Err(WriteError::Exists),
             Err(error) => return Err(error.into()),

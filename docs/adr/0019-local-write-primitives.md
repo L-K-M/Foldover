@@ -29,6 +29,29 @@ archive:  name ──rename(no-replace)──▶ .foldover/archive/…/name
   user data and is never removed automatically.
 - **Archiving:** a no-replace rename into private (0700) directories under
   `.foldover/archive/`, only while the entry still matches its observation.
+- **Volumes without the rename flags:** HFS+ and exFAT answer `ENOTSUP`
+  to both, and macOS's FAT driver takes a swap as a plain rename over
+  the destination, losing what it held (found by the device matrix, ADR
+  0038). On macOS the flags are used only where the volume declares them
+  (`VOL_CAP_INT_RENAME_EXCL`, `VOL_CAP_INT_RENAME_SWAP`). The same FAT
+  driver lists names decomposed and finds files by either spelling, but
+  renames only by the spelling a file was created with; a rename an
+  accented name missed is tried again composed, then decomposed, on
+  macOS only. While an AppleDouble sidecar holds a file's extended
+  attributes, the driver refuses to rename an accented name in either
+  spelling: such a file cannot be replaced or archived there, and its
+  copy fails and is reported, losing nothing. A no-replace
+  rename becomes an exclusive placeholder of the entry's kind at the
+  destination, which a plain rename then replaces; the refusal holds. An
+  exchange becomes PLAN.md §4.7's two steps: the old entry moves aside
+  under a temporary name, then the staged one moves in, and a failure in
+  between moves the old one back. An agent that dies between the steps
+  leaves both under temporary names, which the next run archives: nothing
+  is lost, but the path stays empty until a run fills it. One that dies
+  between a placeholder and its rename leaves the placeholder, empty,
+  under the destination's name: a new empty file for the next run to
+  sync, or an identity file that counts as missing and is written again.
+  `EINVAL` answers take the same fallbacks.
 - **Directories:** created with `mkdirat`; removed only when empty.
 - **Nothing is unlinked** except empty directories and unplaced temporaries.
 

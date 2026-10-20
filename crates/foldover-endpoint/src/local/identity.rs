@@ -15,6 +15,8 @@ fn identity_path() -> SyncPath {
 
 impl LocalEndpoint {
     /// The identity this root carries, or `None` before its first sync.
+    /// An empty file is a placeholder an interrupted first write left on a
+    /// volume without exclusive renames (ADR 0019): no identity yet.
     pub fn identity(&self) -> Result<Option<EndpointId>, ScanError> {
         let path = identity_path();
         let Some(content) = at(
@@ -24,6 +26,9 @@ impl LocalEndpoint {
         else {
             return Ok(None);
         };
+        if content.is_empty() {
+            return Ok(None);
+        }
         let text = content.strip_suffix(b"\n").unwrap_or(&content);
         EndpointId::from_hex(text)
             .map(Some)
@@ -38,13 +43,26 @@ impl LocalEndpoint {
         }
         let identity = EndpointId::from_bytes(*uuid::Uuid::new_v4().as_bytes());
         let path = identity_path();
+        let content = format!("{identity}\n");
         match self
             .root
-            .create_private_file(&path, format!("{identity}\n").as_bytes(), durability)
+            .create_private_file(&path, content.as_bytes(), durability)
         {
             Ok(()) => Ok(identity),
-            // Another writer was first; its identity stands.
-            Err(WriteError::Exists) => self.identity()?.ok_or(ApplyError::DestinationChanged(path)),
+            // Another writer was first; its identity stands. An empty
+            // placeholder is no identity: replace it.
+            Err(WriteError::Exists) => match self.identity()? {
+                Some(existing) => Ok(existing),
+                None => {
+                    self.root
+                        .replace_private_file(&path, content.as_bytes(), durability)
+                        .map_err(|source| ApplyError::Write {
+                            path: path.clone(),
+                            source,
+                        })?;
+                    Ok(identity)
+                }
+            },
             Err(source) => Err(ApplyError::Write { path, source }),
         }
     }
@@ -78,5 +96,19 @@ mod tests {
             Err(ScanError::InvalidIdentity)
         ));
         assert!(endpoint.ensure_identity(Durability::Standard).is_err());
+    }
+
+    /// Review of #105: on volumes without exclusive renames, an agent that
+    /// dies while creating the identity leaves it empty. It counts as
+    /// missing and is written again, rather than wedging every run.
+    #[test]
+    fn an_empty_identity_file_counts_as_missing() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        fs::create_dir(directory.path().join(".foldover")).unwrap();
+        fs::write(directory.path().join(".foldover/id"), b"").unwrap();
+        assert_eq!(endpoint.identity().unwrap(), None);
+        let identity = endpoint.ensure_identity(Durability::Standard).unwrap();
+        assert_eq!(endpoint.identity().unwrap(), Some(identity));
     }
 }
