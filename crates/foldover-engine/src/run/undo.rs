@@ -333,9 +333,25 @@ fn restore(entry: &JournalEntry) -> Vec<BaseUpdate> {
     if entry.moved_from.is_some() {
         updates.push(BaseUpdate::Forget(entry.path.clone()));
     }
-    updates.push(match entry.before {
+    updates.push(match before(entry) {
         Some(base) => BaseUpdate::Record(path.clone(), base),
         None => BaseUpdate::Forget(path.clone()),
     });
     updates
+}
+
+/// What the undone path's base was before the run, as far as the folder
+/// still holds it. A move goes back as the run left it: metadata it
+/// brought stays, as undo leaves metadata-only changes, so its side
+/// records that version. Same content on both sides keeps the pair.
+fn before(entry: &JournalEntry) -> Option<BaselineEntry> {
+    let base = entry.before?;
+    let JournalAction::Move(moved) = entry.action else {
+        return Some(base);
+    };
+    let (left, right) = match entry.side {
+        Side::Left => (moved, base.right()),
+        Side::Right => (base.left(), moved),
+    };
+    Some(BaselineEntry::new(left, right).unwrap_or(base))
 }

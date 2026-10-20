@@ -1608,6 +1608,55 @@ fn moved_files_are_renamed_on_the_other_side_and_undo_moves_them_back() {
     assert!(!right.join("album/a.jpg").exists());
 }
 
+/// Review of moves: a move that also brought new metadata went back
+/// with it, as undo leaves metadata, but the old path got its base from
+/// before the run; the next preview called the moved-back file edited
+/// on one side and deleted on the other.
+#[test]
+fn undoing_a_move_that_brought_new_metadata_leaves_no_conflict() {
+    let mut pair = fixture(SyncMode::Sync);
+    let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+    fs::write(left.join("a.txt"), b"a").unwrap();
+    pair.sync();
+
+    // Same content, a new modification time and a new name.
+    let edited = std::time::SystemTime::now() - Duration::from_secs(3_600);
+    fs::File::options()
+        .write(true)
+        .open(left.join("a.txt"))
+        .unwrap()
+        .set_modified(edited)
+        .unwrap();
+    fs::rename(left.join("a.txt"), left.join("b.txt")).unwrap();
+    let report = pair.ran(Approval::default(), at(1));
+    assert_eq!(
+        (report.moved(), report.copied()),
+        (1, 0),
+        "{:?}",
+        report.failures()
+    );
+
+    let undone = pair.undo_at(at(2));
+    assert!(undone.not_undone().is_empty(), "{:?}", undone.not_undone());
+    assert!(right.join("a.txt").exists());
+
+    let preview = pair.prepare().preview();
+    let actions: Vec<_> = preview.items().iter().map(|item| item.action()).collect();
+    assert!(
+        !actions
+            .iter()
+            .any(|action| matches!(action, Action::Conflict(_))),
+        "{actions:?}"
+    );
+    // Syncing again redoes the move.
+    assert!(
+        actions
+            .iter()
+            .any(|action| matches!(action, Action::Move { on: Side::Right })),
+        "{actions:?}"
+    );
+}
+
 #[test]
 fn undo_reverts_the_newest_run_and_the_next_preview_shows_the_redo() {
     let mut pair = fixture(SyncMode::Sync);
