@@ -1066,7 +1066,9 @@ mod tests {
         // can read the same microsecond twice, which would make the run
         // look unfinished at that check too.
         let finished = SystemTime::now();
+        let deadline = Instant::now() + Duration::from_secs(5);
         while SystemTime::now() <= finished {
+            assert!(Instant::now() < deadline, "the clock stopped or went back");
             std::hint::spin_loop();
         }
         assert_eq!(
