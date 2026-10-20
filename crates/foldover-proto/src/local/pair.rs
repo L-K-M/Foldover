@@ -128,7 +128,7 @@ pub struct PairSettings {
     #[serde(default, skip_serializing_if = "PairRecords::is_both")]
     pub records: PairRecords,
     /// File data bytes per second the pair's copies share at most.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bandwidth_limit: Option<u64>,
 }
 
@@ -533,13 +533,14 @@ mod tests {
         );
     }
 
-    /// Records stay off the wire while in both folders, so settings read
-    /// as before; kept only in the source, they round-trip.
+    /// Records stay off the wire while in both folders, and so does an
+    /// unset bandwidth limit, so settings read as before on an agent
+    /// that knows neither; kept only in the source, records round-trip.
     #[test]
     fn records_travel_only_when_kept_in_the_source() {
         let both = serde_json::to_value(PairSettings::from(&PairOptions::default())).unwrap();
         assert!(both.get("records").is_none());
-        assert_eq!(both["bandwidth_limit"], json!(null));
+        assert!(both.get("bandwidth_limit").is_none());
         let source_only = PairOptions::default().with_records(FolderRecords::SourceOnly);
         let settings = PairSettings::from(&source_only);
         let json = serde_json::to_value(&settings).unwrap();
