@@ -134,34 +134,52 @@ pub(super) fn rename_exclusive(
 }
 
 /// A rename without flags. macOS's FAT driver lists names decomposed and
-/// finds files by either spelling, but renames only from the composed
-/// one (found by the device matrix): a rename a decomposed name missed is
-/// tried again with both names composed. Elsewhere spellings can be
+/// finds files by either spelling, but renames only by the spelling the
+/// file was created with (found by the device matrix), which a listing
+/// does not show: a rename an accented name missed is tried again with
+/// both names composed, then decomposed. Elsewhere spellings can be
 /// different files, so nothing is retried.
 fn plain(from_directory: &Dir, from: &Path, to_directory: &Dir, to: &Path) -> Result<(), Errno> {
     let renamed = rustix::fs::renameat(from_directory, from, to_directory, to);
     #[cfg(target_os = "macos")]
     if renamed == Err(Errno::NOENT) {
-        let (composed_from, composed_to) = (composed(from), composed(to));
-        if composed_from.is_some() || composed_to.is_some() {
-            return rustix::fs::renameat(
+        for form in [Form::Composed, Form::Decomposed] {
+            let (spelled_from, spelled_to) = (spelled(from, form), spelled(to, form));
+            if spelled_from.is_none() && spelled_to.is_none() {
+                continue;
+            }
+            let retried = rustix::fs::renameat(
                 from_directory,
-                composed_from.as_deref().unwrap_or(from),
+                spelled_from.as_deref().unwrap_or(from),
                 to_directory,
-                composed_to.as_deref().unwrap_or(to),
+                spelled_to.as_deref().unwrap_or(to),
             );
+            if retried != Err(Errno::NOENT) {
+                return retried;
+            }
         }
     }
     renamed
 }
 
-/// `name` in composed Unicode, when that differs.
+/// A Unicode normalization form.
 #[cfg(target_os = "macos")]
-fn composed(name: &Path) -> Option<PathBuf> {
+#[derive(Clone, Copy)]
+enum Form {
+    Composed,
+    Decomposed,
+}
+
+/// `name` in `form`, when that differs.
+#[cfg(target_os = "macos")]
+fn spelled(name: &Path, form: Form) -> Option<PathBuf> {
     use unicode_normalization::UnicodeNormalization;
     let text = name.to_str()?;
-    let composed: String = text.nfc().collect();
-    (composed != text).then(|| PathBuf::from(composed))
+    let spelled: String = match form {
+        Form::Composed => text.nfc().collect(),
+        Form::Decomposed => text.nfd().collect(),
+    };
+    (spelled != text).then(|| PathBuf::from(spelled))
 }
 
 /// Exchange the entries at `staged` and `to`; where the displaced one
