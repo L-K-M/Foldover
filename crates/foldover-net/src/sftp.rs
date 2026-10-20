@@ -332,8 +332,18 @@ impl Session {
         handle: &Handle,
         sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
     ) -> io::Result<()> {
+        self.read_from(handle, 0, sink)
+    }
+
+    /// Read from `offset` to the end, as `read_all` does from the start.
+    pub fn read_from(
+        &mut self,
+        handle: &Handle,
+        from: u64,
+        sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
         self.check_alive()?;
-        let mut offset = 0u64;
+        let mut offset = from;
         loop {
             // Request a window of chunks, then take the answers in order.
             let mut pending = VecDeque::new();

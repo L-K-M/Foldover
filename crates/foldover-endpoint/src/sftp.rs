@@ -475,16 +475,42 @@ impl SftpEndpoint {
         control: &mut impl FnMut() -> ScanControl,
         sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
     ) -> Result<Digest, ScanError> {
+        self.read_range(path, expected, 0, control, sink)
+    }
+
+    /// Push a file's data from byte `from` on, for a copy that resumes;
+    /// the receiver checks the whole file's digest.
+    pub(crate) fn read_file_from(
+        &self,
+        path: &SyncPath,
+        expected: &Attributes,
+        from: u64,
+        control: &mut impl FnMut() -> ScanControl,
+        sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    ) -> Result<(), ScanError> {
+        self.read_range(path, expected, from, control, sink)
+            .map(|_| ())
+    }
+
+    /// The digest covers the bytes read, from `from` to the end.
+    fn read_range(
+        &self,
+        path: &SyncPath,
+        expected: &Attributes,
+        from: u64,
+        control: &mut impl FnMut() -> ScanControl,
+        sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    ) -> Result<Digest, ScanError> {
         let remote = self.remote(path.as_bytes());
         let mut session = self.session();
         let handle = session
             .open_read(&remote)
             .map_err(|source| at(Some(path), source))?;
         let mut hasher = blake3::Hasher::new();
-        let mut taken = 0u64;
+        let mut taken = from;
         let mut cancelled = false;
         let mut overrun = false;
-        let read = session.read_all(&handle, &mut |chunk| {
+        let read = session.read_from(&handle, from, &mut |chunk| {
             if control() == ScanControl::Cancel {
                 cancelled = true;
                 return Err(io::Error::other("cancelled"));

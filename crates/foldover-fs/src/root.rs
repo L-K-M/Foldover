@@ -24,7 +24,8 @@ pub use extended::{
 
 mod write;
 pub use write::{
-    Chunks, Displaced, ForeignMetadata, NativeMetadata, Placement, Staged, StagedFile, WriteError,
+    Chunks, Displaced, ForeignMetadata, NativeMetadata, PARTIAL_MIN_BYTES, Placement, Resume,
+    Staged, StagedFile, WriteError,
 };
 
 const MAX_ROOT_ANCESTORS: usize = 4096;

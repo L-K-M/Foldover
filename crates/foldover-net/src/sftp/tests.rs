@@ -79,6 +79,19 @@ fn files_stream_both_ways_and_renames_never_replace_by_default() {
     session.close(handle).unwrap();
     assert!(read == data);
 
+    // A resumed copy reads only the rest.
+    let handle = session.open_read(b"big").unwrap();
+    let from = data.len() as u64 / 3 + 7;
+    let mut rest = Vec::new();
+    session
+        .read_from(&handle, from, &mut |chunk| {
+            rest.extend_from_slice(chunk);
+            Ok(())
+        })
+        .unwrap();
+    session.close(handle).unwrap();
+    assert!(rest == data[from as usize..]);
+
     let handle = session.create_new(b"copy", 0o600).unwrap();
     assert_eq!(
         session.write_all(&handle, &mut data.as_slice()).unwrap(),

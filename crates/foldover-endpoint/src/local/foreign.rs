@@ -2,7 +2,7 @@
 //! such as SFTP servers. Those carry data, mode and modification time
 //! only; the same verification and staging rules apply.
 
-use foldover_fs::{Chunks, ForeignMetadata, NativeMetadata, Placement, WriteError};
+use foldover_fs::{Chunks, ForeignMetadata, NativeMetadata, Placement, Resume, WriteError};
 use foldover_types::{Digest, EntryContent, EntryVersion, SyncPath};
 
 use super::{
@@ -72,6 +72,37 @@ impl LocalEndpoint {
             .map_err(|_| ApplyError::SourceChanged(entry.path.clone()))
     }
 
+    /// Push the entry's data from byte `from` on, for a copy that resumes.
+    /// The skipped bytes are still read: the whole file must still be the
+    /// observed one.
+    pub(crate) fn read_entry_from(
+        &self,
+        entry: &LocalEntry,
+        from: u64,
+        control: &mut impl FnMut() -> ScanControl,
+        sink: &mut impl FnMut(&[u8]) -> std::io::Result<()>,
+    ) -> Result<(), ApplyError> {
+        let mut skipped = 0u64;
+        self.read_entry(entry, control, &mut |chunk| {
+            let skip = usize::try_from(from - skipped)
+                .unwrap_or(usize::MAX)
+                .min(chunk.len());
+            skipped += skip as u64;
+            match &chunk[skip..] {
+                [] => Ok(()),
+                rest => sink(rest),
+            }
+        })
+        .map(|_| ())
+    }
+
+    /// How much of the file with `content` a broken-off copy here kept.
+    pub(crate) fn partial_length(&self, content: &Digest) -> Result<u64, ApplyError> {
+        self.root
+            .partial_length(content)
+            .map_err(|source| ScanError::Io { path: None, source }.into())
+    }
+
     /// What `path` holds before receiving: nothing, or the verified entry
     /// the plan expected.
     pub(crate) fn receiving(
@@ -98,21 +129,29 @@ impl LocalEndpoint {
         }
     }
 
-    /// Receive a file from pushed data. Its content must come out as
-    /// `expected`; anything it replaces is archived for the run.
+    /// Receive a file from pushed data, after what `resume` takes from a
+    /// kept partial. Its content must come out as `resume.content`;
+    /// anything it replaces is archived for the run.
     pub(crate) fn receive_file(
         &self,
         path: &SyncPath,
         destination: Option<&LocalEntry>,
         carried: Carried<'_>,
-        expected: EntryContent,
+        resume: Resume,
         run: &RunScope,
         produce: impl FnOnce(Chunks<'_>) -> std::io::Result<()>,
     ) -> Result<EntryVersion, ApplyError> {
         let options = run.options();
         let staged = self
             .root
-            .stage_stream(path, carried.metadata, carried.native, options, produce)
+            .stage_resumable(
+                path,
+                resume,
+                carried.metadata,
+                carried.native,
+                options,
+                produce,
+            )
             .map_err(|source| write_error(path, source))?;
         let staged_metadata = staged
             .metadata()
@@ -126,7 +165,9 @@ impl LocalEndpoint {
             &observed(&staged_metadata, Some(&extended)),
             options.metadata(),
         );
-        if version.content() != expected {
+        // A resumed file is hashed whole, so a bad kept part ends here
+        // with the staged file, and the next copy starts over.
+        if version.content() != EntryContent::File(resume.content) {
             return Err(ApplyError::ContentNotStored(path.clone()));
         }
         self.place_received(staged.into_staged(), path, destination, run)?;

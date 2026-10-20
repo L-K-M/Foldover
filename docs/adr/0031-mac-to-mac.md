@@ -1,8 +1,8 @@
 # ADR 0031: Mac-to-Mac sync
 
 Status: Device trust, pairing, discovery, shared folders, the peer
-endpoint, change reports and extended attributes implemented; ACLs and
-resumed transfers pending
+endpoint, change reports, extended attributes and resumed transfers
+([ADR 0034](0034-resumed-transfers.md)) implemented; ACLs pending
 
 ## Context
 
@@ -42,7 +42,7 @@ Slices, in order:
    answers through its local endpoint, so staging, verification and the
    archive work as on a local root. Mac B then streams change hints.
 4. **Fidelity and resume.** Extended attributes, ACLs and flags travel
-   with file data; large transfers resume by block.
+   with file data; large transfers resume after what arrived.
 
 ### Pairing
 
