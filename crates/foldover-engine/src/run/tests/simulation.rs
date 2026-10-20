@@ -196,6 +196,8 @@ impl Simulation {
         let prepared = self.pair.try_prepare().unwrap();
         let mut store = self.pair.store();
         let (mut checks, mut commits) = (0u8, 0u8);
+        // Whether the interruption happened; an error is excused only then.
+        let fired = std::cell::Cell::new(false);
         let outcome = prepared.execute(
             Approval::new(u64::MAX, u64::MAX),
             context,
@@ -203,6 +205,7 @@ impl Simulation {
             &mut |planned, commit| {
                 if matches!(commit, Commit::Base { .. }) {
                     if matches!(interruption, Interruption::Crash(at) if at == commits) {
+                        fired.set(true);
                         return Err(crate::Error::StaleRevision);
                     }
                     commits += 1;
@@ -212,7 +215,10 @@ impl Simulation {
             &mut || {
                 checks = checks.saturating_add(1);
                 match interruption {
-                    Interruption::Cancel(at) if checks > at => ScanControl::Cancel,
+                    Interruption::Cancel(at) if checks > at => {
+                        fired.set(true);
+                        ScanControl::Cancel
+                    }
                     _ => ScanControl::Continue,
                 }
             },
@@ -221,9 +227,9 @@ impl Simulation {
         match (outcome, interruption) {
             (Ok(RunOutcome::Ran(report)), _) => Ended::Finished(report),
             (Ok(RunOutcome::NeedsApproval(_)), _) => Ended::NeedsReview,
-            // Only an interruption may end a run in an error.
-            (Err(_), Interruption::Cancel(_) | Interruption::Crash(_)) => Ended::Interrupted,
-            (Err(error), Interruption::None) => panic!("an uninterrupted run failed: {error}"),
+            // Only an interruption that happened may end a run in an error.
+            (Err(_), _) if fired.get() => Ended::Interrupted,
+            (Err(error), _) => panic!("an uninterrupted run failed: {error}"),
         }
     }
 
@@ -292,13 +298,19 @@ impl Simulation {
         self.check_nothing_lost(&before);
         // An interrupted run is followed by one that finishes, and a run a
         // gate held back by one a person reviewed.
+        // Each follow-up run is checked against the state before it and
+        // before the round.
         if !matches!(round.interruption, Interruption::None) {
+            let between = self.snapshot();
             ended = self.run(Interruption::None, RunContext::Interactive);
             self.check_nothing_lost(&before);
+            self.check_nothing_lost(&between);
         }
         if matches!(ended, Ended::NeedsReview) {
+            let between = self.snapshot();
             ended = self.run(Interruption::None, RunContext::Reviewed);
             self.check_nothing_lost(&before);
+            self.check_nothing_lost(&between);
         }
         match ended {
             Ended::Finished(report)

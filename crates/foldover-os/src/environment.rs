@@ -103,6 +103,9 @@ fn start_monitor() {
         nw_path_monitor_set_update_handler(monitor, &handler);
         nw_path_monitor_start(monitor);
     }
+    // The monitor copies the handler, but it lives as long as the process
+    // anyway, so keep this reference too rather than rely on the copy.
+    std::mem::forget(handler);
 }
 
 #[cfg(test)]
