@@ -1008,6 +1008,64 @@ fn a_corrupt_partial_is_dropped_and_the_copy_starts_over() {
     assert!(fs::read(left.join("big.bin")).unwrap() == data);
 }
 
+/// Review of #83: a large copy that arrived whole but could not be
+/// placed, because the file it replaces changed meanwhile, threw its data
+/// away; the next attempt fetched it all again.
+#[test]
+fn a_whole_copy_that_cannot_be_placed_keeps_its_data() {
+    if sftp_server().is_none() {
+        eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
+        return;
+    }
+    let mut pair = fixture(SyncMode::Sync);
+    pair.right_kind = RightKind::Sftp;
+    let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+    fs::write(left.join("big.bin"), b"old").unwrap();
+    pair.sync();
+    let data = resumable_content();
+    fs::write(right.join("big.bin"), &data).unwrap();
+
+    // Halfway through the copy, someone edits the file it replaces.
+    let prepared = pair.prepare();
+    let mut store = pair.store();
+    let (mut reads, mut edited) = (0, false);
+    let outcome = prepared
+        .execute(
+            Approval::default(),
+            RunContext::Interactive,
+            at(1),
+            &mut |planned, commit| store.apply(planned, commit),
+            &mut || {
+                reads += 1;
+                if reads == 10 * 32 {
+                    fs::write(left.join("big.bin"), b"edited here").unwrap();
+                    edited = true;
+                }
+                ScanControl::Continue
+            },
+            &NoProgress,
+        )
+        .unwrap();
+    let RunOutcome::Ran(report) = outcome else {
+        panic!("unexpected approval request");
+    };
+    assert!(
+        edited,
+        "the copy ended before the edit; read in smaller steps"
+    );
+    assert_eq!(report.copied(), 0);
+    assert_eq!(report.failures().len(), 1, "{:?}", report.failures());
+    assert_eq!(fs::read(left.join("big.bin")).unwrap(), b"edited here");
+    let kept: Vec<u64> = fs::read_dir(left.join(".foldover/partial"))
+        .map(|entries| {
+            entries
+                .map(|entry| entry.unwrap().metadata().unwrap().len())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(kept, [data.len() as u64]);
+}
+
 #[test]
 fn sftp_folders_sync_like_local_ones() {
     if sftp_server().is_none() {

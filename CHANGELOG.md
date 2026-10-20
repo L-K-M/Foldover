@@ -242,6 +242,10 @@ All notable changes to this project are documented here. The format follows
   the canary are refused when you save the pair, and a `.foldoverignore`
   file that does is named as the cause.
 
+- A large copy that arrived whole but could not be placed, because the
+  file it replaces changed meanwhile or its metadata could not be set,
+  keeps its data; the next attempt no longer fetches it again.
+
 - A copy to another Mac whose source changed partway no longer waits
   forever for that Mac; asking another Mac gives up after 30 seconds.
 - Stopping a share asks first, since pairs on the other Mac that use it

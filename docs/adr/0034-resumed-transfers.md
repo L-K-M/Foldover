@@ -21,7 +21,9 @@ next run: destination reports N     source sends bytes N.. ; destination
 ```
 
 - **Kept by content:** a staged file that fails after at least 16 MiB is
-  moved to `.foldover/partial/`, named by the planned content digest. The
+  moved to `.foldover/partial/`, named by the planned content digest: when
+  the data breaks off, when giving it its metadata fails, and when it
+  arrived whole but the file it would replace changed meanwhile. The
   next copy of that content to the folder takes it up; copies of other
   content ignore it. Partials follow the archive's retention.
 - **Verified whole:** the destination hashes the kept bytes and the new
@@ -49,4 +51,6 @@ next run: destination reports N     source sends bytes N.. ; destination
   source starts over, and its stale partial is pruned with the archive.
 - Resuming a local source rereads it from its start; on the other Mac
   that costs disk time, not network.
-- A finished copy whose placement failed keeps nothing.
+- A whole copy that failed while being placed, after the destination
+  check, keeps nothing; the check comes first and catches the usual
+  cause, an edit to the file being replaced.
