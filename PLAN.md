@@ -622,7 +622,7 @@ and the peer endpoint remain P5 work.
 | Layer | What |
 |---|---|
 | Property tests (proptest) | Random three-tree states and op sequences against a reference model; failures shrink to minimal cases |
-| Deterministic simulation | Whole engine on one seeded executor with in-memory endpoints, mock clock, network chaos (turmoil), crashes at every journal transition, unmount mid-run; nightly long runs; any failing seed replays exactly |
+| Deterministic simulation ([ADR 0038](docs/adr/0038-simulation.md)) | Whole engine on one seeded executor with in-memory endpoints, mock clock, network chaos (turmoil), crashes at every journal transition, unmount mid-run; nightly long runs; any failing seed replays exactly |
 | Quirk file system | In-memory endpoint emulating case-insensitivity, decomposed names, coarse mtimes, missing xattrs, volatile file IDs, lost events, no atomic replace, ENOSPC |
 | Device matrix (nightly) | APFS SSD/HDD, HFS+, exFAT, FAT32; Samba with and without `vfs_fruit`; macOS file sharing; NFS; OpenSSH SFTP; two-agent peer |
 | Fuzzing | Every parser: IPC frames, peer frames, AppleDouble, paths |

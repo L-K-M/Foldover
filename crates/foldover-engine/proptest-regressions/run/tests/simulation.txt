@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 12eac0a4ca3afd6aaa2429ab3f1fe5db2300fbca2befe09ea41453fac9f4ae3d # shrinks to rounds = [Round { edits: [Write(Left, 0)], interruption: None }]

@@ -1766,3 +1766,5 @@ fn a_recorded_side_must_still_match_when_the_other_side_is_new() {
     );
     assert_eq!(fs::read_dir(pair.right.path()).unwrap().count(), 0);
 }
+
+mod simulation;
