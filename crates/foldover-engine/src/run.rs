@@ -1222,8 +1222,12 @@ fn align_spellings(
             Some((path.clone(), (*known).clone()))
         })
         .collect();
-    for (from, to) in respelled {
-        observation.respell(&from, to);
+    // Such a folder holds one spelling of a name; should two map to one
+    // base spelling anyway, neither is mapped rather than one lost.
+    for (from, to) in &respelled {
+        if respelled.iter().filter(|(_, other)| other == to).count() == 1 {
+            observation.respell(from, to.clone());
+        }
     }
 }
 

@@ -250,7 +250,7 @@ impl MemoryEndpoint {
         if let Some(parent) = parent {
             folder.create_parents(parent)?;
         }
-        let modified = folder.clock;
+        let modified = folder.rounded(folder.clock);
         folder.put(
             path,
             Node::Symlink {
@@ -288,8 +288,10 @@ impl MemoryEndpoint {
         if let Some(parent) = parent {
             folder.create_parents(parent)?;
         }
+        // In place first: a failed move leaves the file where it was.
+        folder.put(to, stored.node)?;
         folder.entries.remove(&from_key);
-        folder.put(to, stored.node)
+        Ok(())
     }
 
     /// Every file outside Foldover's own names, by stored path.
@@ -907,11 +909,15 @@ impl Folder {
     /// Move the entry at `from`, and everything inside it, to `to`,
     /// creating `to`'s folders.
     fn relocate(&mut self, from: &[u8], to: &[u8]) -> io::Result<()> {
-        let key = self.key(from);
-        let stored = self.entries.remove(&key).ok_or(io::ErrorKind::NotFound)?;
+        // Where it goes must exist before it leaves where it is.
+        if self.get(from).is_none() {
+            return Err(io::ErrorKind::NotFound.into());
+        }
         if let (Some(parent), _) = split(to) {
             self.create_parents(parent)?;
         }
+        let key = self.key(from);
+        let stored = self.entries.remove(&key).ok_or(io::ErrorKind::NotFound)?;
         let inner: Vec<Stored> = self
             .entries
             .values()
