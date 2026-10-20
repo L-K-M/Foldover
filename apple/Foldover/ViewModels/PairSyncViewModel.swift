@@ -29,6 +29,8 @@ struct ChangeRow: Identifiable, Equatable {
     /// The preview the row came from; nil for run results, which no
     /// review can act on.
     var review: ReviewContext?
+    /// The file Quick Look shows for this change, if it is on this Mac.
+    var look: URL?
 }
 
 /// One finished run, ready to render.
@@ -261,7 +263,8 @@ struct PairSyncViewModel {
                               item: Self.choosable(change.action) ? change.path : nil,
                               otherWay: Self.otherWay(change.action),
                               otherWayTitle: Self.otherWayTitle(change.action),
-                              review: review)
+                              review: review,
+                              look: Self.lookURL(change, settings: pair.settings))
                 }
         }
         let failures: [RunFailure] = switch state {
@@ -356,6 +359,30 @@ struct PairSyncViewModel {
     func skipOnce(_ row: ChangeRow) async {
         guard let path = row.item, let review = row.review else { return }
         await store.skipOnce(pair.id, path: path, reviewToken: review.token)
+    }
+
+    /// The file to look at for a change: the version it would copy, the
+    /// one it would archive, or Folder A's side of a conflict. Only a
+    /// folder on this Mac has one; SFTP servers and other Macs do not.
+    nonisolated static func lookURL(_ change: PlannedChange, settings: PairSettings) -> URL? {
+        let side: FolderSide
+        switch change.action {
+        case .copy(let to), .update(let to): side = to == .a ? .b : .a
+        case .archive(let on): side = on
+        case .conflict: side = .a
+        case .blocked, .keep: return nil
+        }
+        let root = (side == .a ? settings.left : settings.right).bytes
+        // Local roots are absolute paths; others are sftp:// or peer:// locators.
+        guard root.first == UInt8(ascii: "/") else { return nil }
+        var path = root
+        if path.last != UInt8(ascii: "/") { path.append(UInt8(ascii: "/")) }
+        path.append(change.path)
+        path.append(0)
+        return path.withUnsafeBytes { bytes in
+            URL(fileURLWithFileSystemRepresentation: bytes.baseAddress!.assumingMemoryBound(to: CChar.self),
+                isDirectory: false, relativeTo: nil)
+        }
     }
 
     /// The menu title for copying a change the other way: an archive

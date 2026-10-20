@@ -31,6 +31,9 @@ All notable changes to this project are documented here. The format follows
   SFTP server, continues where it stopped the next time it runs. Copies
   from SFTP servers read each file once instead of twice.
 
+- Quick Look a change's file from the preview list with Space or its
+  context menu. Preview with ⌘R and stop a running sync with ⌘.
+
 - Check for Updates… in the app menu. Updates arrive through Sparkle, and
   each one must carry the release key's signature.
 
