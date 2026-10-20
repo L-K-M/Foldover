@@ -365,6 +365,39 @@ impl Simulation {
         }
     }
 
+    /// Everything in a folder on disk, Foldover's own files included, one
+    /// line each, to show what a failed check saw.
+    fn tree(&self, folder: Folder) -> String {
+        if self.memory(folder).is_some() {
+            return "(in memory)".into();
+        }
+        let root = self.root(folder);
+        let mut lines = Vec::new();
+        let mut pending = vec![root.clone()];
+        while let Some(directory) = pending.pop() {
+            let Ok(entries) = fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let shown = path
+                    .strip_prefix(&root)
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string();
+                if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    lines.push(format!("  {shown}/"));
+                    pending.push(path);
+                } else {
+                    let content = fs::read(&path).unwrap_or_default();
+                    lines.push(format!("  {shown}: {}", String::from_utf8_lossy(&content)));
+                }
+            }
+        }
+        lines.sort();
+        lines.join("\n")
+    }
+
     fn files(&self, folder: Folder) -> BTreeMap<Vec<u8>, Vec<u8>> {
         match self.memory(folder) {
             Some(memory) => memory.user_files(),
@@ -463,9 +496,10 @@ impl Simulation {
                 }
                 assert!(
                     archive.contains(content),
-                    "{folder:?} {} ({}) left without an archived copy",
+                    "{folder:?} {} ({}) left without an archived copy; the folder holds:\n{}",
                     String::from_utf8_lossy(path),
-                    String::from_utf8_lossy(content)
+                    String::from_utf8_lossy(content),
+                    self.tree(*folder)
                 );
             }
         }

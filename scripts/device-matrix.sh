@@ -6,8 +6,9 @@
 #
 #   scripts/device-matrix.sh [WORK_DIRECTORY]
 #
-# FOLDOVER_SIMULATION_CASES sets the cases per file system. Images are
-# detached on exit, however the run ends.
+# FOLDOVER_SIMULATION_CASES sets the cases per file system, and
+# FOLDOVER_DEVICES (e.g. "FOFAT FOHFS") limits the run to those images.
+# Images are detached on exit, however the run ends.
 set -euo pipefail
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -49,6 +50,9 @@ for target in "FOCASE:Case-sensitive APFS" "FOHFS:HFS+" "FOEXFAT:ExFAT" \
   "FOFAT:MS-DOS FAT32"; do
   name="${target%%:*}"
   filesystem="${target#*:}"
+  if [[ -n "${FOLDOVER_DEVICES:-}" && " $FOLDOVER_DEVICES " != *" $name "* ]]; then
+    continue
+  fi
   attach "$name" "$filesystem"
   right="$work/$name"
   echo "== APFS and $filesystem"
