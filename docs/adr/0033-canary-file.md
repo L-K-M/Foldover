@@ -22,6 +22,12 @@ content fails it with `CanaryChanged`. Pairs without a canary are
 unaffected, and `.foldover` paths are rejected so the guard never points
 at the pair's own state.
 
+Filters never hide the canary. Saving a pair whose filter rules leave
+it out, or a folder above it, is refused; a `.foldoverignore` file that
+does fails the run with `CanaryExcluded` before anything is compared.
+Age and size limits do not apply to it: a canary unchanged for longer
+than the pair's age limit is the point.
+
 ## Consequences
 
 - A swapped or unmounted disk stops the run before its first write,

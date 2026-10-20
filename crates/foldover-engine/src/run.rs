@@ -106,6 +106,12 @@ pub enum RunError {
     )]
     CanaryChanged { side: Side, path: SyncPath },
     #[error(
+        "The pair's filters or a .foldoverignore file leave out the canary file “{}”, so nothing \
+         was written. Change the filters, or name another canary.",
+        String::from_utf8_lossy(path.as_bytes())
+    )]
+    CanaryExcluded { path: SyncPath },
+    #[error(
         "The {side:?} folder's disk has {available} bytes free; this sync needs {needed} plus a \
          256 MiB reserve. Free space and sync again."
     )]
@@ -641,6 +647,13 @@ impl PairRun {
         let filter = Filter::new(rules.iter().map(String::as_str))?
             .with_size_limit(filters.size_limit())
             .with_cutoff(cutoff);
+        // A canary the rules leave out would look missing in every run.
+        let canary = draft.options().canary();
+        if let Some(canary) = canary.filter(|canary| !filter.keeps(canary)) {
+            return Err(RunError::CanaryExcluded {
+                path: canary.clone(),
+            });
+        }
         let observe = |side: Side, control: &mut dyn FnMut() -> ScanControl| {
             let previous = match side {
                 Side::Left => &left_snapshot,
@@ -668,6 +681,7 @@ impl PairRun {
             let old_or_absent = |old: &BTreeSet<&SyncPath>, seen: &Observation, path| {
                 old.contains(path) || !seen.entries().contains_key(*path)
             };
+            // The canary proves the folders however old or large it is.
             left_old
                 .iter()
                 .chain(&right_old)
@@ -676,6 +690,7 @@ impl PairRun {
                 })
                 .copied()
                 .chain(left.oversized().iter().chain(right.oversized()))
+                .filter(|path| Some(*path) != canary)
                 .cloned()
                 .collect()
         };
