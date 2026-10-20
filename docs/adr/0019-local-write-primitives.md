@@ -36,7 +36,10 @@ archive:  name ──rename(no-replace)──▶ .foldover/archive/…/name
   (`VOL_CAP_INT_RENAME_EXCL`, `VOL_CAP_INT_RENAME_SWAP`). The same FAT
   driver lists names decomposed and finds files by either spelling, but
   renames only from the composed one; a rename a decomposed name missed
-  is tried again composed, on macOS only. A no-replace
+  is tried again composed, on macOS only. While an AppleDouble sidecar
+  holds a file's extended attributes, the driver refuses to rename an
+  accented name in either spelling: such a file cannot be replaced or
+  archived there, and its copy fails and is reported, losing nothing. A no-replace
   rename becomes an exclusive placeholder of the entry's kind at the
   destination, which a plain rename then replaces; the refusal holds. An
   exchange becomes PLAN.md §4.7's two steps: the old entry moves aside
