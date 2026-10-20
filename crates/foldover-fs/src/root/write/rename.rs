@@ -9,10 +9,14 @@
 //!   (on failure, aside ─▶ `to` again)
 //! ```
 //!
-//! An exclusive rename keeps its refusal. A swap has a moment with
-//! nothing at `to`: an agent that dies then leaves both entries under
-//! temporary names, which the next run archives, so nothing is lost but
-//! the path is empty until a run puts something back.
+//! An exclusive rename keeps its refusal; an agent that dies between the
+//! placeholder and the rename leaves the placeholder, empty, under the
+//! destination's name. A swap has a moment with nothing at `to`: an agent
+//! that dies then leaves both entries under temporary names, which the
+//! next run archives, so nothing is lost but the path is empty until a run
+//! puts something back. Volumes that answer `EINVAL` to the flags, as some
+//! network file systems do, get the same fallbacks; where `EINVAL` means
+//! something else, the plain rename fails the same way.
 
 use std::path::{Path, PathBuf};
 
@@ -34,13 +38,23 @@ thread_local! {
     static FLAGS_UNSUPPORTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Run `body` as if every volume lacked exclusive renames and swaps.
+/// Run `body` as if every volume lacked exclusive renames and swaps; the
+/// thread's volumes answer as before afterwards, even if `body` panics.
 #[cfg(test)]
 pub(super) fn without_rename_flags<T>(body: impl FnOnce() -> T) -> T {
-    FLAGS_UNSUPPORTED.with(|unsupported| unsupported.set(true));
-    let result = body();
-    FLAGS_UNSUPPORTED.with(|unsupported| unsupported.set(false));
-    result
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FLAGS_UNSUPPORTED.with(|unsupported| unsupported.set(self.0));
+        }
+    }
+    let _restore = Restore(FLAGS_UNSUPPORTED.with(|unsupported| unsupported.replace(true)));
+    body()
+}
+
+/// Whether a rename failed only because the volume lacks its flags.
+fn flags_unsupported(error: Errno) -> bool {
+    matches!(error, Errno::NOTSUP | Errno::INVAL)
 }
 
 fn flagged(
@@ -71,7 +85,7 @@ pub(super) fn rename_exclusive(
         to,
         RenameFlags::NOREPLACE,
     ) {
-        Err(Errno::NOTSUP) => {}
+        Err(error) if flags_unsupported(error) => {}
         renamed => return renamed,
     }
     // A placeholder of the moved entry's kind, created exclusively, takes
@@ -114,7 +128,7 @@ pub(super) fn swap(
         RenameFlags::EXCHANGE,
     ) {
         Ok(()) => return Ok(Swapped::InPlace),
-        Err(Errno::NOTSUP) => {}
+        Err(error) if flags_unsupported(error) => {}
         Err(error) => return Err(error),
     }
     let aside = super::temporary_name();

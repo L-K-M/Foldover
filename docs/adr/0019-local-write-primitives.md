@@ -37,7 +37,11 @@ archive:  name ──rename(no-replace)──▶ .foldover/archive/…/name
   under a temporary name, then the staged one moves in, and a failure in
   between moves the old one back. An agent that dies between the steps
   leaves both under temporary names, which the next run archives: nothing
-  is lost, but the path stays empty until a run fills it.
+  is lost, but the path stays empty until a run fills it. One that dies
+  between a placeholder and its rename leaves the placeholder, empty,
+  under the destination's name: a new empty file for the next run to
+  sync, or an identity file that counts as missing and is written again.
+  `EINVAL` answers take the same fallbacks.
 - **Directories:** created with `mkdirat`; removed only when empty.
 - **Nothing is unlinked** except empty directories and unplaced temporaries.
 

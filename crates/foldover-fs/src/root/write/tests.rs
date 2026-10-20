@@ -776,10 +776,10 @@ fn folders_move_exclusively_without_rename_flags() {
             b"n"
         );
         fs::create_dir(target.join("docs")).unwrap();
-        roots
-            .target
-            .restore(&archived, &docs, STANDARD)
-            .unwrap_err();
+        assert!(matches!(
+            roots.target.restore(&archived, &docs, STANDARD),
+            Err(WriteError::Exists)
+        ));
         assert!(
             target
                 .join(".foldover/archive/run/docs/inner/note")
