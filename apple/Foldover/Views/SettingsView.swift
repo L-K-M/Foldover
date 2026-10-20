@@ -31,6 +31,9 @@ struct SettingsView: View {
                 ))
                 Text("When off, automatic syncs wait until Low Power Mode ends. Syncs over the network always wait while the network is expensive or Low Data Mode is on.")
                     .font(.callout).foregroundStyle(.secondary)
+                if let error = automation.error {
+                    Text(error).font(.callout).foregroundStyle(.red).textSelection(.enabled)
+                }
             }
             Section("Folder Access") {
                 Text(viewModel.accessNote).font(.callout).foregroundStyle(.secondary)

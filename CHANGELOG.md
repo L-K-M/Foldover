@@ -228,4 +228,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A copy to another Mac whose source changed partway no longer waits
+  forever for that Mac; asking another Mac gives up after 30 seconds.
+- Stopping a share asks first, since pairs on the other Mac that use it
+  stop syncing.
+
 - Keep the agent running when a client disconnects before authentication.
