@@ -5,6 +5,7 @@ pub(crate) mod filter;
 mod foreign;
 pub(crate) use foreign::Carried;
 mod identity;
+mod lock;
 pub(crate) mod version;
 
 use std::collections::BTreeMap;

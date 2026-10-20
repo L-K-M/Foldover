@@ -121,7 +121,7 @@ pub struct SyncUndoSummary {
 }
 
 /// How far a working job has got; see `foldover_client::SyncProgress`.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, uniffi::Record)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, uniffi::Record)]
 pub struct SyncWorkProgress {
     pub listed: u64,
     pub checked: u64,
@@ -129,6 +129,8 @@ pub struct SyncWorkProgress {
     pub applied: u64,
     pub bytes: u64,
     pub copied: u64,
+    /// The Mac whose sync of a folder this job waits for.
+    pub waiting_for: Option<String>,
 }
 
 impl From<SyncProgress> for SyncWorkProgress {
@@ -140,6 +142,7 @@ impl From<SyncProgress> for SyncWorkProgress {
             applied: progress.applied,
             bytes: progress.bytes,
             copied: progress.copied,
+            waiting_for: progress.waiting_for,
         }
     }
 }

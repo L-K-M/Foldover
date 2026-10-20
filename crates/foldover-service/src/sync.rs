@@ -103,6 +103,7 @@ pub(crate) struct Progress {
     applied: AtomicU64,
     bytes: AtomicU64,
     copied: AtomicU64,
+    waiting_for: Mutex<Option<String>>,
 }
 
 impl RunProgress for Progress {
@@ -123,6 +124,13 @@ impl RunProgress for Progress {
         self.applied.fetch_add(1, Ordering::Relaxed);
         self.copied.fetch_add(bytes, Ordering::Relaxed);
     }
+
+    fn waiting(&self, holder: Option<&str>) {
+        *self
+            .waiting_for
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = holder.map(str::to_owned);
+    }
 }
 
 impl Progress {
@@ -135,6 +143,11 @@ impl Progress {
             applied: read(&self.applied),
             bytes: read(&self.bytes),
             copied: read(&self.copied),
+            waiting_for: self
+                .waiting_for
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
         }
     }
 }

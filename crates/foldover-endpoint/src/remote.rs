@@ -20,13 +20,15 @@ use std::time::{Duration, SystemTime};
 use foldover_fs::{ForeignMetadata, NativeMetadata, WriteError};
 use foldover_proto::local::PairDurability;
 use foldover_proto::peer::{
-    FolderOp, IncomingKind, NameCase, NameUnicode, PeerCall, PeerReply, ScanSettings,
+    FolderOp, IncomingKind, LeaseAction, LeaseFile, NameCase, NameUnicode, PeerCall, PeerReply,
+    ScanSettings,
 };
 use foldover_types::{
     CaseMatching, Durability, EndpointId, EntryVersion, MetadataPolicy, NameMatching, PairOptions,
     PeerRoot, ScanControl, SyncPath, UnicodeMatching,
 };
 
+use crate::lease::LockFile;
 use crate::link::{Exchange, Incoming, LinkError, PeerLink, WatchHandle, Watched};
 use crate::local::Carried;
 use crate::{
@@ -203,6 +205,46 @@ impl PeerEndpoint {
         } else {
             RootRelation::Disjoint
         }
+    }
+
+    pub(crate) fn read_lock_file(&self, file: LockFile) -> Result<Option<Vec<u8>>, ScanError> {
+        match self.reply(lease_op(file, LeaseAction::Read))? {
+            PeerReply::LeaseRead { content } => Ok(content),
+            _ => Err(unexpected()),
+        }
+    }
+
+    pub(crate) fn create_lock_file(
+        &self,
+        file: LockFile,
+        content: &[u8],
+    ) -> Result<bool, ApplyError> {
+        let action = LeaseAction::Create {
+            content: content.to_vec(),
+        };
+        match self.reply(lease_op(file, action))? {
+            PeerReply::LeaseCreated { created } => Ok(created),
+            _ => Err(unexpected().into()),
+        }
+    }
+
+    pub(crate) fn replace_lock_file(
+        &self,
+        file: LockFile,
+        content: &[u8],
+    ) -> Result<(), ApplyError> {
+        let action = LeaseAction::Replace {
+            content: content.to_vec(),
+        };
+        done(self.reply(lease_op(file, action))?)
+    }
+
+    pub(crate) fn remove_lock_file(&self, file: LockFile) -> Result<(), ApplyError> {
+        done(self.reply(lease_op(file, LeaseAction::Remove))?)
+    }
+
+    pub(crate) fn promote_claim(&self) -> Result<(), ApplyError> {
+        done(self.reply(lease_op(LockFile::Lock, LeaseAction::Promote))?)
     }
 
     /// Prove `path` still holds `planned` there, and start reading it.
@@ -547,6 +589,14 @@ fn placed(reply: PeerReply) -> Result<SyncPath, ApplyError> {
         }
         _ => Err(unexpected().into()),
     }
+}
+
+fn lease_op(file: LockFile, action: LeaseAction) -> FolderOp {
+    let file = match file {
+        LockFile::Lock => LeaseFile::Lock,
+        LockFile::Claim => LeaseFile::Claim,
+    };
+    FolderOp::Lease { file, action }
 }
 
 fn pair_durability(durability: Durability) -> PairDurability {

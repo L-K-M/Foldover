@@ -52,6 +52,9 @@ pub use link::{
     Presence, WatchHandle,
 };
 
+mod lease;
+pub use lease::{HeldLease, LeaseError, LeaseHolder, LeaseTiming, LockFile};
+
 mod remote;
 pub use remote::{FolderCache, PeerEndpoint, serve_folder, watch_folder};
 

@@ -27,6 +27,10 @@ All notable changes to this project are documented here. The format follows
   Tags, Finder info and other extended attributes, resource forks and
   file flags travel between Macs.
 
+- Two Macs never sync the same folder at once: a sync waits while
+  another Mac's sync of that folder is running, and takes over from one
+  that stopped responding for two minutes.
+
 - Names that one folder would store as one file, such as `Report.txt`
   and `report.txt` on a case-insensitive Mac volume, are a conflict to
   rename instead of failing on every sync.

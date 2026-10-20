@@ -15,6 +15,7 @@ use foldover_types::{
     ScanControl, SyncPath,
 };
 
+use crate::lease::LockFile;
 use crate::link::PeerLink;
 use crate::remote::PeerEndpoint;
 use crate::sftp::SftpEndpoint;
@@ -269,6 +270,55 @@ impl Endpoint {
             Self::Local(endpoint) => endpoint.keep_copy(path, expected, from, options, control),
             Self::Sftp(endpoint) => endpoint.keep_copy(path, expected, from, options, control),
             Self::Peer(endpoint) => endpoint.keep_copy(path, expected, from, options),
+        }
+    }
+
+    pub(crate) fn read_lock_file(&self, file: LockFile) -> Result<Option<Vec<u8>>, ScanError> {
+        match self {
+            Self::Local(endpoint) => endpoint.read_lock_file(file),
+            Self::Sftp(endpoint) => endpoint.read_lock_file(file),
+            Self::Peer(endpoint) => endpoint.read_lock_file(file),
+        }
+    }
+
+    /// Write `file` unless it exists; whether it was written.
+    pub(crate) fn create_lock_file(
+        &self,
+        file: LockFile,
+        content: &[u8],
+    ) -> Result<bool, ApplyError> {
+        match self {
+            Self::Local(endpoint) => endpoint.create_lock_file(file, content),
+            Self::Sftp(endpoint) => endpoint.create_lock_file(file, content),
+            Self::Peer(endpoint) => endpoint.create_lock_file(file, content),
+        }
+    }
+
+    pub(crate) fn replace_lock_file(
+        &self,
+        file: LockFile,
+        content: &[u8],
+    ) -> Result<(), ApplyError> {
+        match self {
+            Self::Local(endpoint) => endpoint.replace_lock_file(file, content),
+            Self::Sftp(endpoint) => endpoint.replace_lock_file(file, content),
+            Self::Peer(endpoint) => endpoint.replace_lock_file(file, content),
+        }
+    }
+
+    pub(crate) fn remove_lock_file(&self, file: LockFile) -> Result<(), ApplyError> {
+        match self {
+            Self::Local(endpoint) => endpoint.remove_lock_file(file),
+            Self::Sftp(endpoint) => endpoint.remove_lock_file(file),
+            Self::Peer(endpoint) => endpoint.remove_lock_file(file),
+        }
+    }
+
+    pub(crate) fn promote_claim(&self) -> Result<(), ApplyError> {
+        match self {
+            Self::Local(endpoint) => endpoint.promote_claim(),
+            Self::Sftp(endpoint) => endpoint.promote_claim(),
+            Self::Peer(endpoint) => endpoint.promote_claim(),
         }
     }
 

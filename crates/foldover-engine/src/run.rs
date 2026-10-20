@@ -14,12 +14,14 @@
 //! A crash loses at most an uncommitted batch. The next run then finds both
 //! sides equal and records them, or a leftover temporary and archives it.
 
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
 use foldover_endpoint::{
-    ApplyError, Endpoint, EndpointPair, Expected, Filter, InvalidFilter, Observation, ObserveStep,
-    ObservedEntry, PairRootError, Reach, RunScope, ScanError, access_denied,
+    ApplyError, Endpoint, EndpointPair, Expected, Filter, HeldLease, InvalidFilter, LeaseError,
+    LeaseHolder, LeaseTiming, Observation, ObserveStep, ObservedEntry, PairRootError, Reach,
+    RunScope, ScanError, access_denied,
 };
 use foldover_state::{
     BaseUpdate, JournalAction, JournalEntry, MountSources, RecordedIdentities, SnapshotEntry,
@@ -103,6 +105,14 @@ pub enum RunError {
     Cancelled,
     #[error("This pair has no sync to undo: its newest sync changed nothing or was undone")]
     NothingToUndo,
+    #[error("{0}")]
+    Lease(#[from] LeaseError),
+}
+
+/// This agent among others leasing the same folders; one per process.
+fn agent_instance() -> &'static str {
+    static INSTANCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    INSTANCE.get_or_init(|| uuid::Uuid::new_v4().to_string())
 }
 
 /// Durable progress a run hands to the state store, in order.
@@ -140,6 +150,9 @@ pub trait RunProgress {
     fn planned(&self, changes: u64, bytes: u64);
     /// One planned change was handled, copying `bytes`.
     fn applied(&self, bytes: u64);
+    /// The run waits for another Mac's sync of a folder, shown by its
+    /// name, e.g. "Studio"; `None` once it goes on.
+    fn waiting(&self, holder: Option<&str>);
 }
 
 /// For callers that show no progress.
@@ -149,6 +162,37 @@ impl RunProgress for NoProgress {
     fn observed(&self, _: Side, _: ObserveStep) {}
     fn planned(&self, _: u64, _: u64) {}
     fn applied(&self, _: u64) {}
+    fn waiting(&self, _: Option<&str>) {}
+}
+
+/// A run's leases on both folders, renewed as it checks for cancellation.
+struct HeldLeases<'a> {
+    leases: Vec<HeldLease<'a>>,
+    /// The first renewal that failed, e.g. after another Mac took over;
+    /// it stops the run.
+    failure: RefCell<Option<LeaseError>>,
+}
+
+impl HeldLeases<'_> {
+    /// `control`'s answer, after renewing the leases that are due.
+    fn check(&self, control: &mut impl FnMut() -> ScanControl) -> ScanControl {
+        if self.failure.borrow().is_none()
+            && let Some(error) = self
+                .leases
+                .iter()
+                .find_map(|lease| lease.renew_if_due().err())
+        {
+            *self.failure.borrow_mut() = Some(error);
+        }
+        if self.failure.borrow().is_some() {
+            return ScanControl::Cancel;
+        }
+        control()
+    }
+
+    fn failure(&self) -> Option<LeaseError> {
+        self.failure.take()
+    }
 }
 
 /// What the user saw and accepted in a preview.
@@ -426,6 +470,7 @@ pub struct RunInputs {
     left_snapshot: BTreeMap<SyncPath, ObservedEntry>,
     right_snapshot: BTreeMap<SyncPath, ObservedEntry>,
     reach: Reach,
+    lease_timing: LeaseTiming,
 }
 
 impl RunInputs {
@@ -444,6 +489,15 @@ impl RunInputs {
             left_snapshot: BTreeMap::new(),
             right_snapshot: BTreeMap::new(),
             reach: Reach::default(),
+            lease_timing: LeaseTiming::STANDARD,
+        }
+    }
+
+    /// How long runs wait for, and keep, folder leases; tests shorten it.
+    pub fn with_lease_timing(self, lease_timing: LeaseTiming) -> Self {
+        Self {
+            lease_timing,
+            ..self
         }
     }
 
@@ -491,6 +545,7 @@ pub struct PairRun {
     base: BTreeMap<SyncPath, BaselineEntry>,
     /// Whether the base remembered any entry the filters still include.
     remembers: Remembers,
+    lease_timing: LeaseTiming,
 }
 
 /// Whether a run's base held entries, which makes an empty side news.
@@ -529,6 +584,7 @@ impl PairRun {
             left_snapshot,
             right_snapshot,
             reach: _,
+            lease_timing,
         } = inputs;
         let draft = pair.draft();
         for side in [Side::Left, Side::Right] {
@@ -650,6 +706,7 @@ impl PairRun {
                 Remembers::Entries
             },
             base,
+            lease_timing,
         })
     }
 
@@ -844,6 +901,11 @@ impl PairRun {
 
         let scope = RunScope::new(started, options.clone());
         let name = scope.name().to_owned();
+        // PLAN.md §4: a run writes a folder only while it holds the
+        // folder's lease, so two Macs never write one at once.
+        let leases = self.take_leases(identities, &name, control, progress)?;
+        let mut control = || leases.check(control);
+        let control = &mut control;
         let mut executor = Executor {
             run: &self,
             report: RunReport {
@@ -916,6 +978,9 @@ impl PairRun {
             }
         }
         commit(&mut executor)?;
+        if let Some(error) = leases.failure() {
+            return Err(error.into());
+        }
 
         // Retention deletes data, so it runs only after a complete run.
         if executor.report.completion == Completion::Finished {
@@ -932,6 +997,46 @@ impl PairRun {
             }
         }
         Ok(RunOutcome::Ran(executor.report))
+    }
+
+    /// Both roots' leases for the run named `run`, taken in identity order
+    /// so two Macs syncing the same two folders cannot each hold one.
+    fn take_leases(
+        &self,
+        identities: [EndpointId; 2],
+        run: &str,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &dyn RunProgress,
+    ) -> Result<HeldLeases<'_>, RunError> {
+        let mut sides = [(identities[0], Side::Left), (identities[1], Side::Right)];
+        sides.sort_by_key(|(identity, _)| *identity.as_bytes());
+        let holder = LeaseHolder {
+            id: format!("{}/{run}", agent_instance()),
+            label: foldover_host::computer_name(),
+        };
+        let waited = Cell::new(false);
+        let mut waiting = |label: &str| {
+            waited.set(true);
+            progress.waiting(Some(label));
+        };
+        let mut leases = Vec::new();
+        for (_, side) in sides {
+            let endpoint = self.endpoints.endpoint(side);
+            leases.push(HeldLease::take(
+                endpoint,
+                holder.clone(),
+                self.lease_timing,
+                control,
+                &mut waiting,
+            )?);
+        }
+        if waited.get() {
+            progress.waiting(None);
+        }
+        Ok(HeldLeases {
+            leases,
+            failure: RefCell::new(None),
+        })
     }
 
     /// Both roots still hold `identities`, in left, right order.

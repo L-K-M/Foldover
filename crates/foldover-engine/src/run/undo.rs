@@ -100,6 +100,10 @@ impl PairRun {
         let revision = self.pair.revision();
         let scope = RunScope::new(started, options.clone());
         let name = scope.name().to_owned();
+        // An undo writes too: only while it holds both folders' leases.
+        let leases = self.take_leases(identities, &name, control, &NoProgress)?;
+        let mut control = || leases.check(control);
+        let control = &mut control;
         let mut report = UndoReport {
             archive: name.clone(),
             ..UndoReport::default()
@@ -172,6 +176,10 @@ impl PairRun {
                 seqs: &undid,
             };
             commit(revision, undid).map_err(RunError::Commit)?;
+        }
+
+        if let Some(error) = leases.failure() {
+            return Err(error.into());
         }
 
         let mut refilled = Vec::new();

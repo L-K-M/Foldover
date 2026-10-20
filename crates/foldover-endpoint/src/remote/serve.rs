@@ -13,8 +13,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use foldover_proto::local::PairDurability;
 use foldover_proto::peer::{
-    FolderError, FolderErrorKind, FolderOp, Incoming, IncomingKind, NameCase, NameUnicode,
-    PeerReply, RunSettings, ScanSettings, WireItem, WireRun,
+    FolderError, FolderErrorKind, FolderOp, Incoming, IncomingKind, LeaseAction, LeaseFile,
+    NameCase, NameUnicode, PeerReply, RunSettings, ScanSettings, WireItem, WireRun,
 };
 use foldover_types::{
     CaseMatching, Digest, Durability, EntryContent, EntryVersion, LocalRoot, MetadataPolicy,
@@ -22,6 +22,7 @@ use foldover_types::{
 };
 
 use super::wire;
+use crate::lease::LockFile;
 use crate::link::Answer;
 use crate::local::Carried;
 use crate::{
@@ -122,6 +123,7 @@ pub fn serve_folder(root: &LocalRoot, op: FolderOp, cache: &FolderCache, answer:
             .map_err(|error| wire::scan_failure(&error)),
         FolderOp::Observe { scan } => return observe(&endpoint, root, scan, cache, answer),
         FolderOp::Watch => unreachable!("answered before opening the folder"),
+        FolderOp::Lease { file, action } => lease(&endpoint, file, action),
         FolderOp::Read { path, entry, run } => return read(&endpoint, &path, &entry, run, answer),
         FolderOp::Receive { path, entry } => receive(&endpoint, &path, entry, answer),
         FolderOp::Metadata { path, entry, run } => {
@@ -336,6 +338,36 @@ fn observe(
             .is_ok();
     if sent {
         cache.keep(root, policy, observation.entries().clone());
+    }
+}
+
+/// One step of the lease protocol on this Mac's folder.
+fn lease(
+    endpoint: &LocalEndpoint,
+    file: LeaseFile,
+    action: LeaseAction,
+) -> Result<PeerReply, FolderError> {
+    let file = match file {
+        LeaseFile::Lock => LockFile::Lock,
+        LeaseFile::Claim => LockFile::Claim,
+    };
+    let done = |result: Result<(), crate::ApplyError>| {
+        result
+            .map(|()| PeerReply::Done)
+            .map_err(|error| wire::apply_failure(&error))
+    };
+    match action {
+        LeaseAction::Read => endpoint
+            .read_lock_file(file)
+            .map(|content| PeerReply::LeaseRead { content })
+            .map_err(|error| wire::scan_failure(&error)),
+        LeaseAction::Create { content } => endpoint
+            .create_lock_file(file, &content)
+            .map(|created| PeerReply::LeaseCreated { created })
+            .map_err(|error| wire::apply_failure(&error)),
+        LeaseAction::Replace { content } => done(endpoint.replace_lock_file(file, &content)),
+        LeaseAction::Remove => done(endpoint.remove_lock_file(file)),
+        LeaseAction::Promote => done(endpoint.promote_claim()),
     }
 }
 

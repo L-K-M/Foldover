@@ -137,6 +137,8 @@ struct PairSyncViewModel {
             return String(localized: "Preview to see what a sync would change. Nothing is written until you sync.")
         case .working(_, cancelling: true, _):
             return String(localized: "Stopping…")
+        case .working(_, _, let progress) where progress.waitingFor != nil:
+            return String(localized: "Waiting for “\(progress.waitingFor ?? "")” to finish syncing these folders…")
         case .working(.preview, _, let progress):
             return Self.comparing(progress)
         case .working(.run, _, let progress) where progress.changes > 0:
@@ -170,7 +172,7 @@ struct PairSyncViewModel {
     /// measure: bytes when the plan copies any, else changes; while
     /// comparing, entries checked of those found so far.
     var progressFraction: Double? {
-        guard case .working(_, _, let progress) = state else { return nil }
+        guard case .working(_, _, let progress) = state, progress.waitingFor == nil else { return nil }
         if progress.bytes > 0 {
             return Double(progress.copied) / Double(progress.bytes)
         }

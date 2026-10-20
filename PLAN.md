@@ -432,7 +432,8 @@ Endpoint-layer rules, not filters:
 - **`archive/`:** retention-pruned; with several Macs on one share, each
   prunes only what it archived.
 - **`id`:** lets Foldover notice a different disk mounted at the same path.
-- **`lock`:** a lease with holder device, run ID and a heartbeat counter.
+- **`lock`:** a lease with holder device, run ID and a heartbeat counter
+  ([ADR 0032](docs/adr/0032-root-leases.md)).
   - **Reclaim:** a lease is dead when its counter hasn't moved across two
     reads one TTL apart, timed on the reclaimer's own clock. Taking it over
     is an exclusive-create claim file, then the lock swap, so two Macs can't
