@@ -238,7 +238,7 @@ impl Scheduler {
         id: PairId,
         now: Instant,
         last_finished: Option<SystemTime>,
-    ) -> Option<(ChangePoll, PollMode)> {
+    ) -> Option<(ChangePoll, PollMode, SystemTime)> {
         let mut polls = self.polls.lock().unwrap_or_else(PoisonError::into_inner);
         let slot = polls.get_mut(&id)?;
         let mode = match slot.checked {
@@ -250,15 +250,17 @@ impl Scheduler {
             Some(_) => return None,
         };
         let poll = slot.poll.take()?;
-        slot.checked = Some((now, SystemTime::now()));
-        Some((poll, mode))
+        let started = SystemTime::now();
+        slot.checked = Some((now, started));
+        Some((poll, mode, started))
     }
 
-    /// Return a pair's poll after its check. A pair forgotten meanwhile
-    /// stays forgotten.
-    fn poll_done(&self, id: PairId, poll: ChangePoll, need: PollNeed) {
+    /// Return a pair's poll after its check under `revision`. A pair
+    /// forgotten meanwhile stays forgotten, and one edited meanwhile keeps
+    /// its fresh poll: this one looked at the old folders.
+    fn poll_done(&self, id: PairId, revision: u64, poll: ChangePoll, need: PollNeed) {
         let mut polls = self.polls.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(slot) = polls.get_mut(&id) {
+        if let Some(slot) = polls.get_mut(&id).filter(|slot| slot.revision == revision) {
             slot.poll = Some(poll);
             slot.need = need;
         }
@@ -573,17 +575,13 @@ impl Service {
             {
                 continue;
             }
-            let last_finished = self
-                .engine
-                .lock()
-                .ok()
-                .and_then(|engine| engine.history(id, 1).ok())
-                .and_then(|runs| runs.first().map(|run| run.finished));
-            let Some((poll, mode)) = self.scheduler.take_poll(id, now, last_finished) else {
+            let last_finished = self.last_finished(id);
+            let Some((poll, mode, started)) = self.scheduler.take_poll(id, now, last_finished)
+            else {
                 continue;
             };
             let (service, pair, reach) = (self.clone(), pair.clone(), reach.clone());
-            let check = move || service.check_changes(&pair, &reach, poll, mode);
+            let check = move || service.check_changes(&pair, &reach, poll, mode, started);
             if tokio::runtime::Handle::try_current().is_ok() {
                 tokio::task::spawn_blocking(check);
             } else {
@@ -592,15 +590,28 @@ impl Service {
         }
     }
 
-    /// One pair's check for changes notifications miss. A change seen
-    /// while a run started meanwhile may be that run's own writing, and
-    /// the run looks at the folders anyway.
+    /// When the pair's last run finished, from its history.
+    fn last_finished(&self, id: PairId) -> Option<SystemTime> {
+        self.engine
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .history(id, 1)
+            .ok()?
+            .first()
+            .map(|run| run.finished)
+    }
+
+    /// One pair's check for changes notifications miss, started at
+    /// `started`. A change seen while a run went on may be that run's own
+    /// writing, and the run looked at the folders anyway: it counts only
+    /// when no run is working or finished since the check began.
     fn check_changes(
         &self,
         pair: &PairConfig,
         reach: &Reach,
         mut poll: ChangePoll,
         mode: PollMode,
+        started: SystemTime,
     ) {
         let id = pair.id();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -608,7 +619,11 @@ impl Service {
         }));
         let need = match outcome {
             Ok(Ok(Polled::Changed)) => {
-                if !matches!(self.jobs.status(id), SyncStatus::Working { .. }) {
+                let working = matches!(self.jobs.status(id), SyncStatus::Working { .. });
+                let ran = self
+                    .last_finished(id)
+                    .is_some_and(|finished| finished >= started);
+                if !working && !ran {
                     self.scheduler.mark_changed(id, Instant::now());
                 }
                 PollNeed::Needed
@@ -623,7 +638,7 @@ impl Service {
                 PollNeed::Unknown
             }
         };
-        self.scheduler.poll_done(id, poll, need);
+        self.scheduler.poll_done(id, pair.revision(), poll, need);
     }
 
     /// Check one due pair's folders on the blocking pool and record the
@@ -788,8 +803,8 @@ mod tests {
             assert!(scheduler.may_poll(&pair));
             scheduler
                 .take_poll(id, at(seconds), finished)
-                .map(|(poll, mode)| {
-                    scheduler.poll_done(id, poll, PollNeed::Needed);
+                .map(|(poll, mode, _)| {
+                    scheduler.poll_done(id, pair.revision(), poll, PollNeed::Needed);
                     mode
                 })
         };
@@ -807,17 +822,34 @@ mod tests {
 
         // While a check runs, no other starts.
         assert!(scheduler.may_poll(&pair));
-        let (poll, _) = scheduler
+        let (poll, _, _) = scheduler
             .take_poll(id, at(3 * POLL.as_secs()), None)
             .unwrap();
         assert!(!scheduler.may_poll(&pair));
         // Folders notifications cover are not checked again...
-        scheduler.poll_done(id, poll, PollNeed::NotNeeded);
+        scheduler.poll_done(id, pair.revision(), poll, PollNeed::NotNeeded);
         assert!(!scheduler.may_poll(&pair));
         // ...until the pair's configuration changes.
         let edited =
             PairConfig::from_stored(id, pair.revision() + 1, pair.draft().clone()).unwrap();
         scheduler.keep_polls(std::slice::from_ref(&edited));
+        assert!(scheduler.may_poll(&edited));
+
+        // Review: a check of the old folders, still running across the
+        // edit, must not land in the fresh poll.
+        let (_, mode, _) = scheduler
+            .take_poll(id, at(4 * POLL.as_secs()), None)
+            .unwrap();
+        assert_eq!(mode, PollMode::Baseline);
+        let stale = PollNeed::NotNeeded;
+        scheduler.poll_done(id, pair.revision(), ChangePoll::default(), stale);
+        assert!(!scheduler.may_poll(&edited), "the fresh check still runs");
+        scheduler.poll_done(
+            id,
+            edited.revision(),
+            ChangePoll::default(),
+            PollNeed::Needed,
+        );
         assert!(scheduler.may_poll(&edited));
     }
 

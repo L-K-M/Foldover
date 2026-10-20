@@ -183,8 +183,9 @@ you might expect. Warnings never block saving
   ([ADR 0022](../adr/0022-scheduled-runs.md)).
 - A mounted share only reports changes your Mac makes. On "When files
   change", writes from other computers are found within 5 minutes at the
-  share's top level and in folders recently active, and otherwise by the
-  hourly check; SMB notification behavior is unverified
+  share's top level and in recently active folders, and otherwise by the
+  hourly check; with an interval schedule, by the next sync. SMB
+  notification behavior is unverified
   ([ADR 0002](../adr/0002-change-detection.md)).
 - Schedule timers live in agent memory; restarting the agent restarts
   every interval ([ADR 0022](../adr/0022-scheduled-runs.md)).

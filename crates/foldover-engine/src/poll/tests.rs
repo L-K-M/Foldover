@@ -140,3 +140,58 @@ fn an_sftp_folder_is_listed_like_a_local_one() {
     assert!(poll.check(&folder, &everything()).unwrap());
     assert!(!poll.check(&folder, &everything()).unwrap());
 }
+
+/// Review: a directory that failed to answer once counted as a change,
+/// so each hiccup of a struggling server started a full run.
+#[test]
+fn a_directory_that_fails_to_answer_is_no_change_and_stays_watched() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let photos = directory.path().join("photos");
+    let folder = endpoint(directory.path());
+    let mut poll = FolderPoll::default();
+    assert!(!poll.check(&folder, &everything()).unwrap());
+    fs::create_dir(&photos).unwrap();
+    assert!(poll.check(&folder, &everything()).unwrap());
+
+    let set_mode = |mode| fs::set_permissions(&photos, fs::Permissions::from_mode(mode)).unwrap();
+    set_mode(0o000);
+    let unanswered = poll.check(&folder, &everything());
+    set_mode(0o755);
+    assert!(!unanswered.unwrap());
+    assert_eq!(poll.active.len(), 1);
+
+    fs::write(photos.join("a.jpg"), b"a").unwrap();
+    assert!(poll.check(&folder, &everything()).unwrap());
+}
+
+/// Review: once the active list was full, a directory found changed
+/// inside another was never watched, and the one holding them aged out
+/// although all the activity was inside it.
+#[test]
+fn a_full_active_list_makes_room_for_the_newest_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let projects = directory.path().join("projects");
+    let names: Vec<String> = (0..=ACTIVE_LIMIT)
+        .map(|index| format!("p{index:02}"))
+        .collect();
+    for name in &names {
+        fs::create_dir_all(projects.join(name)).unwrap();
+    }
+    let folder = endpoint(directory.path());
+    let mut poll = FolderPoll::default();
+    assert!(!poll.check(&folder, &everything()).unwrap());
+    fs::write(projects.join("notes"), b"start").unwrap();
+    assert!(poll.check(&folder, &everything()).unwrap());
+
+    for name in &names {
+        fs::write(projects.join(name).join("file"), name).unwrap();
+        assert!(poll.check(&folder, &everything()).unwrap(), "{name}");
+    }
+    let active: Vec<&[u8]> = poll.active.iter().map(SyncPath::as_bytes).collect();
+    assert_eq!(active.len(), ACTIVE_LIMIT);
+    let newest = format!("projects/{}", names[ACTIVE_LIMIT]);
+    assert!(active.contains(&b"projects".as_slice()), "{active:?}");
+    assert!(active.contains(&newest.as_bytes()), "{active:?}");
+}

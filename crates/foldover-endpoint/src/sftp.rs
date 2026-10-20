@@ -229,7 +229,14 @@ impl SftpEndpoint {
         };
         let entries = match self.session().read_dir(&remote) {
             Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
             Err(source) => return Err(at(directory, source)),
         };
         let listed = entries

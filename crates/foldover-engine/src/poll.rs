@@ -115,17 +115,30 @@ impl FolderPoll {
                 (Ok(Some(listing)), _) => listing,
                 (Ok(None), None) => return Err(ScanError::RootMissing),
                 (Err(error), None) => return Err(error),
-                // An active directory that vanished or stopped answering
-                // is a change for the run to sort out.
-                (Ok(None) | Err(_), Some(_)) => {
+                // An active directory that is gone is a change for the run
+                // to sort out.
+                (Ok(None), Some(_)) => {
                     changed = true;
+                    continue;
+                }
+                // One that failed to answer keeps its last listing, so a
+                // server's hiccup starts no run and the next check still
+                // compares against what was there.
+                (Err(_), Some(_)) => {
+                    if let Some(before) = self.seen.get(&directory) {
+                        seen.insert(directory, before.clone());
+                    }
                     continue;
                 }
             };
             let mut listing = listing;
             listing.sort_by(|a, b| a.name().cmp(b.name()));
             if let Some(before) = self.seen.get(&directory) {
-                changed |= *before != listing;
+                // A directory whose own entries changed stays recently active.
+                if *before != listing {
+                    changed = true;
+                    newly_active.extend(directory.clone());
+                }
                 for entry in &listing {
                     if entry.kind() != ListedKind::Directory || before.contains(entry) {
                         continue;
@@ -135,7 +148,7 @@ impl FolderPoll {
                     };
                     let listed = seen.contains_key(&Some(path.clone()))
                         || pending.contains(&Some(path.clone()));
-                    if !listed && seen.len() + pending.len() <= ACTIVE_LIMIT {
+                    if !listed && make_room(&mut self.active, &mut seen, &mut pending, &directory) {
                         pending.push_back(Some(path.clone()));
                     }
                     newly_active.push(path);
@@ -162,6 +175,29 @@ impl FolderPoll {
         self.seen = seen;
         Ok(changed)
     }
+}
+
+/// Make room to list one more directory this check: the least recently
+/// active ones, other than `current`, stop being watched. Whether there
+/// is room.
+fn make_room(
+    active: &mut VecDeque<SyncPath>,
+    seen: &mut BTreeMap<Option<SyncPath>, Vec<ListedEntry>>,
+    pending: &mut VecDeque<Option<SyncPath>>,
+    current: &Option<SyncPath>,
+) -> bool {
+    while seen.len() + pending.len() > ACTIVE_LIMIT {
+        let Some(oldest) = active
+            .iter()
+            .rposition(|path| Some(path) != current.as_ref())
+            .and_then(|oldest| active.remove(oldest))
+        else {
+            return false;
+        };
+        seen.remove(&Some(oldest.clone()));
+        pending.retain(|queued| queued.as_ref() != Some(&oldest));
+    }
+    true
 }
 
 fn child(directory: Option<&SyncPath>, name: &[u8]) -> Result<SyncPath, ScanError> {
