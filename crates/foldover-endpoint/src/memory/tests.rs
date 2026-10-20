@@ -197,3 +197,29 @@ fn identities_and_lock_files_live_in_foldovers_own_folder() {
     assert!(folder.user_files().is_empty());
     assert!(observe(&endpoint).entries().is_empty());
 }
+
+#[test]
+fn a_listing_shows_one_directory_without_foldovers_names() {
+    let folder = MemoryEndpoint::new(Quirks::default());
+    folder.put_file(b"a.txt", b"a").unwrap();
+    folder.put_file(b"docs/b.txt", b"b").unwrap();
+    let endpoint = Endpoint::Memory(folder);
+    endpoint.ensure_identity(Durability::Standard).unwrap();
+    let names = |directory: Option<&SyncPath>| -> Vec<Vec<u8>> {
+        endpoint
+            .list(directory, &Filter::none())
+            .unwrap()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.name().to_vec())
+            .collect()
+    };
+    assert_eq!(names(None), [b"a.txt".to_vec(), b"docs".to_vec()]);
+    assert_eq!(names(Some(&path("docs"))), [b"b.txt".to_vec()]);
+    assert!(
+        endpoint
+            .list(Some(&path("gone")), &Filter::none())
+            .unwrap()
+            .is_none()
+    );
+}

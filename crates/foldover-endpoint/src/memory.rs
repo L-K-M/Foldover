@@ -39,8 +39,8 @@ use crate::local::filter::{IGNORE_FILE, parse_ignore_file};
 use crate::local::version::{Observed, Payload, entry_version, metadata_version};
 use crate::local::{Fingerprint, TEMPORARY_PREFIX, protected, temporary};
 use crate::{
-    ApplyError, Expected, Filter, NodeKind, Observation, ObserveStep, ObservedEntry, RunScope,
-    ScanError,
+    ApplyError, Expected, Filter, ListedEntry, ListedKind, NodeKind, Observation, ObserveStep,
+    ObservedEntry, RunScope, ScanError,
 };
 
 const IDENTITY_FILE: &[u8] = b".foldover/id";
@@ -439,6 +439,47 @@ impl MemoryEndpoint {
             observation.entries.insert(path, entry);
         }
         Ok(observation)
+    }
+
+    /// One directory's entries the filter keeps, for a quick change check;
+    /// `None` once it is gone.
+    pub(crate) fn list(
+        &self,
+        directory: Option<&SyncPath>,
+        filter: &Filter,
+    ) -> Result<Option<Vec<ListedEntry>>, ScanError> {
+        let folder = self.folder();
+        let parent = match directory {
+            None => None,
+            Some(directory) => match folder.get(directory.as_bytes()) {
+                Some(Stored {
+                    node: Node::Directory { .. },
+                    path,
+                }) => Some(path.clone()),
+                _ => return Ok(None),
+            },
+        };
+        let listed = folder
+            .entries
+            .values()
+            .filter(|stored| split(&stored.path).0 == parent.as_deref())
+            .filter(|stored| !protected(split(&stored.path).1))
+            .filter_map(|stored| {
+                let kind = match stored.node {
+                    Node::Directory { .. } => ListedKind::Directory,
+                    Node::File { .. } | Node::Symlink { .. } => ListedKind::Other,
+                };
+                ListedEntry::kept(
+                    directory,
+                    filter,
+                    split(&stored.path).1.to_vec(),
+                    kind,
+                    stored.node.size(),
+                    Some(stored.node.modified()),
+                )
+            })
+            .collect();
+        Ok(Some(listed))
     }
 
     /// Prove `path` still holds `expected`; the stored entry if so.

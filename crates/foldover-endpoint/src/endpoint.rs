@@ -237,6 +237,8 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.list(directory, filter),
             Self::Sftp(endpoint) => endpoint.list(directory, filter),
+            #[cfg(feature = "simulation")]
+            Self::Memory(endpoint) => endpoint.list(directory, filter),
             Self::Peer(_) => Err(ScanError::Io {
                 path: directory.cloned(),
                 source: std::io::ErrorKind::Unsupported.into(),
