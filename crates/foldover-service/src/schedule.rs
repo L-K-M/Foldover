@@ -2,10 +2,11 @@
 //! scheduled start, or after the agent started. `OnChange` pairs are due
 //! once their folders have been quiet briefly after a change, after five
 //! minutes of changes that never settle, and hourly, because change
-//! notifications can be missed. Changes made while the agent was not
-//! watching count as one change when it starts, and folders that hear of
-//! no other computer's changes (shares, SFTP) are checked every few
-//! minutes (PLAN.md §3.5, §4.8). `Daily` pairs are due once
+//! notifications can be missed. When the agent starts, a folder whose
+//! volume history shows a change since it was last quiet, or that has
+//! no usable history, counts as changed; folders that hear of no other
+//! computer's changes (shares, SFTP) are checked every few minutes
+//! (PLAN.md §3.5, §4.8). `Daily` pairs are due once
 //! their latest scheduled local moment has passed the last run's start.
 //! Pairs that never completed a first sync are skipped: their first run
 //! is reviewed by a person.
@@ -14,7 +15,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
-use foldover_engine::{ChangePoll, Environment, PairWatcher, PollMode, Polled, Reach, local_time};
+use foldover_engine::{
+    ChangePoll, Environment, PairWatcher, PollMode, Polled, Reach, WatchCursor, local_time,
+};
 use foldover_proto::local::SyncStatus;
 use foldover_types::{LocalDateTime, PairConfig, PairId, Schedule, Side};
 
@@ -30,6 +33,9 @@ const CHURN: Duration = Duration::from_secs(5 * 60);
 /// How often folders without notifications for other computers' changes
 /// are checked for them.
 const POLL: Duration = Duration::from_secs(5 * 60);
+/// How often a quiet pair records where its folders' event history
+/// stands, so a restart replays only what came after.
+const CURSOR_SAVE: Duration = Duration::from_secs(60);
 /// On-change pairs are also verified this often.
 const VERIFY: Duration = Duration::from_secs(60 * 60);
 /// A share that went away is mounted again at most this often.
@@ -56,6 +62,10 @@ enum Probe {
 
 /// The folder presence check probes run, `missing_side` by default.
 type FolderCheck = dyn Fn(&PairConfig, &Reach) -> Option<Side> + Send + Sync;
+
+/// Whether a pair's folders changed while the agent was not watching,
+/// `changed_while_away` by default.
+type AwayCheck = dyn Fn(&PairConfig, &[Option<WatchCursor>; 2]) -> bool + Send + Sync;
 
 /// What a due pair may do this tick.
 enum Gate {
@@ -118,6 +128,15 @@ pub(crate) struct Scheduler {
     probes: Mutex<HashMap<PairId, Probe>>,
     /// Per-pair checks for changes notifications miss.
     polls: Mutex<HashMap<PairId, PollSlot>>,
+    /// Pairs whose start-up replay is still running; their cursors wait.
+    catching_up: Mutex<HashSet<PairId>>,
+    /// When each pair last recorded its cursors.
+    cursor_saved: Mutex<HashMap<PairId, Instant>>,
+    /// The file event at the previous tick: a cursor taken a tick late
+    /// gives events time to arrive.
+    tick_event: Mutex<Option<u64>>,
+    /// The start-up replay; tests replace it.
+    away: Mutex<Arc<AwayCheck>>,
     /// The folder check probes run; tests replace it.
     probe: Mutex<Arc<FolderCheck>>,
 }
@@ -135,6 +154,10 @@ impl Scheduler {
             reconnected: Mutex::default(),
             probes: Mutex::default(),
             polls: Mutex::default(),
+            catching_up: Mutex::default(),
+            cursor_saved: Mutex::default(),
+            tick_event: Mutex::default(),
+            away: Mutex::new(Arc::new(foldover_engine::changed_while_away)),
             probe: Mutex::new(Arc::new(foldover_engine::missing_side)),
         }
     }
@@ -386,9 +409,10 @@ impl Scheduler {
     /// Watch exactly the folders of these pairs, if a watcher runs.
     /// Unwatchable folders (unmounted disks) are retried each tick and get
     /// hourly runs meanwhile; one that becomes watchable counts as changed,
-    /// since it may have changed while it was away. So does every folder
-    /// at the first tick: nothing watched it before the agent started.
-    fn watch(&self, pairs: &[PairConfig], reach: &Reach, now: Instant) {
+    /// since it may have changed while it was away. At the first tick,
+    /// returns the watchable pairs: nothing watched them before the agent
+    /// started, so their histories need replaying.
+    fn watch(&self, pairs: &[PairConfig], reach: &Reach, now: Instant) -> Vec<PairId> {
         let ids: Vec<_> = pairs.iter().map(PairConfig::id).collect();
         let mut watched = self.watched.lock().unwrap_or_else(PoisonError::into_inner);
         let mut unwatchable = self
@@ -396,7 +420,7 @@ impl Scheduler {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         if watched.as_ref() == Some(&ids) && unwatchable.is_empty() {
-            return;
+            return Vec::new();
         }
         let first = watched.is_none();
         *watched = Some(ids.clone());
@@ -410,14 +434,90 @@ impl Scheduler {
             None => HashSet::new(),
         };
 
-        let caught_up = ids.iter().filter(|id| first && !failed.contains(id));
         let back = unwatchable
             .difference(&failed)
             .filter(|id| ids.contains(id));
-        for id in caught_up.chain(back) {
+        for id in back {
             self.mark_changed(*id, now);
         }
+        let away = ids
+            .iter()
+            .filter(|id| first && !failed.contains(id))
+            .copied()
+            .collect();
         *unwatchable = failed;
+        away
+    }
+
+    /// Whether a pair may record its cursors now: no change waits for a
+    /// run, its start-up replay is done, its folders are watched, and it
+    /// has not recorded them within `CURSOR_SAVE`. Records the time.
+    fn quiet(&self, id: PairId, now: Instant) -> bool {
+        let pending = self
+            .changed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains_key(&id);
+        let catching_up = self
+            .catching_up
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&id);
+        let unwatched = self
+            .unwatchable
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&id);
+        if pending || catching_up || unwatched {
+            return false;
+        }
+        let mut saved = self
+            .cursor_saved
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if saved
+            .get(&id)
+            .is_some_and(|at| now.saturating_duration_since(*at) < CURSOR_SAVE)
+        {
+            return false;
+        }
+        saved.insert(id, now);
+        true
+    }
+
+    /// The event the previous tick saw; records this tick's.
+    fn swap_tick_event(&self, event: Option<u64>) -> Option<u64> {
+        std::mem::replace(
+            &mut *self
+                .tick_event
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            event,
+        )
+    }
+
+    fn away_check(&self) -> Arc<AwayCheck> {
+        self.away
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_away(
+        &self,
+        away: impl Fn(&PairConfig, &[Option<WatchCursor>; 2]) -> bool + Send + Sync + 'static,
+    ) {
+        *self.away.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(away);
+    }
+
+    /// Test hook: no start-up replay is still running.
+    #[cfg(test)]
+    pub(crate) fn caught_up(&self) -> bool {
+        self.catching_up
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty()
     }
 }
 
@@ -514,8 +614,10 @@ impl Service {
             .lock()
             .map(|engine| engine.reach())
             .unwrap_or_default();
-        self.scheduler.watch(&changing, &reach, now);
+        let away = self.scheduler.watch(&changing, &reach, now);
+        self.catch_up(&changing, &away, now);
         self.poll(&changing, &held, &reach, now);
+        self.save_cursors(&changing, now);
 
         let mut started = Vec::new();
         for pair in candidates {
@@ -559,6 +661,84 @@ impl Service {
             }
         }
         started
+    }
+
+    /// Replay, on the blocking pool, the histories of folders nothing
+    /// watched before the agent started; a change, or no usable history,
+    /// counts as a change at this tick.
+    fn catch_up(&self, pairs: &[PairConfig], away: &[PairId], now: Instant) {
+        for pair in pairs.iter().filter(|pair| away.contains(&pair.id())) {
+            let id = pair.id();
+            let cursors = self
+                .engine
+                .lock()
+                .ok()
+                .and_then(|engine| engine.watch_cursors(id).ok())
+                .unwrap_or_default();
+            self.scheduler
+                .catching_up
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(id);
+            let (scheduler, pair, check) = (
+                Arc::clone(&self.scheduler),
+                pair.clone(),
+                self.scheduler.away_check(),
+            );
+            let replay = move || {
+                // A replay that blew up proves nothing: count it as a change.
+                let changed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    check(&pair, &cursors)
+                }))
+                .unwrap_or(true);
+                if changed {
+                    scheduler.mark_changed(id, now);
+                }
+                scheduler
+                    .catching_up
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&id);
+            };
+            if tokio::runtime::Handle::try_current().is_ok() {
+                tokio::task::spawn_blocking(replay);
+            } else {
+                replay();
+            }
+        }
+    }
+
+    /// Record, for quiet pairs, the event the previous tick saw: nothing
+    /// before it is left unsynced, so a restart replays from there.
+    /// Reading volumes can stall on a share, so it runs on the blocking
+    /// pool. Systems without an event history record nothing.
+    fn save_cursors(&self, pairs: &[PairConfig], now: Instant) {
+        let Some(event) = self.scheduler.swap_tick_event(foldover_engine::event_now()) else {
+            return;
+        };
+        for pair in pairs {
+            let id = pair.id();
+            if matches!(self.jobs.status(id), SyncStatus::Working { .. })
+                || !self.scheduler.quiet(id, now)
+            {
+                continue;
+            }
+            let (engine, pair) = (Arc::clone(&self.engine), pair.clone());
+            let save = move || {
+                let cursors = foldover_engine::quiet_cursors(&pair, event);
+                if cursors.is_empty() {
+                    return;
+                }
+                if let Ok(mut engine) = engine.lock() {
+                    let _ = engine.save_watch_cursors(id, &cursors);
+                }
+            };
+            if tokio::runtime::Handle::try_current().is_ok() {
+                tokio::task::spawn_blocking(save);
+            } else {
+                save();
+            }
+        }
     }
 
     /// Check, on the blocking pool, the folders of changing-triggered
@@ -749,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn folders_count_as_changed_at_the_first_tick_only() {
+    fn only_the_first_tick_asks_for_a_replay() {
         let directory = tempfile::tempdir().unwrap();
         let pair = changing_pair(directory.path(), 5);
         let start = Instant::now();
@@ -757,14 +937,37 @@ mod tests {
         *scheduler.watcher.lock().unwrap() = Some(PairWatcher::new(|_| {}).unwrap());
         let at = |seconds| start + Duration::from_secs(seconds);
 
-        scheduler.watch(std::slice::from_ref(&pair), &Reach::default(), at(1));
-        assert!(scheduler.due(&pair, at(1) + QUIET, None, None));
-        scheduler.started_run(pair.id(), at(12));
+        let away = scheduler.watch(std::slice::from_ref(&pair), &Reach::default(), at(1));
+        assert_eq!(away, [pair.id()]);
+        // Asking is no change by itself; the replay decides.
+        assert!(!scheduler.due(&pair, at(1) + QUIET, None, None));
 
-        // A later tick, even one that watches the pair anew, is no change.
-        scheduler.watch(&[], &Reach::default(), at(20));
-        scheduler.watch(std::slice::from_ref(&pair), &Reach::default(), at(25));
+        // A later tick, even one that watches the pair anew, asks nothing.
+        assert!(scheduler.watch(&[], &Reach::default(), at(20)).is_empty());
+        let again = scheduler.watch(std::slice::from_ref(&pair), &Reach::default(), at(25));
+        assert!(again.is_empty());
         assert!(!scheduler.due(&pair, at(60), None, None));
+    }
+
+    #[test]
+    fn a_pair_records_its_cursors_only_while_quiet() {
+        let start = Instant::now();
+        let scheduler = Scheduler::new(start);
+        let id = PairId::from_bytes([8; PairId::BYTE_LEN]).unwrap();
+        let at = |seconds| start + Duration::from_secs(seconds);
+
+        // A change waiting for its run would be skipped by a replay.
+        scheduler.mark_changed(id, at(0));
+        assert!(!scheduler.quiet(id, at(1)));
+        scheduler.started_run(id, at(10));
+        // So would one the start-up replay has yet to report.
+        scheduler.catching_up.lock().unwrap().insert(id);
+        assert!(!scheduler.quiet(id, at(11)));
+        scheduler.catching_up.lock().unwrap().remove(&id);
+
+        assert!(scheduler.quiet(id, at(12)));
+        assert!(!scheduler.quiet(id, at(13)));
+        assert!(scheduler.quiet(id, at(12) + CURSOR_SAVE));
     }
 
     #[test]

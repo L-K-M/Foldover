@@ -12,7 +12,7 @@ use foldover_endpoint::{
 use foldover_host::{Environment, EnvironmentHold, LowPowerSyncs, NetworkUse};
 use foldover_state::{
     Device, HistoryEntry, Journal, JournalUpdate, MountSources, PairStore, Pause, Share,
-    SnapshotEntry, StateLocation,
+    SnapshotEntry, StateLocation, WatchCursor,
 };
 use foldover_types::{
     DeviceId, Durability, LocalRoot, MAX_PAIR_NAME_BYTES, PairConfig, PairDraft, PairId, PairRoot,
@@ -215,6 +215,25 @@ impl Engine {
 
     pub fn automation_held(&self, id: PairId) -> Result<bool, Error> {
         Ok(self.pairs.automation_held(id)?)
+    }
+
+    /// The pair's watch cursors (ADR 0002), left then right.
+    pub fn watch_cursors(&self, id: PairId) -> Result<[Option<WatchCursor>; 2], Error> {
+        Ok([
+            self.pairs.watch_cursor(id, Side::Left)?,
+            self.pairs.watch_cursor(id, Side::Right)?,
+        ])
+    }
+
+    pub fn save_watch_cursors(
+        &mut self,
+        id: PairId,
+        cursors: &[(Side, WatchCursor)],
+    ) -> Result<(), Error> {
+        for (side, cursor) in cursors {
+            self.pairs.save_watch_cursor(id, *side, cursor)?;
+        }
+        Ok(())
     }
 
     /// Paired Macs (ADR 0031), by name.

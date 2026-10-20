@@ -27,7 +27,7 @@ mod share;
 pub use share::mount_share;
 
 #[cfg(unix)]
-pub use watch::RootWatcher;
+pub use watch::{RootWatcher, changed_since_event, event_history, event_now};
 
 #[cfg(unix)]
 pub use local::{

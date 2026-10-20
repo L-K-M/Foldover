@@ -4,6 +4,7 @@
 //! foldover-state and foldover-host. See PLAN.md §4.4.
 
 mod archive;
+mod catch_up;
 mod configuration;
 mod conflict;
 mod gates;
@@ -21,15 +22,18 @@ mod plan_properties;
 pub use archive::{
     ArchiveError, ArchiveErrorKind, ArchivedItem, ArchivedRun, PairArchive, PutBackReport,
 };
+pub use catch_up::{changed_while_away, quiet_cursors};
 pub use configuration::{Engine, Error, ErrorKind};
 pub use conflict::{KeepBothError, keep_both};
 pub use foldover_endpoint::ObserveStep;
 pub use foldover_endpoint::Reach;
+pub use foldover_endpoint::event_now;
 pub use foldover_host::{
     Environment, EnvironmentHold, LowPowerSyncs, NetworkCost, NetworkUse, PowerMode, local_time,
 };
 pub use foldover_state::RecordedIdentities;
 pub use foldover_state::StateLocation;
+pub use foldover_state::WatchCursor;
 pub use foldover_state::{
     Device, HISTORY_LIMIT, HistoryEntry, HistoryOutcome, MountSources, Pause, RunTrigger, Share,
 };
