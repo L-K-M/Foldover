@@ -44,7 +44,7 @@ pub use foldover_fs::{
 };
 
 #[cfg(unix)]
-pub use endpoint::Endpoint;
+pub use endpoint::{Endpoint, ObserveStep};
 
 #[cfg(unix)]
 pub use pair::{EndpointPair, PairRootError, access_denied};

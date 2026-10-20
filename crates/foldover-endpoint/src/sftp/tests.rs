@@ -188,6 +188,33 @@ fn archived_runs_are_only_directories_named_like_runs() {
     assert_eq!(runs, [run]);
 }
 
+/// Review: each entry was listed and checked back to back, so the
+/// comparison read nearly complete from the first file.
+#[test]
+fn the_whole_tree_is_listed_before_any_entry_is_checked() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    fs::create_dir(directory.path().join("folder")).unwrap();
+    for name in ["a", "b", "folder/c", "folder/d"] {
+        fs::write(directory.path().join(name), name).unwrap();
+    }
+    let mut steps = Vec::new();
+    remote
+        .observe_reporting(
+            PairOptions::default().metadata(),
+            &Filter::none(),
+            &std::collections::BTreeMap::new(),
+            &mut proceed,
+            &mut |step| steps.push(step),
+        )
+        .unwrap();
+    let listed = vec![ObserveStep::Listed; 5];
+    let checked = vec![ObserveStep::Checked; 5];
+    assert_eq!(steps, [listed, checked].concat());
+}
+
 #[test]
 fn oversized_sidecars_are_excluded_before_classification() {
     let directory = tempfile::tempdir().unwrap();
@@ -404,6 +431,7 @@ fn copies_both_ways_keep_content_and_archive_what_they_replace() {
                 &Filter::none(),
                 &std::collections::BTreeMap::new(),
                 &mut proceed,
+                &mut |_| {},
             )
             .unwrap()
     };
@@ -533,6 +561,7 @@ fn identities_removals_and_pruning_follow_the_local_rules() {
             &Filter::none(),
             &std::collections::BTreeMap::new(),
             &mut proceed,
+            &mut |_| {},
         )
         .unwrap();
     for name in [b"gone".as_slice(), b"empty"] {
@@ -600,6 +629,7 @@ fn full_durability_is_rejected(remote: &Endpoint, root: &Path) {
                 &Filter::none(),
                 &std::collections::BTreeMap::new(),
                 &mut proceed,
+                &mut |_| {},
             )
             .unwrap()
     };

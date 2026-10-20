@@ -1942,6 +1942,79 @@ public func FfiConverterTypeSyncUndoSummary_lower(_ value: SyncUndoSummary) -> R
 }
 
 
+/**
+ * How far a working job has got; see `foldover_client::SyncProgress`.
+ */
+public struct SyncWorkProgress: Equatable, Hashable {
+    public var listed: UInt64
+    public var checked: UInt64
+    public var changes: UInt64
+    public var applied: UInt64
+    public var bytes: UInt64
+    public var copied: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(listed: UInt64, checked: UInt64, changes: UInt64, applied: UInt64, bytes: UInt64, copied: UInt64) {
+        self.listed = listed
+        self.checked = checked
+        self.changes = changes
+        self.applied = applied
+        self.bytes = bytes
+        self.copied = copied
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SyncWorkProgress: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSyncWorkProgress: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SyncWorkProgress {
+        return
+            try SyncWorkProgress(
+                listed: FfiConverterUInt64.read(from: &buf), 
+                checked: FfiConverterUInt64.read(from: &buf), 
+                changes: FfiConverterUInt64.read(from: &buf), 
+                applied: FfiConverterUInt64.read(from: &buf), 
+                bytes: FfiConverterUInt64.read(from: &buf), 
+                copied: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SyncWorkProgress, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.listed, into: &buf)
+        FfiConverterUInt64.write(value.checked, into: &buf)
+        FfiConverterUInt64.write(value.changes, into: &buf)
+        FfiConverterUInt64.write(value.applied, into: &buf)
+        FfiConverterUInt64.write(value.bytes, into: &buf)
+        FfiConverterUInt64.write(value.copied, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncWorkProgress_lift(_ buf: RustBuffer) throws -> SyncWorkProgress {
+    return try FfiConverterTypeSyncWorkProgress.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncWorkProgress_lower(_ value: SyncWorkProgress) -> RustBuffer {
+    return FfiConverterTypeSyncWorkProgress.lower(value)
+}
+
+
 
 public enum AgentCapability: Equatable, Hashable {
     
@@ -2865,7 +2938,7 @@ public func FfiConverterTypeSyncJobKind_lower(_ value: SyncJobKind) -> RustBuffe
 public enum SyncJobState: Equatable, Hashable {
     
     case idle
-    case working(job: SyncJobKind, cancelling: Bool
+    case working(job: SyncJobKind, cancelling: Bool, progress: SyncWorkProgress
     )
     case previewed(preview: SyncPreviewSummary
     )
@@ -2911,7 +2984,7 @@ public struct FfiConverterTypeSyncJobState: FfiConverterRustBuffer {
         
         case 1: return .idle
         
-        case 2: return .working(job: try FfiConverterTypeSyncJobKind.read(from: &buf), cancelling: try FfiConverterBool.read(from: &buf)
+        case 2: return .working(job: try FfiConverterTypeSyncJobKind.read(from: &buf), cancelling: try FfiConverterBool.read(from: &buf), progress: try FfiConverterTypeSyncWorkProgress.read(from: &buf)
         )
         
         case 3: return .previewed(preview: try FfiConverterTypeSyncPreviewSummary.read(from: &buf)
@@ -2944,10 +3017,11 @@ public struct FfiConverterTypeSyncJobState: FfiConverterRustBuffer {
             writeInt(&buf, Int32(1))
         
         
-        case let .working(job,cancelling):
+        case let .working(job,cancelling,progress):
             writeInt(&buf, Int32(2))
             FfiConverterTypeSyncJobKind.write(job, into: &buf)
             FfiConverterBool.write(cancelling, into: &buf)
+            FfiConverterTypeSyncWorkProgress.write(progress, into: &buf)
             
         
         case let .previewed(preview):

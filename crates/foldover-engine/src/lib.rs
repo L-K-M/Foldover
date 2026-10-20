@@ -21,6 +21,7 @@ pub use archive::{
 };
 pub use configuration::{Engine, Error, ErrorKind};
 pub use conflict::{KeepBothError, keep_both};
+pub use foldover_endpoint::ObserveStep;
 pub use foldover_state::RecordedIdentities;
 pub use foldover_state::StateLocation;
 pub use foldover_state::{
@@ -33,7 +34,7 @@ pub use plan::{
 pub use readiness::{missing_side, reconnect};
 pub use reconcile::reconcile_entry;
 pub use run::{
-    Action, Approval, Commit, Completion, Failure, PairRun, Preview, PreviewItem, RunError,
-    RunInputs, RunOutcome, RunReport, UndoReport,
+    Action, Approval, Commit, Completion, Failure, NoProgress, PairRun, Preview, PreviewItem,
+    RunError, RunInputs, RunOutcome, RunProgress, RunReport, UndoReport,
 };
 pub use watch::PairWatcher;

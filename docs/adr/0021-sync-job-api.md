@@ -26,6 +26,12 @@ Idle ─start─▶ Working ─▶ Previewed | NeedsApproval | Finished | Failed
 | `sync.items` | `id`, `review_token`, `after` path, optional `kind` | The next 100 items of the latest preview, in path order |
 
 - Starting a job while one is working fails with `SYNC_BUSY` (-32007).
+- A `working` status carries live `progress` (protocol 6): `listed` and
+  `checked` count entries found in both folders and those whose version
+  is known; once the plan is ready, `changes` and `bytes` give its size
+  and `applied` and `copied` how much is done. Counters are atomics the
+  run updates and status requests read, so polling never waits on the
+  run. Copies count their bytes when each file finishes.
 - Jobs bypass the configuration queue. They lock the engine only to read
   inputs and commit progress, so other requests stay responsive.
 - A status carries at most 100 items or failures, plus counts for all of
@@ -71,5 +77,6 @@ Sync All.
 
 - Polling, not events. A subscription stream can replace it without
   changing job semantics.
-- No progress counts yet; status only says which job is working.
+- Progress is coarse within a file: a single large copy shows no movement
+  until it finishes. Throughput and ETA are left to clients.
 - Unattended runs (watchers, schedules) will use the same jobs.

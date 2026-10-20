@@ -20,6 +20,15 @@ use crate::{
     ObservedEntry, RootRelation, RunScope, ScanError,
 };
 
+/// How far an observation has got, e.g. for "Comparing… 12,345 items".
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObserveStep {
+    /// An entry was found.
+    Listed,
+    /// An entry's version is known, read or reused.
+    Checked,
+}
+
 pub enum Endpoint {
     Local(LocalEndpoint),
     Sftp(SftpEndpoint),
@@ -63,16 +72,23 @@ impl Endpoint {
         }
     }
 
+    /// Observe the root, reporting each entry as it is found and again
+    /// once its version is known.
     pub fn observe_from(
         &self,
         policy: MetadataPolicy,
         filter: &Filter,
         previous: &BTreeMap<SyncPath, ObservedEntry>,
         control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
     ) -> Result<Observation, ScanError> {
         match self {
-            Self::Local(endpoint) => endpoint.observe_from(policy, filter, previous, control),
-            Self::Sftp(endpoint) => endpoint.observe_from(policy, filter, previous, control),
+            Self::Local(endpoint) => {
+                endpoint.observe_reporting(policy, filter, previous, control, progress)
+            }
+            Self::Sftp(endpoint) => {
+                endpoint.observe_reporting(policy, filter, previous, control, progress)
+            }
         }
     }
 

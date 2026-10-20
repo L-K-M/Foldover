@@ -100,7 +100,7 @@ struct PairSyncViewModel {
         return result.copied + result.archived > 0
     }
     var canCancel: Bool {
-        if case .working(_, let cancelling) = state { return !cancelling }
+        if case .working(_, let cancelling, _) = state { return !cancelling }
         return false
     }
     var requestError: String? { store.requestError(for: pair.id) }
@@ -110,9 +110,9 @@ struct PairSyncViewModel {
         if isResolving { return String(localized: "Resolving") }
         return switch state {
         case .idle: String(localized: "Ready")
-        case .working(.preview, _): String(localized: "Comparing…")
-        case .working(.run, _): String(localized: "Syncing…")
-        case .working(.undo, _): String(localized: "Undoing…")
+        case .working(.preview, _, _): String(localized: "Comparing…")
+        case .working(.run, _, _): String(localized: "Syncing…")
+        case .working(.undo, _, _): String(localized: "Undoing…")
         case .previewed(let preview):
             reviewable == nil ? String(localized: "Preview again")
                 : preview.total == 0 ? String(localized: "In sync") : String(localized: "\(preview.total) changes")
@@ -135,13 +135,15 @@ struct PairSyncViewModel {
         switch state {
         case .idle:
             return String(localized: "Preview to see what a sync would change. Nothing is written until you sync.")
-        case .working(_, cancelling: true):
+        case .working(_, cancelling: true, _):
             return String(localized: "Stopping…")
-        case .working(.preview, _):
-            return String(localized: "Comparing folders…")
-        case .working(.run, _):
-            return String(localized: "Syncing…")
-        case .working(.undo, _):
+        case .working(.preview, _, let progress):
+            return Self.comparing(progress)
+        case .working(.run, _, let progress) where progress.changes > 0:
+            return Self.applying(progress)
+        case .working(.run, _, let progress):
+            return Self.comparing(progress)
+        case .working(.undo, _, _):
             return String(localized: "Undoing the last sync…")
         case .previewed(let preview):
             guard reviewable != nil else { return Self.outdated }
@@ -162,6 +164,34 @@ struct PairSyncViewModel {
         case .waiting(let side):
             return String(localized: "\(Self.folderName(side)) is not connected. Automatic syncs resume when its disk or share is back.")
         }
+    }
+
+    /// How far a running job is, from 0 to 1, once there is something to
+    /// measure: bytes when the plan copies any, else changes; while
+    /// comparing, entries checked of those found so far.
+    var progressFraction: Double? {
+        guard case .working(_, _, let progress) = state else { return nil }
+        if progress.bytes > 0 {
+            return Double(progress.copied) / Double(progress.bytes)
+        }
+        if progress.changes > 0 {
+            return Double(progress.applied) / Double(progress.changes)
+        }
+        guard progress.listed > 0 else { return nil }
+        return Double(progress.checked) / Double(progress.listed)
+    }
+
+    static func comparing(_ progress: WorkProgress) -> String {
+        guard progress.listed > 0 else { return String(localized: "Comparing folders…") }
+        return String(localized: "Comparing folders… \(progress.checked) of \(progress.listed) items checked")
+    }
+
+    static func applying(_ progress: WorkProgress) -> String {
+        var text = String(localized: "Syncing… \(progress.applied) of \(progress.changes) changes")
+        if progress.bytes > 0 {
+            text += " · " + String(localized: "\(byteText(progress.copied)) of \(byteText(progress.bytes))")
+        }
+        return text
     }
 
     /// A plan made for another pair revision is shown as information,

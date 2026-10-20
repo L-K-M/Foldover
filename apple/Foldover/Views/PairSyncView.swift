@@ -27,6 +27,10 @@ struct PairSyncView: View {
             Text(viewModel.statusText)
                 .foregroundStyle(.secondary)
                 .accessibilityAddTraits(.updatesFrequently)
+            if let fraction = viewModel.progressFraction {
+                ProgressView(value: fraction)
+                    .accessibilityLabel("Progress")
+            }
             if let error = viewModel.requestError {
                 Text(error).foregroundStyle(.red)
             }

@@ -20,6 +20,8 @@ use foldover_types::{Digest, EntryVersion, InvalidSyncPath, MetadataPolicy, Sync
 
 use version::{Attribute, Observed, Payload, entry_version, metadata_version};
 
+use crate::ObserveStep;
+
 pub use apply::{ApplyError, Expected, RunScope};
 pub use archive::{ArchivedItem, ArchivedRun, archive_name};
 pub use filter::{Filter, InvalidFilter};
@@ -566,9 +568,23 @@ impl LocalEndpoint {
         previous: &BTreeMap<SyncPath, ObservedEntry>,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<Observation, ScanError> {
+        self.observe_reporting(policy, filter, previous, control, &mut |_| {})
+    }
+
+    /// `observe_from`, reporting each entry as it is found and again once
+    /// its version is known.
+    pub fn observe_reporting(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: &BTreeMap<SyncPath, ObservedEntry>,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+    ) -> Result<Observation, ScanError> {
         let mut entries = Vec::new();
         let stats = self.scan_filtered(filter, &mut |entry| {
             entries.push(entry);
+            progress(ObserveStep::Listed);
             control()
         })?;
 
@@ -586,6 +602,7 @@ impl LocalEndpoint {
                 && known.fingerprint.proves_unchanged(&entry.metadata)
             {
                 observation.entries.insert(entry.path, known.clone());
+                progress(ObserveStep::Checked);
                 continue;
             }
             let observed_at = SystemTime::now();
@@ -597,6 +614,7 @@ impl LocalEndpoint {
                     fingerprint: Fingerprint::new(&entry.metadata, observed_at),
                 },
             );
+            progress(ObserveStep::Checked);
         }
         Ok(observation)
     }

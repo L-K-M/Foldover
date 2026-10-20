@@ -2,7 +2,7 @@
 
 use foldover_client::{
     PairSide, ReviewToken, SocketLocation, SyncAction, SyncConflict, SyncDeletions, SyncItemKind,
-    SyncItemPage, SyncJob, SyncPreview, SyncResult, SyncStatus, UndoResult,
+    SyncItemPage, SyncJob, SyncPreview, SyncProgress, SyncResult, SyncStatus, UndoResult,
 };
 
 use crate::{AgentError, invalid_configuration};
@@ -119,12 +119,37 @@ pub struct SyncUndoSummary {
     pub archive: String,
 }
 
+/// How far a working job has got; see `foldover_client::SyncProgress`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, uniffi::Record)]
+pub struct SyncWorkProgress {
+    pub listed: u64,
+    pub checked: u64,
+    pub changes: u64,
+    pub applied: u64,
+    pub bytes: u64,
+    pub copied: u64,
+}
+
+impl From<SyncProgress> for SyncWorkProgress {
+    fn from(progress: SyncProgress) -> Self {
+        Self {
+            listed: progress.listed,
+            checked: progress.checked,
+            changes: progress.changes,
+            applied: progress.applied,
+            bytes: progress.bytes,
+            copied: progress.copied,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Enum)]
 pub enum SyncJobState {
     Idle,
     Working {
         job: SyncJobKind,
         cancelling: bool,
+        progress: SyncWorkProgress,
     },
     Previewed {
         preview: SyncPreviewSummary,
@@ -316,13 +341,18 @@ impl From<SyncStatus> for SyncJobState {
     fn from(status: SyncStatus) -> Self {
         match status {
             SyncStatus::Idle => Self::Idle,
-            SyncStatus::Working { job, cancelling } => Self::Working {
+            SyncStatus::Working {
+                job,
+                cancelling,
+                progress,
+            } => Self::Working {
                 job: match job {
                     SyncJob::Preview => SyncJobKind::Preview,
                     SyncJob::Run => SyncJobKind::Run,
                     SyncJob::Undo => SyncJobKind::Undo,
                 },
                 cancelling,
+                progress: progress.into(),
             },
             SyncStatus::Previewed { preview } => Self::Previewed {
                 preview: preview.into(),
