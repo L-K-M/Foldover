@@ -228,8 +228,18 @@ fn folded(path: &[u8], names: NameMatching) -> Vec<u8> {
 /// A folder's files by folded name: each spelling with its content.
 type Folded = BTreeMap<Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>>;
 
+/// Whether written files carry an extended attribute. On volumes without
+/// native ones, such as exFAT and FAT, macOS keeps it in a `._` sidecar,
+/// which the device matrix wants to meet.
+#[derive(Clone, Copy, PartialEq)]
+enum Attributes {
+    None,
+    Tagged,
+}
+
 struct Simulation {
     pair: Fixture,
+    attributes: Attributes,
     paths: &'static [&'static str],
     /// How the pair compares names: as its stricter folder does.
     names: NameMatching,
@@ -257,8 +267,17 @@ impl Simulation {
                 .name_matching()
         };
         let names = names(pair.left.path()).either(names(pair.right.path()));
+        let chosen = [LEFT_VOLUME, RIGHT_VOLUME]
+            .iter()
+            .any(|variable| std::env::var_os(variable).is_some());
+        let attributes = if chosen && cfg!(target_os = "macos") {
+            Attributes::Tagged
+        } else {
+            Attributes::None
+        };
         Self {
             pair,
+            attributes,
             paths: PATHS,
             names,
             writes: 0,
@@ -272,6 +291,7 @@ impl Simulation {
         pair.leases = MEMORY_LEASES;
         Self {
             pair,
+            attributes: Attributes::None,
             paths: PATHS,
             names: left.names.either(right.names),
             writes: 0,
@@ -308,7 +328,15 @@ impl Simulation {
                 }
                 let path = self.root(folder).join(path);
                 fs::create_dir_all(path.parent().unwrap()).unwrap();
-                fs::write(path, content).unwrap();
+                fs::write(&path, &content).unwrap();
+                if self.attributes == Attributes::Tagged {
+                    let tagged = std::process::Command::new("xattr")
+                        .args(["-w", "ch.lkmc.foldover.simulation", &content])
+                        .arg(&path)
+                        .status()
+                        .unwrap();
+                    assert!(tagged.success());
+                }
             }
             Edit::Delete(folder, path) => {
                 let path = self.paths[path];
