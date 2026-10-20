@@ -1028,7 +1028,7 @@ fn a_whole_copy_that_cannot_be_placed_keeps_its_data() {
     // Halfway through the copy, someone edits the file it replaces.
     let prepared = pair.prepare();
     let mut store = pair.store();
-    let mut reads = 0;
+    let (mut reads, mut edited) = (0, false);
     let outcome = prepared
         .execute(
             Approval::default(),
@@ -1039,6 +1039,7 @@ fn a_whole_copy_that_cannot_be_placed_keeps_its_data() {
                 reads += 1;
                 if reads == 10 * 32 {
                     fs::write(left.join("big.bin"), b"edited here").unwrap();
+                    edited = true;
                 }
                 ScanControl::Continue
             },
@@ -1048,6 +1049,10 @@ fn a_whole_copy_that_cannot_be_placed_keeps_its_data() {
     let RunOutcome::Ran(report) = outcome else {
         panic!("unexpected approval request");
     };
+    assert!(
+        edited,
+        "the copy ended before the edit; read in smaller steps"
+    );
     assert_eq!(report.copied(), 0);
     assert_eq!(report.failures().len(), 1, "{:?}", report.failures());
     assert_eq!(fs::read(left.join("big.bin")).unwrap(), b"edited here");
