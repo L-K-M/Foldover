@@ -32,6 +32,7 @@ The roadmap is PLAN.md §7.
 | Linux CI gate (fmt, clippy, tests, docs, layer check, FFI drift) | `cargo xtask ci` |
 | Layer check only | `cargo xtask check-layers` |
 | Agent/CLI process lifecycle smoke | `cargo xtask agent-smoke` |
+| Fuzz every parser longer (nightly runs 500k cases) | `PROPTEST_CASES=500000 cargo test --release --workspace -- fuzz_` |
 | Regenerate the Swift bindings (commit the result) | `cargo xtask ffi --bindings-only` |
 | Bindings + arm64 XCFramework (macOS) | `cargo xtask ffi` |
 | Dependency licenses and advisories | `cargo deny check` |

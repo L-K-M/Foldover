@@ -50,25 +50,9 @@ impl Stream {
             .block_on(write_message(send, &frame(tag, payload)))?)
     }
 
-    fn read(&mut self) -> Result<(u8, Vec<u8>), LinkError> {
-        let recv = &mut self.recv;
-        let mut frame = self.runtime.block_on(read_message(recv))?;
-        if frame.is_empty() {
-            return Err(LinkError::Protocol);
-        }
-        let tag = frame.remove(0);
-        Ok((tag, frame))
-    }
-
     fn next(&mut self) -> Result<Incoming, LinkError> {
-        match self.read()? {
-            (MESSAGE, json) => Ok(Incoming::Reply(
-                serde_json::from_slice(&json).map_err(|_| LinkError::Protocol)?,
-            )),
-            (DATA, data) => Ok(Incoming::Data(data)),
-            (END, rest) if rest.is_empty() => Ok(Incoming::End),
-            _ => Err(LinkError::Protocol),
-        }
+        let recv = &mut self.recv;
+        decode(self.runtime.block_on(read_message(recv))?)
     }
 }
 
@@ -162,6 +146,21 @@ impl Answer {
     }
 }
 
+/// What a frame holds; anything else is a protocol error.
+fn decode(mut frame: Vec<u8>) -> Result<Incoming, LinkError> {
+    if frame.is_empty() {
+        return Err(LinkError::Protocol);
+    }
+    match frame.remove(0) {
+        MESSAGE => Ok(Incoming::Reply(
+            serde_json::from_slice(&frame).map_err(|_| LinkError::Protocol)?,
+        )),
+        DATA => Ok(Incoming::Data(frame)),
+        END if frame.is_empty() => Ok(Incoming::End),
+        _ => Err(LinkError::Protocol),
+    }
+}
+
 /// Write one JSON frame, a request or a reply, from async code.
 pub(super) async fn send_json(
     send: &mut PeerSendStream,
@@ -186,4 +185,26 @@ fn frame(tag: u8, payload: &[u8]) -> Vec<u8> {
     frame.push(tag);
     frame.extend_from_slice(payload);
     frame
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    proptest! {
+        /// Frames from another Mac never panic the decoder; data and the
+        /// end come back as sent.
+        #[test]
+        fn fuzz_frames(frame in prop::collection::vec(any::<u8>(), 0..512)) {
+            let decoded = decode(frame.clone());
+            match frame.split_first() {
+                Some((&DATA, data)) => prop_assert_eq!(decoded.unwrap(), Incoming::Data(data.to_vec())),
+                Some((&END, [])) => prop_assert_eq!(decoded.unwrap(), Incoming::End),
+                Some((&MESSAGE, _)) => {}
+                _ => prop_assert!(decoded.is_err()),
+            }
+        }
+    }
 }
