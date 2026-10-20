@@ -4,7 +4,7 @@ import Observation
 /// The locator prefix `PairRoot` uses to detect an SFTP folder.
 private let sftpScheme = "sftp://"
 
-enum PairFolderSide: Equatable {
+enum PairFolderSide: Hashable {
     case left
     case right
 }
@@ -14,6 +14,8 @@ enum PairFolderSide: Equatable {
 final class PairEditorViewModel: Identifiable {
     let id = UUID()
     private let store: PairStore
+    /// Paired Macs and their folders; nil hides the choice.
+    private let macs: MacToMacStore?
     private let editing: SyncPair?
     var name: String
     var mode: PairMode
@@ -24,8 +26,9 @@ final class PairEditorViewModel: Identifiable {
     private(set) var errorMessage: String?
     private(set) var savedPairID: String?
 
-    init(store: PairStore, editing: SyncPair? = nil) {
+    init(store: PairStore, editing: SyncPair? = nil, macs: MacToMacStore? = nil) {
         self.store = store
+        self.macs = macs
         self.editing = editing
         name = editing?.settings.name ?? ""
         mode = editing?.settings.mode ?? .sync
@@ -117,7 +120,9 @@ final class PairEditorViewModel: Identifiable {
     /// What metadata each side keeps. A server carries file contents,
     /// permissions and whole-second dates, not the rest (ADR 0028).
     var metadataNote: String {
-        if usesServerFolder {
+        if usesOtherMac {
+            String(localized: "Copies between Macs keep file data, permissions and modification times. Tags and other extended attributes don't sync between Macs yet.")
+        } else if usesServerFolder {
             String(localized: "SFTP keeps file data, mode bits and whole-second modification times. Extended attributes and ACLs are omitted; resource-fork files cannot be copied.")
         } else {
             String(localized: "Resource forks always sync. Without permissions, a file's executable bit still syncs.")
@@ -149,8 +154,40 @@ final class PairEditorViewModel: Identifiable {
     }
 
     func folderText(_ side: PairFolderSide) -> String {
-        let folder = side == .left ? left : right
-        return folder.map(Self.pathText) ?? String(localized: "Choose a folder")
+        guard let folder = side == .left ? left : right else {
+            return String(localized: "Choose a folder")
+        }
+        return macs?.folderName(for: folder.bytes) ?? Self.pathText(folder)
+    }
+
+    /// Either side is a folder a paired Mac shares.
+    var usesOtherMac: Bool { [left, right].contains { $0?.isPeerFolder == true } }
+
+    var offersOtherMacs: Bool { macs != nil }
+
+    var pairedMacs: [PairedDevice] { macs?.state?.paired ?? [] }
+
+    var otherMacsNote: String {
+        pairedMacs.isEmpty
+            ? String(localized: "Pair a Mac in Settings › Mac-to-Mac first, then share a folder on it with this Mac.")
+            : String(localized: "Only folders that Mac shares with this one are listed.")
+    }
+
+    /// Why a paired Mac's folders could not be listed, if they could not.
+    var otherMacsError: String? { macs?.error }
+
+    func folders(on mac: PairedDevice) async -> [OfferedShare] {
+        await macs?.offered(by: mac.device) ?? []
+    }
+
+    /// Use `share` on `mac` as this side's folder.
+    func chooseShared(_ share: OfferedShare, on mac: PairedDevice, side: PairFolderSide) {
+        let folder = SelectedFolder(bytes: Data("\(peerScheme)\(mac.device)/\(share.id)".utf8))
+        switch side {
+        case .left: left = folder
+        case .right: right = folder
+        }
+        errorMessage = nil
     }
 
     func chooseFolder(_ result: Result<[URL], Error>, side: PairFolderSide) {
@@ -206,6 +243,11 @@ final class PairEditorViewModel: Identifiable {
 }
 
 extension SelectedFolder {
+    /// A folder a paired Mac shares, kept as a `peer://…` locator.
+    var isPeerFolder: Bool {
+        bytes.starts(with: Data(peerScheme.utf8))
+    }
+
     /// A folder on an SFTP server, kept as an `sftp://…` locator;
     /// the same byte test `PairRoot` applies.
     var isServerFolder: Bool {

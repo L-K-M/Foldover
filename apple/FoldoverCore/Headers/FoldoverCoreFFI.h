@@ -350,6 +350,11 @@ uint64_t uniffi_foldover_ffi_fn_func_mac_to_mac_status(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_OFFERED_FOLDERS
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_OFFERED_FOLDERS
+uint64_t uniffi_foldover_ffi_fn_func_offered_folders(RustBuffer device
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_OPEN_MAC_PAIRING
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_OPEN_MAC_PAIRING
 uint64_t uniffi_foldover_ffi_fn_func_open_mac_pairing(RustBuffer minutes
@@ -360,10 +365,26 @@ uint64_t uniffi_foldover_ffi_fn_func_open_mac_pairing(RustBuffer minutes
 uint64_t uniffi_foldover_ffi_fn_func_pair_with_mac(RustBuffer device
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SHARE_FOLDER
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SHARE_FOLDER
+uint64_t uniffi_foldover_ffi_fn_func_share_folder(RustBuffer device, RustBuffer path, RustBuffer name
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SHARED_FOLDERS
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SHARED_FOLDERS
+uint64_t uniffi_foldover_ffi_fn_func_shared_folders(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_START_MAC_TO_MAC
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_START_MAC_TO_MAC
 uint64_t uniffi_foldover_ffi_fn_func_start_mac_to_mac(void
     
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_STOP_SHARING
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_STOP_SHARING
+uint64_t uniffi_foldover_ffi_fn_func_stop_sharing(RustBuffer id
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_SYNC_CANCEL
@@ -791,6 +812,12 @@ uint16_t uniffi_foldover_ffi_checksum_func_mac_to_mac_status(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_OFFERED_FOLDERS
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_OFFERED_FOLDERS
+uint16_t uniffi_foldover_ffi_checksum_func_offered_folders(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_OPEN_MAC_PAIRING
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_OPEN_MAC_PAIRING
 uint16_t uniffi_foldover_ffi_checksum_func_open_mac_pairing(void
@@ -803,9 +830,27 @@ uint16_t uniffi_foldover_ffi_checksum_func_pair_with_mac(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_SHARE_FOLDER
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_SHARE_FOLDER
+uint16_t uniffi_foldover_ffi_checksum_func_share_folder(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_SHARED_FOLDERS
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_SHARED_FOLDERS
+uint16_t uniffi_foldover_ffi_checksum_func_shared_folders(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_START_MAC_TO_MAC
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_START_MAC_TO_MAC
 uint16_t uniffi_foldover_ffi_checksum_func_start_mac_to_mac(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_STOP_SHARING
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_STOP_SHARING
+uint16_t uniffi_foldover_ffi_checksum_func_stop_sharing(void
     
 );
 #endif

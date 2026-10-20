@@ -72,6 +72,8 @@ final class MainViewModel {
     private let syncStore: SyncStore
     private let archiveStore: ArchiveStore
     private let automation: AutomationStore
+    /// Paired Macs, for folders they share and how those read.
+    private let macToMac: MacToMacStore
     var selectedPairID: String?
     private(set) var editor: PairEditorViewModel?
     /// The pair whose archive browser is open.
@@ -84,13 +86,20 @@ final class MainViewModel {
     /// initializer.
     init(appInfo: AppInfoStore, agent: AgentStore = AgentStore(), pairs: PairStore = PairStore(),
          sync: SyncStore = SyncStore(), archive: ArchiveStore = ArchiveStore(),
-         automation: AutomationStore = AutomationStore()) {
+         automation: AutomationStore = AutomationStore(), macToMac: MacToMacStore = MacToMacStore()) {
         self.appInfo = appInfo
         self.agent = agent
         pairStore = pairs
         syncStore = sync
         archiveStore = archive
         self.automation = automation
+        self.macToMac = macToMac
+    }
+
+    /// How a pair's folder reads: its path, or a paired Mac's folder by
+    /// name.
+    func folderText(_ folder: SelectedFolder) -> String {
+        macToMac.folderName(for: folder.bytes) ?? PairEditorViewModel.pathText(folder)
     }
 
     var isPaused: Bool {
@@ -322,11 +331,11 @@ final class MainViewModel {
 
     func newPair() {
         guard canConfigurePairs else { return }
-        editor = PairEditorViewModel(store: pairStore)
+        editor = PairEditorViewModel(store: pairStore, macs: macToMac)
     }
     func editPair() {
         guard canConfigurePairs, let selectedPair else { return }
-        editor = PairEditorViewModel(store: pairStore, editing: selectedPair)
+        editor = PairEditorViewModel(store: pairStore, editing: selectedPair, macs: macToMac)
     }
 
     func dismissEditor() {

@@ -42,8 +42,8 @@ struct MainView: View {
             if let pair = viewModel.selectedPair {
                 VStack(alignment: .leading, spacing: 16) {
                     Text(pair.settings.name).font(.title)
-                    LabeledContent("Folder A", value: PairEditorViewModel.pathText(pair.settings.left))
-                    LabeledContent("Folder B", value: PairEditorViewModel.pathText(pair.settings.right))
+                    LabeledContent("Folder A", value: viewModel.folderText(pair.settings.left))
+                    LabeledContent("Folder B", value: viewModel.folderText(pair.settings.right))
                     Text(pair.settings.mode.title).font(.headline)
                     Text(pair.settings.mode.explanation).foregroundStyle(.secondary)
                     Button("Edit Pair") { viewModel.editPair() }.disabled(!viewModel.canConfigurePairs)
