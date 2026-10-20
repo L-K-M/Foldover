@@ -6,7 +6,9 @@
 //! - nothing is lost: a file version a run replaced or removed is in its
 //!   folder's archive;
 //! - a finished run leaves both folders equal outside the conflicts it
-//!   reported, comparing names the way the folders do;
+//!   reported, comparing names the way the folders do; a Backup leaves
+//!   every source file on its target;
+//! - a one-way run never writes its source;
 //! - on in-memory folders, a run right after a finished one writes
 //!   nothing, so no quirk feeds a copy loop.
 //!
@@ -166,6 +168,16 @@ fn rounds(paths: usize, faults: Faults) -> impl Strategy<Value = Vec<Round>> {
     prop::collection::vec(round, 1..8)
 }
 
+/// How the pair syncs; most histories two-way.
+fn mode() -> impl Strategy<Value = SyncMode> {
+    let side = prop_oneof![Just(Side::Left), Just(Side::Right)];
+    prop_oneof![
+        2 => Just(SyncMode::Sync),
+        1 => side.clone().prop_map(|source| SyncMode::Mirror { source }),
+        1 => side.prop_map(|source| SyncMode::Backup { source }),
+    ]
+}
+
 /// One folder's file system, drawn from those Foldover meets.
 fn quirks() -> impl Strategy<Value = Quirks> {
     let names = prop_oneof![
@@ -235,6 +247,7 @@ type Folded = BTreeMap<Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>>;
 
 struct Simulation {
     pair: Fixture,
+    mode: SyncMode,
     paths: &'static [&'static str],
     /// How the pair compares names: as its stricter folder does.
     names: NameMatching,
@@ -247,6 +260,7 @@ impl Simulation {
     fn on_disk() -> Self {
         Self {
             pair: fixture(SyncMode::Sync),
+            mode: SyncMode::Sync,
             paths: DISK_PATHS,
             names: NameMatching::EXACT,
             writes: 0,
@@ -255,11 +269,16 @@ impl Simulation {
     }
 
     fn in_memory(left: Quirks, right: Quirks) -> Self {
-        let mut pair = fixture(SyncMode::Sync);
+        Self::in_memory_as(SyncMode::Sync, left, right)
+    }
+
+    fn in_memory_as(mode: SyncMode, left: Quirks, right: Quirks) -> Self {
+        let mut pair = fixture(mode);
         pair.memory = Some([MemoryEndpoint::new(left), MemoryEndpoint::new(right)]);
         pair.leases = MEMORY_LEASES;
         Self {
             pair,
+            mode,
             paths: QUIRK_PATHS,
             names: left.names.either(right.names),
             writes: 0,
@@ -427,8 +446,36 @@ impl Simulation {
         }
     }
 
+    /// The folder a one-way mode copies from.
+    fn source(&self) -> Option<Folder> {
+        match self.mode {
+            SyncMode::Sync => None,
+            SyncMode::Mirror { source } | SyncMode::Backup { source } => Some(match source {
+                Side::Left => Folder::Left,
+                Side::Right => Folder::Right,
+            }),
+        }
+    }
+
+    /// A one-way run never writes its source.
+    fn check_source_untouched(&self, before: &[BTreeMap<Vec<u8>, Vec<u8>>; 2]) {
+        let Some(source) = self.source() else {
+            return;
+        };
+        let before = match source {
+            Folder::Left => &before[0],
+            Folder::Right => &before[1],
+        };
+        assert_eq!(
+            &self.files(source),
+            before,
+            "a one-way run wrote its source"
+        );
+    }
+
     /// Both folders match except where the run reported a conflict, with
-    /// names compared as the folders compare them.
+    /// names compared as the folders compare them; a Backup's target only
+    /// holds every source file, as it keeps its own edits and extras.
     fn check_converged(&self, report: &RunReport) {
         let conflicted: Vec<Vec<u8>> = report
             .conflicts()
@@ -452,6 +499,20 @@ impl Simulation {
             keyed
         };
         let (left, right) = (by_key(Folder::Left), by_key(Folder::Right));
+        if let SyncMode::Backup { source } = self.mode {
+            let (source, target) = match source {
+                Side::Left => (&left, &right),
+                Side::Right => (&right, &left),
+            };
+            for key in source.keys().filter(|key| !affected(key)) {
+                assert!(
+                    target.contains_key(key),
+                    "{} is missing from the backup",
+                    String::from_utf8_lossy(key)
+                );
+            }
+            return;
+        }
         for key in left.keys().chain(right.keys()) {
             if affected(key) {
                 continue;
@@ -508,15 +569,18 @@ impl Simulation {
         let before = self.snapshot();
         let mut ended = self.run(round.interruption, RunContext::Interactive);
         self.check_nothing_lost(&before);
+        self.check_source_untouched(&before);
         // An interrupted run is followed by one that finishes, and a run a
         // gate held back by one a person reviewed.
         if !matches!(round.interruption, Interruption::None) {
             ended = self.run(Interruption::None, RunContext::Interactive);
             self.check_nothing_lost(&before);
+            self.check_source_untouched(&before);
         }
         if matches!(ended, Ended::NeedsReview) {
             ended = self.run(Interruption::None, RunContext::Reviewed);
             self.check_nothing_lost(&before);
+            self.check_source_untouched(&before);
         }
         match ended {
             Ended::Finished(report)
@@ -540,13 +604,16 @@ impl Simulation {
         if self.pair.memory.is_some() {
             self.check_settled();
             self.check_nothing_lost(&before);
+            self.check_source_untouched(&before);
         }
     }
 
-    /// Some content to start from, synced once.
+    /// Some content to start from, in the source if there is one, synced
+    /// once.
     fn start(&mut self) {
+        let folder = self.source().unwrap_or(Folder::Left);
         for path in 0..3 {
-            self.apply(&Edit::Write(Folder::Left, path));
+            self.apply(&Edit::Write(folder, path));
         }
         self.play(&Round {
             edits: Vec::new(),
@@ -577,11 +644,12 @@ proptest! {
 
     #[test]
     fn quirky_folders_lose_nothing_converge_and_settle(
+        mode in mode(),
         left in quirks(),
         right in quirks(),
         rounds in rounds(QUIRK_PATHS.len(), Faults::On),
     ) {
-        let mut simulation = Simulation::in_memory(left, right);
+        let mut simulation = Simulation::in_memory_as(mode, left, right);
         simulation.start();
         for round in &rounds {
             simulation.play(round);
