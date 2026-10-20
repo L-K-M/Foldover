@@ -29,6 +29,11 @@ What you need to know before trusting a pair with your data.
   The check compares content only, so a re-touched file still passes,
   and an edited canary blocks every run until it is put back
   ([ADR 0033](../adr/0033-canary-file.md)).
+- **A crashing agent stops syncing.** If the background agent stops
+  unexpectedly three times in five minutes, it syncs nothing, scheduled
+  or asked for, until you choose Resume Syncing (or run
+  `foldover safe-mode off`); the app says so and notifies you once
+  ([ADR 0008](../adr/0008-agent-health-path.md)).
 - **Stopped automatic runs wait for you.** An unattended run that needs
   your approval stays stopped until you sync by hand. The app notifies
   you while it is running; with the app closed, nothing alerts you

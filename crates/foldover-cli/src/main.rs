@@ -41,6 +41,8 @@ enum Request {
     /// Pause automatic syncs for minutes, or until resumed.
     Pause(SocketLocation, Option<u32>),
     Resume(SocketLocation),
+    /// `safe-mode off`: sync again after a crash loop.
+    LeaveSafeMode(SocketLocation),
     /// Automation status, or a choice from the environment policy.
     Automation(SocketLocation, AutomationCommand),
     Peers(SocketLocation, PeerCommand),
@@ -199,7 +201,7 @@ async fn main() -> ExitCode {
         }
         Request::Status(location) => match foldover_client::agent_status(&location).await {
             Ok(status) => {
-                println!("Agent {} connected; sync available", status.core_version);
+                println!("{}", status_line(&status));
                 ExitCode::SUCCESS
             }
             Err(error) => {
@@ -207,6 +209,18 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Request::LeaveSafeMode(location) => {
+            match foldover_client::leave_safe_mode(&location).await {
+                Ok(status) => {
+                    println!("{}", status_line(&status));
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("foldover: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Request::Pairs(location, command) => match pairs(&location, command).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
@@ -274,10 +288,23 @@ async fn main() -> ExitCode {
         },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs check NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover automation [low-power pause|run] [--socket PATH]\n       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]\n       foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]\n       foldover servers [--socket PATH]\nLEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES | daily@HH:MM[:DAYS]); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --canary (PATH | none)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs check NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover safe-mode off [--socket PATH]\n       foldover automation [low-power pause|run] [--socket PATH]\n       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]\n       foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]\n       foldover servers [--socket PATH]\nLEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES | daily@HH:MM[:DAYS]); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --canary (PATH | none)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
+    }
+}
+
+/// One line saying whether the agent syncs; in crash-loop safe mode, why
+/// not and how to sync again.
+fn status_line(status: &foldover_client::DaemonStatus) -> String {
+    match status.safe_mode {
+        None => format!("Agent {} connected; sync available", status.core_version),
+        Some(safe_mode) => format!(
+            "Agent {} connected; syncing paused after {} unexpected stops in a few minutes \
+             (foldover safe-mode off to sync again)",
+            status.core_version, safe_mode.unclean_stops
+        ),
     }
 }
 
@@ -317,6 +344,9 @@ fn request(args: impl Iterator<Item = OsString>) -> Request {
             }
         }
         [command] if command == "resume" => Request::Resume(location),
+        [command, state] if command == "safe-mode" && state == "off" => {
+            Request::LeaveSafeMode(location)
+        }
         [command] if command == "automation" => {
             Request::Automation(location, AutomationCommand::Status)
         }
@@ -1314,6 +1344,24 @@ mod tests {
         assert!(matches!(req(&["pause", "60"]), Request::Pause(_, Some(60))));
         assert!(matches!(req(&["pause", "soon"]), Request::Usage));
         assert!(matches!(req(&["resume"]), Request::Resume(_)));
+        assert!(matches!(
+            req(&["safe-mode", "off"]),
+            Request::LeaveSafeMode(_)
+        ));
+        for args in [&["safe-mode"][..], &["safe-mode", "on"]] {
+            assert!(matches!(req(args), Request::Usage), "{args:?}");
+        }
+        let mut status = foldover_client::DaemonStatus {
+            core_version: "1.0.0".into(),
+            capability: foldover_client::AgentCapability::Sync,
+            safe_mode: None,
+        };
+        assert_eq!(
+            status_line(&status),
+            "Agent 1.0.0 connected; sync available"
+        );
+        status.safe_mode = Some(foldover_client::SafeMode { unclean_stops: 3 });
+        assert!(status_line(&status).contains("paused after 3 unexpected stops"));
         assert!(matches!(
             req(&["automation"]),
             Request::Automation(_, AutomationCommand::Status)

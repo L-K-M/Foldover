@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- A background agent that stops unexpectedly three times in five minutes
+  pauses all syncing instead of crashing again and again; the app shows
+  why and notifies you, and Resume Syncing (or `foldover safe-mode off`)
+  starts again.
+
 - "When files change" catches up on changes made while the agent was
   not running, syncs after 5 minutes of nonstop changes, and checks
   shares and SFTP servers for other computers' changes every 5 minutes.

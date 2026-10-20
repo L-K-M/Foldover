@@ -570,6 +570,10 @@ impl Service {
     /// The environment is read once per tick so every candidate is
     /// judged against the same moment.
     pub(crate) fn run_due(&self, now: Instant) -> Vec<PairId> {
+        // Crash-loop safe mode starts nothing until a person resumes.
+        if self.safe_mode.active().is_some() {
+            return Vec::new();
+        }
         self.run_due_in(now, Environment::now())
     }
 

@@ -203,6 +203,18 @@ final class MainViewModel {
         }
     }
 
+    /// Why nothing syncs, in crash-loop safe mode (PLAN.md §4.2).
+    var safeModeText: String? {
+        guard let stops = agent.safeModeStops else { return nil }
+        return String(localized: "Syncing is paused: the background agent stopped unexpectedly \(stops) times in a few minutes. Resume once you have checked what changed, such as a new pair.")
+    }
+
+    var safeModeError: String? { agent.safeModeError }
+
+    func leaveSafeMode() async {
+        await agent.leaveSafeMode()
+    }
+
     var menuRows: [MenuPairRow] {
         pairs.map { pair in
             let sync = sync(for: pair)

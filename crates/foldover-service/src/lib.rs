@@ -6,6 +6,7 @@ mod archive;
 mod automation;
 mod history;
 mod peer;
+mod safe_mode;
 mod schedule;
 mod share;
 mod sync;
@@ -20,11 +21,11 @@ use foldover_proto::local::{
     PEER_SHARES, PEER_START, PEER_STATUS, PairRevision, SHARE_ADD, SHARE_LIST, SHARE_REMOVE,
 };
 use foldover_proto::local::{
-    AgentCapability, DAEMON_STATUS, DaemonStatus, Hello, INTERNAL_ERROR, INVALID_PARAMS,
-    METHOD_NOT_FOUND, PAIR_CHECK, PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_NOT_FOUND, PAIR_PAGE_SIZE,
-    PAIR_UPDATE, PROTOCOL_VERSION, PairInput, PairKey, PairList, PairPage, PairRecord, PairUpdate,
-    PairWarning, PairWarnings, ROOT_OVERLAP, ROOT_UNAVAILABLE, Request, RpcError, SESSION_HELLO,
-    STALE_REVISION, VERSION_MISMATCH,
+    AgentCapability, DAEMON_RESUME, DAEMON_STATUS, DaemonStatus, Hello, INTERNAL_ERROR,
+    INVALID_PARAMS, METHOD_NOT_FOUND, PAIR_CHECK, PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_NOT_FOUND,
+    PAIR_PAGE_SIZE, PAIR_UPDATE, PROTOCOL_VERSION, PairInput, PairKey, PairList, PairPage,
+    PairRecord, PairUpdate, PairWarning, PairWarnings, ROOT_OVERLAP, ROOT_UNAVAILABLE, Request,
+    RpcError, SAFE_MODE, SESSION_HELLO, STALE_REVISION, VERSION_MISMATCH,
 };
 use foldover_proto::local::{
     ConflictKeep, SYNC_CANCEL, SYNC_ITEMS, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS,
@@ -52,11 +53,45 @@ pub struct Service {
     jobs: Arc<Jobs>,
     scheduler: Arc<Scheduler>,
     peers: peer::Peers,
+    safe_mode: Arc<safe_mode::SafeMode>,
 }
 
 impl Service {
+    /// The agent's service over the default state. Its start is recorded,
+    /// and a start after a crash loop enters safe mode (PLAN.md §4.2).
     pub fn open() -> Result<Self, foldover_engine::Error> {
-        Ok(Self::new(Engine::open(&StateLocation::Default)?))
+        let engine = Engine::open(&StateLocation::Default)?;
+        let now = std::time::SystemTime::now();
+        let stops = engine.note_start(now)?;
+        let service = Self::new(engine);
+        service.safe_mode.judge(&stops, now);
+        Ok(service)
+    }
+
+    /// Record a clean stop, so the next start does not count this one as
+    /// a crash.
+    pub fn note_clean_stop(&self) -> Result<(), foldover_engine::Error> {
+        self.engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .note_clean_stop()
+    }
+
+    /// Leave safe mode: the unclean stops behind it are forgotten, and
+    /// syncs, scheduled or asked for, run again.
+    async fn resume(&self) -> Result<Value, RpcError> {
+        let engine = Arc::clone(&self.engine);
+        tokio::task::spawn_blocking(move || {
+            engine
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .forget_unclean_stops()
+        })
+        .await
+        .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?
+        .map_err(engine_error)?;
+        self.safe_mode.leave();
+        health(Request::call(0, DAEMON_STATUS, None), None).await
     }
 
     fn new(engine: Engine) -> Self {
@@ -66,6 +101,7 @@ impl Service {
             jobs: Arc::new(Jobs::default()),
             scheduler: Arc::new(Scheduler::new(std::time::Instant::now())),
             peers: Arc::default(),
+            safe_mode: Arc::default(),
         }
     }
 
@@ -77,7 +113,29 @@ impl Service {
 
     pub async fn handle(&self, request: Request) -> Result<Value, RpcError> {
         if matches!(request.method(), SESSION_HELLO | DAEMON_STATUS) {
-            return health(request).await;
+            return health(request, self.safe_mode.active()).await;
+        }
+        if request.method() == DAEMON_RESUME {
+            return self.resume().await;
+        }
+        if let Some(stops) = self.safe_mode.active()
+            && matches!(
+                request.method(),
+                SYNC_PREVIEW
+                    | SYNC_RUN
+                    | SYNC_UNDO
+                    | SYNC_RESOLVE
+                    | ARCHIVE_PUT_BACK
+                    | ARCHIVE_PUT_BACK_ALL
+            )
+        {
+            return Err(RpcError::new(
+                SAFE_MODE,
+                format!(
+                    "Syncing is paused: the agent stopped unexpectedly {stops} times in a few \
+                     minutes. Resume syncing to try again."
+                ),
+            ));
         }
         if matches!(
             request.method(),
@@ -414,7 +472,7 @@ pub(crate) fn engine_error(error: foldover_engine::Error) -> RpcError {
     RpcError::new(code, error.to_string())
 }
 
-async fn health(request: Request) -> Result<Value, RpcError> {
+async fn health(request: Request, safe_mode: Option<u32>) -> Result<Value, RpcError> {
     match request.method() {
         SESSION_HELLO => {
             let protocol = request
@@ -450,6 +508,8 @@ async fn health(request: Request) -> Result<Value, RpcError> {
             serde_json::to_value(DaemonStatus {
                 core_version: version().to_owned(),
                 capability: AgentCapability::Sync,
+                safe_mode: safe_mode
+                    .map(|unclean_stops| foldover_proto::local::SafeMode { unclean_stops }),
             })
             .map_err(|_| RpcError::new(INTERNAL_ERROR, "Cannot encode status"))
         }
@@ -747,54 +807,106 @@ mod tests {
 
     #[tokio::test]
     async fn health_dispatch_validates_parameters_and_has_no_private_state() {
-        let status = health(Request::call(1, DAEMON_STATUS, None)).await.unwrap();
+        let status = health(Request::call(1, DAEMON_STATUS, None), None)
+            .await
+            .unwrap();
         let status: DaemonStatus = serde_json::from_value(status).unwrap();
         assert_eq!(status.capability, AgentCapability::Sync);
         assert_eq!(status.core_version, version());
         assert_eq!(
-            health(Request::call(1, "pair.list", None))
+            health(Request::call(1, "pair.list", None), None)
                 .await
                 .unwrap_err()
                 .code(),
             METHOD_NOT_FOUND
         );
         assert_eq!(
-            health(Request::call(
-                1,
-                DAEMON_STATUS,
-                Some(json!({"root":"private"}))
-            ))
+            health(
+                Request::call(1, DAEMON_STATUS, Some(json!({"root":"private"}))),
+                None
+            )
             .await
             .unwrap_err()
             .code(),
             INVALID_PARAMS
         );
         assert_eq!(
-            health(Request::call(1, SESSION_HELLO, None))
+            health(Request::call(1, SESSION_HELLO, None), None)
                 .await
                 .unwrap_err()
                 .code(),
             INVALID_PARAMS
         );
         assert_eq!(
-            health(Request::call(
-                1,
-                SESSION_HELLO,
-                Some(json!({"protocol_version": PROTOCOL_VERSION + 1}))
-            ))
+            health(
+                Request::call(
+                    1,
+                    SESSION_HELLO,
+                    Some(json!({"protocol_version": PROTOCOL_VERSION + 1}))
+                ),
+                None
+            )
             .await
             .unwrap_err()
             .code(),
             VERSION_MISMATCH
         );
-        let hello = health(Request::call(
-            1,
-            SESSION_HELLO,
-            Some(json!({"protocol_version": PROTOCOL_VERSION})),
-        ))
+        let hello = health(
+            Request::call(
+                1,
+                SESSION_HELLO,
+                Some(json!({"protocol_version": PROTOCOL_VERSION})),
+            ),
+            None,
+        )
         .await
         .unwrap();
         assert_eq!(hello["core_version"], version());
+    }
+
+    /// PLAN.md §4.2: in a crash loop the agent syncs nothing, says so in
+    /// its status, and syncs again once a person resumes.
+    #[tokio::test]
+    async fn safe_mode_reports_itself_refuses_syncs_and_resumes() {
+        let (_directory, service) = fixture();
+        let at = |seconds| std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+        let stops = {
+            let engine = service.engine.lock().unwrap();
+            engine.note_start(at(1)).unwrap();
+            engine.note_start(at(2)).unwrap();
+            engine.note_start(at(3)).unwrap();
+            engine.note_start(at(4)).unwrap()
+        };
+        service.safe_mode.judge(&stops, at(4));
+
+        let status = |service: &Service| {
+            let service = service.clone();
+            async move {
+                let status = service
+                    .handle(Request::call(1, DAEMON_STATUS, None))
+                    .await
+                    .unwrap();
+                serde_json::from_value::<DaemonStatus>(status).unwrap()
+            }
+        };
+        assert_eq!(
+            status(&service).await.safe_mode,
+            Some(foldover_proto::local::SafeMode { unclean_stops: 3 })
+        );
+        for method in [SYNC_RUN, SYNC_PREVIEW, SYNC_UNDO, ARCHIVE_PUT_BACK] {
+            let refused = service.handle(Request::call(1, method, None)).await;
+            assert_eq!(refused.unwrap_err().code(), SAFE_MODE, "{method}");
+        }
+        assert!(service.run_due(std::time::Instant::now()).is_empty());
+
+        service
+            .handle(Request::call(1, DAEMON_RESUME, None))
+            .await
+            .unwrap();
+        assert_eq!(status(&service).await.safe_mode, None);
+        // The stops behind it are forgotten.
+        let engine = service.engine.lock().unwrap();
+        assert_eq!(engine.note_start(at(5)).unwrap(), [at(5)]);
     }
 
     #[tokio::test]

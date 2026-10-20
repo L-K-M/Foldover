@@ -414,6 +414,24 @@ impl Engine {
         Ok(self.pairs.pause()?)
     }
 
+    /// Record that the agent starts at `now`, and return the starts that
+    /// found the run before them stopped uncleanly, oldest first (crash-loop
+    /// safe mode, PLAN.md §4.2).
+    pub fn note_start(
+        &self,
+        now: std::time::SystemTime,
+    ) -> Result<Vec<std::time::SystemTime>, Error> {
+        Ok(self.pairs.note_start(now)?)
+    }
+
+    pub fn note_clean_stop(&self) -> Result<(), Error> {
+        Ok(self.pairs.note_clean_stop()?)
+    }
+
+    pub fn forget_unclean_stops(&self) -> Result<(), Error> {
+        Ok(self.pairs.forget_unclean_stops()?)
+    }
+
     pub fn set_pause(&mut self, pause: Pause) -> Result<(), Error> {
         Ok(self.pairs.set_pause(pause)?)
     }

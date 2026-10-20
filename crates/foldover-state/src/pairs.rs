@@ -21,6 +21,7 @@ mod mounts;
 mod pause;
 mod settings;
 mod share;
+mod starts;
 pub use cursor::WatchCursor;
 pub use device::Device;
 pub use history::{HISTORY_LIMIT, HistoryEntry, HistoryOutcome, RunTrigger};

@@ -38,6 +38,9 @@ pub enum AgentCapability {
 pub struct AgentHealth {
     pub core_version: String,
     pub capability: AgentCapability,
+    /// The unclean stops behind crash-loop safe mode, while syncing waits
+    /// in it; `None` otherwise.
+    pub safe_mode_stops: Option<u32>,
 }
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -70,16 +73,32 @@ pub async fn agent_status() -> Result<AgentHealth, AgentError> {
     let status = foldover_client::agent_status(&foldover_client::SocketLocation::Default)
         .await
         .map_err(AgentError::from)?;
-    Ok(AgentHealth {
-        core_version: status.core_version,
-        capability: match status.capability {
-            foldover_client::AgentCapability::HealthOnly => AgentCapability::HealthOnly,
-            foldover_client::AgentCapability::PairConfiguration => {
-                AgentCapability::PairConfiguration
-            }
-            foldover_client::AgentCapability::Sync => AgentCapability::Sync,
-        },
-    })
+    Ok(status.into())
+}
+
+/// Leave crash-loop safe mode, so syncs run again.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn leave_safe_mode() -> Result<AgentHealth, AgentError> {
+    let status = foldover_client::leave_safe_mode(&foldover_client::SocketLocation::Default)
+        .await
+        .map_err(AgentError::from)?;
+    Ok(status.into())
+}
+
+impl From<foldover_client::DaemonStatus> for AgentHealth {
+    fn from(status: foldover_client::DaemonStatus) -> Self {
+        Self {
+            core_version: status.core_version,
+            capability: match status.capability {
+                foldover_client::AgentCapability::HealthOnly => AgentCapability::HealthOnly,
+                foldover_client::AgentCapability::PairConfiguration => {
+                    AgentCapability::PairConfiguration
+                }
+                foldover_client::AgentCapability::Sync => AgentCapability::Sync,
+            },
+            safe_mode_stops: status.safe_mode.map(|safe_mode| safe_mode.unclean_stops),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]

@@ -16,9 +16,9 @@ use foldover_proto::local::{
 };
 pub use foldover_proto::local::{
     AgentCapability, ArchiveItem, ArchiveItems, ArchiveRestored, ArchiveRun, ArchiveRuns,
-    DaemonStatus, History, HistoryOutcome, HistoryRecord, HistoryTrigger, PairSide, SyncAction,
-    SyncConflict, SyncCounts, SyncDeletions, SyncFailure, SyncItem, SyncJob, SyncPreview,
-    SyncProgress, SyncResult, SyncStatus, UndoResult,
+    DaemonStatus, History, HistoryOutcome, HistoryRecord, HistoryTrigger, PairSide, SafeMode,
+    SyncAction, SyncConflict, SyncCounts, SyncDeletions, SyncFailure, SyncItem, SyncJob,
+    SyncPreview, SyncProgress, SyncResult, SyncStatus, UndoResult,
 };
 pub use foldover_proto::local::{
     AutomationHold, AutomationStatus, LowPowerSyncs, SyncItemKind, SyncItemPage,
@@ -27,7 +27,9 @@ use foldover_proto::local::{
     ConflictKeep, SYNC_CANCEL, SYNC_ITEMS, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS,
     SYNC_UNDO, SyncItemQuery, SyncKey, SyncResolve, SyncRun,
 };
-use foldover_proto::local::{DAEMON_STATUS, Hello, PROTOCOL_VERSION, Request, SESSION_HELLO};
+use foldover_proto::local::{
+    DAEMON_RESUME, DAEMON_STATUS, Hello, PROTOCOL_VERSION, Request, SESSION_HELLO,
+};
 use foldover_proto::local::{NETWORK_SERVERS, NetworkServers};
 use foldover_proto::local::{
     PAIR_CHECK, PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_UPDATE, PairInput, PairKey,
@@ -60,6 +62,13 @@ pub fn version() -> &'static str {
 pub async fn agent_status(location: &SocketLocation) -> Result<DaemonStatus, Error> {
     Ok(serde_json::from_value(
         call(location, DAEMON_STATUS, None).await?,
+    )?)
+}
+
+/// Leave crash-loop safe mode, so syncs run again; returns the status.
+pub async fn leave_safe_mode(location: &SocketLocation) -> Result<DaemonStatus, Error> {
+    Ok(serde_json::from_value(
+        call(location, DAEMON_RESUME, None).await?,
     )?)
 }
 

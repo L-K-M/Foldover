@@ -15,6 +15,7 @@ mod mounts;
 mod pause;
 mod settings;
 mod share;
+mod starts;
 pub use cursor::WatchCursorRow;
 pub use device::DeviceRow;
 pub use history::HistoryRow;
