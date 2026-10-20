@@ -333,7 +333,10 @@ impl Simulation {
                 let path = self.root(folder).join(path);
                 fs::create_dir_all(path.parent().unwrap()).unwrap();
                 fs::write(&path, &content).unwrap();
-                if self.attributes == Attributes::Tagged {
+                // macOS's FAT driver cannot rename a file with an accented
+                // name while a sidecar holds its attributes, whoever asks
+                // (ADR 0019); those names stay untagged.
+                if self.attributes == Attributes::Tagged && path.is_ascii() {
                     let tagged = std::process::Command::new("xattr")
                         .args(["-w", "ch.lkmc.foldover.simulation", &content])
                         .arg(&path)
