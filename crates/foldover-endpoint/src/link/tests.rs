@@ -90,6 +90,18 @@ async fn pending_on(link: &PeerLink, device: DeviceId) -> PendingPairing {
     panic!("the pairing never reached this Mac");
 }
 
+/// Wait until `link` trusts `device`. A pairing is recorded just before
+/// it is pinned, so the record alone does not prove the pin.
+async fn pinned(link: &PeerLink, device: DeviceId) {
+    for _ in 0..1_000 {
+        if link.is_paired(device) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the pairing was never pinned");
+}
+
 async fn settled(link: &PeerLink) {
     for _ in 0..1_000 {
         if link.pending().is_empty() {
@@ -123,7 +135,8 @@ async fn both_confirmations_pin_both_macs_and_one_pins_nothing() {
     assert_eq!(recorded, Some((b.device(), "Studio".into())));
     let recorded = tokio::time::timeout(WAIT, b_paired.recv()).await.unwrap();
     assert_eq!(recorded, Some((a.device(), "Laptop".into())));
-    assert!(a.is_paired(b.device()) && b.is_paired(a.device()));
+    pinned(&a, b.device()).await;
+    pinned(&b, a.device()).await;
     assert!(a.pending().is_empty() && b.pending().is_empty());
 
     // Paired Macs answer each other's requests.
@@ -244,7 +257,8 @@ async fn a_code_shown_before_the_window_closed_can_still_be_confirmed() {
     b.decide(a.device(), Decision::Confirm).unwrap();
     tokio::time::timeout(WAIT, a_paired.recv()).await.unwrap();
     tokio::time::timeout(WAIT, b_paired.recv()).await.unwrap();
-    assert!(a.is_paired(b.device()) && b.is_paired(a.device()));
+    pinned(&a, b.device()).await;
+    pinned(&b, a.device()).await;
 }
 
 /// Review: a device the store failed to record was trusted until the
@@ -265,6 +279,7 @@ async fn a_device_that_could_not_be_recorded_is_not_trusted() {
     tokio::time::timeout(WAIT, a_paired.recv()).await.unwrap();
     tokio::time::timeout(WAIT, b_paired.recv()).await.unwrap();
     settled(&b).await;
-    assert!(a.is_paired(b.device()));
+    pinned(&a, b.device()).await;
+    // B decided not to pin once its record failed; nothing pins it later.
     assert!(!b.is_paired(a.device()));
 }
