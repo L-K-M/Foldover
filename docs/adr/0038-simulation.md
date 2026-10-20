@@ -17,7 +17,7 @@ folders with proptest:
 
 ```text
 start: three files, first run ──▶ rounds of
-  edits  write / delete / rename on either side (eight nested paths)
+  edits  write / delete / rename on either side (ten nested paths)
   run    finishes, is cancelled after N checkpoints, or dies at base
          commit N with its writes done; a dead or cancelled run is
          followed by one that finishes
@@ -66,6 +66,19 @@ on. Each simulated folder draws its file system:
 - About 700 cases a second in release: CI runs 64, the nightly job
   100,000 (`FOLDOVER_MEMORY_SIMULATION_CASES`).
 
+### Device matrix
+
+The on-disk simulation also runs on chosen volumes
+(`FOLDOVER_SIMULATION_LEFT_VOLUME`, `…_RIGHT_VOLUME`), with each pair's
+name matching read from its folders. On macOS, files with ASCII names
+there carry an extended attribute, so exFAT and FAT keep AppleDouble
+files beside them; accented names go without, as FAT cannot rename
+them then (ADR 0019). The `devices` workflow runs it
+nightly on the macOS runner between an APFS disk image and images of
+case-sensitive APFS, HFS+, exFAT and FAT32, 200 cases each
+(`scripts/device-matrix.sh`). Network shares, SFTP servers and a second
+Mac stay manual.
+
 The first runs found two engine bugs, both fixed
 ([ADR 0030](0030-name-clashes.md)):
 
@@ -83,6 +96,6 @@ The first runs found two engine bugs, both fixed
 - The 1.0 gate (PLAN.md §5.2) asks for 14 consecutive nights without a
   violation; the nightly job runs the count, the record of nights is
   kept by CI history.
-- Not emulated: extended attributes, volatile file identities, lost
+- Not emulated: extended attributes in memory, volatile file identities, lost
   change events, network chaos and the deterministic executor. SFTP and
   peer folders are not simulated yet.

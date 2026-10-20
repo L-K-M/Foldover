@@ -16,7 +16,10 @@
 //! endpoint, staging and archive; or in-memory folders with file system
 //! quirks, fast enough for the nightly gate. A failing case replays from
 //! proptest's seed. `FOLDOVER_SIMULATION_CASES` and
-//! `FOLDOVER_MEMORY_SIMULATION_CASES` scale the nightly run.
+//! `FOLDOVER_MEMORY_SIMULATION_CASES` scale the nightly run, and
+//! `FOLDOVER_SIMULATION_LEFT_VOLUME` and `…_RIGHT_VOLUME` put the real
+//! folders on chosen volumes, as the nightly device matrix does with disk
+//! images of each file system.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -24,7 +27,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use foldover_sim::{MemoryEndpoint, NameStorage, Quirks, Replace};
-use foldover_types::{CaseMatching, NameMatching, UnicodeMatching};
+use foldover_types::{CaseMatching, NameMatching, PairRoot, UnicodeMatching};
 use proptest::prelude::*;
 use unicode_normalization::UnicodeNormalization;
 
@@ -41,22 +44,14 @@ fn cases(variable: &str, default: u32) -> u32 {
         .unwrap_or(default)
 }
 
-/// The paths edits touch: nested, but never a file where another path
-/// needs a folder.
-const DISK_PATHS: &[&str] = &[
-    "a.txt",
-    "b.txt",
-    "docs/c.txt",
-    "docs/d.txt",
-    "docs/deep/e.txt",
-    "photos/f.jpg",
-    "photos/g.jpg",
-    "photos/2026/h.jpg",
-];
+/// Where real folders live instead of temporary directories.
+const LEFT_VOLUME: &str = "FOLDOVER_SIMULATION_LEFT_VOLUME";
+const RIGHT_VOLUME: &str = "FOLDOVER_SIMULATION_RIGHT_VOLUME";
 
-/// The same, with names only some folders tell apart: letter case, and
-/// a composed and a decomposed `é`.
-const QUIRK_PATHS: &[&str] = &[
+/// The paths edits touch: nested, but never a file where another path
+/// needs a folder, with names only some folders tell apart: letter case,
+/// and a composed and a decomposed `é`.
+const PATHS: &[&str] = &[
     "a.txt",
     "A.txt",
     "b.txt",
@@ -205,6 +200,8 @@ fn quirks() -> impl Strategy<Value = Quirks> {
 }
 
 /// Every file below `root`, outside Foldover's own folder, by path.
+/// AppleDouble files are macOS's storage for attributes on volumes
+/// without native ones (exFAT, FAT), not files a person wrote.
 fn disk_files(root: &Path) -> BTreeMap<Vec<u8>, Vec<u8>> {
     let mut found = BTreeMap::new();
     let mut pending = vec![root.to_path_buf()];
@@ -212,7 +209,9 @@ fn disk_files(root: &Path) -> BTreeMap<Vec<u8>, Vec<u8>> {
         for entry in fs::read_dir(&directory).unwrap() {
             let entry = entry.unwrap();
             let path = entry.path();
-            if entry.file_name() == ".foldover" {
+            if entry.file_name() == ".foldover"
+                || entry.file_name().as_encoded_bytes().starts_with(b"._")
+            {
                 continue;
             }
             if entry.file_type().unwrap().is_dir() {
@@ -245,8 +244,18 @@ fn folded(path: &[u8], names: NameMatching) -> Vec<u8> {
 /// A folder's files by folded name: each spelling with its content.
 type Folded = BTreeMap<Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>>;
 
+/// Whether written files carry an extended attribute. On volumes without
+/// native ones, such as exFAT and FAT, macOS keeps it in a `._` sidecar,
+/// which the device matrix wants to meet.
+#[derive(Clone, Copy, PartialEq)]
+enum Attributes {
+    None,
+    Tagged,
+}
+
 struct Simulation {
     pair: Fixture,
+    attributes: Attributes,
     mode: SyncMode,
     /// A Backup's source files after the last finished run, by folded
     /// name: what the target was last brought up to.
@@ -261,12 +270,38 @@ struct Simulation {
 
 impl Simulation {
     fn on_disk() -> Self {
+        let mut pair = fixture(SyncMode::Sync);
+        let placed = |variable| {
+            std::env::var_os(variable).map(|volume| tempfile::tempdir_in(volume).unwrap())
+        };
+        if let Some(left) = placed(LEFT_VOLUME) {
+            pair.left = left;
+        }
+        if let Some(right) = placed(RIGHT_VOLUME) {
+            pair.right = right;
+        }
+        // Compare names the way the folders' file systems do.
+        let names = |path: &Path| {
+            Endpoint::open(&PairRoot::Local(root(path)), &Reach::default())
+                .unwrap()
+                .name_matching()
+        };
+        let names = names(pair.left.path()).either(names(pair.right.path()));
+        let chosen = [LEFT_VOLUME, RIGHT_VOLUME]
+            .iter()
+            .any(|variable| std::env::var_os(variable).is_some());
+        let attributes = if chosen && cfg!(target_os = "macos") {
+            Attributes::Tagged
+        } else {
+            Attributes::None
+        };
         Self {
-            pair: fixture(SyncMode::Sync),
+            pair,
+            attributes,
             mode: SyncMode::Sync,
             backed_up: BTreeMap::new(),
-            paths: DISK_PATHS,
-            names: NameMatching::EXACT,
+            paths: PATHS,
+            names,
             writes: 0,
             hour: 0,
         }
@@ -282,9 +317,10 @@ impl Simulation {
         pair.leases = MEMORY_LEASES;
         Self {
             pair,
+            attributes: Attributes::None,
             mode,
             backed_up: BTreeMap::new(),
-            paths: QUIRK_PATHS,
+            paths: PATHS,
             names: left.names.either(right.names),
             writes: 0,
             hour: 0,
@@ -320,7 +356,22 @@ impl Simulation {
                 }
                 let path = self.root(folder).join(path);
                 fs::create_dir_all(path.parent().unwrap()).unwrap();
-                fs::write(path, content).unwrap();
+                fs::write(&path, &content).unwrap();
+                // macOS's FAT driver cannot rename a file with an accented
+                // name while a sidecar holds its attributes, whoever asks
+                // (ADR 0019); those names stay untagged.
+                if self.attributes == Attributes::Tagged
+                    && path
+                        .file_name()
+                        .is_some_and(|name| name.as_encoded_bytes().is_ascii())
+                {
+                    let tagged = std::process::Command::new("xattr")
+                        .args(["-w", "ch.lkmc.foldover.simulation", &content])
+                        .arg(&path)
+                        .status()
+                        .unwrap();
+                    assert!(tagged.success());
+                }
             }
             Edit::Delete(folder, path) => {
                 let path = self.paths[path];
@@ -336,13 +387,74 @@ impl Simulation {
                     memory.move_file(from.as_bytes(), to.as_bytes()).unwrap();
                     return;
                 }
-                let (from, to) = (self.root(folder).join(from), self.root(folder).join(to));
-                if from.exists() && !to.exists() {
-                    fs::create_dir_all(to.parent().unwrap()).unwrap();
-                    fs::rename(from, to).unwrap();
+                let root = self.root(folder);
+                let (from_path, to_path) = (root.join(from), root.join(to));
+                if from_path.exists() && !to_path.exists() {
+                    fs::create_dir_all(to_path.parent().unwrap()).unwrap();
+                    // macOS's FAT driver renames only by the spelling a file
+                    // was created with, as Foldover does: try both.
+                    if let Err(first) = fs::rename(&from_path, &to_path) {
+                        assert_eq!(first.kind(), std::io::ErrorKind::NotFound, "{from} -> {to}");
+                        let composed = |path: &str| root.join(path.nfc().collect::<String>());
+                        let decomposed = |path: &str| root.join(path.nfd().collect::<String>());
+                        let renamed = fs::rename(composed(from), composed(to))
+                            .or_else(|_| fs::rename(decomposed(from), decomposed(to)));
+                        if let Err(error) = renamed {
+                            let listed = |path: &Path| -> Vec<Vec<u8>> {
+                                fs::read_dir(path.parent().unwrap())
+                                    .map(|entries| {
+                                        entries
+                                            .flatten()
+                                            .map(|entry| {
+                                                entry.file_name().as_encoded_bytes().to_vec()
+                                            })
+                                            .collect()
+                                    })
+                                    .unwrap_or_default()
+                            };
+                            panic!(
+                                "{from:?} -> {to:?}: {first}, then composed and decomposed: {error}; from's folder {:?}, to's folder {:?}",
+                                listed(&from_path),
+                                listed(&to_path)
+                            );
+                        }
+                    }
                 }
             }
         }
+    }
+
+    /// Everything in a folder on disk, Foldover's own files included, one
+    /// line each, to show what a failed check saw.
+    fn tree(&self, folder: Folder) -> String {
+        if self.memory(folder).is_some() {
+            return "(in memory)".into();
+        }
+        let root = self.root(folder);
+        let mut lines = Vec::new();
+        let mut pending = vec![root.clone()];
+        while let Some(directory) = pending.pop() {
+            let Ok(entries) = fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let shown = path
+                    .strip_prefix(&root)
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string();
+                if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    lines.push(format!("  {shown}/"));
+                    pending.push(path);
+                } else {
+                    let content = fs::read(&path).unwrap_or_default();
+                    lines.push(format!("  {shown}: {}", String::from_utf8_lossy(&content)));
+                }
+            }
+        }
+        lines.sort();
+        lines.join("\n")
     }
 
     fn files(&self, folder: Folder) -> BTreeMap<Vec<u8>, Vec<u8>> {
@@ -443,9 +555,10 @@ impl Simulation {
                 }
                 assert!(
                     archive.contains(content),
-                    "{folder:?} {} ({}) left without an archived copy",
+                    "{folder:?} {} ({}) left without an archived copy; the folder holds:\n{}",
                     String::from_utf8_lossy(path),
-                    String::from_utf8_lossy(content)
+                    String::from_utf8_lossy(content),
+                    self.tree(*folder)
                 );
             }
         }
@@ -684,7 +797,7 @@ proptest! {
 
     #[test]
     fn random_edits_and_interrupted_runs_lose_nothing_and_converge(
-        rounds in rounds(DISK_PATHS.len(), Faults::Off),
+        rounds in rounds(PATHS.len(), Faults::Off),
     ) {
         let mut simulation = Simulation::on_disk();
         simulation.start();
@@ -704,7 +817,7 @@ proptest! {
         mode in mode(),
         left in quirks(),
         right in quirks(),
-        rounds in rounds(QUIRK_PATHS.len(), Faults::On),
+        rounds in rounds(PATHS.len(), Faults::On),
     ) {
         let mut simulation = Simulation::in_memory_as(mode, left, right);
         simulation.start();
