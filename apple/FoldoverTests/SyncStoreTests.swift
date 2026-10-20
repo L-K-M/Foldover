@@ -1888,7 +1888,7 @@ func previewedChangesCanBeCopiedTheOtherWayOrSkippedOnce() async {
     await viewModel.preview()
     let rows = viewModel.rows
     #expect(rows.map(\.otherWay) == [.b, .a])
-    #expect(rows.map(\.otherWayTitle) == ["Copy the Other Way", "Restore to Folder B"])
+    #expect(rows.map(\.otherWayTitle) == ["Archive in Folder A", "Restore to Folder B"])
     #expect(rows.allSatisfy { $0.item != nil })
 
     // Copying the other way keeps the folder the change would have changed.

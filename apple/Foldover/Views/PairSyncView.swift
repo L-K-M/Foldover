@@ -54,7 +54,7 @@ struct PairSyncView: View {
                             if let side = row.otherWay, let title = row.otherWayTitle {
                                 Button(title) { Task { await viewModel.copyOtherWay(row) } }
                                     .disabled(!viewModel.canStart)
-                                    .help("Keeps \(PairSyncViewModel.folderName(side))'s version and copies it to the other folder; if \(PairSyncViewModel.folderName(side)) has none, the item is archived there instead.")
+                                    .help("Makes the other folder match \(PairSyncViewModel.folderName(side)).")
                             }
                             if row.item != nil {
                                 Button("Skip Once") { Task { await viewModel.skipOnce(row) } }

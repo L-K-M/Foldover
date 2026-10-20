@@ -61,8 +61,8 @@ once, always skip" (Always Skip adds a filter rule; ADR 0024).
   conflict: keeping the folder a change would have overwritten copies its
   version back instead. An archive becomes a restore into the folder the
   item went missing from; a copy of a new item archives it where it was
-  created. The app labels these "Restore to Folder A" or "Copy the Other
-  Way"; the CLI uses `--keep-left PATH` or `--keep-right PATH`. Blocked
+  created. The app labels these "Restore to Folder A", "Archive in Folder
+  B" or "Copy the Other Way"; the CLI uses `--keep-left PATH` or `--keep-right PATH`. Blocked
   items wait for the conflict above them.
 - A folder present on one side only is settled as a branch, as for folder
   conflicts. A choice for a folder present on both sides copies only its

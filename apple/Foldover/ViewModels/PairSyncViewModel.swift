@@ -327,11 +327,13 @@ struct PairSyncViewModel {
     }
 
     /// The menu title for copying a change the other way: an archive
-    /// becomes a restore into the folder it went missing from.
+    /// becomes a restore into the folder it went missing from, and a new
+    /// item's copy an archive where it was created.
     static func otherWayTitle(_ action: ChangeAction) -> String? {
         switch action {
         case .archive(let on): String(localized: "Restore to \(folderName(on == .a ? .b : .a))")
-        case .copy, .update: String(localized: "Copy the Other Way")
+        case .copy(let to): String(localized: "Archive in \(folderName(to == .a ? .b : .a))")
+        case .update: String(localized: "Copy the Other Way")
         case .conflict, .blocked, .keep: nil
         }
     }
