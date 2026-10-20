@@ -83,11 +83,28 @@ struct PairCatalogPage: Sendable {
     let next: String?
 }
 
+/// What will not work as a person might expect with a picked folder
+/// (PLAN.md §3.6); a warning never blocks saving.
+struct PairReadinessWarning: Equatable, Sendable {
+    enum Kind: Equatable, Sendable {
+        /// Another sync engine manages this folder; `provider` names it.
+        case cloudManaged(provider: String)
+        /// The pair syncs extended attributes this side cannot keep.
+        case metadataUnsupported
+        /// One side ignores name case and the other does not.
+        case namesDiffer
+    }
+
+    let side: FolderSide
+    let kind: Kind
+}
+
 protocol PairClient: Sendable {
     func page(after: String?) async throws -> PairCatalogPage
     func create(_ settings: PairSettings) async throws -> SyncPair
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair
     func remove(_ pair: SyncPair) async throws -> SyncPair
+    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning]
 }
 
 // Keep generated async values inside one actor; only native Sendable records leave it.
@@ -109,6 +126,20 @@ private actor CorePairClient: PairClient {
 
     func remove(_ pair: SyncPair) async throws -> SyncPair {
         self.pair(try await FoldoverCore.pairRemove(id: pair.id, revision: pair.revision))
+    }
+
+    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] {
+        try await FoldoverCore.checkPair(configuration: configuration(settings)).map(warning)
+    }
+
+    private func warning(_ warning: ReadinessWarning) -> PairReadinessWarning {
+        let side: FolderSide = warning.side == .left ? .a : .b
+        let kind: PairReadinessWarning.Kind = switch warning.kind {
+        case .cloudManaged: .cloudManaged(provider: warning.provider ?? "")
+        case .metadataUnsupported: .metadataUnsupported
+        case .namesDiffer: .namesDiffer
+        }
+        return PairReadinessWarning(side: side, kind: kind)
     }
 
     private func configuration(_ settings: PairSettings) -> LocalPairDraft {
@@ -257,6 +288,12 @@ final class PairStore {
             isLoading = false
             loadError = Self.message(for: error)
         }
+    }
+
+    /// What will not work as a person might expect with `settings`' folders
+    /// (PLAN.md §3.6); warnings never block saving.
+    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] {
+        try await client.check(settings)
     }
 
     func save(_ settings: PairSettings, editing: SyncPair?) async throws -> SyncPair {

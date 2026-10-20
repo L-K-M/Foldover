@@ -21,10 +21,10 @@ use foldover_proto::local::{
 };
 use foldover_proto::local::{
     AgentCapability, DAEMON_STATUS, DaemonStatus, Hello, INTERNAL_ERROR, INVALID_PARAMS,
-    METHOD_NOT_FOUND, PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_NOT_FOUND, PAIR_PAGE_SIZE,
+    METHOD_NOT_FOUND, PAIR_CHECK, PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_NOT_FOUND, PAIR_PAGE_SIZE,
     PAIR_UPDATE, PROTOCOL_VERSION, PairInput, PairKey, PairList, PairPage, PairRecord, PairUpdate,
-    ROOT_OVERLAP, ROOT_UNAVAILABLE, Request, RpcError, SESSION_HELLO, STALE_REVISION,
-    VERSION_MISMATCH,
+    PairWarning, PairWarnings, ROOT_OVERLAP, ROOT_UNAVAILABLE, Request, RpcError, SESSION_HELLO,
+    STALE_REVISION, VERSION_MISMATCH,
 };
 use foldover_proto::local::{
     ConflictKeep, SYNC_CANCEL, SYNC_ITEMS, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS,
@@ -224,6 +224,9 @@ enum Command {
     List(Option<PairId>),
     Get(PairId),
     Create(PairDraft),
+    /// Readiness warnings for a draft that has not been saved (PLAN.md
+    /// §3.6); touches disks like creation but mutates nothing.
+    Check(PairDraft),
     Update {
         id: PairId,
         revision: u64,
@@ -258,6 +261,10 @@ impl Command {
                 let params: PairInput = parameters(request)?;
                 Ok(Self::Create(params.try_into().map_err(invalid)?))
             }
+            PAIR_CHECK => {
+                let params: PairInput = parameters(request)?;
+                Ok(Self::Check(params.try_into().map_err(invalid)?))
+            }
             PAIR_UPDATE => {
                 let params: PairUpdate = parameters(request)?;
                 Ok(Self::Update {
@@ -281,7 +288,7 @@ impl Command {
     fn mutation_target(&self) -> Option<PairId> {
         match self {
             Self::Update { id, .. } | Self::Remove { id, .. } => Some(*id),
-            Self::List(_) | Self::Get(_) | Self::Create(_) => None,
+            Self::List(_) | Self::Get(_) | Self::Create(_) | Self::Check(_) => None,
         }
     }
 
@@ -306,6 +313,12 @@ impl Command {
             Self::Create(draft) => encode(PairRecord::from(
                 &engine.create_pair(&draft).map_err(engine_error)?,
             )),
+            Self::Check(draft) => {
+                let warnings = engine.check_pair(&draft).map_err(engine_error)?;
+                encode(PairWarnings {
+                    warnings: warnings.into_iter().map(readiness_warning).collect(),
+                })
+            }
             Self::Update {
                 id,
                 revision,
@@ -319,6 +332,22 @@ impl Command {
                 &engine.remove_pair(id, revision).map_err(engine_error)?,
             )),
         }
+    }
+}
+
+/// The wire form of an engine readiness warning; English wording lives
+/// in the app, which knows its folders' display names.
+fn readiness_warning(warning: foldover_engine::ReadinessWarning) -> PairWarning {
+    use foldover_engine::ReadinessWarning as Warning;
+    match warning {
+        Warning::CloudManaged { side, provider } => PairWarning::CloudManaged {
+            side: side.into(),
+            provider: provider.name().to_owned(),
+        },
+        Warning::MetadataUnsupported { side } => {
+            PairWarning::MetadataUnsupported { side: side.into() }
+        }
+        Warning::NamesDiffer { side } => PairWarning::NamesDiffer { side: side.into() },
     }
 }
 
@@ -483,6 +512,43 @@ mod tests {
             .unwrap();
         assert_eq!(page["pairs"], json!([saved]));
         assert!(page["next"].is_null());
+    }
+
+    #[tokio::test]
+    async fn pair_check_warns_without_saving_and_never_blocks() {
+        let (directory, service) = fixture();
+        let input = input(directory.path(), "Photos");
+        let checked = service
+            .handle(Request::call(1, PAIR_CHECK, Some(input.clone())))
+            .await
+            .unwrap();
+        // Ordinary local folders warn about nothing on CI's filesystems.
+        assert_eq!(checked, json!({"warnings":[]}));
+        // A root that will not open earns no warnings: saving reports it.
+        let mut missing = input.clone();
+        missing["left_root"] = json!(directory.path().join("missing").as_os_str().as_bytes());
+        let checked = service
+            .handle(Request::call(2, PAIR_CHECK, Some(missing)))
+            .await
+            .unwrap();
+        assert_eq!(checked, json!({"warnings":[]}));
+        // Checking saves nothing.
+        let page = service
+            .handle(Request::call(3, PAIR_LIST, None))
+            .await
+            .unwrap();
+        assert_eq!(page["pairs"], json!([]));
+        // It validates like creation.
+        let mut unknown_field = input;
+        unknown_field["run_now"] = json!(true);
+        assert_eq!(
+            service
+                .handle(Request::call(4, PAIR_CHECK, Some(unknown_field)))
+                .await
+                .unwrap_err()
+                .code(),
+            INVALID_PARAMS
+        );
     }
 
     #[tokio::test]

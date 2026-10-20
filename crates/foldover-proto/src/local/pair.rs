@@ -9,6 +9,7 @@ pub const PAIR_GET: &str = "pair.get";
 pub const PAIR_CREATE: &str = "pair.create";
 pub const PAIR_UPDATE: &str = "pair.update";
 pub const PAIR_REMOVE: &str = "pair.remove";
+pub const PAIR_CHECK: &str = "pair.check";
 // Even maximum-length names and raw roots fit below the 1 MiB IPC frame limit.
 pub const PAIR_PAGE_SIZE: usize = 16;
 
@@ -298,6 +299,25 @@ pub struct PairPage {
     pub next: Option<String>,
 }
 
+/// `pair.check`'s answer: what will not work as a person might expect
+/// with the folders they picked (PLAN.md §3.6). Never blocks saving.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PairWarnings {
+    pub warnings: Vec<PairWarning>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum PairWarning {
+    /// Another sync engine manages this side's folder.
+    CloudManaged { side: PairSide, provider: String },
+    /// The pair syncs extended attributes this side cannot keep.
+    MetadataUnsupported { side: PairSide },
+    /// One side ignores name case and the other does not.
+    NamesDiffer { side: PairSide },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +363,43 @@ mod tests {
             .is_err()
         );
         assert!(serde_json::from_value::<PairKey>(json!({"id":"x", "root":"/private"})).is_err());
+    }
+
+    #[test]
+    fn warnings_round_trip_and_reject_unknown_fields() {
+        let warnings = PairWarnings {
+            warnings: vec![
+                PairWarning::CloudManaged {
+                    side: PairSide::Left,
+                    provider: "iCloud Drive".into(),
+                },
+                PairWarning::MetadataUnsupported {
+                    side: PairSide::Right,
+                },
+                PairWarning::NamesDiffer {
+                    side: PairSide::Left,
+                },
+            ],
+        };
+        let json = serde_json::to_value(&warnings).unwrap();
+        assert_eq!(
+            json,
+            json!({"warnings":[
+                {"kind":"cloudManaged","side":"left","provider":"iCloud Drive"},
+                {"kind":"metadataUnsupported","side":"right"},
+                {"kind":"namesDiffer","side":"left"},
+            ]})
+        );
+        assert_eq!(
+            serde_json::from_value::<PairWarnings>(json).unwrap(),
+            warnings
+        );
+        assert!(
+            serde_json::from_value::<PairWarnings>(
+                json!({"warnings":[{"kind":"namesDiffer","side":"left","why":"case"}]})
+            )
+            .is_err()
+        );
     }
 
     #[test]

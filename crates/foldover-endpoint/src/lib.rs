@@ -46,6 +46,8 @@ pub use foldover_fs::{
 #[cfg(unix)]
 pub use endpoint::{Endpoint, ObserveStep, Reach};
 
+pub use foldover_os::{CloudProvider, cloud_provider, current_cloud_provider};
+
 mod link;
 pub use link::{
     Answer, Decision, LinkError, NearbyMac, NotRecorded, PeerHost, PeerLink, PendingPairing,

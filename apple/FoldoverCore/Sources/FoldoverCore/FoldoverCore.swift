@@ -1676,6 +1676,70 @@ public func FfiConverterTypePairingCode_lower(_ value: PairingCode) -> RustBuffe
 }
 
 
+public struct ReadinessWarning: Equatable, Hashable {
+    public var side: SyncSide
+    public var kind: ReadinessWarningKind
+    /**
+     * The other sync engine's name, for `CloudManaged` only.
+     */
+    public var provider: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(side: SyncSide, kind: ReadinessWarningKind, 
+        /**
+         * The other sync engine's name, for `CloudManaged` only.
+         */provider: String?) {
+        self.side = side
+        self.kind = kind
+        self.provider = provider
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ReadinessWarning: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeReadinessWarning: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ReadinessWarning {
+        return
+            try ReadinessWarning(
+                side: FfiConverterTypeSyncSide.read(from: &buf), 
+                kind: FfiConverterTypeReadinessWarningKind.read(from: &buf), 
+                provider: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ReadinessWarning, into buf: inout [UInt8]) {
+        FfiConverterTypeSyncSide.write(value.side, into: &buf)
+        FfiConverterTypeReadinessWarningKind.write(value.kind, into: &buf)
+        FfiConverterOptionString.write(value.provider, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReadinessWarning_lift(_ buf: RustBuffer) throws -> ReadinessWarning {
+    return try FfiConverterTypeReadinessWarning.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReadinessWarning_lower(_ value: ReadinessWarning) -> RustBuffer {
+    return FfiConverterTypeReadinessWarning.lower(value)
+}
+
+
 public struct RunHistoryEntry: Equatable, Hashable {
     /**
      * Milliseconds since the Unix epoch.
@@ -3039,6 +3103,91 @@ public func FfiConverterTypePairSchedule_lower(_ value: PairSchedule) -> RustBuf
 
 
 
+/**
+ * What a readiness check found on one side of a pair (PLAN.md §3.6).
+ */
+
+public enum ReadinessWarningKind: Equatable, Hashable {
+    
+    /**
+     * Another sync engine manages this folder; `provider` names it.
+     */
+    case cloudManaged
+    /**
+     * The pair syncs extended attributes this side cannot keep.
+     */
+    case metadataUnsupported
+    /**
+     * One side ignores name case and the other does not.
+     */
+    case namesDiffer
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ReadinessWarningKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeReadinessWarningKind: FfiConverterRustBuffer {
+    typealias SwiftType = ReadinessWarningKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ReadinessWarningKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .cloudManaged
+        
+        case 2: return .metadataUnsupported
+        
+        case 3: return .namesDiffer
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ReadinessWarningKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .cloudManaged:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .metadataUnsupported:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .namesDiffer:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReadinessWarningKind_lift(_ buf: RustBuffer) throws -> ReadinessWarningKind {
+    return try FfiConverterTypeReadinessWarningKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReadinessWarningKind_lower(_ value: ReadinessWarningKind) -> RustBuffer {
+    return FfiConverterTypeReadinessWarningKind.lower(value)
+}
+
+
+
 
 public enum RunOutcomeKind: Equatable, Hashable {
     
@@ -4186,6 +4335,31 @@ fileprivate struct FfiConverterSequenceTypePairingCode: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeReadinessWarning: FfiConverterRustBuffer {
+    typealias SwiftType = [ReadinessWarning]
+
+    public static func write(_ value: [ReadinessWarning], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeReadinessWarning.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ReadinessWarning] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ReadinessWarning]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeReadinessWarning.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeRunHistoryEntry: FfiConverterRustBuffer {
     typealias SwiftType = [RunHistoryEntry]
 
@@ -4341,6 +4515,24 @@ public func agentStatus()async throws  -> AgentHealth  {
             completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeAgentHealth_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+/**
+ * What will not work as a person might expect with `configuration`'s
+ * folders (PLAN.md §3.6). Warnings never block saving.
+ */
+public func checkPair(configuration: LocalPairDraft)async throws  -> [ReadinessWarning]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_check_pair(FfiConverterTypeLocalPairDraft_lower(configuration)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeReadinessWarning.lift,
             errorHandler: FfiConverterTypeAgentError_lift
         )
 }
@@ -4924,6 +5116,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.contractVersionMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_agent_status() != 7308) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_check_pair() != 41529) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_core_version() != 27554) {

@@ -15,13 +15,16 @@ private func pairFixture(id: String = "11111111111111111111111111111111") -> Syn
 private actor PairFixtureClient: PairClient {
     private let catalog: [SyncPair]
     private let outcome: SaveOutcome
+    private let warnings: [PairReadinessWarning]
     private(set) var updatedRevision: UInt64?
     private(set) var savedSettings: PairSettings?
     private(set) var removedRevision: UInt64?
 
-    init(catalog: [SyncPair] = [], outcome: SaveOutcome = .succeeds) {
+    init(catalog: [SyncPair] = [], outcome: SaveOutcome = .succeeds,
+         warnings: [PairReadinessWarning] = []) {
         self.catalog = catalog
         self.outcome = outcome
+        self.warnings = warnings
     }
 
     func page(after: String?) async throws -> PairCatalogPage {
@@ -47,6 +50,8 @@ private actor PairFixtureClient: PairClient {
         if case .fails = outcome { throw PairFixtureError.changedElsewhere }
         return pair
     }
+
+    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { warnings }
 }
 
 @MainActor
@@ -91,6 +96,7 @@ private actor DeferredPairClient: PairClient {
     func create(_ settings: PairSettings) async throws -> SyncPair { pairFixture() }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { pair }
     func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
+    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { [] }
 }
 
 @MainActor
@@ -116,6 +122,7 @@ private actor FailingPairPageClient: PairClient {
     func create(_ settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func remove(_ pair: SyncPair) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
+    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { throw PairFixtureError.changedElsewhere }
 }
 
 @MainActor
@@ -371,6 +378,77 @@ func sftpFoldersAreWrittenAsLocators() {
     editor.chooseServer("nas.local:/Photos", side: .left)
     #expect(editor.errorMessage != nil)
     #expect(editor.folderText(.left) == "Choose a folder")
+}
+
+@MainActor
+@Test
+func readinessWarningsNameTheSidesInEnglish() async {
+    let client = PairFixtureClient(warnings: [
+        PairReadinessWarning(side: .a, kind: .cloudManaged(provider: "iCloud Drive")),
+        PairReadinessWarning(side: .b, kind: .metadataUnsupported),
+        PairReadinessWarning(side: .a, kind: .namesDiffer),
+    ])
+    let editor = PairEditorViewModel(store: PairStore(client: client))
+    #expect(editor.readinessWarnings.isEmpty)
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/a")]), side: .left)
+    editor.chooseServer("sftp://nas.local/srv/photos", side: .right)
+    await editor.awaitReadinessCheck()
+    #expect(editor.readinessWarnings == [
+        "Folder A is in iCloud Drive, which also syncs it. Two sync engines on one folder can undo each other's changes; prefer a folder outside it.",
+        "Folder B is on an SFTP server, which keeps no tags or other extended attributes; they will not sync to it.",
+        "Folder A ignores the case of names and Folder B does not: names that differ only in case become conflicts to rename.",
+    ])
+}
+
+@MainActor
+@Test
+func readinessWarningsRefreshWhenMetadataChoicesChange() async {
+    let unsupported = PairReadinessWarning(side: .b, kind: .metadataUnsupported)
+    let client = WarningOnAttributesClient(warning: unsupported)
+    let editor = PairEditorViewModel(store: PairStore(client: client))
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/a")]), side: .left)
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/b")]), side: .right)
+    await editor.awaitReadinessCheck()
+    // The defaults sync extended attributes, so the warning is up.
+    #expect(editor.readinessWarnings == [
+        "Folder B cannot keep tags or other extended attributes; they will not sync to it.",
+    ])
+    editor.options.syncExtendedAttributes = false
+    await editor.awaitReadinessCheck()
+    #expect(editor.readinessWarnings.isEmpty)
+    // Other option edits do not re-check.
+    editor.options.durability = .full
+    #expect(editor.readinessWarnings.isEmpty)
+}
+
+private actor WarningOnAttributesClient: PairClient {
+    let warning: PairReadinessWarning
+    init(warning: PairReadinessWarning) { self.warning = warning }
+
+    func page(after: String?) async throws -> PairCatalogPage { PairCatalogPage(pairs: [], next: nil) }
+    func create(_ settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
+    func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
+    func remove(_ pair: SyncPair) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
+    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] {
+        settings.options.syncExtendedAttributes ? [warning] : []
+    }
+}
+
+@MainActor
+@Test
+func aFailedReadinessCheckKeepsTheLastAnswer() async {
+    let client = WarningOnAttributesClient(warning: PairReadinessWarning(side: .a, kind: .namesDiffer))
+    let editor = PairEditorViewModel(store: PairStore(client: client))
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/a")]), side: .left)
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/b")]), side: .right)
+    await editor.awaitReadinessCheck()
+    #expect(editor.readinessWarnings.count == 1)
+    let failing = PairEditorViewModel(store: PairStore(client: FailingPairPageClient()))
+    failing.chooseFolder(.success([URL(fileURLWithPath: "/a")]), side: .left)
+    failing.chooseFolder(.success([URL(fileURLWithPath: "/b")]), side: .right)
+    await failing.awaitReadinessCheck()
+    #expect(failing.readinessWarnings.isEmpty)
+    #expect(failing.errorMessage == nil)
 }
 
 @MainActor
