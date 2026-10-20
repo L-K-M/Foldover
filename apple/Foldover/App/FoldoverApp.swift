@@ -11,6 +11,7 @@ struct FoldoverApp: App {
     @State private var settings = SettingsStore()
     @State private var macToMac: MacToMacStore
     @State private var automation = AutomationStore()
+    @State private var updates = UpdateStore()
 
     init() {
         // One store each, so the pair editor sees the Macs Settings
@@ -31,6 +32,12 @@ struct FoldoverApp: App {
         // One configuration window shares the same selection and editor as the menu bar.
         Window("Foldover", id: "main") {
             MainView(viewModel: viewModel)
+        }
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { updates.checkForUpdates() }
+                    .disabled(!updates.canUpdate)
+            }
         }
 
         // .window style hosts a regular SwiftUI view instead of the
