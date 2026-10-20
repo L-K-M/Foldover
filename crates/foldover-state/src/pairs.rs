@@ -13,6 +13,7 @@ use foldover_types::{
 use crate::BaseUpdate;
 use crate::base::{decode, decode_entry, encode};
 
+mod cursor;
 mod device;
 mod history;
 mod journal;
@@ -20,6 +21,7 @@ mod mounts;
 mod pause;
 mod settings;
 mod share;
+pub use cursor::WatchCursor;
 pub use device::Device;
 pub use history::{HISTORY_LIMIT, HistoryEntry, HistoryOutcome, RunTrigger};
 pub use journal::{Journal, JournalAction, JournalEntry, JournalUpdate};

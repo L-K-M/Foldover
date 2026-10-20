@@ -13,6 +13,10 @@ All notable changes to this project are documented here. The format follows
   shares and SFTP servers for other computers' changes every 5 minutes.
   It now waits for 10 seconds of quiet instead of 5.
 
+- At start, "When files change" replays each local folder's file event
+  history from when the pair was last quiet, and syncs only folders
+  that changed while the agent was not running.
+
 - Signature moments: drop one or two folders on the window's sidebar or
   empty detail to start a pair with them; the pair editor shows a
   sentence that says what the pair will do and rewrites itself as you
