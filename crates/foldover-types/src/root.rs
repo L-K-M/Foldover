@@ -167,9 +167,13 @@ impl SftpRoot {
 
     /// The folder at absolute `path` on the same server, as the same user:
     /// `sftp://alice@nas.local/srv` at `/srv/photos` is
-    /// `sftp://alice@nas.local/srv/photos`.
+    /// `sftp://alice@nas.local/srv/photos`. A folder named `~` at the
+    /// server's top cannot be named: `/~` means the home folder.
     pub fn at(&self, path: &[u8]) -> Result<Self, InvalidPair> {
-        if !path.starts_with(b"/") {
+        let names_home = path
+            .strip_prefix(HOME)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(b"/"));
+        if !path.starts_with(b"/") || names_home {
             return Err(InvalidPair::Root);
         }
         let rest = &self.locator[SFTP_SCHEME.len()..];
@@ -268,6 +272,10 @@ mod tests {
             b"sftp://alice@nas.local:2222/"
         );
         assert!(root.at(b"relative").is_err());
+        // `/~` in a locator names the home folder, not a folder named `~`.
+        assert!(root.at(b"/~").is_err());
+        assert!(root.at(b"/~/photos").is_err());
+        assert!(root.at(b"/~photos").is_ok());
         assert!(root.at(b"/a\0b").is_err());
     }
 

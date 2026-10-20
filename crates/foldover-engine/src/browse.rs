@@ -20,7 +20,8 @@ pub struct ServerFolder {
     /// The folder above it; `None` at the server's `/`.
     pub parent: Option<SftpRoot>,
     /// The folders in it, by name, sorted. Names that are not UTF-8
-    /// cannot be shown or typed, so they are left out.
+    /// cannot be shown or typed, and a locator cannot name a folder `~`
+    /// at the server's top, so those are left out.
     pub folders: Vec<(String, SftpRoot)>,
 }
 
@@ -50,6 +51,7 @@ fn browse(endpoint: &Endpoint, root: &SftpRoot) -> Result<ServerFolder, Error> {
         let Ok(name) = std::str::from_utf8(entry.name()) else {
             continue;
         };
+        // Too deep for a locator, or `~` at the top, which names home.
         let Ok(folder) = at(&child(&path, entry.name())) else {
             continue;
         };
