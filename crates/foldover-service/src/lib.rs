@@ -1302,6 +1302,23 @@ mod tests {
         assert!(service.peers.get().is_none());
     }
 
+    /// A user extended attribute both platforms sync.
+    #[cfg(target_os = "linux")]
+    const TAG: &str = "user.ch.lkmc.foldover.tag";
+    #[cfg(not(target_os = "linux"))]
+    const TAG: &str = "ch.lkmc.foldover.tag";
+
+    fn tag(path: &Path, value: &[u8]) {
+        rustix::fs::setxattr(path, TAG, value, rustix::fs::XattrFlags::empty()).unwrap();
+    }
+
+    fn tag_of(path: &Path) -> Option<Vec<u8>> {
+        let mut value = vec![0; 64];
+        let size = rustix::fs::getxattr(path, TAG, &mut value).ok()?;
+        value.truncate(size);
+        Some(value)
+    }
+
     /// Two agents already paired with each other over loopback, as
     /// (A, B, A's device, B's device).
     async fn paired_agents() -> (
@@ -1353,6 +1370,7 @@ mod tests {
         fs::create_dir(shared.path().join("album")).unwrap();
         fs::write(shared.path().join("album/one.jpg"), b"one").unwrap();
         fs::write(shared.path().join("two.jpg"), b"two").unwrap();
+        tag(&shared.path().join("two.jpg"), b"red");
         let share = b
             .handle(Request::call(
                 1,
@@ -1397,9 +1415,12 @@ mod tests {
         assert_eq!(ran["result"]["copied"], 3, "{ran}");
         assert_eq!(fs::read(local.join("album/one.jpg")).unwrap(), b"one");
         assert_eq!(fs::read(local.join("two.jpg")).unwrap(), b"two");
+        // P5.4: extended attributes travel with the copy.
+        assert_eq!(tag_of(&local.join("two.jpg")), Some(b"red".to_vec()));
 
         // Changes on A reach B's folder; a deletion is archived there.
         fs::write(local.join("three.jpg"), b"three").unwrap();
+        tag(&local.join("three.jpg"), b"blue");
         fs::write(local.join("two.jpg"), b"two, edited").unwrap();
         fs::remove_file(local.join("album/one.jpg")).unwrap();
         a.handle(Request::call(6, SYNC_PREVIEW, Some(key.clone())))
@@ -1414,6 +1435,10 @@ mod tests {
         let ran = settled(&a, &key).await;
         assert_eq!(ran["result"]["failure_count"], 0, "{ran}");
         assert_eq!(fs::read(shared.path().join("three.jpg")).unwrap(), b"three");
+        assert_eq!(
+            tag_of(&shared.path().join("three.jpg")),
+            Some(b"blue".to_vec())
+        );
         assert_eq!(
             fs::read(shared.path().join("two.jpg")).unwrap(),
             b"two, edited"

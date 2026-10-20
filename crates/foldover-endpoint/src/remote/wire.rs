@@ -10,8 +10,10 @@
 use std::io;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use foldover_fs::ForeignMetadata;
-use foldover_proto::peer::{FolderError, FolderErrorKind, RunSettings, WireMetadata};
+use foldover_fs::{ForeignMetadata, NativeMetadata};
+use foldover_proto::peer::{
+    FolderError, FolderErrorKind, RunSettings, WireAttribute, WireMetadata,
+};
 use foldover_types::{Digest, EntryContent, EntryVersion, PairOptions, SyncPath};
 
 use crate::{ApplyError, ObservedEntry, RunScope, ScanError};
@@ -104,7 +106,10 @@ fn take_version(bytes: &mut &[u8]) -> Option<EntryVersion> {
     Some(EntryVersion::new(content, metadata))
 }
 
-pub(super) fn metadata_wire(metadata: ForeignMetadata) -> WireMetadata {
+pub(super) fn metadata_wire(
+    metadata: ForeignMetadata,
+    native: Option<&NativeMetadata>,
+) -> WireMetadata {
     let (seconds, nanos) = match metadata.modified.duration_since(UNIX_EPOCH) {
         Ok(after) => (
             i64::try_from(after.as_secs()).unwrap_or(i64::MAX),
@@ -124,20 +129,41 @@ pub(super) fn metadata_wire(metadata: ForeignMetadata) -> WireMetadata {
         permissions: metadata.permissions,
         modified_seconds: seconds,
         modified_nanos: nanos,
+        attributes: native.map(|native| {
+            native
+                .attributes
+                .iter()
+                .map(|(name, value)| WireAttribute {
+                    name: name.clone(),
+                    value: value.clone(),
+                })
+                .collect()
+        }),
+        flags: native.and_then(|native| native.flags),
     }
 }
 
-pub(super) fn metadata_from(metadata: WireMetadata) -> ForeignMetadata {
+pub(super) fn metadata_from(metadata: WireMetadata) -> (ForeignMetadata, Option<NativeMetadata>) {
     let seconds = Duration::from_secs(metadata.modified_seconds.unsigned_abs());
     let base = if metadata.modified_seconds >= 0 {
         UNIX_EPOCH + seconds
     } else {
         UNIX_EPOCH - seconds
     };
-    ForeignMetadata {
+    let nanos = Duration::from_nanos(u64::from(metadata.modified_nanos.min(999_999_999)));
+    let foreign = ForeignMetadata {
         permissions: metadata.permissions,
-        modified: base + Duration::from_nanos(u64::from(metadata.modified_nanos.min(999_999_999))),
-    }
+        modified: base + nanos,
+    };
+    let flags = metadata.flags;
+    let native = metadata.attributes.map(|attributes| NativeMetadata {
+        attributes: attributes
+            .into_iter()
+            .map(|attribute| (attribute.name, attribute.value))
+            .collect(),
+        flags,
+    });
+    (foreign, native)
 }
 
 pub(super) fn run_wire(run: &RunScope) -> RunSettings {

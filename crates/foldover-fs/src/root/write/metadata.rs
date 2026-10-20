@@ -11,7 +11,7 @@ use foldover_types::{MetadataPolicy, Propagation};
 use rustix::fs::{Mode, Timespec, Timestamps, XattrFlags};
 
 use super::super::{AttributeRole, EntryMetadata, NodeKind};
-use super::ForeignMetadata;
+use super::{ForeignMetadata, NativeMetadata};
 
 /// Setuid, setgid and sticky bits are never copied.
 const PERMISSION_BITS: u32 = 0o777;
@@ -21,6 +21,8 @@ const READ_BITS: u32 = 0o444;
 const READ_TO_EXECUTE_SHIFT: u32 = 2;
 const MAX_VALUE_BYTES: usize = 16 * 1024 * 1024;
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
+/// Most attribute bytes a copy between Macs carries; its messages hold them.
+const MAX_NATIVE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Destination {
@@ -65,6 +67,76 @@ pub(super) fn apply(
     if policy.modification_times() == Propagation::Sync && source_metadata.kind() == NodeKind::File
     {
         set_modified(target, source_metadata.modified())?;
+    }
+    Ok(())
+}
+
+/// What a copy to another Mac carries of `file`: its resource fork, and
+/// the attributes and user flags the pair syncs.
+pub(super) fn native(
+    file: &impl AsFd,
+    metadata: &EntryMetadata,
+    policy: MetadataPolicy,
+) -> io::Result<NativeMetadata> {
+    let synced = policy.extended_attributes() == Propagation::Sync;
+    let mut native = NativeMetadata::default();
+    let mut bytes = 0;
+    for name in attribute_names(file)? {
+        let wanted = match metadata.attribute_role(name.as_bytes()) {
+            AttributeRole::ResourceFork => true,
+            AttributeRole::Synced => synced,
+            AttributeRole::CompressionStorage | AttributeRole::SystemManaged => false,
+        };
+        if !wanted {
+            continue;
+        }
+        let size = rustix::fs::fgetxattr(file, name.as_c_str(), &mut [0_u8; 0][..])?;
+        bytes += name.as_bytes().len() + size;
+        if bytes > MAX_NATIVE_BYTES {
+            return Err(io::Error::other(
+                "Extended attributes exceed what a copy between Macs carries",
+            ));
+        }
+        let mut value = vec![0; size];
+        let size = rustix::fs::fgetxattr(file, name.as_c_str(), &mut value)?;
+        value.truncate(size);
+        native.attributes.push((name.into_bytes(), value));
+    }
+    if synced {
+        native.flags = metadata.user_flags();
+    }
+    Ok(native)
+}
+
+/// Give `target` attributes and flags another Mac sent. Only names this
+/// side would sync itself are set, so another Mac cannot plant system
+/// state; a fork only on a new file, as with local copies.
+pub(super) fn apply_native(
+    target: &impl AsFd,
+    native: &NativeMetadata,
+    destination: Destination,
+    policy: MetadataPolicy,
+) -> io::Result<()> {
+    let target_metadata = EntryMetadata::from_file(target)?;
+    let synced = policy.extended_attributes() == Propagation::Sync;
+    if synced && destination == Destination::Existing {
+        remove_attributes(target, &target_metadata, AttributeRole::Synced)?;
+    }
+    for (name, value) in &native.attributes {
+        let allowed = match target_metadata.attribute_role(name) {
+            AttributeRole::ResourceFork => destination == Destination::New,
+            AttributeRole::Synced => synced,
+            AttributeRole::CompressionStorage | AttributeRole::SystemManaged => false,
+        };
+        if !allowed {
+            continue;
+        }
+        let name = CString::new(name.clone())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid xattr name"))?;
+        rustix::fs::fsetxattr(target, name.as_c_str(), value, XattrFlags::empty())?;
+    }
+    if synced && let Some(flags) = native.flags {
+        set_user_flags(target, &target_metadata, flags)?;
     }
     Ok(())
 }

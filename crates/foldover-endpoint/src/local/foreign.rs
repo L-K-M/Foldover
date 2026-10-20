@@ -2,13 +2,22 @@
 //! such as SFTP servers. Those carry data, mode and modification time
 //! only; the same verification and staging rules apply.
 
-use foldover_fs::{Chunks, ForeignMetadata, Placement, WriteError};
+use foldover_fs::{Chunks, ForeignMetadata, NativeMetadata, Placement, WriteError};
 use foldover_types::{Digest, EntryContent, EntryVersion, SyncPath};
 
 use super::{
     ApplyError, Expected, LocalEndpoint, LocalEntry, ObservedEntry, Payload, RunScope, ScanControl,
     ScanError, entry_version, metadata_version, observed,
 };
+
+/// What a streamed copy carries besides data: mode and time, and the
+/// attributes another Mac sends; None from sources without any, such as
+/// SFTP servers, which leaves the receiving entry's own.
+#[derive(Clone, Copy)]
+pub(crate) struct Carried<'a> {
+    pub(crate) metadata: ForeignMetadata,
+    pub(crate) native: Option<&'a NativeMetadata>,
+}
 
 impl LocalEndpoint {
     /// Prove `path` still holds the planned source entry.
@@ -33,6 +42,21 @@ impl LocalEndpoint {
             permissions: entry.metadata.permissions(),
             modified: entry.metadata.modified(),
         }
+    }
+
+    /// What a copy to another Mac carries of a verified entry besides data,
+    /// mode and time.
+    pub(crate) fn native_metadata(
+        &self,
+        entry: &LocalEntry,
+        policy: foldover_types::MetadataPolicy,
+    ) -> Result<NativeMetadata, ApplyError> {
+        self.root
+            .native_metadata(&entry.path, &entry.metadata, policy)
+            .map_err(|source| match source {
+                WriteError::Changed => ApplyError::SourceChanged(entry.path.clone()),
+                source => write_error(&entry.path, source),
+            })
     }
 
     /// Push a verified file's data to `sink` and return its digest.
@@ -80,7 +104,7 @@ impl LocalEndpoint {
         &self,
         path: &SyncPath,
         destination: Option<&LocalEntry>,
-        metadata: ForeignMetadata,
+        carried: Carried<'_>,
         expected: EntryContent,
         run: &RunScope,
         produce: impl FnOnce(Chunks<'_>) -> std::io::Result<()>,
@@ -88,7 +112,7 @@ impl LocalEndpoint {
         let options = run.options();
         let staged = self
             .root
-            .stage_stream(path, metadata, options, produce)
+            .stage_stream(path, carried.metadata, carried.native, options, produce)
             .map_err(|source| write_error(path, source))?;
         let staged_metadata = staged
             .metadata()
@@ -132,12 +156,12 @@ impl LocalEndpoint {
     pub(crate) fn receive_directory(
         &self,
         path: &SyncPath,
-        metadata: ForeignMetadata,
+        carried: Carried<'_>,
         run: &RunScope,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<EntryVersion, ApplyError> {
         self.root
-            .create_foreign_directory(path, metadata, run.options())
+            .create_foreign_directory(path, carried.metadata, carried.native, run.options())
             .map_err(|source| match source {
                 WriteError::Exists => ApplyError::DestinationChanged(path.clone()),
                 source => write_error(path, source),
@@ -153,7 +177,7 @@ impl LocalEndpoint {
         &self,
         path: &SyncPath,
         current: &ObservedEntry,
-        metadata: ForeignMetadata,
+        carried: Carried<'_>,
         run: &RunScope,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<EntryVersion, ApplyError> {
@@ -162,7 +186,13 @@ impl LocalEndpoint {
             .ok_or_else(|| ApplyError::DestinationChanged(path.clone()))?;
         if destination.metadata.kind() != super::NodeKind::Symlink {
             self.root
-                .update_foreign_metadata(path, &destination.metadata, metadata, run.options())
+                .update_foreign_metadata(
+                    path,
+                    &destination.metadata,
+                    carried.metadata,
+                    carried.native,
+                    run.options(),
+                )
                 .map_err(|source| match source {
                     WriteError::Changed => ApplyError::DestinationChanged(path.clone()),
                     source => write_error(path, source),

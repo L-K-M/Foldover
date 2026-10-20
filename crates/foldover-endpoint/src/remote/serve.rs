@@ -23,6 +23,7 @@ use foldover_types::{
 
 use super::wire;
 use crate::link::Answer;
+use crate::local::Carried;
 use crate::{
     Expected, Filter, LocalEndpoint, LocalEntry, ObserveStep, ObservedEntry, RootWatcher, RunScope,
 };
@@ -126,10 +127,10 @@ pub fn serve_folder(root: &LocalRoot, op: FolderOp, cache: &FolderCache, answer:
         FolderOp::Metadata { path, entry, run } => {
             decoded(&path, Some(&entry), run).and_then(|(path, entry, run)| {
                 let entry = entry.ok_or_else(malformed)?;
-                endpoint
+                let source = endpoint
                     .source_entry(&path, &entry, &run, &mut proceed)
-                    .map(|source| reading(&source))
-                    .map_err(|error| wire::apply_failure(&error))
+                    .map_err(|error| wire::apply_failure(&error))?;
+                reading(&endpoint, &source, &run)
             })
         }
         FolderOp::ReceiveMetadata {
@@ -139,14 +140,13 @@ pub fn serve_folder(root: &LocalRoot, op: FolderOp, cache: &FolderCache, answer:
             run,
         } => decoded(&path, Some(&current), run).and_then(|(path, current, run)| {
             let current = current.ok_or_else(malformed)?;
+            let (metadata, native) = wire::metadata_from(metadata);
+            let carried = Carried {
+                metadata,
+                native: native.as_ref(),
+            };
             endpoint
-                .receive_metadata(
-                    &path,
-                    &current,
-                    wire::metadata_from(metadata),
-                    &run,
-                    &mut proceed,
-                )
+                .receive_metadata(&path, &current, carried, &run, &mut proceed)
                 .map(received)
                 .map_err(|error| wire::apply_failure(&error))
         }),
@@ -402,15 +402,17 @@ fn read(
 ) {
     let source = decoded(path, Some(entry), run).and_then(|(path, entry, run)| {
         let entry = entry.ok_or_else(malformed)?;
-        endpoint
+        let source = endpoint
             .source_entry(&path, &entry, &run, &mut proceed)
-            .map_err(|error| wire::apply_failure(&error))
+            .map_err(|error| wire::apply_failure(&error))?;
+        let reading = reading(endpoint, &source, &run)?;
+        Ok((source, reading))
     });
-    let source = match source {
+    let (source, reading) = match source {
         Ok(source) => source,
         Err(error) => return failed(answer, error),
     };
-    if answer.reply(&reading(&source)).is_err() {
+    if answer.reply(&reading).is_err() {
         return;
     }
     let mut sent = Ok(());
@@ -440,7 +442,11 @@ fn receive(
     answer: &mut Answer,
 ) -> Result<PeerReply, FolderError> {
     let (path, current, run) = decoded(path, entry.current.as_deref(), entry.run)?;
-    let metadata = wire::metadata_from(entry.metadata);
+    let (metadata, native) = wire::metadata_from(entry.metadata);
+    let carried = Carried {
+        metadata,
+        native: native.as_ref(),
+    };
     let current = match &current {
         Some(current) => Expected::Present(current),
         None => Expected::Absent,
@@ -455,7 +461,7 @@ fn receive(
             endpoint.receive_file(
                 &path,
                 destination.as_ref(),
-                metadata,
+                carried,
                 EntryContent::File(Digest::from_bytes(content)),
                 &run,
                 |sink| {
@@ -469,7 +475,7 @@ fn receive(
         IncomingKind::Folder if destination.is_some() => {
             Err(crate::ApplyError::Unsupported(path.clone()))
         }
-        IncomingKind::Folder => endpoint.receive_directory(&path, metadata, &run, &mut proceed),
+        IncomingKind::Folder => endpoint.receive_directory(&path, carried, &run, &mut proceed),
         IncomingKind::Link { target } => {
             endpoint.receive_link(&path, destination.as_ref(), &target, &run, &mut proceed)
         }
@@ -493,11 +499,25 @@ fn decoded(
     Ok((path, entry, run))
 }
 
-fn reading(source: &LocalEntry) -> PeerReply {
-    PeerReply::Reading {
-        metadata: wire::metadata_wire(LocalEndpoint::foreign_metadata(source)),
+/// A verified entry's metadata for the asking Mac: mode and time, and
+/// the attributes and flags the pair syncs.
+fn reading(
+    endpoint: &LocalEndpoint,
+    source: &LocalEntry,
+    run: &RunScope,
+) -> Result<PeerReply, FolderError> {
+    let native = match source.link_target() {
+        Some(_) => None,
+        None => Some(
+            endpoint
+                .native_metadata(source, run.options().metadata())
+                .map_err(|error| wire::apply_failure(&error))?,
+        ),
+    };
+    Ok(PeerReply::Reading {
+        metadata: wire::metadata_wire(LocalEndpoint::foreign_metadata(source), native.as_ref()),
         target: source.link_target().map(<[u8]>::to_vec),
-    }
+    })
 }
 
 fn received(version: EntryVersion) -> PeerReply {

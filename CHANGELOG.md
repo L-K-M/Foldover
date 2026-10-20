@@ -24,6 +24,8 @@ All notable changes to this project are documented here. The format follows
   folder can be one a paired Mac shares (`peer://DEVICE/SHARE`): syncs
   run through that Mac, which stages, verifies and archives in its own
   folder, and "When files change" pairs run when that folder changes.
+  Tags, Finder info and other extended attributes, resource forks and
+  file flags travel between Macs.
 
 - Names that one folder would store as one file, such as `Report.txt`
   and `report.txt` on a case-insensitive Mac volume, are a conflict to
