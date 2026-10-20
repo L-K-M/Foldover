@@ -50,6 +50,21 @@ impl RunScope {
         }
     }
 
+    /// A run named by another Mac; None unless `name` is one folder name.
+    pub(crate) fn named(name: &str, options: PairOptions) -> Option<Self> {
+        if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+            return None;
+        }
+        let mut archive = ARCHIVE_ROOT.to_vec();
+        archive.push(b'/');
+        archive.extend_from_slice(name.as_bytes());
+        Some(Self {
+            name: name.to_owned(),
+            archive: SyncPath::try_from(archive).ok()?,
+            options,
+        })
+    }
+
     /// The run's folder under `.foldover/archive`.
     pub fn name(&self) -> &str {
         &self.name

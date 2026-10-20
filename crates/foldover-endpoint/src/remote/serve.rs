@@ -8,23 +8,29 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use foldover_proto::local::PairDurability;
 use foldover_proto::peer::{
-    FolderError, FolderErrorKind, FolderOp, NameCase, NameUnicode, PeerReply, ScanSettings,
+    FolderError, FolderErrorKind, FolderOp, Incoming, IncomingKind, NameCase, NameUnicode,
+    PeerReply, RunSettings, ScanSettings, WireItem, WireRun,
 };
 use foldover_types::{
-    CaseMatching, Durability, LocalRoot, MetadataPolicy, ScanControl, SyncPath, UnicodeMatching,
+    CaseMatching, Digest, Durability, EntryContent, EntryVersion, LocalRoot, MetadataPolicy,
+    PairOptions, ScanControl, SyncPath, UnicodeMatching,
 };
 
 use super::wire;
 use crate::link::Answer;
-use crate::{Filter, LocalEndpoint, ObserveStep, ObservedEntry};
+use crate::{Expected, Filter, LocalEndpoint, LocalEntry, ObserveStep, ObservedEntry, RunScope};
 
 /// How often a scan reports progress, which is also how soon it notices
 /// that the asking Mac gave up.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
+/// Longest label a kept copy's name may carry.
+const MAX_LABEL_BYTES: usize = 64;
+/// PLAN.md §4: archives keep 30 days.
+const MIN_SHARED_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// The latest observation of each shared folder under each metadata
 /// policy, so an unchanged file is not read again on the next scan.
@@ -74,18 +80,12 @@ pub fn serve_folder(root: &LocalRoot, op: FolderOp, cache: &FolderCache, answer:
                 id: id.map(|id| id.to_string()),
             })
             .map_err(|error| wire::scan_failure(&error)),
-        FolderOp::EnsureIdentity { durability } => {
-            let durability = match durability {
-                PairDurability::Standard => Durability::Standard,
-                PairDurability::Full => Durability::Full,
-            };
-            endpoint
-                .ensure_identity(durability)
-                .map(|id| PeerReply::Identity {
-                    id: Some(id.to_string()),
-                })
-                .map_err(|error| wire::apply_failure(&error))
-        }
+        FolderOp::EnsureIdentity { durability } => endpoint
+            .ensure_identity(durability_from(durability))
+            .map(|id| PeerReply::Identity {
+                id: Some(id.to_string()),
+            })
+            .map_err(|error| wire::apply_failure(&error)),
         FolderOp::IgnoreRules => endpoint
             .ignore_rules()
             .map(|rules| PeerReply::Rules { rules })
@@ -108,6 +108,121 @@ pub fn serve_folder(root: &LocalRoot, op: FolderOp, cache: &FolderCache, answer:
             .map(|bytes| PeerReply::Space { bytes })
             .map_err(|error| wire::scan_failure(&error)),
         FolderOp::Observe { scan } => return observe(&endpoint, root, scan, cache, answer),
+        FolderOp::Read { path, entry, run } => return read(&endpoint, &path, &entry, run, answer),
+        FolderOp::Receive { path, entry } => receive(&endpoint, &path, entry, answer),
+        FolderOp::Metadata { path, entry, run } => {
+            decoded(&path, Some(&entry), run).and_then(|(path, entry, run)| {
+                let entry = entry.ok_or_else(malformed)?;
+                endpoint
+                    .source_entry(&path, &entry, &run, &mut proceed)
+                    .map(|source| reading(&source))
+                    .map_err(|error| wire::apply_failure(&error))
+            })
+        }
+        FolderOp::ReceiveMetadata {
+            path,
+            current,
+            metadata,
+            run,
+        } => decoded(&path, Some(&current), run).and_then(|(path, current, run)| {
+            let current = current.ok_or_else(malformed)?;
+            endpoint
+                .receive_metadata(
+                    &path,
+                    &current,
+                    wire::metadata_from(metadata),
+                    &run,
+                    &mut proceed,
+                )
+                .map(received)
+                .map_err(|error| wire::apply_failure(&error))
+        }),
+        FolderOp::Remove { path, current, run } => {
+            decoded(&path, Some(&current), run).and_then(|(path, current, run)| {
+                let current = current.ok_or_else(malformed)?;
+                endpoint
+                    .remove(&path, &current, &run, &mut proceed)
+                    .map(|()| PeerReply::Done)
+                    .map_err(|error| wire::apply_failure(&error))
+            })
+        }
+        FolderOp::RecoverLeftover { path, run } => {
+            decoded(&path, None, run).and_then(|(path, _, run)| {
+                endpoint
+                    .recover_leftover(&path, &run)
+                    .map(|()| PeerReply::Done)
+                    .map_err(|error| wire::apply_failure(&error))
+            })
+        }
+        // This Mac's clock decides what is old here.
+        FolderOp::PruneArchive { retention_seconds } => endpoint
+            .prune_archive(shared_retention(retention_seconds), SystemTime::now())
+            .map(|count| PeerReply::Pruned { count })
+            .map_err(|error| wire::apply_failure(&error)),
+        FolderOp::ArchivedRuns => endpoint
+            .archived_runs()
+            .map(|runs| PeerReply::Runs {
+                runs: runs
+                    .iter()
+                    .map(|run| WireRun {
+                        name: run.name().to_owned(),
+                        started_ms: wire::milliseconds(run.started()),
+                    })
+                    .collect(),
+            })
+            .map_err(|error| wire::scan_failure(&error)),
+        FolderOp::ArchivedItems { run, after, limit } => {
+            let after = after.map(|after| SyncPath::try_from(after.as_slice()));
+            match after.transpose() {
+                Err(_) => Err(malformed()),
+                Ok(after) => endpoint
+                    .archived_items(
+                        &run,
+                        after.as_ref(),
+                        usize::try_from(limit).unwrap_or(usize::MAX),
+                    )
+                    .map(|(items, more)| PeerReply::Items {
+                        items: items
+                            .iter()
+                            .map(|item| WireItem {
+                                path: item.path().as_bytes().to_vec(),
+                                size: item.size(),
+                            })
+                            .collect(),
+                        more,
+                    })
+                    .map_err(|error| wire::scan_failure(&error)),
+            }
+        }
+        FolderOp::PutBack {
+            run,
+            path,
+            durability,
+        } => match SyncPath::try_from(path.as_slice()) {
+            Err(_) => Err(malformed()),
+            Ok(path) => endpoint
+                .put_back(&run, &path, durability_from(durability))
+                .map(placed)
+                .map_err(|error| wire::apply_failure(&error)),
+        },
+        FolderOp::KeepCopy {
+            path,
+            version,
+            from,
+            options,
+        } => {
+            let path = SyncPath::try_from(path.as_slice()).ok();
+            let version = wire::version_from(&version);
+            let options = PairOptions::try_from(options).ok();
+            match (path, version, options) {
+                // The label becomes part of a file name here.
+                (Some(path), Some(version), Some(options)) if plain_label(&from) => endpoint
+                    .keep_copy(&path, version, &from, &options, &mut proceed)
+                    .map(placed)
+                    .map_err(|error| wire::apply_failure(&error)),
+                _ => Err(malformed()),
+            }
+        }
     };
     match reply {
         Ok(reply) => {
@@ -211,6 +326,162 @@ fn observe(
     }
 }
 
+/// Send a verified entry: `reading`, a file's data and its end, then
+/// `done`. A failure after `reading` comes after the end of the data.
+fn read(
+    endpoint: &LocalEndpoint,
+    path: &[u8],
+    entry: &[u8],
+    run: RunSettings,
+    answer: &mut Answer,
+) {
+    let source = decoded(path, Some(entry), run).and_then(|(path, entry, run)| {
+        let entry = entry.ok_or_else(malformed)?;
+        endpoint
+            .source_entry(&path, &entry, &run, &mut proceed)
+            .map_err(|error| wire::apply_failure(&error))
+    });
+    let source = match source {
+        Ok(source) => source,
+        Err(error) => return failed(answer, error),
+    };
+    if answer.reply(&reading(&source)).is_err() {
+        return;
+    }
+    let mut sent = Ok(());
+    if source.metadata().kind() == foldover_fs::NodeKind::File {
+        sent = endpoint
+            .read_entry(&source, &mut proceed, &mut |chunk| {
+                answer.send_data(chunk).map_err(std::io::Error::other)
+            })
+            .map(|_| ());
+    }
+    if answer.end_data().is_err() {
+        return;
+    }
+    match sent {
+        Ok(()) => {
+            let _ = answer.reply(&PeerReply::Done);
+        }
+        Err(error) => failed(answer, wire::apply_failure(&error)),
+    }
+}
+
+/// Place what the asking Mac sends, staged and verified like any copy.
+fn receive(
+    endpoint: &LocalEndpoint,
+    path: &[u8],
+    entry: Incoming,
+    answer: &mut Answer,
+) -> Result<PeerReply, FolderError> {
+    let (path, current, run) = decoded(path, entry.current.as_deref(), entry.run)?;
+    let metadata = wire::metadata_from(entry.metadata);
+    let current = match &current {
+        Some(current) => Expected::Present(current),
+        None => Expected::Absent,
+    };
+    let destination = endpoint
+        .receiving(&path, current, &run, &mut proceed)
+        .map_err(|error| wire::apply_failure(&error))?;
+    let version = match entry.kind {
+        IncomingKind::File { content } => {
+            let content =
+                <[u8; Digest::BYTE_LEN]>::try_from(content.as_slice()).map_err(|_| malformed())?;
+            endpoint.receive_file(
+                &path,
+                destination.as_ref(),
+                metadata,
+                EntryContent::File(Digest::from_bytes(content)),
+                &run,
+                |sink| {
+                    while let Some(chunk) = answer.next_data().map_err(std::io::Error::other)? {
+                        sink(&chunk)?;
+                    }
+                    Ok(())
+                },
+            )
+        }
+        IncomingKind::Folder if destination.is_some() => {
+            Err(crate::ApplyError::Unsupported(path.clone()))
+        }
+        IncomingKind::Folder => endpoint.receive_directory(&path, metadata, &run, &mut proceed),
+        IncomingKind::Link { target } => {
+            endpoint.receive_link(&path, destination.as_ref(), &target, &run, &mut proceed)
+        }
+    };
+    version
+        .map(received)
+        .map_err(|error| wire::apply_failure(&error))
+}
+
+/// A request's path, expected entry and run, or why they are unusable.
+fn decoded(
+    path: &[u8],
+    entry: Option<&[u8]>,
+    run: RunSettings,
+) -> Result<(SyncPath, Option<ObservedEntry>, RunScope), FolderError> {
+    let path = SyncPath::try_from(path).map_err(|_| malformed())?;
+    let entry = entry
+        .map(|entry| wire::entry_from(entry).ok_or_else(malformed))
+        .transpose()?;
+    let run = wire::run_from(run).ok_or_else(malformed)?;
+    Ok((path, entry, run))
+}
+
+fn reading(source: &LocalEntry) -> PeerReply {
+    PeerReply::Reading {
+        metadata: wire::metadata_wire(LocalEndpoint::foreign_metadata(source)),
+        target: source.link_target().map(<[u8]>::to_vec),
+    }
+}
+
+fn received(version: EntryVersion) -> PeerReply {
+    PeerReply::Received {
+        version: wire::version_bytes(version),
+    }
+}
+
+fn placed(path: SyncPath) -> PeerReply {
+    PeerReply::Placed {
+        path: path.as_bytes().to_vec(),
+    }
+}
+
+/// How long this Mac keeps archived runs when a paired Mac prunes them:
+/// never less than its own archives keep.
+fn shared_retention(requested_seconds: u64) -> Duration {
+    Duration::from_secs(requested_seconds).max(MIN_SHARED_RETENTION)
+}
+
+/// A short label without path separators or control characters, such as
+/// "Folder B".
+fn plain_label(label: &str) -> bool {
+    !label.trim().is_empty()
+        && label.len() <= MAX_LABEL_BYTES
+        && !label.chars().any(|c| c == '/' || c.is_control())
+}
+
+fn durability_from(durability: PairDurability) -> Durability {
+    match durability {
+        PairDurability::Standard => Durability::Standard,
+        PairDurability::Full => Durability::Full,
+    }
+}
+
+/// The other Mac gives up by dropping its request, which ends any data in
+/// flight; the operations themselves need no other stop.
+fn proceed() -> ScanControl {
+    ScanControl::Continue
+}
+
+fn malformed() -> FolderError {
+    FolderError {
+        kind: FolderErrorKind::Invalid,
+        path: None,
+        message: "That Mac sent a request this Mac cannot read".into(),
+    }
+}
+
 fn failed(answer: &mut Answer, error: FolderError) {
     let _ = answer.reply(&PeerReply::Failed { error });
 }
@@ -245,5 +516,39 @@ mod tests {
         assert!(cache.take(&root, without).is_empty());
         cache.keep(&root, with_times, entries.clone());
         assert_eq!(cache.take(&root, with_times), entries);
+    }
+
+    /// Review: the asking Mac's clock and retention decided what this
+    /// Mac's archive kept, so a wrong clock could empty it.
+    #[test]
+    fn a_paired_mac_cannot_shorten_this_macs_archive() {
+        assert_eq!(shared_retention(0), MIN_SHARED_RETENTION);
+        assert_eq!(
+            shared_retention(MIN_SHARED_RETENTION.as_secs() * 2),
+            MIN_SHARED_RETENTION * 2
+        );
+    }
+
+    #[test]
+    fn kept_copy_labels_stay_one_plain_name() {
+        assert!(plain_label("Folder B"));
+        for label in [
+            "",
+            "  ",
+            "a/b",
+            "line\nbreak",
+            &"x".repeat(MAX_LABEL_BYTES + 1),
+        ] {
+            assert!(!plain_label(label), "{label:?}");
+        }
+    }
+
+    #[test]
+    fn runs_named_by_another_mac_are_one_folder() {
+        let options = PairOptions::default();
+        assert!(RunScope::named("2026-10-20T10-00-00.000Z", options.clone()).is_some());
+        for name in ["", ".", "..", "a/b", "../x"] {
+            assert!(RunScope::named(name, options.clone()).is_none(), "{name}");
+        }
     }
 }
