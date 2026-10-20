@@ -1,6 +1,7 @@
 use foldover_types::{
-    Durability, Filters, InvalidPair, MetadataPolicy, PairConfig, PairDraft, PairOptions, PairRoot,
-    Propagation, Schedule, ScheduleInterval, Side, SyncMode, SyncPath,
+    DailySchedule, Durability, Filters, InvalidPair, MetadataPolicy, PairConfig, PairDraft,
+    PairOptions, PairRoot, Propagation, Schedule, ScheduleInterval, Side, SyncMode, SyncPath,
+    TimeOfDay, Weekday, Weekdays,
 };
 use serde::{Deserialize, Serialize};
 
@@ -109,12 +110,59 @@ pub struct PairSettings {
     pub canary: Option<Vec<u8>>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum PairSchedule {
     Manual,
-    Every { minutes: u32 },
+    Every {
+        minutes: u32,
+    },
     OnChange,
+    /// A time of day in minutes after local midnight, on these weekdays.
+    Daily {
+        at_minutes: u32,
+        days: Vec<PairDay>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PairDay {
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+    Sunday,
+}
+
+impl From<PairDay> for Weekday {
+    fn from(day: PairDay) -> Self {
+        match day {
+            PairDay::Monday => Self::Monday,
+            PairDay::Tuesday => Self::Tuesday,
+            PairDay::Wednesday => Self::Wednesday,
+            PairDay::Thursday => Self::Thursday,
+            PairDay::Friday => Self::Friday,
+            PairDay::Saturday => Self::Saturday,
+            PairDay::Sunday => Self::Sunday,
+        }
+    }
+}
+
+impl From<Weekday> for PairDay {
+    fn from(day: Weekday) -> Self {
+        match day {
+            Weekday::Monday => Self::Monday,
+            Weekday::Tuesday => Self::Tuesday,
+            Weekday::Wednesday => Self::Wednesday,
+            Weekday::Thursday => Self::Thursday,
+            Weekday::Friday => Self::Friday,
+            Weekday::Saturday => Self::Saturday,
+            Weekday::Sunday => Self::Sunday,
+        }
+    }
 }
 
 impl From<Propagation> for PairPropagation {
@@ -152,6 +200,10 @@ impl From<&PairOptions> for PairSettings {
                     minutes: interval.minutes(),
                 },
                 Schedule::OnChange => PairSchedule::OnChange,
+                Schedule::Daily(daily) => PairSchedule::Daily {
+                    at_minutes: daily.at().minutes(),
+                    days: daily.days().days().map(PairDay::from).collect(),
+                },
             },
             filters: options.filters().rules().to_vec(),
             size_limit: options.filters().size_limit(),
@@ -171,6 +223,15 @@ impl TryFrom<PairSettings> for PairOptions {
                 Schedule::Every(ScheduleInterval::from_minutes(minutes)?)
             }
             PairSchedule::OnChange => Schedule::OnChange,
+            PairSchedule::Daily { at_minutes, days } => Schedule::Daily(DailySchedule::new(
+                TimeOfDay::from_minutes(at_minutes)?,
+                Weekdays::of(
+                    &days
+                        .iter()
+                        .map(|day| Weekday::from(*day))
+                        .collect::<Vec<_>>(),
+                )?,
+            )),
         };
         Self::new(
             MetadataPolicy::new(
@@ -397,6 +458,37 @@ mod tests {
         assert!(
             serde_json::from_value::<PairWarnings>(
                 json!({"warnings":[{"kind":"namesDiffer","side":"left","why":"case"}]})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_daily_schedule_serializes_as_time_and_weekdays() {
+        let daily = Schedule::Daily(DailySchedule::new(
+            TimeOfDay::from_minutes(18 * 60).unwrap(),
+            Weekdays::MONDAY_TO_FRIDAY,
+        ));
+        let options = PairOptions::default().with_schedule(daily);
+        assert_eq!(
+            serde_json::to_value(PairSettings::from(&options).schedule).unwrap(),
+            json!({"kind":"daily","at_minutes":1080,"days":["monday","tuesday","wednesday","thursday","friday"]})
+        );
+        for json in [
+            json!({"kind":"daily","at_minutes":1440,"days":["monday"]}),
+            json!({"kind":"daily","at_minutes":0,"days":[]}),
+        ] {
+            let settings: PairSettings = serde_json::from_value(json!({
+                "modification_times":"sync","extended_attributes":"sync",
+                "permissions":"sync","durability":"standard","schedule":json,
+                "filters":[],"size_limit":null,"age_limit":null,
+            }))
+            .unwrap_or_else(|_| panic!("{json}"));
+            assert!(PairOptions::try_from(settings).is_err(), "{json}");
+        }
+        assert!(
+            serde_json::from_value::<PairSchedule>(
+                json!({"kind":"daily","at_minutes":0,"days":["funday"]})
             )
             .is_err()
         );

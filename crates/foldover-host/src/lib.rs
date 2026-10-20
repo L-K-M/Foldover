@@ -2,7 +2,7 @@
 //! battery, Low Power Mode, metered networks and power assertions.
 //! Depends on foldover-os. See PLAN.md §4.4.
 
-pub use foldover_os::{NetworkCost, PowerMode, computer_name};
+pub use foldover_os::{NetworkCost, PowerMode, computer_name, local_time};
 
 use std::io;
 

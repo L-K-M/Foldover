@@ -156,7 +156,7 @@ pub struct LocalPairOptions {
     pub canary: Option<Vec<u8>>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Enum)]
 pub enum PairSchedule {
     Manual,
     /// Unattended syncs at this interval, after the first manual sync.
@@ -165,6 +165,51 @@ pub enum PairSchedule {
     },
     /// Unattended syncs after files change, and hourly.
     OnChange,
+    /// Unattended syncs at `minutes` after local midnight, on `days`.
+    Daily {
+        minutes: u32,
+        days: Vec<ScheduleDay>,
+    },
+}
+
+/// A weekday of a `PairSchedule::Daily`, Monday first.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum ScheduleDay {
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+    Sunday,
+}
+
+impl From<ScheduleDay> for foldover_client::Weekday {
+    fn from(day: ScheduleDay) -> Self {
+        match day {
+            ScheduleDay::Monday => Self::Monday,
+            ScheduleDay::Tuesday => Self::Tuesday,
+            ScheduleDay::Wednesday => Self::Wednesday,
+            ScheduleDay::Thursday => Self::Thursday,
+            ScheduleDay::Friday => Self::Friday,
+            ScheduleDay::Saturday => Self::Saturday,
+            ScheduleDay::Sunday => Self::Sunday,
+        }
+    }
+}
+
+impl From<foldover_client::Weekday> for ScheduleDay {
+    fn from(day: foldover_client::Weekday) -> Self {
+        match day {
+            foldover_client::Weekday::Monday => Self::Monday,
+            foldover_client::Weekday::Tuesday => Self::Tuesday,
+            foldover_client::Weekday::Wednesday => Self::Wednesday,
+            foldover_client::Weekday::Thursday => Self::Thursday,
+            foldover_client::Weekday::Friday => Self::Friday,
+            foldover_client::Weekday::Saturday => Self::Saturday,
+            foldover_client::Weekday::Sunday => Self::Sunday,
+        }
+    }
 }
 
 impl From<foldover_client::Propagation> for MetadataSync {
@@ -202,6 +247,10 @@ impl From<&foldover_client::PairOptions> for LocalPairOptions {
                     minutes: interval.minutes(),
                 },
                 foldover_client::Schedule::OnChange => PairSchedule::OnChange,
+                foldover_client::Schedule::Daily(daily) => PairSchedule::Daily {
+                    minutes: daily.at().minutes(),
+                    days: daily.days().days().map(ScheduleDay::from).collect(),
+                },
             },
             filters: options.filters().rules().to_vec(),
             size_limit: options.filters().size_limit(),
@@ -221,6 +270,17 @@ impl TryFrom<LocalPairOptions> for foldover_client::PairOptions {
                 foldover_client::ScheduleInterval::from_minutes(minutes)?,
             ),
             PairSchedule::OnChange => foldover_client::Schedule::OnChange,
+            PairSchedule::Daily { minutes, days } => {
+                foldover_client::Schedule::Daily(foldover_client::DailySchedule::new(
+                    foldover_client::TimeOfDay::from_minutes(minutes)?,
+                    foldover_client::Weekdays::of(
+                        &days
+                            .iter()
+                            .map(|day| foldover_client::Weekday::from(*day))
+                            .collect::<Vec<_>>(),
+                    )?,
+                ))
+            }
         };
         Self::new(
             foldover_client::MetadataPolicy::new(

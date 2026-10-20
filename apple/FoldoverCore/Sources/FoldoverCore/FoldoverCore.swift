@@ -3034,6 +3034,11 @@ public enum PairSchedule: Equatable, Hashable {
      * Unattended syncs after files change, and hourly.
      */
     case onChange
+    /**
+     * Unattended syncs at `minutes` after local midnight, on `days`.
+     */
+    case daily(minutes: UInt32, days: [ScheduleDay]
+    )
 
 
 
@@ -3062,6 +3067,9 @@ public struct FfiConverterTypePairSchedule: FfiConverterRustBuffer {
         
         case 3: return .onChange
         
+        case 4: return .daily(minutes: try FfiConverterUInt32.read(from: &buf), days: try FfiConverterSequenceTypeScheduleDay.read(from: &buf)
+        )
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -3082,6 +3090,12 @@ public struct FfiConverterTypePairSchedule: FfiConverterRustBuffer {
         case .onChange:
             writeInt(&buf, Int32(3))
         
+        
+        case let .daily(minutes,days):
+            writeInt(&buf, Int32(4))
+            FfiConverterUInt32.write(minutes, into: &buf)
+            FfiConverterSequenceTypeScheduleDay.write(days, into: &buf)
+            
         }
     }
 }
@@ -3344,6 +3358,110 @@ public func FfiConverterTypeRunTriggerKind_lift(_ buf: RustBuffer) throws -> Run
 #endif
 public func FfiConverterTypeRunTriggerKind_lower(_ value: RunTriggerKind) -> RustBuffer {
     return FfiConverterTypeRunTriggerKind.lower(value)
+}
+
+
+
+/**
+ * A weekday of a `PairSchedule::Daily`, Monday first.
+ */
+
+public enum ScheduleDay: Equatable, Hashable {
+    
+    case monday
+    case tuesday
+    case wednesday
+    case thursday
+    case friday
+    case saturday
+    case sunday
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ScheduleDay: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeScheduleDay: FfiConverterRustBuffer {
+    typealias SwiftType = ScheduleDay
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ScheduleDay {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .monday
+        
+        case 2: return .tuesday
+        
+        case 3: return .wednesday
+        
+        case 4: return .thursday
+        
+        case 5: return .friday
+        
+        case 6: return .saturday
+        
+        case 7: return .sunday
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ScheduleDay, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .monday:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .tuesday:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .wednesday:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .thursday:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .friday:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .saturday:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .sunday:
+            writeInt(&buf, Int32(7))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeScheduleDay_lift(_ buf: RustBuffer) throws -> ScheduleDay {
+    return try FfiConverterTypeScheduleDay.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeScheduleDay_lower(_ value: ScheduleDay) -> RustBuffer {
+    return FfiConverterTypeScheduleDay.lower(value)
 }
 
 
@@ -4452,6 +4570,31 @@ fileprivate struct FfiConverterSequenceTypeSyncFailureItem: FfiConverterRustBuff
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeSyncFailureItem.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeScheduleDay: FfiConverterRustBuffer {
+    typealias SwiftType = [ScheduleDay]
+
+    public static func write(_ value: [ScheduleDay], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeScheduleDay.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ScheduleDay] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ScheduleDay]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeScheduleDay.read(from: &buf))
         }
         return seq
     }

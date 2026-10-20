@@ -90,6 +90,28 @@ struct PairEditorView: View {
                             Text(PairEditorViewModel.scheduleTitle(schedule)).tag(schedule)
                         }
                     }
+                    if viewModel.showsDailySettings {
+                        DatePicker("At", selection: $viewModel.dailyTime, displayedComponents: .hourAndMinute)
+                        LabeledContent("On") {
+                            HStack(spacing: 4) {
+                                ForEach(SyncDay.allCases, id: \.self) { day in
+                                    Toggle(day.shortName, isOn: Binding(
+                                        get: { viewModel.dailyDays.contains(day) },
+                                        set: { on in
+                                            var days = viewModel.dailyDays
+                                            if on { days.insert(day) } else { days.remove(day) }
+                                            viewModel.dailyDays = days
+                                        }
+                                    ))
+                                    .toggleStyle(.button)
+                                }
+                            }
+                        }
+                        if let warning = viewModel.dailyWarning {
+                            Text(warning)
+                                .font(.callout).foregroundStyle(.orange)
+                        }
+                    }
                     Text("Automatic syncs start after the first sync you run yourself. They stop instead of asking when they would archive many items.")
                         .font(.callout).foregroundStyle(.secondary)
                 }

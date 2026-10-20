@@ -248,12 +248,44 @@ func pairOptionDefaultsComeFromTheEngine() {
 func scheduleChoicesKeepAnIntervalSetElsewhere() {
     let store = PairStore(client: PairFixtureClient())
     let editor = PairEditorViewModel(store: store)
-    #expect(editor.scheduleChoices.count == 6)
+    #expect(editor.scheduleChoices.count == 7)
     editor.options.schedule = .every(minutes: 30)
     #expect(editor.scheduleChoices.last == .every(minutes: 30))
     #expect(PairEditorViewModel.scheduleTitle(.manual) == "Only when I click Sync Now")
     #expect(PairEditorViewModel.scheduleTitle(.onChange) == "When files change")
     #expect(PairEditorViewModel.scheduleTitle(.every(minutes: 30)) == "Every 30 minutes")
+}
+
+@MainActor
+@Test
+func dailyScheduleIsEditableInPlace() {
+    let store = PairStore(client: PairFixtureClient())
+    let editor = PairEditorViewModel(store: store)
+    #expect(editor.scheduleChoices.contains(.daily(minutes: 120, days: Set(SyncDay.allCases))))
+    #expect(!editor.showsDailySettings)
+
+    editor.options.schedule = .daily(minutes: 120, days: Set(SyncDay.allCases))
+    #expect(editor.showsDailySettings)
+    #expect(editor.scheduleChoices.last == editor.options.schedule)
+    #expect(editor.dailyWarning == nil)
+
+    editor.dailyMinutes = 18 * 60
+    editor.dailyDays = [.monday, .tuesday, .wednesday, .thursday, .friday]
+    #expect(editor.options.schedule == .daily(minutes: 18 * 60, days: [.monday, .tuesday, .wednesday, .thursday, .friday]))
+    #expect(editor.scheduleChoices.contains(editor.options.schedule))
+
+    editor.name = "Photos"
+    editor.chooseFolder(.success([URL(filePath: "/a")]), side: .left)
+    editor.chooseFolder(.success([URL(filePath: "/b")]), side: .right)
+    #expect(editor.canSave)
+
+    editor.dailyDays = []
+    #expect(editor.dailyWarning != nil)
+    #expect(!editor.canSave)
+
+    #expect(PairEditorViewModel.scheduleTitle(.daily(minutes: 150, days: Set(SyncDay.allCases))) == "Every day at 02:30")
+    #expect(PairEditorViewModel.scheduleTitle(.daily(minutes: 18 * 60, days: [.monday, .tuesday, .wednesday, .thursday, .friday])) == "Weekdays at 18:00")
+    #expect(PairEditorViewModel.scheduleTitle(.daily(minutes: 7 * 60 + 15, days: [.monday, .wednesday, .friday])) == "Mon, Wed, Fri at 07:15")
 }
 
 @MainActor

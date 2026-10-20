@@ -52,7 +52,7 @@ final class PairEditorViewModel: Identifiable {
     }
 
     var title: String { editing == nil ? String(localized: "New Pair") : String(localized: "Edit Pair") }
-    var canSave: Bool { !isSaving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && left != nil && right != nil && durabilityWarning == nil && canaryWarning == nil }
+    var canSave: Bool { !isSaving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && left != nil && right != nil && durabilityWarning == nil && canaryWarning == nil && dailyWarning == nil }
 
     /// Exclusion rules as editable text, one per line.
     var filterText: String {
@@ -119,12 +119,61 @@ final class PairEditorViewModel: Identifiable {
         return String(localized: "Name a file inside the synced folders, like docs/canary.txt; the .foldover folder is not allowed.")
     }
 
+    /// The daily schedule a new Daily choice starts with: 02:00, all days.
+    static let defaultDaily: SyncSchedule = .daily(minutes: 2 * 60, days: Set(SyncDay.allCases))
+
     /// Fixed choices, plus a stored interval set elsewhere (e.g. the CLI).
+    /// The Daily row carries the current daily settings, so it stays the
+    /// picker's selection while the time and days are edited.
     var scheduleChoices: [SyncSchedule] {
+        let daily = if case .daily = options.schedule { options.schedule } else { Self.defaultDaily }
         var choices: [SyncSchedule] = [.manual, .onChange, .every(minutes: 5), .every(minutes: 15),
-                                       .every(minutes: 60), .every(minutes: 24 * 60)]
+                                       .every(minutes: 60), .every(minutes: 24 * 60), daily]
         if !choices.contains(options.schedule) { choices.append(options.schedule) }
         return choices
+    }
+
+    /// The Daily time and weekday controls are shown only for Daily.
+    var showsDailySettings: Bool {
+        if case .daily = options.schedule { true } else { false }
+    }
+
+    /// Minutes after local midnight the daily schedule runs.
+    var dailyMinutes: Int {
+        get {
+            if case .daily(let minutes, _) = options.schedule { Int(minutes) } else { 2 * 60 }
+        }
+        set {
+            if case .daily(_, let days) = options.schedule {
+                options.schedule = .daily(minutes: UInt32(min(1439, max(0, newValue))), days: days)
+            }
+        }
+    }
+
+    /// `dailyMinutes` as a `Date` on a fixed day, for the time picker.
+    var dailyTime: Date {
+        get {
+            Calendar.current.date(
+                bySettingHour: dailyMinutes / 60, minute: dailyMinutes % 60, second: 0,
+                of: Date(timeIntervalSince1970: 0)
+            ) ?? Date(timeIntervalSince1970: 0)
+        }
+        set {
+            let parts = Calendar.current.dateComponents([.hour, .minute], from: newValue)
+            dailyMinutes = (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
+        }
+    }
+
+    /// The weekdays the daily schedule runs on.
+    var dailyDays: Set<SyncDay> {
+        get {
+            if case .daily(_, let days) = options.schedule { days } else { Set(SyncDay.allCases) }
+        }
+        set {
+            if case .daily(let minutes, _) = options.schedule {
+                options.schedule = .daily(minutes: minutes, days: newValue)
+            }
+        }
     }
 
     static func scheduleTitle(_ schedule: SyncSchedule) -> String {
@@ -134,6 +183,30 @@ final class PairEditorViewModel: Identifiable {
         case .every(60): String(localized: "Every hour")
         case .every(1440): String(localized: "Every day")
         case .every(let minutes): String(localized: "Every \(minutes) minutes")
+        case .daily(let minutes, let days): dailyTitle(minutes: Int(minutes), days: days)
+        }
+    }
+
+    /// "Every day at 02:30", "Weekdays at 18:00" or "Mon, Wed, Fri at 07:15".
+    private static func dailyTitle(minutes: Int, days: Set<SyncDay>) -> String {
+        let time = String(format: "%02d:%02d", minutes / 60, minutes % 60)
+        if days.count == SyncDay.allCases.count {
+            return String(localized: "Every day at \(time)")
+        }
+        if days == Set([.monday, .tuesday, .wednesday, .thursday, .friday]) {
+            return String(localized: "Weekdays at \(time)")
+        }
+        let list = SyncDay.allCases.filter(days.contains).map(\.shortName).joined(separator: ", ")
+        return String(localized: "\(list) at \(time)")
+    }
+
+    /// A daily schedule needs at least one weekday; the engine rejects an
+    /// empty set, so saving is blocked instead.
+    var dailyWarning: String? {
+        if case .daily(_, let days) = options.schedule, days.isEmpty {
+            String(localized: "Choose at least one weekday.")
+        } else {
+            nil
         }
     }
 
@@ -352,6 +425,20 @@ extension PairMode {
         case .mirrorRight: String(localized: "Folder A is made identical to B. Replaced and removed files are archived for 30 days.")
         case .backupLeft: String(localized: "New and changed files are copied from A to B. Nothing in B is deleted.")
         case .backupRight: String(localized: "New and changed files are copied from B to A. Nothing in A is deleted.")
+        }
+    }
+}
+
+extension SyncDay {
+    var shortName: String {
+        switch self {
+        case .monday: String(localized: "Mon")
+        case .tuesday: String(localized: "Tue")
+        case .wednesday: String(localized: "Wed")
+        case .thursday: String(localized: "Thu")
+        case .friday: String(localized: "Fri")
+        case .saturday: String(localized: "Sat")
+        case .sunday: String(localized: "Sun")
         }
     }
 }

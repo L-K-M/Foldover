@@ -40,12 +40,12 @@ pub use foldover_proto::local::{
     PeerDeviceRecord, PeerNearbyRecord, PeerPendingRecord, PeerStatus,
 };
 pub use foldover_proto::local::{PeerShareList, PeerShareRecord, ShareList, ShareRecord};
-pub use foldover_types::{DeviceId, ShareId};
 pub use foldover_types::{
-    Durability, Filters, InvalidPair, InvalidReviewToken, LocalRoot, MetadataPolicy, PairConfig,
-    PairDraft, PairId, PairOptions, PairRoot, Propagation, ReviewToken, Schedule, ScheduleInterval,
-    Side, SyncMode, SyncPath,
+    DailySchedule, Durability, Filters, InvalidPair, InvalidReviewToken, LocalRoot, MetadataPolicy,
+    PairConfig, PairDraft, PairId, PairOptions, PairRoot, Propagation, ReviewToken, Schedule,
+    ScheduleInterval, Side, SyncMode, SyncPath, TimeOfDay, Weekday, Weekdays,
 };
+pub use foldover_types::{DeviceId, ShareId};
 use serde_json::Value;
 use serde_json::json;
 use std::net::SocketAddr;
