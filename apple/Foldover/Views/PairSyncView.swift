@@ -1,13 +1,17 @@
+import QuickLook
 import SwiftUI
 
 /// Preview, sync and their results for one pair.
 struct PairSyncView: View {
     let viewModel: PairSyncViewModel
+    @State private var selection: ChangeRow.ID?
+    @State private var looking: URL?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Button("Preview") { Task { await viewModel.preview() } }
+                    .keyboardShortcut("r")
                     .disabled(!viewModel.canStart)
                 Button("Sync Now") { Task { await viewModel.sync() } }
                     .keyboardShortcut("s")
@@ -17,6 +21,7 @@ struct PairSyncView: View {
                 }
                 if viewModel.isWorking {
                     Button("Cancel") { Task { await viewModel.cancel() } }
+                        .keyboardShortcut(".")
                         .disabled(!viewModel.canCancel)
                 }
                 if viewModel.canUndo {
@@ -47,7 +52,7 @@ struct PairSyncView: View {
                 .fixedSize()
             }
             if !viewModel.rows.isEmpty {
-                List(viewModel.rows) { row in
+                List(viewModel.rows, selection: $selection) { row in
                     HStack {
                         VStack(alignment: .leading) {
                             Text(row.path).lineLimit(1).truncationMode(.middle)
@@ -55,6 +60,9 @@ struct PairSyncView: View {
                         }
                         .accessibilityElement(children: .combine)
                         .contextMenu {
+                            if let url = row.look {
+                                Button("Quick Look") { looking = url }
+                            }
                             if let side = row.otherWay, let title = row.otherWayTitle {
                                 Button(title) { Task { await viewModel.copyOtherWay(row) } }
                                     .disabled(!viewModel.canStart)
@@ -84,6 +92,15 @@ struct PairSyncView: View {
                     }
                 }
                 .frame(minHeight: 160)
+                // Space shows the selected change's file, as in Finder.
+                .onKeyPress(.space) {
+                    guard let url = viewModel.rows.first(where: { $0.id == selection })?.look else {
+                        return .ignored
+                    }
+                    looking = url
+                    return .handled
+                }
+                .quickLookPreview($looking)
                 if let hidden = viewModel.hiddenRowsText {
                     HStack {
                         Text(hidden).font(.caption).foregroundStyle(.secondary)
