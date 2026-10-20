@@ -702,6 +702,7 @@ impl PairRun {
                 .copied()
                 .chain(left.oversized().iter().chain(right.oversized()))
                 .filter(|path| Some(*path) != canary)
+                .chain(unavailable(&left, &right, &base))
                 .cloned()
                 .collect()
         };
@@ -1425,6 +1426,33 @@ impl Executor<'_> {
 
 mod undo;
 pub use undo::UndoReport;
+
+/// Entries either folder keeps only in iCloud, with everything below them
+/// on either side or in the base: skipped in both folders rather than
+/// downloaded, and unchanged to the base (PLAN.md §4.10).
+fn unavailable<'a>(
+    left: &'a Observation,
+    right: &'a Observation,
+    base: &'a BTreeMap<SyncPath, BaselineEntry>,
+) -> impl Iterator<Item = &'a SyncPath> {
+    let roots: Vec<&SyncPath> = left
+        .unavailable()
+        .iter()
+        .chain(right.unavailable())
+        .collect();
+    let below = move |path: &&SyncPath| {
+        roots
+            .iter()
+            .any(|root| *root == *path || root.is_ancestor_of(path))
+    };
+    left.unavailable()
+        .iter()
+        .chain(right.unavailable())
+        .chain(left.entries().keys())
+        .chain(right.entries().keys())
+        .chain(base.keys())
+        .filter(below)
+}
 
 #[cfg(test)]
 mod tests;

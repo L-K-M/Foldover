@@ -184,10 +184,12 @@ impl PeerEndpoint {
                     leftovers,
                     oversized,
                     old,
+                    unavailable,
                 }) => {
                     observation.leftovers = paths(leftovers)?;
                     observation.oversized = paths(oversized)?;
                     observation.old = paths(old)?;
+                    observation.unavailable = paths(unavailable)?;
                     return Ok(observation);
                 }
                 Incoming::Reply(PeerReply::Failed { error }) => {

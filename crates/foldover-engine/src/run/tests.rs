@@ -271,6 +271,44 @@ impl Fixture {
     }
 }
 
+/// PLAN.md §4.10: what iCloud keeps only in the cloud is skipped in both
+/// folders, folders with their contents, rather than downloaded; it is
+/// never taken for a deletion, and syncs again once it is back.
+#[test]
+fn entries_kept_only_in_icloud_are_skipped_never_deleted() {
+    let mut pair = fixture(SyncMode::Sync);
+    let folders = [
+        foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default()),
+        foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default()),
+    ];
+    pair.memory = Some(folders.clone());
+    let [left, right] = &folders;
+    for file in [b"notes.txt".as_slice(), b"photos/a.jpg", b"photos/b.jpg"] {
+        left.put_file(file, b"v1").unwrap();
+    }
+    pair.sync();
+    assert_eq!(right.user_files().len(), 3);
+
+    // Evicted on the left, and edited on the right meanwhile.
+    left.evict(b"notes.txt");
+    left.evict(b"photos");
+    right.put_file(b"photos/a.jpg", b"v2").unwrap();
+    right.put_file(b"photos/c.jpg", b"new").unwrap();
+    let report = pair.sync();
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    assert_eq!((report.copied(), report.archived()), (0, 0));
+    assert_eq!(right.user_files().len(), 4);
+
+    // Downloaded again, it syncs as usual.
+    left.download(b"photos");
+    let report = pair.sync();
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    assert_eq!(report.copied(), 2);
+    assert_eq!(left.user_files()[b"photos/a.jpg".as_slice()], b"v2");
+    assert_eq!(left.user_files()[b"photos/c.jpg".as_slice()], b"new");
+    assert_eq!(left.user_files()[b"notes.txt".as_slice()], b"v1");
+}
+
 #[test]
 fn first_sync_copies_both_ways_and_a_second_run_has_nothing_to_do() {
     let mut pair = fixture(SyncMode::Sync);

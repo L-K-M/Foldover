@@ -242,6 +242,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A folder holding files iCloud keeps only in the cloud no longer stops
+  every sync: those files and folders are skipped in both folders until
+  you download them, and never taken for deletions.
+
 - Syncing to disks formatted HFS+ (Mac OS Extended), exFAT or FAT32
   works: every copy to them failed with "Operation not supported".
 

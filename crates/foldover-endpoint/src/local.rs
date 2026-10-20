@@ -137,6 +137,7 @@ pub struct ScanStats {
     leftovers: Vec<SyncPath>,
     oversized: Vec<SyncPath>,
     old: Vec<SyncPath>,
+    unavailable: Vec<SyncPath>,
 }
 
 impl ScanStats {
@@ -303,6 +304,7 @@ pub struct Observation {
     pub(crate) leftovers: Vec<SyncPath>,
     pub(crate) oversized: Vec<SyncPath>,
     pub(crate) old: Vec<SyncPath>,
+    pub(crate) unavailable: Vec<SyncPath>,
 }
 
 impl Observation {
@@ -324,13 +326,24 @@ impl Observation {
         &self.old
     }
 
+    /// Entries macOS keeps only in iCloud (dataless), left unread with
+    /// everything below them: reading would download them.
+    pub fn unavailable(&self) -> &[SyncPath] {
+        &self.unavailable
+    }
+
     /// Report the entry at `from` under `to`: the same file, spelled as
     /// the pair knows it.
     pub fn respell(&mut self, from: &SyncPath, to: SyncPath) {
         if let Some(entry) = self.entries.remove(from) {
             self.entries.insert(to.clone(), entry);
         }
-        for listed in self.oversized.iter_mut().chain(&mut self.old) {
+        for listed in self
+            .oversized
+            .iter_mut()
+            .chain(&mut self.old)
+            .chain(&mut self.unavailable)
+        {
             if listed == from {
                 *listed = to.clone();
             }
@@ -642,9 +655,14 @@ impl LocalEndpoint {
             let at_path = Some(path.clone());
             let name = SyncPath::try_from(entry.name())?;
             let metadata = entry.metadata().clone();
-            // An unavailable entry is not absence. Stop rather than publish a
-            // complete inventory that could turn skipped placeholders into deletes.
-            reject_dataless(metadata.data_residency(), &at_path)?;
+            // An entry kept only in iCloud is not absence, and reading it
+            // would download it (PLAN.md §4.10): it is set aside unread,
+            // folders without their contents, for both folders to skip.
+            if metadata.data_residency() == DataResidency::Dataless {
+                stats.skipped += 1;
+                stats.unavailable.push(path);
+                continue;
+            }
             if metadata.identity().device() != self.identity.device() {
                 return Err(ScanError::NestedFilesystem(path));
             }
@@ -734,6 +752,7 @@ impl LocalEndpoint {
             leftovers: stats.leftovers,
             oversized: stats.oversized,
             old: stats.old,
+            unavailable: stats.unavailable,
         };
         for entry in entries {
             if control() == ScanControl::Cancel {
