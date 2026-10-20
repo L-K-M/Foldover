@@ -24,6 +24,7 @@ pub use mounts::MountRow;
 pub use pause::PauseRow;
 pub use settings::AutomationSettingRow;
 pub use share::ShareRow;
+pub use starts::RunMarker;
 
 const APPLICATION_ID: i64 = 0x464f4c44; // FOLD
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;

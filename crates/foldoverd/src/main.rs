@@ -39,6 +39,9 @@ async fn main() -> ExitCode {
 }
 
 async fn run(location: foldover_ipc::SocketLocation) -> Result<(), Box<dyn std::error::Error>> {
+    // Hear a stop before starting anything slow, so one that comes while
+    // the agent starts still ends cleanly instead of counting as a crash.
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let listener = foldover_ipc::bind(&location)?;
     let service = foldover_service::Service::open()?;
     service.start_scheduler();
@@ -46,7 +49,6 @@ async fn run(location: foldover_ipc::SocketLocation) -> Result<(), Box<dyn std::
     if let Err(error) = service.start_peers().await {
         eprintln!("foldoverd: Mac-to-Mac is unavailable: {}", error.message());
     }
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let serving = service.clone();
     tokio::select! {
         result = foldover_ipc::serve(listener, move |request| {

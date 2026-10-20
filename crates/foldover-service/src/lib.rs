@@ -54,6 +54,9 @@ pub struct Service {
     scheduler: Arc<Scheduler>,
     peers: peer::Peers,
     safe_mode: Arc<safe_mode::SafeMode>,
+    /// Cleared at a clean stop without waiting for the engine, which a
+    /// sync may hold for seconds while the system waits to stop us.
+    run_marker: foldover_engine::RunMarker,
 }
 
 impl Service {
@@ -62,7 +65,12 @@ impl Service {
     pub fn open() -> Result<Self, foldover_engine::Error> {
         let engine = Engine::open(&StateLocation::Default)?;
         let now = std::time::SystemTime::now();
-        let stops = engine.note_start(now)?;
+        // Counting crashes must never be what keeps the agent from
+        // starting: without the record, it starts outside safe mode.
+        let stops = engine.note_start(now).unwrap_or_else(|error| {
+            eprintln!("foldoverd: unclean stops cannot be counted: {error}");
+            Vec::new()
+        });
         let service = Self::new(engine);
         service.safe_mode.judge(&stops, now);
         Ok(service)
@@ -71,10 +79,7 @@ impl Service {
     /// Record a clean stop, so the next start does not count this one as
     /// a crash.
     pub fn note_clean_stop(&self) -> Result<(), foldover_engine::Error> {
-        self.engine
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .note_clean_stop()
+        Ok(self.run_marker.note_clean_stop()?)
     }
 
     /// Leave safe mode: the unclean stops behind it are forgotten, and
@@ -96,6 +101,7 @@ impl Service {
 
     fn new(engine: Engine) -> Self {
         Self {
+            run_marker: engine.run_marker(),
             engine: Arc::new(Mutex::new(engine)),
             commands: Arc::new(Semaphore::new(1)),
             jobs: Arc::new(Jobs::default()),
@@ -108,7 +114,7 @@ impl Service {
     /// Listen for paired Macs (ADR 0031), if this Mac has any. Otherwise
     /// the first `peer.*` request starts listening.
     pub async fn start_peers(&self) -> Result<(), RpcError> {
-        peer::start_if_paired(&self.engine, &self.peers).await
+        peer::start_if_paired(&self.engine, &self.peers, &self.safe_mode).await
     }
 
     pub async fn handle(&self, request: Request) -> Result<Value, RpcError> {
@@ -201,7 +207,7 @@ impl Service {
                 | PEER_REVOKE
                 | PEER_SHARES
         ) {
-            return peer::handle(&self.engine, &self.peers, &request).await;
+            return peer::handle(&self.engine, &self.peers, &self.safe_mode, &request).await;
         }
         if matches!(request.method(), SHARE_LIST | SHARE_ADD | SHARE_REMOVE) {
             return share::handle(&self.engine, &request).await;
@@ -1751,6 +1757,7 @@ mod tests {
                 identity,
                 loopback,
                 foldover_engine::Presence::Unlisted,
+                &service.safe_mode,
             )
             .await
             .unwrap();
@@ -1759,6 +1766,50 @@ mod tests {
         let b_address = b.1.peers.get().unwrap().address().unwrap();
         a.1.peers.get().unwrap().reach(devices[1], b_address);
         (a, b, devices[0], devices[1])
+    }
+
+    /// Review of safe mode: a Mac in safe mode serves no folder to another
+    /// Mac, as the work crashing its agent may be that Mac's syncs.
+    #[tokio::test]
+    async fn a_mac_in_safe_mode_serves_no_folders() {
+        let ((a_directory, a), (_b_directory, b), a_device, b_device) = paired_agents().await;
+        let shared = tempfile::tempdir().unwrap();
+        fs::write(shared.path().join("one.jpg"), b"one").unwrap();
+        let share = b
+            .handle(Request::call(
+                1,
+                SHARE_ADD,
+                Some(json!({"device": a_device.to_string(), "root": shared.path().as_os_str().as_bytes(), "name": "Photos"})),
+            ))
+            .await
+            .unwrap();
+        let local = a_directory.path().join("photos");
+        fs::create_dir(&local).unwrap();
+        let mut mac = input(a_directory.path(), "Mac");
+        mac["left_root"] = json!(local.as_os_str().as_bytes());
+        mac["right_root"] =
+            json!(format!("peer://{b_device}/{}", share["id"].as_str().unwrap()).into_bytes());
+        let created = a
+            .handle(Request::call(2, PAIR_CREATE, Some(mac)))
+            .await
+            .unwrap();
+
+        let now = std::time::SystemTime::now();
+        b.safe_mode.judge(&[now, now, now], now);
+        let key = json!({"id": created["id"]});
+        a.handle(Request::call(3, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        let refused = settled(&a, &key).await;
+        assert!(refused.to_string().contains("paused syncing"), "{refused}");
+        assert!(!local.join("one.jpg").exists());
+
+        b.safe_mode.leave();
+        a.handle(Request::call(4, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        let previewed = settled(&a, &key).await;
+        assert_eq!(previewed["state"], "previewed", "{previewed}");
     }
 
     /// P5.2: a pair's side can be a folder another Mac shares; that Mac
@@ -2063,6 +2114,7 @@ mod tests {
                     identity,
                     loopback,
                     foldover_engine::Presence::Unlisted,
+                    &service.safe_mode,
                 )
                 .await
                 .unwrap();

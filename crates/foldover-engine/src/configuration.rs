@@ -424,8 +424,10 @@ impl Engine {
         Ok(self.pairs.note_start(now)?)
     }
 
-    pub fn note_clean_stop(&self) -> Result<(), Error> {
-        Ok(self.pairs.note_clean_stop()?)
+    /// The marker `note_start` leaves, to clear at a clean stop without
+    /// holding the engine.
+    pub fn run_marker(&self) -> foldover_state::RunMarker {
+        self.pairs.run_marker()
     }
 
     pub fn forget_unclean_stops(&self) -> Result<(), Error> {

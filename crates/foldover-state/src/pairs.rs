@@ -30,6 +30,7 @@ pub use mounts::MountSources;
 pub use pause::Pause;
 pub use settings::LowPowerSyncs;
 pub use share::Share;
+pub use starts::RunMarker;
 
 const SYNC: &str = "sync";
 const MIRROR_LEFT: &str = "mirror-left";

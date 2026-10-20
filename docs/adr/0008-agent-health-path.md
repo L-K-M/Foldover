@@ -69,7 +69,13 @@ every run reading it, would restart into the same crash for ever. A
 removed on a clean stop (SIGTERM or Ctrl-C); a start that finds it records
 an unclean stop in `unclean-stops`. Three such starts within five minutes
 start safe mode: no scheduled runs, and previews, runs, undo, conflict
-choices and Put back are refused with `SAFE_MODE`. `daemon.status`, which
+choices and Put back are refused with `SAFE_MODE`; folders shared with
+other Macs are not served either, as their syncs may be what crashes the
+agent. The agent hears SIGTERM before it starts anything slow and clears
+the marker without waiting for the engine, so neither a stop during
+start-up nor a busy engine at shutdown counts as a crash. Recording a
+start never blocks it: a marker that cannot be read or written leaves
+the agent running outside safe mode, with a log line. `daemon.status`, which
 needs no authentication, reports `safe_mode` with the count, so the app
 shows a banner and posts one notification; `daemon.resume` (and
 `foldover safe-mode off`) forgets the stops and syncs again. The agent

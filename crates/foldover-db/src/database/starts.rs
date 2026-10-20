@@ -5,7 +5,7 @@
 
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{Database, Error, private_file};
@@ -33,9 +33,12 @@ impl Database {
         Ok(stops)
     }
 
-    /// Record a clean stop: the next start does not count this run.
-    pub fn note_clean_stop(&self) -> Result<(), Error> {
-        remove(&self.directory.join(RUNNING))
+    /// The marker `note_start` leaves while the agent runs, to clear at a
+    /// clean stop without waiting for the database.
+    pub fn run_marker(&self) -> RunMarker {
+        RunMarker {
+            running: self.directory.join(RUNNING),
+        }
     }
 
     /// Forget earlier unclean stops, as a person resuming after safe mode
@@ -45,15 +48,28 @@ impl Database {
     }
 }
 
+/// The file that marks a running agent.
+#[derive(Clone, Debug)]
+pub struct RunMarker {
+    running: PathBuf,
+}
+
+impl RunMarker {
+    /// Record a clean stop: the next start does not count this run.
+    pub fn note_clean_stop(&self) -> Result<(), Error> {
+        remove(&self.running)
+    }
+}
+
 /// Milliseconds since the Unix epoch, one per line; a missing file is
 /// none, and a malformed line is skipped rather than blocking startup.
 fn read_times(path: &Path) -> Result<Vec<SystemTime>, Error> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let mut text = String::new();
-    private_file(path)?.read_to_string(&mut text)?;
-    Ok(text
+    let mut bytes = Vec::new();
+    private_file(path)?.read_to_end(&mut bytes)?;
+    Ok(String::from_utf8_lossy(&bytes)
         .lines()
         .filter_map(|line| line.trim().parse::<u64>().ok())
         .map(|milliseconds| UNIX_EPOCH + Duration::from_millis(milliseconds))
@@ -90,22 +106,29 @@ mod tests {
 
     #[test]
     fn starts_after_unclean_stops_are_remembered_until_forgotten() {
-        let (_directory, location) = location();
+        let (directory, location) = location();
         let database = Database::open(&location).unwrap();
         let at = |seconds| UNIX_EPOCH + Duration::from_secs(seconds);
 
         assert!(database.note_start(at(10)).unwrap().is_empty());
-        database.note_clean_stop().unwrap();
+        database.run_marker().note_clean_stop().unwrap();
         assert!(database.note_start(at(20)).unwrap().is_empty());
         // No clean stop: the next two starts each find the run before.
         assert_eq!(database.note_start(at(30)).unwrap(), [at(30)]);
         assert_eq!(database.note_start(at(40)).unwrap(), [at(30), at(40)]);
-        database.note_clean_stop().unwrap();
+        database.run_marker().note_clean_stop().unwrap();
         assert_eq!(database.note_start(at(50)).unwrap(), [at(30), at(40)]);
 
         database.forget_unclean_stops().unwrap();
-        database.note_clean_stop().unwrap();
+        database.run_marker().note_clean_stop().unwrap();
         assert!(database.note_start(at(60)).unwrap().is_empty());
+
+        // A damaged record is read as far as it makes sense.
+        let record = directory.path().join(UNCLEAN_STOPS);
+        fs::write(&record, b"\xff\n30000\n").unwrap();
+        fs::set_permissions(&record, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+        database.run_marker().note_clean_stop().unwrap();
+        assert_eq!(database.note_start(at(70)).unwrap(), [at(30)]);
 
         // Only the newest are kept.
         for second in 0..2 * REMEMBERED as u64 {
