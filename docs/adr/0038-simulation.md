@@ -57,6 +57,12 @@ on. Each simulated folder draws its file system:
   the next run archives it; a finished run must leave none.
 - A third invariant: right after a finished run, another one writes
   nothing, so no quirk feeds a copy loop.
+- Each history draws its mode: Sync, or Mirror or Backup from either
+  side. One-way runs must never write their source. Outside reported
+  conflicts, a Mirror's target ends equal to its source, and a Backup's
+  target holds every source file, with the source's content where the
+  source changed since the last finished run, and loses nothing it held.
+  One-way modes run on in-memory folders only.
 - About 700 cases a second in release: CI runs 64, the nightly job
   100,000 (`FOLDOVER_MEMORY_SIMULATION_CASES`).
 
@@ -78,5 +84,5 @@ The first runs found two engine bugs, both fixed
   violation; the nightly job runs the count, the record of nights is
   kept by CI history.
 - Not emulated: extended attributes, volatile file identities, lost
-  change events, network chaos and the deterministic executor. Backup
-  and Mirror modes, SFTP and peer folders are not simulated yet.
+  change events, network chaos and the deterministic executor. SFTP and
+  peer folders are not simulated yet.
