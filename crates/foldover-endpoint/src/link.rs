@@ -385,8 +385,9 @@ impl PeerLink {
         self.state().addresses.insert(device, address);
     }
 
-    /// Ask paired `device`, connecting first if needed. A connection that
-    /// went stale is replaced once.
+    /// Ask paired `device` something that changes nothing there,
+    /// connecting first if needed. A connection that went stale is
+    /// replaced once.
     pub async fn request(&self, device: DeviceId, call: PeerCall) -> Result<PeerReply, LinkError> {
         if !self.is_paired(device) {
             return Err(LinkError::NotPaired);
@@ -395,9 +396,21 @@ impl PeerLink {
             protocol: PEER_PROTOCOL,
             call,
         };
-        let (mut send, mut recv) = self.open(device, &request).await?;
-        send.finish()?;
-        let reply = stream::receive_json(&mut recv).await?;
+        let attempt = async || {
+            let (mut send, mut recv) = self.open(device, &request).await?;
+            send.finish()?;
+            stream::receive_json(&mut recv).await
+        };
+        // A connection that died after the stream opened, as when the
+        // other agent restarted, shows only in the reply. Requests here
+        // change nothing, so one is sent again on a new connection.
+        let reply = match attempt().await {
+            Ok(reply) => reply,
+            Err(_) => {
+                self.state().connections.remove(&device);
+                attempt().await?
+            }
+        };
         serde_json::from_slice(&reply).map_err(|_| LinkError::Protocol)
     }
 
