@@ -60,6 +60,16 @@ on. Each simulated folder draws its file system:
 - About 700 cases a second in release: CI runs 64, the nightly job
   100,000 (`FOLDOVER_MEMORY_SIMULATION_CASES`).
 
+### Device matrix
+
+The on-disk simulation also runs on chosen volumes
+(`FOLDOVER_SIMULATION_LEFT_VOLUME`, `…_RIGHT_VOLUME`), with each pair's
+name matching read from its folders. The `devices` workflow runs it
+nightly on the macOS runner between an APFS disk image and images of
+case-sensitive APFS, HFS+, exFAT and FAT32, 200 cases each
+(`scripts/device-matrix.sh`). Network shares, SFTP servers and a second
+Mac stay manual.
+
 The first runs found two engine bugs, both fixed
 ([ADR 0030](0030-name-clashes.md)):
 

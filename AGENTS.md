@@ -34,6 +34,7 @@ The roadmap is PLAN.md §7.
 | Linux CI gate (fmt, clippy, tests, docs, layer check, FFI drift) | `cargo xtask ci` |
 | Layer check only | `cargo xtask check-layers` |
 | Agent/CLI process lifecycle smoke | `cargo xtask agent-smoke` |
+| Simulation on disk images of each file system (macOS) | `scripts/device-matrix.sh [WORK_DIR]` |
 | Fuzz every parser longer (nightly runs 500k cases) | `PROPTEST_CASES=500000 cargo test --release --workspace -- fuzz_` |
 | Benchmark budgets (scan, hash, plan, DB) | `cargo xtask bench-check` |
 | Regenerate the Swift bindings (commit the result) | `cargo xtask ffi --bindings-only` |

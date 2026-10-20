@@ -14,7 +14,10 @@
 //! endpoint, staging and archive; or in-memory folders with file system
 //! quirks, fast enough for the nightly gate. A failing case replays from
 //! proptest's seed. `FOLDOVER_SIMULATION_CASES` and
-//! `FOLDOVER_MEMORY_SIMULATION_CASES` scale the nightly run.
+//! `FOLDOVER_MEMORY_SIMULATION_CASES` scale the nightly run, and
+//! `FOLDOVER_SIMULATION_LEFT_VOLUME` and `…_RIGHT_VOLUME` put the real
+//! folders on chosen volumes, as the nightly device matrix does with disk
+//! images of each file system.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -22,7 +25,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use foldover_sim::{MemoryEndpoint, NameStorage, Quirks, Replace};
-use foldover_types::{CaseMatching, NameMatching, UnicodeMatching};
+use foldover_types::{CaseMatching, NameMatching, PairRoot, UnicodeMatching};
 use proptest::prelude::*;
 use unicode_normalization::UnicodeNormalization;
 
@@ -39,22 +42,14 @@ fn cases(variable: &str, default: u32) -> u32 {
         .unwrap_or(default)
 }
 
-/// The paths edits touch: nested, but never a file where another path
-/// needs a folder.
-const DISK_PATHS: &[&str] = &[
-    "a.txt",
-    "b.txt",
-    "docs/c.txt",
-    "docs/d.txt",
-    "docs/deep/e.txt",
-    "photos/f.jpg",
-    "photos/g.jpg",
-    "photos/2026/h.jpg",
-];
+/// Where real folders live instead of temporary directories.
+const LEFT_VOLUME: &str = "FOLDOVER_SIMULATION_LEFT_VOLUME";
+const RIGHT_VOLUME: &str = "FOLDOVER_SIMULATION_RIGHT_VOLUME";
 
-/// The same, with names only some folders tell apart: letter case, and
-/// a composed and a decomposed `é`.
-const QUIRK_PATHS: &[&str] = &[
+/// The paths edits touch: nested, but never a file where another path
+/// needs a folder, with names only some folders tell apart: letter case,
+/// and a composed and a decomposed `é`.
+const PATHS: &[&str] = &[
     "a.txt",
     "A.txt",
     "b.txt",
@@ -245,10 +240,27 @@ struct Simulation {
 
 impl Simulation {
     fn on_disk() -> Self {
+        let mut pair = fixture(SyncMode::Sync);
+        let placed = |variable| {
+            std::env::var_os(variable).map(|volume| tempfile::tempdir_in(volume).unwrap())
+        };
+        if let Some(left) = placed(LEFT_VOLUME) {
+            pair.left = left;
+        }
+        if let Some(right) = placed(RIGHT_VOLUME) {
+            pair.right = right;
+        }
+        // Compare names the way the folders' file systems do.
+        let names = |path: &Path| {
+            Endpoint::open(&PairRoot::Local(root(path)), &Reach::default())
+                .unwrap()
+                .name_matching()
+        };
+        let names = names(pair.left.path()).either(names(pair.right.path()));
         Self {
-            pair: fixture(SyncMode::Sync),
-            paths: DISK_PATHS,
-            names: NameMatching::EXACT,
+            pair,
+            paths: PATHS,
+            names,
             writes: 0,
             hour: 0,
         }
@@ -260,7 +272,7 @@ impl Simulation {
         pair.leases = MEMORY_LEASES;
         Self {
             pair,
-            paths: QUIRK_PATHS,
+            paths: PATHS,
             names: left.names.either(right.names),
             writes: 0,
             hour: 0,
@@ -560,7 +572,7 @@ proptest! {
 
     #[test]
     fn random_edits_and_interrupted_runs_lose_nothing_and_converge(
-        rounds in rounds(DISK_PATHS.len(), Faults::Off),
+        rounds in rounds(PATHS.len(), Faults::Off),
     ) {
         let mut simulation = Simulation::on_disk();
         simulation.start();
@@ -579,7 +591,7 @@ proptest! {
     fn quirky_folders_lose_nothing_converge_and_settle(
         left in quirks(),
         right in quirks(),
-        rounds in rounds(QUIRK_PATHS.len(), Faults::On),
+        rounds in rounds(PATHS.len(), Faults::On),
     ) {
         let mut simulation = Simulation::in_memory(left, right);
         simulation.start();
