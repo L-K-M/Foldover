@@ -104,21 +104,53 @@ impl Root {
             return Err(error.into());
         }
 
-        if let Some(native) = native {
-            metadata::apply_native(
-                &file,
-                native,
-                metadata::Destination::New,
-                options.metadata(),
-            )?;
+        let finished = (|| -> Result<(), WriteError> {
+            if let Some(native) = native {
+                metadata::apply_native(
+                    &file,
+                    native,
+                    metadata::Destination::New,
+                    options.metadata(),
+                )?;
+            }
+            metadata::apply_foreign(&file, metadata, options.metadata())?;
+            flush(&file, options.durability())?;
+            Ok(())
+        })();
+        // All the data arrived: a failure giving it its metadata keeps
+        // it, so the next attempt sends nothing again.
+        if let Err(error) = finished {
+            if written >= PARTIAL_MIN_BYTES
+                && self
+                    .keep_partial(&staged.parent, &staged.name, content)
+                    .is_ok()
+            {
+                staged.placed = true;
+            }
+            return Err(error);
         }
-        metadata::apply_foreign(&file, metadata, options.metadata())?;
-        flush(&file, options.durability())?;
         Ok(StagedFile {
             staged,
             file,
             data: Digest::from_bytes(*hasher.finalize().as_bytes()),
         })
+    }
+
+    /// Keep a whole staged copy of `content` that could not be placed as
+    /// its partial, so the next attempt sends nothing again. A copy too
+    /// small to resume is removed as usual.
+    pub fn keep_staged(
+        &self,
+        staged: super::Staged,
+        content: &Digest,
+        size: u64,
+    ) -> io::Result<()> {
+        let mut staged = staged;
+        if size >= PARTIAL_MIN_BYTES {
+            self.keep_partial(&staged.parent, &staged.name, content)?;
+            staged.placed = true;
+        }
+        Ok(())
     }
 
     /// Remove partials nothing wrote to for `retention`; how many.
@@ -302,6 +334,35 @@ mod tests {
         .unwrap();
         assert_eq!(fs::read(directory.path().join("big.bin")).unwrap(), data);
         assert_eq!(root.partial_length(&digest).unwrap(), 0);
+    }
+
+    /// A whole copy that could not be placed is kept, ready to resume
+    /// from its end; a small one is removed as usual.
+    #[test]
+    fn a_whole_staged_copy_can_be_kept_for_the_next_attempt() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = Root::open(directory.path()).unwrap();
+        let (data, digest) = content(20 * MIB);
+        let fresh = Resume {
+            content: digest,
+            from: 0,
+        };
+        let staged = stage(&root, &data, fresh, None).unwrap();
+        root.keep_staged(staged.into_staged(), &digest, data.len() as u64)
+            .unwrap();
+        assert_eq!(root.partial_length(&digest).unwrap(), data.len() as u64);
+        assert!(visible(directory.path()).is_empty());
+
+        let (small, small_digest) = content(1024);
+        let fresh = Resume {
+            content: small_digest,
+            from: 0,
+        };
+        let staged = stage(&root, &small, fresh, None).unwrap();
+        root.keep_staged(staged.into_staged(), &small_digest, small.len() as u64)
+            .unwrap();
+        assert_eq!(root.partial_length(&small_digest).unwrap(), 0);
+        assert!(visible(directory.path()).is_empty());
     }
 
     #[test]

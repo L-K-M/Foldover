@@ -5,7 +5,13 @@
 yanked = "deny"
 unmaintained = "all"
 unsound = "all"
-ignore = []
+ignore = [
+  # basic-toml is archived. It reaches the build only through UniFFI's
+  # askama templates (uniffi_bindgen, pinned at 0.32.2 with the rest of
+  # UniFFI), parses only templates in the build, and has no safe upgrade.
+  # Drop this when a UniFFI release moves off it.
+  { id = "RUSTSEC-2026-0374", reason = "build-time only, via pinned UniFFI 0.32.2; no upgrade" },
+]
 maximum-db-staleness = "P1D"
 unused-ignored-advisory = "warn"
 

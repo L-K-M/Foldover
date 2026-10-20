@@ -1,6 +1,6 @@
 # ADR 0002: Change detection from a non-app process
 
-Status: Accepted with fallback (local probes only)
+Status: Accepted with fallback (local probes only); replay implemented
 
 ## Context
 
@@ -151,6 +151,32 @@ only as a hint backed by metadata verification. Store a cursor with both
 the volume UUID and the FSEvents-store UUID; reuse it only when both match.
 A missing or changed UUID, or any remount, requires a full root metadata
 rescan. Remount replay must be proven before relaxing that fallback.
+
+## Implementation
+
+Start-up replay for "When files change" pairs:
+
+```text
+pair quiet ──every minute──▶ cursor per local side: root, store UUID,
+                             event ID seen one tick (5 s) earlier
+agent starts ──▶ replay each root from its cursor until HistoryDone
+  relevant event            ──▶ changed: the pair runs
+  HistoryDone, none found   ──▶ unchanged: no run
+  anything else             ──▶ changed
+```
+
+- `foldover-watch` opens a path-scoped stream with `sinceWhen` set to
+  the cursor and reads until `HistoryDone`, at most 30 s; its FFI is the
+  audited `history/fsevents.rs`.
+- A cursor (state schema 22, `watch_cursor`) is recorded only while the
+  pair is quiet: no run in progress, no change waiting for a run, its
+  start-up replay done and its folders watched. Nothing before the
+  recorded event is then left unsynced.
+- Foldover's own names never count. Drop, root-changed, mount and
+  unmount flags, a timeout, a store UUID that is missing or differs, a
+  cursor for another root, and folders without a history (network
+  volumes, SFTP, paired Macs, Linux) all count as a change, which costs
+  one full observation.
 
 ## Consequences
 

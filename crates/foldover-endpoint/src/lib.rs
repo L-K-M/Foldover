@@ -27,7 +27,7 @@ mod share;
 pub use share::mount_share;
 
 #[cfg(unix)]
-pub use watch::RootWatcher;
+pub use watch::{RootWatcher, changed_since_event, event_history, event_now};
 
 #[cfg(unix)]
 pub use local::{
@@ -44,7 +44,7 @@ pub use foldover_fs::{
 };
 
 #[cfg(unix)]
-pub use endpoint::{Endpoint, ObserveStep, Reach};
+pub use endpoint::{Endpoint, ListedEntry, ListedKind, ObserveStep, Reach};
 
 pub use foldover_os::{CloudProvider, cloud_provider, current_cloud_provider};
 

@@ -102,6 +102,19 @@ impl Filter {
         self.cutoff
     }
 
+    /// Whether syncs see the file at `path`: neither it nor a folder
+    /// above it is excluded.
+    pub fn keeps(&self, path: &SyncPath) -> bool {
+        let mut folder = path.parent();
+        while let Some(current) = folder {
+            if self.excludes(&current, true) {
+                return false;
+            }
+            folder = current.parent();
+        }
+        !self.excludes(path, false)
+    }
+
     pub(crate) fn excludes(&self, path: &SyncPath, directory: bool) -> bool {
         self.rules
             .matched(Path::new(OsStr::from_bytes(path.as_bytes())), directory)

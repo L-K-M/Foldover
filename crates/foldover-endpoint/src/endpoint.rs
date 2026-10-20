@@ -24,6 +24,56 @@ use crate::{
     ObservedEntry, RootRelation, RunScope, ScanError,
 };
 
+/// One directory entry as a quick change check sees it (PLAN.md §4.8):
+/// enough to tell that something changed, not what.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ListedEntry {
+    name: Vec<u8>,
+    kind: ListedKind,
+    size: u64,
+    modified: Option<SystemTime>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ListedKind {
+    Directory,
+    Other,
+}
+
+impl ListedEntry {
+    fn new(name: Vec<u8>, kind: ListedKind, size: u64, modified: Option<SystemTime>) -> Self {
+        Self {
+            name,
+            kind,
+            size,
+            modified,
+        }
+    }
+
+    pub fn name(&self) -> &[u8] {
+        &self.name
+    }
+
+    pub fn kind(&self) -> ListedKind {
+        self.kind
+    }
+
+    /// An entry in `directory`, unless `filter` leaves it out of syncs.
+    /// A name no sync path can hold is kept: a run will report it.
+    pub(crate) fn kept(
+        directory: Option<&SyncPath>,
+        filter: &Filter,
+        name: Vec<u8>,
+        kind: ListedKind,
+        size: u64,
+        modified: Option<SystemTime>,
+    ) -> Option<Self> {
+        let excluded = crate::local::child_path(directory, &name)
+            .is_ok_and(|path| filter.excludes(&path, kind == ListedKind::Directory));
+        (!excluded).then(|| Self::new(name, kind, size, modified))
+    }
+}
+
 /// How far an observation has got, e.g. for "Comparing… 12,345 items".
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ObserveStep {
@@ -155,6 +205,25 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.network_source(),
             Self::Sftp(_) | Self::Peer(_) => Ok(None),
+        }
+    }
+
+    /// One directory's entries the filter keeps, without recursion or
+    /// Foldover's own names; `None` once the directory is gone. A paired
+    /// Mac reports its own changes, so its folders are never listed this
+    /// way.
+    pub fn list(
+        &self,
+        directory: Option<&SyncPath>,
+        filter: &Filter,
+    ) -> Result<Option<Vec<ListedEntry>>, ScanError> {
+        match self {
+            Self::Local(endpoint) => endpoint.list(directory, filter),
+            Self::Sftp(endpoint) => endpoint.list(directory, filter),
+            Self::Peer(_) => Err(ScanError::Io {
+                path: directory.cloned(),
+                source: std::io::ErrorKind::Unsupported.into(),
+            }),
         }
     }
 

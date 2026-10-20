@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- "When files change" catches up on changes made while the agent was
+  not running, syncs after 5 minutes of nonstop changes, and checks
+  shares and SFTP servers for other computers' changes every 5 minutes.
+  It now waits for 10 seconds of quiet instead of 5.
+
+- At start, "When files change" replays each local folder's file event
+  history from when the pair was last quiet, and syncs only folders
+  that changed while the agent was not running.
+
 - Signature moments: drop one or two folders on the window's sidebar or
   empty detail to start a pair with them; the pair editor shows a
   sentence that says what the pair will do and rewrites itself as you
@@ -231,6 +240,15 @@ All notable changes to this project are documented here. The format follows
 - Folders on exFAT and FAT disks no longer stop with an AppleDouble
   error: the `._` files macOS keeps there for extended attributes are
   skipped, as the attributes travel with their files.
+
+- A canary file kept unchanged for longer than the pair's age limit no
+  longer stops every sync as if it were missing. Filters that leave out
+  the canary are refused when you save the pair, and a `.foldoverignore`
+  file that does is named as the cause.
+
+- A large copy that arrived whole but could not be placed, because the
+  file it replaces changed meanwhile or its metadata could not be set,
+  keeps its data; the next attempt no longer fetches it again.
 
 - A copy to another Mac whose source changed partway no longer waits
   forever for that Mac; asking another Mac gives up after 30 seconds.
