@@ -78,6 +78,9 @@ you might expect. Warnings never block saving
 - **Only the owner syncs.** The Mac that owns a pair reconciles it; the
   other serves its shared folder, and the pair waits while the owner is
   offline ([ADR 0031](../adr/0031-mac-to-mac.md)).
+- **The sharing Mac shows shares, not pairs.** It lists the folders it
+  shares with each paired Mac, not the other Mac's pairs that use them
+  or how their syncs went ([ADR 0031](../adr/0031-mac-to-mac.md)).
 - A copy between two Macs' folders relays through your Mac
   ([ADR 0031](../adr/0031-mac-to-mac.md)).
 - Agents listen and advertise on IPv4 only. Where multicast is blocked,
@@ -198,6 +201,9 @@ you might expect. Warnings never block saving
   ([ADR 0002](../adr/0002-change-detection.md)).
 - Schedule timers live in agent memory; restarting the agent restarts
   every interval ([ADR 0022](../adr/0022-scheduled-runs.md)).
+- A disk that comes back is noticed within 5 seconds for "When files
+  change" pairs and within 30 seconds for a scheduled pair that is due
+  ([ADR 0002](../adr/0002-change-detection.md)).
 - **Daily schedules.** A pair can sync at a time of day on chosen
   weekdays in the Mac's local time zone, like "Weekdays at 18:00" or
   "Every day at 02:30". A schedule missed while the Mac slept or the
