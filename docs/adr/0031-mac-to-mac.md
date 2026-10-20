@@ -1,7 +1,7 @@
 # ADR 0031: Mac-to-Mac sync
 
-Status: Device trust, pairing and discovery implemented; shared folders,
-the peer wire protocol and the peer endpoint pending
+Status: Device trust, pairing, discovery and shared-folder grants
+implemented; the peer endpoint pending
 
 ## Context
 
@@ -33,8 +33,9 @@ Slices, in order:
    device ID, name and port, plus its pairing port while a window is
    open, so nobody types addresses.
 3. **Shared folders and the peer endpoint.** Mac B grants one folder to
-   one device (`share`); Mac A names it `peer://<device>/<share>` as a
-   pair side. Requests carry the share and are refused outside it
+   one device (`share`, implemented: schema v17, removed with the device);
+   Mac A lists them by asking Mac B, and names one `peer://<device>/<share>`
+   as a pair side. Requests carry the share and are refused outside it
    (PLAN.md §5.1 invariant 5). Each request is one QUIC stream: a JSON
    control message, then raw data frames for file contents. Mac B
    answers through its local endpoint, so staging, verification and the
@@ -72,7 +73,22 @@ Mac B: peer.pairingOpen          Mac A: peer.pair(B, address)
   but `peer.status`): a Mac that never pairs never opens a network port,
   and the app can explain the Local Network prompt before it appears.
 
-### Local API (protocol 8)
+### Paired requests
+
+Paired Macs talk over the main QUIC endpoint, one bidirectional stream
+per request: a JSON `PeerRequest` (`protocol`, `call`) in one
+length-prefixed frame, answered by one `PeerReply` frame. Another
+version's request, or one this Mac does not know, gets `refused` with a
+reason. A Mac reaches a paired one at its advertised address, else one
+remembered for it, and reuses the connection; a stale one is redialed
+once. Requests are answered on blocking threads by the agent, which
+tells each Mac only what is shared with it.
+
+| Call | Reply |
+|---|---|
+| `shares` | The folders the answering Mac shares with the asking one: `id`, `name` |
+
+### Local API (protocol 9)
 
 | Method | Params | Result |
 |---|---|---|
@@ -82,11 +98,15 @@ Mac B: peer.pairingOpen          Mac A: peer.pair(B, address)
 | `peer.pairingClose` | none | Status |
 | `peer.pair` | `device`, optional `address` (`ip:port`; by default the window the network advertises) | The pending pairing: device, name, `code` |
 | `peer.confirm`, `peer.cancel` | `device` | Status |
-| `peer.revoke` | `device` | Status |
+| `peer.revoke` | `device` | Status; also ends what this Mac shared with it |
+| `peer.shares` | `device` | The folders that paired Mac shares with this one: `id`, `name` |
+| `share.list` | none | The folders this Mac shares: `id`, `device`, `root`, `name`, `created_ms` |
+| `share.add` | `device` (paired), `root` (an existing folder), `name` | The new share |
+| `share.remove` | `id` | The remaining shares |
 
 When the link cannot start (no Keychain access, no network), `peer.*`
 fails with `PEER_UNAVAILABLE` (-32010) and folder sync is unaffected.
-`foldover peers` exposes the same calls.
+`foldover peers` and `foldover shares` expose the same calls.
 
 ### App
 

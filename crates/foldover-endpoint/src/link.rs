@@ -23,7 +23,7 @@ use foldover_net::peer::{
     DeviceId as NetDeviceId, Identity, Node, PeerConnection, PeerError, PeerMode, PeerRecvStream,
     PeerSendStream, TrustStore, read_message, write_message,
 };
-use foldover_proto::peer::{PEER_PROTOCOL, PairingMessage};
+use foldover_proto::peer::{PEER_PROTOCOL, PairingMessage, PeerCall, PeerReply, PeerRequest};
 use foldover_types::DeviceId;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -51,6 +51,10 @@ pub enum LinkError {
     NotNearby,
     #[error("{0}")]
     Discovery(String),
+    #[error("That Mac is not paired with this one")]
+    NotPaired,
+    #[error("That Mac is not on this network; check that it is awake and runs Foldover")]
+    Unreachable,
 }
 
 /// Whether this Mac announces itself to other Macs on the local network.
@@ -90,9 +94,22 @@ pub enum Decision {
     Cancel,
 }
 
-/// Records a confirmed device; a device it could not record is not
-/// trusted, as it would be forgotten at the next start.
-type Paired = Box<dyn Fn(DeviceId, String) -> Result<(), ()> + Send + Sync>;
+/// The agent could not record a device both people confirmed.
+#[derive(Debug)]
+pub struct NotRecorded;
+
+/// What this Mac's agent does for the link: record pairings and answer
+/// paired Macs' requests. Requests are answered off the async runtime's
+/// workers, so `serve` may block.
+pub trait PeerHost: Send + Sync + 'static {
+    /// Both people confirmed `device`'s pairing code. A device that could
+    /// not be recorded is not trusted, as it would be forgotten at the
+    /// next start.
+    fn paired(&self, device: DeviceId, name: String) -> Result<(), NotRecorded>;
+
+    /// Answer a request from paired `device`.
+    fn serve(&self, device: DeviceId, call: PeerCall) -> PeerReply;
+}
 
 pub struct PeerLink {
     identity: Arc<Identity>,
@@ -101,8 +118,7 @@ pub struct PeerLink {
     node: Arc<Node>,
     neighbourhood: Neighbourhood,
     state: Mutex<State>,
-    /// Records a device both people confirmed, e.g. in the state store.
-    paired: Paired,
+    host: Arc<dyn PeerHost>,
 }
 
 /// How this Mac finds, and is found by, others on the network.
@@ -122,6 +138,10 @@ struct State {
     /// Nodes of closed windows, kept until the codes they showed settle.
     draining: Vec<Arc<Node>>,
     accept: Option<JoinHandle<()>>,
+    /// Open connections to paired devices, reused across requests.
+    connections: BTreeMap<DeviceId, PeerConnection>,
+    /// Where to reach devices the network does not advertise.
+    addresses: BTreeMap<DeviceId, SocketAddr>,
 }
 
 struct Window {
@@ -145,7 +165,7 @@ impl PeerLink {
         address: SocketAddr,
         presence: Presence,
         paired: impl IntoIterator<Item = DeviceId>,
-        on_paired: impl Fn(DeviceId, String) -> Result<(), ()> + Send + Sync + 'static,
+        host: Arc<dyn PeerHost>,
     ) -> Result<Arc<Self>, LinkError> {
         let identity = Arc::new(identity);
         let trust = Arc::new(TrustStore::default());
@@ -172,15 +192,14 @@ impl PeerLink {
             node: Arc::clone(&node),
             neighbourhood,
             state: Mutex::default(),
-            paired: Box::new(on_paired),
+            host,
         });
         link.announce();
-        // Shared folders arrive in the next slice; until then a paired
-        // device's connection is accepted and closed.
+        let answering = Arc::downgrade(&link);
         let accept = tokio::spawn(async move {
             while let Some(connection) = node.accept().await {
                 if let Ok(connection) = connection {
-                    connection.close();
+                    tokio::spawn(answer(answering.clone(), connection));
                 }
             }
         });
@@ -347,6 +366,58 @@ impl PeerLink {
     /// Forget `device` and close its connections, pairing ones included.
     pub fn revoke(&self, device: DeviceId) {
         self.trust.revoke(net_device(device));
+        let mut state = self.state();
+        state.connections.remove(&device);
+        state.addresses.remove(&device);
+    }
+
+    /// Reach paired `device` at `address` when the network does not
+    /// advertise it, e.g. across subnets.
+    pub fn reach(&self, device: DeviceId, address: SocketAddr) {
+        self.state().addresses.insert(device, address);
+    }
+
+    /// Ask paired `device`, connecting first if needed. A connection that
+    /// went stale is replaced once.
+    pub async fn request(&self, device: DeviceId, call: PeerCall) -> Result<PeerReply, LinkError> {
+        if !self.is_paired(device) {
+            return Err(LinkError::NotPaired);
+        }
+        let request = PeerRequest {
+            protocol: PEER_PROTOCOL,
+            call,
+        };
+        let connection = self.connection(device).await?;
+        match exchange(&connection, &request).await {
+            Ok(reply) => Ok(reply),
+            Err(_) => {
+                self.state().connections.remove(&device);
+                let connection = self.connection(device).await?;
+                exchange(&connection, &request).await
+            }
+        }
+    }
+
+    async fn connection(&self, device: DeviceId) -> Result<PeerConnection, LinkError> {
+        if let Some(connection) = self.state().connections.get(&device) {
+            return Ok(connection.clone());
+        }
+        let advertised = self
+            .nearby()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|nearby| nearby.device == device)
+            .map(|nearby| nearby.address);
+        let address = advertised
+            .or_else(|| self.state().addresses.get(&device).copied())
+            .ok_or(LinkError::Unreachable)?;
+        let connection = self
+            .node
+            .dial(address, net_device(device))
+            .await
+            .map_err(|_| LinkError::Unreachable)?;
+        self.state().connections.insert(device, connection.clone());
+        Ok(connection)
     }
 
     /// Derive the code, exchange names, then wait for both decisions.
@@ -536,7 +607,7 @@ async fn settle(
     let pending = link.state().pending.remove(&device);
     if confirmed
         && let Some(pending) = pending
-        && (link.paired)(device, pending.name).is_ok()
+        && link.host.paired(device, pending.name).is_ok()
     {
         link.trust.pin(net_device(device));
     }
@@ -544,6 +615,60 @@ async fn settle(
     let _ = tokio::time::timeout(DELIVERY_TIMEOUT, send.finish_delivered()).await;
     connection.close();
     link.drain();
+}
+
+/// Send one request and read its reply on a new stream.
+async fn exchange(
+    connection: &PeerConnection,
+    request: &PeerRequest,
+) -> Result<PeerReply, LinkError> {
+    let (mut send, mut recv) = connection.open_bi().await?;
+    let bytes = serde_json::to_vec(request).map_err(|_| LinkError::Protocol)?;
+    write_message(&mut send, &bytes).await?;
+    send.finish()?;
+    let reply = read_message(&mut recv).await?;
+    serde_json::from_slice(&reply).map_err(|_| LinkError::Protocol)
+}
+
+/// Answer each request a paired device sends on `connection`.
+async fn answer(link: Weak<PeerLink>, connection: PeerConnection) {
+    let device = DeviceId::from_bytes(*connection.device().as_bytes());
+    while let Ok((send, recv)) = connection.accept_bi().await {
+        tokio::spawn(answer_one(link.clone(), device, send, recv));
+    }
+}
+
+async fn answer_one(
+    link: Weak<PeerLink>,
+    device: DeviceId,
+    mut send: PeerSendStream,
+    mut recv: PeerRecvStream,
+) {
+    let Ok(bytes) = read_message(&mut recv).await else {
+        return;
+    };
+    let refused = |reason: &str| PeerReply::Refused {
+        reason: reason.to_owned(),
+    };
+    let reply = match serde_json::from_slice::<PeerRequest>(&bytes) {
+        Ok(request) if request.protocol == PEER_PROTOCOL => {
+            let Some(host) = link.upgrade().map(|link| Arc::clone(&link.host)) else {
+                return;
+            };
+            match tokio::task::spawn_blocking(move || host.serve(device, request.call)).await {
+                Ok(reply) => reply,
+                Err(_) => refused("That Mac could not answer"),
+            }
+        }
+        // A newer request, or another version's.
+        _ => refused("That Mac runs another Foldover version; update both Macs"),
+    };
+    let Ok(bytes) = serde_json::to_vec(&reply) else {
+        return;
+    };
+    if write_message(&mut send, &bytes).await.is_ok() {
+        let _ = tokio::time::timeout(DELIVERY_TIMEOUT, send.finish_delivered()).await;
+    }
 }
 
 async fn send_message(

@@ -26,12 +26,12 @@ pub use foldover_endpoint::ObserveStep;
 pub use foldover_state::RecordedIdentities;
 pub use foldover_state::StateLocation;
 pub use foldover_state::{
-    Device, HISTORY_LIMIT, HistoryEntry, HistoryOutcome, MountSources, Pause, RunTrigger,
+    Device, HISTORY_LIMIT, HistoryEntry, HistoryOutcome, MountSources, Pause, RunTrigger, Share,
 };
 pub use gates::{DeletionCounts, DeletionReview, InvalidDeletionCounts, RunContext};
 pub use peers::{
-    Decision, LinkError, NearbyMac, PeerIdentity, PeerLink, PendingPairing, Presence,
-    computer_name, peer_identity,
+    Decision, LinkError, NearbyMac, NotRecorded, PeerHost, PeerIdentity, PeerLink, PendingPairing,
+    Presence, computer_name, peer_identity,
 };
 pub use plan::{
     CandidateDecision, CandidatePlan, Choices, PlanError, PlanRow, TreeRole, plan_candidates,

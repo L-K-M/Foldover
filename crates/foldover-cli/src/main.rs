@@ -1,7 +1,7 @@
 //! `foldover-cli` — client layer. The `foldover` CLI (`pairs`, `sync`,
 //! `status`). Depends on foldover-client. See PLAN.md §4.4.
 
-use foldover_client::{DeviceId, PeerStatus, SyncStatus};
+use foldover_client::{DeviceId, PeerStatus, ShareId, SyncStatus};
 use foldover_client::{
     Durability, Filters, MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions, PairRoot,
     Propagation, ReviewToken, Schedule, ScheduleInterval, Side, SocketLocation, SyncMode,
@@ -41,7 +41,19 @@ enum Request {
     Pause(SocketLocation, Option<u32>),
     Resume(SocketLocation),
     Peers(SocketLocation, PeerCommand),
+    Shares(SocketLocation, ShareCommand),
     Usage,
+}
+
+/// Folders this Mac shares with paired Macs.
+enum ShareCommand {
+    List,
+    Add {
+        device: DeviceId,
+        root: Vec<u8>,
+        name: String,
+    },
+    Remove(ShareId),
 }
 
 /// Pairing with other Macs (ADR 0031).
@@ -60,6 +72,8 @@ enum PeerCommand {
     Confirm(DeviceId),
     Cancel(DeviceId),
     Revoke(DeviceId),
+    /// The folders a paired Mac shares with this one.
+    Shares(DeviceId),
 }
 
 enum ArchiveCommand {
@@ -217,9 +231,16 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Request::Shares(location, command) => match shares(&location, command).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("foldover: {error}");
+                ExitCode::FAILURE
+            }
+        },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE] [--socket PATH]\nLEFT, RIGHT: an absolute path, or sftp://[user@]host[:port]/path\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]\n       foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]\nLEFT, RIGHT: an absolute path, or sftp://[user@]host[:port]/path\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -264,6 +285,10 @@ fn request(args: impl Iterator<Item = OsString>) -> Request {
         [command] if command == "resume" => Request::Resume(location),
         [command, rest @ ..] if command == "peers" => match peer_command(rest) {
             Some(command) => Request::Peers(location, command),
+            None => Request::Usage,
+        },
+        [command, rest @ ..] if command == "shares" => match share_command(rest) {
+            Some(command) => Request::Shares(location, command),
             None => Request::Usage,
         },
         [command, id] if command == "history" => match id.to_str().and_then(|id| id.parse().ok()) {
@@ -488,6 +513,22 @@ fn peer_command(args: &[OsString]) -> Option<PeerCommand> {
         ["confirm", _] => Some(PeerCommand::Confirm(device(&args[1])?)),
         ["cancel", _] => Some(PeerCommand::Cancel(device(&args[1])?)),
         ["revoke", _] => Some(PeerCommand::Revoke(device(&args[1])?)),
+        ["shares", _] => Some(PeerCommand::Shares(device(&args[1])?)),
+        _ => None,
+    }
+}
+
+fn share_command(args: &[OsString]) -> Option<ShareCommand> {
+    match args {
+        [] => Some(ShareCommand::List),
+        [command, device, root, name] if command == "add" => Some(ShareCommand::Add {
+            device: device.to_str()?.parse().ok()?,
+            root: root.as_bytes().to_vec(),
+            name: name.to_str()?.to_owned(),
+        }),
+        [command, id] if command == "remove" => {
+            Some(ShareCommand::Remove(id.to_str()?.parse().ok()?))
+        }
         _ => None,
     }
 }
@@ -713,8 +754,33 @@ async fn peers(
         PeerCommand::Confirm(device) => foldover_client::confirm_pairing(location, device).await?,
         PeerCommand::Cancel(device) => foldover_client::cancel_pairing(location, device).await?,
         PeerCommand::Revoke(device) => foldover_client::revoke_device(location, device).await?,
+        PeerCommand::Shares(device) => {
+            let offered = foldover_client::peer_shares(location, device).await?;
+            println!("{}", serde_json::to_string(&offered)?);
+            return Ok(());
+        }
     };
     print_peers(&status)
+}
+
+async fn shares(
+    location: &SocketLocation,
+    command: ShareCommand,
+) -> Result<(), foldover_client::Error> {
+    let listed = match command {
+        ShareCommand::List => foldover_client::shares(location).await?,
+        ShareCommand::Add { device, root, name } => {
+            let shared = foldover_client::add_share(location, device, &root, &name).await?;
+            println!("{}", serde_json::to_string(&shared)?);
+            return Ok(());
+        }
+        ShareCommand::Remove(id) => foldover_client::remove_share(location, id).await?,
+    };
+    // JSON lines keep raw root bytes and escape control characters.
+    for share in &listed.shares {
+        println!("{}", serde_json::to_string(share)?);
+    }
+    Ok(())
 }
 
 fn print_peers(status: &PeerStatus) -> Result<(), foldover_client::Error> {
@@ -771,6 +837,40 @@ mod tests {
     #[test]
     fn version_flag_selects_version() {
         assert!(matches!(req(&["--version"]), Request::Version));
+    }
+
+    #[test]
+    fn share_commands_name_a_device_folder_and_name() {
+        let device = "ab".repeat(32);
+        let share = "cd".repeat(16);
+        assert!(matches!(
+            req(&["shares"]),
+            Request::Shares(_, ShareCommand::List)
+        ));
+        let Request::Shares(_, ShareCommand::Add { root, name, .. }) =
+            req(&["shares", "add", &device, "/Users/a/Photos", "Photos"])
+        else {
+            panic!("not a share");
+        };
+        assert_eq!(
+            (root.as_slice(), name.as_str()),
+            (&b"/Users/a/Photos"[..], "Photos")
+        );
+        assert!(matches!(
+            req(&["shares", "remove", &share]),
+            Request::Shares(_, ShareCommand::Remove(_))
+        ));
+        assert!(matches!(
+            req(&["peers", "shares", &device]),
+            Request::Peers(_, PeerCommand::Shares(_))
+        ));
+        for args in [
+            &["shares", "add", "abc", "/x", "X"][..],
+            &["shares", "remove", "abc"],
+            &["shares", "add", &device, "/x"],
+        ] {
+            assert!(matches!(req(args), Request::Usage), "{args:?}");
+        }
     }
 
     #[test]

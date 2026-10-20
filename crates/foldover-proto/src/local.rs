@@ -24,6 +24,12 @@ pub use peer::{
     PeerNearbyRecord, PeerPair, PeerPairingOpen, PeerPendingRecord, PeerStatus,
 };
 
+mod share;
+pub use share::{
+    PEER_SHARES, PeerShareList, PeerShareRecord, SHARE_ADD, SHARE_LIST, SHARE_REMOVE, ShareAdd,
+    ShareKey, ShareList, ShareRecord,
+};
+
 mod sync;
 pub use sync::{
     ConflictKeep, SYNC_CANCEL, SYNC_ITEM_LIMIT, SYNC_ITEMS, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN,
@@ -39,7 +45,7 @@ pub use pair::{
 };
 
 pub const JSON_RPC_VERSION: &str = "2.0";
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 pub const SESSION_HELLO: &str = "session.hello";
 pub const DAEMON_STATUS: &str = "daemon.status";
 pub const PARSE_ERROR: i32 = -32700;
