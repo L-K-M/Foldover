@@ -23,10 +23,20 @@ struct SetupView: View {
                     }
                 }
                 .accessibilityElement(children: .combine)
+                // The icon shows where the step stands; VoiceOver says it.
+                .accessibilityValue(progressText(step.progress))
             }
         }
         .padding(32)
         .frame(maxWidth: 560, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func progressText(_ progress: SetupProgress) -> Text {
+        switch progress {
+        case .done: Text("Done")
+        case .current: Text("Next step")
+        case .upcoming: Text("Not yet")
+        }
     }
 
     private func symbol(_ progress: SetupProgress) -> String {
