@@ -223,7 +223,9 @@ impl MemoryEndpoint {
         self.folder().quirks.capacity = capacity;
     }
 
-    /// Write a file as a person would, creating its folders.
+    /// Write a file as a person would, creating its folders. Writing to a
+    /// file that exists under another spelling the folder takes for the
+    /// same name opens that file, which keeps its name.
     pub fn put_file(&self, path: &[u8], data: &[u8]) -> io::Result<()> {
         let mut folder = self.folder();
         folder.tick();
@@ -232,14 +234,19 @@ impl MemoryEndpoint {
             folder.create_parents(parent)?;
         }
         let modified = folder.rounded(folder.clock);
-        folder.put(
-            path,
-            Node::File {
-                data: Arc::new(data.to_vec()),
-                mode: DEFAULT_FILE_MODE,
-                modified,
-            },
-        )
+        let node = Node::File {
+            data: Arc::new(data.to_vec()),
+            mode: DEFAULT_FILE_MODE,
+            modified,
+        };
+        let key = folder.key(path);
+        if let Some(stored) = folder.entries.get_mut(&key)
+            && matches!(stored.node, Node::File { .. })
+        {
+            stored.node = node;
+            return Ok(());
+        }
+        folder.put(path, node)
     }
 
     /// Make a symbolic link as a person would, creating its folders.

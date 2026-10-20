@@ -58,9 +58,11 @@ on. Each simulated folder draws its file system:
 - A third invariant: right after a finished run, another one writes
   nothing, so no quirk feeds a copy loop.
 - Each history draws its mode: Sync, or Mirror or Backup from either
-  side. One-way runs must never write their source, a Mirror's target
-  ends equal to its source, and a Backup's target holds every source
-  file (it keeps its own edits and extras).
+  side. One-way runs must never write their source. Outside reported
+  conflicts, a Mirror's target ends equal to its source, and a Backup's
+  target holds every source file, with the source's content where the
+  source changed since the last finished run, and loses nothing it held.
+  One-way modes run on in-memory folders only.
 - About 700 cases a second in release: CI runs 64, the nightly job
   100,000 (`FOLDOVER_MEMORY_SIMULATION_CASES`).
 

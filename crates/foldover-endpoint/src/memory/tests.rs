@@ -63,9 +63,9 @@ fn a_case_insensitive_folder_keeps_one_file_under_its_first_name() {
     });
     folder.put_file(b"Docs/Report.txt", b"one").unwrap();
     folder.put_file(b"docs/report.txt", b"two").unwrap();
-    // The folder kept its name; the file took the newer one.
-    assert_eq!(names(&folder), ["Docs/report.txt"]);
-    assert_eq!(folder.user_files()[b"Docs/report.txt".as_slice()], b"two");
+    // Writing opened the file there: both kept their names.
+    assert_eq!(names(&folder), ["Docs/Report.txt"]);
+    assert_eq!(folder.user_files()[b"Docs/Report.txt".as_slice()], b"two");
 }
 
 #[test]

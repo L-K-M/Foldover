@@ -248,6 +248,9 @@ type Folded = BTreeMap<Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>>;
 struct Simulation {
     pair: Fixture,
     mode: SyncMode,
+    /// A Backup's source files after the last finished run, by folded
+    /// name: what the target was last brought up to.
+    backed_up: BTreeMap<Vec<u8>, Vec<u8>>,
     paths: &'static [&'static str],
     /// How the pair compares names: as its stricter folder does.
     names: NameMatching,
@@ -261,6 +264,7 @@ impl Simulation {
         Self {
             pair: fixture(SyncMode::Sync),
             mode: SyncMode::Sync,
+            backed_up: BTreeMap::new(),
             paths: DISK_PATHS,
             names: NameMatching::EXACT,
             writes: 0,
@@ -279,6 +283,7 @@ impl Simulation {
         Self {
             pair,
             mode,
+            backed_up: BTreeMap::new(),
             paths: QUIRK_PATHS,
             names: left.names.either(right.names),
             writes: 0,
@@ -474,9 +479,12 @@ impl Simulation {
     }
 
     /// Both folders match except where the run reported a conflict, with
-    /// names compared as the folders compare them; a Backup's target only
-    /// holds every source file, as it keeps its own edits and extras.
-    fn check_converged(&self, report: &RunReport) {
+    /// names compared as the folders compare them. A Backup's target holds
+    /// every source file, with the source's content where the source
+    /// changed since the last finished run, and loses nothing it held
+    /// before this round's runs (`before`): it keeps its own edits and
+    /// extras.
+    fn check_converged(&mut self, report: &RunReport, before: &[BTreeMap<Vec<u8>, Vec<u8>>; 2]) {
         let conflicted: Vec<Vec<u8>> = report
             .conflicts()
             .iter()
@@ -500,16 +508,54 @@ impl Simulation {
         };
         let (left, right) = (by_key(Folder::Left), by_key(Folder::Right));
         if let SyncMode::Backup { source } = self.mode {
-            let (source, target) = match source {
-                Side::Left => (&left, &right),
-                Side::Right => (&right, &left),
+            let (source, target, target_before) = match source {
+                Side::Left => (&left, &right, &before[1]),
+                Side::Right => (&right, &left, &before[0]),
+            };
+            // A byte-exact target may hold several spellings of a name the
+            // source folds together; any of them may be the copy.
+            let copies = |key: &[u8]| -> Vec<Vec<u8>> {
+                target
+                    .get(key)
+                    .map(|copies| copies.iter().map(|(_, content)| content.clone()).collect())
+                    .unwrap_or_default()
             };
             for key in source.keys().filter(|key| !affected(key)) {
+                let copied = copies(key);
                 assert!(
-                    target.contains_key(key),
+                    !copied.is_empty(),
                     "{} is missing from the backup",
                     String::from_utf8_lossy(key)
                 );
+                let current = source[key].first().map(|(_, content)| content.clone());
+                if let Some(current) = current
+                    && self.backed_up.get(key) != Some(&current)
+                {
+                    assert!(
+                        copied.contains(&current),
+                        "{} changed in the source but not in the backup",
+                        String::from_utf8_lossy(key)
+                    );
+                }
+            }
+            for (path, _) in target_before {
+                let key = folded(path, self.names);
+                assert!(
+                    affected(&key) || target.contains_key(&key),
+                    "the backup lost {}",
+                    String::from_utf8_lossy(path)
+                );
+            }
+            // What the run brought the target up to. A name in conflict, or
+            // spelled several ways in the source, was not brought up, and
+            // one the source lost keeps its last content, as the base does:
+            // it comes back unchanged if the source gets it back.
+            for (key, copies) in source {
+                if let [(_, content)] = copies.as_slice()
+                    && !affected(key)
+                {
+                    self.backed_up.insert(key.clone(), content.clone());
+                }
             }
             return;
         }
@@ -586,7 +632,7 @@ impl Simulation {
             Ended::Finished(report)
                 if report.completion() == Completion::Finished && report.failures().is_empty() =>
             {
-                self.check_converged(&report);
+                self.check_converged(&report, &before);
                 // What interrupted writes left is archived by now.
                 for folder in [Folder::Left, Folder::Right] {
                     if let Some(memory) = self.memory(folder) {
