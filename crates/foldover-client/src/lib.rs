@@ -4,6 +4,7 @@
 //! foldover-ipc. See PLAN.md §4.4.
 
 pub use foldover_ipc::{Error, SocketLocation};
+pub use foldover_proto::local::NetworkServer;
 pub use foldover_proto::local::PairWarning;
 use foldover_proto::local::{
     ARCHIVE_ITEMS, ARCHIVE_PUT_BACK, ARCHIVE_PUT_BACK_ALL, ARCHIVE_RUNS, ArchiveItemQuery,
@@ -27,6 +28,7 @@ use foldover_proto::local::{
     SYNC_UNDO, SyncItemQuery, SyncKey, SyncResolve, SyncRun,
 };
 use foldover_proto::local::{DAEMON_STATUS, Hello, PROTOCOL_VERSION, Request, SESSION_HELLO};
+use foldover_proto::local::{NETWORK_SERVERS, NetworkServers};
 use foldover_proto::local::{
     PAIR_CHECK, PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_UPDATE, PairInput, PairKey,
     PairList, PairRecord, PairUpdate, PairWarnings,
@@ -420,6 +422,14 @@ pub async fn remove_pair(
         ));
     }
     Ok(removed)
+}
+
+/// SMB file servers seen on the local network (PLAN.md §3.8); waits
+/// about two seconds while the agent browses.
+pub async fn network_servers(location: &SocketLocation) -> Result<Vec<NetworkServer>, Error> {
+    let listed: NetworkServers =
+        serde_json::from_value(call(location, NETWORK_SERVERS, None).await?)?;
+    Ok(listed.servers)
 }
 
 /// This Mac's device, its pairing window and the Macs paired with it;

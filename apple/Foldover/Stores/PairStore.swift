@@ -112,12 +112,24 @@ struct PairReadinessWarning: Equatable, Sendable {
     let kind: Kind
 }
 
+/// An SMB file server seen on the local network (PLAN.md §3.8).
+struct NearbyServer: Equatable, Sendable, Identifiable {
+    let name: String
+    /// Where SMB connects, e.g. "nas.local".
+    let host: String
+    let port: UInt16
+
+    var id: String { "\(host):\(port)" }
+}
+
 protocol PairClient: Sendable {
     func page(after: String?) async throws -> PairCatalogPage
     func create(_ settings: PairSettings) async throws -> SyncPair
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair
     func remove(_ pair: SyncPair) async throws -> SyncPair
     func check(_ settings: PairSettings) async throws -> [PairReadinessWarning]
+    /// Waits about two seconds while the agent browses the network.
+    func servers() async throws -> [NearbyServer]
 }
 
 // Keep generated async values inside one actor; only native Sendable records leave it.
@@ -143,6 +155,12 @@ private actor CorePairClient: PairClient {
 
     func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] {
         try await FoldoverCore.checkPair(configuration: configuration(settings)).map(warning)
+    }
+
+    func servers() async throws -> [NearbyServer] {
+        try await FoldoverCore.nearbyFileServers().map {
+            NearbyServer(name: $0.name, host: $0.host, port: $0.port)
+        }
     }
 
     private func warning(_ warning: ReadinessWarning) -> PairReadinessWarning {
@@ -333,6 +351,12 @@ final class PairStore {
     /// (PLAN.md §3.6); warnings never block saving.
     func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] {
         try await client.check(settings)
+    }
+
+    /// SMB file servers seen on the local network (PLAN.md §3.8); waits
+    /// about two seconds while the agent browses.
+    func nearbyServers() async throws -> [NearbyServer] {
+        try await client.servers()
     }
 
     func save(_ settings: PairSettings, editing: SyncPair?) async throws -> SyncPair {

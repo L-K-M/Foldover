@@ -16,15 +16,17 @@ private actor PairFixtureClient: PairClient {
     private let catalog: [SyncPair]
     private let outcome: SaveOutcome
     private let warnings: [PairReadinessWarning]
+    private let servers: [NearbyServer]
     private(set) var updatedRevision: UInt64?
     private(set) var savedSettings: PairSettings?
     private(set) var removedRevision: UInt64?
 
     init(catalog: [SyncPair] = [], outcome: SaveOutcome = .succeeds,
-         warnings: [PairReadinessWarning] = []) {
+         warnings: [PairReadinessWarning] = [], servers: [NearbyServer] = []) {
         self.catalog = catalog
         self.outcome = outcome
         self.warnings = warnings
+        self.servers = servers
     }
 
     func page(after: String?) async throws -> PairCatalogPage {
@@ -52,6 +54,8 @@ private actor PairFixtureClient: PairClient {
     }
 
     func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { warnings }
+
+    func servers() async throws -> [NearbyServer] { servers }
 }
 
 @MainActor
@@ -97,6 +101,7 @@ private actor DeferredPairClient: PairClient {
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { pair }
     func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
     func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { [] }
+    func servers() async throws -> [NearbyServer] { [] }
 }
 
 @MainActor
@@ -123,6 +128,7 @@ private actor FailingPairPageClient: PairClient {
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func remove(_ pair: SyncPair) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { throw PairFixtureError.changedElsewhere }
+    func servers() async throws -> [NearbyServer] { throw PairFixtureError.changedElsewhere }
 }
 
 @MainActor
@@ -464,6 +470,7 @@ private actor WarningOnAttributesClient: PairClient {
     func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] {
         settings.options.syncExtendedAttributes ? [warning] : []
     }
+    func servers() async throws -> [NearbyServer] { [] }
 }
 
 @MainActor
@@ -480,6 +487,32 @@ func aFailedReadinessCheckKeepsTheLastAnswer() async {
     failing.chooseFolder(.success([URL(fileURLWithPath: "/b")]), side: .right)
     await failing.awaitReadinessCheck()
     #expect(failing.readinessWarnings.isEmpty)
+    #expect(failing.errorMessage == nil)
+}
+
+@MainActor
+@Test
+func pairEditorListsServersFoundNearbyAndBuildsTheirConnectURLs() async {
+    let nas = NearbyServer(name: "NAS", host: "nas.local", port: 445)
+    let old = NearbyServer(name: "Old", host: "old.local", port: 139)
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient(servers: [nas, old])))
+    await editor.awaitNearbyServers()
+    #expect(editor.nearbyServers == [nas, old])
+    #expect(editor.serverURL(nas)?.absoluteString == "smb://nas.local")
+    #expect(editor.serverURL(old)?.absoluteString == "smb://old.local:139")
+}
+
+@MainActor
+@Test
+func aFailedServerBrowseKeepsTheLastAnswer() async {
+    let nas = NearbyServer(name: "NAS", host: "nas.local", port: 445)
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient(servers: [nas])))
+    await editor.awaitNearbyServers()
+    #expect(editor.nearbyServers == [nas])
+
+    let failing = PairEditorViewModel(store: PairStore(client: FailingPairPageClient()))
+    await failing.awaitNearbyServers()
+    #expect(failing.nearbyServers.isEmpty)
     #expect(failing.errorMessage == nil)
 }
 

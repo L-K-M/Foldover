@@ -49,6 +49,7 @@ pub use endpoint::{Endpoint, ObserveStep, Reach};
 pub use foldover_os::{CloudProvider, cloud_provider, current_cloud_provider};
 
 mod link;
+pub use foldover_net::discovery::{FileServer, file_servers};
 pub use link::{
     Answer, Decision, LinkError, NearbyMac, NotRecorded, PeerHost, PeerLink, PendingPairing,
     Presence, WatchHandle,
