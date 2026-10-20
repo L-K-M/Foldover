@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::io;
 
-use foldover_fs::NativeMetadata;
+use foldover_fs::{NativeMetadata, PARTIAL_MIN_BYTES, Resume};
 use foldover_net::sftp::{Attributes, FileKind};
 use foldover_proto::peer::IncomingKind;
 use foldover_types::{EntryContent, EntryKind, EntryVersion, ScanControl, SyncPath};
@@ -57,22 +57,24 @@ impl Source<'_> {
         }
     }
 
-    /// Push the file's data; a failure carries the endpoint's error out
-    /// through `error`, since the sink only speaks `io::Error`.
+    /// Push the file's data from byte `from`; a failure carries the
+    /// endpoint's error out through `error`, since the sink only speaks
+    /// `io::Error`. Another Mac was asked for that offset when the
+    /// source was opened.
     fn push(
         &self,
         path: &SyncPath,
+        from: u64,
         control: &mut impl FnMut() -> ScanControl,
         sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
         error: &RefCell<Option<ApplyError>>,
     ) -> io::Result<()> {
         let pushed = match self {
-            Self::Local(endpoint, entry) => endpoint
-                .read_entry(entry, control, &mut |chunk| sink(chunk))
-                .map(|_| ()),
+            Self::Local(endpoint, entry) => {
+                endpoint.read_entry_from(entry, from, control, &mut |chunk| sink(chunk))
+            }
             Self::Sftp(endpoint, attributes) => endpoint
-                .read_file(path, attributes, control, sink)
-                .map(|_| ())
+                .read_file_from(path, attributes, from, control, sink)
                 .map_err(|source| match source {
                     ScanError::Changed(_) => ApplyError::SourceChanged(path.clone()),
                     source => ApplyError::Scan(source),
@@ -99,7 +101,10 @@ pub(crate) fn copy(
     if let Endpoint::Sftp(_) = to {
         super::check_durability(run.options().durability(), path)?;
     }
-    let source = source(from, path, planned, run, control)?;
+    // PLAN.md §4.9: a large file continues after what a broken-off copy
+    // kept at the destination.
+    let kept = kept(to, planned);
+    let source = source(from, path, planned, run, control, kept)?;
     let kind = planned.version().kind();
     let expected = planned.version().content();
     match to {
@@ -122,19 +127,26 @@ pub(crate) fn copy(
                     local.receive_link(path, destination.as_ref(), &target, run, control)
                 }
                 EntryKind::File => {
+                    let EntryContent::File(content) = expected else {
+                        return Err(ApplyError::Unsupported(path.clone()));
+                    };
                     let native = source.native(run)?;
                     let failure = RefCell::new(None);
                     let carried = Carried {
                         metadata: source.metadata(),
                         native: native.as_ref(),
                     };
+                    let resume = Resume {
+                        content,
+                        from: kept,
+                    };
                     let received = local.receive_file(
                         path,
                         destination.as_ref(),
                         carried,
-                        expected,
+                        resume,
                         run,
-                        |sink| source.push(path, control, sink, &failure),
+                        |sink| source.push(path, kept, control, sink, &failure),
                     );
                     received.map_err(|error| failure.into_inner().unwrap_or(error))
                 }
@@ -158,6 +170,7 @@ pub(crate) fn copy(
                 EntryKind::File => match expected {
                     EntryContent::File(digest) => IncomingKind::File {
                         content: digest.as_bytes().to_vec(),
+                        from: kept,
                     },
                     _ => return Err(ApplyError::Unsupported(path.clone())),
                 },
@@ -173,7 +186,7 @@ pub(crate) fn copy(
                 native: native.as_ref(),
             };
             let received = remote.receive(path, current, kind, carried, run, |sink| {
-                source.push(path, control, sink, &failure)
+                source.push(path, kept, control, sink, &failure)
             });
             received.map_err(|error| failure.into_inner().unwrap_or(error))
         }
@@ -200,7 +213,7 @@ pub(crate) fn update_metadata(
     let (metadata, native) = match from {
         Endpoint::Peer(remote) => remote.source_metadata(path, planned, run)?,
         _ => {
-            let source = source(from, path, planned, run, control)?;
+            let source = source(from, path, planned, run, control, 0)?;
             let native = match to {
                 Endpoint::Sftp(_) => None,
                 _ => source.native(run)?,
@@ -239,16 +252,49 @@ pub(crate) fn update_metadata(
     }
 }
 
+/// How much of `planned` a broken-off copy kept at `to`. Resuming only
+/// saves time, so a failure to find out starts the copy over.
+fn kept(to: &Endpoint, planned: &ObservedEntry) -> u64 {
+    let EntryContent::File(content) = planned.version().content() else {
+        return 0;
+    };
+    if planned.size() < PARTIAL_MIN_BYTES {
+        return 0;
+    }
+    let kept = match to {
+        Endpoint::Local(local) => local.partial_length(&content),
+        Endpoint::Peer(remote) => remote.partial_length(&content),
+        // Pipelined SFTP writes may land out of order, leaving holes no
+        // digest there would catch; SFTP copies start over.
+        Endpoint::Sftp(_) => Ok(0),
+    };
+    kept.unwrap_or(0).min(planned.size())
+}
+
+/// `from`'s entry, a peer's read starting at byte `kept`.
 fn source<'a>(
     from: &'a Endpoint,
     path: &SyncPath,
     planned: &ObservedEntry,
     run: &RunScope,
     control: &mut impl FnMut() -> ScanControl,
+    kept: u64,
 ) -> Result<Source<'a>, ApplyError> {
     Ok(match from {
         Endpoint::Local(local) => {
             Source::Local(local, local.source_entry(path, planned, run, control)?)
+        }
+        // Every destination checks a file's digest as it lands, so
+        // hashing it here first would only download it twice; the read
+        // checks its stat stays put.
+        Endpoint::Sftp(remote) if planned.version().kind() == EntryKind::File => {
+            let attributes = remote
+                .attributes(path)?
+                .filter(|attributes| {
+                    attributes.kind() == FileKind::File && attributes.size == Some(planned.size())
+                })
+                .ok_or_else(|| ApplyError::SourceChanged(path.clone()))?;
+            Source::Sftp(remote, attributes)
         }
         Endpoint::Sftp(remote) => Source::Sftp(
             remote,
@@ -261,7 +307,7 @@ fn source<'a>(
                     error => error,
                 })?,
         ),
-        Endpoint::Peer(remote) => Source::Peer(remote.read(path, planned, run)?),
+        Endpoint::Peer(remote) => Source::Peer(remote.read(path, planned, run, kept)?),
     })
 }
 
@@ -341,6 +387,7 @@ fn send(
                     |sink| {
                         source.push(
                             path,
+                            0,
                             control,
                             &mut |chunk| {
                                 digest.borrow_mut().update(chunk);

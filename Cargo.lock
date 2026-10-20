@@ -678,6 +678,7 @@ dependencies = [
 name = "foldover-service"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "foldover-engine",
  "foldover-proto",
  "foldover-types",

@@ -18,6 +18,7 @@ serde_json = "1"
 tokio = { version = "1.53.2", features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
+blake3 = "1.8.2"
 rustix = { version = "1.1.5", features = ["fs"] }
 tokio = { version = "1.53.2", features = ["macros", "rt", "time"] }
 tempfile = "3"

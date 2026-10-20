@@ -24,8 +24,8 @@ use foldover_proto::peer::{
     ScanSettings,
 };
 use foldover_types::{
-    CaseMatching, Durability, EndpointId, EntryVersion, MetadataPolicy, NameMatching, PairOptions,
-    PeerRoot, ScanControl, SyncPath, UnicodeMatching,
+    CaseMatching, Digest, Durability, EndpointId, EntryVersion, MetadataPolicy, NameMatching,
+    PairOptions, PeerRoot, ScanControl, SyncPath, UnicodeMatching,
 };
 
 use crate::lease::LockFile;
@@ -247,17 +247,20 @@ impl PeerEndpoint {
         done(self.reply(lease_op(LockFile::Lock, LeaseAction::Promote))?)
     }
 
-    /// Prove `path` still holds `planned` there, and start reading it.
+    /// Prove `path` still holds `planned` there, and start reading it
+    /// from byte `from`.
     pub(crate) fn read(
         &self,
         path: &SyncPath,
         planned: &ObservedEntry,
         run: &RunScope,
+        from: u64,
     ) -> Result<PeerSource, ApplyError> {
         let mut exchange = self.ask(FolderOp::Read {
             path: path.as_bytes().to_vec(),
             entry: wire::entry_bytes(planned),
             run: wire::run_wire(run),
+            from,
         })?;
         let (metadata, native, target) = reading(exchange.reply().map_err(unreachable)?)?;
         Ok(PeerSource {
@@ -282,6 +285,17 @@ impl PeerEndpoint {
         });
         let (metadata, native, _) = reading(reply_or_source_changed(reply, path)?)?;
         Ok((metadata, native))
+    }
+
+    /// How much of the file with `content` a broken-off copy to this
+    /// folder kept.
+    pub(crate) fn partial_length(&self, content: &Digest) -> Result<u64, ApplyError> {
+        match self.reply(FolderOp::Partial {
+            content: content.as_bytes().to_vec(),
+        })? {
+            PeerReply::Partial { length } => Ok(length),
+            _ => Err(unexpected().into()),
+        }
     }
 
     /// Make `path` hold an entry of `kind`; `send` pushes a file's data.
