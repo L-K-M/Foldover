@@ -503,6 +503,11 @@ impl Node {
         )
     }
 
+    /// Refuse new connections; established ones carry on.
+    pub fn stop_accepting(&self) {
+        self.endpoint.set_server_config(None);
+    }
+
     pub fn close(&self) {
         self.endpoint.close(VarInt::from_u32(0), b"closed");
     }
@@ -613,6 +618,14 @@ impl PeerSendStream {
 
     pub fn finish(&mut self) -> Result<(), PeerError> {
         self.stream.finish().map_err(connection_error)
+    }
+
+    /// Finish, then wait until the other Mac has received everything, so
+    /// closing the connection right after cannot discard the last message.
+    pub async fn finish_delivered(&mut self) -> Result<(), PeerError> {
+        self.finish()?;
+        self.stream.stopped().await.map_err(connection_error)?;
+        Ok(())
     }
 }
 

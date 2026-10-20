@@ -6,11 +6,13 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
+mod device;
 mod history;
 mod hold;
 mod journal;
 mod mounts;
 mod pause;
+pub use device::DeviceRow;
 pub use history::HistoryRow;
 pub use journal::{JournalChange, JournalRow};
 pub use mounts::MountRow;
@@ -27,9 +29,9 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 15] = [
+const MIGRATIONS: [&str; 16] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
-    SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, SCHEMA_V15,
+    SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, SCHEMA_V15, SCHEMA_V16,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -212,6 +214,15 @@ INSERT INTO run_history_next SELECT * FROM run_history;
 DROP TABLE run_history;
 ALTER TABLE run_history_next RENAME TO run_history;
 UPDATE state_meta SET minimum_reader=max(minimum_reader,15) WHERE singleton=1;
+";
+// Macs this agent paired with (ADR 0031); the ID is the device's
+// certificate fingerprint. Older agents ignore the table.
+const SCHEMA_V16: &str = "
+CREATE TABLE device (
+    id BLOB PRIMARY KEY NOT NULL CHECK(length(id) = 32),
+    name TEXT NOT NULL CHECK(length(trim(name)) > 0 AND instr(name, char(0)) = 0),
+    paired_ms INTEGER NOT NULL CHECK(paired_ms >= 0)
+) STRICT, WITHOUT ROWID;
 ";
 
 #[derive(Debug, thiserror::Error)]

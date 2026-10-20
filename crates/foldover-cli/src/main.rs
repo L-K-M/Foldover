@@ -1,7 +1,7 @@
 //! `foldover-cli` — client layer. The `foldover` CLI (`pairs`, `sync`,
 //! `status`). Depends on foldover-client. See PLAN.md §4.4.
 
-use foldover_client::SyncStatus;
+use foldover_client::{DeviceId, PeerStatus, SyncStatus};
 use foldover_client::{
     Durability, Filters, MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions, PairRoot,
     Propagation, ReviewToken, Schedule, ScheduleInterval, Side, SocketLocation, SyncMode,
@@ -9,6 +9,7 @@ use foldover_client::{
 use foldover_proto::local::PairRecord;
 use std::env;
 use std::ffi::OsString;
+use std::net::SocketAddr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -39,7 +40,23 @@ enum Request {
     /// Pause automatic syncs for minutes, or until resumed.
     Pause(SocketLocation, Option<u32>),
     Resume(SocketLocation),
+    Peers(SocketLocation, PeerCommand),
     Usage,
+}
+
+/// Pairing with other Macs (ADR 0031).
+enum PeerCommand {
+    Status,
+    /// Let unpaired Macs reach this one for minutes (10 when absent).
+    Open(Option<u32>),
+    Close,
+    Pair {
+        device: DeviceId,
+        address: SocketAddr,
+    },
+    Confirm(DeviceId),
+    Cancel(DeviceId),
+    Revoke(DeviceId),
 }
 
 enum ArchiveCommand {
@@ -190,9 +207,16 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Request::Peers(location, command) => match peers(&location, command).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("foldover: {error}");
+                ExitCode::FAILURE
+            }
+        },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\nLEFT, RIGHT: an absolute path, or sftp://[user@]host[:port]/path\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover peers [open [MINUTES] | close | pair DEVICE IP:PORT | confirm DEVICE | cancel DEVICE | revoke DEVICE] [--socket PATH]\nLEFT, RIGHT: an absolute path, or sftp://[user@]host[:port]/path\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -235,6 +259,10 @@ fn request(args: impl Iterator<Item = OsString>) -> Request {
             }
         }
         [command] if command == "resume" => Request::Resume(location),
+        [command, rest @ ..] if command == "peers" => match peer_command(rest) {
+            Some(command) => Request::Peers(location, command),
+            None => Request::Usage,
+        },
         [command, id] if command == "history" => match id.to_str().and_then(|id| id.parse().ok()) {
             Some(id) => Request::History(location, id),
             None => Request::Usage,
@@ -437,6 +465,25 @@ fn option_changes(args: &[OsString]) -> Option<OptionChanges> {
     Some(changes)
 }
 
+fn peer_command(args: &[OsString]) -> Option<PeerCommand> {
+    let device = |device: &OsString| device.to_str()?.parse().ok();
+    let words: Vec<&str> = args.iter().map(|arg| arg.to_str()).collect::<Option<_>>()?;
+    match words.as_slice() {
+        [] => Some(PeerCommand::Status),
+        ["open"] => Some(PeerCommand::Open(None)),
+        ["open", minutes] => Some(PeerCommand::Open(Some(minutes.parse().ok()?))),
+        ["close"] => Some(PeerCommand::Close),
+        ["pair", _, address] => Some(PeerCommand::Pair {
+            device: device(&args[1])?,
+            address: address.parse().ok()?,
+        }),
+        ["confirm", _] => Some(PeerCommand::Confirm(device(&args[1])?)),
+        ["cancel", _] => Some(PeerCommand::Cancel(device(&args[1])?)),
+        ["revoke", _] => Some(PeerCommand::Revoke(device(&args[1])?)),
+        _ => None,
+    }
+}
+
 fn draft(name: &OsString, left: &OsString, right: &OsString, mode: &OsString) -> Option<PairDraft> {
     let mode = match mode.to_str()? {
         "sync" => SyncMode::Sync,
@@ -637,6 +684,41 @@ async fn archive(
     Ok(())
 }
 
+async fn peers(
+    location: &SocketLocation,
+    command: PeerCommand,
+) -> Result<(), foldover_client::Error> {
+    let status = match command {
+        PeerCommand::Status => foldover_client::peer_status(location).await?,
+        PeerCommand::Open(minutes) => foldover_client::open_pairing(location, minutes).await?,
+        PeerCommand::Close => foldover_client::close_pairing(location).await?,
+        PeerCommand::Pair { device, address } => {
+            let pending = foldover_client::pair_device(location, device, address).await?;
+            println!("{}", serde_json::to_string(&pending)?);
+            eprintln!(
+                "foldover: check that {:?} shows code {:06}, then run `foldover peers confirm {device}`",
+                pending.name, pending.code
+            );
+            return Ok(());
+        }
+        PeerCommand::Confirm(device) => foldover_client::confirm_pairing(location, device).await?,
+        PeerCommand::Cancel(device) => foldover_client::cancel_pairing(location, device).await?,
+        PeerCommand::Revoke(device) => foldover_client::revoke_device(location, device).await?,
+    };
+    print_peers(&status)
+}
+
+fn print_peers(status: &PeerStatus) -> Result<(), foldover_client::Error> {
+    println!("{}", serde_json::to_string(status)?);
+    for pending in &status.pending {
+        eprintln!(
+            "foldover: {:?} wants to pair with code {:06}; compare it, then run `foldover peers confirm {}` or `foldover peers cancel {}`",
+            pending.name, pending.code, pending.device, pending.device
+        );
+    }
+    Ok(())
+}
+
 fn print_pair(pair: &PairConfig) -> Result<(), foldover_client::Error> {
     // JSON lines preserve raw path bytes and escape terminal control characters.
     println!("{}", serde_json::to_string(&PairRecord::from(pair))?);
@@ -667,6 +749,35 @@ mod tests {
     #[test]
     fn version_flag_selects_version() {
         assert!(matches!(req(&["--version"]), Request::Version));
+    }
+
+    #[test]
+    fn peer_commands_name_a_device_and_an_ip_address() {
+        let device = "ab".repeat(32);
+        assert!(matches!(
+            req(&["peers"]),
+            Request::Peers(_, PeerCommand::Status)
+        ));
+        assert!(matches!(
+            req(&["peers", "open", "15"]),
+            Request::Peers(_, PeerCommand::Open(Some(15)))
+        ));
+        assert!(matches!(
+            req(&["peers", "pair", &device, "192.168.1.5:50123"]),
+            Request::Peers(_, PeerCommand::Pair { address, .. }) if address.port() == 50123
+        ));
+        assert!(matches!(
+            req(&["peers", "confirm", &device, "--socket", "/tmp/s"]),
+            Request::Peers(SocketLocation::Path(_), PeerCommand::Confirm(_))
+        ));
+        for args in [
+            &["peers", "open", "soon"][..],
+            &["peers", "pair", &device, "studio.local"],
+            &["peers", "confirm", "abc"],
+            &["peers", "revoke"],
+        ] {
+            assert!(matches!(req(args), Request::Usage), "{args:?}");
+        }
     }
 
     #[test]

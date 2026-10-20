@@ -17,6 +17,24 @@ mod mount;
 use std::io;
 use std::path::PathBuf;
 
+/// This computer's name for other Macs, e.g. "Studio-iMac" from
+/// `Studio-iMac.local`; "Mac" when the system reports none.
+pub fn computer_name() -> String {
+    let name = rustix::system::uname()
+        .nodename()
+        .to_string_lossy()
+        .into_owned();
+    let name = name
+        .strip_suffix(".local")
+        .unwrap_or(&name)
+        .trim()
+        .to_owned();
+    if name.is_empty() {
+        return String::from("Mac");
+    }
+    name
+}
+
 /// Mount the network share at `url`, e.g. `smb://alice@nas.local/Photos`,
 /// under `/Volumes` the way Finder does, with credentials saved in the
 /// user's Keychain and never a dialog. Returns the mount points.
