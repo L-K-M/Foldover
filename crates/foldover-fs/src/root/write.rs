@@ -568,6 +568,55 @@ impl Root {
         Ok(())
     }
 
+    /// Replace a small private file atomically, creating it if absent.
+    pub fn replace_private_file(
+        &self,
+        path: &SyncPath,
+        content: &[u8],
+        durability: Durability,
+    ) -> Result<(), WriteError> {
+        let (parent, name) = self.create_parents(path, Parents::Private)?;
+        let (mut staged, mut file) = create_temporary_file(parent, PRIVATE_FILE_MODE)?;
+        file.write_all(content)?;
+        flush(&file, durability)?;
+        rustix::fs::renameat(&staged.parent, &staged.name, &staged.parent, &name)?;
+        staged.placed = true;
+        sync_directory(&staged.parent, durability)?;
+        Ok(())
+    }
+
+    /// Move a private file over another atomically; `Changed` if `from`
+    /// is gone.
+    pub fn rename_private_file(
+        &self,
+        from: &SyncPath,
+        to: &SyncPath,
+        durability: Durability,
+    ) -> Result<(), WriteError> {
+        let (from_parent, from_name) = self.parent_of(from)?;
+        let (to_parent, to_name) = self.parent_of(to)?;
+        match rustix::fs::renameat(&from_parent, &from_name, &to_parent, &to_name) {
+            Ok(()) => {}
+            Err(Errno::NOENT) => return Err(WriteError::Changed),
+            Err(error) => return Err(error.into()),
+        }
+        sync_directory(&to_parent, durability)?;
+        Ok(())
+    }
+
+    /// Remove a private file; nothing to do if it is absent.
+    pub fn remove_private_file(&self, path: &SyncPath) -> Result<(), WriteError> {
+        let (parent, name) = match self.parent_of(path) {
+            Ok(found) => found,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        match rustix::fs::unlinkat(&parent, &name, rustix::fs::AtFlags::empty()) {
+            Ok(()) | Err(Errno::NOENT) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Read a small regular file without following links; `None` if absent.
     pub fn read_private_file(&self, path: &SyncPath, limit: u64) -> io::Result<Option<Vec<u8>>> {
         let (parent, name) = match self.parent_of(path) {
