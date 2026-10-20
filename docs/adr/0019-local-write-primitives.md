@@ -33,7 +33,10 @@ archive:  name ──rename(no-replace)──▶ .foldover/archive/…/name
   to both, and macOS's FAT driver takes a swap as a plain rename over
   the destination, losing what it held (found by the device matrix, ADR
   0038). On macOS the flags are used only where the volume declares them
-  (`VOL_CAP_INT_RENAME_EXCL`, `VOL_CAP_INT_RENAME_SWAP`). A no-replace
+  (`VOL_CAP_INT_RENAME_EXCL`, `VOL_CAP_INT_RENAME_SWAP`). The same FAT
+  driver lists names decomposed and finds files by either spelling, but
+  renames only from the composed one; a rename a decomposed name missed
+  is tried again composed, on macOS only. A no-replace
   rename becomes an exclusive placeholder of the entry's kind at the
   destination, which a plain rename then replaces; the refusal holds. An
   exchange becomes PLAN.md §4.7's two steps: the old entry moves aside

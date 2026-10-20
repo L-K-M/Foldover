@@ -714,6 +714,7 @@ dependencies = [
  "rustix",
  "tempfile",
  "thiserror",
+ "unicode-normalization",
  "uuid",
 ]
 
