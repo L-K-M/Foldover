@@ -58,7 +58,7 @@ impl ChangePoll {
         mode: PollMode,
     ) -> Result<Polled, Error> {
         let draft = pair.draft();
-        let filter = Filter::new(draft.options().filters().rules().iter().map(String::as_str))?;
+        let rules = draft.options().filters().rules();
         let mut polled = Polled::NotNeeded;
         for side in [Side::Left, Side::Right] {
             let (root, folder) = match side {
@@ -76,7 +76,7 @@ impl ChangePoll {
                     endpoint
                 }
             };
-            let changed = folder.check(&endpoint, &filter)?;
+            let changed = folder.check(&endpoint, &folder_filter(rules, &endpoint)?)?;
             polled = match (polled, changed) {
                 (Polled::Changed, _) | (_, true) => Polled::Changed,
                 _ => Polled::Unchanged,
@@ -87,6 +87,15 @@ impl ChangePoll {
             (polled, _) => polled,
         })
     }
+}
+
+/// The pair's rules and the folder's own `.foldoverignore`, so what a run
+/// leaves out never counts as a change.
+fn folder_filter(rules: &[String], endpoint: &Endpoint) -> Result<Filter, Error> {
+    let ignored = endpoint.ignore_rules()?;
+    Ok(Filter::new(
+        rules.iter().chain(&ignored).map(String::as_str),
+    )?)
 }
 
 /// What one folder looked like at the last check.
