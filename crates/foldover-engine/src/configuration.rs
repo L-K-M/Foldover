@@ -3,10 +3,11 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use foldover_endpoint::{
     Endpoint, EndpointPair, Filter, InvalidFilter, LocalEndpoint, ObservedEntry, PairRootError,
-    RootRelation, ScanError,
+    PeerLink, Reach, RootRelation, ScanError,
 };
 use foldover_state::{
     Device, HistoryEntry, Journal, JournalUpdate, MountSources, PairStore, Pause, Share,
@@ -45,6 +46,8 @@ pub enum Error {
     DeviceNotPaired,
     #[error("Name the shared folder, as the other Mac will show it")]
     InvalidShareName,
+    #[error("That folder is inside, or holds, a folder already shared with that Mac")]
+    ShareOverlap,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,7 +68,8 @@ impl Error {
             Self::StaleRevision => ErrorKind::Changed,
             Self::Roots(PairRootError::Overlap(_))
             | Self::CatalogOverlap(_)
-            | Self::StateOverlap => ErrorKind::Overlap,
+            | Self::StateOverlap
+            | Self::ShareOverlap => ErrorKind::Overlap,
             Self::Filter(_) | Self::DurabilityUnsupported | Self::InvalidShareName => {
                 ErrorKind::Invalid
             }
@@ -91,6 +95,8 @@ impl From<foldover_state::Error> for Error {
 pub struct Engine {
     pairs: PairStore,
     state_root: Endpoint,
+    /// How folders on paired Macs are reached, once Mac-to-Mac is on.
+    reach: Reach,
 }
 
 impl Engine {
@@ -100,7 +106,11 @@ impl Engine {
         let state_root = Endpoint::Local(LocalEndpoint::open(Path::new(OsStr::from_bytes(
             root.as_bytes(),
         )))?);
-        Ok(Self { pairs, state_root })
+        Ok(Self {
+            pairs,
+            state_root,
+            reach: Reach::default(),
+        })
     }
 
     pub fn pairs_after(
@@ -140,6 +150,16 @@ impl Engine {
         Ok(self.pairs.update(id, revision, draft)?)
     }
 
+    /// Reach folders on paired Macs through `link`.
+    pub fn reach_peers(&mut self, link: &Arc<PeerLink>) {
+        self.reach = Reach::through(link);
+    }
+
+    /// How folders are reached, for work outside the engine lock.
+    pub fn reach(&self) -> Reach {
+        self.reach.clone()
+    }
+
     /// What a run reads from state, for work outside the engine lock.
     pub fn run_inputs(&self, id: PairId) -> Result<RunInputs, Error> {
         // Malformed cached fingerprints or versions only cost a reread.
@@ -160,7 +180,8 @@ impl Engine {
             self.pairs.identities(id)?,
             self.pairs.resolutions(id)?,
         )
-        .with_snapshots(snapshot(Side::Left)?, snapshot(Side::Right)?))
+        .with_snapshots(snapshot(Side::Left)?, snapshot(Side::Right)?)
+        .with_reach(self.reach.clone()))
     }
 
     /// Store a fresh observation of one side for the next run to reuse.
@@ -245,13 +266,40 @@ impl Engine {
         if name.is_empty() || name.contains('\0') || name.len() > MAX_PAIR_NAME_BYTES {
             return Err(Error::InvalidShareName);
         }
-        let folder = Endpoint::open(&PairRoot::Local(root.clone()))?;
+        let folder = Endpoint::open(&PairRoot::Local(root.clone()), &Reach::default())?;
         if folder.relation_to(&self.state_root)? != RootRelation::Disjoint {
             return Err(Error::StateOverlap);
+        }
+        // That Mac could otherwise pair two views of the same files.
+        for shared in self.pairs.shares_for(device)? {
+            let overlaps =
+                match Endpoint::open(&PairRoot::Local(shared.root.clone()), &Reach::default()) {
+                    Ok(other) => folder.relation_to(&other)? != RootRelation::Disjoint,
+                    // A folder that is away, as on an unplugged disk, is
+                    // judged by its path.
+                    Err(_) => paths_nest(root.as_bytes(), shared.root.as_bytes()),
+                };
+            if overlaps {
+                return Err(Error::ShareOverlap);
+            }
         }
         Ok(self
             .pairs
             .add_share(device, &root, name, std::time::SystemTime::now())?)
+    }
+
+    /// The folder this Mac shares with `device` as `share`, if it does.
+    pub fn shared_folder(
+        &self,
+        device: DeviceId,
+        share: ShareId,
+    ) -> Result<Option<LocalRoot>, Error> {
+        Ok(self
+            .pairs
+            .shares_for(device)?
+            .into_iter()
+            .find(|shared| shared.id == share)
+            .map(|shared| shared.root))
     }
 
     /// Stop sharing; whether the share existed.
@@ -353,7 +401,7 @@ impl Engine {
     }
 
     fn validate_roots(&self, draft: &PairDraft, replacing: Option<PairId>) -> Result<(), Error> {
-        let selected = EndpointPair::open(draft.left(), draft.right())?;
+        let selected = EndpointPair::open(draft.left(), draft.right(), &self.reach)?;
         for side in [Side::Left, Side::Right] {
             if selected.endpoint(side).relation_to(&self.state_root)? != RootRelation::Disjoint {
                 return Err(Error::StateOverlap);
@@ -372,12 +420,14 @@ impl Engine {
                 if Some(pair.id()) == replacing {
                     continue;
                 }
-                // Local roots are compared on disk; SFTP roots by locator, so
-                // changing the catalog never waits on a server.
+                // Local roots are compared on disk; SFTP and paired Macs'
+                // roots by locator, so changing the catalog never waits on a
+                // server or another Mac.
                 for existing in [pair.draft().left(), pair.draft().right()] {
                     let overlapping = match existing {
                         PairRoot::Local(_) => {
-                            let existing = Endpoint::open(existing).map_err(|source| {
+                            let existing =
+                                Endpoint::open(existing, &Reach::default()).map_err(|source| {
                                 Error::CatalogUnavailable {
                                     pair: pair.id(),
                                     source: PairRootError::Endpoint(source),
@@ -395,9 +445,12 @@ impl Engine {
                                 .into_iter()
                                 .any(|selected| match selected {
                                     PairRoot::Sftp(selected) => selected.overlaps(existing),
-                                    PairRoot::Local(_) => false,
+                                    PairRoot::Local(_) | PairRoot::Peer(_) => false,
                                 })
                         }
+                        PairRoot::Peer(existing) => [draft.left(), draft.right()]
+                            .into_iter()
+                            .any(|selected| matches!(selected, PairRoot::Peer(selected) if selected == existing)),
                     };
                     if overlapping {
                         return Err(Error::CatalogOverlap(pair.id()));
@@ -426,6 +479,15 @@ fn validate_options(draft: &PairDraft) -> Result<(), Error> {
 fn validate_filters(draft: &PairDraft) -> Result<(), Error> {
     Filter::new(draft.options().filters().rules().iter().map(String::as_str))?;
     Ok(())
+}
+
+/// Whether one absolute path is the other or lies below it.
+fn paths_nest(left: &[u8], right: &[u8]) -> bool {
+    let below = |path: &[u8], parent: &[u8]| {
+        path.strip_prefix(parent)
+            .is_some_and(|rest| rest.starts_with(b"/") || parent == b"/")
+    };
+    left == right || below(left, right) || below(right, left)
 }
 
 #[cfg(test)]
@@ -471,6 +533,37 @@ mod tests {
             Err(Error::StateOverlap)
         ));
         assert_eq!(engine.pairs_after(None, 10).unwrap(), vec![pair]);
+    }
+
+    /// Review: two shares for one Mac could nest, so that Mac could pair
+    /// two views of the same files with each other.
+    #[test]
+    fn folders_shared_with_one_mac_never_nest() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut engine =
+            Engine::open(&StateLocation::Directory(temporary.path().join("state"))).unwrap();
+        let [studio, mini] = [[1; 32], [2; 32]].map(DeviceId::from_bytes);
+        engine.add_device(studio, "Studio".into()).unwrap();
+        engine.add_device(mini, "Mini".into()).unwrap();
+        let home = temporary.path().join("home");
+        let photos = home.join("Photos");
+        fs::create_dir_all(photos.join("2024")).unwrap();
+        fs::create_dir(home.join("Music")).unwrap();
+        engine.add_share(studio, root(&photos), "Photos").unwrap();
+
+        for nested in [photos.join("2024"), home.clone(), photos.clone()] {
+            assert!(matches!(
+                engine.add_share(studio, root(&nested), "Nested"),
+                Err(Error::ShareOverlap)
+            ));
+        }
+        engine
+            .add_share(studio, root(&home.join("Music")), "Music")
+            .unwrap();
+        // Another Mac's shares are its own.
+        engine
+            .add_share(mini, root(&photos.join("2024")), "2024")
+            .unwrap();
     }
 
     #[test]

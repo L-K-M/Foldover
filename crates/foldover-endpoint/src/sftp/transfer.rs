@@ -120,6 +120,7 @@ pub(crate) fn copy(
                 control,
             )
         }
+        Endpoint::Peer(_) => Err(crate::PeerEndpoint::writes_pending()),
     }
 }
 
@@ -141,6 +142,7 @@ pub(crate) fn update_metadata(
     }
     let metadata = source(from, path, planned, run, control)?.metadata();
     match to {
+        Endpoint::Peer(_) => Err(crate::PeerEndpoint::writes_pending()),
         Endpoint::Local(local) => local.receive_metadata(path, current, metadata, run, control),
         Endpoint::Sftp(remote) => {
             let attributes = receiving(remote, path, Expected::Present(current), run, control)?
@@ -180,6 +182,7 @@ fn source<'a>(
                     error => error,
                 })?,
         ),
+        Endpoint::Peer(_) => return Err(crate::PeerEndpoint::writes_pending()),
     })
 }
 

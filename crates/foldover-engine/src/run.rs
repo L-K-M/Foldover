@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime};
 
 use foldover_endpoint::{
     ApplyError, Endpoint, EndpointPair, Expected, Filter, InvalidFilter, Observation, ObserveStep,
-    ObservedEntry, PairRootError, RunScope, ScanError, access_denied,
+    ObservedEntry, PairRootError, Reach, RunScope, ScanError, access_denied,
 };
 use foldover_state::{
     BaseUpdate, JournalAction, JournalEntry, MountSources, RecordedIdentities, SnapshotEntry,
@@ -425,6 +425,7 @@ pub struct RunInputs {
     skips: BTreeMap<SyncPath, Skip>,
     left_snapshot: BTreeMap<SyncPath, ObservedEntry>,
     right_snapshot: BTreeMap<SyncPath, ObservedEntry>,
+    reach: Reach,
 }
 
 impl RunInputs {
@@ -442,7 +443,17 @@ impl RunInputs {
             skips: BTreeMap::new(),
             left_snapshot: BTreeMap::new(),
             right_snapshot: BTreeMap::new(),
+            reach: Reach::default(),
         }
+    }
+
+    /// How folders on paired Macs are reached.
+    pub fn with_reach(self, reach: Reach) -> Self {
+        Self { reach, ..self }
+    }
+
+    pub fn reach(&self) -> &Reach {
+        &self.reach
     }
 
     /// Changes a person chose to leave alone in this run only.
@@ -498,7 +509,7 @@ impl PairRun {
         progress: &dyn RunProgress,
     ) -> Result<Self, RunError> {
         let draft = inputs.pair.draft();
-        let endpoints = EndpointPair::open(draft.left(), draft.right())?;
+        let endpoints = EndpointPair::open(draft.left(), draft.right(), &inputs.reach)?;
         Self::prepare_on(inputs, endpoints, control, progress)
     }
 
@@ -517,6 +528,7 @@ impl PairRun {
             skips,
             left_snapshot,
             right_snapshot,
+            reach: _,
         } = inputs;
         let draft = pair.draft();
         for side in [Side::Left, Side::Right] {

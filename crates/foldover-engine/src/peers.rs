@@ -2,8 +2,8 @@
 //! engine records the devices both people confirmed.
 
 pub use foldover_endpoint::{
-    Decision, LinkError, NearbyMac, NotRecorded, PeerHost, PeerIdentity, PeerLink, PendingPairing,
-    Presence,
+    Answer, Decision, FolderCache, LinkError, NearbyMac, NotRecorded, PeerHost, PeerIdentity,
+    PeerLink, PendingPairing, Presence, serve_folder,
 };
 
 /// This Mac's identity for other Macs: the one in the Keychain on macOS,

@@ -23,6 +23,7 @@ pub use archive::{
 pub use configuration::{Engine, Error, ErrorKind};
 pub use conflict::{KeepBothError, keep_both};
 pub use foldover_endpoint::ObserveStep;
+pub use foldover_endpoint::Reach;
 pub use foldover_state::RecordedIdentities;
 pub use foldover_state::StateLocation;
 pub use foldover_state::{
@@ -30,8 +31,8 @@ pub use foldover_state::{
 };
 pub use gates::{DeletionCounts, DeletionReview, InvalidDeletionCounts, RunContext};
 pub use peers::{
-    Decision, LinkError, NearbyMac, NotRecorded, PeerHost, PeerIdentity, PeerLink, PendingPairing,
-    Presence, computer_name, peer_identity,
+    Answer, Decision, FolderCache, LinkError, NearbyMac, NotRecorded, PeerHost, PeerIdentity,
+    PeerLink, PendingPairing, Presence, computer_name, peer_identity, serve_folder,
 };
 pub use plan::{
     CandidateDecision, CandidatePlan, Choices, PlanError, PlanRow, TreeRole, plan_candidates,

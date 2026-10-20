@@ -1302,6 +1302,120 @@ mod tests {
         assert!(service.peers.get().is_none());
     }
 
+    /// Two agents already paired with each other over loopback, as
+    /// (A, B, A's device, B's device).
+    async fn paired_agents() -> (
+        (tempfile::TempDir, Service),
+        (tempfile::TempDir, Service),
+        foldover_types::DeviceId,
+        foldover_types::DeviceId,
+    ) {
+        let loopback = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+        let (a, b) = (fixture(), fixture());
+        let identities = [
+            foldover_engine::PeerIdentity::generate().unwrap(),
+            foldover_engine::PeerIdentity::generate().unwrap(),
+        ];
+        let devices = identities
+            .each_ref()
+            .map(|identity| foldover_types::DeviceId::from_bytes(*identity.id().as_bytes()));
+        let [a_identity, b_identity] = identities;
+        for (service, other, name) in [(&a.1, devices[1], "Studio"), (&b.1, devices[0], "Laptop")] {
+            service
+                .engine
+                .lock()
+                .unwrap()
+                .add_device(other, name.into())
+                .unwrap();
+        }
+        for (service, identity) in [(&a.1, a_identity), (&b.1, b_identity)] {
+            let link = peer::open(
+                &service.engine,
+                identity,
+                loopback,
+                foldover_engine::Presence::Unlisted,
+            )
+            .await
+            .unwrap();
+            assert!(service.peers.set(link).is_ok());
+        }
+        let b_address = b.1.peers.get().unwrap().address().unwrap();
+        a.1.peers.get().unwrap().reach(devices[1], b_address);
+        (a, b, devices[0], devices[1])
+    }
+
+    /// P5.2: a pair's side can be a folder another Mac shares; that Mac
+    /// observes it, and a preview shows what syncing would copy.
+    #[tokio::test]
+    async fn a_folder_another_mac_shares_is_previewed_through_it() {
+        let ((a_directory, a), (_b_directory, b), a_device, b_device) = paired_agents().await;
+        let shared = tempfile::tempdir().unwrap();
+        fs::create_dir(shared.path().join("album")).unwrap();
+        fs::write(shared.path().join("album/one.jpg"), b"one").unwrap();
+        fs::write(shared.path().join("two.jpg"), b"two").unwrap();
+        let share = b
+            .handle(Request::call(
+                1,
+                SHARE_ADD,
+                Some(json!({"device": a_device.to_string(), "root": shared.path().as_os_str().as_bytes(), "name": "Photos"})),
+            ))
+            .await
+            .unwrap();
+
+        let local = a_directory.path().join("photos");
+        fs::create_dir(&local).unwrap();
+        let mut mac = input(a_directory.path(), "Mac");
+        mac["left_root"] = json!(local.as_os_str().as_bytes());
+        mac["right_root"] =
+            json!(format!("peer://{b_device}/{}", share["id"].as_str().unwrap()).into_bytes());
+        let created = a
+            .handle(Request::call(2, PAIR_CREATE, Some(mac)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        a.handle(Request::call(3, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        let previewed = settled(&a, &key).await;
+        assert_eq!(previewed["state"], "previewed", "{previewed}");
+        assert_eq!(previewed["preview"]["counts"]["copies"], 3, "{previewed}");
+        assert!(
+            previewed["preview"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["action"] == json!({"kind": "copy", "to": "left"}))
+        );
+
+        // Copying from another Mac comes next; until then each item says so.
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0, "review_token": previewed["preview"]["review_token"]});
+        a.handle(Request::call(5, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        let ran = settled(&a, &key).await;
+        assert_eq!(ran["result"]["failure_count"], 3, "{ran}");
+        assert!(
+            ran["result"]["failures"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("not available yet")
+        );
+        assert!(!local.join("two.jpg").exists());
+
+        // A folder not shared with A is refused by B.
+        let mut other = input(a_directory.path(), "Other");
+        other["right_root"] = json!(format!("peer://{b_device}/{}", "ab".repeat(16)).into_bytes());
+        let refused = a
+            .handle(Request::call(4, PAIR_CREATE, Some(other)))
+            .await
+            .unwrap_err();
+        assert!(
+            refused.message().contains("not shared"),
+            "{}",
+            refused.message()
+        );
+    }
+
     /// Two agents pair over loopback; the pin survives a restart and
     /// revoking forgets it.
     #[tokio::test]
@@ -1499,7 +1613,7 @@ mod tests {
         let probes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         service.scheduler.set_probe({
             let probes = std::sync::Arc::clone(&probes);
-            move |_| {
+            move |_, _| {
                 probes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Some(Side::Left)
             }
@@ -1547,7 +1661,7 @@ mod tests {
         service.scheduler.set_probe({
             let entered = std::sync::Arc::clone(&entered);
             let release = std::sync::Arc::clone(&release);
-            move |pair| {
+            move |pair, _| {
                 if pair.id() != parked_id {
                     return None;
                 }
@@ -1623,7 +1737,7 @@ mod tests {
         service.scheduler.set_probe({
             let entered = std::sync::Arc::clone(&entered);
             let release = std::sync::Arc::clone(&release);
-            move |_| {
+            move |_, _| {
                 entered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let (lock, changed) = &*release;
                 let mut released = lock.lock().unwrap();

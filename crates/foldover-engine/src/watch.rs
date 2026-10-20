@@ -30,7 +30,7 @@ impl PairWatcher {
             })
             .filter_map(|(root, id)| match root {
                 PairRoot::Local(root) => Some((root.clone(), id)),
-                PairRoot::Sftp(_) => None,
+                PairRoot::Sftp(_) | PairRoot::Peer(_) => None,
             })
             .collect();
         self.roots

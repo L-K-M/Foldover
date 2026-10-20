@@ -111,16 +111,16 @@ pub(crate) async fn handle(
 async fn open(engine: &Arc<Mutex<Engine>>, id: &str, side: Side) -> Result<PairArchive, RpcError> {
     let id = pair_id(id)?;
     let engine = Arc::clone(engine);
-    let pair = tokio::task::spawn_blocking(move || {
-        engine
+    let (pair, reach) = tokio::task::spawn_blocking(move || {
+        let engine = engine
             .lock()
-            .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?
-            .pair(id)
-            .map_err(crate::engine_error)
+            .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?;
+        let pair = engine.pair(id).map_err(crate::engine_error)?;
+        Ok::<_, RpcError>((pair, engine.reach()))
     })
     .await
     .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))??;
-    blocking(move || PairArchive::open(&pair, side)).await
+    blocking(move || PairArchive::open(&pair, side, &reach)).await
 }
 
 async fn blocking<T: Send + 'static>(
