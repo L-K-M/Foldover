@@ -36,6 +36,9 @@ struct MenuBarView: View {
                 Text(pause).font(.caption)
                 Button("Resume Automatic Syncs") { Task { await viewModel.resume() } }
             } else {
+                if let hold = viewModel.holdText {
+                    Text(hold).font(.caption)
+                }
                 Menu("Pause Automatic Syncs") {
                     ForEach(PauseLength.allCases, id: \.self) { length in
                         Button(MainViewModel.title(length)) { Task { await viewModel.pause(length) } }

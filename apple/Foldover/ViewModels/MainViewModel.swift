@@ -107,11 +107,27 @@ final class MainViewModel {
         return false
     }
 
-    /// Shown while automatic syncs are held.
+    /// Shown while automatic syncs are paused.
     var pauseText: String? {
         guard case .paused(let until) = automation.state else { return nil }
         guard let until else { return String(localized: "Automatic syncs are paused.") }
         return String(localized: "Automatic syncs are paused until \(until.formatted(date: .omitted, time: .shortened)).")
+    }
+
+    /// Shown while the environment holds automatic syncs (PLAN.md §3.5);
+    /// a pause's own text takes the slot instead.
+    var holdText: String? {
+        guard !isPaused else { return nil }
+        switch automation.heldBy {
+        case .lowPowerMode:
+            return String(localized: "Automatic syncs wait while Low Power Mode is on.")
+        case .expensiveNetwork:
+            return String(localized: "Automatic syncs over the network wait while this Mac's network is expensive.")
+        case .constrainedNetwork:
+            return String(localized: "Automatic syncs over the network wait while Low Data Mode is on.")
+        case nil:
+            return nil
+        }
     }
 
     static func title(_ length: PauseLength) -> String {
@@ -136,12 +152,12 @@ final class MainViewModel {
     /// Pause for Shortcuts and say what happened.
     func pauseForShortcuts(_ length: PauseLength) async -> String {
         await pause(length)
-        return automation.error ?? pauseText ?? String(localized: "Automatic syncs are running.")
+        return automation.error ?? pauseText ?? holdText ?? String(localized: "Automatic syncs are running.")
     }
 
     func resumeForShortcuts() async -> String {
         await resume()
-        return automation.error ?? pauseText ?? String(localized: "Automatic syncs are running.")
+        return automation.error ?? pauseText ?? holdText ?? String(localized: "Automatic syncs are running.")
     }
 
     var title: String { "Foldover" }

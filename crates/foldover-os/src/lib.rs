@@ -18,6 +18,10 @@ mod mount;
 #[allow(unsafe_code)]
 mod power;
 
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod environment;
+
 use std::io;
 use std::path::PathBuf;
 
@@ -60,6 +64,42 @@ impl IdleSleepAssertion {
             Ok(None)
         }
     }
+}
+
+/// Whether the system asks apps to save power.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PowerMode {
+    Normal,
+    LowPower,
+}
+
+/// Low Power Mode on macOS; always `Normal` elsewhere.
+pub fn power_mode() -> PowerMode {
+    #[cfg(target_os = "macos")]
+    if environment::low_power_mode() {
+        return PowerMode::LowPower;
+    }
+    PowerMode::Normal
+}
+
+/// What using the network costs right now.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkCost {
+    Unrestricted,
+    /// Cellular, or a phone's hotspot.
+    Expensive,
+    /// Low Data Mode.
+    Constrained,
+}
+
+/// The current network path's cost on macOS, `None` until the system
+/// first reports it, shortly after the first call; `Unrestricted`
+/// elsewhere.
+pub fn network_cost() -> Option<NetworkCost> {
+    #[cfg(target_os = "macos")]
+    return environment::network_cost();
+    #[cfg(not(target_os = "macos"))]
+    Some(NetworkCost::Unrestricted)
 }
 
 /// Mount the network share at `url`, e.g. `smb://alice@nas.local/Photos`,

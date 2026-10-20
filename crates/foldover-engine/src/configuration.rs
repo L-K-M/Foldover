@@ -9,6 +9,7 @@ use foldover_endpoint::{
     Endpoint, EndpointPair, Filter, InvalidFilter, LocalEndpoint, ObservedEntry, PairRootError,
     PeerLink, Reach, RootRelation, ScanError,
 };
+use foldover_host::{Environment, EnvironmentHold, LowPowerSyncs, NetworkUse};
 use foldover_state::{
     Device, HistoryEntry, Journal, JournalUpdate, MountSources, PairStore, Pause, Share,
     SnapshotEntry, StateLocation,
@@ -395,6 +396,48 @@ impl Engine {
         Ok(self.pairs.set_pause(pause)?)
     }
 
+    /// The person's choice for automatic syncs in Low Power Mode.
+    pub fn low_power_syncs(&self) -> Result<LowPowerSyncs, Error> {
+        Ok(match self.pairs.low_power_syncs()? {
+            foldover_state::LowPowerSyncs::Pause => LowPowerSyncs::Pause,
+            foldover_state::LowPowerSyncs::Run => LowPowerSyncs::Run,
+        })
+    }
+
+    pub fn set_low_power_syncs(&mut self, syncs: LowPowerSyncs) -> Result<(), Error> {
+        Ok(self.pairs.set_low_power_syncs(match syncs {
+            LowPowerSyncs::Pause => foldover_state::LowPowerSyncs::Pause,
+            LowPowerSyncs::Run => foldover_state::LowPowerSyncs::Run,
+        })?)
+    }
+
+    /// Whether the pair's syncs go over the network: an SFTP or paired
+    /// Mac root, or a local root Foldover last saw on a mounted share.
+    /// An unreadable mount record counts as network: automation fails
+    /// closed on costly networks.
+    pub fn uses_network(&self, pair: &PairConfig) -> NetworkUse {
+        let remote = |root: &PairRoot| !matches!(root, PairRoot::Local(_));
+        if remote(pair.draft().left()) || remote(pair.draft().right()) {
+            return NetworkUse::Network;
+        }
+        match self.pairs.mounts(pair.id()) {
+            Ok(mounts) if mounts == MountSources::default() => NetworkUse::Local,
+            _ => NetworkUse::Network,
+        }
+    }
+
+    /// Why the pair's automatic syncs wait in `environment`, if they do
+    /// (PLAN.md §3.5). Manual syncs never wait.
+    pub fn automatic_hold(
+        &self,
+        pair: &PairConfig,
+        environment: Environment,
+    ) -> Option<EnvironmentHold> {
+        // An unreadable choice is the default: pause in Low Power Mode.
+        let low_power = self.low_power_syncs().unwrap_or_default();
+        environment.hold(self.uses_network(pair), low_power)
+    }
+
     pub fn remove_pair(&mut self, id: PairId, revision: u64) -> Result<PairConfig, Error> {
         // The caller reserves this pair against active or starting jobs.
         Ok(self.pairs.remove(id, revision)?)
@@ -493,6 +536,7 @@ fn paths_nest(left: &[u8], right: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use foldover_host::{NetworkCost, PowerMode};
     use foldover_types::{LocalRoot, SyncMode};
     use std::fs;
     use std::os::unix::fs::symlink;
@@ -658,6 +702,89 @@ mod tests {
             engine.update_pair(pair.id(), revision, &remote),
             Err(Error::DurabilityUnsupported)
         ));
+    }
+
+    /// PLAN.md §3.5: a pair uses the network when a root is remote or a
+    /// local root last synced from a mounted share; only those pairs
+    /// hold on a costly network. Low Power Mode holds every pair unless
+    /// the person opted in.
+    #[test]
+    fn automatic_holds_follow_the_network_use_rule() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut engine =
+            Engine::open(&StateLocation::Directory(temporary.path().join("state"))).unwrap();
+        let left = temporary.path().join("left");
+        let right = temporary.path().join("right");
+        fs::create_dir(&left).unwrap();
+        fs::create_dir(&right).unwrap();
+        let local = engine.create_pair(&draft(&left, &right)).unwrap();
+        // Remote pairs need no catalog row: the roots alone decide.
+        let remote = |bytes: Vec<u8>| {
+            PairConfig::from_stored(
+                PairId::from_bytes([9; PairId::BYTE_LEN]).unwrap(),
+                1,
+                PairDraft::new(
+                    "Remote".into(),
+                    PairRoot::from_bytes(bytes).unwrap(),
+                    PairRoot::from(root(&right)),
+                    SyncMode::Sync,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let costly = Environment {
+            power: PowerMode::Normal,
+            network: Some(NetworkCost::Expensive),
+        };
+        let low = Environment {
+            power: PowerMode::LowPower,
+            network: Some(NetworkCost::Unrestricted),
+        };
+
+        assert_eq!(engine.uses_network(&local), NetworkUse::Local);
+        assert_eq!(engine.automatic_hold(&local, costly), None);
+        for bytes in [
+            b"sftp://nas/photos".to_vec(),
+            format!("peer://{}/{}", "ab".repeat(32), "cd".repeat(16)).into_bytes(),
+        ] {
+            let pair = remote(bytes);
+            assert_eq!(engine.uses_network(&pair), NetworkUse::Network);
+            assert_eq!(
+                engine.automatic_hold(&pair, costly),
+                Some(EnvironmentHold::ExpensiveNetwork)
+            );
+        }
+
+        // A share Foldover mounted counts as a network root.
+        engine
+            .record_mounts(
+                local.id(),
+                local.revision(),
+                &MountSources {
+                    left: Some("smb://nas/photos".into()),
+                    right: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(engine.uses_network(&local), NetworkUse::Network);
+        assert_eq!(
+            engine.automatic_hold(&local, costly),
+            Some(EnvironmentHold::ExpensiveNetwork)
+        );
+
+        assert_eq!(
+            engine.automatic_hold(&local, low),
+            Some(EnvironmentHold::LowPowerMode)
+        );
+        engine.set_low_power_syncs(LowPowerSyncs::Run).unwrap();
+        assert_eq!(engine.low_power_syncs().unwrap(), LowPowerSyncs::Run);
+        assert_eq!(engine.automatic_hold(&local, low), None);
+        // The network hold is unaffected by the low-power choice.
+        assert_eq!(
+            engine.automatic_hold(&local, costly),
+            Some(EnvironmentHold::ExpensiveNetwork)
+        );
     }
 
     #[test]

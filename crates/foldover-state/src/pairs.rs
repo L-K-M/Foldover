@@ -18,12 +18,14 @@ mod history;
 mod journal;
 mod mounts;
 mod pause;
+mod settings;
 mod share;
 pub use device::Device;
 pub use history::{HISTORY_LIMIT, HistoryEntry, HistoryOutcome, RunTrigger};
 pub use journal::{Journal, JournalAction, JournalEntry, JournalUpdate};
 pub use mounts::MountSources;
 pub use pause::Pause;
+pub use settings::LowPowerSyncs;
 pub use share::Share;
 
 const SYNC: &str = "sync";
