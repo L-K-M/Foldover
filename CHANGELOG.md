@@ -237,6 +237,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Folders on exFAT and FAT disks no longer stop with an AppleDouble
+  error: the `._` files macOS keeps there for extended attributes are
+  skipped, as the attributes travel with their files.
+
 - A canary file kept unchanged for longer than the pair's age limit no
   longer stops every sync as if it were missing. Filters that leave out
   the canary are refused when you save the pair, and a `.foldoverignore`
