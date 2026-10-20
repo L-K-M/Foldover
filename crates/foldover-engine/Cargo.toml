@@ -19,6 +19,11 @@ thiserror = "2"
 unicode-normalization = "0.1.26"
 uuid = { version = "1", features = ["v4"] }
 
+[[bench]]
+name = "plan"
+harness = false
+
 [dev-dependencies]
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 tempfile = "3"
 proptest = { version = "1", default-features = false, features = ["std"] }

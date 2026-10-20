@@ -5,6 +5,7 @@
 // Adapted from L-K-M/Sweetbriar.
 
 pub mod agent;
+pub mod bench;
 pub mod ffi;
 pub mod layers;
 
