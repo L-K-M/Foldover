@@ -94,8 +94,9 @@ pub enum FolderOp {
     },
     /// Archive an interrupted run's temporary file. `done`.
     RecoverLeftover { path: Vec<u8>, run: RunSettings },
-    /// `pruned`.
-    PruneArchive { retention_seconds: u64, now_ms: u64 },
+    /// `pruned`. The answering Mac's clock decides what is old, and it
+    /// keeps at least its own retention.
+    PruneArchive { retention_seconds: u64 },
     /// `runs`, newest first.
     ArchivedRuns,
     /// `items` after `after`, and whether more follow.
