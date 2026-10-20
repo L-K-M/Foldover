@@ -183,13 +183,15 @@ private struct OtherMacFolderPicker: View {
         }
         .padding()
         .frame(width: 380, height: 340)
-        .onChange(of: mac) { _, mac in
+        // A new selection cancels the last one's request, so a slow Mac's
+        // folders never show under another Mac.
+        .task(id: mac) {
             guard let mac else { return folders = [] }
             loading = true
-            Task {
-                folders = await viewModel.folders(on: mac)
-                loading = false
-            }
+            let shared = await viewModel.folders(on: mac)
+            guard !Task.isCancelled else { return }
+            folders = shared
+            loading = false
         }
     }
 }
