@@ -47,6 +47,8 @@ pub enum Error {
     DeviceNotPaired,
     #[error("Name the shared folder, as the other Mac will show it")]
     InvalidShareName,
+    #[error("The filters leave out the canary file; change them, or name another canary")]
+    CanaryExcluded,
     #[error("That folder is inside, or holds, a folder already shared with that Mac")]
     ShareOverlap,
 }
@@ -71,9 +73,10 @@ impl Error {
             | Self::CatalogOverlap(_)
             | Self::StateOverlap
             | Self::ShareOverlap => ErrorKind::Overlap,
-            Self::Filter(_) | Self::DurabilityUnsupported | Self::InvalidShareName => {
-                ErrorKind::Invalid
-            }
+            Self::Filter(_)
+            | Self::DurabilityUnsupported
+            | Self::InvalidShareName
+            | Self::CanaryExcluded => ErrorKind::Invalid,
             Self::Roots(_) | Self::Endpoint(_) | Self::CatalogUnavailable { .. } => {
                 ErrorKind::Unavailable
             }
@@ -518,9 +521,18 @@ fn validate_options(draft: &PairDraft) -> Result<(), Error> {
     validate_filters(draft)
 }
 
-/// Rules are checked when saved, so a run never meets an invalid one.
+/// Rules are checked when saved, so a run never meets an invalid one,
+/// nor one that leaves out the canary. A `.foldoverignore` file can still
+/// leave it out; runs report that.
 fn validate_filters(draft: &PairDraft) -> Result<(), Error> {
-    Filter::new(draft.options().filters().rules().iter().map(String::as_str))?;
+    let filter = Filter::new(draft.options().filters().rules().iter().map(String::as_str))?;
+    if draft
+        .options()
+        .canary()
+        .is_some_and(|canary| !filter.keeps(canary))
+    {
+        return Err(Error::CanaryExcluded);
+    }
     Ok(())
 }
 
@@ -702,6 +714,43 @@ mod tests {
             engine.update_pair(pair.id(), revision, &remote),
             Err(Error::DurabilityUnsupported)
         ));
+    }
+
+    /// Review of #84: filters that leave out the canary are refused when
+    /// saved, before any run reports it missing.
+    #[test]
+    fn filters_that_leave_out_the_canary_are_refused() {
+        let temporary = tempfile::tempdir().unwrap();
+        let location = StateLocation::Directory(temporary.path().join("state"));
+        let mut engine = Engine::open(&location).unwrap();
+        let (left, right) = (
+            temporary.path().join("left"),
+            temporary.path().join("right"),
+        );
+        fs::create_dir(&left).unwrap();
+        fs::create_dir(&right).unwrap();
+        let canary = foldover_types::SyncPath::try_from(b"docs/canary.txt".to_vec()).unwrap();
+        let draft = |rules: &[&str]| {
+            let filters =
+                foldover_types::Filters::new(rules.iter().map(|rule| (*rule).to_owned()).collect())
+                    .unwrap();
+            let options = foldover_types::PairOptions::default()
+                .with_filters(filters)
+                .with_canary(Some(canary.clone()))
+                .unwrap();
+            PairDraft::new("Pair".into(), root(&left), root(&right), SyncMode::Sync)
+                .unwrap()
+                .with_options(options)
+        };
+        for rules in [&["docs/"][..], &["*.txt"][..]] {
+            let error = engine.create_pair(&draft(rules)).unwrap_err();
+            assert!(
+                matches!(error, Error::CanaryExcluded),
+                "{rules:?}: {error:?}"
+            );
+            assert_eq!(error.kind(), ErrorKind::Invalid);
+        }
+        assert!(engine.create_pair(&draft(&["*.tmp"])).is_ok());
     }
 
     /// PLAN.md §3.5: a pair uses the network when a root is remote or a

@@ -1768,3 +1768,45 @@ fn a_recorded_side_must_still_match_when_the_other_side_is_new() {
 }
 
 mod simulation;
+
+/// Review of #84: a canary kept unchanged past the pair's age limit was
+/// skipped as old, and every run then stopped as if it were missing.
+#[test]
+fn an_old_canary_still_proves_the_folders() {
+    let mut pair = fixture(SyncMode::Sync);
+    pair.canary = Some(path(b"canary"));
+    let hundred_days = std::time::Duration::from_secs(100 * 24 * 60 * 60);
+    for folder in [pair.left.path(), pair.right.path()] {
+        fs::write(folder.join("canary"), b"here").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(folder.join("canary"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - hundred_days)
+            .unwrap();
+    }
+    pair.age_limit = Some(30);
+    pair.sync();
+    fs::write(pair.left.path().join("new"), b"n").unwrap();
+    assert_eq!(pair.sync().copied(), 1);
+}
+
+/// Review of #84: a canary a `.foldoverignore` file leaves out was
+/// reported missing, sending people to look for a file that is there.
+#[test]
+fn a_canary_left_out_by_an_ignore_file_says_so() {
+    let mut pair = fixture(SyncMode::Sync);
+    pair.canary = Some(path(b"canary"));
+    for folder in [pair.left.path(), pair.right.path()] {
+        fs::write(folder.join("canary"), b"here").unwrap();
+    }
+    fs::write(pair.left.path().join(".foldoverignore"), b"canary\n").unwrap();
+    // Even a preview says so, before anything is compared.
+    let Err(error) = pair.try_prepare() else {
+        panic!("a run with an excluded canary was prepared");
+    };
+    assert!(
+        matches!(&error, RunError::CanaryExcluded { path } if *path == super::tests::path(b"canary")),
+        "{error:?}"
+    );
+}
