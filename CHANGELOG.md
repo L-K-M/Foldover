@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Signature moments: drop one or two folders on the window's sidebar or
+  empty detail to start a pair with them; the pair editor shows a
+  sentence that says what the pair will do and rewrites itself as you
+  change settings; a search field narrows the preview's change list; and
+  a finished sync offers a card to review the conflicts it left or undo
+  what it changed.
+
 - Guides: what each folder kind can do, setting up NAS shares and SFTP
   servers, and current limitations.
 

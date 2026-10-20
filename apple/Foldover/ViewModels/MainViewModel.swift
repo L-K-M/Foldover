@@ -349,6 +349,34 @@ final class MainViewModel {
         guard canConfigurePairs else { return }
         editor = PairEditorViewModel(store: pairStore, macs: macToMac)
     }
+
+    /// Open the New Pair editor with the folders among `urls` filling
+    /// its sides in drop order: one folder fills Folder A, two fill
+    /// both; anything else is ignored (PLAN.md §3.8).
+    /// Returns whether the drop was accepted.
+    @discardableResult
+    func newPair(dropping urls: [URL]) -> Bool {
+        guard canConfigurePairs else { return false }
+        let folders = Self.droppedFolders(urls)
+        guard !folders.isEmpty else { return false }
+        let editor = PairEditorViewModel(store: pairStore, macs: macToMac)
+        editor.chooseFolder(.success([folders[0]]), side: .left)
+        if folders.count > 1 { editor.chooseFolder(.success([folders[1]]), side: .right) }
+        self.editor = editor
+        return true
+    }
+
+    /// The folders among dropped URLs, in drop order, at most two:
+    /// only file URLs that are directories count.
+    static func droppedFolders(_ urls: [URL]) -> [URL] {
+        Array(urls.filter { url in
+            guard url.isFileURL else { return false }
+            var isDirectory: ObjCBool = false
+            return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+                && isDirectory.boolValue
+        }.prefix(2))
+    }
+
     func editPair() {
         guard canConfigurePairs, let selectedPair else { return }
         editor = PairEditorViewModel(store: pairStore, editing: selectedPair, macs: macToMac)

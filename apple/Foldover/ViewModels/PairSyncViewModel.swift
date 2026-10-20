@@ -40,6 +40,17 @@ struct HistoryRow: Identifiable, Equatable {
     let summary: String
 }
 
+/// What the card under a finished sync offers (PLAN.md §3.8): review
+/// the conflicts it left and undo what it changed.
+struct CompletionCard: Equatable {
+    /// The finished run's summary, as the status text reads it.
+    let summary: String
+    /// Conflicts the run left; Review previews again filtered to them.
+    let conflicts: UInt64
+    /// The run copied or archived something Undo can still reverse.
+    let undoable: Bool
+}
+
 /// Everything the approval dialog was presented with: which pair, which
 /// exact plan the deletion counts belong to, and the wording shown.
 /// Approving sends this capture back, so a state change between
@@ -249,7 +260,24 @@ struct PairSyncViewModel {
         }
     }
 
-    var rows: [ChangeRow] {
+    /// Text narrowing the listed changes, case-insensitively, on top of
+    /// the kind filter (PLAN.md §3.8); it never refetches. The store
+    /// holds it because this view model is recreated on every render.
+    var searchText: String {
+        get { store.searchText(for: pair.id) }
+        nonmutating set { store.setSearchText(newValue, for: pair.id) }
+    }
+
+    /// The field is worth showing when changes are listed or a search
+    /// is already narrowing them, so a search that hides every row can
+    /// still be cleared or changed.
+    var showsSearch: Bool {
+        !listedRows.isEmpty || !searchText.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    /// The listed changes a search can narrow: the previewed plan's
+    /// rows, or a finished or undone run's failures.
+    private var listedRows: [ChangeRow] {
         if let preview = reviewable {
             let review = ReviewContext(token: preview.reviewToken,
                                        pairRevision: preview.pairRevision)
@@ -276,6 +304,30 @@ struct PairSyncViewModel {
             ChangeRow(id: index, path: Self.pathText(failure.path), description: failure.message,
                       resolvable: nil)
         }
+    }
+
+    /// The listed rows whose path contains the search text.
+    var rows: [ChangeRow] {
+        let text = searchText.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty else { return listedRows }
+        return listedRows.filter { $0.path.range(of: text, options: .caseInsensitive) != nil }
+    }
+
+    /// The card shown under a finished sync's status when it left
+    /// conflicts or can be undone (PLAN.md §3.8).
+    var completionCard: CompletionCard? {
+        guard case .finished(let result) = state else { return nil }
+        let undoable = result.copied + result.archived > 0
+        guard result.conflicts > 0 || undoable else { return nil }
+        return CompletionCard(summary: Self.summary(result), conflicts: result.conflicts,
+                              undoable: undoable)
+    }
+
+    /// Preview again and list only the conflicts the last run left
+    /// (the completion card's Review).
+    func reviewConflicts() async {
+        await store.preview(pair.id)
+        await store.showChanges(pair.id, filter: .conflicts)
     }
 
     /// Rows not shown because responses carry only the first changes.

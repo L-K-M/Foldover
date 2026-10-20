@@ -24,14 +24,39 @@ struct PairSyncView: View {
                         .keyboardShortcut(".")
                         .disabled(!viewModel.canCancel)
                 }
-                if viewModel.canUndo {
+                if viewModel.canUndo && viewModel.completionCard?.undoable != true {
                     Button("Undo") { Task { await viewModel.undo() } }
                         .help("Put back what this sync replaced or archived, and archive what it created.")
                 }
             }
-            Text(viewModel.statusText)
-                .foregroundStyle(.secondary)
-                .accessibilityAddTraits(.updatesFrequently)
+            // A finished sync's summary moves into its card, beside what
+            // can follow it, so it is not shown twice.
+            if viewModel.completionCard == nil {
+                Text(viewModel.statusText)
+                    .foregroundStyle(.secondary)
+                    .accessibilityAddTraits(.updatesFrequently)
+            }
+            if let card = viewModel.completionCard {
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(card.summary).font(.callout)
+                        HStack(spacing: 12) {
+                            if card.conflicts > 0 {
+                                Button("Review \(card.conflicts) Conflicts") {
+                                    Task { await viewModel.reviewConflicts() }
+                                }
+                                .disabled(!viewModel.canStart)
+                            }
+                            if card.undoable {
+                                Button("Undo") { Task { await viewModel.undo() } }
+                                    .disabled(!viewModel.canUndo)
+                                    .help("Put back what this sync replaced or archived, and archive what it created.")
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
             if let fraction = viewModel.progressFraction {
                 ProgressView(value: fraction)
                     .accessibilityLabel("Progress")
@@ -51,7 +76,7 @@ struct PairSyncView: View {
                 .pickerStyle(.segmented)
                 .fixedSize()
             }
-            if !viewModel.rows.isEmpty {
+            if viewModel.showsSearch {
                 List(viewModel.rows, selection: $selection) { row in
                     HStack {
                         VStack(alignment: .leading) {
@@ -92,6 +117,10 @@ struct PairSyncView: View {
                     }
                 }
                 .frame(minHeight: 160)
+                .searchable(text: Binding(
+                    get: { viewModel.searchText },
+                    set: { viewModel.searchText = $0 }
+                ), prompt: "Filter changes")
                 // Space shows the selected change's file, as in Finder.
                 .onKeyPress(.space) {
                     guard let url = viewModel.rows.first(where: { $0.id == selection })?.look else {

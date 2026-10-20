@@ -445,6 +445,9 @@ final class SyncStore {
     private(set) var requestErrors: [String: String] = [:]
     private(set) var histories: [String: [RunRecord]] = [:]
     private(set) var listings: [String: ChangeListing] = [:]
+    /// The text narrowing each pair's listed changes; view state held
+    /// here because view models are recreated on every render.
+    private(set) var searches: [String: String] = [:]
 
     init(client: any SyncClient = CoreSyncClient(), pollInterval: Duration = .milliseconds(500),
          alert: @escaping @MainActor (SyncAlert) async -> Void = SyncStore.postAlert) {
@@ -502,6 +505,13 @@ final class SyncStore {
 
     func state(for id: String) -> PairSyncState { states[id] ?? .idle }
     func listing(for id: String) -> ChangeListing? { listings[id] }
+
+    /// The pair's change-list text filter; it narrows the fetched rows
+    /// and never refetches (PLAN.md §3.8).
+    func searchText(for id: String) -> String { searches[id] ?? "" }
+    func setSearchText(_ text: String, for id: String) {
+        searches[id] = text.isEmpty ? nil : text
+    }
 
     /// List the latest preview's changes of one kind, or all of them.
     func showChanges(_ id: String, filter: ChangeFilter?) async {

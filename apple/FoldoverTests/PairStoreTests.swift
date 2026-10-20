@@ -566,3 +566,58 @@ func anExistingFullPairGainingAServerRootMustChooseStandard() {
     #expect(editor.durabilityChoices == [.standard])
     #expect(editor.canSave)
 }
+
+@MainActor
+@Test
+func planSentenceSaysWhatThePairWillDo() {
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()))
+    #expect(editor.planText == "Changes in either folder go to the other. A file deleted in one folder is archived in the other. Syncs only when you click Sync Now.")
+
+    editor.options.schedule = .onChange
+    #expect(editor.planText == "Changes in either folder go to the other. A file deleted in one folder is archived in the other. Syncs when files change.")
+
+    editor.mode = .backupLeft
+    editor.options.schedule = .daily(minutes: 120, days: Set(SyncDay.allCases))
+    #expect(editor.planText == "Folder A is copied to Folder B. Files you delete in A stay in B. Syncs every day at 02:00.")
+
+    editor.mode = .mirrorLeft
+    #expect(editor.planText == "Folder B is made identical to A. Files you delete in A are archived in B, never deleted. Syncs every day at 02:00.")
+
+    editor.mode = .mirrorRight
+    editor.options.schedule = .daily(minutes: 18 * 60, days: [.monday, .tuesday, .wednesday, .thursday, .friday])
+    #expect(editor.planText == "Folder A is made identical to B. Files you delete in B are archived in A, never deleted. Syncs weekdays at 18:00.")
+
+    editor.mode = .backupRight
+    editor.options.schedule = .daily(minutes: 7 * 60 + 15, days: [.monday, .wednesday, .friday])
+    #expect(editor.planText == "Folder B is copied to Folder A. Files you delete in B stay in A. Syncs Mon, Wed, Fri at 07:15.")
+
+    editor.options.schedule = .every(minutes: 15)
+    #expect(editor.planText.hasSuffix("Syncs every 15 minutes."))
+    editor.options.schedule = .every(minutes: 60)
+    #expect(editor.planText.hasSuffix("Syncs every hour."))
+}
+
+@MainActor
+@Test
+func planSentenceListsOnlyUnusualChoices() {
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()))
+    // Defaults add nothing to the second sentence.
+    #expect(!editor.planText.contains(";"))
+
+    editor.options.syncPermissions = true
+    #expect(editor.planText.contains("archived in the other; permissions and access lists sync."))
+
+    editor.options.filters = ["*.tmp", "", "build/"]
+    editor.options.sizeLimit = 1_000_000_000
+    editor.options.ageLimit = 30
+    editor.options.canary = Data("docs/canary.txt".utf8)
+    #expect(editor.planText.contains("skipped: 2 rules, files larger than 1 GB, files unchanged for more than 30 days"))
+    #expect(editor.planText.contains("the canary file docs/canary.txt must stay unchanged in both folders"))
+    // Three sentences at most, however much is unusual.
+    #expect(editor.planText.split(separator: ". ").count <= 3)
+
+    editor.options.syncExtendedAttributes = false
+    #expect(editor.planText.contains("tags and other extended attributes don't sync"))
+    editor.options.syncModificationTimes = false
+    #expect(editor.planText.contains("modification dates don't sync"))
+}

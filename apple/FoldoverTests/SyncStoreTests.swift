@@ -1955,3 +1955,160 @@ func quickLookShowsTheFileAChangeWouldCopyOnlyWhereItIsOnThisMac() {
     #expect(PairSyncViewModel.lookURL(PlannedChange(path: Data("d".utf8), action: .blocked),
                                       settings: local) == nil)
 }
+
+@MainActor
+@Test
+func searchNarrowsTheListedChangesWithoutRefetching() async {
+    let summary = PreviewSummary(
+        changes: [PlannedChange(path: Data("docs/report.txt".utf8), action: .copy(to: .b)),
+                  PlannedChange(path: Data("Photos/IMG_1.RAW".utf8), action: .copy(to: .b)),
+                  PlannedChange(path: Data("photos/notes.txt".utf8), action: .archive(on: .a))],
+        copies: 2, updates: 0, archives: 4, conflicts: 0, blocked: 0, kept: 0,
+        a: DeletionCheck(deletions: 4, paths: 10, needsApproval: false),
+        b: DeletionCheck(deletions: 0, paths: 10, needsApproval: false),
+        reviewToken: reviewTokenA, pairRevision: 1
+    )
+    let client = ScriptedSyncClient([.previewed(summary)])
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
+    await viewModel.preview()
+    #expect(viewModel.rows.count == 3)
+    #expect(viewModel.showsSearch)
+
+    viewModel.searchText = "photos"
+    #expect(viewModel.searchText == "photos")
+    #expect(viewModel.rows.map(\.path) == ["Photos/IMG_1.RAW", "photos/notes.txt"])
+    // The hidden-rows text still counts unfetched changes, not searched-away rows.
+    #expect(viewModel.hiddenRowsText == "and 3 more")
+    // Nothing is refetched: only the preview request happened.
+    #expect(await client.changeTokens.isEmpty)
+
+    viewModel.searchText = "DOCS"
+    #expect(viewModel.rows.map(\.path) == ["docs/report.txt"])
+    viewModel.searchText = "zzz"
+    #expect(viewModel.rows.isEmpty)
+    #expect(viewModel.showsSearch)
+    viewModel.searchText = "  "
+    #expect(viewModel.rows.count == 3)
+}
+
+/// Pages differ by the kind filter, so a search's stacking on it shows.
+private actor KindPageClient: SyncClient {
+    private let reply: PairSyncState
+    private(set) var filters: [ChangeFilter?] = []
+
+    init(_ reply: PairSyncState) { self.reply = reply }
+
+    func preview(_ id: String) async throws -> PairSyncState { reply }
+    func run(_ id: String, approvedA: UInt64, approvedB: UInt64,
+             reviewToken: String?) async throws -> PairSyncState { reply }
+    func status(_ id: String) async throws -> PairSyncState { reply }
+    func cancel(_ id: String) async throws -> PairSyncState { .idle }
+    func undo(_ id: String) async throws -> PairSyncState { .idle }
+    func resolve(_ id: String, path: Data, keep: FolderSide,
+                 reviewToken: String) async throws -> PairSyncState { .idle }
+    func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
+    func skipOnce(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
+    func history(_ id: String) async throws -> [RunRecord] { [] }
+
+    func changes(_ id: String, after: Data?, filter: ChangeFilter?,
+                 reviewToken: String) async throws -> ChangePage {
+        filters.append(filter)
+        let page: [PlannedChange] = switch filter {
+        case .copies:
+            [PlannedChange(path: Data("alpha.txt".utf8), action: .copy(to: .b)),
+             PlannedChange(path: Data("beta.txt".utf8), action: .copy(to: .b))]
+        case .conflicts:
+            [PlannedChange(path: Data("alpha.txt".utf8), action: .conflict(.bothChanged)),
+             PlannedChange(path: Data("gamma.txt".utf8), action: .conflict(.bothChanged))]
+        default:
+            []
+        }
+        return ChangePage(changes: page, more: false)
+    }
+}
+
+@MainActor
+@Test
+func searchStacksOnTheKindFilter() async {
+    let summary = preview(archivesInA: 0, needsApproval: false)
+    let client = KindPageClient(.previewed(summary))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
+    await viewModel.preview()
+
+    await viewModel.showChanges(.copies)
+    #expect(viewModel.rows.map(\.path) == ["alpha.txt", "beta.txt"])
+    viewModel.searchText = "alpha"
+    #expect(viewModel.rows.map(\.path) == ["alpha.txt"])
+
+    // A new kind listing narrows the same way.
+    await viewModel.showChanges(.conflicts)
+    #expect(viewModel.changeFilter == .conflicts)
+    #expect(viewModel.rows.map(\.path) == ["alpha.txt"])
+    viewModel.searchText = ""
+    #expect(viewModel.rows.map(\.path) == ["alpha.txt", "gamma.txt"])
+}
+
+@MainActor
+@Test
+func aFinishedSyncWithFollowupsShowsTheCompletionCard() async throws {
+    let conflicted = preview(archivesInA: 0, needsApproval: false)
+    let result = RunSummary(cancelled: false, copied: 2, updated: 0, archived: 1, recovered: 0,
+                            conflicts: 3, failures: [], failureCount: 0, archive: "run")
+    let client = ScriptedSyncClient([.finished(result), .previewed(conflicted)])
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
+    await viewModel.sync()
+
+    let card = try #require(viewModel.completionCard)
+    #expect(card.summary == viewModel.statusText)
+    #expect(card.conflicts == 3)
+    #expect(card.undoable)
+    #expect(viewModel.canUndo)
+
+    // Review previews again and shows only the conflicts.
+    await viewModel.reviewConflicts()
+    #expect(store.state(for: pair().id) == .previewed(conflicted))
+    #expect(viewModel.changeFilter == .conflicts)
+    #expect(await client.changeTokens == [conflicted.reviewToken])
+    #expect(viewModel.completionCard == nil)
+}
+
+@MainActor
+@Test
+func theCompletionCardAppearsOnlyWhenARunLeavesWorkToReview() async throws {
+    let bare = RunSummary(cancelled: false, copied: 0, updated: 2, archived: 0, recovered: 0,
+                          conflicts: 0, failures: [], failureCount: 0, archive: "run")
+    let undoable = RunSummary(cancelled: false, copied: 1, updated: 0, archived: 0, recovered: 0,
+                              conflicts: 0, failures: [], failureCount: 0, archive: "run")
+    let conflictsOnly = RunSummary(cancelled: false, copied: 0, updated: 0, archived: 0, recovered: 0,
+                                   conflicts: 2, failures: [], failureCount: 0, archive: "run")
+    let undone = UndoSummary(cancelled: false, removed: 1, restored: 2, beside: 0,
+                             notUndone: [], notUndoneCount: 0, archive: "undo")
+    let client = ScriptedSyncClient([.finished(bare), .finished(undoable),
+                                     .finished(conflictsOnly), .undone(undone)])
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
+
+    // Metadata-only runs have nothing to review or undo.
+    await viewModel.refresh()
+    #expect(viewModel.completionCard == nil)
+
+    // An undoable run offers Undo without a Review button.
+    await viewModel.refresh()
+    let undoableCard = try #require(viewModel.completionCard)
+    #expect(undoableCard.conflicts == 0)
+    #expect(undoableCard.undoable)
+
+    // A conflicted run offers Review without Undo.
+    await viewModel.refresh()
+    let conflictedCard = try #require(viewModel.completionCard)
+    #expect(conflictedCard.conflicts == 2)
+    #expect(!conflictedCard.undoable)
+    #expect(!viewModel.canUndo)
+
+    // An undone run is behind it.
+    await viewModel.refresh()
+    #expect(viewModel.completionCard == nil)
+}
