@@ -23,7 +23,9 @@ pub use extended::{
 };
 
 mod write;
-pub use write::{Chunks, Displaced, ForeignMetadata, Placement, Staged, StagedFile, WriteError};
+pub use write::{
+    Chunks, Displaced, ForeignMetadata, NativeMetadata, Placement, Staged, StagedFile, WriteError,
+};
 
 const MAX_ROOT_ANCESTORS: usize = 4096;
 // Darwin sys/stat.h defines this synthetic, read-only flag; libc omits it.

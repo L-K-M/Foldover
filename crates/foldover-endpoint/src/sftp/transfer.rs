@@ -6,11 +6,13 @@
 use std::cell::RefCell;
 use std::io;
 
+use foldover_fs::NativeMetadata;
 use foldover_net::sftp::{Attributes, FileKind};
 use foldover_proto::peer::IncomingKind;
 use foldover_types::{EntryContent, EntryKind, EntryVersion, ScanControl, SyncPath};
 
 use super::{DEFAULT_DIRECTORY, DEFAULT_FILE, PERMISSION_BITS, SftpEndpoint, write_error};
+use crate::local::Carried;
 use crate::{ApplyError, Endpoint, Expected, ForeignMetadata, ObservedEntry, RunScope, ScanError};
 
 /// What a source provides for one entry.
@@ -26,6 +28,18 @@ impl Source<'_> {
             Self::Local(_, entry) => crate::LocalEndpoint::foreign_metadata(entry),
             Self::Sftp(_, attributes) => SftpEndpoint::foreign_metadata(attributes),
             Self::Peer(source) => source.metadata(),
+        }
+    }
+
+    /// What a copy to or from another Mac carries besides data, mode and
+    /// time; None where the source keeps none of it, as on SFTP servers.
+    fn native(&self, run: &RunScope) -> Result<Option<NativeMetadata>, ApplyError> {
+        match self {
+            Self::Local(endpoint, entry) if entry.link_target().is_none() => endpoint
+                .native_metadata(entry, run.options().metadata())
+                .map(Some),
+            Self::Local(..) | Self::Sftp(..) => Ok(None),
+            Self::Peer(source) => Ok(source.native().cloned()),
         }
     }
 
@@ -96,18 +110,28 @@ pub(crate) fn copy(
                     if destination.is_some() {
                         return Err(ApplyError::Unsupported(path.clone()));
                     }
-                    local.receive_directory(path, source.metadata(), run, control)
+                    let native = source.native(run)?;
+                    let carried = Carried {
+                        metadata: source.metadata(),
+                        native: native.as_ref(),
+                    };
+                    local.receive_directory(path, carried, run, control)
                 }
                 EntryKind::Symlink => {
                     let target = source.link_target(path)?;
                     local.receive_link(path, destination.as_ref(), &target, run, control)
                 }
                 EntryKind::File => {
+                    let native = source.native(run)?;
                     let failure = RefCell::new(None);
+                    let carried = Carried {
+                        metadata: source.metadata(),
+                        native: native.as_ref(),
+                    };
                     let received = local.receive_file(
                         path,
                         destination.as_ref(),
-                        source.metadata(),
+                        carried,
                         expected,
                         run,
                         |sink| source.push(path, control, sink, &failure),
@@ -142,8 +166,13 @@ pub(crate) fn copy(
                     target: source.link_target(path)?,
                 },
             };
+            let native = source.native(run)?;
             let failure = RefCell::new(None);
-            let received = remote.receive(path, current, kind, source.metadata(), run, |sink| {
+            let carried = Carried {
+                metadata: source.metadata(),
+                native: native.as_ref(),
+            };
+            let received = remote.receive(path, current, kind, carried, run, |sink| {
                 source.push(path, control, sink, &failure)
             });
             received.map_err(|error| failure.into_inner().unwrap_or(error))
@@ -168,13 +197,32 @@ pub(crate) fn update_metadata(
         return Err(ApplyError::Unsupported(path.clone()));
     }
     // Another Mac sends only the metadata, not the data with it.
-    let metadata = match from {
+    let (metadata, native) = match from {
         Endpoint::Peer(remote) => remote.source_metadata(path, planned, run)?,
-        _ => source(from, path, planned, run, control)?.metadata(),
+        _ => {
+            let source = source(from, path, planned, run, control)?;
+            let native = match to {
+                Endpoint::Sftp(_) => None,
+                _ => source.native(run)?,
+            };
+            (source.metadata(), native)
+        }
     };
     match to {
-        Endpoint::Peer(remote) => remote.receive_metadata(path, current, metadata, run),
-        Endpoint::Local(local) => local.receive_metadata(path, current, metadata, run, control),
+        Endpoint::Peer(remote) => {
+            let carried = Carried {
+                metadata,
+                native: native.as_ref(),
+            };
+            remote.receive_metadata(path, current, carried, run)
+        }
+        Endpoint::Local(local) => {
+            let carried = Carried {
+                metadata,
+                native: native.as_ref(),
+            };
+            local.receive_metadata(path, current, carried, run, control)
+        }
         Endpoint::Sftp(remote) => {
             let attributes = receiving(remote, path, Expected::Present(current), run, control)?
                 .ok_or_else(|| ApplyError::DestinationChanged(path.clone()))?;

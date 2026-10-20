@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
-use foldover_fs::{ForeignMetadata, WriteError};
+use foldover_fs::{ForeignMetadata, NativeMetadata, WriteError};
 use foldover_proto::local::PairDurability;
 use foldover_proto::peer::{
     FolderOp, IncomingKind, NameCase, NameUnicode, PeerCall, PeerReply, ScanSettings,
@@ -28,6 +28,7 @@ use foldover_types::{
 };
 
 use crate::link::{Exchange, Incoming, LinkError, PeerLink, WatchHandle, Watched};
+use crate::local::Carried;
 use crate::{
     ApplyError, ArchivedItem, ArchivedRun, Expected, Filter, Observation, ObserveStep,
     ObservedEntry, RootRelation, RunScope, ScanError,
@@ -216,10 +217,11 @@ impl PeerEndpoint {
             entry: wire::entry_bytes(planned),
             run: wire::run_wire(run),
         })?;
-        let (metadata, target) = reading(exchange.reply().map_err(unreachable)?)?;
+        let (metadata, native, target) = reading(exchange.reply().map_err(unreachable)?)?;
         Ok(PeerSource {
             exchange: RefCell::new(Some(exchange)),
             metadata,
+            native,
             target,
         })
     }
@@ -230,13 +232,14 @@ impl PeerEndpoint {
         path: &SyncPath,
         planned: &ObservedEntry,
         run: &RunScope,
-    ) -> Result<ForeignMetadata, ApplyError> {
+    ) -> Result<(ForeignMetadata, Option<NativeMetadata>), ApplyError> {
         let reply = self.reply(FolderOp::Metadata {
             path: path.as_bytes().to_vec(),
             entry: wire::entry_bytes(planned),
             run: wire::run_wire(run),
         });
-        Ok(reading(reply_or_source_changed(reply, path)?)?.0)
+        let (metadata, native, _) = reading(reply_or_source_changed(reply, path)?)?;
+        Ok((metadata, native))
     }
 
     /// Make `path` hold an entry of `kind`; `send` pushes a file's data.
@@ -245,7 +248,7 @@ impl PeerEndpoint {
         path: &SyncPath,
         current: Expected<'_>,
         kind: IncomingKind,
-        metadata: ForeignMetadata,
+        carried: Carried<'_>,
         run: &RunScope,
         send: impl FnOnce(&mut dyn FnMut(&[u8]) -> io::Result<()>) -> io::Result<()>,
     ) -> Result<EntryVersion, ApplyError> {
@@ -259,7 +262,7 @@ impl PeerEndpoint {
             entry: foldover_proto::peer::Incoming {
                 kind,
                 current,
-                metadata: wire::metadata_wire(metadata),
+                metadata: wire::metadata_wire(carried.metadata, carried.native),
                 run: wire::run_wire(run),
             },
         })?;
@@ -293,13 +296,13 @@ impl PeerEndpoint {
         &self,
         path: &SyncPath,
         current: &ObservedEntry,
-        metadata: ForeignMetadata,
+        carried: Carried<'_>,
         run: &RunScope,
     ) -> Result<EntryVersion, ApplyError> {
         let reply = self.reply(FolderOp::ReceiveMetadata {
             path: path.as_bytes().to_vec(),
             current: wire::entry_bytes(current),
-            metadata: wire::metadata_wire(metadata),
+            metadata: wire::metadata_wire(carried.metadata, carried.native),
             run: wire::run_wire(run),
         });
         match reply_or_destination_changed(reply, path)? {
@@ -446,12 +449,17 @@ pub(crate) struct PeerSource {
     /// The request still sending a file's data.
     exchange: RefCell<Option<Exchange>>,
     metadata: ForeignMetadata,
+    native: Option<NativeMetadata>,
     target: Option<Vec<u8>>,
 }
 
 impl PeerSource {
     pub(crate) fn metadata(&self) -> ForeignMetadata {
         self.metadata
+    }
+
+    pub(crate) fn native(&self) -> Option<&NativeMetadata> {
+        self.native.as_ref()
     }
 
     pub(crate) fn link_target(&self) -> Option<&[u8]> {
@@ -488,9 +496,15 @@ impl PeerSource {
     }
 }
 
-fn reading(reply: PeerReply) -> Result<(ForeignMetadata, Option<Vec<u8>>), ApplyError> {
+/// What a `reading` reply says of the entry.
+type Reading = (ForeignMetadata, Option<NativeMetadata>, Option<Vec<u8>>);
+
+fn reading(reply: PeerReply) -> Result<Reading, ApplyError> {
     match reply {
-        PeerReply::Reading { metadata, target } => Ok((wire::metadata_from(metadata), target)),
+        PeerReply::Reading { metadata, target } => {
+            let (metadata, native) = wire::metadata_from(metadata);
+            Ok((metadata, native, target))
+        }
         PeerReply::Failed { error } => Err(wire::apply_error(error, ApplyError::SourceChanged)),
         PeerReply::Refused { reason } => Err(ScanError::MacUnreachable(reason).into()),
         _ => Err(unexpected().into()),

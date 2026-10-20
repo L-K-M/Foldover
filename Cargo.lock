@@ -678,6 +678,7 @@ dependencies = [
  "foldover-engine",
  "foldover-proto",
  "foldover-types",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
