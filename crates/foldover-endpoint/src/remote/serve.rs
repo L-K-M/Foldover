@@ -8,7 +8,7 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use foldover_proto::local::PairDurability;
 use foldover_proto::peer::{
@@ -29,6 +29,8 @@ use crate::{Expected, Filter, LocalEndpoint, LocalEntry, ObserveStep, ObservedEn
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
 /// Longest label a kept copy's name may carry.
 const MAX_LABEL_BYTES: usize = 64;
+/// PLAN.md §4: archives keep 30 days.
+const MIN_SHARED_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// The latest observation of each shared folder under each metadata
 /// policy, so an unchanged file is not read again on the next scan.
@@ -152,14 +154,9 @@ pub fn serve_folder(root: &LocalRoot, op: FolderOp, cache: &FolderCache, answer:
                     .map_err(|error| wire::apply_failure(&error))
             })
         }
-        FolderOp::PruneArchive {
-            retention_seconds,
-            now_ms,
-        } => endpoint
-            .prune_archive(
-                Duration::from_secs(retention_seconds),
-                UNIX_EPOCH + Duration::from_millis(now_ms),
-            )
+        // This Mac's clock decides what is old here.
+        FolderOp::PruneArchive { retention_seconds } => endpoint
+            .prune_archive(shared_retention(retention_seconds), SystemTime::now())
             .map(|count| PeerReply::Pruned { count })
             .map_err(|error| wire::apply_failure(&error)),
         FolderOp::ArchivedRuns => endpoint
@@ -450,6 +447,12 @@ fn placed(path: SyncPath) -> PeerReply {
     }
 }
 
+/// How long this Mac keeps archived runs when a paired Mac prunes them:
+/// never less than its own archives keep.
+fn shared_retention(requested_seconds: u64) -> Duration {
+    Duration::from_secs(requested_seconds).max(MIN_SHARED_RETENTION)
+}
+
 /// A short label without path separators or control characters, such as
 /// "Folder B".
 fn plain_label(label: &str) -> bool {
@@ -513,6 +516,17 @@ mod tests {
         assert!(cache.take(&root, without).is_empty());
         cache.keep(&root, with_times, entries.clone());
         assert_eq!(cache.take(&root, with_times), entries);
+    }
+
+    /// Review: the asking Mac's clock and retention decided what this
+    /// Mac's archive kept, so a wrong clock could empty it.
+    #[test]
+    fn a_paired_mac_cannot_shorten_this_macs_archive() {
+        assert_eq!(shared_retention(0), MIN_SHARED_RETENTION);
+        assert_eq!(
+            shared_retention(MIN_SHARED_RETENTION.as_secs() * 2),
+            MIN_SHARED_RETENTION * 2
+        );
     }
 
     #[test]
