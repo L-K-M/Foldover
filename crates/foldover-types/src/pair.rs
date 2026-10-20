@@ -181,7 +181,10 @@ impl fmt::Display for InvalidPair {
             }
             Self::IdenticalRoots => "A pair needs two different selected roots",
             Self::Revision => "Pair revision is outside the supported range",
-            Self::Schedule => "A sync interval must be from 1 minute to 1 week",
+            Self::Schedule => {
+                "A schedule needs an interval of 1 minute to 1 week, or a time of day with at \
+                 least one weekday"
+            }
             Self::Filters => "Filters allow at most 256 single-line rules of at most 1024 bytes",
             Self::Canary => {
                 "A canary file needs a relative path inside the synced folders, outside \

@@ -10,6 +10,9 @@ pub enum Schedule {
     /// Unattended runs once changed files have been quiet briefly, and
     /// hourly, because change notifications can be missed.
     OnChange,
+    /// Unattended runs at a time of day on the set weekdays, in the
+    /// machine's local time zone (PLAN.md §3.5).
+    Daily(DailySchedule),
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -29,6 +32,198 @@ impl ScheduleInterval {
 
     pub const fn minutes(self) -> u32 {
         self.0
+    }
+}
+
+/// A time of day as minutes after local midnight.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct TimeOfDay(u16);
+
+impl TimeOfDay {
+    /// `23:59`; a daily schedule cannot target the day's final instant.
+    pub const MAX_MINUTES: u16 = 24 * 60 - 1;
+
+    pub fn from_minutes(minutes: u32) -> Result<Self, InvalidPair> {
+        if minutes > u32::from(Self::MAX_MINUTES) {
+            return Err(InvalidPair::Schedule);
+        }
+        Ok(Self(minutes as u16))
+    }
+
+    pub const fn minutes(self) -> u32 {
+        self.0 as u32
+    }
+}
+
+/// Monday through Sunday; bit `0` of `Weekdays` is Monday.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Weekday {
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+    Sunday,
+}
+
+impl Weekday {
+    /// Monday first, the `Weekdays` bit order.
+    pub const ALL: [Self; 7] = [
+        Self::Monday,
+        Self::Tuesday,
+        Self::Wednesday,
+        Self::Thursday,
+        Self::Friday,
+        Self::Saturday,
+        Self::Sunday,
+    ];
+
+    const fn bit(self) -> u8 {
+        1 << (self as u8)
+    }
+
+    fn previous(self) -> Self {
+        Self::ALL[(self as usize + 6) % 7]
+    }
+}
+
+/// A non-empty set of weekdays, one bit per `Weekday`.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct Weekdays(u8);
+
+impl Weekdays {
+    /// Every day of the week.
+    pub const ALL: Self = Self(0x7f);
+    /// Monday through Friday.
+    pub const MONDAY_TO_FRIDAY: Self = Self(0x1f);
+
+    /// The given days; at least one is required.
+    pub fn of(days: &[Weekday]) -> Result<Self, InvalidPair> {
+        Self::from_bits(days.iter().fold(0, |bits, day| bits | day.bit()))
+    }
+
+    /// Bits map Monday onto `0x01` through Sunday onto `0x40`.
+    pub fn from_bits(bits: u8) -> Result<Self, InvalidPair> {
+        if bits == 0 || bits & !Self::ALL.0 != 0 {
+            return Err(InvalidPair::Schedule);
+        }
+        Ok(Self(bits))
+    }
+
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    pub fn contains(self, day: Weekday) -> bool {
+        self.0 & day.bit() != 0
+    }
+
+    /// The set's days, Monday first.
+    pub fn days(self) -> impl Iterator<Item = Weekday> {
+        Weekday::ALL
+            .into_iter()
+            .filter(move |day| self.contains(*day))
+    }
+}
+
+/// A local wall-clock date and minute; a calendar schedule compares
+/// these, so weekday must match the date and minute stays under 1440.
+/// Drivers produce valid values, so `new` does not check.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct LocalDateTime {
+    year: i32,
+    month: u8,
+    day: u8,
+    weekday: Weekday,
+    minute: u16,
+}
+
+impl LocalDateTime {
+    pub const fn new(year: i32, month: u8, day: u8, weekday: Weekday, minute: u16) -> Self {
+        Self {
+            year,
+            month,
+            day,
+            weekday,
+            minute,
+        }
+    }
+
+    pub const fn weekday(self) -> Weekday {
+        self.weekday
+    }
+
+    /// Minutes after local midnight.
+    pub const fn minute(self) -> u16 {
+        self.minute
+    }
+
+    /// The same date at `minute` after midnight.
+    fn with_minute(self, minute: u16) -> Self {
+        Self { minute, ..self }
+    }
+
+    /// The calendar day before this one.
+    fn previous_day(self) -> Self {
+        let (year, month, day) = if self.day > 1 {
+            (self.year, self.month, self.day - 1)
+        } else if self.month > 1 {
+            let month = self.month - 1;
+            (self.year, month, Self::month_length(self.year, month))
+        } else {
+            (self.year - 1, 12, 31)
+        };
+        Self {
+            year,
+            month,
+            day,
+            weekday: self.weekday.previous(),
+            minute: self.minute,
+        }
+    }
+
+    fn month_length(year: i32, month: u8) -> u8 {
+        match month {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            _ if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+            _ => 28,
+        }
+    }
+}
+
+/// Unattended runs at a time of day on the set weekdays.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct DailySchedule {
+    at: TimeOfDay,
+    days: Weekdays,
+}
+
+impl DailySchedule {
+    pub const fn new(at: TimeOfDay, days: Weekdays) -> Self {
+        Self { at, days }
+    }
+
+    pub const fn at(self) -> TimeOfDay {
+        self.at
+    }
+
+    pub const fn days(self) -> Weekdays {
+        self.days
+    }
+
+    /// The most recent scheduled moment at or before `local`. The day
+    /// set is never empty, so the answer is at most a week back.
+    pub fn latest_at_or_before(self, local: LocalDateTime) -> LocalDateTime {
+        let mut day = local;
+        if !self.days.contains(day.weekday()) || u32::from(day.minute()) < self.at.minutes() {
+            day = day.previous_day();
+            while !self.days.contains(day.weekday()) {
+                day = day.previous_day();
+            }
+        }
+        day.with_minute(self.at.0)
     }
 }
 
@@ -191,6 +386,61 @@ mod tests {
         assert!(ScheduleInterval::from_minutes(ScheduleInterval::MAX_MINUTES).is_ok());
         assert!(ScheduleInterval::from_minutes(ScheduleInterval::MAX_MINUTES + 1).is_err());
         assert_eq!(PairOptions::default().schedule(), Schedule::Manual);
+    }
+
+    fn local(year: i32, month: u8, day: u8, weekday: Weekday, minute: u16) -> LocalDateTime {
+        LocalDateTime::new(year, month, day, weekday, minute)
+    }
+
+    #[test]
+    fn daily_time_and_days_are_validated() {
+        assert_eq!(TimeOfDay::from_minutes(0).unwrap().minutes(), 0);
+        assert_eq!(TimeOfDay::from_minutes(1439).unwrap().minutes(), 1439);
+        assert!(TimeOfDay::from_minutes(1440).is_err());
+        for bits in [0, 0x80, 0xff] {
+            assert!(Weekdays::from_bits(bits).is_err());
+        }
+        assert!(Weekdays::of(&[]).is_err());
+        let weekdays = Weekdays::MONDAY_TO_FRIDAY;
+        assert!(weekdays.contains(Weekday::Friday));
+        assert!(!weekdays.contains(Weekday::Saturday));
+        assert_eq!(weekdays.days().count(), 5);
+    }
+
+    #[test]
+    fn latest_at_or_before_wraps_weeks_and_months() {
+        let at = TimeOfDay::from_minutes(18 * 60).unwrap();
+        let weekdays = DailySchedule::new(at, Weekdays::MONDAY_TO_FRIDAY);
+        // A Friday evening lands the same day; Saturday falls back.
+        assert_eq!(
+            weekdays.latest_at_or_before(local(2026, 10, 16, Weekday::Friday, 19 * 60)),
+            local(2026, 10, 16, Weekday::Friday, 18 * 60)
+        );
+        assert_eq!(
+            weekdays.latest_at_or_before(local(2026, 10, 17, Weekday::Saturday, 19 * 60)),
+            local(2026, 10, 16, Weekday::Friday, 18 * 60)
+        );
+        // A Monday morning before the time falls back across the weekend
+        // and, on March 1st, across a month boundary.
+        assert_eq!(
+            weekdays.latest_at_or_before(local(2026, 10, 19, Weekday::Monday, 9 * 60)),
+            local(2026, 10, 16, Weekday::Friday, 18 * 60)
+        );
+        assert_eq!(
+            weekdays.latest_at_or_before(local(2027, 3, 1, Weekday::Monday, 9 * 60)),
+            local(2027, 2, 26, Weekday::Friday, 18 * 60)
+        );
+        // A Sunday-only schedule steps back a whole week.
+        let sundays = DailySchedule::new(at, Weekdays::of(&[Weekday::Sunday]).unwrap());
+        assert_eq!(
+            sundays.latest_at_or_before(local(2026, 10, 18, Weekday::Sunday, 17 * 60)),
+            local(2026, 10, 11, Weekday::Sunday, 18 * 60)
+        );
+        // Exactly at the scheduled minute still counts as reached.
+        assert_eq!(
+            weekdays.latest_at_or_before(local(2026, 10, 16, Weekday::Friday, 18 * 60)),
+            local(2026, 10, 16, Weekday::Friday, 18 * 60)
+        );
     }
 
     #[test]

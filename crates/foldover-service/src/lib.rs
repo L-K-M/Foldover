@@ -442,13 +442,16 @@ async fn health(request: Request) -> Result<Value, RpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use foldover_engine::{Completion, Environment, MountSources, NetworkCost, PowerMode};
+    use foldover_engine::{
+        Completion, Environment, MountSources, NetworkCost, PowerMode, local_time,
+    };
     use foldover_proto::local::SyncProgress;
     use foldover_proto::local::{
         SyncCounts, SyncDeletions, SyncJob, SyncPreview, SyncResult, SyncStatus,
     };
+    use foldover_types::LocalDateTime;
     use serde_json::json;
-    use std::{fs, os::unix::ffi::OsStrExt, path::Path};
+    use std::{fs, os::unix::ffi::OsStrExt, path::Path, time::SystemTime};
 
     fn fixture() -> (tempfile::TempDir, Service) {
         let directory = tempfile::tempdir().unwrap();
@@ -826,6 +829,18 @@ mod tests {
         started
     }
 
+    /// `run_due_started` with the local wall clock injected.
+    async fn run_due_started_at(
+        service: &Service,
+        at: std::time::Instant,
+        local: Option<LocalDateTime>,
+    ) -> Vec<PairId> {
+        let mut started = service.run_due_at(at, Environment::now(), local);
+        probes_idle(service).await;
+        started.extend(service.run_due_at(at, Environment::now(), local));
+        started
+    }
+
     /// `run_due_started` with the environment injected.
     async fn run_due_started_in(
         service: &Service,
@@ -992,6 +1007,53 @@ mod tests {
         assert!(service.run_due(at(90)).is_empty());
         assert_eq!(run_due_started(&service, at(122)).await.len(), 1);
         settled(&service, &key).await;
+    }
+
+    #[tokio::test]
+    async fn daily_pairs_catch_up_a_missed_moment_once_at_the_next_tick() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Notes");
+        input["options"]["schedule"] = json!({"kind": "daily", "at_minutes": 60, "days":
+            ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]});
+        let left = directory.path().join("Notes-left");
+        fs::write(left.join("a"), b"a").unwrap();
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        let start = service.scheduler.started();
+        let at = |seconds| start + std::time::Duration::from_secs(seconds);
+        let local_now = || local_time(SystemTime::now());
+
+        // A first run is always reviewed by a person; the pair cannot
+        // become due before it, nor while the local clock is missing.
+        assert!(
+            service
+                .run_due_at(at(10), Environment::now(), local_now())
+                .is_empty()
+        );
+        assert_eq!(first_sync(&service, &key).await["state"], "finished");
+        assert!(
+            service
+                .run_due_at(at(15), Environment::now(), None)
+                .is_empty()
+        );
+
+        // A scheduled moment newer than the last run's start is due
+        // once; here "tomorrow" stands in for a moment the agent missed.
+        let tomorrow = local_time(SystemTime::now() + std::time::Duration::from_secs(86400));
+        assert_eq!(run_due_started_at(&service, at(20), tomorrow).await, [id]);
+        let finished = settled(&service, &key).await;
+        assert_eq!(finished["state"], "finished", "{finished}");
+
+        // The recorded start covers today's scheduled moment already.
+        assert!(
+            run_due_started_at(&service, at(30), local_now())
+                .await
+                .is_empty()
+        );
     }
 
     #[tokio::test]
