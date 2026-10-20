@@ -39,6 +39,8 @@ const WATCH_RETRY: Duration = Duration::from_secs(30);
 /// How long a person has to confirm a code once both Macs show it.
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// How long a final pairing message may take to reach the other Mac.
+/// Longest wait for a paired Mac to answer a request.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DELIVERY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Longest name a peer may announce, in bytes.
 const MAX_NAME_BYTES: usize = 256;
@@ -412,12 +414,17 @@ impl PeerLink {
         // A connection that died after the stream opened, as when the
         // other agent restarted, shows only in the reply. Requests here
         // change nothing, so one is sent again on a new connection.
-        let reply = match attempt().await {
-            Ok(reply) => reply,
-            Err(_) => {
+        // A Mac that never answers counts as unreachable, so a caller
+        // such as the app's folder picker does not wait forever.
+        let reply = match tokio::time::timeout(REQUEST_TIMEOUT, attempt()).await {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(_)) => {
                 self.state().connections.remove(&device);
-                attempt().await?
+                tokio::time::timeout(REQUEST_TIMEOUT, attempt())
+                    .await
+                    .map_err(|_| LinkError::Unreachable)??
             }
+            Err(_) => return Err(LinkError::Unreachable),
         };
         serde_json::from_slice(&reply).map_err(|_| LinkError::Protocol)
     }

@@ -325,11 +325,29 @@ impl PeerEndpoint {
         // The other Mac may refuse before reading the data, e.g. for a
         // changed destination; its reply says why better than a broken
         // stream.
+        let stream_broke = std::cell::Cell::new(false);
+        let broke = |error| {
+            stream_broke.set(true);
+            io::Error::other(error)
+        };
         let sent = if file {
-            send(&mut |chunk| exchange.send_data(chunk).map_err(io::Error::other))
-                .and_then(|()| exchange.end_data().map_err(io::Error::other))
+            send(&mut |chunk| exchange.send_data(chunk).map_err(broke))
+                .and_then(|()| exchange.end_data().map_err(broke))
         } else {
             Ok(())
+        };
+        // This Mac's source failed partway: the other Mac still waits for
+        // the rest and will not reply. Dropping the request resets its
+        // stream, so it gives up too.
+        let sent = match sent {
+            Err(source) if !stream_broke.get() => {
+                drop(exchange);
+                return Err(ApplyError::Write {
+                    path: path.clone(),
+                    source: WriteError::Io(source),
+                });
+            }
+            sent => sent,
         };
         match (exchange.reply(), sent) {
             (Ok(PeerReply::Received { version }), Ok(())) => {
@@ -627,3 +645,6 @@ fn unreachable(error: LinkError) -> ScanError {
 fn unexpected() -> ScanError {
     ScanError::Peer("The other Mac answered out of order".into())
 }
+
+#[cfg(test)]
+mod tests;
