@@ -1,7 +1,9 @@
 name: release
 
 # A version tag (vX.Y.Z, from scripts/release.sh --push) publishes the
-# ad-hoc-signed app as a GitHub release. Sparkle updates arrive later.
+# ad-hoc-signed app and its Sparkle appcast as a GitHub release
+# (ADR 0035). Needs the SPARKLE_PUBLIC_KEY variable and the
+# SPARKLE_PRIVATE_KEY secret.
 on:
   push:
     tags: ["v*"]
@@ -21,6 +23,7 @@ jobs:
       contents: write
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
+      SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -29,9 +32,14 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          grep -Fx "    MARKETING_VERSION: \"$version\"" apple/project.yml
+          # The release engine writes the version unquoted.
+          grep -Ex "    MARKETING_VERSION: \"?${version//./\\.}\"?" apple/project.yml
           grep -Fx "version = \"$version\"" Cargo.toml
           echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      # Without the key, the app could never update itself.
+      - name: Check the update key
+        run: test -n "$SPARKLE_PUBLIC_KEY"
 
       - name: Build the XCFramework
         run: cargo xtask ffi
@@ -50,9 +58,15 @@ jobs:
       - name: Build, verify and zip the app
         run: bash scripts/package-app.sh "$RUNNER_TEMP/Foldover-$VERSION.zip" "$RUNNER_TEMP/DerivedData"
 
+      - name: Sign the update
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: bash scripts/appcast.sh "$RUNNER_TEMP/Foldover-$VERSION.zip" "$VERSION" "$RUNNER_TEMP/appcast.xml"
+
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/release-notes.py "$VERSION" > "$RUNNER_TEMP/notes.md" &&
           gh release create "$GITHUB_REF_NAME" "$RUNNER_TEMP/Foldover-$VERSION.zip"
+          "$RUNNER_TEMP/appcast.xml"
           --title "Foldover $VERSION" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag
