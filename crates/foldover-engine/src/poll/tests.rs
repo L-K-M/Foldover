@@ -200,3 +200,22 @@ fn a_full_active_list_makes_room_for_the_newest_directory() {
         assert!(!active.contains(&oldest.as_bytes()), "{active:?}");
     }
 }
+
+/// Review of #99: what a folder's `.foldoverignore` leaves out started
+/// runs that then found nothing to do.
+#[test]
+fn what_a_folders_ignore_file_leaves_out_is_no_change() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join(".foldoverignore"), b"*.log\n").unwrap();
+    let folder = endpoint(directory.path());
+    let filter = folder_filter(&["*.tmp".to_owned()], &folder).unwrap();
+    let mut poll = FolderPoll::default();
+    assert!(!poll.check(&folder, &filter).unwrap());
+    fs::write(directory.path().join("build.log"), b"noise").unwrap();
+    assert!(!poll.check(&folder, &filter).unwrap());
+    // The pair's own rules still count.
+    fs::write(directory.path().join("draft.tmp"), b"noise").unwrap();
+    assert!(!poll.check(&folder, &filter).unwrap());
+    fs::write(directory.path().join("notes.txt"), b"news").unwrap();
+    assert!(poll.check(&folder, &filter).unwrap());
+}
