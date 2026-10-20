@@ -1,7 +1,7 @@
 //! `xtask` — tool (outside the layer graph). Foldover's task runner:
 //! `cargo xtask ci` mirrors the CI gate, `check-layers` enforces the
 //! PLAN.md §4.4 layer graph, `ffi`/`check-ffi` manage the UniFFI Swift
-//! bindings.
+//! bindings, `bench-check` enforces the perf/budgets.toml medians.
 
 // Adapted from L-K-M/Sweetbriar.
 
@@ -25,6 +25,7 @@ fn main() -> ExitCode {
         "ffi" => ffi(),
         "check-ffi" => check_ffi(),
         "agent-smoke" => agent_smoke(),
+        "bench-check" => bench_check(),
         _ => {
             usage();
             ExitCode::FAILURE
@@ -129,6 +130,20 @@ fn step_agent_smoke(_root: &Path) -> bool {
     xtask::agent::smoke()
 }
 
+/// `cargo xtask bench-check`: run the criterion benches and enforce
+/// perf/budgets.toml.
+fn bench_check() -> ExitCode {
+    if env::args().nth(2).is_some() {
+        usage();
+        return ExitCode::FAILURE;
+    }
+    if xtask::bench::bench_check() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
 fn step_doc(root: &Path) -> bool {
     let mut cmd = cargo(root, &["doc", "--workspace", "--no-deps"]);
     cmd.env("RUSTDOCFLAGS", "-D warnings");
@@ -215,5 +230,7 @@ fn workspace_root() -> PathBuf {
 }
 
 fn usage() {
-    eprintln!("usage: cargo xtask <ci|check-layers|ffi [--bindings-only]|check-ffi|agent-smoke>");
+    eprintln!(
+        "usage: cargo xtask <ci|check-layers|ffi [--bindings-only]|check-ffi|agent-smoke|bench-check>"
+    );
 }

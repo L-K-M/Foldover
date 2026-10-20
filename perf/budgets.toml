@@ -1,0 +1,11 @@
+# perf/budgets.toml — maximum criterion medians for `cargo xtask
+# bench-check`, in milliseconds (PLAN.md §5.2). Each budget sits at
+# about 3x a local median so slower, noisier CI runners still pass.
+# How to update them: perf/README.md.
+
+db_commit_100k = 1000
+db_read_100k = 300
+hash_64_mib = 60
+plan_100k_entries = 350
+# PLAN.md §5.3: a cold scan reads at least 10k entries per second.
+scan_10k_files = 1000
