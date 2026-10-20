@@ -64,9 +64,11 @@ name-handling fidelity as unverified
 [ADR 0027](../adr/0027-share-reconnect.md)).
 
 macOS writes AppleDouble files (`._*`) beside files on volumes that cannot
-store its metadata, and these stop a scan. Add a `._*` rule to the pair's
-filters to skip them ([limitations](limitations.md),
-[ADR 0024](../adr/0024-filters.md)).
+store its metadata. Where the volume says it has no extended attributes,
+as exFAT and FAT disks do, Foldover skips them: they hold the attributes
+of the files beside them, which travel with those files. Elsewhere they
+stop a scan; add a `._*` rule to the pair's filters to skip them
+([limitations](limitations.md), [ADR 0024](../adr/0024-filters.md)).
 
 ## An SFTP folder
 

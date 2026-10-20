@@ -155,6 +155,31 @@ impl ScanStats {
     }
 }
 
+/// What `._name` files are on a root's volume (PLAN.md §4.10).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Sidecars {
+    /// The volume keeps extended attributes itself, so a `._` file is a
+    /// copy of another volume's bookkeeping, and ambiguous: it stops the
+    /// scan (ADR 0010).
+    Unclassified,
+    /// The volume has none, as exFAT and FAT: macOS keeps each file's
+    /// extended attributes in its `._` sidecar and shows them as the
+    /// file's own, moving and removing the sidecar with it. A scan skips
+    /// the sidecars; the attributes travel with their files.
+    Metadata,
+}
+
+impl Sidecars {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn of(native_attributes: foldover_fs::DeclaredSupport) -> Self {
+        use foldover_fs::DeclaredSupport;
+        match native_attributes {
+            DeclaredSupport::Unsupported => Self::Metadata,
+            DeclaredSupport::Supported | DeclaredSupport::NotReported => Self::Unclassified,
+        }
+    }
+}
+
 /// How long after its last modification an entry's stat stays untrusted.
 /// Coarse timestamps (FAT, exFAT) cannot show an edit within the same tick.
 const RACY_WINDOW: Duration = Duration::from_secs(3);
@@ -432,6 +457,17 @@ impl LocalEndpoint {
         NameMatching::EXACT
     }
 
+    /// What `._` names hold on this root's volume. Only macOS keeps
+    /// attributes in sidecars, and only there do volumes say whether they
+    /// keep them natively.
+    fn sidecars(&self) -> Sidecars {
+        #[cfg(target_os = "macos")]
+        if let Ok(features) = self.filesystem_features() {
+            return Sidecars::of(features.support(FilesystemFeature::NativeXattrs));
+        }
+        Sidecars::Unclassified
+    }
+
     pub fn filesystem_features(&self) -> Result<FilesystemFeatures, ScanError> {
         let before = at(&None, self.root.root_metadata())?;
         if before.identity() != self.identity {
@@ -534,6 +570,7 @@ impl LocalEndpoint {
         if at(&None, root.root_metadata())?.identity() != self.identity {
             return Err(ScanError::Changed(None));
         }
+        let sidecars = self.sidecars();
         let mut directories = vec![Directory::open(root, None)?];
         let mut stats = ScanStats::default();
 
@@ -581,6 +618,12 @@ impl LocalEndpoint {
                 stats.old.push(path.clone());
             }
             if entry.name().starts_with(b"._") {
+                // Sidecars are files; a folder so named is someone's.
+                let file = entry.metadata().kind() == NodeKind::File;
+                if sidecars == Sidecars::Metadata && file {
+                    stats.skipped += 1;
+                    continue;
+                }
                 return Err(ScanError::UnclassifiedSidecar(path));
             }
             let at_path = Some(path.clone());
@@ -1441,6 +1484,25 @@ mod tests {
         assert_eq!(
             observed.versions().keys().collect::<Vec<_>>(),
             [&SyncPath::try_from(b"kept.txt".as_slice()).unwrap()]
+        );
+    }
+
+    /// Only a volume that says it has no extended attributes keeps them
+    /// in `._` sidecars; one that does not say stops the scan as before.
+    #[test]
+    fn sidecars_are_bookkeeping_only_where_attributes_are_not_native() {
+        use foldover_fs::DeclaredSupport;
+        assert_eq!(
+            Sidecars::of(DeclaredSupport::Unsupported),
+            Sidecars::Metadata
+        );
+        assert_eq!(
+            Sidecars::of(DeclaredSupport::Supported),
+            Sidecars::Unclassified
+        );
+        assert_eq!(
+            Sidecars::of(DeclaredSupport::NotReported),
+            Sidecars::Unclassified
         );
     }
 }
