@@ -18,7 +18,7 @@
 //! proptest's seed. `FOLDOVER_SIMULATION_CASES` and
 //! `FOLDOVER_MEMORY_SIMULATION_CASES` scale the nightly run.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
@@ -538,12 +538,23 @@ impl Simulation {
                     );
                 }
             }
-            for path in target_before.keys() {
-                let key = folded(path, self.names);
+            let held: BTreeSet<Vec<u8>> = target_before
+                .keys()
+                .map(|path| folded(path, self.names))
+                .collect();
+            for key in &held {
                 assert!(
-                    affected(&key) || target.contains_key(&key),
+                    affected(key) || target.contains_key(key),
                     "the backup lost {}",
-                    String::from_utf8_lossy(path)
+                    String::from_utf8_lossy(key)
+                );
+            }
+            // Review: nor does it make up names the source never had.
+            for key in target.keys().filter(|key| !affected(key)) {
+                assert!(
+                    source.contains_key(key) || held.contains(key),
+                    "the backup gained {}",
+                    String::from_utf8_lossy(key)
                 );
             }
             // What the run brought the target up to. A name in conflict, or

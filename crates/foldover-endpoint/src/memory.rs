@@ -240,10 +240,18 @@ impl MemoryEndpoint {
             modified,
         };
         let key = folder.key(path);
+        // Writing into an existing file keeps its mode, as a real one does.
         if let Some(stored) = folder.entries.get_mut(&key)
-            && matches!(stored.node, Node::File { .. })
+            && let Node::File { mode, .. } = stored.node
         {
-            stored.node = node;
+            stored.node = match node {
+                Node::File { data, modified, .. } => Node::File {
+                    data,
+                    mode,
+                    modified,
+                },
+                other => other,
+            };
             return Ok(());
         }
         folder.put(path, node)
