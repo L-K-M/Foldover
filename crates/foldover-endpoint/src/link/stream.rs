@@ -12,6 +12,9 @@
 //! the stream on the link's runtime. Dropping a stream resets it, which
 //! is how either side gives up.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use foldover_net::peer::{PeerRecvStream, PeerSendStream, read_message, write_message};
 use foldover_proto::peer::PeerReply;
 use serde::Serialize;
@@ -104,33 +107,50 @@ impl Exchange {
 
 /// A request this Mac answers, for sending replies and data and reading
 /// data.
-pub struct Answer(Stream);
+pub struct Answer {
+    stream: Stream,
+    closing: Arc<AtomicBool>,
+}
 
 impl Answer {
-    pub(super) fn new(runtime: Handle, send: PeerSendStream, recv: PeerRecvStream) -> Self {
-        Self(Stream {
-            runtime,
-            send,
-            recv,
-        })
+    pub(super) fn new(
+        runtime: Handle,
+        send: PeerSendStream,
+        recv: PeerRecvStream,
+        closing: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            stream: Stream {
+                runtime,
+                send,
+                recv,
+            },
+            closing,
+        }
+    }
+
+    /// Whether this Mac's link is going away; an answer that waits on its
+    /// own, such as a folder watch, stops then.
+    pub fn closing(&self) -> bool {
+        self.closing.load(Ordering::Relaxed)
     }
 
     pub fn reply(&mut self, reply: &PeerReply) -> Result<(), LinkError> {
         let json = serde_json::to_vec(reply).map_err(|_| LinkError::Protocol)?;
-        self.0.write(MESSAGE, &json)
+        self.stream.write(MESSAGE, &json)
     }
 
     pub fn send_data(&mut self, chunk: &[u8]) -> Result<(), LinkError> {
-        self.0.write(DATA, chunk)
+        self.stream.write(DATA, chunk)
     }
 
     pub fn end_data(&mut self) -> Result<(), LinkError> {
-        self.0.write(END, &[])
+        self.stream.write(END, &[])
     }
 
     /// The next data chunk the asker sent; None after its end.
     pub fn next_data(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
-        match self.0.next()? {
+        match self.stream.next()? {
             Incoming::Data(data) => Ok(Some(data)),
             Incoming::End => Ok(None),
             Incoming::Reply(_) => Err(LinkError::Protocol),
@@ -138,7 +158,7 @@ impl Answer {
     }
 
     pub(super) fn into_send(self) -> PeerSendStream {
-        self.0.send
+        self.stream.send
     }
 }
 
