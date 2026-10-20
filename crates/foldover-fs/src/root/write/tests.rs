@@ -529,6 +529,12 @@ fn quarantine_stays_behind_where_a_run_leaves_it_alone() {
     };
     assert_eq!(copy(&left_alone, b"left-alone"), None);
     assert_eq!(copy(&ALL, b"travels").unwrap(), b"0081;6538a6f1;Safari;");
+    // Copying the ACL alone carries it on macOS; ignored attributes keep it out.
+    let permissions_only = PairOptions::new(
+        MetadataPolicy::new(Propagation::Sync, Propagation::Ignore, Propagation::Sync),
+        STANDARD,
+    );
+    assert_eq!(copy(&permissions_only, b"permissions-only"), None);
 }
 
 #[cfg(target_os = "macos")]

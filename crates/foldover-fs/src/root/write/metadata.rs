@@ -58,13 +58,7 @@ pub(super) fn apply(
         }
     }
 
-    apply_permissions(
-        source,
-        source_metadata,
-        target,
-        &target_metadata,
-        policy.permissions(),
-    )?;
+    apply_permissions(source, source_metadata, target, &target_metadata, policy)?;
 
     if policy.modification_times() == Propagation::Sync && source_metadata.kind() == NodeKind::File
     {
@@ -182,12 +176,12 @@ fn apply_permissions(
     source_metadata: &EntryMetadata,
     target: &impl AsFd,
     target_metadata: &EntryMetadata,
-    permissions: Propagation,
+    policy: MetadataPolicy,
 ) -> io::Result<()> {
     let current = target_metadata.permissions() & PERMISSION_BITS;
-    let wanted = match permissions {
+    let wanted = match policy.permissions() {
         Propagation::Sync => {
-            copy_access_control(source, target)?;
+            copy_access_control(source, target, policy.quarantine())?;
             source_metadata.permissions() & PERMISSION_BITS
         }
         // Like git: only whether a file is executable follows it. Execute is
@@ -320,14 +314,48 @@ fn set_user_flags(_: &impl AsFd, _: &EntryMetadata, _: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// macOS's copyfile carries Gatekeeper's mark along with the ACL. Where
+/// the run leaves the mark alone, the target keeps its own, or none.
 #[cfg(target_os = "macos")]
-fn copy_access_control(source: &impl AsFd, target: &impl AsFd) -> io::Result<()> {
-    crate::mac_metadata::copy_access_control(source, target)
+fn copy_access_control(
+    source: &impl AsFd,
+    target: &impl AsFd,
+    quarantine: Propagation,
+) -> io::Result<()> {
+    const QUARANTINE: &CStr = c"com.apple.quarantine";
+    let kept = match quarantine {
+        Propagation::Sync => None,
+        Propagation::Ignore => Some(attribute_value(target, QUARANTINE)?),
+    };
+    crate::mac_metadata::copy_access_control(source, target)?;
+    match kept {
+        None => Ok(()),
+        Some(Some(value)) => rustix::fs::fsetxattr(target, QUARANTINE, &value, XattrFlags::empty())
+            .map_err(io::Error::from),
+        Some(None) => match rustix::fs::fremovexattr(target, QUARANTINE) {
+            Ok(()) | Err(rustix::io::Errno::NOATTR) => Ok(()),
+            Err(error) => Err(error.into()),
+        },
+    }
+}
+
+/// The value of `name` on `file`, or `None` without it.
+#[cfg(target_os = "macos")]
+fn attribute_value(file: &impl AsFd, name: &CStr) -> io::Result<Option<Vec<u8>>> {
+    let size = match rustix::fs::fgetxattr(file, name, &mut [0_u8; 0][..]) {
+        Ok(size) => size,
+        Err(rustix::io::Errno::NOATTR) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut value = vec![0; size];
+    let size = rustix::fs::fgetxattr(file, name, &mut value)?;
+    value.truncate(size);
+    Ok(Some(value))
 }
 
 /// Linux ACLs live in privileged xattr namespaces, which are not copied.
 #[cfg(not(target_os = "macos"))]
-fn copy_access_control(_: &impl AsFd, _: &impl AsFd) -> io::Result<()> {
+fn copy_access_control(_: &impl AsFd, _: &impl AsFd, _: Propagation) -> io::Result<()> {
     Ok(())
 }
 
