@@ -956,7 +956,7 @@ mod tests {
     use std::os::unix::net::UnixListener;
 
     #[test]
-    fn dataless_roots_and_entries_cannot_complete_an_inventory() {
+    fn dataless_roots_and_reads_are_refused() {
         for path in [
             None,
             Some(SyncPath::try_from(b"placeholder".as_slice()).unwrap()),
