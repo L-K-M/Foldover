@@ -232,6 +232,11 @@ pub struct ScanSettings {
     pub size_limit: Option<u64>,
     /// Files older than this, in milliseconds since the Unix epoch, are old.
     pub cutoff_ms: Option<u64>,
+    /// `ignore` when the run leaves Gatekeeper's download mark alone, as
+    /// it does with a network volume in the pair; absent means it syncs
+    /// with the other attributes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quarantine: Option<PairPropagation>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -374,4 +379,30 @@ pub struct WireItem {
 pub struct OfferedShare {
     pub id: String,
     pub name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scan that lets Gatekeeper's mark travel reads as before, so
+    /// both Macs agree on what an observation includes.
+    #[test]
+    fn quarantine_goes_on_the_wire_only_when_left_alone() {
+        let mut scan = ScanSettings {
+            modification_times: PairPropagation::Sync,
+            extended_attributes: PairPropagation::Sync,
+            permissions: PairPropagation::Ignore,
+            rules: Vec::new(),
+            size_limit: None,
+            cutoff_ms: None,
+            quarantine: None,
+        };
+        let json = serde_json::to_value(&scan).unwrap();
+        assert!(json.get("quarantine").is_none());
+        scan.quarantine = Some(PairPropagation::Ignore);
+        let json = serde_json::to_value(&scan).unwrap();
+        assert_eq!(json["quarantine"], "ignore");
+        assert_eq!(serde_json::from_value::<ScanSettings>(json).unwrap(), scan);
+    }
 }

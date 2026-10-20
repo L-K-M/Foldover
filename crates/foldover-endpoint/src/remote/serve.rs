@@ -19,7 +19,7 @@ use foldover_proto::peer::{
 };
 use foldover_types::{
     CaseMatching, Digest, Durability, EntryVersion, LocalRoot, MetadataPolicy, PairOptions,
-    ScanControl, SyncPath, UnicodeMatching,
+    Propagation, ScanControl, SyncPath, UnicodeMatching,
 };
 
 use super::wire;
@@ -290,7 +290,8 @@ fn observe(
         scan.modification_times.into(),
         scan.extended_attributes.into(),
         scan.permissions.into(),
-    );
+    )
+    .with_quarantine(scan.quarantine.map_or(Propagation::Sync, Into::into));
     let previous = cache.take(root, policy);
 
     // The asking Mac gives up by dropping the request; the next progress

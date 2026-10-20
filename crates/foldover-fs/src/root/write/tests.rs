@@ -456,6 +456,81 @@ fn ignored_attributes_leave_existing_target_attributes_alone() {
     assert_eq!(&value[..size], b"kept");
 }
 
+/// PLAN.md §4.10: a run that leaves Gatekeeper's mark alone neither
+/// copies it nor removes the target's; other attributes still sync.
+#[cfg(target_os = "macos")]
+#[test]
+fn quarantine_stays_behind_where_a_run_leaves_it_alone() {
+    const QUARANTINE: &str = "com.apple.quarantine";
+    let mark = |file: &std::path::Path, value: &[u8]| {
+        let handle = fs::File::open(file).unwrap();
+        rustix::fs::fsetxattr(&handle, QUARANTINE, value, rustix::fs::XattrFlags::empty()).unwrap();
+    };
+    let read = |file: &std::path::Path| {
+        let handle = fs::File::open(file).unwrap();
+        let mut value = [0; 64];
+        rustix::fs::fgetxattr(&handle, QUARANTINE, &mut value)
+            .ok()
+            .map(|size| value[..size].to_vec())
+    };
+    let roots = roots();
+    let source = roots._source_directory.path().join("file");
+    let target = roots.target_directory.path().join("file");
+    fs::write(&source, b"data").unwrap();
+    fs::write(&target, b"data").unwrap();
+    mark(&source, b"0081;6538a6f1;Safari;");
+    mark(&target, b"0081;6538a6f2;Mail;");
+    let file = path(b"file");
+    let left_alone = ALL
+        .clone()
+        .with_metadata(ALL.metadata().with_quarantine(Propagation::Ignore));
+
+    let source_observed = roots.source.metadata(&file).unwrap();
+    let target_observed = roots.target.metadata(&file).unwrap();
+    roots
+        .target
+        .update_metadata(
+            &file,
+            &target_observed,
+            &roots.source,
+            &source_observed,
+            &left_alone,
+        )
+        .unwrap();
+    assert_eq!(read(&target).unwrap(), b"0081;6538a6f2;Mail;");
+
+    // New copies get it only where it travels.
+    let copy = |options: &PairOptions, name: &[u8]| {
+        let staged = roots
+            .target
+            .stage_file(
+                &file,
+                &roots.source,
+                &source_observed,
+                options,
+                &mut proceed,
+            )
+            .unwrap();
+        roots
+            .target
+            .place(
+                staged.into_staged(),
+                &path(name),
+                Placement::Create,
+                STANDARD,
+            )
+            .unwrap();
+        read(
+            &roots
+                .target_directory
+                .path()
+                .join(std::str::from_utf8(name).unwrap()),
+        )
+    };
+    assert_eq!(copy(&left_alone, b"left-alone"), None);
+    assert_eq!(copy(&ALL, b"travels").unwrap(), b"0081;6538a6f1;Safari;");
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn forks_always_copy_hidden_follows_attributes_and_locks_stay_behind() {

@@ -333,6 +333,10 @@ impl PairOptions {
         }
     }
 
+    pub fn with_metadata(self, metadata: MetadataPolicy) -> Self {
+        Self { metadata, ..self }
+    }
+
     pub fn with_schedule(self, schedule: Schedule) -> Self {
         Self { schedule, ..self }
     }

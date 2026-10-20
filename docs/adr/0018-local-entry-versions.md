@@ -37,7 +37,7 @@ reads already cover the data.
 | Category | Default | Covers |
 |---|---|---|
 | Modification times | Sync | File mtimes |
-| Extended attributes | Sync | Xattr names/sizes/digests (tags, Finder info, comments, quarantine), hidden and no-dump flags |
+| Extended attributes | Sync | Xattr names/sizes/digests (tags, Finder info, comments, quarantine), hidden and no-dump flags. A pair with a folder on a network volume leaves `com.apple.quarantine` out on both sides and never writes it (PLAN.md §4.10) |
 | Permissions | Ignore | Mode bits (not links) and the ACL; when ignored, a file's executable bit still syncs |
 
 An ignored category is absent from the digest, so changing it never causes

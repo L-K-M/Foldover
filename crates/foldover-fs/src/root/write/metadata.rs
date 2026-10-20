@@ -47,10 +47,12 @@ pub(super) fn apply(
     }
 
     if policy.extended_attributes() == Propagation::Sync {
-        if destination == Destination::Existing {
-            remove_attributes(target, &target_metadata, AttributeRole::Synced)?;
+        for role in synced_roles(policy) {
+            if destination == Destination::Existing {
+                remove_attributes(target, &target_metadata, role)?;
+            }
+            copy_attributes(source, source_metadata, target, role)?;
         }
-        copy_attributes(source, source_metadata, target, AttributeRole::Synced)?;
         if let Some(flags) = source_metadata.user_flags() {
             set_user_flags(target, &target_metadata, flags)?;
         }
@@ -85,6 +87,7 @@ pub(super) fn native(
         let wanted = match metadata.attribute_role(name.as_bytes()) {
             AttributeRole::ResourceFork => true,
             AttributeRole::Synced => synced,
+            AttributeRole::Quarantine => policy.quarantine() == Propagation::Sync,
             AttributeRole::CompressionStorage | AttributeRole::SystemManaged => false,
         };
         if !wanted {
@@ -120,12 +123,15 @@ pub(super) fn apply_native(
     let target_metadata = EntryMetadata::from_file(target)?;
     let synced = policy.extended_attributes() == Propagation::Sync;
     if synced && destination == Destination::Existing {
-        remove_attributes(target, &target_metadata, AttributeRole::Synced)?;
+        for role in synced_roles(policy) {
+            remove_attributes(target, &target_metadata, role)?;
+        }
     }
     for (name, value) in &native.attributes {
         let allowed = match target_metadata.attribute_role(name) {
             AttributeRole::ResourceFork => destination == Destination::New,
             AttributeRole::Synced => synced,
+            AttributeRole::Quarantine => policy.quarantine() == Propagation::Sync,
             AttributeRole::CompressionStorage | AttributeRole::SystemManaged => false,
         };
         if !allowed {
@@ -199,6 +205,18 @@ fn apply_permissions(
         rustix::fs::fchmod(target, Mode::from_raw_mode(wanted as _))?;
     }
     Ok(())
+}
+
+/// The attribute roles a run syncing extended attributes replaces: user
+/// metadata, and Gatekeeper's mark unless the run leaves it alone.
+fn synced_roles(policy: MetadataPolicy) -> impl Iterator<Item = AttributeRole> {
+    let quarantine = policy.quarantine() == Propagation::Sync;
+    [
+        Some(AttributeRole::Synced),
+        quarantine.then_some(AttributeRole::Quarantine),
+    ]
+    .into_iter()
+    .flatten()
 }
 
 fn copy_attributes(

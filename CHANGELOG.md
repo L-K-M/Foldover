@@ -242,6 +242,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Files synced to a network share no longer get macOS's quarantine
+  mark (Gatekeeper's note that a file was downloaded) written there.
+
 - Syncing to disks formatted HFS+ (Mac OS Extended), exFAT or FAT32
   works: every copy to them failed with "Operation not supported".
 
