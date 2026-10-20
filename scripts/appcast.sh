@@ -38,6 +38,7 @@ tar -xJf "$tools/sparkle.tar.xz" -C "$tools"
 # e.g. sparkle:edSignature="…" length="1234"
 ( umask 077 && printf '%s' "$SPARKLE_PRIVATE_KEY" > "$tools/key" )
 attributes="$("$tools/bin/sign_update" --ed-key-file "$tools/key" "$ARCHIVE")"
+rm -f "$tools/key"
 signed='sparkle:edSignature="([^"]+)"'
 [[ "$attributes" =~ $signed ]]
 
