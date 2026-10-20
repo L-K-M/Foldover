@@ -139,6 +139,9 @@ jobs:
       - name: Launchd materialization policy
         run: python3 scripts/test-materialization-policy.py
 
+      - name: Update signature check
+        run: bash scripts/test-verify-update.sh
+
       # Builds the arm64 FoldoverCoreFFI.xcframework plus the Swift
       # bindings; the app links it below.
       - name: xtask ffi

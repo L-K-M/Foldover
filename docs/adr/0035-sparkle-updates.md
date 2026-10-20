@@ -32,7 +32,10 @@ app ─ SUFeedURL ─▶ releases/latest/download/appcast.xml ─▶ zip
   `MARKETING_VERSION`, which every release raises.
 - **Appcast:** `scripts/appcast.sh` downloads Sparkle's tools (checksum
   pinned), signs the zip with `sign_update`, and writes a one-item feed
-  uploaded with the release.
+  uploaded with the release. It first checks the signature against
+  `SPARKLE_PUBLIC_KEY` (`scripts/verify-update.swift`), so a private
+  key from another pair fails the release before anything is published,
+  instead of shipping an update no installed copy accepts.
 
 ### Owner setup, once
 
