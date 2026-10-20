@@ -37,7 +37,7 @@ What you need to know before trusting a pair with your data.
 ## Readiness warnings
 
 While you edit a pair, Foldover warns about sides that will not work as
-you might expect. Warnings never block saving
+you might expect. Only the last one below blocks saving
 ([ADR 0037](../adr/0037-readiness-warnings.md)):
 
 - A folder another sync engine manages: iCloud Drive, Desktop &
@@ -46,6 +46,12 @@ you might expect. Warnings never block saving
   SFTP side always warns.
 - Two sides that compare names differently, one ignoring case and one
   exact; such names become conflicts to rename.
+- A folder that cannot hold Foldover's `.foldover` folder, such as a
+  share that refuses names starting with a dot. This one blocks saving:
+  such a folder can only be a Backup's target that keeps nothing, where
+  replaced files are deleted, not archived, Undo is unavailable, and
+  another Mac backing up to it is not noticed
+  ([ADR 0040](../adr/0040-backup-targets-without-records.md)).
 
 ## Several Macs on one folder
 

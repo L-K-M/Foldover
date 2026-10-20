@@ -526,6 +526,20 @@ mod tests {
         );
     }
 
+    /// Records stay off the wire while in both folders, so settings read
+    /// as before; kept only in the source, they round-trip.
+    #[test]
+    fn records_travel_only_when_kept_in_the_source() {
+        let both = serde_json::to_value(PairSettings::from(&PairOptions::default())).unwrap();
+        assert!(both.get("records").is_none());
+        let source_only = PairOptions::default().with_records(FolderRecords::SourceOnly);
+        let settings = PairSettings::from(&source_only);
+        let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(json["records"], json!("sourceOnly"));
+        let read: PairSettings = serde_json::from_value(json).unwrap();
+        assert_eq!(PairOptions::try_from(read).unwrap(), source_only);
+    }
+
     #[test]
     fn worst_case_page_remains_below_the_frame_limit() {
         let mut left = vec![u8::MAX; MAX_LOCAL_ROOT_BYTES];

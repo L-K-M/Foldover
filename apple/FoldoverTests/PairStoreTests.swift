@@ -485,6 +485,52 @@ private actor WarningOnAttributesClient: PairClient {
 
 @MainActor
 @Test
+func aFolderThatRefusesRecordsCanOnlyBeABackupTargetKeepingNothing() async {
+    let editor = PairEditorViewModel(store: PairStore(client: RecordsRefusingClient()))
+    editor.name = "Archive"
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/a")]), side: .left)
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/b")]), side: .right)
+    await editor.awaitReadinessCheck()
+    #expect(editor.readinessWarnings.isEmpty)
+    #expect(editor.recordsWarning == "Folder B can't hold Foldover's .foldover folder, so it can only be a Backup's target. Choose a Backup to Folder B, then keep nothing in it.")
+    #expect(!editor.offersKeepingNothing)
+    #expect(!editor.canSave)
+
+    editor.mode = .backupLeft
+    await editor.awaitReadinessCheck()
+    #expect(editor.offersKeepingNothing)
+    #expect(editor.recordsWarning == "Folder B can't hold Foldover's .foldover folder. To back up to it, turn on “Keep nothing in Folder B”.")
+    #expect(!editor.canSave)
+    editor.keepsNothingInTarget = true
+    await editor.awaitReadinessCheck()
+    #expect(editor.recordsWarning == nil)
+    #expect(editor.offersKeepingNothing)
+    #expect(editor.canSave)
+    #expect(editor.planText.contains("files replaced in Folder B are deleted, not archived"))
+
+    // Leaving Backup keeps records in both folders again.
+    editor.mode = .sync
+    #expect(editor.options.records == .both)
+    await editor.awaitReadinessCheck()
+    #expect(!editor.canSave)
+}
+
+/// Refuses records in Folder B, and like the engine does not probe a
+/// Backup target that already keeps none.
+private actor RecordsRefusingClient: PairClient {
+    func page(after: String?) async throws -> PairCatalogPage { PairCatalogPage(pairs: [], next: nil) }
+    func create(_ settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
+    func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
+    func remove(_ pair: SyncPair) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
+    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] {
+        let spared = settings.mode == .backupLeft && settings.options.records == .sourceOnly
+        return spared ? [] : [PairReadinessWarning(side: .b, kind: .recordsUnsupported)]
+    }
+    func servers() async throws -> [NearbyServer] { [] }
+}
+
+@MainActor
+@Test
 func aFailedReadinessCheckKeepsTheLastAnswer() async {
     let client = WarningOnAttributesClient(warning: PairReadinessWarning(side: .a, kind: .namesDiffer))
     let editor = PairEditorViewModel(store: PairStore(client: client))

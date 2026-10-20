@@ -41,6 +41,15 @@ enum PairDurability: CaseIterable, Hashable, Sendable {
     case full
 }
 
+/// Which folders hold Foldover's records (`.foldover`): its identity,
+/// lease and archive.
+enum PairRecords: Hashable, Sendable {
+    case both
+    /// Only a Backup's source, for a target that cannot hold `.foldover`:
+    /// files a sync replaces there are deleted, not archived.
+    case sourceOnly
+}
+
 /// Metadata categories and flush strength a pair uses.
 struct PairOptions: Equatable, Sendable {
     var syncModificationTimes: Bool
@@ -57,6 +66,7 @@ struct PairOptions: Equatable, Sendable {
     /// A file kept unchanged in both folders that proves the right ones
     /// are mounted; syncs stop before writing if it is missing or changed.
     var canary: Data?
+    var records: PairRecords
 
     /// The engine's defaults, so the app never restates them.
     static var defaults: PairOptions { pairOptions(FoldoverCore.defaultPairOptions()) }
@@ -97,7 +107,8 @@ struct PairCatalogPage: Sendable {
 }
 
 /// What will not work as a person might expect with a picked folder
-/// (PLAN.md §3.6); a warning never blocks saving.
+/// (PLAN.md §3.6). The agent saves regardless; the editor blocks saving
+/// only over refused records.
 struct PairReadinessWarning: Equatable, Sendable {
     enum Kind: Equatable, Sendable {
         /// Another sync engine manages this folder; `provider` names it.
@@ -106,6 +117,9 @@ struct PairReadinessWarning: Equatable, Sendable {
         case metadataUnsupported
         /// One side ignores name case and the other does not.
         case namesDiffer
+        /// This folder cannot hold Foldover's `.foldover` records, so it
+        /// can only be a Backup target that keeps none.
+        case recordsUnsupported
     }
 
     let side: FolderSide
@@ -169,6 +183,7 @@ private actor CorePairClient: PairClient {
         case .cloudManaged: .cloudManaged(provider: warning.provider ?? "")
         case .metadataUnsupported: .metadataUnsupported
         case .namesDiffer: .namesDiffer
+        case .recordsUnsupported: .recordsUnsupported
         }
         return PairReadinessWarning(side: side, kind: kind)
     }
@@ -223,7 +238,8 @@ private func pairOptions(_ options: LocalPairOptions) -> PairOptions {
         filters: options.filters,
         sizeLimit: options.sizeLimit,
         ageLimit: options.ageLimit,
-        canary: options.canary
+        canary: options.canary,
+        records: options.records == .sourceOnly ? .sourceOnly : .both
     )
 }
 
@@ -284,7 +300,8 @@ private func corePairOptions(_ options: PairOptions) -> LocalPairOptions {
         filters: options.filters,
         sizeLimit: options.sizeLimit,
         ageLimit: options.ageLimit,
-        canary: options.canary
+        canary: options.canary,
+        records: options.records == .sourceOnly ? .sourceOnly : .both
     )
 }
 

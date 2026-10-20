@@ -556,6 +556,7 @@ mod tests {
                     size_limit: Some(1_000_000),
                     age_limit: Some(365),
                     canary: Some(b"docs/canary.txt".to_vec()),
+                    records: FolderRecords::SourceOnly,
                 },
             };
             let domain = foldover_client::PairDraft::try_from(draft.clone()).unwrap();
@@ -603,6 +604,16 @@ mod tests {
                 ReadinessWarning {
                     side: SyncSide::Left,
                     kind: ReadinessWarningKind::NamesDiffer,
+                    provider: None,
+                },
+            ),
+            (
+                PairWarning::RecordsUnsupported {
+                    side: PairSide::Right,
+                },
+                ReadinessWarning {
+                    side: SyncSide::Right,
+                    kind: ReadinessWarningKind::RecordsUnsupported,
                     provider: None,
                 },
             ),

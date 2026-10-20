@@ -4,7 +4,8 @@
 //! these invariants:
 //!
 //! - nothing is lost: a file version a run replaced or removed is in its
-//!   folder's archive;
+//!   folder's archive, except on a Backup target that keeps no records,
+//!   which never gains an archive;
 //! - a finished run leaves both folders equal outside the conflicts it
 //!   reported, comparing names the way the folders do; a Backup leaves
 //!   every source file on its target;
@@ -24,7 +25,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use foldover_sim::{MemoryEndpoint, NameStorage, Quirks, Replace};
-use foldover_types::{CaseMatching, NameMatching, UnicodeMatching};
+use foldover_types::{CaseMatching, FolderRecords, NameMatching, UnicodeMatching};
 use proptest::prelude::*;
 use unicode_normalization::UnicodeNormalization;
 
@@ -78,7 +79,7 @@ const MEMORY_LEASES: LeaseTiming = LeaseTiming {
     wait: Duration::from_secs(1),
 };
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Folder {
     Left,
     Right,
@@ -168,13 +169,17 @@ fn rounds(paths: usize, faults: Faults) -> impl Strategy<Value = Vec<Round>> {
     prop::collection::vec(round, 1..8)
 }
 
-/// How the pair syncs; most histories two-way.
-fn mode() -> impl Strategy<Value = SyncMode> {
+/// How the pair syncs; most histories two-way. Half the Backups keep
+/// no records in their target (PLAN.md §3.6).
+fn mode() -> impl Strategy<Value = (SyncMode, FolderRecords)> {
     let side = prop_oneof![Just(Side::Left), Just(Side::Right)];
+    let records = prop_oneof![Just(FolderRecords::Both), Just(FolderRecords::SourceOnly)];
     prop_oneof![
-        2 => Just(SyncMode::Sync),
-        1 => side.clone().prop_map(|source| SyncMode::Mirror { source }),
-        1 => side.prop_map(|source| SyncMode::Backup { source }),
+        2 => Just((SyncMode::Sync, FolderRecords::Both)),
+        1 => side
+            .clone()
+            .prop_map(|source| (SyncMode::Mirror { source }, FolderRecords::Both)),
+        1 => (side, records).prop_map(|(source, records)| (SyncMode::Backup { source }, records)),
     ]
 }
 
@@ -273,11 +278,16 @@ impl Simulation {
     }
 
     fn in_memory(left: Quirks, right: Quirks) -> Self {
-        Self::in_memory_as(SyncMode::Sync, left, right)
+        Self::in_memory_as((SyncMode::Sync, FolderRecords::Both), left, right)
     }
 
-    fn in_memory_as(mode: SyncMode, left: Quirks, right: Quirks) -> Self {
+    fn in_memory_as(
+        (mode, records): (SyncMode, FolderRecords),
+        left: Quirks,
+        right: Quirks,
+    ) -> Self {
         let mut pair = fixture(mode);
+        pair.records = records;
         pair.memory = Some([MemoryEndpoint::new(left), MemoryEndpoint::new(right)]);
         pair.leases = MEMORY_LEASES;
         Self {
@@ -433,9 +443,19 @@ impl Simulation {
     }
 
     /// Nothing that left a folder during a run is missing from what it
-    /// keeps.
+    /// keeps. A Backup target without records keeps nothing: what a run
+    /// replaces there goes by design, and no archive appears.
     fn check_nothing_lost(&self, before: &[BTreeMap<Vec<u8>, Vec<u8>>; 2]) {
         for (folder, before) in [Folder::Left, Folder::Right].iter().zip(before) {
+            if self.unrecorded() == Some(*folder) {
+                if let Some(memory) = self.memory(*folder) {
+                    assert!(
+                        memory.archived_files().is_empty(),
+                        "{folder:?} keeps no records but gained an archive"
+                    );
+                }
+                continue;
+            }
             let (after, archive) = (self.files(*folder), self.kept(*folder));
             for (path, content) in before {
                 if after.get(path) == Some(content) {
@@ -449,6 +469,17 @@ impl Simulation {
                 );
             }
         }
+    }
+
+    /// The Backup target that keeps no records, if the pair has one.
+    fn unrecorded(&self) -> Option<Folder> {
+        if self.pair.records != FolderRecords::SourceOnly {
+            return None;
+        }
+        self.source().map(|source| match source {
+            Folder::Left => Folder::Right,
+            Folder::Right => Folder::Left,
+        })
     }
 
     /// The folder a one-way mode copies from.

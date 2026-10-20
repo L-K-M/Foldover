@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- A Backup can go to a folder that cannot hold Foldover's `.foldover`
+  folder, such as a share that refuses names starting with a dot, once
+  you choose to keep nothing there: files replaced in it are deleted,
+  not archived. The pair editor says when a folder refuses it.
+
 - "When files change" catches up on changes made while the agent was
   not running, syncs after 5 minutes of nonstop changes, and checks
   shares and SFTP servers for other computers' changes every 5 minutes.
