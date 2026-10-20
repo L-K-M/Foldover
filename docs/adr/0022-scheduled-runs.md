@@ -14,7 +14,7 @@ is skipped until its job ends.
 | Schedule | Due |
 |---|---|
 | `every` | One interval after the last scheduled start, or after the agent started |
-| `changes` | 5 seconds after the last change in either folder, and hourly |
+| `changes` | 10 seconds after the last change in either folder, 5 minutes after the first when changes never stop, and hourly |
 
 - **Change notifications** come from FSEvents on macOS and inotify on
   Linux (the `notify` crate, behind `foldover-watch`). They are hints: a
@@ -23,6 +23,20 @@ is skipped until its job ends.
   folders, such as unmounted disks, are covered by the hourly run.
   Unwatchable folders are retried every check; one that becomes watchable
   counts as changed, since it may have changed while it was away.
+- **Catch-up:** at the agent's first check every watchable folder counts
+  as changed once, since nothing watched it while the agent was not
+  running. Replaying FSEvents from a stored event ID would skip that run
+  when nothing changed; it is not implemented
+  ([ADR 0002](0002-change-detection.md)).
+- **Other computers' changes** reach no notification on shares and SFTP
+  folders. Every 5 minutes the agent lists their root and up to 32
+  recently active directories, one level each, and compares names,
+  kinds, sizes and modification times with the previous check; excluded
+  names and Foldover's own do not count. A directory whose entry changed
+  is listed from then on. After any run the next check only records the
+  folders, so the run's own writes are not changes. Edits further down
+  wait for the hourly run. Pairs held by Low Power Mode or a costly
+  network are not checked.
 - **Missing folders:** when a due pair's folder path does not exist, as
   for an unmounted disk or share, no run starts. The pair's status becomes
   `waiting` for that side, without a notification or history entry, and the
