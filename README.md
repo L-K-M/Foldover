@@ -15,8 +15,9 @@ Free and open-source under the Unlicense. No sponsorships or paid features.
 The macOS app requires macOS 27 and Apple silicon.
 
 > [!NOTE]
-> **Status: early development.** Local folders sync from the app and the command
-> line. Do not trust it with data you have not backed up. [`PLAN.md`](PLAN.md) is the
+> **Status: beta in preparation.** Folders on this Mac, SFTP servers and other
+> Macs running Foldover sync from the app and the command line. Do not trust it
+> with data you have not backed up. [`PLAN.md`](PLAN.md) is the
 > source of truth for scope and design; the research behind it lives in
 > [`docs/research`](docs/research/README.md).
 

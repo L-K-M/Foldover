@@ -69,8 +69,11 @@ you might expect. Warnings never block saving
 
 ## Mac-to-Mac
 
-- **ACLs do not travel yet.** Extended attributes, resource forks and
-  file flags do, at most 2 MiB of attributes per entry
+- **ACLs stay on each Mac.** Their entries name accounts by identifiers
+  each Mac assigns itself, so they cannot mean the same on another Mac.
+  A new entry gets the access its receiving folder gives new files;
+  check access there if you rely on ACLs. Extended attributes, resource
+  forks and file flags travel, at most 2 MiB of attributes per entry
   ([ADR 0031](../adr/0031-mac-to-mac.md)).
 - **Only the owner syncs.** The Mac that owns a pair reconciles it; the
   other serves its shared folder, and the pair waits while the owner is

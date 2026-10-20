@@ -107,8 +107,14 @@ final class AutomationStore {
         await perform { try await $0.resume() }
     }
 
+    /// Shows the choice at once, so the toggle does not bounce while the
+    /// agent saves it; a failed save puts the previous choice back unless
+    /// a newer choice replaced it meanwhile.
     func setLowPower(_ syncs: LowPowerSyncs) async {
-        await perform { try await $0.setLowPower(syncs) }
+        let previous = lowPower
+        lowPower = syncs
+        let saved = await perform { try await $0.setLowPower(syncs) }
+        if !saved, lowPower == syncs { lowPower = previous }
     }
 
     private func apply(_ status: AutomationStatus) {
@@ -117,7 +123,10 @@ final class AutomationStore {
         heldBy = status.heldBy
     }
 
-    private func perform(_ request: @Sendable (any AutomationClient) async throws -> AutomationStatus) async {
+    /// Whether this request succeeded; `error` is shared by requests
+    /// that overlap, so it cannot tell.
+    @discardableResult
+    private func perform(_ request: @Sendable (any AutomationClient) async throws -> AutomationStatus) async -> Bool {
         generation += 1
         // Completing an action invalidates reads issued while it was
         // on the wire, so they cannot overwrite this reply.
@@ -125,8 +134,10 @@ final class AutomationStore {
         error = nil
         do {
             apply(try await request(client))
+            return true
         } catch {
             self.error = PairStore.message(for: error)
+            return false
         }
     }
 }

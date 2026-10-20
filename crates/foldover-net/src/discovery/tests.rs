@@ -203,3 +203,20 @@ fn two_agents_on_one_network_see_each_other_and_pairing_windows() {
             .any(|seen| seen.device == b_id && seen.pairing.is_empty())
     });
 }
+
+/// Review: an advert's host goes into an smb:// URL, so only a plain
+/// host name is taken.
+#[test]
+fn file_servers_need_a_plain_host_name() {
+    let fullname = "NAS._smb._tcp.local.";
+    assert!(file_server(fullname, "nas.local.", 445).is_some());
+    for host in [
+        "user@evil.local.",
+        "nas.local/share",
+        "nas..local",
+        "",
+        "nas local",
+    ] {
+        assert!(file_server(fullname, host, 445).is_none(), "{host}");
+    }
+}

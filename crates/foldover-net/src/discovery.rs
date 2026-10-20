@@ -198,7 +198,15 @@ fn file_server(fullname: &str, host: &str, port: u16) -> Option<FileServer> {
     let name = fullname.strip_suffix(SMB_SERVICE)?.strip_suffix('.')?;
     let name: String = name.chars().filter(|c| !c.is_control()).collect();
     let host = host.strip_suffix('.').unwrap_or(host);
-    if name.is_empty() || host.is_empty() || port == 0 {
+    // The host becomes part of an smb:// URL; anything but a plain host
+    // name, such as "user@evil" or a path, could point it elsewhere.
+    let plain = |label: &str| {
+        !label.is_empty()
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    };
+    if name.is_empty() || !host.split('.').all(plain) || port == 0 {
         return None;
     }
     Some(FileServer {

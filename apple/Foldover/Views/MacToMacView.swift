@@ -5,6 +5,8 @@ import UniformTypeIdentifiers
 struct MacToMacView: View {
     let viewModel: MacToMacViewModel
     @State private var forgetting: MacToMacViewModel.PairedRow?
+    /// A share about to stop, and the Mac it was shared with.
+    @State private var stopping: (share: MacToMacViewModel.ShareRow, mac: String)?
     /// The Mac a folder is being chosen for; kept past the panel closing.
     @State private var sharingWith: MacToMacViewModel.PairedRow?
     @State private var choosingShare = false
@@ -85,7 +87,7 @@ struct MacToMacView: View {
                                 }
                                 .accessibilityElement(children: .combine)
                                 Spacer()
-                                Button("Stop Sharing") { Task { await viewModel.stopSharing(share) } }
+                                Button("Stop Sharing…") { stopping = (share, row.name) }
                             }
                             .padding(.leading)
                         }
@@ -106,6 +108,17 @@ struct MacToMacView: View {
                       allowsMultipleSelection: false) { result in
             guard let row = sharingWith, let url = try? result.get().first else { return }
             Task { await viewModel.share(url, with: row) }
+        }
+        .confirmationDialog(
+            "Stop sharing “\(stopping?.share.name ?? "")” with “\(stopping?.mac ?? "")”?",
+            isPresented: Binding(get: { stopping != nil }, set: { if !$0 { stopping = nil } }),
+            presenting: stopping
+        ) { stopping in
+            Button("Stop Sharing", role: .destructive) {
+                Task { await viewModel.stopSharing(stopping.share) }
+            }
+        } message: { stopping in
+            Text("Pairs on “\(stopping.mac)” that use this folder stop syncing until you share it again.")
         }
         .confirmationDialog(
             "Forget “\(forgetting?.name ?? "")”?",

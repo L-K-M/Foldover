@@ -186,22 +186,32 @@ impl<'a> HeldLease<'a> {
     ) -> Result<Self, LeaseError> {
         let deadline = Instant::now() + timing.wait;
         let (mut lock, mut claim): (Option<Seen>, Option<Seen>) = (None, None);
-        let mut announced = false;
+        let (mut announced, mut released) = (false, false);
         loop {
             let ours = Record::of(&holder, 0);
             if endpoint.create_lock_file(LockFile::Lock, &ours.bytes())? {
                 return Ok(Self::held(endpoint, holder, 0, timing));
             }
-            let Some(bytes) = endpoint.read_lock_file(LockFile::Lock)? else {
-                continue; // Released meanwhile.
-            };
-            if Record::parse(&bytes).is_some_and(|record| record.holder == holder.id) {
-                return Ok(Self::held(endpoint, holder, 0, timing));
-            }
-            if Seen::dead(&mut lock, &bytes, timing.ttl)
-                && Self::take_over(endpoint, &holder, &bytes, &mut claim, timing.ttl)?
-            {
-                return Ok(Self::held(endpoint, holder, 0, timing));
+            match endpoint.read_lock_file(LockFile::Lock)? {
+                // Released meanwhile: try again at once. A lock that keeps
+                // vanishing as this run creates its own waits below like a
+                // busy one, so it cannot spin past the deadline.
+                None if !released => {
+                    released = true;
+                    continue;
+                }
+                None => released = false,
+                Some(bytes) => {
+                    released = false;
+                    if Record::parse(&bytes).is_some_and(|record| record.holder == holder.id) {
+                        return Ok(Self::held(endpoint, holder, 0, timing));
+                    }
+                    if Seen::dead(&mut lock, &bytes, timing.ttl)
+                        && Self::take_over(endpoint, &holder, &bytes, &mut claim, timing.ttl)?
+                    {
+                        return Ok(Self::held(endpoint, holder, 0, timing));
+                    }
+                }
             }
             let label = Seen::label(lock.as_ref());
             if Instant::now() >= deadline {

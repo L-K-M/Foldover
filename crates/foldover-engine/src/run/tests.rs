@@ -1008,6 +1008,64 @@ fn a_corrupt_partial_is_dropped_and_the_copy_starts_over() {
     assert!(fs::read(left.join("big.bin")).unwrap() == data);
 }
 
+/// Review of #83: a large copy that arrived whole but could not be
+/// placed, because the file it replaces changed meanwhile, threw its data
+/// away; the next attempt fetched it all again.
+#[test]
+fn a_whole_copy_that_cannot_be_placed_keeps_its_data() {
+    if sftp_server().is_none() {
+        eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
+        return;
+    }
+    let mut pair = fixture(SyncMode::Sync);
+    pair.right_kind = RightKind::Sftp;
+    let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+    fs::write(left.join("big.bin"), b"old").unwrap();
+    pair.sync();
+    let data = resumable_content();
+    fs::write(right.join("big.bin"), &data).unwrap();
+
+    // Halfway through the copy, someone edits the file it replaces.
+    let prepared = pair.prepare();
+    let mut store = pair.store();
+    let (mut reads, mut edited) = (0, false);
+    let outcome = prepared
+        .execute(
+            Approval::default(),
+            RunContext::Interactive,
+            at(1),
+            &mut |planned, commit| store.apply(planned, commit),
+            &mut || {
+                reads += 1;
+                if reads == 10 * 32 {
+                    fs::write(left.join("big.bin"), b"edited here").unwrap();
+                    edited = true;
+                }
+                ScanControl::Continue
+            },
+            &NoProgress,
+        )
+        .unwrap();
+    let RunOutcome::Ran(report) = outcome else {
+        panic!("unexpected approval request");
+    };
+    assert!(
+        edited,
+        "the copy ended before the edit; read in smaller steps"
+    );
+    assert_eq!(report.copied(), 0);
+    assert_eq!(report.failures().len(), 1, "{:?}", report.failures());
+    assert_eq!(fs::read(left.join("big.bin")).unwrap(), b"edited here");
+    let kept: Vec<u64> = fs::read_dir(left.join(".foldover/partial"))
+        .map(|entries| {
+            entries
+                .map(|entry| entry.unwrap().metadata().unwrap().len())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(kept, [data.len() as u64]);
+}
+
 #[test]
 fn sftp_folders_sync_like_local_ones() {
     if sftp_server().is_none() {
@@ -1768,3 +1826,71 @@ fn a_recorded_side_must_still_match_when_the_other_side_is_new() {
 }
 
 mod simulation;
+
+/// Review of #84: a canary kept unchanged past the pair's age limit was
+/// skipped as old, and every run then stopped as if it were missing.
+#[test]
+fn an_old_canary_still_proves_the_folders() {
+    let mut pair = fixture(SyncMode::Sync);
+    pair.canary = Some(path(b"canary"));
+    let hundred_days = std::time::Duration::from_secs(100 * 24 * 60 * 60);
+    for folder in [pair.left.path(), pair.right.path()] {
+        fs::write(folder.join("canary"), b"here").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(folder.join("canary"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - hundred_days)
+            .unwrap();
+    }
+    pair.age_limit = Some(30);
+    pair.sync();
+    fs::write(pair.left.path().join("new"), b"n").unwrap();
+    assert_eq!(pair.sync().copied(), 1);
+
+    // Review: exempt from the age limit, a canary that is gone still
+    // stops the run.
+    fs::remove_file(pair.right.path().join("canary")).unwrap();
+    let Err(error) = pair.try_prepare().and_then(|prepared| {
+        prepared.execute(
+            Approval::default(),
+            RunContext::Interactive,
+            STARTED,
+            &mut |_, _| panic!("nothing may commit"),
+            &mut proceed,
+            &NoProgress,
+        )
+    }) else {
+        panic!("a run without its canary went ahead");
+    };
+    assert!(
+        matches!(
+            error,
+            RunError::CanaryMissing {
+                side: Side::Right,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+}
+
+/// Review of #84: a canary a `.foldoverignore` file leaves out was
+/// reported missing, sending people to look for a file that is there.
+#[test]
+fn a_canary_left_out_by_an_ignore_file_says_so() {
+    let mut pair = fixture(SyncMode::Sync);
+    pair.canary = Some(path(b"canary"));
+    for folder in [pair.left.path(), pair.right.path()] {
+        fs::write(folder.join("canary"), b"here").unwrap();
+    }
+    fs::write(pair.left.path().join(".foldoverignore"), b"canary\n").unwrap();
+    // Even a preview says so, before anything is compared.
+    let Err(error) = pair.try_prepare() else {
+        panic!("a run with an excluded canary was prepared");
+    };
+    assert!(
+        matches!(&error, RunError::CanaryExcluded { path } if *path == super::tests::path(b"canary")),
+        "{error:?}"
+    );
+}
