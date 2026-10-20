@@ -1789,6 +1789,32 @@ fn an_old_canary_still_proves_the_folders() {
     pair.sync();
     fs::write(pair.left.path().join("new"), b"n").unwrap();
     assert_eq!(pair.sync().copied(), 1);
+
+    // Review: exempt from the age limit, a canary that is gone still
+    // stops the run.
+    fs::remove_file(pair.right.path().join("canary")).unwrap();
+    let Err(error) = pair.try_prepare().and_then(|prepared| {
+        prepared.execute(
+            Approval::default(),
+            RunContext::Interactive,
+            STARTED,
+            &mut |_, _| panic!("nothing may commit"),
+            &mut proceed,
+            &NoProgress,
+        )
+    }) else {
+        panic!("a run without its canary went ahead");
+    };
+    assert!(
+        matches!(
+            error,
+            RunError::CanaryMissing {
+                side: Side::Right,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
 }
 
 /// Review of #84: a canary a `.foldoverignore` file leaves out was
