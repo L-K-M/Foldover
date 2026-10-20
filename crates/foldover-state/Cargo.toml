@@ -14,5 +14,10 @@ foldover-db = { path = "../foldover-db" }
 foldover-types = { path = "../foldover-types" }
 thiserror = "2"
 
+[[bench]]
+name = "db"
+harness = false
+
 [dev-dependencies]
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 tempfile = "3"
