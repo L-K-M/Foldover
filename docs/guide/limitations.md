@@ -86,9 +86,9 @@ you might expect. Only the last one below blocks saving
 ## Copy speed
 
 - **Four at most, and only on fast disks.** Files copy four at a time
-  when both folders are on solid-state disks, mounted shares or SFTP
-  servers, using up to five sessions per server. Spinning disks, disks
-  that do not report their kind, other Macs, and pairs between two SFTP
+  when both folders are on solid-state disks, mounted shares, SFTP
+  servers (up to five sessions each) or other Macs. Spinning disks,
+  disks that do not report their kind, and pairs between two SFTP
   servers take one file at a time. Two pairs on one disk each use its
   full count ([ADR 0043](../adr/0043-parallel-copies.md)).
 - **Bandwidth limits count file data.** A pair's limit paces the files
