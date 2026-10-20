@@ -151,6 +151,9 @@ pub struct LocalPairOptions {
     /// Files unchanged for more than this many days in both folders are
     /// skipped.
     pub age_limit: Option<u32>,
+    /// A file kept unchanged in both folders that proves the right ones
+    /// are mounted.
+    pub canary: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -203,6 +206,7 @@ impl From<&foldover_client::PairOptions> for LocalPairOptions {
             filters: options.filters().rules().to_vec(),
             size_limit: options.filters().size_limit(),
             age_limit: options.filters().age_limit(),
+            canary: options.canary().map(|path| path.as_bytes().to_vec()),
         }
     }
 }
@@ -218,7 +222,7 @@ impl TryFrom<LocalPairOptions> for foldover_client::PairOptions {
             ),
             PairSchedule::OnChange => foldover_client::Schedule::OnChange,
         };
-        Ok(Self::new(
+        Self::new(
             foldover_client::MetadataPolicy::new(
                 options.modification_times.into(),
                 options.extended_attributes.into(),
@@ -234,7 +238,14 @@ impl TryFrom<LocalPairOptions> for foldover_client::PairOptions {
             foldover_client::Filters::new(options.filters)?
                 .with_size_limit(options.size_limit)?
                 .with_age_limit(options.age_limit)?,
-        ))
+        )
+        .with_canary(
+            options
+                .canary
+                .map(foldover_client::SyncPath::try_from)
+                .transpose()
+                .map_err(|_| foldover_client::InvalidPair::Canary)?,
+        )
     }
 }
 
@@ -395,6 +406,7 @@ mod tests {
                     filters: vec!["*.tmp".into(), "build/".into()],
                     size_limit: Some(1_000_000),
                     age_limit: Some(365),
+                    canary: Some(b"docs/canary.txt".to_vec()),
                 },
             };
             let domain = foldover_client::PairDraft::try_from(draft.clone()).unwrap();

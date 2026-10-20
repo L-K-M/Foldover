@@ -1160,6 +1160,11 @@ public struct LocalPairOptions: Equatable, Hashable {
      * skipped.
      */
     public var ageLimit: UInt32?
+    /**
+     * A file kept unchanged in both folders that proves the right ones
+     * are mounted.
+     */
+    public var canary: Data?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1173,7 +1178,11 @@ public struct LocalPairOptions: Equatable, Hashable {
         /**
          * Files unchanged for more than this many days in both folders are
          * skipped.
-         */ageLimit: UInt32?) {
+         */ageLimit: UInt32?, 
+        /**
+         * A file kept unchanged in both folders that proves the right ones
+         * are mounted.
+         */canary: Data?) {
         self.modificationTimes = modificationTimes
         self.extendedAttributes = extendedAttributes
         self.permissions = permissions
@@ -1182,6 +1191,7 @@ public struct LocalPairOptions: Equatable, Hashable {
         self.filters = filters
         self.sizeLimit = sizeLimit
         self.ageLimit = ageLimit
+        self.canary = canary
     }
 
     
@@ -1207,7 +1217,8 @@ public struct FfiConverterTypeLocalPairOptions: FfiConverterRustBuffer {
                 schedule: FfiConverterTypePairSchedule.read(from: &buf), 
                 filters: FfiConverterSequenceString.read(from: &buf), 
                 sizeLimit: FfiConverterOptionUInt64.read(from: &buf), 
-                ageLimit: FfiConverterOptionUInt32.read(from: &buf)
+                ageLimit: FfiConverterOptionUInt32.read(from: &buf), 
+                canary: FfiConverterOptionData.read(from: &buf)
         )
     }
 
@@ -1220,6 +1231,7 @@ public struct FfiConverterTypeLocalPairOptions: FfiConverterRustBuffer {
         FfiConverterSequenceString.write(value.filters, into: &buf)
         FfiConverterOptionUInt64.write(value.sizeLimit, into: &buf)
         FfiConverterOptionUInt32.write(value.ageLimit, into: &buf)
+        FfiConverterOptionData.write(value.canary, into: &buf)
     }
 }
 

@@ -75,6 +75,10 @@ All notable changes to this project are documented here. The format follows
 - Skip old files: an age limit per pair, in the editor and as
   `--max-age DAYS`; a file is skipped while unchanged that long in both
   folders, and syncs again once edited.
+- Canary file: name a file a pair must find unchanged in both folders, in
+  the editor and as `--canary PATH` (`none` clears it). If the file is
+  missing or changed on either side, the sync stops before writing
+  anything, catching a wrong folder or a disk that never mounted.
 - First-run guide: turn on the agent, create a pair, preview and sync.
 - A folder macOS refuses to share (Documents, external volumes) now says
   to allow Foldover in Full Disk Access; Settings opens that list.

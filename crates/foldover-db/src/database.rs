@@ -28,13 +28,13 @@ const PERMISSION_BITS: u32 = 0o777;
 const DATABASE_NAME: &str = "state.db";
 const WRITER_LOCK: &str = "writer.lock";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit";
+const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 18] = [
+const MIGRATIONS: [&str; 19] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
     SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, SCHEMA_V15, SCHEMA_V16,
-    SCHEMA_V17, SCHEMA_V18,
+    SCHEMA_V17, SCHEMA_V18, SCHEMA_V19,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -277,6 +277,11 @@ CREATE TABLE share (
 CREATE INDEX share_device ON share(device);
 ";
 
+// Per-pair canary path; older readers ignore the column.
+const SCHEMA_V19: &str = "
+ALTER TABLE pair ADD COLUMN canary BLOB CHECK(canary IS NULL OR length(canary) > 0);
+";
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("State I/O: {0}")]
@@ -395,6 +400,7 @@ pub struct PairValues {
     pub filters: String,
     pub size_limit: Option<i64>,
     pub age_limit: Option<i64>,
+    pub canary: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
@@ -489,7 +495,7 @@ impl Database {
     pub fn create_pair(&mut self, values: &PairValues) -> Result<PairRow, Error> {
         let id = uuid::Uuid::new_v4().into_bytes();
         self.connection.execute(
-            "INSERT INTO pair (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,schedule,schedule_minutes,filters,size_limit,age_limit) VALUES (?1,1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+            "INSERT INTO pair (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,schedule,schedule_minutes,filters,size_limit,age_limit,canary) VALUES (?1,1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             params![
                 id.as_slice(),
                 values.name,
@@ -504,7 +510,8 @@ impl Database {
                 values.schedule_minutes,
                 values.filters,
                 values.size_limit,
-                values.age_limit
+                values.age_limit,
+                values.canary
             ],
         )?;
         self.pair(&id)?
@@ -569,7 +576,7 @@ impl Database {
         }
         let changed = transaction.execute(
             // A changed root is a different endpoint; forget its identity.
-            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,schedule=?11,schedule_minutes=?12,filters=?13,size_limit=?14,age_limit=?15,left_identity=CASE WHEN left_root=?4 THEN left_identity END,right_identity=CASE WHEN right_root=?5 THEN right_identity END,left_mount=CASE WHEN left_root=?4 THEN left_mount END,right_mount=CASE WHEN right_root=?5 THEN right_mount END WHERE id=?1 AND revision=?2",
+            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,schedule=?11,schedule_minutes=?12,filters=?13,size_limit=?14,age_limit=?15,canary=?16,left_identity=CASE WHEN left_root=?4 THEN left_identity END,right_identity=CASE WHEN right_root=?5 THEN right_identity END,left_mount=CASE WHEN left_root=?4 THEN left_mount END,right_mount=CASE WHEN right_root=?5 THEN right_mount END WHERE id=?1 AND revision=?2",
             params![
                 id,
                 revision,
@@ -585,7 +592,8 @@ impl Database {
                 values.schedule_minutes,
                 values.filters,
                 values.size_limit,
-                values.age_limit
+                values.age_limit,
+                values.canary
             ],
         )?;
         if changed == 0 {
@@ -999,6 +1007,7 @@ fn pair_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairRow> {
             filters: row.get(12)?,
             size_limit: row.get(13)?,
             age_limit: row.get(14)?,
+            canary: row.get(15)?,
         },
     })
 }
@@ -1032,6 +1041,7 @@ pub(super) mod tests {
             filters: String::new(),
             size_limit: None,
             age_limit: None,
+            canary: None,
         }
     }
 
@@ -1467,7 +1477,35 @@ pub(super) mod tests {
         input.filters = "*.tmp\nprivate".into();
         input.size_limit = Some(9876);
         input.age_limit = Some(42);
-        let pair = legacy.create_pair(&input).unwrap();
+        let id = uuid::Uuid::new_v4().into_bytes();
+        // A legacy agent's row; today's create_pair writes newer columns.
+        legacy
+            .connection
+            .execute(
+                "INSERT INTO pair (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,schedule,schedule_minutes,filters,size_limit,age_limit) VALUES (?1,1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                params![
+                    id.as_slice(),
+                    input.name,
+                    input.left_root,
+                    input.right_root,
+                    input.mode,
+                    input.modification_times,
+                    input.extended_attributes,
+                    input.permissions,
+                    input.durability,
+                    input.schedule,
+                    input.schedule_minutes,
+                    input.filters,
+                    input.size_limit,
+                    input.age_limit
+                ],
+            )
+            .unwrap();
+        let pair = PairRow {
+            id: id.to_vec(),
+            revision: 1,
+            values: input.clone(),
+        };
         // A legacy agent's rename; today's update_pair expects newer tables.
         input.name = "Preserved".into();
         legacy
@@ -1477,7 +1515,11 @@ pub(super) mod tests {
                 params![pair.id, input.name],
             )
             .unwrap();
-        let pair = legacy.pair(&pair.id).unwrap().unwrap();
+        let pair = PairRow {
+            revision: pair.revision + 1,
+            values: input.clone(),
+            ..pair
+        };
         legacy
             .record_identities(&pair.id, pair.revision, &[1; 16], &[2; 16])
             .unwrap();
@@ -1598,9 +1640,16 @@ pub(super) mod tests {
             SCHEMA_VERSION
         );
         for (table, expected) in &before {
+            let mut expected = expected.clone();
+            if *table == "pair" {
+                // V19's canary column reads NULL on every migrated row.
+                for row in &mut expected {
+                    row.push(rusqlite::types::Value::Null);
+                }
+            }
             assert_eq!(
                 &stored_rows(&database.connection, table),
-                expected,
+                &expected,
                 "{table}"
             );
         }
@@ -1642,7 +1691,9 @@ pub(super) mod tests {
         assert_eq!(minimum_reader(&backup), legacy_reader);
 
         input.left_root = b"sftp://nas/srv/photos/\xff".to_vec();
-        database.create_pair(&input).unwrap();
+        input.canary = Some(b"docs/canary.txt".to_vec());
+        let stored = database.create_pair(&input).unwrap();
+        assert_eq!(stored.values.canary, input.canary);
         input.left_root = format!("peer://{}/{}", "ab".repeat(32), "cd".repeat(16)).into_bytes();
         database.create_pair(&input).unwrap();
         for invalid in [

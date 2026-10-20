@@ -71,6 +71,13 @@ struct PairEditorView: View {
                         Text("Skipped only while unchanged in both folders; editing one makes it sync again.")
                             .font(.callout).foregroundStyle(.secondary)
                     }
+                    TextField("Canary file", text: $viewModel.canary)
+                    if let warning = viewModel.canaryWarning {
+                        Text(warning)
+                            .font(.callout).foregroundStyle(.orange)
+                    }
+                    Text("A file that must stay in both folders unchanged. If it goes missing or changes, syncs stop before writing anything.")
+                        .font(.callout).foregroundStyle(.secondary)
                 }
                 Section("Schedule") {
                     Picker("Sync automatically", selection: $viewModel.options.schedule) {

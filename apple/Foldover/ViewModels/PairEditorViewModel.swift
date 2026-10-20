@@ -38,7 +38,7 @@ final class PairEditorViewModel: Identifiable {
     }
 
     var title: String { editing == nil ? String(localized: "New Pair") : String(localized: "Edit Pair") }
-    var canSave: Bool { !isSaving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && left != nil && right != nil && durabilityWarning == nil }
+    var canSave: Bool { !isSaving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && left != nil && right != nil && durabilityWarning == nil && canaryWarning == nil }
 
     /// Exclusion rules as editable text, one per line.
     var filterText: String {
@@ -81,6 +81,28 @@ final class PairEditorViewModel: Identifiable {
     var ageLimitDays: Int {
         get { Int(options.ageLimit ?? 0) }
         set { options.ageLimit = UInt32(min(max(1, newValue), Int(Self.maxAgeDays))) }
+    }
+
+    /// The file the run checks before it writes, as editable text. Empty
+    /// means none; surrounding whitespace and a leading "/" are forgiven.
+    var canary: String {
+        get { options.canary.map { String(decoding: $0, as: UTF8.self) } ?? "" }
+        set {
+            var text = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if text.hasPrefix("/") { text.removeFirst() }
+            options.canary = text.isEmpty ? nil : Data(text.utf8)
+        }
+    }
+
+    /// A canary names a file inside the synced folders, never inside
+    /// `.foldover`, the pair's own state folder.
+    var canaryWarning: String? {
+        guard let canary = options.canary else { return nil }
+        let components = canary.split(separator: UInt8(ascii: "/"), omittingEmptySubsequences: false)
+        let reserved = components.first == Data(".foldover".utf8)
+        let malformed = components.contains { $0.isEmpty || $0 == Data(".".utf8) || $0 == Data("..".utf8) }
+        guard reserved || malformed else { return nil }
+        return String(localized: "Name a file inside the synced folders, like docs/canary.txt; the .foldover folder is not allowed.")
     }
 
     /// Fixed choices, plus a stored interval set elsewhere (e.g. the CLI).

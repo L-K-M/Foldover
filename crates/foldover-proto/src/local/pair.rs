@@ -1,6 +1,6 @@
 use foldover_types::{
     Durability, Filters, InvalidPair, MetadataPolicy, PairConfig, PairDraft, PairOptions, PairRoot,
-    Propagation, Schedule, ScheduleInterval, Side, SyncMode,
+    Propagation, Schedule, ScheduleInterval, Side, SyncMode, SyncPath,
 };
 use serde::{Deserialize, Serialize};
 
@@ -102,6 +102,10 @@ pub struct PairSettings {
     /// Files unchanged for more than this many days in both folders are
     /// skipped.
     pub age_limit: Option<u32>,
+    /// A file kept unchanged in both folders that proves the right ones
+    /// are mounted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canary: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -151,6 +155,7 @@ impl From<&PairOptions> for PairSettings {
             filters: options.filters().rules().to_vec(),
             size_limit: options.filters().size_limit(),
             age_limit: options.filters().age_limit(),
+            canary: options.canary().map(|path| path.as_bytes().to_vec()),
         }
     }
 }
@@ -166,7 +171,7 @@ impl TryFrom<PairSettings> for PairOptions {
             }
             PairSchedule::OnChange => Schedule::OnChange,
         };
-        Ok(Self::new(
+        Self::new(
             MetadataPolicy::new(
                 settings.modification_times.into(),
                 settings.extended_attributes.into(),
@@ -182,7 +187,14 @@ impl TryFrom<PairSettings> for PairOptions {
             Filters::new(settings.filters)?
                 .with_size_limit(settings.size_limit)?
                 .with_age_limit(settings.age_limit)?,
-        ))
+        )
+        .with_canary(
+            settings
+                .canary
+                .map(SyncPath::try_from)
+                .transpose()
+                .map_err(|_| InvalidPair::Canary)?,
+        )
     }
 }
 
