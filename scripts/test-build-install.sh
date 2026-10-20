@@ -23,9 +23,17 @@ cp "$here/build.sh" "$repo/scripts/build.sh"
 printf '[workspace.package]\nversion = "9.9.9"\n' > "$repo/Cargo.toml"
 
 # Fakes record their calls in $log and read their behavior from $state:
-#   app-running   pgrep finds the installed app until pkill removes this
-#   agent-loaded  launchctl print succeeds
-#   kickstart-fails, xcodebuild-fails, app-ignores-term
+#   app-running      holds the command line of this user's running app;
+#                    pgrep and pkill match their pattern against it, and
+#                    pkill removes it
+#   helper-running   the same, for a FoldoverHelper next to the app
+#   agent-running    launchctl print reports a running agent
+#   agent-loaded     launchctl print reports a loaded, stopped agent
+#   interrupted-swap the old app sits in .Foldover.app.outgoing, as a run
+#                    killed mid-swap leaves it
+#   mv-into-fails    moving the new copy into place fails
+#   ditto-fails, kickstart-fails, open-fails, xcodebuild-fails,
+#   app-ignores-term
 fakes="$work/bin"
 log="$work/calls.log"
 state="$work/state"
@@ -55,21 +63,32 @@ while [[ $# -gt 0 ]]; do
 done
 app="$derived/Build/Products/$config/Foldover.app/Contents/MacOS"
 mkdir -p "$app" && echo new > "$app/Foldover"'
-fake ditto 'cp -R "$1" "$2"'
-fake pgrep 'echo "pgrep $*" >> "$log"; [[ -e "$state/app-running" ]]'
+fake ditto '[[ -e "$state/ditto-fails" ]] && exit 1; cp -R "$1" "$2"'
+fake mv '[[ -e "$state/mv-into-fails" && "$1" == *.incoming ]] && exit 1; exec /bin/mv "$@"'
+# Both refuse to run unscoped to this user, then match like the real tools.
+fake pgrep '
+echo "pgrep $*" >> "$log"
+[[ "$1 $2" == "-U $(id -u)" ]] || exit 2
+[[ -e "$state/app-running" ]] && grep -Eq -- "${!#}" "$state/app-running"'
 fake pkill '
 echo "pkill $*" >> "$log"
+[[ "$2 $3" == "-U $(id -u)" ]] || exit 2
+[[ -e "$state/app-running" ]] && grep -Eq -- "${!#}" "$state/app-running" || exit 1
 [[ -e "$state/app-ignores-term" ]] || rm -f "$state/app-running"'
 fake sleep ':'
 fake launchctl '
 echo "launchctl $*" >> "$log"
 case "$1" in
-  print) [[ -e "$state/agent-loaded" ]] ;;
+  print)
+    if [[ -e "$state/agent-running" ]]; then echo "	state = running"
+    elif [[ -e "$state/agent-loaded" ]]; then echo "	state = not running"
+    else exit 113; fi ;;
   kickstart) [[ ! -e "$state/kickstart-fails" ]] ;;
 esac'
-fake open 'echo "open $*" >> "$log"'
+fake open 'echo "open $*" >> "$log"; [[ ! -e "$state/open-fails" ]]'
 
-apps="$work/Applications"
+# Regex metacharacters and a space: the process pattern must quote them.
+apps="$work/My Apps (test)"
 installed="$apps/Foldover.app/Contents/MacOS/Foldover"
 
 # run NAME [STATE...] -- ARGS: reset the fakes, preinstall an old app,
@@ -81,10 +100,19 @@ run() {
   echo old > "$installed"
   while [[ "$1" != "--" ]]; do touch "$state/$1"; shift; done
   shift
+  if [[ -e "$state/app-running" ]]; then
+    echo "$installed" > "$state/app-running"
+  fi
+  if [[ -e "$state/helper-running" ]]; then
+    echo "${installed}Helper" > "$state/app-running"
+  fi
+  if [[ -e "$state/interrupted-swap" ]]; then
+    mv "$apps/Foldover.app" "$apps/.Foldover.app.outgoing"
+  fi
   echo "== $name"
   status=0
   out="$(PATH="$fakes:$PATH" FOLDOVER_APPLICATIONS_DIR="$apps" \
-    bash "$repo/scripts/build.sh" "$@" 2>&1)" || status=$?
+    "$BASH" "$repo/scripts/build.sh" "$@" 2>&1)" || status=$?
   touch "$log"
 }
 
@@ -98,11 +126,12 @@ expect_installed() {
 
 agent="gui/$(id -u)/ch.lkmc.foldover.agent"
 
-run "replaces a running app and restarts its agent" app-running agent-loaded -- app --install
+run "replaces a running app and restarts its agent" app-running agent-running -- app --install
 expect_status 0
 expect_installed new
 expect_out "install app: ok ($apps/Foldover.app)"
-expect_call "pkill -TERM -f ^$apps/Foldover.app/Contents/MacOS/Foldover"
+expect_call "pkill -TERM -U $(id -u) -f"
+[[ ! -e "$state/app-running" ]] || fail "$name: the running app was not quit"
 expect_call "launchctl kickstart -k $agent"
 expect_call "open $apps/Foldover.app"
 [[ ! -e "$apps/.Foldover.app.incoming" && ! -e "$apps/.Foldover.app.outgoing" ]] \
@@ -114,6 +143,16 @@ expect_installed new
 expect_no_call "pkill"
 expect_no_call "kickstart"
 expect_no_call "open $apps/Foldover.app"
+
+run "leaves a loaded but stopped agent alone" agent-loaded -- app --install
+expect_status 0
+expect_installed new
+expect_no_call "kickstart"
+expect_out "background agent not running; nothing to restart"
+
+run "does not quit another app with a similar name" helper-running -- app --install
+expect_status 0
+expect_no_call "pkill"
 
 run "builds without installing by default" -- app
 expect_status 0
@@ -132,7 +171,28 @@ expect_installed old
 expect_out "install app: FAILED (Foldover did not quit; quit it and rerun)"
 [[ ! -e "$apps/.Foldover.app.incoming" ]] || fail "$name: incoming copy left behind"
 
-run "reports an agent that does not restart" agent-loaded kickstart-fails -- app --install
+run "keeps the old app when the copy fails" ditto-fails -- app --install
+expect_status 1
+expect_installed old
+expect_out "install app: FAILED (cannot write $apps"
+
+run "restores the old app when the swap fails" mv-into-fails -- app --install
+expect_status 1
+expect_installed old
+expect_out "install app: FAILED (cannot move the new app into place)"
+[[ ! -e "$apps/.Foldover.app.incoming" && ! -e "$apps/.Foldover.app.outgoing" ]] \
+  || fail "$name: staging copies left behind"
+
+run "recovers the app an interrupted swap left aside" interrupted-swap ditto-fails -- app --install
+expect_status 1
+expect_installed old
+
+run "reports an app that does not reopen" app-running open-fails -- app --install
+expect_status 0
+expect_installed new
+expect_out "install app: ok ($apps/Foldover.app), but Foldover did not reopen"
+
+run "reports an agent that does not restart" agent-running kickstart-fails -- app --install
 expect_status 1
 expect_installed new
 expect_out "the agent did not restart"

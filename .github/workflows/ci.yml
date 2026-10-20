@@ -145,6 +145,11 @@ jobs:
       - name: Update signature check
         run: bash scripts/test-verify-update.sh
 
+      # /bin/bash is 3.2 here, the oldest bash build.sh supports; the
+      # shellcheck job runs the same test on Linux's bash 5.
+      - name: build.sh --install on bash 3.2
+        run: /bin/bash scripts/test-build-install.sh
+
       # Builds the arm64 FoldoverCoreFFI.xcframework plus the Swift
       # bindings; the app links it below.
       - name: xtask ffi

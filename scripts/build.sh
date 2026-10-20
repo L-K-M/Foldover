@@ -20,7 +20,7 @@
 #
 # --install replaces /Applications/Foldover.app with the app this run
 # built. A running Foldover is quit first and reopened afterwards, and a
-# loaded background agent is restarted: both pin the installed code at
+# running background agent is restarted: both pin the installed code at
 # launch and refuse the changed bundle until they restart (ADR 0006).
 # FOLDOVER_APPLICATIONS_DIR installs elsewhere, e.g. ~/Applications.
 # core installs nothing: the app embeds its own agent and CLI, and Linux
@@ -270,10 +270,13 @@ APPLICATIONS_DIR="${FOLDOVER_APPLICATIONS_DIR:-/Applications}"
 AGENT_LABEL="ch.lkmc.foldover.agent"
 APP_QUIT_SECONDS=10
 
-# Wait for the processes matching $1 to exit; non-zero on timeout.
+# Escape $1 for use as a literal inside an extended regular expression.
+ere_literal() { printf '%s' "$1" | sed 's/[][\.^$*+?(){}|]/\\&/g'; }
+
+# Wait for this user's processes matching $1 to exit; non-zero on timeout.
 wait_for_exit() {
   local pattern="$1" waited=0
-  while pgrep -f "$pattern" >/dev/null; do
+  while pgrep -U "$UID" -f "$pattern" >/dev/null; do
     if [[ $waited -ge $APP_QUIT_SECONDS ]]; then return 1; fi
     sleep 1
     waited=$((waited + 1))
@@ -287,10 +290,19 @@ install_app() {
   local dest="$APPLICATIONS_DIR/Foldover.app"
   local incoming="$APPLICATIONS_DIR/.Foldover.app.incoming"
   local outgoing="$APPLICATIONS_DIR/.Foldover.app.outgoing"
-  local running="^$dest/Contents/MacOS/Foldover"
-  local agent
-  agent="gui/$(id -u)/$AGENT_LABEL"
+  local agent="gui/$UID/$AGENT_LABEL"
+  # This user's copy of the installed app only, e.g.
+  # ^/Applications/Foldover\.app/Contents/MacOS/Foldover( |$)
+  local running
+  running="^$(ere_literal "$dest/Contents/MacOS/Foldover")( |\$)"
   echo "==> install app"
+
+  # A run killed between the two renames below leaves the previous app
+  # only in $outgoing: put it back before anything is deleted.
+  if [[ ! -e "$dest" && -e "$outgoing" ]] && ! mv "$outgoing" "$dest"; then
+    record "install app: FAILED (the previous app is stranded at $outgoing)"
+    return 1
+  fi
 
   echo "-- copying dist/Foldover.app next to $dest"
   if ! rm -rf "$incoming" "$outgoing" || ! ditto "$DIST/Foldover.app" "$incoming"; then
@@ -301,10 +313,10 @@ install_app() {
   fi
 
   local reopen=false
-  if pgrep -f "$running" >/dev/null; then
+  if pgrep -U "$UID" -f "$running" >/dev/null; then
     echo "-- quitting Foldover"
     reopen=true
-    pkill -TERM -f "$running"
+    pkill -TERM -U "$UID" -f "$running"
     if ! wait_for_exit "$running"; then
       rm -rf "$incoming"
       echo "!! install app: Foldover did not quit within ${APP_QUIT_SECONDS}s" >&2
@@ -319,27 +331,42 @@ install_app() {
     return 1
   fi
   if ! mv "$incoming" "$dest"; then
-    [[ -e "$outgoing" ]] && mv "$outgoing" "$dest"
+    rm -rf "$incoming"
+    if [[ -e "$outgoing" ]] && ! mv "$outgoing" "$dest"; then
+      record "install app: FAILED (cannot move the new app into place; the previous app is at $outgoing)"
+      return 1
+    fi
     record "install app: FAILED (cannot move the new app into place)"
     return 1
   fi
   rm -rf "$outgoing"
   echo "-- installed $dest"
 
-  # Only an agent the user enabled is restarted; enabling stays a choice
-  # made in the app.
-  if launchctl print "$agent" >/dev/null 2>&1; then
+  # A running agent keeps the old code until it restarts. One that is not
+  # running (never enabled, disabled, awaiting approval) starts from the
+  # new bundle whenever it next launches, so it is left alone. The state
+  # is captured first: grep -q would cut launchctl off mid-write and fail
+  # the pipeline under pipefail.
+  local agent_state
+  agent_state="$(launchctl print "$agent" 2>/dev/null)"
+  if [[ "$agent_state" == *"state = running"* ]]; then
     echo "-- restarting the background agent"
     if ! launchctl kickstart -k "$agent"; then
       echo "!! install app: the background agent did not restart" >&2
       record "install app: FAILED (installed $dest, but the agent did not restart; choose Enable Background Agent in Foldover)"
       return 1
     fi
+  else
+    echo "-- background agent not running; nothing to restart"
   fi
 
   if $reopen; then
     echo "-- reopening Foldover"
-    open "$dest"
+    if ! open "$dest"; then
+      echo "!! install app: Foldover did not reopen" >&2
+      record "install app: ok ($dest), but Foldover did not reopen"
+      return 0
+    fi
   fi
   record "install app: ok ($dest)"
 }
