@@ -188,6 +188,8 @@ fn quirks() -> impl Strategy<Value = Quirks> {
 }
 
 /// Every file below `root`, outside Foldover's own folder, by path.
+/// AppleDouble files are macOS's storage for attributes on volumes
+/// without native ones (exFAT, FAT), not files a person wrote.
 fn disk_files(root: &Path) -> BTreeMap<Vec<u8>, Vec<u8>> {
     let mut found = BTreeMap::new();
     let mut pending = vec![root.to_path_buf()];
@@ -195,7 +197,9 @@ fn disk_files(root: &Path) -> BTreeMap<Vec<u8>, Vec<u8>> {
         for entry in fs::read_dir(&directory).unwrap() {
             let entry = entry.unwrap();
             let path = entry.path();
-            if entry.file_name() == ".foldover" {
+            if entry.file_name() == ".foldover"
+                || entry.file_name().as_encoded_bytes().starts_with(b"._")
+            {
                 continue;
             }
             if entry.file_type().unwrap().is_dir() {
