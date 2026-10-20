@@ -1270,9 +1270,20 @@ impl PairRun {
     }
 
     /// Copies the run makes at once: as many as the slower folder takes.
+    /// A copy between two servers holds a session on each, so two in
+    /// opposite directions could each wait for the other's server once a
+    /// server refuses more sessions: such pairs copy one at a time.
     fn workers(&self) -> NonZeroUsize {
-        let workers = |side| self.endpoints.endpoint(side).workers();
-        workers(Side::Left).min(workers(Side::Right))
+        let endpoint = |side| self.endpoints.endpoint(side);
+        if matches!(
+            (endpoint(Side::Left), endpoint(Side::Right)),
+            (Endpoint::Sftp(_), Endpoint::Sftp(_))
+        ) {
+            return NonZeroUsize::MIN;
+        }
+        endpoint(Side::Left)
+            .workers()
+            .min(endpoint(Side::Right).workers())
     }
 
     /// The side a row copies file data to, and how many bytes.

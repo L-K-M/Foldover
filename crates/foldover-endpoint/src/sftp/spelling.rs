@@ -17,7 +17,7 @@
 
 use std::io;
 
-use foldover_net::sftp::Attributes;
+use foldover_net::sftp::{Attributes, Session};
 use foldover_types::SyncPath;
 use unicode_normalization::UnicodeNormalization;
 
@@ -37,6 +37,26 @@ impl SftpEndpoint {
             Err(error) if error.kind() == io::ErrorKind::NotFound && respellable(path) => {
                 match self.respelled(path) {
                     Some(stored) => op(&stored),
+                    None => Err(error),
+                }
+            }
+            result => result,
+        }
+    }
+
+    /// `on_stored` on one session throughout, so a handle `op` opens
+    /// stays valid on it.
+    pub(super) fn on_stored_with<T>(
+        &self,
+        session: &mut Session,
+        path: &[u8],
+        op: impl Fn(&mut Session, &[u8]) -> io::Result<T>,
+    ) -> io::Result<T> {
+        let given = self.remote(path);
+        match op(session, &given) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound && respellable(path) => {
+                match self.respelled_on(session, path) {
+                    Some(stored) => op(session, &stored),
                     None => Err(error),
                 }
             }
@@ -92,7 +112,10 @@ impl SftpEndpoint {
     /// `path` with each component in the spelling that exists, or `None`
     /// when one exists in none or the result is `path` itself.
     fn respelled(&self, path: &[u8]) -> Option<Vec<u8>> {
-        let mut session = self.session();
+        self.respelled_on(&mut self.session(), path)
+    }
+
+    fn respelled_on(&self, session: &mut Session, path: &[u8]) -> Option<Vec<u8>> {
         let mut stored = self.root.clone();
         for component in path.split(|byte| *byte == b'/') {
             stored = spellings(component)

@@ -12,13 +12,17 @@
 //! - `Durability::Full` is refused, not downgraded: namespace changes
 //!   have no protocol flush.
 
+mod sessions;
 mod spelling;
 mod transfer;
 
 pub(crate) use transfer::{copy, update_metadata};
 
+use sessions::{Borrowed, Connect, Sessions};
+
 use std::io;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::num::NonZeroUsize;
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use foldover_net::sftp::{Attributes, FileKind, Handle, Session, SshTarget};
@@ -55,17 +59,20 @@ const PUT_BACK_ATTEMPTS: u32 = 100;
 const RESTORED: &str = "restored";
 const SSH_PORT: u16 = 22;
 
-/// Opens another session to the same server.
-type Connect = Box<dyn Fn() -> io::Result<Session> + Send + Sync>;
+/// Copies a server takes at once when Foldover can open more sessions
+/// to it (PLAN.md §4.9).
+const PARALLEL_COPIES: NonZeroUsize = NonZeroUsize::new(4).expect("four is not zero");
+/// Sessions per server: one per copy worker, and the run's own thread.
+const SESSIONS: usize = PARALLEL_COPIES.get() + 1;
 
 pub struct SftpEndpoint {
-    session: Mutex<Box<Session>>,
+    sessions: Sessions,
     /// Leases beat over their own session, opened on first use: a transfer
-    /// holds `session` while it calls back into the run, and a beat must
+    /// holds a session while it calls back into the run, and a beat must
     /// neither wait for the transfer nor deadlock with it.
     lease: Mutex<Option<Box<Session>>>,
-    /// How to open that session; without one, as for a session made
-    /// elsewhere, leases share `session`.
+    /// How to open more sessions; without one, as for a session made
+    /// elsewhere, everything shares that one.
     connect: Option<Connect>,
     /// `host:port`, to tell whether two roots can overlap; unknown for
     /// sessions made elsewhere.
@@ -170,7 +177,7 @@ impl SftpEndpoint {
             Err(error) => return Err(io_error(error)),
         }
         Ok(Self {
-            session: Mutex::new(Box::new(session)),
+            sessions: Sessions::new(session, SESSIONS),
             lease: Mutex::new(None),
             connect: None,
             server: None,
@@ -178,8 +185,19 @@ impl SftpEndpoint {
         })
     }
 
-    fn session(&self) -> MutexGuard<'_, Box<Session>> {
-        self.session.lock().unwrap_or_else(PoisonError::into_inner)
+    /// A session to use alone until it drops. Hold one at a time: a
+    /// handle opened on it is valid only there.
+    fn session(&self) -> Borrowed<'_> {
+        self.sessions.borrow(self.connect.as_ref())
+    }
+
+    /// How many copies the server takes at once: one without a way to
+    /// open more sessions.
+    pub fn workers(&self) -> NonZeroUsize {
+        match self.connect {
+            Some(_) => PARALLEL_COPIES,
+            None => NonZeroUsize::MIN,
+        }
     }
 
     /// Run `request` over the lease session, opening it first if needed;
@@ -572,14 +590,15 @@ impl SftpEndpoint {
         control: &mut impl FnMut() -> ScanControl,
         sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
     ) -> Result<Digest, ScanError> {
+        // The handle is valid only on the session that opened it.
+        let mut session = self.session();
         let (handle, remote) = self
-            .on_stored(path.as_bytes(), |remote| {
-                self.session()
+            .on_stored_with(&mut session, path.as_bytes(), |session, remote| {
+                session
                     .open_read(remote)
                     .map(|handle| (handle, remote.to_vec()))
             })
             .map_err(|source| at(Some(path), source))?;
-        let mut session = self.session();
         let mut hasher = blake3::Hasher::new();
         let mut taken = from;
         let mut cancelled = false;

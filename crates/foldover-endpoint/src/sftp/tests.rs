@@ -403,6 +403,88 @@ fn keep_copy_streams_a_file_beside_the_original_and_cancels_cleanly() {
     ));
 }
 
+/// PLAN.md §4.9: copies from several threads go out on several sessions
+/// at once and come back the same way, each file whole.
+#[test]
+fn copies_from_several_threads_use_their_own_sessions() {
+    const FILES: usize = 32;
+    let Some(server) = server() else {
+        eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
+        return;
+    };
+    let (local_directory, back_directory) =
+        (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let remote_directory = tempfile::tempdir().unwrap();
+    let remote = Endpoint::Sftp(
+        SftpEndpoint::spawn(
+            &server,
+            &[OsStr::new("-d"), OsStr::new("/")],
+            remote_directory.path().as_os_str().as_encoded_bytes(),
+        )
+        .unwrap(),
+    );
+    assert_eq!(remote.workers().get(), 4);
+    let local = Endpoint::Local(LocalEndpoint::open(local_directory.path()).unwrap());
+    let back = Endpoint::Local(LocalEndpoint::open(back_directory.path()).unwrap());
+    let options = PairOptions::default();
+    let run = RunScope::new(UNIX_EPOCH, options.clone());
+    let content = |index: usize| format!("file {index} ").repeat(4_000).into_bytes();
+    for index in 0..FILES {
+        fs::write(
+            local_directory.path().join(format!("{index}.txt")),
+            content(index),
+        )
+        .unwrap();
+    }
+    let observe = |endpoint: &Endpoint| {
+        endpoint
+            .observe_from(
+                options.metadata(),
+                &Filter::none(),
+                &std::collections::BTreeMap::new(),
+                &mut proceed,
+                &mut |_| {},
+            )
+            .unwrap()
+    };
+    let copy_all = |to: &Endpoint, from: &Endpoint| {
+        let observed = observe(from);
+        let names: Vec<_> = observed.entries().keys().cloned().collect();
+        std::thread::scope(|threads| {
+            for share in names.chunks(FILES / 4) {
+                let (observed, run) = (&observed, &run);
+                threads.spawn(move || {
+                    for name in share {
+                        to.copy_from(
+                            from,
+                            name,
+                            &observed.entries()[name],
+                            Expected::Absent,
+                            run,
+                            &mut proceed,
+                        )
+                        .unwrap();
+                    }
+                });
+            }
+        });
+    };
+
+    copy_all(&remote, &local);
+    copy_all(&back, &remote);
+    for index in 0..FILES {
+        let name = format!("{index}.txt");
+        assert_eq!(
+            fs::read(remote_directory.path().join(&name)).unwrap(),
+            content(index)
+        );
+        assert_eq!(
+            fs::read(back_directory.path().join(&name)).unwrap(),
+            content(index)
+        );
+    }
+}
+
 #[test]
 fn copies_both_ways_keep_content_and_archive_what_they_replace() {
     let local_directory = tempfile::tempdir().unwrap();

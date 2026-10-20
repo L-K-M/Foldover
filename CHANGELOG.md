@@ -11,6 +11,9 @@ All notable changes to this project are documented here. The format follows
 - A pair can limit how fast it copies, in megabytes per second, so a
   large sync leaves room on the network for everything else.
 
+- Copies to and from SFTP servers run four at a time over several
+  sessions, when the other folder takes that many.
+
 - Files copy four at a time between solid-state disks and mounted
   shares. Spinning disks, disks that do not say what they are, SFTP
   servers and other Macs still take one file at a time.

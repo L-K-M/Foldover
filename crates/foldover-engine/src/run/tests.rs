@@ -973,6 +973,61 @@ fn break_off(pair: &mut Fixture) -> std::path::PathBuf {
     partial
 }
 
+/// PLAN.md §4.9: copies to and from a server run on several sessions at
+/// once, each file whole and recorded once.
+#[test]
+fn many_files_reach_a_server_and_come_back_on_several_sessions() {
+    const FOLDERS: usize = 3;
+    const FILES: usize = 20;
+    if sftp_server().is_none() {
+        eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
+        return;
+    }
+    let mut pair = fixture(SyncMode::Sync);
+    pair.right_kind = RightKind::Sftp;
+    let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+    let file = |folder: usize, file: usize| format!("folder {folder}/file {file}.txt");
+    for folder in 0..FOLDERS {
+        fs::create_dir(left.join(format!("folder {folder}"))).unwrap();
+        for index in 0..FILES {
+            fs::write(
+                left.join(file(folder, index)),
+                file(folder, index).repeat(500),
+            )
+            .unwrap();
+        }
+    }
+
+    let report = pair.sync();
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    assert_eq!(report.copied(), (FOLDERS + FOLDERS * FILES) as u64);
+    for folder in 0..FOLDERS {
+        for index in 0..FILES {
+            let path = file(folder, index);
+            assert_eq!(
+                fs::read(right.join(&path)).unwrap(),
+                fs::read(left.join(&path)).unwrap()
+            );
+        }
+    }
+    assert!(pair.prepare().preview().items().is_empty());
+
+    // Back from the server: it is the source now.
+    for index in 0..FILES {
+        fs::write(right.join(file(0, index)), format!("edited {index}")).unwrap();
+    }
+    let report = pair.sync();
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    assert_eq!(report.copied(), FILES as u64);
+    for index in 0..FILES {
+        assert_eq!(
+            fs::read_to_string(left.join(file(0, index))).unwrap(),
+            format!("edited {index}")
+        );
+    }
+    assert!(pair.prepare().preview().items().is_empty());
+}
+
 /// PLAN.md §4.9: a pair's bandwidth limit paces its copies, local and
 /// streamed alike, across all of a run's files.
 #[test]

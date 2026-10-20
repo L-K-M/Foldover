@@ -297,13 +297,13 @@ impl Endpoint {
     }
 
     /// How many copies into or out of this folder may run at once (PLAN.md
-    /// §4.9). An SFTP server's one session takes them in turn anyway, and
-    /// a paired Mac's link has few streams to spare beside change reports
-    /// and lease beats.
+    /// §4.9). A paired Mac's link has few streams to spare beside change
+    /// reports and lease beats.
     pub fn workers(&self) -> NonZeroUsize {
         match self {
             Self::Local(endpoint) => endpoint.workers(),
-            Self::Sftp(_) | Self::Peer(_) => NonZeroUsize::MIN,
+            Self::Sftp(endpoint) => endpoint.workers(),
+            Self::Peer(_) => NonZeroUsize::MIN,
             #[cfg(feature = "simulation")]
             Self::Memory(endpoint) => endpoint.workers(),
         }
