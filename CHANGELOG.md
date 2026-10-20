@@ -250,6 +250,9 @@ All notable changes to this project are documented here. The format follows
   spelling into a folder that stores both as one file; the copy landed
   on the conflicted file.
 
+- Syncing to disks formatted HFS+ (Mac OS Extended), exFAT or FAT32
+  works: every copy to them failed with "Operation not supported".
+
 - Folders on exFAT and FAT disks no longer stop with an AppleDouble
   error: the `._` files macOS keeps there for extended attributes are
   skipped, as the attributes travel with their files.
