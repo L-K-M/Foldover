@@ -37,9 +37,17 @@ jobs:
           grep -Fx "version = \"$version\"" Cargo.toml
           echo "VERSION=$version" >> "$GITHUB_ENV"
 
-      # Without the key, the app could never update itself.
-      - name: Check the update key
-        run: test -n "$SPARKLE_PUBLIC_KEY"
+      # Without both keys, the app could never update itself.
+      - name: Check the update keys
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          for key in SPARKLE_PUBLIC_KEY SPARKLE_PRIVATE_KEY; do
+            if [[ -z "${!key}" ]]; then
+              echo "::error::$key is not set; see docs/adr/0035-sparkle-updates.md"
+              exit 1
+            fi
+          done
 
       - name: Build the XCFramework
         run: cargo xtask ffi
@@ -58,7 +66,8 @@ jobs:
       - name: Build, verify and zip the app
         run: bash scripts/package-app.sh "$RUNNER_TEMP/Foldover-$VERSION.zip" "$RUNNER_TEMP/DerivedData"
 
-      - name: Sign the update
+      # Fails when the private key is not the shipped public key's pair.
+      - name: Sign and check the update
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: bash scripts/appcast.sh "$RUNNER_TEMP/Foldover-$VERSION.zip" "$VERSION" "$RUNNER_TEMP/appcast.xml"
