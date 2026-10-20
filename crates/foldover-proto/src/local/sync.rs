@@ -250,7 +250,7 @@ pub struct UndoResult {
 /// How far a working job has got (PLAN.md §3.2: live counters). Counts
 /// grow while it works; `changes` and `bytes` stay 0 until its plan is
 /// ready.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SyncProgress {
     /// Entries found in both folders.
@@ -263,6 +263,9 @@ pub struct SyncProgress {
     /// Bytes the changes copy, and those copied so far.
     pub bytes: u64,
     pub copied: u64,
+    /// The Mac whose sync of a folder this job waits for, e.g. "Studio".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_for: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

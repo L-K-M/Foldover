@@ -26,6 +26,7 @@ use foldover_types::{
     SyncPath,
 };
 
+use crate::lease::{LEASE_LIMIT, LockFile};
 use crate::local::archive::{ARCHIVE_ROOT, archive_time, date_name, sibling_name};
 use crate::local::filter::{IGNORE_FILE, IGNORE_FILE_LIMIT, parse_ignore_file};
 use crate::local::version::{Observed, Payload, entry_version, metadata_version};
@@ -52,8 +53,18 @@ const PUT_BACK_ATTEMPTS: u32 = 100;
 const RESTORED: &str = "restored";
 const SSH_PORT: u16 = 22;
 
+/// Opens another session to the same server.
+type Connect = Box<dyn Fn() -> io::Result<Session> + Send + Sync>;
+
 pub struct SftpEndpoint {
     session: Mutex<Box<Session>>,
+    /// Leases beat over their own session, opened on first use: a transfer
+    /// holds `session` while it calls back into the run, and a beat must
+    /// neither wait for the transfer nor deadlock with it.
+    lease: Mutex<Option<Box<Session>>>,
+    /// How to open that session; without one, as for a session made
+    /// elsewhere, leases share `session`.
+    connect: Option<Connect>,
     /// `host:port`, to tell whether two roots can overlap; unknown for
     /// sessions made elsewhere.
     server: Option<String>,
@@ -72,6 +83,7 @@ impl SftpEndpoint {
         let session = Session::connect(&target)
             .map_err(|source| ScanError::Unreachable(source.to_string()))?;
         let mut endpoint = Self::with_session(session, location.path())?;
+        endpoint.connect = Some(Box::new(move || Session::connect(&target)));
         endpoint.server = Some(format!(
             "{}:{}",
             location.host(),
@@ -114,7 +126,22 @@ impl SftpEndpoint {
         path: &[u8],
     ) -> Result<Self, ScanError> {
         let session = Session::spawn(program, arguments).map_err(io_error)?;
-        Self::with_session(session, path)
+        let mut endpoint = Self::with_session(session, path)?;
+        let (program, arguments) = (
+            program.to_owned(),
+            arguments
+                .iter()
+                .map(|argument| (*argument).to_owned())
+                .collect::<Vec<_>>(),
+        );
+        endpoint.connect = Some(Box::new(move || {
+            let arguments: Vec<&std::ffi::OsStr> = arguments
+                .iter()
+                .map(std::ffi::OsString::as_os_str)
+                .collect();
+            Session::spawn(&program, &arguments)
+        }));
+        Ok(endpoint)
     }
 
     /// Use an existing session, e.g. to a local `sftp-server` in tests.
@@ -142,6 +169,8 @@ impl SftpEndpoint {
         }
         Ok(Self {
             session: Mutex::new(Box::new(session)),
+            lease: Mutex::new(None),
+            connect: None,
             server: None,
             root,
         })
@@ -149,6 +178,26 @@ impl SftpEndpoint {
 
     fn session(&self) -> MutexGuard<'_, Box<Session>> {
         self.session.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Run `request` over the lease session, opening it first if needed;
+    /// a failed request drops it, so the next one reconnects.
+    fn on_lease_session<T>(
+        &self,
+        request: impl FnOnce(&mut Session) -> io::Result<T>,
+    ) -> io::Result<T> {
+        let Some(connect) = &self.connect else {
+            return request(&mut self.session());
+        };
+        let mut lease = self.lease.lock().unwrap_or_else(PoisonError::into_inner);
+        if lease.is_none() {
+            *lease = Some(Box::new(connect()?));
+        }
+        let result = request(lease.as_mut().expect("opened above"));
+        if result.is_err() {
+            *lease = None;
+        }
+        result
     }
 
     /// The server path of `path` below the root.
@@ -203,6 +252,78 @@ impl SftpEndpoint {
             return self.identity()?.ok_or(ApplyError::DestinationChanged(path));
         }
         Ok(identity)
+    }
+
+    pub(crate) fn read_lock_file(&self, file: LockFile) -> Result<Option<Vec<u8>>, ScanError> {
+        let remote = self.remote(file.path());
+        self.on_lease_session(|session| read_small_on(session, &remote, LEASE_LIMIT))
+            .map_err(io_error)
+    }
+
+    /// Write `file` unless it exists; whether it was written. A plain SFTP
+    /// rename refuses an existing target, which makes the create exclusive.
+    pub(crate) fn create_lock_file(
+        &self,
+        file: LockFile,
+        content: &[u8],
+    ) -> Result<bool, ApplyError> {
+        let remote = self.remote(file.path());
+        self.on_lease_session(|session| {
+            let temporary = self.stage_lock(session, file, content)?;
+            let Err(error) = session.rename(&temporary, &remote) else {
+                return Ok(true);
+            };
+            let _ = session.remove_file(&temporary);
+            match read_small_on(session, &remote, LEASE_LIMIT)? {
+                Some(_) => Ok(false),
+                None => Err(error),
+            }
+        })
+        .map_err(|source| write_error(&lock_path(file), source))
+    }
+
+    pub(crate) fn replace_lock_file(
+        &self,
+        file: LockFile,
+        content: &[u8],
+    ) -> Result<(), ApplyError> {
+        let remote = self.remote(file.path());
+        self.on_lease_session(|session| {
+            let temporary = self.stage_lock(session, file, content)?;
+            session.rename_replacing(&temporary, &remote)
+        })
+        .map_err(|source| write_error(&lock_path(file), source))
+    }
+
+    pub(crate) fn remove_lock_file(&self, file: LockFile) -> Result<(), ApplyError> {
+        let remote = self.remote(file.path());
+        self.on_lease_session(|session| match session.remove_file(&remote) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            removed => removed,
+        })
+        .map_err(|source| write_error(&lock_path(file), source))
+    }
+
+    /// Move the claim over the lock.
+    pub(crate) fn promote_claim(&self) -> Result<(), ApplyError> {
+        let (claim, lock) = (
+            self.remote(LockFile::Claim.path()),
+            self.remote(LockFile::Lock.path()),
+        );
+        self.on_lease_session(|session| session.rename_replacing(&claim, &lock))
+            .map_err(|source| write_error(&lock_path(LockFile::Lock), source))
+    }
+
+    /// `content` in a fresh temporary beside `file`, over `session`.
+    fn stage_lock(
+        &self,
+        session: &mut Session,
+        file: LockFile,
+        content: &[u8],
+    ) -> io::Result<Vec<u8>> {
+        self.make_directories_on(session, INTERNAL_DIRECTORY, PRIVATE_DIRECTORY)?;
+        let temporary = self.remote(&temporary_beside(file.path()));
+        write_new(session, temporary, PRIVATE_FILE, |sink| sink(content))
     }
 
     pub fn ignore_rules(&self) -> Result<Vec<String>, ScanError> {
@@ -468,15 +589,7 @@ impl SftpEndpoint {
             ));
         }
         let temporary = self.remote(&temporary_beside(path));
-        let mut session = self.session();
-        let handle = session.create_new(&temporary, permissions)?;
-        let written = session.write_chunks(&handle, produce);
-        let closed = session.close(handle);
-        if let Err(error) = written.and(closed) {
-            let _ = session.remove_file(&temporary);
-            return Err(error);
-        }
-        Ok(temporary)
+        write_new(&mut self.session(), temporary, permissions, produce)
     }
 
     /// The version a staged file will have, from its attributes and the
@@ -950,6 +1063,15 @@ impl SftpEndpoint {
 
     /// Create every missing folder of `path` (raw, below the root).
     fn make_directories(&self, path: &[u8], permissions: u32) -> io::Result<()> {
+        self.make_directories_on(&mut self.session(), path, permissions)
+    }
+
+    fn make_directories_on(
+        &self,
+        session: &mut Session,
+        path: &[u8],
+        permissions: u32,
+    ) -> io::Result<()> {
         let mut prefix = Vec::new();
         for component in path.split(|byte| *byte == b'/') {
             if !prefix.is_empty() {
@@ -957,7 +1079,6 @@ impl SftpEndpoint {
             }
             prefix.extend_from_slice(component);
             let remote = self.remote(&prefix);
-            let mut session = self.session();
             if let Err(error) = session.make_directory(&remote, permissions) {
                 // SFTP reports an existing folder as a generic failure.
                 match session.lstat(&remote) {
@@ -971,25 +1092,53 @@ impl SftpEndpoint {
 
     /// A small file below the root, or `None` when it is missing.
     fn read_small(&self, path: &[u8], limit: usize) -> Result<Option<Vec<u8>>, ScanError> {
-        let remote = self.remote(path);
-        let mut session = self.session();
-        let handle: Handle = match session.open_read(&remote) {
-            Ok(handle) => handle,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(io_error(error)),
-        };
-        let mut content = Vec::new();
-        let read = session.read_all(&handle, &mut |chunk| {
-            content.extend_from_slice(chunk);
-            if content.len() > limit {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "File too large"));
-            }
-            Ok(())
-        });
-        let _ = session.close(handle);
-        read.map_err(io_error)?;
-        Ok(Some(content))
+        read_small_on(&mut self.session(), &self.remote(path), limit).map_err(io_error)
     }
+}
+
+/// The small file at `remote`, or `None` when it is missing.
+fn read_small_on(
+    session: &mut Session,
+    remote: &[u8],
+    limit: usize,
+) -> io::Result<Option<Vec<u8>>> {
+    let handle: Handle = match session.open_read(remote) {
+        Ok(handle) => handle,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut content = Vec::new();
+    let read = session.read_all(&handle, &mut |chunk| {
+        content.extend_from_slice(chunk);
+        if content.len() > limit {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "File too large"));
+        }
+        Ok(())
+    });
+    let _ = session.close(handle);
+    read?;
+    Ok(Some(content))
+}
+
+/// `produce`'s data in a new file at `remote`, removed again on failure.
+fn write_new(
+    session: &mut Session,
+    remote: Vec<u8>,
+    permissions: u32,
+    produce: impl FnOnce(foldover_net::sftp::Chunks<'_>) -> io::Result<()>,
+) -> io::Result<Vec<u8>> {
+    let handle = session.create_new(&remote, permissions)?;
+    let written = session.write_chunks(&handle, produce);
+    let closed = session.close(handle);
+    if let Err(error) = written.and(closed) {
+        let _ = session.remove_file(&remote);
+        return Err(error);
+    }
+    Ok(remote)
+}
+
+fn lock_path(file: LockFile) -> SyncPath {
+    SyncPath::try_from(file.path()).expect("lease paths are valid")
 }
 
 /// Full durability cannot be promised over SFTP: namespace changes have

@@ -182,6 +182,7 @@ impl Fixture {
             self.resolutions.clone(),
         )
         .with_skips(self.skips.clone())
+        .with_lease_timing(TEST_LEASES)
     }
 
     fn try_prepare(&self) -> Result<PairRun, RunError> {
@@ -1112,6 +1113,53 @@ fn a_root_whose_identity_changes_mid_run_stops_at_the_next_batch() {
 
 const HOUR: std::time::Duration = std::time::Duration::from_secs(3_600);
 
+/// Leases that give up on a busy folder at once and count a still one as
+/// dead quickly.
+const TEST_LEASES: LeaseTiming = LeaseTiming {
+    ttl: std::time::Duration::from_millis(200),
+    beat: std::time::Duration::from_millis(50),
+    poll: std::time::Duration::from_millis(20),
+    wait: std::time::Duration::ZERO,
+};
+
+/// PLAN.md §4: while another Mac's run holds a folder's lease, a run
+/// writes nothing and says who is syncing.
+#[test]
+fn a_folder_another_mac_is_syncing_waits_until_its_lease_is_free_or_dead() {
+    let mut pair = fixture(SyncMode::Sync);
+    let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+    fs::write(left.join("keep.txt"), b"k").unwrap();
+    pair.sync();
+    fs::write(left.join("new.txt"), b"n").unwrap();
+    let lock = right.join(".foldover/lock");
+    fs::write(
+        &lock,
+        "foldover-lease 1\nholder other/run\nlabel Studio\nbeat 1\n",
+    )
+    .unwrap();
+
+    let prepared = pair.prepare();
+    let mut store = pair.store();
+    let busy = prepared.execute(
+        Approval::default(),
+        RunContext::Interactive,
+        at(1),
+        &mut |planned, commit| store.apply(planned, commit),
+        &mut proceed,
+        &NoProgress,
+    );
+    assert!(
+        matches!(&busy, Err(RunError::Lease(LeaseError::Busy { label })) if label == "Studio"),
+        "{busy:?}"
+    );
+    assert!(!right.join("new.txt").exists());
+    // Released: the run proceeds and leaves no lease behind.
+    fs::remove_file(&lock).unwrap();
+    pair.ran(Approval::default(), at(2));
+    assert_eq!(fs::read(right.join("new.txt")).unwrap(), b"n");
+    assert!(!lock.exists());
+}
+
 /// Runs `hours` after the first, so each gets its own archive folder.
 fn at(hours: u32) -> std::time::SystemTime {
     STARTED + HOUR * hours
@@ -1454,6 +1502,8 @@ struct Counts {
 }
 
 impl RunProgress for Counts {
+    fn waiting(&self, _: Option<&str>) {}
+
     fn observed(&self, _: Side, step: ObserveStep) {
         let counter = match step {
             ObserveStep::Listed => &self.listed,

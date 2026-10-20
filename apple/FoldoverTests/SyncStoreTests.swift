@@ -1919,8 +1919,15 @@ func workingJobsShowLiveCountsWithoutCountingAsNewStates() async {
     #expect(viewModel.statusText == "Comparing folders… 50 of 200 items checked")
     #expect(viewModel.progressFraction == 0.25)
 
-    await client.reply(.working(.run, cancelling: false, progress: applying))
+    // Another Mac is syncing one of the folders; nothing to measure yet.
+    let waiting = WorkProgress(listed: 200, checked: 200, changes: 4, waitingFor: "Studio")
+    await client.reply(.working(.run, cancelling: false, progress: waiting))
     await client.waitForStatusCalls(3)
+    #expect(viewModel.statusText == "Waiting for “Studio” to finish syncing these folders…")
+    #expect(viewModel.progressFraction == nil)
+
+    await client.reply(.working(.run, cancelling: false, progress: applying))
+    await client.waitForStatusCalls(4)
     #expect(viewModel.statusText.hasPrefix("Syncing… 1 of 4 changes · "))
     #expect(viewModel.progressFraction == 0.25)
     // New counts are the same state: no new history, listing or alert.

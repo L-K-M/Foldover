@@ -725,3 +725,33 @@ fn full_durability_is_rejected(remote: &Endpoint, root: &Path) {
         .unwrap();
     assert!(!root.join("original").exists());
 }
+
+/// The lease primitives over SFTP: a create is exclusive, a promoted
+/// claim replaces the lock, and removal tolerates a missing file.
+#[test]
+fn lock_files_are_created_exclusively_and_replaced_by_a_promoted_claim() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    assert!(remote.create_lock_file(LockFile::Lock, b"first").unwrap());
+    assert!(!remote.create_lock_file(LockFile::Lock, b"second").unwrap());
+    assert_eq!(
+        remote.read_lock_file(LockFile::Lock).unwrap().as_deref(),
+        Some(&b"first"[..])
+    );
+
+    remote.replace_lock_file(LockFile::Lock, b"beat").unwrap();
+    assert!(remote.create_lock_file(LockFile::Claim, b"claim").unwrap());
+    remote.promote_claim().unwrap();
+    assert_eq!(
+        remote.read_lock_file(LockFile::Lock).unwrap().as_deref(),
+        Some(&b"claim"[..])
+    );
+    assert_eq!(remote.read_lock_file(LockFile::Claim).unwrap(), None);
+
+    remote.remove_lock_file(LockFile::Lock).unwrap();
+    remote.remove_lock_file(LockFile::Lock).unwrap();
+    let left = fs::read_dir(directory.path().join(".foldover")).unwrap();
+    assert_eq!(left.count(), 0, "temporary files were left behind");
+}

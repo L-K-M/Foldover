@@ -584,6 +584,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "unicode-normalization",
+ "uuid",
 ]
 
 [[package]]

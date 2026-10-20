@@ -111,6 +111,12 @@ pub enum FolderOp {
         path: Vec<u8>,
         durability: PairDurability,
     },
+    /// The folder's lease files (ADR 0032): `leaseRead`, `leaseCreated` or
+    /// `done`.
+    Lease {
+        file: LeaseFile,
+        action: LeaseAction,
+    },
     /// Report changes until the asking Mac drops the request: `watching`
     /// once the folder is watched and then every minute, `changed` after
     /// each burst of changes.
@@ -122,6 +128,29 @@ pub enum FolderOp {
         from: String,
         options: PairSettings,
     },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LeaseFile {
+    Lock,
+    Claim,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum LeaseAction {
+    Read,
+    /// Write it unless it exists.
+    Create {
+        content: Vec<u8>,
+    },
+    Replace {
+        content: Vec<u8>,
+    },
+    Remove,
+    /// Move the claim over the lock.
+    Promote,
 }
 
 /// What a write belongs to: the run's archive folder and the pair's
@@ -298,6 +327,12 @@ pub enum PeerReply {
     /// Where an entry was put.
     Placed {
         path: Vec<u8>,
+    },
+    LeaseRead {
+        content: Option<Vec<u8>>,
+    },
+    LeaseCreated {
+        created: bool,
     },
     /// The folder is watched; also sent while nothing changes, so a Mac
     /// that left is noticed.
