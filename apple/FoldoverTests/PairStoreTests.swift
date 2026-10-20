@@ -233,6 +233,7 @@ func pairOptionDefaultsComeFromTheEngine() {
     #expect(!defaults.syncPermissions)
     #expect(defaults.durability == .standard)
     #expect(defaults.schedule == .manual)
+    #expect(defaults.canary == nil)
 }
 
 @MainActor
@@ -305,6 +306,59 @@ func ageLimitsAreWholeDaysUpToACentury() {
     #expect(editor.options.ageLimit == 36_500)
     editor.limitsAge = false
     #expect(editor.options.ageLimit == nil)
+}
+
+@MainActor
+@Test
+func aCanaryIsAForgivingRelativePathOutsideFoldover() {
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()))
+    #expect(editor.canary == "")
+    #expect(editor.options.canary == nil)
+    #expect(editor.canaryWarning == nil)
+    editor.canary = "  docs/canary.txt  "
+    #expect(editor.options.canary == Data("docs/canary.txt".utf8))
+    #expect(editor.canary == "docs/canary.txt")
+    #expect(editor.canaryWarning == nil)
+    editor.canary = "/canary.txt"
+    #expect(editor.options.canary == Data("canary.txt".utf8))
+    editor.canary = "   "
+    #expect(editor.options.canary == nil)
+    #expect(editor.canaryWarning == nil)
+}
+
+@MainActor
+@Test
+func anInvalidCanaryShowsAWarningAndBlocksSaving() {
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()))
+    editor.name = "Photos"
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/a")]), side: .left)
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/b")]), side: .right)
+    #expect(editor.canSave)
+    for path in [".foldover/id", ".foldover", "a//b", "a/../b", "./a", "b/"] {
+        editor.canary = path
+        #expect(editor.canaryWarning != nil, "expected a warning for \(path)")
+        #expect(!editor.canSave)
+    }
+    editor.canary = "docs/canary.txt"
+    #expect(editor.canaryWarning == nil)
+    #expect(editor.canSave)
+}
+
+@MainActor
+@Test
+func aSavedCanarySurvivesTheRoundTripThroughTheStore() async {
+    let client = PairFixtureClient()
+    let store = PairStore(client: client)
+    let editor = PairEditorViewModel(store: store)
+    editor.name = "Photos"
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/a")]), side: .left)
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/b")]), side: .right)
+    editor.canary = "docs/canary.txt"
+    #expect(await editor.save())
+    #expect(await client.savedSettings?.options.canary == Data("docs/canary.txt".utf8))
+    #expect(store.pairs.first?.settings.options.canary == Data("docs/canary.txt".utf8))
+    let reloaded = PairEditorViewModel(store: store, editing: store.pairs.first)
+    #expect(reloaded.canary == "docs/canary.txt")
 }
 
 @MainActor

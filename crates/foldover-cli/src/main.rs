@@ -4,7 +4,7 @@
 use foldover_client::{DeviceId, PeerStatus, ShareId, SyncStatus};
 use foldover_client::{
     Durability, Filters, MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions, PairRoot,
-    Propagation, ReviewToken, Schedule, ScheduleInterval, Side, SocketLocation, SyncMode,
+    Propagation, ReviewToken, Schedule, ScheduleInterval, Side, SocketLocation, SyncMode, SyncPath,
 };
 use foldover_proto::local::PairRecord;
 use std::env;
@@ -143,6 +143,8 @@ struct OptionChanges {
     size_limit: Option<Option<u64>>,
     /// Days; `Some(None)` removes the limit.
     age_limit: Option<Option<u32>>,
+    /// `Some(None)` removes the canary.
+    canary: Option<Option<SyncPath>>,
 }
 
 impl OptionChanges {
@@ -168,6 +170,8 @@ impl OptionChanges {
                 })
                 .expect("limits are checked when parsed"),
         )
+        .with_canary(self.canary.unwrap_or_else(|| base.canary().cloned()))
+        .expect("the canary is checked when parsed")
     }
 }
 
@@ -240,7 +244,7 @@ async fn main() -> ExitCode {
         },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]\n       foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]\nLEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]\n       foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]\nLEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --canary (PATH | none)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -467,6 +471,19 @@ fn option_changes(args: &[OsString]) -> Option<OptionChanges> {
                             .ok()
                             .filter(|days| (1..=Filters::MAX_AGE_DAYS).contains(days))?,
                     ),
+                })
+                .is_some(),
+            "--canary" => changes
+                .canary
+                .replace(match value {
+                    "none" => None,
+                    path => {
+                        let path = SyncPath::try_from(path.as_bytes()).ok()?;
+                        PairOptions::default()
+                            .with_canary(Some(path.clone()))
+                            .ok()?;
+                        Some(path)
+                    }
                 })
                 .is_some(),
             "--schedule" => changes
@@ -1198,6 +1215,42 @@ mod tests {
         for value in ["0", "-1", "lots"] {
             assert!(matches!(
                 req(&["pairs", "add", "P", "/a", "/b", "sync", "--max-size", value]),
+                Request::Usage
+            ));
+        }
+
+        let Request::Pairs(_, PairCommand::Update { options, .. }) = req(&[
+            "pairs",
+            "update",
+            id,
+            "1",
+            "Photos",
+            "/a",
+            "/b",
+            "sync",
+            "--canary",
+            "docs/canary.txt",
+        ]) else {
+            panic!("expected an update command");
+        };
+        let current = PairOptions::default()
+            .with_canary(SyncPath::try_from(b"old.txt".as_slice()).ok())
+            .unwrap();
+        let updated = options.apply(current.clone());
+        assert_eq!(
+            updated.canary(),
+            Some(&SyncPath::try_from(b"docs/canary.txt".as_slice()).unwrap())
+        );
+
+        let Request::Pairs(_, PairCommand::Update { options, .. }) = req(&[
+            "pairs", "update", id, "1", "Photos", "/a", "/b", "sync", "--canary", "none",
+        ]) else {
+            panic!("expected an update command");
+        };
+        assert_eq!(options.apply(current).canary(), None);
+        for value in ["/abs.txt", ".foldover/id", ""] {
+            assert!(matches!(
+                req(&["pairs", "add", "P", "/a", "/b", "sync", "--canary", value]),
                 Request::Usage
             ));
         }
