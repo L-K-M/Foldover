@@ -7,12 +7,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, UNIX_EPOCH};
 
 use foldover_engine::{
-    Decision, Device, Engine, LinkError, PeerIdentity, PeerLink, PendingPairing,
+    Decision, Device, Engine, LinkError, PeerIdentity, PeerLink, PendingPairing, Presence,
 };
 use foldover_proto::local::{
     INTERNAL_ERROR, INVALID_PARAMS, MAX_PAIRING_MINUTES, PEER_CANCEL, PEER_CONFIRM, PEER_PAIR,
-    PEER_PAIRING_CLOSE, PEER_PAIRING_OPEN, PEER_REVOKE, PEER_UNAVAILABLE, PeerDeviceRecord,
-    PeerKey, PeerPair, PeerPairingOpen, PeerPendingRecord, PeerStatus, Request, RpcError,
+    PEER_PAIRING_CLOSE, PEER_PAIRING_OPEN, PEER_REVOKE, PEER_STATUS, PEER_UNAVAILABLE,
+    PeerDeviceRecord, PeerKey, PeerNearbyRecord, PeerPair, PeerPairingOpen, PeerPendingRecord,
+    PeerStatus, Request, RpcError,
 };
 use foldover_types::DeviceId;
 use serde_json::Value;
@@ -54,7 +55,7 @@ async fn link<'a>(
                 .await
                 .map_err(|_| RpcError::new(INTERNAL_ERROR, "The peer link failed to start"))?
                 .map_err(unavailable)?;
-            open(engine, identity, LISTEN).await
+            open(engine, identity, LISTEN, Presence::Announced).await
         })
         .await
 }
@@ -65,6 +66,7 @@ pub(crate) async fn open(
     engine: &Arc<Mutex<Engine>>,
     identity: PeerIdentity,
     address: SocketAddr,
+    presence: Presence,
 ) -> Result<Arc<PeerLink>, RpcError> {
     let paired = devices(engine).await?;
     let recording = Arc::clone(engine);
@@ -72,6 +74,7 @@ pub(crate) async fn open(
         identity,
         foldover_engine::computer_name(),
         address,
+        presence,
         paired.iter().map(|device| device.id),
         move |device, name| {
             recording
@@ -91,6 +94,12 @@ pub(crate) async fn handle(
     peers: &Peers,
     request: &Request,
 ) -> Result<Value, RpcError> {
+    if request.method() == PEER_STATUS {
+        return match peers.get() {
+            Some(link) => encode(status(engine, link).await?),
+            None => encode(off(engine).await?),
+        };
+    }
     let link = link(engine, peers).await?;
     match request.method() {
         PEER_PAIRING_OPEN => {
@@ -112,12 +121,16 @@ pub(crate) async fn handle(
         PEER_PAIR => {
             let params: PeerPair = parameters(request)?;
             let device = device(&params.device)?;
-            let address: SocketAddr = params.address.parse().map_err(|_| {
-                RpcError::new(
-                    INVALID_PARAMS,
-                    "An address is host:port, e.g. 192.168.1.5:50123",
-                )
-            })?;
+            let address = params
+                .address
+                .map(|address| address.parse::<SocketAddr>())
+                .transpose()
+                .map_err(|_| {
+                    RpcError::new(
+                        INVALID_PARAMS,
+                        "An address is ip:port, e.g. 192.168.1.5:50123",
+                    )
+                })?;
             let pending = link.pair(device, address).await.map_err(unavailable)?;
             return encode(record(&pending));
         }
@@ -153,23 +166,53 @@ pub(crate) async fn handle(
 
 async fn status(engine: &Arc<Mutex<Engine>>, link: &PeerLink) -> Result<PeerStatus, RpcError> {
     let devices = devices(engine).await?;
+    let (nearby, discovery) = match link.nearby() {
+        Ok(nearby) => (nearby, None),
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    };
     Ok(PeerStatus {
-        device: link.device().to_string(),
-        name: foldover_engine::computer_name(),
-        address: link.address().map_err(unavailable)?.to_string(),
-        pairing: link.pairing_address().map(|address| address.to_string()),
-        pending: link.pending().iter().map(record).collect(),
-        devices: devices
+        nearby: nearby
             .into_iter()
-            .map(|device| PeerDeviceRecord {
-                device: device.id.to_string(),
-                name: device.name,
-                paired_ms: device.paired.duration_since(UNIX_EPOCH).map_or(0, |since| {
-                    u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-                }),
+            .map(|nearby| PeerNearbyRecord {
+                device: nearby.device.to_string(),
+                name: nearby.name,
+                address: nearby.address.to_string(),
+                pairing: nearby.pairing.map(|address| address.to_string()),
+                paired: link.is_paired(nearby.device),
             })
             .collect(),
+        discovery,
+        device: Some(link.device().to_string()),
+        name: foldover_engine::computer_name(),
+        address: Some(link.address().map_err(unavailable)?.to_string()),
+        pairing: link.pairing_address().map(|address| address.to_string()),
+        pending: link.pending().iter().map(record).collect(),
+        devices: devices.iter().map(device_record).collect(),
     })
+}
+
+/// Status before Mac-to-Mac is on: only the devices recorded earlier.
+async fn off(engine: &Arc<Mutex<Engine>>) -> Result<PeerStatus, RpcError> {
+    Ok(PeerStatus {
+        device: None,
+        name: foldover_engine::computer_name(),
+        address: None,
+        pairing: None,
+        pending: Vec::new(),
+        devices: devices(engine).await?.iter().map(device_record).collect(),
+        nearby: Vec::new(),
+        discovery: None,
+    })
+}
+
+fn device_record(device: &Device) -> PeerDeviceRecord {
+    PeerDeviceRecord {
+        device: device.id.to_string(),
+        name: device.name.clone(),
+        paired_ms: device.paired.duration_since(UNIX_EPOCH).map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        }),
+    }
 }
 
 async fn devices(engine: &Arc<Mutex<Engine>>) -> Result<Vec<Device>, RpcError> {

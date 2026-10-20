@@ -15,7 +15,8 @@ use foldover_engine::{Approval, Engine, ErrorKind, StateLocation};
 use foldover_proto::local::{
     ARCHIVE_ITEMS, ARCHIVE_PUT_BACK, ARCHIVE_PUT_BACK_ALL, ARCHIVE_RUNS, AUTOMATION_PAUSE,
     AUTOMATION_RESUME, AUTOMATION_STATUS, HISTORY_LIST, PAIR_REMOVE, PEER_CANCEL, PEER_CONFIRM,
-    PEER_PAIR, PEER_PAIRING_CLOSE, PEER_PAIRING_OPEN, PEER_REVOKE, PEER_STATUS, PairRevision,
+    PEER_PAIR, PEER_PAIRING_CLOSE, PEER_PAIRING_OPEN, PEER_REVOKE, PEER_START, PEER_STATUS,
+    PairRevision,
 };
 use foldover_proto::local::{
     AgentCapability, DAEMON_STATUS, DaemonStatus, Hello, INTERNAL_ERROR, INVALID_PARAMS,
@@ -114,6 +115,7 @@ impl Service {
         if matches!(
             request.method(),
             PEER_STATUS
+                | PEER_START
                 | PEER_PAIRING_OPEN
                 | PEER_PAIRING_CLOSE
                 | PEER_PAIR
@@ -1281,6 +1283,20 @@ mod tests {
         assert!(right.join("later").exists());
     }
 
+    /// Opening the Mac-to-Mac view must not start the network, which
+    /// would show the Local Network prompt before anything explains it.
+    #[tokio::test]
+    async fn peer_status_reports_mac_to_mac_off_without_starting_it() {
+        let (_directory, service) = fixture();
+        let status = service
+            .handle(Request::call(1, PEER_STATUS, None))
+            .await
+            .unwrap();
+        assert_eq!(status["device"], Value::Null);
+        assert_eq!(status["devices"], json!([]));
+        assert!(service.peers.get().is_none());
+    }
+
     /// Two agents pair over loopback; the pin survives a restart and
     /// revoking forgets it.
     #[tokio::test]
@@ -1294,9 +1310,14 @@ mod tests {
         let start = |service: &Service, identity| {
             let service = service.clone();
             async move {
-                let link = peer::open(&service.engine, identity, loopback)
-                    .await
-                    .unwrap();
+                let link = peer::open(
+                    &service.engine,
+                    identity,
+                    loopback,
+                    foldover_engine::Presence::Unlisted,
+                )
+                .await
+                .unwrap();
                 assert!(service.peers.set(link).is_ok());
             }
         };

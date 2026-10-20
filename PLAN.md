@@ -565,7 +565,7 @@ FSEvents is a hint, never the truth.
 
 | Part | Choice |
 |---|---|
-| Discovery | mDNS `_foldover._tcp` (mdns-sd), with the Local Network permission explained before the prompt |
+| Discovery | mDNS `_foldover._udp` (mdns-sd; QUIC is UDP), with the Local Network permission explained before the prompt |
 | Transport | QUIC (quinn + rustls), one control stream plus data streams; LAN only in 1.0; iroh evaluated for WAN later |
 | Identity | Ed25519 device key in Keychain; device ID = certificate fingerprint |
 | Pairing | Both Macs show a 6-digit code derived from the TLS session, both fingerprints and a commit-then-reveal nonce exchange ([ADR 0004](docs/adr/0004-peer-pairing.md)); the user confirms; keys pinned. Inbound policy: ask, allow paired, allow list. One-click revoke, which also closes open connections |
@@ -578,9 +578,9 @@ The transport driver provides pinned TLS connections, code exchange and
 live-channel revocation ([ADR 0004](docs/adr/0004-peer-pairing.md#driver-implementation)).
 The endpoint layer can restore its exact identity from the macOS Keychain;
 installed-agent authorization across updates remains an integration gate.
-Agents pair and keep paired devices ([ADR 0031](docs/adr/0031-mac-to-mac.md));
-discovery, shared folders, wire messages and the peer endpoint remain P5
-work.
+Agents find each other on the local network, pair and keep paired devices
+([ADR 0031](docs/adr/0031-mac-to-mac.md)); shared folders, wire messages
+and the peer endpoint remain P5 work.
 
 ### 4.12 Linux readiness
 

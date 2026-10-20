@@ -10,6 +10,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+mdns-sd = { version = "=0.21.6", default-features = false }
 quinn = { version = "=0.11.12", default-features = false, features = ["rustls-ring", "runtime-tokio"] }
 rcgen = { version = "=0.14.10", default-features = false, features = ["ring"] }
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std"] }
