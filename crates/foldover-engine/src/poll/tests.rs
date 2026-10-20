@@ -194,4 +194,9 @@ fn a_full_active_list_makes_room_for_the_newest_directory() {
     let newest = format!("projects/{}", names[ACTIVE_LIMIT]);
     assert!(active.contains(&b"projects".as_slice()), "{active:?}");
     assert!(active.contains(&newest.as_bytes()), "{active:?}");
+    // Review: the least recently active made room, not the newest.
+    for oldest in &names[..2] {
+        let oldest = format!("projects/{oldest}");
+        assert!(!active.contains(&oldest.as_bytes()), "{active:?}");
+    }
 }

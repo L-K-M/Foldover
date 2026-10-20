@@ -14,7 +14,7 @@ is skipped until its job ends.
 | Schedule | Due |
 |---|---|
 | `every` | One interval after the last scheduled start, or after the agent started |
-| `changes` | 10 seconds after the last change in either folder, 5 minutes after the first when changes never stop, and hourly |
+| `changes` | 10 seconds after the last change in either folder; at most 5 minutes after the first change since the last run, when changes never stop; and hourly |
 
 - **Change notifications** come from FSEvents on macOS and inotify on
   Linux (the `notify` crate, behind `foldover-watch`). They are hints: a
@@ -33,8 +33,10 @@ is skipped until its job ends.
   recently active directories, one level each, and compares names,
   kinds, sizes and modification times with the previous check; excluded
   names and Foldover's own do not count. A directory whose entry changed
-  is listed from then on. After any run the next check only records the
-  folders, so the run's own writes are not changes. Edits further down
+  is listed from then on, and when 32 are listed the least recently
+  active one makes room. After any run the next check takes its listings
+  as the new reference without comparing them, so the run's own writes
+  are not changes. Edits further down
   wait for the hourly run. Pairs held by Low Power Mode or a costly
   network are not checked.
 - **Missing folders:** when a due pair's folder path does not exist, as
