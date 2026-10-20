@@ -270,6 +270,10 @@ impl LocalEndpoint {
     /// number of runs removed.
     pub fn prune_archive(&self, retention: Duration, now: SystemTime) -> Result<u64, ApplyError> {
         let archive = SyncPath::try_from(ARCHIVE_ROOT).expect("the archive path is valid");
+        // Data kept from broken-off copies follows the same retention.
+        self.root
+            .prune_partials(retention, now)
+            .map_err(|source| io_error(&archive, source))?;
         let entries = match self.root.entries(DirectoryScope::At(&archive)) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),

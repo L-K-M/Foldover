@@ -11,14 +11,15 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use foldover_fs::Resume;
 use foldover_proto::local::PairDurability;
 use foldover_proto::peer::{
     FolderError, FolderErrorKind, FolderOp, Incoming, IncomingKind, LeaseAction, LeaseFile,
     NameCase, NameUnicode, PeerReply, RunSettings, ScanSettings, WireItem, WireRun,
 };
 use foldover_types::{
-    CaseMatching, Digest, Durability, EntryContent, EntryVersion, LocalRoot, MetadataPolicy,
-    PairOptions, ScanControl, SyncPath, UnicodeMatching,
+    CaseMatching, Digest, Durability, EntryVersion, LocalRoot, MetadataPolicy, PairOptions,
+    ScanControl, SyncPath, UnicodeMatching,
 };
 
 use super::wire;
@@ -124,7 +125,20 @@ pub fn serve_folder(root: &LocalRoot, op: FolderOp, cache: &FolderCache, answer:
         FolderOp::Observe { scan } => return observe(&endpoint, root, scan, cache, answer),
         FolderOp::Watch => unreachable!("answered before opening the folder"),
         FolderOp::Lease { file, action } => lease(&endpoint, file, action),
-        FolderOp::Read { path, entry, run } => return read(&endpoint, &path, &entry, run, answer),
+        FolderOp::Read {
+            path,
+            entry,
+            run,
+            from,
+        } => return read(&endpoint, &path, &entry, run, from, answer),
+        FolderOp::Partial { content } => <[u8; Digest::BYTE_LEN]>::try_from(content.as_slice())
+            .map_err(|_| malformed())
+            .and_then(|content| {
+                endpoint
+                    .partial_length(&Digest::from_bytes(content))
+                    .map_err(|error| wire::apply_failure(&error))
+            })
+            .map(|length| PeerReply::Partial { length }),
         FolderOp::Receive { path, entry } => receive(&endpoint, &path, entry, answer),
         FolderOp::Metadata { path, entry, run } => {
             decoded(&path, Some(&entry), run).and_then(|(path, entry, run)| {
@@ -430,6 +444,7 @@ fn read(
     path: &[u8],
     entry: &[u8],
     run: RunSettings,
+    from: u64,
     answer: &mut Answer,
 ) {
     let source = decoded(path, Some(entry), run).and_then(|(path, entry, run)| {
@@ -449,11 +464,9 @@ fn read(
     }
     let mut sent = Ok(());
     if source.metadata().kind() == foldover_fs::NodeKind::File {
-        sent = endpoint
-            .read_entry(&source, &mut proceed, &mut |chunk| {
-                answer.send_data(chunk).map_err(std::io::Error::other)
-            })
-            .map(|_| ());
+        sent = endpoint.read_entry_from(&source, from, &mut proceed, &mut |chunk| {
+            answer.send_data(chunk).map_err(std::io::Error::other)
+        });
     }
     if answer.end_data().is_err() {
         return;
@@ -487,22 +500,19 @@ fn receive(
         .receiving(&path, current, &run, &mut proceed)
         .map_err(|error| wire::apply_failure(&error))?;
     let version = match entry.kind {
-        IncomingKind::File { content } => {
+        IncomingKind::File { content, from } => {
             let content =
                 <[u8; Digest::BYTE_LEN]>::try_from(content.as_slice()).map_err(|_| malformed())?;
-            endpoint.receive_file(
-                &path,
-                destination.as_ref(),
-                carried,
-                EntryContent::File(Digest::from_bytes(content)),
-                &run,
-                |sink| {
-                    while let Some(chunk) = answer.next_data().map_err(std::io::Error::other)? {
-                        sink(&chunk)?;
-                    }
-                    Ok(())
-                },
-            )
+            let resume = Resume {
+                content: Digest::from_bytes(content),
+                from,
+            };
+            endpoint.receive_file(&path, destination.as_ref(), carried, resume, &run, |sink| {
+                while let Some(chunk) = answer.next_data().map_err(std::io::Error::other)? {
+                    sink(&chunk)?;
+                }
+                Ok(())
+            })
         }
         IncomingKind::Folder if destination.is_some() => {
             Err(crate::ApplyError::Unsupported(path.clone()))

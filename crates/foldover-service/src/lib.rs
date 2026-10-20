@@ -1465,6 +1465,81 @@ mod tests {
         );
     }
 
+    /// Where a folder keeps what a broken-off copy of `data` received.
+    fn partial_of(root: &Path, data: &[u8]) -> std::path::PathBuf {
+        // The local endpoint's file content digest, for a file without a
+        // resource fork.
+        let mut content =
+            blake3::Hasher::new_derive_key("ch.lkmc.foldover 2026-10-18 local file content v1");
+        content.update(blake3::hash(data).as_bytes());
+        content.update(&[0]);
+        let hex: String = content
+            .finalize()
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        root.join(".foldover/partial").join(hex)
+    }
+
+    /// P5.4: copies between Macs continue after what a broken-off copy
+    /// kept, in either direction.
+    #[tokio::test]
+    async fn copies_between_macs_continue_from_what_was_kept() {
+        const MIB: usize = 1024 * 1024;
+        let ((a_directory, a), (_b_directory, b), a_device, b_device) = paired_agents().await;
+        let shared = tempfile::tempdir().unwrap();
+        let local = a_directory.path().join("videos");
+        fs::create_dir(&local).unwrap();
+        let pulled: Vec<u8> = (0..20 * MIB).map(|index| (index % 251) as u8).collect();
+        let pushed: Vec<u8> = (0..20 * MIB).map(|index| (index % 241) as u8).collect();
+        fs::write(shared.path().join("pulled.mov"), &pulled).unwrap();
+        fs::write(local.join("pushed.mov"), &pushed).unwrap();
+        let kept = [
+            (partial_of(&local, &pulled), &pulled),
+            (partial_of(shared.path(), &pushed), &pushed),
+        ];
+        for (partial, data) in &kept {
+            fs::create_dir_all(partial.parent().unwrap()).unwrap();
+            fs::write(partial, &data[..17 * MIB]).unwrap();
+        }
+
+        let share = b
+            .handle(Request::call(
+                1,
+                SHARE_ADD,
+                Some(json!({"device": a_device.to_string(), "root": shared.path().as_os_str().as_bytes(), "name": "Videos"})),
+            ))
+            .await
+            .unwrap();
+        let mut mac = input(a_directory.path(), "Videos");
+        mac["left_root"] = json!(local.as_os_str().as_bytes());
+        mac["right_root"] =
+            json!(format!("peer://{b_device}/{}", share["id"].as_str().unwrap()).into_bytes());
+        let created = a
+            .handle(Request::call(2, PAIR_CREATE, Some(mac)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        a.handle(Request::call(3, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        let previewed = settled(&a, &key).await;
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0, "review_token": previewed["preview"]["review_token"]});
+        a.handle(Request::call(4, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        let ran = settled(&a, &key).await;
+        assert_eq!(ran["result"]["copied"], 2, "{ran}");
+
+        assert!(fs::read(local.join("pulled.mov")).unwrap() == pulled);
+        assert!(fs::read(shared.path().join("pushed.mov")).unwrap() == pushed);
+        // Each copy took up its kept part rather than starting over.
+        for (partial, _) in &kept {
+            assert!(!partial.exists(), "{partial:?} was not resumed");
+        }
+    }
+
     /// P5.3: a paired Mac reports changes in a folder it shares, so a
     /// pair with that folder runs when it changes.
     #[tokio::test]

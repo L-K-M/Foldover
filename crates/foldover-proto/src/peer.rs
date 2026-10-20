@@ -63,12 +63,18 @@ pub enum FolderOp {
     /// `observed`.
     Observe { scan: ScanSettings },
     /// Prove `path` still holds `entry`, then send it: `reading`, a file's
-    /// data frames and their end, then `done`.
+    /// data frames from byte `from` and their end, then `done`.
     Read {
         path: Vec<u8>,
         entry: Vec<u8>,
         run: RunSettings,
+        /// Bytes the asking Mac kept from a broken-off copy (PLAN.md §4.9).
+        #[serde(default)]
+        from: u64,
     },
+    /// `partial`: how much of the file with `content` a broken-off copy
+    /// to this folder kept.
+    Partial { content: Vec<u8> },
     /// `reading` alone, for a metadata update from this folder.
     Metadata {
         path: Vec<u8>,
@@ -201,9 +207,12 @@ pub struct Incoming {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum IncomingKind {
-    /// Data frames follow; their content must hash to `content`.
+    /// Data frames follow from byte `from`, after what this folder kept
+    /// from a broken-off copy; the whole file must hash to `content`.
     File {
         content: Vec<u8>,
+        #[serde(default)]
+        from: u64,
     },
     Folder,
     Link {
@@ -313,6 +322,10 @@ pub enum PeerReply {
     /// The version now stored.
     Received {
         version: Vec<u8>,
+    },
+    /// Bytes kept from a broken-off copy; 0 for none.
+    Partial {
+        length: u64,
     },
     Pruned {
         count: u64,

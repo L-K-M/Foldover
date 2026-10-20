@@ -27,6 +27,10 @@ All notable changes to this project are documented here. The format follows
   Tags, Finder info and other extended attributes, resource forks and
   file flags travel between Macs.
 
+- A large copy over the network that breaks off, from another Mac or an
+  SFTP server, continues where it stopped the next time it runs. Copies
+  from SFTP servers read each file once instead of twice.
+
 - Two Macs never sync the same folder at once: a sync waits while
   another Mac's sync of that folder is running, and takes over from one
   that stopped responding for two minutes.

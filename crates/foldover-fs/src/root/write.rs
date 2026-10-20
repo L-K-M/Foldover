@@ -29,7 +29,9 @@ use rustix::io::Errno;
 use super::{EntryMetadata, HashError, NodeKind, Root};
 
 mod metadata;
+mod partial;
 use metadata::Destination;
+pub use partial::{PARTIAL_MIN_BYTES, Resume};
 
 const TEMPORARY_PREFIX: &str = ".foldover-tmp-";
 /// Until synced permissions are applied, only the owner can read a copy.
@@ -219,11 +221,7 @@ impl Root {
         produce: impl FnOnce(Chunks<'_>) -> io::Result<()>,
     ) -> Result<StagedFile, WriteError> {
         let (parent, _) = self.parent_of(path)?;
-        let mode = match options.metadata().permissions() {
-            Propagation::Sync => PRIVATE_FILE_MODE,
-            Propagation::Ignore => DEFAULT_FILE_MODE,
-        };
-        let (staged, mut file) = create_temporary_file(parent, mode)?;
+        let (staged, mut file) = create_temporary_file(parent, file_mode(options))?;
         let mut hasher = blake3::Hasher::new();
         produce(&mut |chunk| {
             hasher.update(chunk);
@@ -730,6 +728,15 @@ fn remove_entry(parent: &Dir, name: &Path) -> io::Result<()> {
         rustix::fs::unlinkat(&directory, leaf, AtFlags::REMOVEDIR)?;
     }
     Ok(())
+}
+
+/// A new file's mode until synced metadata sets it: private while the
+/// pair syncs permissions, else what the umask allows.
+fn file_mode(options: &PairOptions) -> Mode {
+    match options.metadata().permissions() {
+        Propagation::Sync => PRIVATE_FILE_MODE,
+        Propagation::Ignore => DEFAULT_FILE_MODE,
+    }
 }
 
 fn temporary_name() -> PathBuf {

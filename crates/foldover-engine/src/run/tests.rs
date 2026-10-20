@@ -908,6 +908,102 @@ fn age_excluded_files_stay_in_the_snapshot_cache_for_reuse() {
     );
 }
 
+const MIB: usize = 1024 * 1024;
+
+/// Content big enough to resume.
+fn resumable_content() -> Vec<u8> {
+    (0..20 * MIB).map(|index| (index % 253) as u8).collect()
+}
+
+/// Run until about 18 MiB of 32 KiB reads went by, then cancel; returns
+/// the partial the broken-off copy kept.
+fn break_off(pair: &mut Fixture) -> std::path::PathBuf {
+    let prepared = pair.prepare();
+    let mut store = pair.store();
+    let mut reads = 0;
+    let outcome = prepared
+        .execute(
+            Approval::default(),
+            RunContext::Reviewed,
+            at(1),
+            &mut |planned, commit| store.apply(planned, commit),
+            &mut || {
+                reads += 1;
+                if reads > 18 * 32 {
+                    ScanControl::Cancel
+                } else {
+                    ScanControl::Continue
+                }
+            },
+            &NoProgress,
+        )
+        .unwrap();
+    let RunOutcome::Ran(report) = outcome else {
+        panic!("unexpected approval request");
+    };
+    assert_eq!(report.copied(), 0);
+    let mut kept = fs::read_dir(pair.left.path().join(".foldover/partial"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path());
+    let partial = kept.next().expect("a kept partial");
+    assert!(kept.next().is_none());
+    partial
+}
+
+/// PLAN.md §4.9: a large copy that breaks off keeps what arrived, and the
+/// next run fetches only the rest.
+#[test]
+fn a_broken_off_copy_from_a_server_resumes_where_it_stopped() {
+    if sftp_server().is_none() {
+        eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
+        return;
+    }
+    let mut pair = fixture(SyncMode::Sync);
+    pair.right_kind = RightKind::Sftp;
+    let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+    let data = resumable_content();
+    fs::write(right.join("big.bin"), &data).unwrap();
+
+    let partial = break_off(&mut pair);
+    let kept = fs::metadata(&partial).unwrap().len();
+    assert!((16 * MIB as u64..20 * MIB as u64).contains(&kept), "{kept}");
+    assert!(!left.join("big.bin").exists());
+
+    let report = pair.sync();
+    assert_eq!(report.copied(), 1, "{:?}", report.failures());
+    assert!(fs::read(left.join("big.bin")).unwrap() == data);
+    assert!(!partial.exists());
+}
+
+/// A kept part that no longer matches fails its copy once, then the copy
+/// starts over.
+#[test]
+fn a_corrupt_partial_is_dropped_and_the_copy_starts_over() {
+    if sftp_server().is_none() {
+        eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
+        return;
+    }
+    let mut pair = fixture(SyncMode::Sync);
+    pair.right_kind = RightKind::Sftp;
+    let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+    let data = resumable_content();
+    fs::write(right.join("big.bin"), &data).unwrap();
+    let partial = break_off(&mut pair);
+    let mut garbled = fs::read(&partial).unwrap();
+    garbled[MIB] ^= 0xff;
+    fs::write(&partial, garbled).unwrap();
+
+    let report = pair.sync();
+    assert_eq!(report.copied(), 0);
+    assert_eq!(report.failures().len(), 1, "{:?}", report.failures());
+    assert!(!partial.exists());
+    assert!(!left.join("big.bin").exists());
+
+    let report = pair.sync();
+    assert_eq!(report.copied(), 1, "{:?}", report.failures());
+    assert!(fs::read(left.join("big.bin")).unwrap() == data);
+}
+
 #[test]
 fn sftp_folders_sync_like_local_ones() {
     if sftp_server().is_none() {
