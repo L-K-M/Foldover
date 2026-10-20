@@ -1062,7 +1062,13 @@ mod tests {
         assert_eq!(take(1, None), None);
         assert_eq!(take(POLL.as_secs(), None), Some(PollMode::Compare));
         // A run finished since the last check: its writes are no change.
+        // The next check starts after it, as in the agent; macOS's clock
+        // can read the same microsecond twice, which would make the run
+        // look unfinished at that check too.
         let finished = SystemTime::now();
+        while SystemTime::now() <= finished {
+            std::hint::spin_loop();
+        }
         assert_eq!(
             take(POLL.as_secs() + 5, Some(finished)),
             Some(PollMode::Baseline)
