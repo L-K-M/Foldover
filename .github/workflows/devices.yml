@@ -6,6 +6,11 @@ on:
     - cron: "47 4 * * *"
   workflow_dispatch:
 
+# One run at a time on the shared macOS runner.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 

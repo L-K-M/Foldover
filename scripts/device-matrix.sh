@@ -46,6 +46,7 @@ attach() {
 attach FOAPFS "APFS"
 left="$work/FOAPFS"
 failed=()
+ran=0
 for target in "FOCASE:Case-sensitive APFS" "FOHFS:HFS+" "FOEXFAT:ExFAT" \
   "FOFAT:MS-DOS FAT32"; do
   name="${target%%:*}"
@@ -55,6 +56,7 @@ for target in "FOCASE:Case-sensitive APFS" "FOHFS:HFS+" "FOEXFAT:ExFAT" \
   fi
   attach "$name" "$filesystem"
   right="$work/$name"
+  ran=$((ran + 1))
   echo "== APFS and $filesystem"
   if ! FOLDOVER_SIMULATION_LEFT_VOLUME="$left" \
     FOLDOVER_SIMULATION_RIGHT_VOLUME="$right" \
@@ -64,6 +66,10 @@ for target in "FOCASE:Case-sensitive APFS" "FOHFS:HFS+" "FOEXFAT:ExFAT" \
   fi
 done
 
+if (( ran == 0 )); then
+  echo "device-matrix: FOLDOVER_DEVICES '${FOLDOVER_DEVICES:-}' names no image" >&2
+  exit 1
+fi
 if (( ${#failed[@]} > 0 )); then
   echo "device-matrix: failed on ${failed[*]}" >&2
   exit 1

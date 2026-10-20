@@ -360,7 +360,11 @@ impl Simulation {
                 // macOS's FAT driver cannot rename a file with an accented
                 // name while a sidecar holds its attributes, whoever asks
                 // (ADR 0019); those names stay untagged.
-                if self.attributes == Attributes::Tagged && path.as_os_str().is_ascii() {
+                if self.attributes == Attributes::Tagged
+                    && path
+                        .file_name()
+                        .is_some_and(|name| name.as_encoded_bytes().is_ascii())
+                {
                     let tagged = std::process::Command::new("xattr")
                         .args(["-w", "ch.lkmc.foldover.simulation", &content])
                         .arg(&path)
@@ -409,7 +413,7 @@ impl Simulation {
                                     .unwrap_or_default()
                             };
                             panic!(
-                                "{from:?} -> {to:?}: {first}, then composed: {error}; from's folder {:?}, to's folder {:?}",
+                                "{from:?} -> {to:?}: {first}, then composed and decomposed: {error}; from's folder {:?}, to's folder {:?}",
                                 listed(&from_path),
                                 listed(&to_path)
                             );
