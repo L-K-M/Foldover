@@ -101,6 +101,12 @@ pub enum RunError {
     )]
     CanaryMissing { side: Side, path: SyncPath },
     #[error(
+        "The canary file “{}” is only in iCloud in the {side:?} folder, so nothing was written. \
+         Download it, or keep it downloaded.",
+        String::from_utf8_lossy(path.as_bytes())
+    )]
+    CanaryUnavailable { side: Side, path: SyncPath },
+    #[error(
         "The canary file “{}” changed in the {side:?} folder since the last sync, so nothing was \
          written. Check that the right disk is connected, or change the pair's canary.",
         String::from_utf8_lossy(path.as_bytes())
@@ -884,10 +890,14 @@ impl PairRun {
                     .map(ObservedEntry::version)
                     .filter(|version| version.kind() == EntryKind::File);
                 let Some(observed) = observed else {
-                    return Err(RunError::CanaryMissing {
-                        side,
-                        path: canary.clone(),
-                    });
+                    // Evicted, it is there but cannot prove its content.
+                    let path = canary.clone();
+                    return Err(
+                        match self.observation(side).unavailable().contains(canary) {
+                            true => RunError::CanaryUnavailable { side, path },
+                            false => RunError::CanaryMissing { side, path },
+                        },
+                    );
                 };
                 let recorded = self.base.get(canary).map(|entry| match side {
                     Side::Left => entry.left(),

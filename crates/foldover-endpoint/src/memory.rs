@@ -448,16 +448,18 @@ impl MemoryEndpoint {
                 observation.leftovers.push(path);
                 continue;
             }
-            if folder.evicted.contains(&folder.key(&stored.path)) {
-                observation.unavailable.push(path);
-                skipped.push(stored.path.clone());
-                continue;
-            }
+            // The filter first, as on disk: what it leaves out is never
+            // reported, evicted or not.
             let directory = matches!(stored.node, Node::Directory { .. });
             if filter.excludes(&path, directory) {
                 if directory {
                     skipped.push(stored.path.clone());
                 }
+                continue;
+            }
+            if folder.evicted.contains(&folder.key(&stored.path)) {
+                observation.unavailable.push(path);
+                skipped.push(stored.path.clone());
                 continue;
             }
             if let Node::File { data, modified, .. } = &stored.node {
