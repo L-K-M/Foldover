@@ -276,7 +276,11 @@ def main():
             if "syncing paused after 3 unexpected stops" not in paused.stdout:
                 raise RuntimeError(f"A crash loop did not start safe mode: {paused.stdout}")
             resumed = invoke(cli, endpoint, ("safe-mode", "off"))
-            if resumed.returncode != 0 or "sync available" not in resumed.stdout:
+            if arguments.configuration == "denied":
+                # Resuming is private: a client the agent cannot verify is refused.
+                if resumed.returncode == 0:
+                    raise RuntimeError("An unverified client ended safe mode")
+            elif resumed.returncode != 0 or "sync available" not in resumed.stdout:
                 raise RuntimeError(f"Safe mode did not end: {resumed.stdout} {resumed.stderr}")
             child.terminate()
             if child.wait(timeout=COMMAND_SECONDS) != 0:
