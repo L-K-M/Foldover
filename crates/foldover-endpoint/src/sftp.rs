@@ -1018,9 +1018,10 @@ impl SftpEndpoint {
         }
         let folder = crate::local::archive::run_folder(run).ok_or(ScanError::UnknownArchiveRun)?;
         let archived = crate::local::archive::join(&folder, path.as_bytes())?;
-        if self.attributes(&archived)?.is_none() {
+        // Found in whichever spelling it is stored; that is what moves.
+        let Some((stored, _)) = self.lookup(&archived)? else {
             return Err(ApplyError::NotArchived(path.clone()));
-        }
+        };
         // A missing folder comes back composed, as new names do.
         if let Some(parent) = path.parent()
             && self.attributes(&parent)?.is_none()
@@ -1038,10 +1039,7 @@ impl SftpEndpoint {
             }
             return self
                 .session()
-                .rename(
-                    &self.remote(archived.as_bytes()),
-                    &self.fresh(destination.as_bytes()),
-                )
+                .rename(&stored, &self.fresh(destination.as_bytes()))
                 .map(|()| destination.clone())
                 .map_err(|source| write_error(&destination, source));
         }

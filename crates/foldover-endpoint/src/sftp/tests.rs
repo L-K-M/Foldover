@@ -690,6 +690,39 @@ fn identities_removals_and_pruning_follow_the_local_rules() {
     assert!(remote.archived_runs().unwrap().is_empty());
 }
 
+/// Review of composed names: put back found an archived item in either
+/// spelling but renamed the spelling given, which failed.
+#[test]
+fn put_back_finds_an_archived_name_in_either_spelling() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = remote(directory.path()) else {
+        return;
+    };
+    let options = PairOptions::default();
+    let run = RunScope::new(SystemTime::now(), options.clone());
+    let (decomposed, composed) = ("cafe\u{301}.txt", "caf\u{e9}.txt");
+    fs::write(directory.path().join(decomposed), b"kept").unwrap();
+    let observed = remote
+        .observe_from(
+            options.metadata(),
+            &Filter::none(),
+            &std::collections::BTreeMap::new(),
+            &mut proceed,
+            &mut |_| {},
+        )
+        .unwrap();
+    let name = path(decomposed.as_bytes());
+    remote
+        .remove(&name, &observed.entries()[&name], &run, &mut proceed)
+        .unwrap();
+
+    let placed = remote
+        .put_back(run.name(), &path(composed.as_bytes()), Durability::Standard)
+        .unwrap();
+    assert_eq!(placed, path(composed.as_bytes()));
+    assert_eq!(fs::read(directory.path().join(composed)).unwrap(), b"kept");
+}
+
 /// `Durability::Full` cannot be promised over SFTP at all: namespace
 /// changes have no protocol flush. Every mutating entry point must
 /// reject it before touching the server, whatever the server offers.

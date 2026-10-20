@@ -28,6 +28,9 @@ An SFTP folder behaves like a macOS volume that ignores normalization:
   is missing, component by component in its composed and decomposed
   spellings. A name with one spelling, such as any ASCII name, costs no
   extra request.
+- Filter rules and `.foldoverignore` lines compare composed with
+  composed names on every folder, so a rule leaves a name out on both
+  sides whichever spelling each stores.
 - The folder declares names that ignore normalization but keep case.
   The engine's existing mapping (ADR 0030) then takes the composed
   spelling it reads back for the pair's, so the next run has nothing to
