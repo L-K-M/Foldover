@@ -62,6 +62,12 @@ SFTP Standard uses the server's acknowledged-write policy. Full is rejected
 before writes: `fsync@openssh.com` only applies to files, so it cannot provide
 the local endpoint's power-loss-safe rename and directory-flush contract.
 
+**Choosing a folder.** The pair editor takes a typed locator or browses
+the server (`endpoint.browse`): it connects as a run would and lists one
+folder's folders at a time, with `~` resolved and the enclosing folder
+to walk up to. Foldover's own folder and names that are not UTF-8 are
+left out. The CLI offers the same as `foldover servers browse LOCATOR`.
+
 **Availability.** An unreachable server, or one refusing the login, is
 waited for like an unmounted disk on automatic runs (ADR 0022) and fails
 manual runs with ssh's message. Adding or changing a pair connects to its

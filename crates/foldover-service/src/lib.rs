@@ -30,8 +30,11 @@ use foldover_proto::local::{
     ConflictKeep, SYNC_CANCEL, SYNC_ITEMS, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS,
     SYNC_UNDO, SyncItemQuery, SyncKey, SyncResolve, SyncRun,
 };
-use foldover_proto::local::{NETWORK_SERVERS, NetworkServer, NetworkServers, PEER_UNAVAILABLE};
-use foldover_types::{PairDraft, PairId, ReviewToken, Side};
+use foldover_proto::local::{
+    ENDPOINT_BROWSE, EndpointBrowse, NETWORK_SERVERS, NetworkServer, NetworkServers,
+    PEER_UNAVAILABLE, ServerFolderList, ServerFolderRecord,
+};
+use foldover_types::{PairDraft, PairId, PairRoot, ReviewToken, Side};
 use schedule::Scheduler;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -118,6 +121,9 @@ impl Service {
                     })
                     .collect(),
             });
+        }
+        if request.method() == ENDPOINT_BROWSE {
+            return browse(parameters(&request)?).await;
         }
         if matches!(
             request.method(),
@@ -396,6 +402,36 @@ fn parameters<T: DeserializeOwned>(request: &Request) -> Result<T, RpcError> {
             .unwrap_or_else(|| serde_json::json!({})),
     )
     .map_err(|_| RpcError::new(INVALID_PARAMS, "Invalid method parameters"))
+}
+
+/// The folders in a folder on an SFTP server. Connecting can take
+/// seconds, so it waits off the runtime; it never touches the engine's
+/// state, so other requests go on.
+async fn browse(params: EndpointBrowse) -> Result<Value, RpcError> {
+    let PairRoot::Sftp(root) = PairRoot::from_bytes(params.root)
+        .map_err(|error| RpcError::new(INVALID_PARAMS, error.to_string()))?
+    else {
+        return Err(RpcError::new(
+            INVALID_PARAMS,
+            "Only folders on SFTP servers are browsed",
+        ));
+    };
+    let folder = tokio::task::spawn_blocking(move || foldover_engine::browse_server(&root))
+        .await
+        .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?
+        .map_err(engine_error)?;
+    encode(ServerFolderList {
+        root: folder.root.as_bytes().to_vec(),
+        parent: folder.parent.map(|parent| parent.as_bytes().to_vec()),
+        folders: folder
+            .folders
+            .into_iter()
+            .map(|(name, root)| ServerFolderRecord {
+                name,
+                root: root.as_bytes().to_vec(),
+            })
+            .collect(),
+    })
 }
 
 fn encode(value: impl Serialize) -> Result<Value, RpcError> {
@@ -811,6 +847,22 @@ mod tests {
             .await
             .unwrap();
         assert!(listed["servers"].is_array(), "{listed}");
+    }
+
+    #[tokio::test]
+    async fn browsing_takes_only_folders_on_servers() {
+        let (_directory, service) = fixture();
+        for params in [
+            json!({"root": b"/Users/alice".to_vec()}),
+            json!({"root": b"sftp://nas".to_vec()}),
+            json!({"path": "/"}),
+        ] {
+            let refused = service
+                .handle(Request::call(1, ENDPOINT_BROWSE, Some(params)))
+                .await
+                .unwrap_err();
+            assert_eq!(refused.code(), INVALID_PARAMS);
+        }
     }
 
     #[test]

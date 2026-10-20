@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- The pair editor browses folders on an SFTP server, so you can walk to
+  the folder to sync instead of typing its path.
+
 - "When files change" catches up on changes made while the agent was
   not running, syncs after 5 minutes of nonstop changes, and checks
   shares and SFTP servers for other computers' changes every 5 minutes.

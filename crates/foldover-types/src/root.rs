@@ -165,6 +165,26 @@ impl SftpRoot {
         &self.path
     }
 
+    /// The folder at absolute `path` on the same server, as the same user:
+    /// `sftp://alice@nas.local/srv` at `/srv/photos` is
+    /// `sftp://alice@nas.local/srv/photos`.
+    pub fn at(&self, path: &[u8]) -> Result<Self, InvalidPair> {
+        if !path.starts_with(b"/") {
+            return Err(InvalidPair::Root);
+        }
+        let rest = &self.locator[SFTP_SCHEME.len()..];
+        let slash = rest
+            .iter()
+            .position(|byte| *byte == b'/')
+            .expect("parsed locators name a path");
+        Self::from_bytes([SFTP_SCHEME, &rest[..slash], path].concat())
+    }
+
+    /// The locator's text: `sftp://alice@nas.local/srv/photos`.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.locator
+    }
+
     /// Whether one folder holds the other, judged from the locators alone:
     /// the same server and port, and nested paths. A home-relative path
     /// and an absolute one are not compared.
@@ -232,6 +252,23 @@ mod tests {
             PairRoot::Sftp(root) => Ok(root),
             PairRoot::Local(_) | PairRoot::Peer(_) => panic!("not an SFTP root"),
         }
+    }
+
+    #[test]
+    fn sftp_folders_on_the_same_server_keep_its_user_and_port() {
+        let root = sftp("sftp://alice@nas.local:2222/~/photos").unwrap();
+        let below = root.at(b"/home/alice/photos/2026").unwrap();
+        assert_eq!(
+            below.as_bytes(),
+            b"sftp://alice@nas.local:2222/home/alice/photos/2026"
+        );
+        assert_eq!(below.path(), b"/home/alice/photos/2026");
+        assert_eq!(
+            root.at(b"/").unwrap().as_bytes(),
+            b"sftp://alice@nas.local:2222/"
+        );
+        assert!(root.at(b"relative").is_err());
+        assert!(root.at(b"/a\0b").is_err());
     }
 
     #[test]

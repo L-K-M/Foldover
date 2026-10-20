@@ -47,6 +47,8 @@ enum Request {
     Shares(SocketLocation, ShareCommand),
     /// SMB file servers seen on the local network (PLAN.md §3.8).
     Servers(SocketLocation),
+    /// The folders in a folder on an SFTP server (PLAN.md §4.3).
+    Browse(SocketLocation, Vec<u8>),
     Usage,
 }
 
@@ -272,9 +274,16 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Request::Browse(location, root) => match browse(&location, &root).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("foldover: {error}");
+                ExitCode::FAILURE
+            }
+        },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs check NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover automation [low-power pause|run] [--socket PATH]\n       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]\n       foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]\n       foldover servers [--socket PATH]\nLEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES | daily@HH:MM[:DAYS]); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --canary (PATH | none)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs check NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover automation [low-power pause|run] [--socket PATH]\n       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]\n       foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]\n       foldover servers [browse sftp://[user@]host[:port]/path] [--socket PATH]\nLEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES | daily@HH:MM[:DAYS]); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --canary (PATH | none)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -343,6 +352,9 @@ fn request(args: impl Iterator<Item = OsString>) -> Request {
             None => Request::Usage,
         },
         [command] if command == "servers" => Request::Servers(location),
+        [command, browse, root] if command == "servers" && browse == "browse" => {
+            Request::Browse(location, root.as_bytes().to_vec())
+        }
         [command, id] if command == "history" => match id.to_str().and_then(|id| id.parse().ok()) {
             Some(id) => Request::History(location, id),
             None => Request::Usage,
@@ -925,6 +937,12 @@ async fn servers(location: &SocketLocation) -> Result<(), foldover_client::Error
     Ok(())
 }
 
+async fn browse(location: &SocketLocation, root: &[u8]) -> Result<(), foldover_client::Error> {
+    let listed = foldover_client::browse_server(location, root).await?;
+    println!("{}", serde_json::to_string(&listed)?);
+    Ok(())
+}
+
 fn print_peers(status: &PeerStatus) -> Result<(), foldover_client::Error> {
     println!("{}", serde_json::to_string(status)?);
     for pending in &status.pending {
@@ -1061,6 +1079,11 @@ mod tests {
             Request::Servers(SocketLocation::Path(_))
         ));
         assert!(matches!(req(&["servers", "extra"]), Request::Usage));
+        let Request::Browse(_, root) = req(&["servers", "browse", "sftp://nas/~"]) else {
+            panic!("expected a browse");
+        };
+        assert_eq!(root, b"sftp://nas/~");
+        assert!(matches!(req(&["servers", "browse"]), Request::Usage));
     }
 
     #[test]

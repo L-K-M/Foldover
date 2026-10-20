@@ -39,9 +39,18 @@ final class PairEditorViewModel: Identifiable {
     /// SMB servers found on the local network (PLAN.md §3.8); empty
     /// until the browse answers.
     private(set) var nearbyServers: [NearbyServer] = []
+    /// The SFTP folder being typed or browsed to (PLAN.md §4.3).
+    var serverLocator = ""
+    /// The folders in `serverLocator`'s folder once browsed.
+    private(set) var serverListing: ServerListing?
+    private(set) var isBrowsingServer = false
+    private(set) var serverBrowseError: String?
     private var checkTask: Task<Void, Never>?
     private var checkGeneration = 0
     private var serversTask: Task<Void, Never>?
+    /// Only the latest browse answers, when a person clicks faster than
+    /// the server replies.
+    private var browseGeneration = 0
 
     init(store: PairStore, editing: SyncPair? = nil, macs: MacToMacStore? = nil) {
         self.store = store
@@ -430,8 +439,8 @@ final class PairEditorViewModel: Identifiable {
     /// The agent checks the rest and connects when the pair is saved.
     func chooseServer(_ locator: String, side: PairFolderSide) {
         let locator = locator.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard locator.hasPrefix(sftpScheme), locator.dropFirst(sftpScheme.count).contains("/") else {
-            errorMessage = String(localized: "Write the folder as sftp://host/path, for example sftp://nas.local/~/Photos.")
+        guard Self.isServerLocator(locator) else {
+            errorMessage = Self.serverLocatorHelp
             return
         }
         let folder = SelectedFolder(bytes: Data(locator.utf8))
@@ -441,6 +450,64 @@ final class PairEditorViewModel: Identifiable {
         }
         errorMessage = nil
         queueReadinessCheck()
+    }
+
+    /// List the folders in `serverLocator`'s folder on its server, to
+    /// walk in and out of before choosing one.
+    func browseServer() async {
+        let locator = serverLocator.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.isServerLocator(locator) else {
+            serverBrowseError = Self.serverLocatorHelp
+            return
+        }
+        browseGeneration += 1
+        let generation = browseGeneration
+        isBrowsingServer = true
+        serverBrowseError = nil
+        do {
+            let listing = try await store.browseServer(locator)
+            guard generation == browseGeneration else { return }
+            serverListing = listing
+        } catch {
+            guard generation == browseGeneration else { return }
+            serverBrowseError = PairStore.message(for: error)
+        }
+        isBrowsingServer = false
+    }
+
+    /// Use `serverLocator` for `side`; false, with the reason shown, when
+    /// it does not name a folder on a server.
+    func useServerFolder(side: PairFolderSide) -> Bool {
+        let locator = serverLocator.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.isServerLocator(locator) else {
+            serverBrowseError = Self.serverLocatorHelp
+            return false
+        }
+        chooseServer(locator, side: side)
+        return true
+    }
+
+    /// Browse into a listed folder, or up to the parent.
+    func openServerFolder(_ locator: String) async {
+        serverLocator = locator
+        await browseServer()
+    }
+
+    /// Start over for a new choice of server folder.
+    func resetServerBrowser() {
+        browseGeneration += 1
+        serverLocator = ""
+        serverListing = nil
+        isBrowsingServer = false
+        serverBrowseError = nil
+    }
+
+    private static func isServerLocator(_ locator: String) -> Bool {
+        locator.hasPrefix(sftpScheme) && locator.dropFirst(sftpScheme.count).contains("/")
+    }
+
+    private static var serverLocatorHelp: String {
+        String(localized: "Write the folder as sftp://host/path, for example sftp://nas.local/~/Photos.")
     }
 
     /// Look for file servers on the local network; the browse waits
