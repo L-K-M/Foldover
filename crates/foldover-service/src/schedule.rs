@@ -132,6 +132,9 @@ pub(crate) struct Scheduler {
     catching_up: Mutex<HashSet<PairId>>,
     /// When each pair last recorded its cursors.
     cursor_saved: Mutex<HashMap<PairId, Instant>>,
+    /// Pairs recording their cursors on the blocking pool: one at a time,
+    /// so a share that stalls cannot pile up waiting threads.
+    saving: Mutex<HashSet<PairId>>,
     /// The file event at the previous tick: a cursor taken a tick late
     /// gives events time to arrive.
     tick_event: Mutex<Option<u64>>,
@@ -156,6 +159,7 @@ impl Scheduler {
             polls: Mutex::default(),
             catching_up: Mutex::default(),
             cursor_saved: Mutex::default(),
+            saving: Mutex::default(),
             tick_event: Mutex::default(),
             away: Mutex::new(Arc::new(foldover_engine::changed_while_away)),
             probe: Mutex::new(Arc::new(foldover_engine::missing_side)),
@@ -450,9 +454,27 @@ impl Scheduler {
     }
 
     /// Whether a pair may record its cursors now: no change waits for a
-    /// run, its start-up replay is done, its folders are watched, and it
-    /// has not recorded them within `CURSOR_SAVE`. Records the time.
+    /// run, its start-up replay is done, its folders are watched (by a
+    /// watcher that runs), no recording is under way, and it has not
+    /// recorded them within `CURSOR_SAVE`. Records the time.
     fn quiet(&self, id: PairId, now: Instant) -> bool {
+        // Without notifications, nothing proves the folders unchanged.
+        if self
+            .watcher
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_none()
+        {
+            return false;
+        }
+        if self
+            .saving
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&id)
+        {
+            return false;
+        }
         let pending = self
             .changed
             .lock()
@@ -617,7 +639,7 @@ impl Service {
         let away = self.scheduler.watch(&changing, &reach, now);
         self.catch_up(&changing, &away, now);
         self.poll(&changing, &held, &reach, now);
-        self.save_cursors(&changing, now);
+        self.save_cursors(&changing, &held, now);
 
         let mut started = Vec::new();
         for pair in candidates {
@@ -711,27 +733,42 @@ impl Service {
     /// Record, for quiet pairs, the event the previous tick saw: nothing
     /// before it is left unsynced, so a restart replays from there.
     /// Reading volumes can stall on a share, so it runs on the blocking
-    /// pool. Systems without an event history record nothing.
-    fn save_cursors(&self, pairs: &[PairConfig], now: Instant) {
+    /// pool, and held pairs are skipped like their checks. Systems
+    /// without an event history record nothing.
+    fn save_cursors(&self, pairs: &[PairConfig], held: &HashSet<PairId>, now: Instant) {
         let Some(event) = self.scheduler.swap_tick_event(foldover_engine::event_now()) else {
             return;
         };
         for pair in pairs {
             let id = pair.id();
-            if matches!(self.jobs.status(id), SyncStatus::Working { .. })
+            if held.contains(&id)
+                || matches!(self.jobs.status(id), SyncStatus::Working { .. })
                 || !self.scheduler.quiet(id, now)
             {
                 continue;
             }
-            let (engine, pair) = (Arc::clone(&self.engine), pair.clone());
+            self.scheduler
+                .saving
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(id);
+            let (engine, scheduler, pair) = (
+                Arc::clone(&self.engine),
+                Arc::clone(&self.scheduler),
+                pair.clone(),
+            );
             let save = move || {
                 let cursors = foldover_engine::quiet_cursors(&pair, event);
-                if cursors.is_empty() {
-                    return;
-                }
-                if let Ok(mut engine) = engine.lock() {
+                if !cursors.is_empty()
+                    && let Ok(mut engine) = engine.lock()
+                {
                     let _ = engine.save_watch_cursors(id, &cursors);
                 }
+                scheduler
+                    .saving
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&id);
             };
             if tokio::runtime::Handle::try_current().is_ok() {
                 tokio::task::spawn_blocking(save);
@@ -956,6 +993,11 @@ mod tests {
         let id = PairId::from_bytes([8; PairId::BYTE_LEN]).unwrap();
         let at = |seconds| start + Duration::from_secs(seconds);
 
+        // Review: with no watcher running, nothing proves a quiet folder
+        // unchanged.
+        assert!(!scheduler.quiet(id, at(0)));
+        *scheduler.watcher.lock().unwrap() = Some(PairWatcher::new(|_| {}).unwrap());
+
         // A change waiting for its run would be skipped by a replay.
         scheduler.mark_changed(id, at(0));
         assert!(!scheduler.quiet(id, at(1)));
@@ -967,6 +1009,10 @@ mod tests {
 
         assert!(scheduler.quiet(id, at(12)));
         assert!(!scheduler.quiet(id, at(13)));
+        // One recording at a time, however long it takes.
+        scheduler.saving.lock().unwrap().insert(id);
+        assert!(!scheduler.quiet(id, at(12) + CURSOR_SAVE));
+        scheduler.saving.lock().unwrap().remove(&id);
         assert!(scheduler.quiet(id, at(12) + CURSOR_SAVE));
     }
 

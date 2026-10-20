@@ -198,16 +198,18 @@ pub(super) fn changed_since(
     // the stream, so the stream is dropped, and stops calling, first.
     let sender = Box::new(sender);
     let _stream = Stream::open(root, since, &sender)?;
-    let deadline = Instant::now() + timeout;
+    // A timeout too long to represent waits as long as the stream lives.
+    let deadline = Instant::now().checked_add(timeout);
     loop {
-        let batch = receiver
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "The event history did not answer in time",
-                )
-            })?;
+        let left = deadline.map_or(Duration::MAX, |deadline| {
+            deadline.saturating_duration_since(Instant::now())
+        });
+        let batch = receiver.recv_timeout(left).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "The event history did not answer in time",
+            )
+        })?;
         for (path, flags) in batch {
             if flags & INCOMPLETE != 0 {
                 return Err(io::Error::other("The event history is incomplete"));
@@ -379,7 +381,8 @@ mod tests {
     /// Long enough for the history to record recent events, as ADR 0002
     /// measured: replaying right after a write can miss the last one.
     const SETTLE: Duration = Duration::from_secs(3);
-    const ANSWER: Duration = Duration::from_secs(20);
+    /// The budget the engine gives a replay.
+    const ANSWER: Duration = Duration::from_secs(30);
 
     #[test]
     fn the_history_replays_what_changed_after_an_event() {

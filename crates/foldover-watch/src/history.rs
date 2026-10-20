@@ -35,10 +35,12 @@ pub fn history_id(path: &Path) -> io::Result<Option<String>> {
 }
 
 /// Whether anything `relevant` accepts changed below `root` after event
-/// `since`. `root` must be canonical, as event paths are, e.g.
-/// `/private/var/…` rather than `/var/…`. Fails when the history cannot
-/// tell: events were dropped, the root moved or was remounted, or no
-/// answer came within `timeout`.
+/// `since`, which is exclusive. `root` must be canonical, as event paths
+/// are, e.g. `/private/var/…` rather than `/var/…`. Fails when the
+/// history cannot tell: events were dropped, the root moved or was
+/// remounted, or no answer came within `timeout`. Callers must count a
+/// failure as a change, and trust `since` only while `history_id` still
+/// returns the ID recorded with it.
 pub fn changed_since(
     root: &Path,
     since: u64,
