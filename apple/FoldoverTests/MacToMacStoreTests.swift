@@ -161,6 +161,7 @@ func failedMacToMacRequestsStayVisiblePastRefreshes() async {
 func codesShowSixDigitsInTwoGroups() {
     #expect(MacToMacViewModel.codeText(7) == "000 007")
     #expect(MacToMacViewModel.codeText(987_654) == "987 654")
+    #expect(MacToMacViewModel.codeSpeech(12_345) == "0 1 2 3 4 5")
 }
 
 @MainActor

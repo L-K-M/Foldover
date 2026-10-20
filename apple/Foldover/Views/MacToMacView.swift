@@ -32,7 +32,7 @@ struct MacToMacView: View {
                         Text(row.code)
                             .font(.system(.largeTitle, design: .monospaced))
                             .textSelection(.enabled)
-                            .accessibilityLabel(row.code.replacingOccurrences(of: " ", with: ""))
+                            .accessibilityLabel(row.spoken)
                         Text(row.note).font(.callout).foregroundStyle(.secondary)
                         HStack {
                             Button("Cancel", role: .cancel) { Task { await viewModel.cancel(row) } }

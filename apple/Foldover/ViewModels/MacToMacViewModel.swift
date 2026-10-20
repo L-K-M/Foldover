@@ -15,6 +15,8 @@ struct MacToMacViewModel {
         let id: String
         let title: String
         let code: String
+        /// The code as VoiceOver reads it: digit by digit.
+        let spoken: String
         let note: String
     }
 
@@ -64,6 +66,7 @@ struct MacToMacViewModel {
             CodeRow(id: pending.device,
                     title: String(localized: "Pairing with “\(pending.name)”"),
                     code: Self.codeText(pending.code),
+                    spoken: Self.codeSpeech(pending.code),
                     note: String(localized: "Confirm only if “\(pending.name)” shows the same code."))
         }
     }
@@ -111,6 +114,12 @@ struct MacToMacViewModel {
     nonisolated static func codeText(_ code: UInt32) -> String {
         let digits = String(format: "%06u", code)
         return "\(digits.prefix(3)) \(digits.suffix(3))"
+    }
+
+    /// The digits one by one, e.g. "0 1 2 3 4 5", so VoiceOver does not
+    /// read the code as one large number people then compare by ear.
+    nonisolated static func codeSpeech(_ code: UInt32) -> String {
+        String(format: "%06u", code).map(String.init).joined(separator: " ")
     }
 
     func monitor() async { await store.monitor() }
