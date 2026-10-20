@@ -34,9 +34,10 @@ use foldover_state::{
 };
 use foldover_types::{
     BaselineEntry, ChangeKind, ConflictKind, Durability, EndpointId, EntryContent, EntryDecision,
-    EntryKind, EntryVersion, PairConfig, PairId, Resolution, ReviewToken, ScanControl, Side, Skip,
-    SyncPath,
+    EntryKind, EntryVersion, NameMatching, PairConfig, PairId, Resolution, ReviewToken,
+    ScanControl, Side, Skip, SyncPath, UnicodeMatching,
 };
+use unicode_normalization::UnicodeNormalization;
 
 use crate::{
     CandidateDecision, CandidatePlan, Choices, DeletionCounts, DeletionReview, PlanError, PlanRow,
@@ -658,6 +659,16 @@ impl PairRun {
         };
         let mut left = observe(Side::Left, control)?;
         let mut right = observe(Side::Right, control)?;
+        align_spellings(
+            &mut left,
+            &base,
+            endpoints.endpoint(Side::Left).name_matching(),
+        );
+        align_spellings(
+            &mut right,
+            &base,
+            endpoints.endpoint(Side::Right).name_matching(),
+        );
         // Size and age differ between folders. A file too large in either
         // folder, or old or absent in both, is skipped in both, and hidden
         // from the base too: its base row stays, so a later edit syncs as
@@ -1164,6 +1175,56 @@ fn observe_error(side: Side, source: ScanError) -> RunError {
         return RunError::AccessDenied { side, source };
     }
     RunError::Observe { side, source }
+}
+
+/// A folder that ignores Unicode normalization may store a name in
+/// another normalization than it was written in: HFS+ decomposes `é`
+/// (PLAN.md §4.10). An entry the base knows in one spelling, observed
+/// only in another, is mapped back to the base's, so the respelling is no
+/// change. The folder finds the file by either spelling, so writing it by
+/// the base's still lands on it. Case is left alone: a case-only rename
+/// is a person's, and syncs as one (ADR 0030).
+fn align_spellings(
+    observation: &mut Observation,
+    base: &BTreeMap<SyncPath, BaselineEntry>,
+    names: NameMatching,
+) {
+    if names.unicode() != UnicodeMatching::Normalized {
+        return;
+    }
+    let composed = |path: &SyncPath| -> Option<String> {
+        let text = std::str::from_utf8(path.as_bytes()).ok()?;
+        Some(text.nfc().collect())
+    };
+    // Base spellings this folder no longer shows, by composed form; two
+    // that compose alike are ambiguous and left alone.
+    let mut missing: BTreeMap<String, Option<&SyncPath>> = BTreeMap::new();
+    for path in base.keys() {
+        if observation.entries().contains_key(path) {
+            continue;
+        }
+        if let Some(key) = composed(path) {
+            missing
+                .entry(key)
+                .and_modify(|known| *known = None)
+                .or_insert(Some(path));
+        }
+    }
+    if missing.is_empty() {
+        return;
+    }
+    let respelled: Vec<(SyncPath, SyncPath)> = observation
+        .entries()
+        .keys()
+        .filter(|path| !base.contains_key(*path))
+        .filter_map(|path| {
+            let known = missing.get(&composed(path)?)?.as_ref()?;
+            Some((path.clone(), (*known).clone()))
+        })
+        .collect();
+    for (from, to) in respelled {
+        observation.respell(&from, to);
+    }
 }
 
 fn require_space(side: Side, needed: u64, available: u64) -> Result<(), RunError> {

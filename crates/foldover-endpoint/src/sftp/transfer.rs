@@ -108,6 +108,8 @@ pub(crate) fn copy(
     let kind = planned.version().kind();
     let expected = planned.version().content();
     match to {
+        #[cfg(feature = "simulation")]
+        Endpoint::Memory(_) => Err(ApplyError::Unsupported(path.clone())),
         Endpoint::Local(local) => {
             let destination = local.receiving(path, current, run, control)?;
             match kind {
@@ -222,6 +224,8 @@ pub(crate) fn update_metadata(
         }
     };
     match to {
+        #[cfg(feature = "simulation")]
+        Endpoint::Memory(_) => Err(ApplyError::Unsupported(path.clone())),
         Endpoint::Peer(remote) => {
             let carried = Carried {
                 metadata,
@@ -262,6 +266,8 @@ fn kept(to: &Endpoint, planned: &ObservedEntry) -> u64 {
         return 0;
     }
     let kept = match to {
+        #[cfg(feature = "simulation")]
+        Endpoint::Memory(_) => Ok(0),
         Endpoint::Local(local) => local.partial_length(&content),
         Endpoint::Peer(remote) => remote.partial_length(&content),
         // Pipelined SFTP writes may land out of order, leaving holes no
@@ -281,6 +287,8 @@ fn source<'a>(
     kept: u64,
 ) -> Result<Source<'a>, ApplyError> {
     Ok(match from {
+        #[cfg(feature = "simulation")]
+        Endpoint::Memory(_) => return Err(ApplyError::Unsupported(path.clone())),
         Endpoint::Local(local) => {
             Source::Local(local, local.source_entry(path, planned, run, control)?)
         }

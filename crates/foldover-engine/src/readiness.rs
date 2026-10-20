@@ -93,20 +93,18 @@ impl Engine {
     }
 }
 
-/// Whether the endpoint can keep extended attributes. SFTP never can; a
-/// local filesystem can unless it declares them unsupported — a
-/// filesystem that does not report them earns no warning.
+/// Whether the endpoint can keep extended attributes. Another Mac can
+/// and SFTP never can; a local filesystem can unless it declares them
+/// unsupported — a filesystem that does not report them earns no
+/// warning. Simulated folders keep none.
 fn keeps_extended_attributes(endpoint: &Endpoint) -> Result<bool, Error> {
-    Ok(match endpoint {
-        Endpoint::Sftp(_) => false,
-        Endpoint::Local(local) => {
-            local
-                .filesystem_features()?
-                .support(FilesystemFeature::NativeXattrs)
-                != DeclaredSupport::Unsupported
-        }
-        Endpoint::Peer(_) => true,
-    })
+    if let Endpoint::Local(local) = endpoint {
+        return Ok(local
+            .filesystem_features()?
+            .support(FilesystemFeature::NativeXattrs)
+            != DeclaredSupport::Unsupported);
+    }
+    Ok(matches!(endpoint, Endpoint::Peer(_)))
 }
 
 /// The side ignoring name case, when one side does and the other does

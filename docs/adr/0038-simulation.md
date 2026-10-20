@@ -1,7 +1,7 @@
 # ADR 0038: Simulation
 
-Status: Implemented over local folders; in-memory and quirk endpoints,
-network chaos and the 100k-seed nightly gate pending
+Status: Implemented over local and in-memory quirk folders, with the
+100k-seed nightly run; network chaos and the 14-night record pending
 
 ## Context
 
@@ -34,9 +34,49 @@ start: three files, first run ──▶ rounds of
 - proptest shrinks a failure to a minimal history and replays it from
   its seed.
 
+### In-memory folders
+
+`foldover-sim` provides `MemoryEndpoint`, an `Endpoint::Memory` folder
+behind `foldover-endpoint`'s `simulation` feature, which only tests turn
+on. Each simulated folder draws its file system:
+
+| Quirk | Choices |
+|---|---|
+| Names | byte-exact; case ignored (APFS); case ignored and stored decomposed (HFS+) |
+| Modification times | exact; 2-second resolution (FAT) |
+| Replace | one swap; two steps, old out before new in (plain SFTP) |
+| Size | unlimited; a capacity in a dedicated test |
+
+- Paths include spellings only some folders tell apart: `a.txt` and
+  `A.txt`, a composed and a decomposed `café`.
+- A run can be cut off by a fault: from a chosen write step on, every
+  write to one folder fails, as when a disk goes away. Each write is
+  split into the local endpoint's steps (ADR 0019), so a fault can land
+  between placing a file and archiving what it displaced.
+- Nothing lost counts a displaced original in a leftover temporary, as
+  the next run archives it; a finished run must leave none.
+- A third invariant: right after a finished run, another one writes
+  nothing, so no quirk feeds a copy loop.
+- About 700 cases a second in release: CI runs 64, the nightly job
+  100,000 (`FOLDOVER_MEMORY_SIMULATION_CASES`).
+
+The first runs found two engine bugs, both fixed
+([ADR 0030](0030-name-clashes.md)):
+
+- A folder that stores names decomposed respelled a copied `café.txt`,
+  and the next run took the new spelling for a rename on the other
+  folder. Observed spellings that differ from the base's only in Unicode
+  normalization are now mapped back to the base's on folders that
+  ignore normalization.
+- With both spellings in a byte-exact folder and one of them in
+  conflict, the other was copied onto an HFS+ disk, where it landed on
+  the conflicted name. A conflicted spelling now holds its name.
+
 ## Consequences
 
-- The 100k-seed gate needs an in-memory endpoint; it would also bring
-  the quirk file system (case folding, decomposed names, coarse times,
-  no atomic replace, ENOSPC) and crashes inside a write.
-- Backup mode, SFTP and peer folders are not simulated yet.
+- The 1.0 gate (PLAN.md §5.2) asks for 14 consecutive nights without a
+  violation; the nightly job runs the count, the record of nights is
+  kept by CI history.
+- Not emulated: extended attributes, volatile file identities, lost
+  change events, network chaos and the deterministic executor. Backup
+  and Mirror modes, SFTP and peer folders are not simulated yet.

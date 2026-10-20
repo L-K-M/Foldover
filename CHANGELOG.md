@@ -13,6 +13,11 @@ All notable changes to this project are documented here. The format follows
   shares and SFTP servers for other computers' changes every 5 minutes.
   It now waits for 10 seconds of quiet instead of 5.
 
+- Simulation over in-memory folders that act like the file systems
+  Foldover meets: names that ignore case or are stored decomposed,
+  2-second times, two-step replaces, a full disk, and writes that start
+  failing mid-run. Each night it runs 100,000 random histories.
+
 - Signature moments: drop one or two folders on the window's sidebar or
   empty detail to start a pair with them; the pair editor shows a
   sentence that says what the pair will do and rewrites itself as you
@@ -232,6 +237,14 @@ All notable changes to this project are documented here. The format follows
   scripts, CI.
 
 ### Fixed
+
+- A file copied to a folder that stores names decomposed, such as an
+  HFS+ disk, no longer makes the next sync rename it on the other
+  folder.
+
+- A name in conflict now blocks copying its other Unicode or case
+  spelling into a folder that stores both as one file; the copy landed
+  on the conflicted file.
 
 - A copy to another Mac whose source changed partway no longer waits
   forever for that Mac; asking another Mac gives up after 30 seconds.

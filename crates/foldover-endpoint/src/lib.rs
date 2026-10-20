@@ -46,6 +46,11 @@ pub use foldover_fs::{
 #[cfg(unix)]
 pub use endpoint::{Endpoint, ListedEntry, ListedKind, ObserveStep, Reach};
 
+#[cfg(feature = "simulation")]
+mod memory;
+#[cfg(feature = "simulation")]
+pub use memory::{MemoryEndpoint, NameStorage, Quirks, Replace};
+
 pub use foldover_os::{CloudProvider, cloud_provider, current_cloud_provider};
 
 mod link;

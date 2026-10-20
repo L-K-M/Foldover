@@ -87,6 +87,9 @@ pub enum Endpoint {
     Local(LocalEndpoint),
     Sftp(SftpEndpoint),
     Peer(PeerEndpoint),
+    /// A folder in memory with chosen quirks, for simulations.
+    #[cfg(feature = "simulation")]
+    Memory(crate::memory::MemoryEndpoint),
 }
 
 /// What opening a root may need beyond its bytes: the running peer link,
@@ -140,6 +143,8 @@ impl Endpoint {
             Self::Local(endpoint) => endpoint.identity(),
             Self::Sftp(endpoint) => endpoint.identity(),
             Self::Peer(endpoint) => endpoint.identity(),
+            #[cfg(feature = "simulation")]
+            Self::Memory(endpoint) => endpoint.identity(),
         }
     }
 
@@ -148,6 +153,8 @@ impl Endpoint {
             Self::Local(endpoint) => endpoint.ensure_identity(durability),
             Self::Sftp(endpoint) => endpoint.ensure_identity(durability),
             Self::Peer(endpoint) => endpoint.ensure_identity(durability),
+            #[cfg(feature = "simulation")]
+            Self::Memory(endpoint) => endpoint.ensure_identity(durability),
         }
     }
 
@@ -156,6 +163,8 @@ impl Endpoint {
             Self::Local(endpoint) => endpoint.ignore_rules(),
             Self::Sftp(endpoint) => endpoint.ignore_rules(),
             Self::Peer(endpoint) => endpoint.ignore_rules(),
+            #[cfg(feature = "simulation")]
+            Self::Memory(endpoint) => endpoint.ignore_rules(),
         }
     }
 
@@ -178,6 +187,8 @@ impl Endpoint {
             }
             // The other Mac keeps its own previous observation.
             Self::Peer(endpoint) => endpoint.observe_reporting(policy, filter, control, progress),
+            #[cfg(feature = "simulation")]
+            Self::Memory(endpoint) => endpoint.observe(policy, filter, control, progress),
         }
     }
 
@@ -188,6 +199,8 @@ impl Endpoint {
             Self::Local(endpoint) => endpoint.name_matching(),
             Self::Sftp(_) => NameMatching::EXACT,
             Self::Peer(endpoint) => endpoint.name_matching(),
+            #[cfg(feature = "simulation")]
+            Self::Memory(endpoint) => endpoint.name_matching(),
         }
     }
 
@@ -196,6 +209,8 @@ impl Endpoint {
             Self::Local(endpoint) => endpoint.available_space(),
             Self::Sftp(endpoint) => endpoint.available_space(),
             Self::Peer(endpoint) => endpoint.available_space(),
+            #[cfg(feature = "simulation")]
+            Self::Memory(endpoint) => Ok(endpoint.available_space()),
         }
     }
 
@@ -205,6 +220,8 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.network_source(),
             Self::Sftp(_) | Self::Peer(_) => Ok(None),
+            #[cfg(feature = "simulation")]
+            Self::Memory(_) => Ok(None),
         }
     }
 
@@ -232,6 +249,8 @@ impl Endpoint {
             Self::Local(endpoint) => endpoint.recover_leftover(leftover, run),
             Self::Sftp(endpoint) => endpoint.recover_leftover(leftover, run),
             Self::Peer(endpoint) => endpoint.recover_leftover(leftover, run),
+            #[cfg(feature = "simulation")]
+            Self::Memory(endpoint) => endpoint.recover_leftover(leftover, run),
         }
     }
 
@@ -246,6 +265,8 @@ impl Endpoint {
             Self::Local(endpoint) => endpoint.remove(path, current, run, control),
             Self::Sftp(endpoint) => endpoint.remove(path, current, run, control),
             Self::Peer(endpoint) => endpoint.remove(path, current, run),
+            #[cfg(feature = "simulation")]
+            Self::Memory(endpoint) => endpoint.remove(path, current, run),
         }
     }
 
@@ -262,6 +283,14 @@ impl Endpoint {
         match (self, source) {
             (Self::Local(to), Self::Local(from_endpoint)) => {
                 to.copy_from(from_endpoint, path, from, current, run, control)
+            }
+            #[cfg(feature = "simulation")]
+            (Self::Memory(to), Self::Memory(from_endpoint)) => {
+                to.copy_from(from_endpoint, path, from, current, run)
+            }
+            #[cfg(feature = "simulation")]
+            (Self::Memory(_), _) | (_, Self::Memory(_)) => {
+                Err(ApplyError::Unsupported(path.clone()))
             }
             _ => crate::sftp::copy(self, source, path, from, current, run, control),
         }
@@ -281,6 +310,14 @@ impl Endpoint {
             (Self::Local(to), Self::Local(from_endpoint)) => {
                 to.update_metadata_from(from_endpoint, path, from, current, run, control)
             }
+            #[cfg(feature = "simulation")]
+            (Self::Memory(to), Self::Memory(from_endpoint)) => {
+                to.update_metadata_from(from_endpoint, path, from, current, run)
+            }
+            #[cfg(feature = "simulation")]
+            (Self::Memory(_), _) | (_, Self::Memory(_)) => {
+                Err(ApplyError::Unsupported(path.clone()))
+            }
             _ => crate::sftp::update_metadata(self, source, path, from, current, run, control),
         }
     }
@@ -290,6 +327,8 @@ impl Endpoint {
             Self::Local(endpoint) => endpoint.prune_archive(retention, now),
             Self::Sftp(endpoint) => endpoint.prune_archive(retention, now),
             Self::Peer(endpoint) => endpoint.prune_archive(retention, now),
+            #[cfg(feature = "simulation")]
+            Self::Memory(endpoint) => endpoint.prune_archive(retention, now),
         }
     }
 
@@ -298,6 +337,8 @@ impl Endpoint {
             Self::Local(endpoint) => endpoint.archived_runs(),
             Self::Sftp(endpoint) => endpoint.archived_runs(),
             Self::Peer(endpoint) => endpoint.archived_runs(),
+            #[cfg(feature = "simulation")]
+            Self::Memory(_) => Err(unsupported_in_memory()),
         }
     }
 
@@ -311,6 +352,8 @@ impl Endpoint {
             Self::Local(endpoint) => endpoint.archived_items(run, after, limit),
             Self::Sftp(endpoint) => endpoint.archived_items(run, after, limit),
             Self::Peer(endpoint) => endpoint.archived_items(run, after, limit),
+            #[cfg(feature = "simulation")]
+            Self::Memory(_) => Err(unsupported_in_memory()),
         }
     }
 
@@ -324,6 +367,8 @@ impl Endpoint {
             Self::Local(endpoint) => endpoint.put_back(run, path, durability),
             Self::Sftp(endpoint) => endpoint.put_back(run, path),
             Self::Peer(endpoint) => endpoint.put_back(run, path, durability),
+            #[cfg(feature = "simulation")]
+            Self::Memory(_) => Err(ApplyError::Unsupported(path.clone())),
         }
     }
 
@@ -339,6 +384,8 @@ impl Endpoint {
             Self::Local(endpoint) => endpoint.keep_copy(path, expected, from, options, control),
             Self::Sftp(endpoint) => endpoint.keep_copy(path, expected, from, options, control),
             Self::Peer(endpoint) => endpoint.keep_copy(path, expected, from, options),
+            #[cfg(feature = "simulation")]
+            Self::Memory(_) => Err(ApplyError::Unsupported(path.clone())),
         }
     }
 
@@ -347,6 +394,8 @@ impl Endpoint {
             Self::Local(endpoint) => endpoint.read_lock_file(file),
             Self::Sftp(endpoint) => endpoint.read_lock_file(file),
             Self::Peer(endpoint) => endpoint.read_lock_file(file),
+            #[cfg(feature = "simulation")]
+            Self::Memory(endpoint) => endpoint.read_lock_file(file),
         }
     }
 
@@ -360,6 +409,8 @@ impl Endpoint {
             Self::Local(endpoint) => endpoint.create_lock_file(file, content),
             Self::Sftp(endpoint) => endpoint.create_lock_file(file, content),
             Self::Peer(endpoint) => endpoint.create_lock_file(file, content),
+            #[cfg(feature = "simulation")]
+            Self::Memory(endpoint) => endpoint.create_lock_file(file, content),
         }
     }
 
@@ -372,6 +423,8 @@ impl Endpoint {
             Self::Local(endpoint) => endpoint.replace_lock_file(file, content),
             Self::Sftp(endpoint) => endpoint.replace_lock_file(file, content),
             Self::Peer(endpoint) => endpoint.replace_lock_file(file, content),
+            #[cfg(feature = "simulation")]
+            Self::Memory(endpoint) => endpoint.replace_lock_file(file, content),
         }
     }
 
@@ -380,6 +433,8 @@ impl Endpoint {
             Self::Local(endpoint) => endpoint.remove_lock_file(file),
             Self::Sftp(endpoint) => endpoint.remove_lock_file(file),
             Self::Peer(endpoint) => endpoint.remove_lock_file(file),
+            #[cfg(feature = "simulation")]
+            Self::Memory(endpoint) => endpoint.remove_lock_file(file),
         }
     }
 
@@ -388,6 +443,8 @@ impl Endpoint {
             Self::Local(endpoint) => endpoint.promote_claim(),
             Self::Sftp(endpoint) => endpoint.promote_claim(),
             Self::Peer(endpoint) => endpoint.promote_claim(),
+            #[cfg(feature = "simulation")]
+            Self::Memory(endpoint) => endpoint.promote_claim(),
         }
     }
 
@@ -398,7 +455,20 @@ impl Endpoint {
             (Self::Local(endpoint), Self::Local(other)) => endpoint.relation_to(other),
             (Self::Sftp(endpoint), Self::Sftp(other)) => Ok(endpoint.relation_to(other)),
             (Self::Peer(endpoint), Self::Peer(other)) => Ok(endpoint.relation_to(other)),
+            #[cfg(feature = "simulation")]
+            (Self::Memory(endpoint), Self::Memory(other)) if endpoint.same(other) => {
+                Ok(RootRelation::Same)
+            }
             _ => Ok(RootRelation::Disjoint),
         }
+    }
+}
+
+/// Archive browsing works on disks, servers and other Macs only.
+#[cfg(feature = "simulation")]
+fn unsupported_in_memory() -> ScanError {
+    ScanError::Io {
+        path: None,
+        source: std::io::ErrorKind::Unsupported.into(),
     }
 }
