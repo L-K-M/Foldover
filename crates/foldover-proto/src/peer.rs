@@ -133,14 +133,29 @@ pub struct RunSettings {
     pub options: PairSettings,
 }
 
-/// Permissions and modification time, as streamed copies carry them.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// What a copy between Macs carries besides data: permissions,
+/// modification time, and the extended attributes (a file's resource fork
+/// among them) and user flags the pair syncs.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WireMetadata {
     pub permissions: u32,
     /// Since the Unix epoch.
     pub modified_seconds: i64,
     pub modified_nanos: u32,
+    /// None when the source keeps no attributes, e.g. an SFTP server:
+    /// the receiving entry keeps its own then.
+    #[serde(default)]
+    pub attributes: Option<Vec<WireAttribute>>,
+    #[serde(default)]
+    pub flags: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireAttribute {
+    pub name: Vec<u8>,
+    pub value: Vec<u8>,
 }
 
 /// What a receiving folder gets.

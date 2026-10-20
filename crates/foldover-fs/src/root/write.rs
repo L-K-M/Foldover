@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 
 use cap_fs_ext::DirExt;
 use cap_std::fs::Dir;
-use foldover_types::{Digest, Durability, PairOptions, Propagation, ScanControl, SyncPath};
+use foldover_types::{
+    Digest, Durability, MetadataPolicy, PairOptions, Propagation, ScanControl, SyncPath,
+};
 use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags};
 use rustix::io::Errno;
 
@@ -136,6 +138,16 @@ pub struct ForeignMetadata {
     pub modified: std::time::SystemTime,
 }
 
+/// What a copy between two Macs carries besides data, mode and time: a
+/// file's resource fork, the extended attributes a pair syncs, and user
+/// flags. ACLs do not travel yet.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NativeMetadata {
+    /// Names and values, the resource fork among them.
+    pub attributes: Vec<(Vec<u8>, Vec<u8>)>,
+    pub flags: Option<u32>,
+}
+
 /// The entry an exchange moved out of its path. It holds user data and is
 /// never removed automatically; archive it.
 pub struct Displaced {
@@ -196,11 +208,13 @@ impl Root {
     }
 
     /// Write a new temporary beside `path` from chunks `produce` pushes,
-    /// and give it the pair's synced part of `metadata`.
+    /// and give it the pair's synced part of `metadata` and of `native`,
+    /// when the source carries that.
     pub fn stage_stream(
         &self,
         path: &SyncPath,
         metadata: ForeignMetadata,
+        native: Option<&NativeMetadata>,
         options: &PairOptions,
         produce: impl FnOnce(Chunks<'_>) -> io::Result<()>,
     ) -> Result<StagedFile, WriteError> {
@@ -215,6 +229,10 @@ impl Root {
             hasher.update(chunk);
             file.write_all(chunk)
         })?;
+        // Attributes before mode and time, as a read-only mode blocks them.
+        if let Some(native) = native {
+            metadata::apply_native(&file, native, Destination::New, options.metadata())?;
+        }
         metadata::apply_foreign(&file, metadata, options.metadata())?;
         flush(&file, options.durability())?;
         Ok(StagedFile {
@@ -230,9 +248,14 @@ impl Root {
         path: &SyncPath,
         expected: &EntryMetadata,
         metadata: ForeignMetadata,
+        native: Option<&NativeMetadata>,
         options: &PairOptions,
     ) -> Result<(), WriteError> {
         let target = self.open_observed(path, expected)?;
+        // A source without attributes, such as SFTP, leaves them alone.
+        if let Some(native) = native {
+            metadata::apply_native(&target, native, Destination::Existing, options.metadata())?;
+        }
         metadata::apply_foreign(&target, metadata, options.metadata())?;
         flush(&target, options.durability())?;
         Ok(())
@@ -357,6 +380,7 @@ impl Root {
         &self,
         path: &SyncPath,
         metadata: ForeignMetadata,
+        native: Option<&NativeMetadata>,
         options: &PairOptions,
     ) -> Result<(), WriteError> {
         let (parent, name) = self.parent_of(path)?;
@@ -369,8 +393,29 @@ impl Root {
             Err(Errno::EXIST) => return Err(WriteError::Exists),
             Err(error) => return Err(error.into()),
         }
+        if let Some(native) = native.filter(|native| **native != NativeMetadata::default()) {
+            let created = rustix::fs::openat(
+                &parent,
+                &name,
+                open_flags(NodeKind::Directory),
+                Mode::empty(),
+            )?;
+            metadata::apply_native(&created, native, Destination::New, options.metadata())?;
+        }
         sync_directory(&parent, options.durability())?;
         Ok(())
+    }
+
+    /// What a copy to another Mac carries of `path`, which must still be
+    /// `expected`: see `NativeMetadata`.
+    pub fn native_metadata(
+        &self,
+        path: &SyncPath,
+        expected: &EntryMetadata,
+        policy: MetadataPolicy,
+    ) -> Result<NativeMetadata, WriteError> {
+        let file = self.open_observed(path, expected)?;
+        Ok(metadata::native(&file, expected, policy)?)
     }
 
     /// Replace the synced metadata of the file or directory at `path` with

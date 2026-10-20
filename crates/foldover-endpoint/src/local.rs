@@ -3,6 +3,7 @@ pub(crate) mod archive;
 mod conflict;
 pub(crate) mod filter;
 mod foreign;
+pub(crate) use foreign::Carried;
 mod identity;
 pub(crate) mod version;
 

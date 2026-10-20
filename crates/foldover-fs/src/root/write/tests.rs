@@ -592,3 +592,73 @@ fn archived_entries_are_restored_without_replacing_anything() {
     ));
     assert_eq!(fs::read(target.join("docs/note")).unwrap(), b"old");
 }
+
+/// Attributes another Mac sends reach a streamed copy; an update replaces
+/// them, and a source that keeps none, such as SFTP, leaves them alone.
+#[test]
+fn native_metadata_travels_with_streamed_copies() {
+    let roots = roots();
+    let file = path(b"photo.jpg");
+    let native = NativeMetadata {
+        attributes: vec![(ATTRIBUTE.as_bytes().to_vec(), b"blue".to_vec())],
+        flags: None,
+    };
+    let foreign = ForeignMetadata {
+        permissions: 0o644,
+        modified: std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000),
+    };
+    let staged = roots
+        .target
+        .stage_stream(&file, foreign, Some(&native), &ALL, |sink| sink(b"pixels"))
+        .unwrap();
+    roots
+        .target
+        .place(staged.into_staged(), &file, Placement::Create, STANDARD)
+        .unwrap();
+    let placed = roots.target.metadata(&file).unwrap();
+    let read = roots
+        .target
+        .native_metadata(&file, &placed, ALL.metadata())
+        .unwrap();
+    assert_eq!(read.attributes, native.attributes);
+
+    // An SFTP-like source keeps no attributes: they stay.
+    roots
+        .target
+        .update_foreign_metadata(&file, &placed, foreign, None, &ALL)
+        .unwrap();
+    let placed = roots.target.metadata(&file).unwrap();
+    let kept = roots
+        .target
+        .native_metadata(&file, &placed, ALL.metadata())
+        .unwrap();
+    assert_eq!(kept.attributes, native.attributes);
+
+    // Another Mac without the attribute removes it.
+    roots
+        .target
+        .update_foreign_metadata(
+            &file,
+            &placed,
+            foreign,
+            Some(&NativeMetadata::default()),
+            &ALL,
+        )
+        .unwrap();
+    let placed = roots.target.metadata(&file).unwrap();
+    let cleared = roots
+        .target
+        .native_metadata(&file, &placed, ALL.metadata())
+        .unwrap();
+    assert!(cleared.attributes.is_empty());
+
+    // A pair that ignores attributes neither reads nor writes them.
+    assert!(
+        roots
+            .target
+            .native_metadata(&file, &placed, NOTHING.metadata())
+            .unwrap()
+            .attributes
+            .is_empty()
+    );
+}

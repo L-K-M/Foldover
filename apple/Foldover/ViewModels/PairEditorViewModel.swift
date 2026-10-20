@@ -121,7 +121,7 @@ final class PairEditorViewModel: Identifiable {
     /// permissions and whole-second dates, not the rest (ADR 0028).
     var metadataNote: String {
         if usesOtherMac {
-            String(localized: "Copies between Macs keep file data, permissions and modification times. Tags and other extended attributes don't sync between Macs yet.")
+            String(localized: "Copies between Macs keep tags, Finder info and other extended attributes, resource forks and file flags. Access control lists don't sync between Macs yet.")
         } else if usesServerFolder {
             String(localized: "SFTP keeps file data, mode bits and whole-second modification times. Extended attributes and ACLs are omitted; resource-fork files cannot be copied.")
         } else {

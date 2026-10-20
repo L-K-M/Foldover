@@ -1,7 +1,7 @@
 # ADR 0031: Mac-to-Mac sync
 
 Status: Device trust, pairing, discovery, shared folders, the peer
-endpoint and change reports implemented; full metadata fidelity and
+endpoint, change reports and extended attributes implemented; ACLs and
 resumed transfers pending
 
 ## Context
@@ -131,9 +131,14 @@ Writes run on the sharing Mac through its local endpoint, so the same
 staging, verification, archive and durability rules hold there, and
 every path is checked against the share root. A run named by the other
 Mac must be a single folder name, and a kept copy's label a short plain
-name. Copies carry data, permissions and modification time, as with
-SFTP; extended attributes and ACLs wait for slice 4. A copy between two
-Macs' folders relays through this Mac.
+name. Copies carry data, permissions and modification time, plus the
+extended attributes the pair syncs, a file's resource fork and user
+flags (up to 2 MiB of attributes per entry, sent in its message). The
+receiving Mac sets only names it would sync itself, so another Mac
+cannot plant system state, and replaces an entry's attributes only when
+the source carries them: a source without any, such as an SFTP server,
+leaves the receiving entry's own. ACLs do not travel yet. A copy between
+two Macs' folders relays through this Mac.
 
 ### Local API (protocol 9)
 
