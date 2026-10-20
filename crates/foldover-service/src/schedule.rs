@@ -1,7 +1,11 @@
 //! Unattended runs. `Every` pairs are due one interval after their last
 //! scheduled start, or after the agent started. `OnChange` pairs are due
-//! once their folders have been quiet briefly after a change, and hourly,
-//! because change notifications can be missed. `Daily` pairs are due once
+//! once their folders have been quiet briefly after a change, after five
+//! minutes of changes that never settle, and hourly, because change
+//! notifications can be missed. Changes made while the agent was not
+//! watching count as one change when it starts, and folders that hear of
+//! no other computer's changes (shares, SFTP) are checked every few
+//! minutes (PLAN.md §3.5, §4.8). `Daily` pairs are due once
 //! their latest scheduled local moment has passed the last run's start.
 //! Pairs that never completed a first sync are skipped: their first run
 //! is reviewed by a person.
@@ -10,7 +14,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
-use foldover_engine::{Environment, PairWatcher, Reach, local_time};
+use foldover_engine::{ChangePoll, Environment, PairWatcher, PollMode, Polled, Reach, local_time};
+use foldover_proto::local::SyncStatus;
 use foldover_types::{LocalDateTime, PairConfig, PairId, Schedule, Side};
 
 use crate::Service;
@@ -19,7 +24,12 @@ use crate::sync::Work;
 /// How often the agent checks for due pairs.
 const TICK: Duration = Duration::from_secs(5);
 /// Changes must stop this long before a run, so a copy in progress settles.
-const QUIET: Duration = Duration::from_secs(5);
+const QUIET: Duration = Duration::from_secs(10);
+/// A folder that never stops changing runs anyway after this long.
+const CHURN: Duration = Duration::from_secs(5 * 60);
+/// How often folders without notifications for other computers' changes
+/// are checked for them.
+const POLL: Duration = Duration::from_secs(5 * 60);
 /// On-change pairs are also verified this often.
 const VERIFY: Duration = Duration::from_secs(60 * 60);
 /// A share that went away is mounted again at most this often.
@@ -59,17 +69,55 @@ enum Gate {
     Parked,
 }
 
+/// One pair's checks for changes notifications miss.
+struct PollSlot {
+    /// The configuration revision checked; another starts over.
+    revision: u64,
+    /// `None` while a check runs on the blocking pool.
+    poll: Option<ChangePoll>,
+    /// When the last check started, on both clocks: run history records
+    /// wall-clock times.
+    checked: Option<(Instant, SystemTime)>,
+    need: PollNeed,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PollNeed {
+    /// Not checked yet, or the last check failed.
+    Unknown,
+    /// A folder needs checking.
+    Needed,
+    /// Notifications cover both folders.
+    NotNeeded,
+}
+
+impl PollSlot {
+    fn new(revision: u64) -> Self {
+        Self {
+            revision,
+            poll: Some(ChangePoll::default()),
+            checked: None,
+            need: PollNeed::Unknown,
+        }
+    }
+}
+
 pub(crate) struct Scheduler {
     started: Instant,
     last: Mutex<HashMap<PairId, Instant>>,
     changed: Mutex<HashMap<PairId, Instant>>,
+    /// When each pair's folders first changed since its last run.
+    churning: Mutex<HashMap<PairId, Instant>>,
     watcher: Mutex<Option<PairWatcher>>,
-    watched: Mutex<Vec<PairId>>,
+    /// `None` until the first tick watches anything.
+    watched: Mutex<Option<Vec<PairId>>>,
     /// Pairs with a folder that could not be watched, retried every tick.
     unwatchable: Mutex<HashSet<PairId>>,
     reconnected: Mutex<HashMap<PairId, Instant>>,
     /// Per-pair folder checks, kept off the tick.
     probes: Mutex<HashMap<PairId, Probe>>,
+    /// Per-pair checks for changes notifications miss.
+    polls: Mutex<HashMap<PairId, PollSlot>>,
     /// The folder check probes run; tests replace it.
     probe: Mutex<Arc<FolderCheck>>,
 }
@@ -80,11 +128,13 @@ impl Scheduler {
             started,
             last: Mutex::default(),
             changed: Mutex::default(),
+            churning: Mutex::default(),
             watcher: Mutex::default(),
             watched: Mutex::default(),
             unwatchable: Mutex::default(),
             reconnected: Mutex::default(),
             probes: Mutex::default(),
+            polls: Mutex::default(),
             probe: Mutex::new(Arc::new(foldover_engine::missing_side)),
         }
     }
@@ -94,12 +144,18 @@ impl Scheduler {
         self.started
     }
 
-    /// Record a change; the pair runs once changes stop for `QUIET`.
+    /// Record a change; the pair runs once changes stop for `QUIET`, or
+    /// `CHURN` after the first one.
     pub(crate) fn mark_changed(&self, id: PairId, at: Instant) {
         self.changed
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id, at);
+        self.churning
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(id)
+            .or_insert(at);
     }
 
     /// `last_run` is the pair's last recorded run start in local
@@ -132,7 +188,14 @@ impl Scheduler {
                     .unwrap_or_else(PoisonError::into_inner)
                     .get(&pair.id())
                     .copied();
+                let first = self
+                    .churning
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&pair.id())
+                    .copied();
                 changed.is_some_and(|at| now.saturating_duration_since(at) >= QUIET)
+                    || first.is_some_and(|at| now.saturating_duration_since(at) >= CHURN)
                     || since >= VERIFY
             }
             // The latest scheduled moment must be newer than the last
@@ -143,6 +206,63 @@ impl Scheduler {
                 Some(local) => last_run.is_none_or(|last| daily.latest_at_or_before(local) > last),
                 None => false,
             },
+        }
+    }
+
+    /// Forget the polls of pairs no longer changing-triggered, and those
+    /// of pairs whose configuration changed.
+    fn keep_polls(&self, pairs: &[PairConfig]) {
+        let mut polls = self.polls.lock().unwrap_or_else(PoisonError::into_inner);
+        polls.retain(|id, slot| {
+            pairs
+                .iter()
+                .any(|pair| pair.id() == *id && pair.revision() == slot.revision)
+        });
+    }
+
+    /// Whether the pair's folders may need a check now: one is not
+    /// running, and the last did not find notifications cover them.
+    fn may_poll(&self, pair: &PairConfig) -> bool {
+        let mut polls = self.polls.lock().unwrap_or_else(PoisonError::into_inner);
+        let slot = polls
+            .entry(pair.id())
+            .or_insert_with(|| PollSlot::new(pair.revision()));
+        slot.poll.is_some() && slot.need != PollNeed::NotNeeded
+    }
+
+    /// Take the pair's poll when a check is due: `POLL` after the last,
+    /// or at once to only record the folders when there was none yet or
+    /// a run finished since, so the run's own writes are not changes.
+    fn take_poll(
+        &self,
+        id: PairId,
+        now: Instant,
+        last_finished: Option<SystemTime>,
+    ) -> Option<(ChangePoll, PollMode, SystemTime)> {
+        let mut polls = self.polls.lock().unwrap_or_else(PoisonError::into_inner);
+        let slot = polls.get_mut(&id)?;
+        let mode = match slot.checked {
+            None => PollMode::Baseline,
+            Some((_, checked)) if last_finished.is_some_and(|finished| finished >= checked) => {
+                PollMode::Baseline
+            }
+            Some((at, _)) if now.saturating_duration_since(at) >= POLL => PollMode::Compare,
+            Some(_) => return None,
+        };
+        let poll = slot.poll.take()?;
+        let started = SystemTime::now();
+        slot.checked = Some((now, started));
+        Some((poll, mode, started))
+    }
+
+    /// Return a pair's poll after its check under `revision`. A pair
+    /// forgotten meanwhile stays forgotten, and one edited meanwhile keeps
+    /// its fresh poll: this one looked at the old folders.
+    fn poll_done(&self, id: PairId, revision: u64, poll: ChangePoll, need: PollNeed) {
+        let mut polls = self.polls.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(slot) = polls.get_mut(&id).filter(|slot| slot.revision == revision) {
+            slot.poll = Some(poll);
+            slot.need = need;
         }
     }
 
@@ -169,6 +289,10 @@ impl Scheduler {
             .insert(id, now);
         // Later events, including this run's own writes, start another run.
         self.changed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+        self.churning
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&id);
@@ -262,7 +386,8 @@ impl Scheduler {
     /// Watch exactly the folders of these pairs, if a watcher runs.
     /// Unwatchable folders (unmounted disks) are retried each tick and get
     /// hourly runs meanwhile; one that becomes watchable counts as changed,
-    /// since it may have changed while it was away.
+    /// since it may have changed while it was away. So does every folder
+    /// at the first tick: nothing watched it before the agent started.
     fn watch(&self, pairs: &[PairConfig], reach: &Reach, now: Instant) {
         let ids: Vec<_> = pairs.iter().map(PairConfig::id).collect();
         let mut watched = self.watched.lock().unwrap_or_else(PoisonError::into_inner);
@@ -270,24 +395,27 @@ impl Scheduler {
             .unwatchable
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if *watched == ids && unwatchable.is_empty() {
+        if watched.as_ref() == Some(&ids) && unwatchable.is_empty() {
             return;
         }
-        *watched = ids;
+        let first = watched.is_none();
+        *watched = Some(ids.clone());
         let mut watcher = self.watcher.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(watcher) = watcher.as_mut() else {
-            return;
+        let failed: HashSet<_> = match watcher.as_mut() {
+            Some(watcher) => watcher
+                .watch(pairs, reach)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect(),
+            None => HashSet::new(),
         };
 
-        let failed: HashSet<_> = watcher
-            .watch(pairs, reach)
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-        for id in unwatchable.difference(&failed) {
-            if watched.contains(id) {
-                self.mark_changed(*id, now);
-            }
+        let caught_up = ids.iter().filter(|id| first && !failed.contains(id));
+        let back = unwatchable
+            .difference(&failed)
+            .filter(|id| ids.contains(id));
+        for id in caught_up.chain(back) {
+            self.mark_changed(*id, now);
         }
         *unwatchable = failed;
     }
@@ -387,6 +515,7 @@ impl Service {
             .map(|engine| engine.reach())
             .unwrap_or_default();
         self.scheduler.watch(&changing, &reach, now);
+        self.poll(&changing, &held, &reach, now);
 
         let mut started = Vec::new();
         for pair in candidates {
@@ -430,6 +559,86 @@ impl Service {
             }
         }
         started
+    }
+
+    /// Check, on the blocking pool, the folders of changing-triggered
+    /// pairs that hear of no other computer's changes. Held pairs are
+    /// skipped: a check spends the costly network or battery the hold
+    /// saves. So are running ones, whose own writes are not changes.
+    fn poll(&self, pairs: &[PairConfig], held: &HashSet<PairId>, reach: &Reach, now: Instant) {
+        self.scheduler.keep_polls(pairs);
+        for pair in pairs {
+            let id = pair.id();
+            if held.contains(&id)
+                || matches!(self.jobs.status(id), SyncStatus::Working { .. })
+                || !self.scheduler.may_poll(pair)
+            {
+                continue;
+            }
+            let last_finished = self.last_finished(id);
+            let Some((poll, mode, started)) = self.scheduler.take_poll(id, now, last_finished)
+            else {
+                continue;
+            };
+            let (service, pair, reach) = (self.clone(), pair.clone(), reach.clone());
+            let check = move || service.check_changes(&pair, &reach, poll, mode, started);
+            if tokio::runtime::Handle::try_current().is_ok() {
+                tokio::task::spawn_blocking(check);
+            } else {
+                check();
+            }
+        }
+    }
+
+    /// When the pair's last run finished, from its history.
+    fn last_finished(&self, id: PairId) -> Option<SystemTime> {
+        self.engine
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .history(id, 1)
+            .ok()?
+            .first()
+            .map(|run| run.finished)
+    }
+
+    /// One pair's check for changes notifications miss, started at
+    /// `started`. A change seen while a run went on may be that run's own
+    /// writing, and the run looked at the folders anyway: it counts only
+    /// when no run is working or finished since the check began.
+    fn check_changes(
+        &self,
+        pair: &PairConfig,
+        reach: &Reach,
+        mut poll: ChangePoll,
+        mode: PollMode,
+        started: SystemTime,
+    ) {
+        let id = pair.id();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            poll.check(pair, reach, mode)
+        }));
+        let need = match outcome {
+            Ok(Ok(Polled::Changed)) => {
+                let working = matches!(self.jobs.status(id), SyncStatus::Working { .. });
+                let ran = self
+                    .last_finished(id)
+                    .is_some_and(|finished| finished >= started);
+                if !working && !ran {
+                    self.scheduler.mark_changed(id, Instant::now());
+                }
+                PollNeed::Needed
+            }
+            Ok(Ok(Polled::Unchanged)) => PollNeed::Needed,
+            Ok(Ok(Polled::NotNeeded)) => PollNeed::NotNeeded,
+            // An unreachable folder is checked again on the cadence.
+            Ok(Err(_)) => PollNeed::Unknown,
+            // A panic may have left the poll half updated; start over.
+            Err(_) => {
+                poll = ChangePoll::default();
+                PollNeed::Unknown
+            }
+        };
+        self.scheduler.poll_done(id, pair.revision(), poll, need);
     }
 
     /// Check one due pair's folders on the blocking pool and record the
@@ -517,7 +726,131 @@ mod tests {
         fs::create_dir(&right).unwrap();
         scheduler.watch(std::slice::from_ref(&pair), &Reach::default(), at(20));
         assert!(!scheduler.due(&pair, at(21), None, None));
-        assert!(scheduler.due(&pair, at(26), None, None));
+        assert!(scheduler.due(&pair, at(20) + QUIET, None, None));
+    }
+
+    /// A Sync pair over two folders in `directory`, both present.
+    fn changing_pair(directory: &Path, id: u8) -> PairConfig {
+        let (left, right) = (directory.join("left"), directory.join("right"));
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        let root =
+            |path: &Path| LocalRoot::from_bytes(path.as_os_str().as_bytes().to_vec()).unwrap();
+        let options = PairOptions::default().with_schedule(Schedule::OnChange);
+        let draft = PairDraft::new("Live".into(), root(&left), root(&right), SyncMode::Sync)
+            .unwrap()
+            .with_options(options);
+        PairConfig::from_stored(
+            PairId::from_bytes([id; PairId::BYTE_LEN]).unwrap(),
+            1,
+            draft,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn folders_count_as_changed_at_the_first_tick_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let pair = changing_pair(directory.path(), 5);
+        let start = Instant::now();
+        let scheduler = Scheduler::new(start);
+        *scheduler.watcher.lock().unwrap() = Some(PairWatcher::new(|_| {}).unwrap());
+        let at = |seconds| start + Duration::from_secs(seconds);
+
+        scheduler.watch(std::slice::from_ref(&pair), &Reach::default(), at(1));
+        assert!(scheduler.due(&pair, at(1) + QUIET, None, None));
+        scheduler.started_run(pair.id(), at(12));
+
+        // A later tick, even one that watches the pair anew, is no change.
+        scheduler.watch(&[], &Reach::default(), at(20));
+        scheduler.watch(std::slice::from_ref(&pair), &Reach::default(), at(25));
+        assert!(!scheduler.due(&pair, at(60), None, None));
+    }
+
+    #[test]
+    fn a_folder_that_never_settles_runs_after_five_minutes() {
+        let directory = tempfile::tempdir().unwrap();
+        let pair = changing_pair(directory.path(), 6);
+        let start = Instant::now();
+        let scheduler = Scheduler::new(start);
+        let at = |seconds| start + Duration::from_secs(seconds);
+
+        // A change every few seconds keeps the folder from going quiet.
+        let mut second = 0;
+        while second < CHURN.as_secs() {
+            scheduler.mark_changed(pair.id(), at(second));
+            assert!(!scheduler.due(&pair, at(second + 1), None, None));
+            second += 3;
+        }
+        scheduler.mark_changed(pair.id(), at(second));
+        assert!(scheduler.due(&pair, at(second), None, None));
+
+        // A run starts the count over.
+        scheduler.started_run(pair.id(), at(second));
+        scheduler.mark_changed(pair.id(), at(second + 1));
+        assert!(!scheduler.due(&pair, at(second + 2), None, None));
+    }
+
+    #[test]
+    fn polls_record_first_check_on_a_cadence_and_after_each_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let pair = changing_pair(directory.path(), 7);
+        let id = pair.id();
+        let start = Instant::now();
+        let scheduler = Scheduler::new(start);
+        let at = |seconds| start + Duration::from_secs(seconds);
+        let take = |seconds, finished| {
+            assert!(scheduler.may_poll(&pair));
+            scheduler
+                .take_poll(id, at(seconds), finished)
+                .map(|(poll, mode, _)| {
+                    scheduler.poll_done(id, pair.revision(), poll, PollNeed::Needed);
+                    mode
+                })
+        };
+
+        assert_eq!(take(0, None), Some(PollMode::Baseline));
+        assert_eq!(take(1, None), None);
+        assert_eq!(take(POLL.as_secs(), None), Some(PollMode::Compare));
+        // A run finished since the last check: its writes are no change.
+        let finished = SystemTime::now();
+        assert_eq!(
+            take(POLL.as_secs() + 5, Some(finished)),
+            Some(PollMode::Baseline)
+        );
+        assert_eq!(take(POLL.as_secs() + 10, Some(finished)), None);
+
+        // While a check runs, no other starts.
+        assert!(scheduler.may_poll(&pair));
+        let (poll, _, _) = scheduler
+            .take_poll(id, at(3 * POLL.as_secs()), None)
+            .unwrap();
+        assert!(!scheduler.may_poll(&pair));
+        // Folders notifications cover are not checked again...
+        scheduler.poll_done(id, pair.revision(), poll, PollNeed::NotNeeded);
+        assert!(!scheduler.may_poll(&pair));
+        // ...until the pair's configuration changes.
+        let edited =
+            PairConfig::from_stored(id, pair.revision() + 1, pair.draft().clone()).unwrap();
+        scheduler.keep_polls(std::slice::from_ref(&edited));
+        assert!(scheduler.may_poll(&edited));
+
+        // Review: a check of the old folders, still running across the
+        // edit, must not land in the fresh poll.
+        let (_, mode, _) = scheduler
+            .take_poll(id, at(4 * POLL.as_secs()), None)
+            .unwrap();
+        assert_eq!(mode, PollMode::Baseline);
+        let stale = PollNeed::NotNeeded;
+        scheduler.poll_done(id, pair.revision(), ChangePoll::default(), stale);
+        assert!(!scheduler.may_poll(&edited), "the fresh check still runs");
+        scheduler.poll_done(
+            id,
+            edited.revision(),
+            ChangePoll::default(),
+            PollNeed::Needed,
+        );
+        assert!(scheduler.may_poll(&edited));
     }
 
     #[test]

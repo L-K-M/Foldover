@@ -121,8 +121,11 @@ Keep Both all work the same way as on a local folder
 On SFTP, extended attributes and ACLs are not synced, only mode bits and
 file modification times in whole seconds are kept, and a local file
 with a resource fork fails to copy. Change notifications do not exist,
-so "When files change" means an hourly check
-([ADR 0028](../adr/0028-sftp-endpoints.md)).
+so "When files change" looks every 5 minutes at the folder's top level
+and at up to 32 recently active folders, those where it last saw
+changes, and compares everything hourly
+([ADR 0022](../adr/0022-scheduled-runs.md),
+[ADR 0028](../adr/0028-sftp-endpoints.md)).
 
 A large copy that breaks off resumes where it stopped when it lands in
 a local folder or on a paired Mac; a copy to an SFTP server starts

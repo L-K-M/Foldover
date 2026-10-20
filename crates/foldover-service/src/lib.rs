@@ -1151,7 +1151,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changed_pairs_run_once_quiet_and_hourly_without_changes() {
+    async fn changed_pairs_catch_up_then_run_once_quiet_and_hourly() {
         let (directory, service) = fixture();
         let mut input = input(directory.path(), "Live");
         input["options"]["schedule"] = json!({"kind": "onChange"});
@@ -1166,13 +1166,17 @@ mod tests {
         let start = service.scheduler.started();
         let at = |seconds| start + std::time::Duration::from_secs(seconds);
 
+        // Nothing watched the folders before the first tick, so it counts
+        // as a change; the pair runs once it has been quiet for 10 s.
         assert!(service.run_due(at(10)).is_empty());
-        service.mark_changed(id, at(20));
-        assert!(service.run_due(at(22)).is_empty());
-        assert_eq!(run_due_started(&service, at(26)).await, [id]);
+        assert_eq!(run_due_started(&service, at(20)).await, [id]);
         settled(&service, &key).await;
-        assert!(service.run_due(at(40)).is_empty());
-        assert_eq!(run_due_started(&service, at(26 + 3_600)).await, [id]);
+        service.mark_changed(id, at(30));
+        assert!(service.run_due(at(32)).is_empty());
+        assert_eq!(run_due_started(&service, at(40)).await, [id]);
+        settled(&service, &key).await;
+        assert!(service.run_due(at(50)).is_empty());
+        assert_eq!(run_due_started(&service, at(40 + 3_600)).await, [id]);
         settled(&service, &key).await;
     }
 

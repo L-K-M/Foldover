@@ -28,7 +28,7 @@ use foldover_types::{
 
 use version::{Attribute, Observed, Payload, entry_version, metadata_version};
 
-use crate::ObserveStep;
+use crate::{ListedEntry, ListedKind, ObserveStep};
 
 pub use apply::{ApplyError, Expected, RunScope};
 pub use archive::{ArchivedItem, ArchivedRun, archive_name};
@@ -366,6 +366,46 @@ impl LocalEndpoint {
             Some(Err(source)) => Err(ScanError::Io { path: None, source }),
             Some(Ok(_)) | None => Ok(()),
         }
+    }
+
+    /// One directory's entries for a quick change check; `None` once the
+    /// directory is gone or is no longer one.
+    pub fn list(
+        &self,
+        directory: Option<&SyncPath>,
+        filter: &Filter,
+    ) -> Result<Option<Vec<ListedEntry>>, ScanError> {
+        let path = directory.cloned();
+        let scope = match directory {
+            None => DirectoryScope::Root,
+            Some(directory) => DirectoryScope::At(directory),
+        };
+        let entries = match self.root.entries(scope) {
+            Ok(entries) => entries,
+            Err(error) if gone(&error) => return Ok(None),
+            Err(source) => return Err(ScanError::Io { path, source }),
+        };
+        let mut listed = Vec::new();
+        for entry in entries {
+            let entry = at(&path, entry)?;
+            if protected(entry.name()) {
+                continue;
+            }
+            let metadata = entry.metadata();
+            let kind = match metadata.kind() {
+                NodeKind::Directory => ListedKind::Directory,
+                NodeKind::File | NodeKind::Symlink | NodeKind::Other => ListedKind::Other,
+            };
+            listed.extend(ListedEntry::kept(
+                directory,
+                filter,
+                entry.name().to_vec(),
+                kind,
+                metadata.size(),
+                Some(metadata.modified()),
+            ));
+        }
+        Ok(Some(listed))
     }
 
     /// Bytes an unprivileged writer can still use on the root's volume.
@@ -813,6 +853,14 @@ pub(crate) fn protected(name: &[u8]) -> bool {
 pub(crate) fn temporary(name: &[u8]) -> bool {
     name.get(..TEMPORARY_PREFIX.len())
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case(TEMPORARY_PREFIX))
+}
+
+/// The directory a listing asked for no longer exists as one.
+fn gone(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    )
 }
 
 fn at<T>(path: &Option<SyncPath>, result: io::Result<T>) -> Result<T, ScanError> {

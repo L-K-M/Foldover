@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- "When files change" catches up on changes made while the agent was
+  not running, syncs after 5 minutes of nonstop changes, and checks
+  shares and SFTP servers for other computers' changes every 5 minutes.
+  It now waits for 10 seconds of quiet instead of 5.
+
 - Signature moments: drop one or two folders on the window's sidebar or
   empty detail to start a pair with them; the pair editor shows a
   sentence that says what the pair will do and rewrites itself as you

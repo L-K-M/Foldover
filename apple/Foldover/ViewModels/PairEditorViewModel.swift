@@ -138,6 +138,14 @@ final class PairEditorViewModel: Identifiable {
         return choices
     }
 
+    /// How quickly "When files change" notices changes (PLAN.md §4.8):
+    /// this Mac's own at once, other computers' on shares and servers by
+    /// looking every few minutes.
+    var scheduleNote: String? {
+        guard options.schedule == .onChange else { return nil }
+        return String(localized: "Syncs 10 seconds after changes stop, or after 5 minutes of nonstop changes. Shares and SFTP servers are checked for other computers' changes every 5 minutes, and both folders are compared in full every hour.")
+    }
+
     /// The Daily time and weekday controls are shown only for Daily.
     var showsDailySettings: Bool {
         if case .daily = options.schedule { true } else { false }

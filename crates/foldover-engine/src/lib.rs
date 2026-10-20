@@ -9,6 +9,7 @@ mod conflict;
 mod gates;
 mod peers;
 mod plan;
+mod poll;
 mod readiness;
 mod reconcile;
 mod run;
@@ -42,6 +43,7 @@ pub use plan::{
     CandidateDecision, CandidatePlan, Choices, PlanError, PlanRow, TreeRole, plan_candidates,
     plan_resolved,
 };
+pub use poll::{ChangePoll, PollMode, Polled};
 pub use readiness::{ReadinessWarning, missing_side, reconnect};
 pub use reconcile::reconcile_entry;
 pub use run::{
