@@ -58,7 +58,7 @@ not replace an enforced non-materializing I/O policy or cloud-root readiness.
 On a volume that declares no native extended attributes (exFAT, FAT),
 macOS keeps each file's attributes in its `._` sidecar and presents them
 as the file's own, moving and removing the sidecar with it, so a scan
-skips `._` names there. Elsewhere, including volumes that do not say,
+skips `._` files there; a folder so named is not a sidecar. Elsewhere, including volumes that do not say,
 `._` names stop the scan with an explicit sidecar-classification error:
 they are neither silently omitted nor treated as ordinary content. The need for separate
 filesystem and operation-fidelity probes remains as recorded in

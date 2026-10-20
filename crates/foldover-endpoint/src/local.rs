@@ -417,7 +417,9 @@ impl LocalEndpoint {
         NameMatching::EXACT
     }
 
-    /// What `._` names hold on this root's volume.
+    /// What `._` names hold on this root's volume. Only macOS keeps
+    /// attributes in sidecars, and only there do volumes say whether they
+    /// keep them natively.
     fn sidecars(&self) -> Sidecars {
         #[cfg(target_os = "macos")]
         if let Ok(features) = self.filesystem_features() {
@@ -576,13 +578,13 @@ impl LocalEndpoint {
                 stats.old.push(path.clone());
             }
             if entry.name().starts_with(b"._") {
-                match sidecars {
-                    Sidecars::Metadata => {
-                        stats.skipped += 1;
-                        continue;
-                    }
-                    Sidecars::Unclassified => return Err(ScanError::UnclassifiedSidecar(path)),
+                // Sidecars are files; a folder so named is someone's.
+                let file = entry.metadata().kind() == NodeKind::File;
+                if sidecars == Sidecars::Metadata && file {
+                    stats.skipped += 1;
+                    continue;
                 }
+                return Err(ScanError::UnclassifiedSidecar(path));
             }
             let at_path = Some(path.clone());
             let name = SyncPath::try_from(entry.name())?;
