@@ -928,9 +928,8 @@ impl Folder {
         Ok(())
     }
 
-    /// Move the entry at `from`, and everything inside it, to `to`,
-    /// creating `to`'s folders.
-    /// Move the entry at `path` to `archive`, or delete it without one.
+    /// Move the file or link at `path` to `archive`, or delete it without
+    /// one. Folders never come here: `remove` takes them only when empty.
     fn set_aside(&mut self, path: &[u8], archive: Option<&[u8]>) -> io::Result<()> {
         let Some(archive) = archive else {
             let key = self.key(path);
@@ -942,6 +941,8 @@ impl Folder {
         self.relocate(path, archive)
     }
 
+    /// Move the entry at `from`, and everything inside it, to `to`,
+    /// creating `to`'s folders.
     fn relocate(&mut self, from: &[u8], to: &[u8]) -> io::Result<()> {
         // Where it goes must exist before it leaves where it is.
         if self.get(from).is_none() {

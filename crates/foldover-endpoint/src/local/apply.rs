@@ -348,7 +348,8 @@ impl LocalEndpoint {
 
     /// Archive a temporary an interrupted write left behind. It may hold a
     /// displaced original, so it is deleted only where the run keeps no
-    /// archive.
+    /// archive, as the person chose for that folder, even one an earlier,
+    /// archiving run left.
     pub fn recover_leftover(&self, leftover: &SyncPath, run: &RunScope) -> Result<(), ApplyError> {
         let metadata = self
             .root

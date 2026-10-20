@@ -655,7 +655,8 @@ impl Database {
             // A changed root is a different endpoint; forget its identity.
             // So do changed records, or a changed mode while records stay
             // with the source: a folder without records has an identity
-            // only this agent knows.
+            // only this agent knows. SET expressions read the row as it
+            // was, so `records=?19` and `mode=?6` hold only when unchanged.
             "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,schedule=?11,schedule_minutes=?12,filters=?13,size_limit=?14,age_limit=?15,canary=?16,schedule_time=?17,schedule_days=?18,records=?19,left_identity=CASE WHEN left_root=?4 AND records=?19 AND (records='both' OR mode=?6) THEN left_identity END,right_identity=CASE WHEN right_root=?5 AND records=?19 AND (records='both' OR mode=?6) THEN right_identity END,left_mount=CASE WHEN left_root=?4 THEN left_mount END,right_mount=CASE WHEN right_root=?5 THEN right_mount END WHERE id=?1 AND revision=?2",
             params![
                 id,

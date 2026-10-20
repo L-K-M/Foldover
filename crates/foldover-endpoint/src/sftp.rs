@@ -799,7 +799,9 @@ impl SftpEndpoint {
     }
 
     /// Move `path` to the run's archive, creating its folders there, or
-    /// delete it where the run keeps no archive.
+    /// delete it where the run keeps no archive. Only files and links come
+    /// here: `remove` takes folders when empty, and `place` never replaces
+    /// a folder, since a file meeting one is a type conflict.
     fn set_aside(&self, path: &SyncPath, run: &RunScope) -> Result<(), ApplyError> {
         if run.archiving() == Archiving::Off {
             return self

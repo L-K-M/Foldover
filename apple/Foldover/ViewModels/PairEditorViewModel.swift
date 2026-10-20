@@ -105,10 +105,13 @@ final class PairEditorViewModel: Identifiable {
     /// Backup's target that keeps none (PLAN.md §3.6); until it is,
     /// saving is blocked, since every sync would fail.
     var recordsWarning: String? {
-        let refused = [FolderSide.a, .b].first { side in
+        let refused = [FolderSide.a, .b].filter { side in
             recordsRefused.contains(side) && !(side == backupTarget && options.records == .sourceOnly)
         }
-        guard let refused else { return nil }
+        if refused.count > 1 {
+            return String(localized: "Neither folder can hold Foldover's .foldover folder, so they cannot be paired: a Backup's source needs one.")
+        }
+        guard let refused = refused.first else { return nil }
         let name = PairSyncViewModel.folderName(refused)
         if refused == backupTarget {
             return String(localized: "\(name) can't hold Foldover's .foldover folder. To back up to it, turn on “Keep nothing in \(name)”.")
@@ -575,6 +578,12 @@ final class PairEditorViewModel: Identifiable {
     }
 
     func save() async -> Bool {
+        guard !isSaving else { return false }
+        // A folder that refuses records must be known before saving, or a
+        // pair that can never sync slips through while the check runs.
+        isSaving = true
+        await checkTask?.value
+        isSaving = false
         guard canSave, let left, let right else { return false }
         isSaving = true
         errorMessage = nil

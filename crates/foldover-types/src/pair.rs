@@ -210,6 +210,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_a_backup_target_goes_without_records() {
+        let draft = |mode| {
+            PairDraft::new(
+                "Pair".into(),
+                LocalRoot::from_bytes(b"/a".to_vec()).unwrap(),
+                LocalRoot::from_bytes(b"/b".to_vec()).unwrap(),
+                mode,
+            )
+            .unwrap()
+        };
+        let source_only = PairOptions::default().with_records(FolderRecords::SourceOnly);
+        let backup = SyncMode::Backup { source: Side::Left };
+        assert_eq!(
+            draft(backup).with_options(source_only.clone()).unrecorded(),
+            Some(Side::Right)
+        );
+        assert_eq!(draft(backup).unrecorded(), None);
+        for mode in [SyncMode::Sync, SyncMode::Mirror { source: Side::Left }] {
+            assert_eq!(
+                draft(mode).with_options(source_only.clone()).unrecorded(),
+                None
+            );
+        }
+    }
+
+    #[test]
     fn rejects_invalid_configuration_and_preserves_raw_roots() {
         assert!(PairId::from_bytes([0; PairId::BYTE_LEN]).is_err());
         for root in [b"".as_slice(), b"relative", b"/bad\0root"] {

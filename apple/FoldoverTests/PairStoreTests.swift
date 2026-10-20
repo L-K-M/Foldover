@@ -515,6 +515,19 @@ func aFolderThatRefusesRecordsCanOnlyBeABackupTargetKeepingNothing() async {
     #expect(!editor.canSave)
 }
 
+/// Review of #112: Save waits for a check still running, so a folder that
+/// refuses records cannot slip through before the answer.
+@MainActor
+@Test
+func savingWaitsForTheRecordsCheck() async {
+    let editor = PairEditorViewModel(store: PairStore(client: RecordsRefusingClient()))
+    editor.name = "Archive"
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/a")]), side: .left)
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/b")]), side: .right)
+    #expect(await editor.save() == false)
+    #expect(editor.recordsWarning != nil)
+}
+
 /// Refuses records in Folder B, and like the engine does not probe a
 /// Backup target that already keeps none.
 private actor RecordsRefusingClient: PairClient {

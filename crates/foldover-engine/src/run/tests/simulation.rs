@@ -473,7 +473,9 @@ impl Simulation {
 
     /// The Backup target that keeps no records, if the pair has one.
     fn unrecorded(&self) -> Option<Folder> {
-        if self.pair.records != FolderRecords::SourceOnly {
+        if self.pair.records != FolderRecords::SourceOnly
+            || !matches!(self.mode, SyncMode::Backup { .. })
+        {
             return None;
         }
         self.source().map(|source| match source {
