@@ -356,10 +356,18 @@ impl Simulation {
                     memory.move_file(from.as_bytes(), to.as_bytes()).unwrap();
                     return;
                 }
-                let (from, to) = (self.root(folder).join(from), self.root(folder).join(to));
-                if from.exists() && !to.exists() {
-                    fs::create_dir_all(to.parent().unwrap()).unwrap();
-                    fs::rename(from, to).unwrap();
+                let root = self.root(folder);
+                let (from_path, to_path) = (root.join(from), root.join(to));
+                if from_path.exists() && !to_path.exists() {
+                    fs::create_dir_all(to_path.parent().unwrap()).unwrap();
+                    // macOS's FAT driver renames only from composed names,
+                    // as a person's Finder does.
+                    if fs::rename(&from_path, &to_path)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                    {
+                        let composed = |path: &str| root.join(path.nfc().collect::<String>());
+                        fs::rename(composed(from), composed(to)).unwrap();
+                    }
                 }
             }
         }
