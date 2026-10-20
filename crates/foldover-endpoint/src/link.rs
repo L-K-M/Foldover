@@ -424,7 +424,11 @@ impl PeerLink {
                     .await
                     .map_err(|_| LinkError::Unreachable)??
             }
-            Err(_) => return Err(LinkError::Unreachable),
+            Err(_) => {
+                // A connection that stalled is not reused.
+                self.state().connections.remove(&device);
+                return Err(LinkError::Unreachable);
+            }
         };
         serde_json::from_slice(&reply).map_err(|_| LinkError::Protocol)
     }
