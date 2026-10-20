@@ -32,3 +32,26 @@ jobs:
 
       - name: Fuzz parsers
         run: cargo test --locked --release --workspace -- fuzz_
+
+  # The engine against random edits and interrupted runs (PLAN.md §5.2),
+  # far longer than the per-PR suite's handful of cases. A failure prints
+  # the minimal sequence of edits and runs it found.
+  simulate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      FOLDOVER_SIMULATION_CASES: "5000"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Log toolchain and image
+        run: |
+          rustup show
+          rustc -Vv
+          echo "Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+
+      - name: Simulate
+        run: cargo test --locked --release -p foldover-engine -- simulation
