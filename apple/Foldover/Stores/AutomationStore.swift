@@ -107,8 +107,13 @@ final class AutomationStore {
         await perform { try await $0.resume() }
     }
 
+    /// Shows the choice at once, so the toggle does not bounce while the
+    /// agent saves it; a failed save puts the previous choice back.
     func setLowPower(_ syncs: LowPowerSyncs) async {
+        let previous = lowPower
+        lowPower = syncs
         await perform { try await $0.setLowPower(syncs) }
+        if error != nil { lowPower = previous }
     }
 
     private func apply(_ status: AutomationStatus) {
