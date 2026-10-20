@@ -185,6 +185,7 @@ fn skip_branches(
 /// Paths whose names one of the folders would store as one file are a
 /// conflict for a person to rename (PLAN.md §4.10) when they would meet
 /// there: two of them written, or one written beside another that stays.
+/// A spelling in conflict stays too: resolving it may write it there.
 /// Copying either spelling would fail against, or silently become, the
 /// other. A folder that keeps the spellings apart takes them
 /// as they are, so a case-only rename on a Mac reaches a byte-exact server
@@ -235,9 +236,13 @@ fn mark_name_clashes(
                 let (writes, untouched): (Vec<usize>, Vec<usize>) = spellings
                     .iter()
                     .partition(|&&index| writes_on(&rows[index].decision, side));
-                let stays = untouched
-                    .iter()
-                    .any(|&index| present.contains_key(&rows[index].path));
+                let stays = untouched.iter().any(|&index| {
+                    present.contains_key(&rows[index].path)
+                        || matches!(
+                            rows[index].decision,
+                            CandidateDecision::Entry(EntryDecision::Conflict(_))
+                        )
+                });
                 if writes.len() > 1 || (!writes.is_empty() && stays) {
                     clashes.extend(spellings);
                 }
@@ -1015,6 +1020,27 @@ mod tests {
                     })
                 ),
             ]
+        );
+    }
+
+    /// Simulation: a byte-exact folder held both spellings of `café`; the
+    /// decomposed one was edited there and deleted on an HFS+ disk, a
+    /// conflict, and the composed one was copied onto the disk, which
+    /// stored it over the conflicted name. The next run archived a file
+    /// and found both sides changed.
+    #[test]
+    fn a_spelling_in_conflict_holds_its_name_against_another() {
+        let hfs = NameMatching::new(CaseMatching::Insensitive, UnicodeMatching::Normalized);
+        let base = BTreeMap::from([(
+            path(b"cafe\xcc\x81"),
+            BaselineEntry::new(file(1), file(1)).unwrap(),
+        )]);
+        let left = tree(&[(b"cafe\xcc\x81", file(2)), (b"caf\xc3\xa9", file(3))]);
+        let right = tree(&[]);
+        let rows = plan_between(&base, &left, &right, [NameMatching::EXACT, hfs]);
+        assert!(
+            rows.iter().all(|(_, decision)| *decision == CLASH),
+            "{rows:?}"
         );
     }
 

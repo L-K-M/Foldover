@@ -670,6 +670,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "unicode-normalization",
  "uuid",
  "zeroize",
 ]
@@ -682,6 +683,7 @@ dependencies = [
  "criterion",
  "foldover-endpoint",
  "foldover-host",
+ "foldover-sim",
  "foldover-state",
  "foldover-types",
  "proptest",

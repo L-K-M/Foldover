@@ -22,6 +22,9 @@ struct Fixture {
     durability: foldover_types::Durability,
     right_kind: RightKind,
     journal: Option<foldover_state::Journal>,
+    /// In-memory folders that replace both temporary directories.
+    memory: Option<[foldover_sim::MemoryEndpoint; 2]>,
+    leases: LeaseTiming,
 }
 
 /// How the fixture reaches its right folder.
@@ -64,6 +67,8 @@ fn fixture(mode: SyncMode) -> Fixture {
         durability: foldover_types::Durability::Standard,
         right_kind: RightKind::Local,
         journal: None,
+        memory: None,
+        leases: TEST_LEASES,
     }
 }
 
@@ -186,11 +191,18 @@ impl Fixture {
             self.resolutions.clone(),
         )
         .with_skips(self.skips.clone())
-        .with_lease_timing(TEST_LEASES)
+        .with_lease_timing(self.leases)
     }
 
     fn try_prepare(&self) -> Result<PairRun, RunError> {
         let inputs = self.inputs();
+        if let Some([left, right]) = &self.memory {
+            let endpoints = foldover_endpoint::EndpointPair::new(
+                foldover_endpoint::Endpoint::Memory(left.clone()),
+                foldover_endpoint::Endpoint::Memory(right.clone()),
+            );
+            return PairRun::prepare_on(inputs, endpoints, &mut proceed, &NoProgress);
+        }
         if self.right_kind == RightKind::Local {
             return PairRun::prepare(inputs, &mut proceed, &NoProgress);
         }
