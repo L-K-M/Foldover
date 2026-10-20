@@ -29,8 +29,11 @@ archive:  name ──rename(no-replace)──▶ .foldover/archive/…/name
   user data and is never removed automatically.
 - **Archiving:** a no-replace rename into private (0700) directories under
   `.foldover/archive/`, only while the entry still matches its observation.
-- **Volumes without the rename flags:** HFS+, exFAT and FAT answer
-  `ENOTSUP` to both (found by the device matrix, ADR 0038). A no-replace
+- **Volumes without the rename flags:** HFS+ and exFAT answer `ENOTSUP`
+  to both, and macOS's FAT driver takes a swap as a plain rename over
+  the destination, losing what it held (found by the device matrix, ADR
+  0038). On macOS the flags are used only where the volume declares them
+  (`VOL_CAP_INT_RENAME_EXCL`, `VOL_CAP_INT_RENAME_SWAP`). A no-replace
   rename becomes an exclusive placeholder of the entry's kind at the
   destination, which a plain rename then replaces; the refusal holds. An
   exchange becomes PLAN.md §4.7's two steps: the old entry moves aside

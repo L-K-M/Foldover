@@ -1,6 +1,9 @@
 //! Renames that refuse to replace, and swaps. APFS has both
-//! (`RENAME_EXCL`, `RENAME_SWAP`); HFS+, exFAT and FAT answer `ENOTSUP`,
-//! as the device matrix found (ADR 0038), so they get fallbacks:
+//! (`RENAME_EXCL`, `RENAME_SWAP`); HFS+ and exFAT answer `ENOTSUP`, and
+//! macOS's FAT driver takes a swap as a plain rename over the destination,
+//! losing what it held, as the device matrix found (ADR 0038). On macOS
+//! the flags are therefore used only where the volume declares them, and
+//! every other volume gets fallbacks:
 //!
 //! ```text
 //! exclusive rename: placeholder created exclusively at `to` ─▶ rename over it
@@ -68,7 +71,25 @@ fn flagged(
     if FLAGS_UNSUPPORTED.with(std::cell::Cell::get) {
         return Err(Errno::NOTSUP);
     }
+    #[cfg(target_os = "macos")]
+    if !declared(to_directory, flags) {
+        return Err(Errno::NOTSUP);
+    }
     rustix::fs::renameat_with(from_directory, from, to_directory, to, flags)
+}
+
+/// Whether the volume holding `directory` says it has `flags`; a volume
+/// that does not say is taken at its word as lacking them.
+#[cfg(target_os = "macos")]
+fn declared(directory: &Dir, flags: RenameFlags) -> bool {
+    use crate::{DeclaredSupport, FilesystemFeature};
+    let feature = if flags.contains(RenameFlags::EXCHANGE) {
+        FilesystemFeature::SwapRename
+    } else {
+        FilesystemFeature::ExclusiveRename
+    };
+    crate::volume::filesystem_features(directory)
+        .is_ok_and(|features| features.support(feature) == DeclaredSupport::Supported)
 }
 
 /// Rename `from` to `to` unless something is at `to`: `EEXIST` then.
