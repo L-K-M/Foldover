@@ -19,7 +19,8 @@ settings:
     SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
     GCC_TREAT_WARNINGS_AS_ERRORS: YES
     MARKETING_VERSION: "0.1.0"
-    CURRENT_PROJECT_VERSION: "1"
+    # Sparkle compares CFBundleVersion, which must grow with each release.
+    CURRENT_PROJECT_VERSION: $(MARKETING_VERSION)
     CODE_SIGN_IDENTITY: "-"
     CODE_SIGN_STYLE: Manual
     DEVELOPMENT_TEAM: ""
@@ -55,11 +56,12 @@ targets:
       - name: Embed the background agent and CLI
         basedOnDependencyAnalysis: false
         script: bash "$SRCROOT/../scripts/embed-agent.sh" "$TARGET_BUILD_DIR/$WRAPPER_NAME"
-    # Xcode writes the Info.plist from these settings, so no plist file
-    # sits in the tree: an XcodeGen-written one would leave the tree
+    # Xcode writes the Info.plist from these settings, so no generated
+    # plist sits in the tree: an XcodeGen-written one would leave the tree
     # dirty after every generate, which the release engine rejects.
     # CFBundleShortVersionString and CFBundleVersion come from
-    # MARKETING_VERSION and CURRENT_PROJECT_VERSION.
+    # MARKETING_VERSION and CURRENT_PROJECT_VERSION. Foldover-Info.plist,
+    # written by hand, adds only Sparkle's keys, which have no settings.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ch.lkmc.foldover
@@ -67,6 +69,10 @@ targets:
         # Cargo resolves its own workspace inputs and writes to its target directory.
         ENABLE_USER_SCRIPT_SANDBOXING: NO
         GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_FILE: Foldover-Info.plist
+        # The owner's Sparkle EdDSA public key (ADR 0035), set by releases;
+        # empty, as in development builds, the app does not update itself.
+        SPARKLE_PUBLIC_KEY: ""
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
         # The embedded agent connects to paired Macs (ADR 0031); macOS asks
         # for Local Network access on the app's behalf.

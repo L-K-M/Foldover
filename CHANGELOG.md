@@ -31,6 +31,9 @@ All notable changes to this project are documented here. The format follows
   SFTP server, continues where it stopped the next time it runs. Copies
   from SFTP servers read each file once instead of twice.
 
+- Check for Updates… in the app menu. Updates arrive through Sparkle, and
+  each one must carry the release key's signature.
+
 - Two Macs never sync the same folder at once: a sync waits while
   another Mac's sync of that folder is running, and takes over from one
   that stopped responding for two minutes.
