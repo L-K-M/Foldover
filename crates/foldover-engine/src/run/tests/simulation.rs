@@ -363,12 +363,15 @@ impl Simulation {
                 let (from_path, to_path) = (root.join(from), root.join(to));
                 if from_path.exists() && !to_path.exists() {
                     fs::create_dir_all(to_path.parent().unwrap()).unwrap();
-                    // macOS's FAT driver renames only from composed names,
-                    // as a person's Finder does.
+                    // macOS's FAT driver renames only by the spelling a file
+                    // was created with, as Foldover does: try both.
                     if let Err(first) = fs::rename(&from_path, &to_path) {
                         assert_eq!(first.kind(), std::io::ErrorKind::NotFound, "{from} -> {to}");
                         let composed = |path: &str| root.join(path.nfc().collect::<String>());
-                        if let Err(error) = fs::rename(composed(from), composed(to)) {
+                        let decomposed = |path: &str| root.join(path.nfd().collect::<String>());
+                        let renamed = fs::rename(composed(from), composed(to))
+                            .or_else(|_| fs::rename(decomposed(from), decomposed(to)));
+                        if let Err(error) = renamed {
                             let listed = |path: &Path| -> Vec<Vec<u8>> {
                                 fs::read_dir(path.parent().unwrap())
                                     .map(|entries| {
