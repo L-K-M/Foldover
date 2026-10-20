@@ -62,21 +62,31 @@ impl<K: Clone + Eq + Send + 'static> RootWatcher<K> {
                 Err(error) => failures.push((root.clone(), error)),
             }
         }
-        let mut roots = self.roots.lock().unwrap_or_else(PoisonError::into_inner);
-        for path in roots.keys() {
+        // Never hold the roots while changing watches: on macOS a change
+        // stops the event stream and waits for its thread, which may be
+        // in the callback waiting for the roots. Events for a root being
+        // added are missed only until it is listed; schedules cover them.
+        let current: Vec<PathBuf> = self
+            .roots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keys()
+            .cloned()
+            .collect();
+        for path in &current {
             if !next.contains_key(path) {
                 let _ = self.watcher.unwatch(path);
             }
         }
         let mut watched = BTreeMap::new();
         for (path, keys) in next {
-            if roots.contains_key(&path) || self.watcher.watch(&path).is_ok() {
+            if current.contains(&path) || self.watcher.watch(&path).is_ok() {
                 watched.insert(path, keys);
             } else if let Some((root, _)) = wanted.iter().find(|(_, key)| keys.contains(key)) {
                 failures.push((root.clone(), io::Error::other("Cannot watch this folder")));
             }
         }
-        *roots = watched;
+        *self.roots.lock().unwrap_or_else(PoisonError::into_inner) = watched;
         failures
     }
 }

@@ -13,6 +13,8 @@ enum ConflictReason: Sendable {
     case deletedVersusEdited
     case typeMismatch
     case metadataOnly
+    /// Names one folder would store as one file; a rename resolves it.
+    case nameClash
 }
 
 enum ChangeAction: Equatable, Sendable {
@@ -386,6 +388,7 @@ private actor CoreSyncClient: SyncClient {
         case .deletedVersusEdited: .deletedVersusEdited
         case .typeMismatch: .typeMismatch
         case .metadataOnly: .metadataOnly
+        case .nameClash: .nameClash
         }
     }
 }

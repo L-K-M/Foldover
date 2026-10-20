@@ -4,6 +4,7 @@
 
 mod endpoint_id;
 mod metadata_policy;
+mod names;
 mod options;
 mod pair;
 mod reconcile;
@@ -18,6 +19,7 @@ pub use pair::{
 
 pub use endpoint_id::EndpointId;
 pub use metadata_policy::{MetadataPolicy, Propagation};
+pub use names::{CaseMatching, NameMatching, UnicodeMatching};
 pub use options::{Durability, Filters, PairOptions, Schedule, ScheduleInterval};
 pub use review::{InvalidReviewToken, ReviewToken};
 pub use root::{PairRoot, SftpRoot};

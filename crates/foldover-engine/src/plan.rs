@@ -1,8 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+
+use unicode_normalization::UnicodeNormalization;
 
 use foldover_types::{
-    BaselineEntry, ConflictKind, EntryDecision, EntryKind, EntryVersion, Resolution, ScanControl,
-    Side, Skip, SyncMode, SyncPath,
+    BaselineEntry, CaseMatching, ConflictKind, EntryDecision, EntryKind, EntryVersion,
+    NameMatching, Resolution, ScanControl, Side, Skip, SyncMode, SyncPath, UnicodeMatching,
 };
 
 use crate::reconcile::resolve;
@@ -180,6 +182,107 @@ fn skip_branches(
     Ok(())
 }
 
+/// Paths whose names one of the folders would store as one file are a
+/// conflict for a person to rename (PLAN.md §4.10) when they would meet
+/// there: two of them written, or one written beside another that stays.
+/// Copying either spelling would fail against, or silently become, the
+/// other. A folder that keeps the spellings apart takes them
+/// as they are, so a case-only rename on a Mac reaches a byte-exact server
+/// as an archive and a copy. Folders that clash block what is inside them,
+/// like any folder conflict.
+///
+/// ```text
+/// A ignores case, B keeps spellings apart
+/// A: Report.txt  B: report.txt  each would be copied to A as one file: conflict
+/// A: report.txt  B: Report.txt  A renamed it: B archives Report.txt, copies
+///                               report.txt
+/// ```
+fn mark_name_clashes(
+    rows: &mut [PlanRow],
+    [left, right]: [&BTreeMap<SyncPath, EntryVersion>; 2],
+    left_names: NameMatching,
+    right_names: NameMatching,
+    control: &mut impl FnMut() -> ScanControl,
+) -> Result<(), PlanError> {
+    let loose = left_names.either(right_names);
+    if loose == NameMatching::EXACT {
+        return Ok(());
+    }
+    let mut keys: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        check_control(control)?;
+        keys.entry(name_key(row.path.as_bytes(), loose))
+            .or_default()
+            .push(index);
+    }
+    let mut clashes = Vec::new();
+    for group in keys.into_values().filter(|group| group.len() > 1) {
+        for (side, names, present) in [
+            (Side::Left, left_names, left),
+            (Side::Right, right_names, right),
+        ] {
+            // Spellings this folder stores as one file.
+            let mut same: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
+            for &index in &group {
+                check_control(control)?;
+                same.entry(name_key(rows[index].path.as_bytes(), names))
+                    .or_default()
+                    .push(index);
+            }
+            // One write is safe while no other spelling stays there; two
+            // writes, or a write beside a spelling that stays, meet.
+            for spellings in same.into_values().filter(|spellings| spellings.len() > 1) {
+                let (writes, untouched): (Vec<usize>, Vec<usize>) = spellings
+                    .iter()
+                    .partition(|&&index| writes_on(&rows[index].decision, side));
+                let stays = untouched
+                    .iter()
+                    .any(|&index| present.contains_key(&rows[index].path));
+                if writes.len() > 1 || (!writes.is_empty() && stays) {
+                    clashes.extend(spellings);
+                }
+            }
+        }
+    }
+    for index in clashes {
+        rows[index].decision =
+            CandidateDecision::Entry(EntryDecision::Conflict(ConflictKind::NameClash));
+    }
+    Ok(())
+}
+
+/// Whether `decision` writes or archives on `side`.
+fn writes_on(decision: &CandidateDecision, side: Side) -> bool {
+    match decision {
+        CandidateDecision::Entry(EntryDecision::Propagate { from, .. }) => from.other() == side,
+        CandidateDecision::Entry(EntryDecision::Archive { on }) => *on == side,
+        _ => false,
+    }
+}
+
+/// The bytes two names share when `names` treats them as one: composed
+/// Unicode (NFC) where normalization is ignored, lower case where case is.
+/// Names that are not UTF-8 compare as bytes, ASCII case folded.
+fn name_key(path: &[u8], names: NameMatching) -> Vec<u8> {
+    let insensitive = names.case() == CaseMatching::Insensitive;
+    let Ok(text) = std::str::from_utf8(path) else {
+        return if insensitive {
+            path.to_ascii_lowercase()
+        } else {
+            path.to_vec()
+        };
+    };
+    let text: String = match names.unicode() {
+        UnicodeMatching::Normalized => text.nfc().collect(),
+        UnicodeMatching::Exact => text.to_owned(),
+    };
+    if insensitive {
+        text.to_lowercase().into_bytes()
+    } else {
+        text.into_bytes()
+    }
+}
+
 /// The side a person chose for this folder, present on one side only,
 /// while both sides still match what they saw.
 fn folder_choice(
@@ -207,15 +310,27 @@ pub fn plan_candidates(
     right: &BTreeMap<SyncPath, EntryVersion>,
     control: &mut impl FnMut() -> ScanControl,
 ) -> Result<CandidatePlan, PlanError> {
-    plan_resolved(
-        mode,
-        base,
-        left,
-        right,
-        &BTreeMap::new(),
-        &BTreeMap::new(),
-        control,
-    )
+    plan_resolved(mode, base, left, right, &Choices::NONE, control)
+}
+
+/// What a person chose, and how the folders compare names, for planning.
+pub struct Choices<'a> {
+    /// The side kept for a change or conflict.
+    pub resolutions: &'a BTreeMap<SyncPath, Resolution>,
+    /// Changes left alone in this run.
+    pub skips: &'a BTreeMap<SyncPath, Skip>,
+    /// How each folder compares names.
+    pub left_names: NameMatching,
+    pub right_names: NameMatching,
+}
+
+impl Choices<'static> {
+    const NONE: Self = Self {
+        resolutions: &BTreeMap::new(),
+        skips: &BTreeMap::new(),
+        left_names: NameMatching::EXACT,
+        right_names: NameMatching::EXACT,
+    };
 }
 
 /// `plan_candidates`, with the side a person chose for a change or conflict
@@ -226,10 +341,15 @@ pub fn plan_resolved(
     base: &BTreeMap<SyncPath, BaselineEntry>,
     left: &BTreeMap<SyncPath, EntryVersion>,
     right: &BTreeMap<SyncPath, EntryVersion>,
-    resolutions: &BTreeMap<SyncPath, Resolution>,
-    skips: &BTreeMap<SyncPath, Skip>,
+    choices: &Choices<'_>,
     control: &mut impl FnMut() -> ScanControl,
 ) -> Result<CandidatePlan, PlanError> {
+    let Choices {
+        resolutions,
+        skips,
+        left_names,
+        right_names,
+    } = *choices;
     validate_tree(base, TreeRole::Base, |entry| entry.left().kind(), control)?;
     validate_tree(left, TreeRole::Left, |entry| entry.kind(), control)?;
     validate_tree(right, TreeRole::Right, |entry| entry.kind(), control)?;
@@ -308,6 +428,7 @@ pub fn plan_resolved(
 
     settle_folder_choices(&mut rows, base, left, right, resolutions, control)?;
     skip_branches(&mut rows, left, right, skips, control)?;
+    mark_name_clashes(&mut rows, [left, right], left_names, right_names, control)?;
 
     // Ancestors precede descendants. Suppression therefore propagates an outer
     // conflict through the whole branch without recursive traversal.
@@ -742,5 +863,167 @@ mod tests {
                 change: ChangeKind::Create
             })));
         eprintln!("500,000 candidate paths in {elapsed:?}");
+    }
+
+    /// Both folders compare names as `names`.
+    fn plan_with_names(
+        left: &BTreeMap<SyncPath, EntryVersion>,
+        right: &BTreeMap<SyncPath, EntryVersion>,
+        names: NameMatching,
+    ) -> Vec<(SyncPath, CandidateDecision)> {
+        plan_between(&BTreeMap::new(), left, right, [names, names])
+    }
+
+    fn plan_between(
+        base: &BTreeMap<SyncPath, BaselineEntry>,
+        left: &BTreeMap<SyncPath, EntryVersion>,
+        right: &BTreeMap<SyncPath, EntryVersion>,
+        [left_names, right_names]: [NameMatching; 2],
+    ) -> Vec<(SyncPath, CandidateDecision)> {
+        let choices = Choices {
+            resolutions: &BTreeMap::new(),
+            skips: &BTreeMap::new(),
+            left_names,
+            right_names,
+        };
+        plan_resolved(SyncMode::Sync, base, left, right, &choices, &mut || {
+            ScanControl::Continue
+        })
+        .unwrap()
+        .rows()
+        .iter()
+        .map(|row| (row.path().clone(), row.decision().clone()))
+        .collect()
+    }
+
+    const CLASH: CandidateDecision =
+        CandidateDecision::Entry(EntryDecision::Conflict(ConflictKind::NameClash));
+
+    #[test]
+    fn names_one_folder_stores_as_one_file_are_a_conflict_not_two_copies() {
+        let insensitive = NameMatching::new(CaseMatching::Insensitive, UnicodeMatching::Normalized);
+        let left = tree(&[(b"Report.txt", file(1)), (b"cafe\xcc\x81", file(2))]);
+        let right = tree(&[(b"report.txt", file(3)), (b"caf\xc3\xa9", file(4))]);
+
+        let rows = plan_with_names(&left, &right, insensitive);
+        assert!(
+            rows.iter().all(|(_, decision)| *decision == CLASH),
+            "{rows:?}"
+        );
+        assert_eq!(rows.len(), 4);
+
+        // Byte-exact folders keep all four as separate files.
+        let rows = plan_with_names(&left, &right, NameMatching::EXACT);
+        assert!(rows.iter().all(|(_, decision)| *decision != CLASH));
+    }
+
+    #[test]
+    fn a_clashing_folder_blocks_what_is_inside_it() {
+        let insensitive = NameMatching::new(CaseMatching::Insensitive, UnicodeMatching::Exact);
+        let left = tree(&[(b"Photos", directory()), (b"Photos/a", file(1))]);
+        let right = tree(&[(b"photos", directory()), (b"photos/b", file(2))]);
+
+        let rows = plan_with_names(&left, &right, insensitive);
+        let decision = |name: &[u8]| {
+            rows.iter()
+                .find(|(path, _)| path.as_bytes() == name)
+                .unwrap()
+                .1
+                .clone()
+        };
+        assert_eq!(decision(b"Photos"), CLASH);
+        assert_eq!(decision(b"photos"), CLASH);
+        assert_eq!(
+            decision(b"Photos/a"),
+            CandidateDecision::BlockedByAncestor(path(b"Photos"))
+        );
+        assert_eq!(
+            decision(b"photos/b"),
+            CandidateDecision::BlockedByAncestor(path(b"photos"))
+        );
+    }
+
+    /// Review: a case-only rename on a Mac wedged its pair with a server
+    /// that keeps both spellings apart, though that server can take the
+    /// rename as an archive and a copy.
+    #[test]
+    fn a_case_only_rename_syncs_where_the_target_keeps_spellings_apart() {
+        let insensitive = NameMatching::new(CaseMatching::Insensitive, UnicodeMatching::Normalized);
+        let base = BTreeMap::from([(
+            path(b"Report.txt"),
+            BaselineEntry::new(file(1), file(1)).unwrap(),
+        )]);
+        let left = tree(&[(b"report.txt", file(1))]);
+        let right = tree(&[(b"Report.txt", file(1))]);
+        let rows = plan_between(&base, &left, &right, [insensitive, NameMatching::EXACT]);
+        assert_eq!(
+            rows,
+            [
+                (
+                    path(b"Report.txt"),
+                    CandidateDecision::Entry(EntryDecision::Archive { on: Side::Right })
+                ),
+                (
+                    path(b"report.txt"),
+                    CandidateDecision::Entry(EntryDecision::Propagate {
+                        from: Side::Left,
+                        change: ChangeKind::Create
+                    })
+                ),
+            ]
+        );
+
+        // Two Macs: the copy would land on the file being archived.
+        let rows = plan_between(&base, &left, &right, [insensitive, insensitive]);
+        assert!(
+            rows.iter().all(|(_, decision)| *decision == CLASH),
+            "{rows:?}"
+        );
+
+        // Renamed on the server instead: the Mac would be written.
+        let rows = plan_between(&base, &left, &right, [NameMatching::EXACT, insensitive]);
+        assert!(
+            rows.iter().all(|(_, decision)| *decision == CLASH),
+            "{rows:?}"
+        );
+    }
+
+    /// Review: a spelling deleted on a Mac and a new one created on a
+    /// byte-exact server never meet on either side, so they sync.
+    #[test]
+    fn a_write_meets_no_clash_where_the_other_spelling_is_gone() {
+        let insensitive = NameMatching::new(CaseMatching::Insensitive, UnicodeMatching::Normalized);
+        let base = BTreeMap::from([(
+            path(b"Report.txt"),
+            BaselineEntry::new(file(1), file(1)).unwrap(),
+        )]);
+        let left = tree(&[]);
+        let right = tree(&[(b"Report.txt", file(1)), (b"report.txt", file(2))]);
+        let rows = plan_between(&base, &left, &right, [insensitive, NameMatching::EXACT]);
+        assert_eq!(
+            rows,
+            [
+                (
+                    path(b"Report.txt"),
+                    CandidateDecision::Entry(EntryDecision::Archive { on: Side::Right })
+                ),
+                (
+                    path(b"report.txt"),
+                    CandidateDecision::Entry(EntryDecision::Propagate {
+                        from: Side::Right,
+                        change: ChangeKind::Create
+                    })
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn case_only_matching_keeps_unicode_spellings_apart() {
+        let case_only = NameMatching::new(CaseMatching::Insensitive, UnicodeMatching::Exact);
+        let left = tree(&[(b"cafe\xcc\x81", file(1))]);
+        let right = tree(&[(b"caf\xc3\xa9", file(2))]);
+        let rows = plan_with_names(&left, &right, case_only);
+        assert!(rows.iter().all(|(_, decision)| *decision != CLASH));
     }
 }

@@ -369,10 +369,11 @@ struct PairSyncViewModel {
     }
 
     /// Changes a person can steer; blocked items wait for the conflict
-    /// above them, and kept ones change nothing.
+    /// above them, kept ones change nothing, and a name clash needs a
+    /// rename.
     static func choosable(_ action: ChangeAction) -> Bool {
         switch action {
-        case .blocked, .keep: false
+        case .blocked, .keep, .conflict(.nameClash): false
         default: true
         }
     }
@@ -512,6 +513,7 @@ struct PairSyncViewModel {
         case .conflict(.deletedVersusEdited): String(localized: "Conflict: deleted in one folder, changed in the other")
         case .conflict(.typeMismatch): String(localized: "Conflict: a file in one folder, a folder in the other")
         case .conflict(.metadataOnly): String(localized: "Conflict: different metadata in both folders")
+        case .conflict(.nameClash): String(localized: "Conflict: another item's name differs only in case or accents; rename one")
         case .blocked: String(localized: "Waiting on a conflict in an enclosing folder")
         case .keep: String(localized: "Left as it is")
         }

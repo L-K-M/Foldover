@@ -30,7 +30,7 @@ use foldover_types::{
 };
 
 use crate::{
-    CandidateDecision, CandidatePlan, DeletionCounts, DeletionReview, PlanError, PlanRow,
+    CandidateDecision, CandidatePlan, Choices, DeletionCounts, DeletionReview, PlanError, PlanRow,
     RunContext, plan_resolved,
 };
 
@@ -320,6 +320,7 @@ impl Preview {
                         ConflictKind::DeletedVersusEdited => 1,
                         ConflictKind::TypeMismatch => 2,
                         ConflictKind::MetadataOnly => 3,
+                        ConflictKind::NameClash => 4,
                     }]);
                 }
                 Action::Blocked => {
@@ -604,13 +605,18 @@ impl PairRun {
         for path in &skipped {
             base.remove(path);
         }
+        let choices = Choices {
+            resolutions: &resolutions,
+            skips: &skips,
+            left_names: endpoints.endpoint(Side::Left).name_matching(),
+            right_names: endpoints.endpoint(Side::Right).name_matching(),
+        };
         let plan = plan_resolved(
             draft.mode(),
             &base,
             &left.versions(),
             &right.versions(),
-            &resolutions,
-            &skips,
+            &choices,
             control,
         )
         .map_err(|error| match error {

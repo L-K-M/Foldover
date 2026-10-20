@@ -27,6 +27,7 @@ pub enum SyncConflictKind {
     DeletedVersusEdited,
     TypeMismatch,
     MetadataOnly,
+    NameClash,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -467,6 +468,7 @@ impl From<SyncAction> for SyncChangeKind {
                     SyncConflict::DeletedVersusEdited => SyncConflictKind::DeletedVersusEdited,
                     SyncConflict::TypeMismatch => SyncConflictKind::TypeMismatch,
                     SyncConflict::MetadataOnly => SyncConflictKind::MetadataOnly,
+                    SyncConflict::NameClash => SyncConflictKind::NameClash,
                 },
             },
             SyncAction::Blocked => Self::Blocked,

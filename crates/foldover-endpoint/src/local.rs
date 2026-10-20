@@ -15,8 +15,14 @@ use foldover_fs::{
     DataResidency, DirectoryEntry, DirectoryScope, EntryMetadata, ExtendedMetadata, FileIdentity,
     FilesystemFeatures, HashError, MetadataReadError, NodeKind, Root, RootRelation,
 };
+#[cfg(target_os = "macos")]
+use foldover_fs::{DeclaredSupport, FilesystemFeature};
 pub use foldover_types::ScanControl;
-use foldover_types::{Digest, EntryVersion, InvalidSyncPath, MetadataPolicy, SyncPath};
+#[cfg(target_os = "macos")]
+use foldover_types::{CaseMatching, UnicodeMatching};
+use foldover_types::{
+    Digest, EntryVersion, InvalidSyncPath, MetadataPolicy, NameMatching, SyncPath,
+};
 
 use version::{Attribute, Observed, Payload, entry_version, metadata_version};
 
@@ -345,6 +351,25 @@ impl LocalEndpoint {
     /// Bytes an unprivileged writer can still use on the root's volume.
     pub fn available_space(&self) -> Result<u64, ScanError> {
         at(&None, self.root.available_space())
+    }
+
+    /// How this root's filesystem compares names. macOS volumes ignore
+    /// Unicode normalization, and most ignore case; a volume that does not
+    /// say counts as ignoring case, which flags more clashes, never fewer.
+    pub fn name_matching(&self) -> NameMatching {
+        #[cfg(target_os = "macos")]
+        {
+            let case = match self
+                .filesystem_features()
+                .map(|features| features.support(FilesystemFeature::CaseSensitiveNames))
+            {
+                Ok(DeclaredSupport::Supported) => CaseMatching::Exact,
+                _ => CaseMatching::Insensitive,
+            };
+            NameMatching::new(case, UnicodeMatching::Normalized)
+        }
+        #[cfg(not(target_os = "macos"))]
+        NameMatching::EXACT
     }
 
     pub fn filesystem_features(&self) -> Result<FilesystemFeatures, ScanError> {
