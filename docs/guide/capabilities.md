@@ -11,22 +11,27 @@ A pair joins two folders. Each side can be:
   [ADR 0005](../adr/0005-metadata-fidelity.md)).
 - **SFTP folder**: a folder on a server Foldover reaches through OpenSSH
   ([ADR 0028](../adr/0028-sftp-endpoints.md)).
+- **Another Mac's folder**: a folder a paired Mac running Foldover shares
+  with yours, written `peer://<device>/<share>` and chosen with
+  Another Mac… in the pair editor
+  ([ADR 0031](../adr/0031-mac-to-mac.md)).
 
-| | Local folder | Mounted share | SFTP folder | Source |
-|---|---|---|---|---|
-| File content | Data and resource fork synced; a fork change is a content change | Same code path; what the share keeps depends on its filesystem | Data only; a file with a resource fork fails the copy | [0018](../adr/0018-local-entry-versions.md), [0028](../adr/0028-sftp-endpoints.md), [0005](../adr/0005-metadata-fidelity.md) |
-| Modification times | File times synced; folder and link times never | Same code path; precision is whatever the filesystem stores | File times only, in whole seconds | [0018](../adr/0018-local-entry-versions.md), [0028](../adr/0028-sftp-endpoints.md) |
-| Permissions and ACLs | Mode bits and the macOS ACL when you enable Permissions; a file's executable bit always follows the source | Same code path; fidelity depends on the share | Mode bits only; ACLs are not synced | [0018](../adr/0018-local-entry-versions.md), [0019](../adr/0019-local-write-primitives.md), [0028](../adr/0028-sftp-endpoints.md) |
-| Extended attributes | Synced by default: tags, Finder info, comments, quarantine, hidden and no-dump flags | Same code path; many share filesystems cannot store macOS attributes | Not synced | [0016](../adr/0016-local-extended-metadata.md), [0018](../adr/0018-local-entry-versions.md), [0028](../adr/0028-sftp-endpoints.md) |
-| Lock and append-only flags | Never synced or written | Never synced or written | Never synced or written | [0018](../adr/0018-local-entry-versions.md), [0019](../adr/0019-local-write-primitives.md) |
-| Symlinks | Copied as links; the target is never followed | Same code path | Copied as links; tested against OpenSSH's server only | [0018](../adr/0018-local-entry-versions.md), [0028](../adr/0028-sftp-endpoints.md) |
-| Hard links | Each path arrives as an independent file; link counts are never tracked | Same | Same | [0018](../adr/0018-local-entry-versions.md) |
-| Empty folders | Created on the other side | Same | Same | [0019](../adr/0019-local-write-primitives.md), [0028](../adr/0028-sftp-endpoints.md) |
-| Archive and Put Back | Replaced and removed items go to `.foldover/archive/<run>/` for 30 days; Put Back restores without replacing | Same | Same | [0020](../adr/0020-run-execution.md), [0025](../adr/0025-archive-browser.md), [0028](../adr/0028-sftp-endpoints.md) |
-| Undo | Reverses the newest run that wrote; metadata-only changes are not undone | Same | Same | [0029](../adr/0029-undo.md) |
-| Change detection | FSEvents hints plus a full check every run; hourly verification on "When files change" | FSEvents reports only this Mac's writes; other computers' writes are found by the hourly check or your interval | No notifications; hourly verification on "When files change" | [0002](../adr/0002-change-detection.md), [0022](../adr/0022-scheduled-runs.md), [0028](../adr/0028-sftp-endpoints.md) |
-| Durability | Standard (`fsync`) or Full (`F_FULLFSYNC`, slower, also survives power loss) | Same settings; the guarantee is limited to what the mounted filesystem honors | Standard only; Full is rejected when you save the pair | [0019](../adr/0019-local-write-primitives.md), [0028](../adr/0028-sftp-endpoints.md) |
-| Identity checks | First sync writes `.foldover/id`; later runs stop if it is missing or different | Same | Same | [0020](../adr/0020-run-execution.md), [0028](../adr/0028-sftp-endpoints.md) |
+| | Local folder | Mounted share | SFTP folder | Another Mac's folder | Source |
+|---|---|---|---|---|---|
+| File content | Data and resource fork synced; a fork change is a content change | Same code path; what the share keeps depends on its filesystem | Data only; a file with a resource fork fails the copy | Data and resource fork carried with copies; writes run through the sharing Mac's local endpoint | [0018](../adr/0018-local-entry-versions.md), [0028](../adr/0028-sftp-endpoints.md), [0005](../adr/0005-metadata-fidelity.md), [0031](../adr/0031-mac-to-mac.md) |
+| Modification times | File times synced; folder and link times never | Same code path; precision is whatever the filesystem stores | File times only, in whole seconds | File times carried with copies; folder and link times never | [0018](../adr/0018-local-entry-versions.md), [0028](../adr/0028-sftp-endpoints.md), [0031](../adr/0031-mac-to-mac.md) |
+| Permissions and ACLs | Mode bits and the macOS ACL when you enable Permissions; a file's executable bit always follows the source | Same code path; fidelity depends on the share | Mode bits only; ACLs are not synced | Mode bits carried; ACLs do not travel yet | [0018](../adr/0018-local-entry-versions.md), [0019](../adr/0019-local-write-primitives.md), [0028](../adr/0028-sftp-endpoints.md), [0031](../adr/0031-mac-to-mac.md) |
+| Extended attributes | Synced by default: tags, Finder info, comments, quarantine, hidden and no-dump flags | Same code path; many share filesystems cannot store macOS attributes | Not synced | The attributes the pair syncs travel, at most 2 MiB per entry | [0016](../adr/0016-local-extended-metadata.md), [0018](../adr/0018-local-entry-versions.md), [0028](../adr/0028-sftp-endpoints.md), [0031](../adr/0031-mac-to-mac.md) |
+| Lock and append-only flags | Never synced or written | Never synced or written | Never synced or written | User flags travel; the receiving Mac writes only what it would sync itself | [0018](../adr/0018-local-entry-versions.md), [0019](../adr/0019-local-write-primitives.md), [0031](../adr/0031-mac-to-mac.md) |
+| Symlinks | Copied as links; the target is never followed | Same code path | Copied as links; tested against OpenSSH's server only | Copied as links; the target is read from the sharing Mac | [0018](../adr/0018-local-entry-versions.md), [0028](../adr/0028-sftp-endpoints.md), [0031](../adr/0031-mac-to-mac.md) |
+| Hard links | Each path arrives as an independent file; link counts are never tracked | Same | Same | Same | [0018](../adr/0018-local-entry-versions.md) |
+| Empty folders | Created on the other side | Same | Same | Same | [0019](../adr/0019-local-write-primitives.md), [0028](../adr/0028-sftp-endpoints.md), [0031](../adr/0031-mac-to-mac.md) |
+| Archive and Put Back | Replaced and removed items go to `.foldover/archive/<run>/` for 30 days; Put Back restores without replacing | Same | Same | Same; the archive lives on the sharing Mac | [0020](../adr/0020-run-execution.md), [0025](../adr/0025-archive-browser.md), [0028](../adr/0028-sftp-endpoints.md), [0031](../adr/0031-mac-to-mac.md) |
+| Undo | Reverses the newest run that wrote; metadata-only changes are not undone | Same | Same | Same | [0029](../adr/0029-undo.md) |
+| Change detection | FSEvents hints plus a full check every run; hourly verification on "When files change" | FSEvents reports only this Mac's writes; other computers' writes are found by the hourly check or your interval | No notifications; hourly verification on "When files change" | The sharing Mac reports changes; a report broken for 30 seconds is asked again and its next answer counts as a change; hourly verification on "When files change" | [0002](../adr/0002-change-detection.md), [0022](../adr/0022-scheduled-runs.md), [0028](../adr/0028-sftp-endpoints.md), [0031](../adr/0031-mac-to-mac.md) |
+| Durability | Standard (`fsync`) or Full (`F_FULLFSYNC`, slower, also survives power loss) | Same settings; the guarantee is limited to what the mounted filesystem honors | Standard only; Full is rejected when you save the pair | Same settings; the sharing Mac's filesystem applies them | [0019](../adr/0019-local-write-primitives.md), [0028](../adr/0028-sftp-endpoints.md), [0031](../adr/0031-mac-to-mac.md) |
+| Identity checks | First sync writes `.foldover/id`; later runs stop if it is missing or different | Same | Same | Same | [0020](../adr/0020-run-execution.md), [0028](../adr/0028-sftp-endpoints.md), [0031](../adr/0031-mac-to-mac.md) |
+| Resumed copies | A copy that broke off after at least 16 MiB resumes where it stopped | Same code path | Starts over | Resumes on the paired Mac's folder | [0034](../adr/0034-resumed-transfers.md) |
 
 ## Notes
 
@@ -52,3 +57,15 @@ A pair joins two folders. Each side can be:
   observation; interval schedules and the hourly check cover what events
   miss ([ADR 0002](../adr/0002-change-detection.md),
   [ADR 0022](../adr/0022-scheduled-runs.md)).
+- **Another Mac's folder needs pairing.** Pair two Macs in
+  Settings › Mac-to-Mac: allow pairing on one, pick the other from the
+  Macs found on your network, and confirm the same six-digit code on
+  both. Share a folder with a paired Mac there; the pair editor lists
+  what each paired Mac shares with yours under Another Mac…, and the
+  chosen folder reads as "Studio › Photos"
+  ([ADR 0031](../adr/0031-mac-to-mac.md)).
+- **Broken-off copies resume by content.** A folder keeps what arrived
+  of a copy that failed after at least 16 MiB, and the next copy of the
+  same content sends only the rest. An edited source starts over and its
+  stale partial is pruned with the archive; a copy into an SFTP folder
+  always starts over ([ADR 0034](../adr/0034-resumed-transfers.md)).

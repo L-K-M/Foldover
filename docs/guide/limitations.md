@@ -22,10 +22,64 @@ What you need to know before trusting a pair with your data.
   unmounted disk does not look like a mass deletion
   ([ADR 0020](../adr/0020-run-execution.md)). A folder you cannot write
   to cannot hold this file, so read-only folders cannot sync.
+- **Canary file.** A pair can name, in the editor, a file it must find
+  unchanged in both folders. If the canary is missing or changed on
+  either side, the sync stops before anything is written, which
+  catches a wrong folder or a disk that never mounted.
+  The check compares content only, so a re-touched file still passes,
+  and an edited canary blocks every run until it is put back
+  ([ADR 0033](../adr/0033-canary-file.md)).
 - **Stopped automatic runs wait for you.** An unattended run that needs
   your approval stays stopped until you sync by hand. The app notifies
   you while it is running; with the app closed, nothing alerts you
   ([ADR 0022](../adr/0022-scheduled-runs.md)).
+
+## Readiness warnings
+
+While you edit a pair, Foldover warns about sides that will not work as
+you might expect. Warnings never block saving
+([ADR 0037](../adr/0037-readiness-warnings.md)):
+
+- A folder another sync engine manages: iCloud Drive, Desktop &
+  Documents in iCloud, or a provider folder such as Dropbox.
+- A side that cannot keep the extended attributes you chose to sync; an
+  SFTP side always warns.
+- Two sides that compare names differently, one ignoring case and one
+  exact; such names become conflicts to rename.
+
+## Several Macs on one folder
+
+- **One sync at a time.** Every run holds a lease, the file
+  `.foldover/lock` inside each folder, from before its first write until
+  it ends, so two Macs never write the same folder at once. Undo takes
+  the same leases ([ADR 0032](../adr/0032-root-leases.md)).
+- **Waiting, then takeover.** A run that finds another Mac's live lease
+  waits with "Waiting for <Mac> to finish syncing these folders…" and
+  fails with "<Mac> is syncing this folder" after 150 seconds;
+  scheduled runs retry on their cadence. A Mac that crashed or slept
+  mid-sync holds its folders for up to two minutes; the next run waits
+  that out and takes over ([ADR 0032](../adr/0032-root-leases.md)).
+- After a takeover the old holder may still write for up to one beat,
+  15 seconds, before it stops; staged writes and archived replacements
+  keep that window recoverable ([ADR 0032](../adr/0032-root-leases.md)).
+- A run on an SFTP folder opens a second SSH connection for its leases,
+  and an SFTP server whose rename replaces an existing file breaks the
+  exclusive create: two Macs could both take a free lease
+  ([ADR 0032](../adr/0032-root-leases.md)).
+
+## Mac-to-Mac
+
+- **ACLs do not travel yet.** Extended attributes, resource forks and
+  file flags do, at most 2 MiB of attributes per entry
+  ([ADR 0031](../adr/0031-mac-to-mac.md)).
+- **Only the owner syncs.** The Mac that owns a pair reconciles it; the
+  other serves its shared folder, and the pair waits while the owner is
+  offline ([ADR 0031](../adr/0031-mac-to-mac.md)).
+- A copy between two Macs' folders relays through your Mac
+  ([ADR 0031](../adr/0031-mac-to-mac.md)).
+- Agents listen and advertise on IPv4 only. Where multicast is blocked,
+  pair by typing the other Mac's address and pairing port
+  ([ADR 0031](../adr/0031-mac-to-mac.md)).
 
 ## SFTP folders
 
@@ -104,6 +158,11 @@ What you need to know before trusting a pair with your data.
   previewed ([ADR 0023](../adr/0023-conflict-resolution.md)).
 - A file/folder type mismatch needs you to resolve it by hand
   ([ADR 0023](../adr/0023-conflict-resolution.md)).
+- **Name clashes.** Names that one folder would store as one file, such
+  as `Report.txt` and `report.txt` on a case-insensitive Mac volume,
+  are a conflict to rename; keeping a side, keeping both or skipping is
+  refused, and case folding approximates the filesystem's own tables
+  ([ADR 0030](../adr/0030-name-clashes.md)).
 
 ## What never syncs
 
@@ -128,28 +187,43 @@ What you need to know before trusting a pair with your data.
   ([ADR 0002](../adr/0002-change-detection.md)).
 - Schedule timers live in agent memory; restarting the agent restarts
   every interval ([ADR 0022](../adr/0022-scheduled-runs.md)).
+- **Daily schedules.** A pair can sync at a time of day on chosen
+  weekdays in the Mac's local time zone, like "Weekdays at 18:00" or
+  "Every day at 02:30". A schedule missed while the Mac slept or the
+  agent was off runs once when they are back, and the time follows
+  daylight saving ([ADR 0039](../adr/0039-calendar-schedules.md)).
+- **Automatic syncs wait in Low Power Mode** unless "Sync automatically
+  in Low Power Mode" is on in Settings. Pairs that reach a folder over
+  the network (SFTP, another Mac or a mounted share) also wait while
+  the network is expensive or Low Data Mode is on. Syncs you start
+  yourself always run, and held pairs run on the first tick after the
+  hold lifts ([ADR 0036](../adr/0036-environment-policy.md)).
+- A local folder Foldover once mounted from a share keeps counting as
+  network use until a sync observes it on plain disk again
+  ([ADR 0036](../adr/0036-environment-policy.md)).
+
+## Updates
+
+- **Check for Updates…** in the app menu. Updates arrive through Sparkle
+  and each must carry the release key's signature
+  ([ADR 0035](../adr/0035-sparkle-updates.md)).
+- Builds from before the release keys existed cannot update themselves;
+  download the next release by hand for those. Each update replaces the
+  app and its embedded agent together
+  ([ADR 0035](../adr/0035-sparkle-updates.md)).
 
 ## Not yet
 
 Planned in [PLAN.md](../../PLAN.md) but not implemented:
 
-- **Mac-to-Mac pairs.** There is no peer folder type; the README's
-  "Mac to Mac" highlight and the QUIC transport in `foldover-net` are
-  not wired into sync.
-- **Sparkle updates.** Builds update by downloading and re-running the
-  activation steps by hand.
+- **Name mapping between spellings.** Folders that compare names
+  differently turn clashing spellings into conflicts to rename; mapping
+  one spelling onto the other is not implemented, so two folders whose
+  files differ only in Unicode spelling show conflicts until one is
+  renamed ([ADR 0030](../adr/0030-name-clashes.md)).
 - **FSEvents replay after remount.** Replay is a hint only; a remount or
   a changed store identity forces a full rescan, and replay continuity
   is unproven ([ADR 0002](../adr/0002-change-detection.md)).
-- **Low Power Mode, battery and metered-network policy.** Scheduled runs
-  do not yet adapt to power or network state
-  ([PLAN.md](../../PLAN.md) section 3.5).
-- **Unicode and case-insensitive name matching.** Names are compared
-  byte-exact; NFC/NFD matching and name-collision handling on
-  case-insensitive volumes are unvalidated
-  ([ADR 0005](../adr/0005-metadata-fidelity.md)).
-- **Root leases.** Nothing stops two Macs' agents from syncing the same
-  share; Foldover has no multi-Mac lock on a folder.
 - **Per-volume capability probing.** Foldover does not yet test what a
   chosen folder can store before the first write; unsupported metadata
   fails the entry instead of being predicted

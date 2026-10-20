@@ -116,6 +116,16 @@ with a resource fork fails to copy. Change notifications do not exist,
 so "When files change" means an hourly check
 ([ADR 0028](../adr/0028-sftp-endpoints.md)).
 
+A large copy that breaks off resumes where it stopped when it lands in
+a local folder or on a paired Mac; a copy to an SFTP server starts
+over. Copies from an SFTP server read each file once instead of twice
+([ADR 0034](../adr/0034-resumed-transfers.md)).
+
+While you edit a pair, Foldover warns that an SFTP side cannot keep the
+extended attributes you chose to sync, and, between a Mac and an SFTP
+server, that the two sides compare names differently; warnings never
+block saving ([ADR 0037](../adr/0037-readiness-warnings.md)).
+
 ### Durability
 
 SFTP folders only offer Standard durability, which follows the server's
@@ -137,3 +147,12 @@ changes or guarantee a drive-cache flush
   server does not block the catalog. One folder written two ways, say
   with another user name or through `~`, is not caught as an overlap
   ([ADR 0028](../adr/0028-sftp-endpoints.md)).
+
+## Two Macs, one folder
+
+- Several Macs can sync the same share or server folder; one syncs at a
+  time. A run that finds another Mac's sync running waits with "Waiting
+  for <Mac> to finish syncing these folders…", and takes over from one
+  that stopped responding two minutes ago. See
+  [limitations](limitations.md) for the details
+  ([ADR 0032](../adr/0032-root-leases.md)).
