@@ -300,3 +300,92 @@ func monitorRefreshesTheAgentAndCatalogAfterTheFirstLoad() async {
     monitor.cancel()
     await monitor.value
 }
+
+/// Real folders and files under a fresh temporary directory, removed
+/// after the test; the drop helper checks the file system.
+private struct DropFixture {
+    let root: URL
+    let first: URL
+    let second: URL
+    let third: URL
+    let file: URL
+
+    init() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("foldover-drop-\(UUID().uuidString)", isDirectory: true)
+        first = root.appendingPathComponent("first", isDirectory: true)
+        second = root.appendingPathComponent("second", isDirectory: true)
+        third = root.appendingPathComponent("third", isDirectory: true)
+        file = root.appendingPathComponent("note.txt")
+        for folder in [first, second, third] {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+        try Data("x".utf8).write(to: file)
+    }
+
+    func clean() { try? FileManager.default.removeItem(at: root) }
+}
+
+@MainActor
+@Test
+func droppedFoldersKeepDirectoriesInOrderAndIgnoreTheRest() throws {
+    let fixture = try DropFixture()
+    defer { fixture.clean() }
+    let remote = try #require(URL(string: "sftp://nas.local/srv/photos"))
+
+    #expect(MainViewModel.droppedFolders([fixture.file, fixture.first, fixture.second, fixture.third])
+        == [fixture.first, fixture.second])
+    #expect(MainViewModel.droppedFolders([fixture.file]).isEmpty)
+    #expect(MainViewModel.droppedFolders([remote]).isEmpty)
+    #expect(MainViewModel.droppedFolders([fixture.first]).count == 1)
+}
+
+@MainActor
+@Test
+func droppingFoldersOpensANewPairWithThemInOrder() async throws {
+    let fixture = try DropFixture()
+    defer { fixture.clean() }
+    let viewModel = MainViewModel(
+        appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { "test" }),
+        pairs: PairStore(client: EmptyCatalogClient())
+    )
+    await viewModel.refreshAgent()
+
+    #expect(viewModel.newPair(dropping: [fixture.file, fixture.first, fixture.second]))
+    let editor = try #require(viewModel.editor)
+    #expect(editor.folderText(.left) == fixture.first.path)
+    #expect(editor.folderText(.right) == fixture.second.path)
+}
+
+@MainActor
+@Test
+func droppingOneFolderFillsOnlyFolderAAndFilesOpenNothing() async throws {
+    let fixture = try DropFixture()
+    defer { fixture.clean() }
+    let viewModel = MainViewModel(
+        appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { "test" }),
+        pairs: PairStore(client: EmptyCatalogClient())
+    )
+    await viewModel.refreshAgent()
+
+    #expect(viewModel.newPair(dropping: [fixture.first]))
+    let editor = try #require(viewModel.editor)
+    #expect(editor.folderText(.left) == fixture.first.path)
+    #expect(editor.folderText(.right) == "Choose a folder")
+
+    let empty = MainViewModel(
+        appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { "test" }),
+        pairs: PairStore(client: EmptyCatalogClient())
+    )
+    await empty.refreshAgent()
+    #expect(!empty.newPair(dropping: [fixture.file]))
+    #expect(empty.editor == nil)
+
+    // A disconnected agent rejects the drop like the New Pair button.
+    let offline = MainViewModel(
+        appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { throw SetupFixtureError.off }),
+        pairs: PairStore(client: EmptyCatalogClient())
+    )
+    #expect(!offline.newPair(dropping: [fixture.first]))
+    #expect(offline.editor == nil)
+}

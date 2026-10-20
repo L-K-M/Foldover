@@ -1,6 +1,7 @@
 // Pairs, their sync controls and background-agent status (PLAN.md §3.8).
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct MainView: View {
     @Bindable var viewModel: MainViewModel
@@ -38,6 +39,10 @@ struct MainView: View {
                 }
                 .padding()
             }
+            // Drag two folders in to create a pair (PLAN.md §3.8).
+            .dropDestination(for: URL.self) { urls, _ in
+                viewModel.newPair(dropping: urls)
+            }
         } detail: {
             if let pair = viewModel.selectedPair {
                 VStack(alignment: .leading, spacing: 16) {
@@ -56,11 +61,18 @@ struct MainView: View {
                 .textSelection(.enabled)
                 .padding(24)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            } else if viewModel.showsSetup {
-                SetupView(viewModel: viewModel)
             } else {
-                ContentUnavailableView(viewModel.detailTitle, systemImage: "folder.badge.plus",
-                    description: Text("Choose two folders and a sync mode, then preview and sync."))
+                Group {
+                    if viewModel.showsSetup {
+                        SetupView(viewModel: viewModel)
+                    } else {
+                        ContentUnavailableView(viewModel.detailTitle, systemImage: "folder.badge.plus",
+                            description: Text("Choose two folders and a sync mode, then preview and sync."))
+                    }
+                }
+                .dropDestination(for: URL.self) { urls, _ in
+                    viewModel.newPair(dropping: urls)
+                }
             }
         }
         .toolbar {

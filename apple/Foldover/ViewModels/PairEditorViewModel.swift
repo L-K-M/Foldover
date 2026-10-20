@@ -187,17 +187,115 @@ final class PairEditorViewModel: Identifiable {
         }
     }
 
+    /// Monday through Friday, the daily schedule titled "Weekdays".
+    private static let weekdays: Set<SyncDay> = [.monday, .tuesday, .wednesday, .thursday, .friday]
+
+    private static func timeText(_ minutes: Int) -> String {
+        String(format: "%02d:%02d", minutes / 60, minutes % 60)
+    }
+
     /// "Every day at 02:30", "Weekdays at 18:00" or "Mon, Wed, Fri at 07:15".
     private static func dailyTitle(minutes: Int, days: Set<SyncDay>) -> String {
-        let time = String(format: "%02d:%02d", minutes / 60, minutes % 60)
+        let time = timeText(minutes)
         if days.count == SyncDay.allCases.count {
             return String(localized: "Every day at \(time)")
         }
-        if days == Set([.monday, .tuesday, .wednesday, .thursday, .friday]) {
+        if days == weekdays {
             return String(localized: "Weekdays at \(time)")
         }
         let list = SyncDay.allCases.filter(days.contains).map(\.shortName).joined(separator: ", ")
         return String(localized: "\(list) at \(time)")
+    }
+
+    /// What the pair will do, in at most three short sentences that
+    /// rewrite themselves as the settings change (PLAN.md §3.8): the
+    /// direction, what happens to deleted files plus any unusual
+    /// choices, and when syncs run.
+    var planText: String {
+        let details = planDetails
+        var consequence = [Self.deletionClause(mode)]
+        consequence.append(contentsOf: details)
+        let joined = consequence.joined(separator: "; ")
+        let consequenceSentence = "\(joined.prefix(1).uppercased())\(joined.dropFirst())."
+        return [Self.directionSentence(mode), consequenceSentence, scheduleSentence]
+            .joined(separator: " ")
+    }
+
+    private static func directionSentence(_ mode: PairMode) -> String {
+        switch mode {
+        case .sync: String(localized: "Changes in either folder go to the other.")
+        case .mirrorLeft: String(localized: "Folder B is made identical to A.")
+        case .mirrorRight: String(localized: "Folder A is made identical to B.")
+        case .backupLeft: String(localized: "Folder A is copied to Folder B.")
+        case .backupRight: String(localized: "Folder B is copied to Folder A.")
+        }
+    }
+
+    private static func deletionClause(_ mode: PairMode) -> String {
+        switch mode {
+        case .sync: String(localized: "a file deleted in one folder is archived in the other")
+        case .mirrorLeft: String(localized: "files you delete in A are archived in B, never deleted")
+        case .mirrorRight: String(localized: "files you delete in B are archived in A, never deleted")
+        case .backupLeft: String(localized: "files you delete in A stay in B")
+        case .backupRight: String(localized: "files you delete in B stay in A")
+        }
+    }
+
+    /// When syncs run, from the schedule's own title; daily titles that
+    /// name weekdays keep their capitals.
+    private var scheduleSentence: String {
+        switch options.schedule {
+        case .manual:
+            return String(localized: "Syncs only when you click Sync Now.")
+        case .daily(let minutes, let days) where days.isEmpty:
+            return String(localized: "Syncs at \(Self.timeText(Int(minutes))) once you choose weekdays.")
+        case .daily(_, let days) where days.count != SyncDay.allCases.count && days != Self.weekdays:
+            return String(localized: "Syncs \(Self.scheduleTitle(options.schedule)).")
+        default:
+            let title = Self.scheduleTitle(options.schedule)
+            return String(localized: "Syncs \(title.prefix(1).lowercased())\(title.dropFirst()).")
+        }
+    }
+
+    /// Metadata choices that differ from the engine's defaults, the skip
+    /// rules and limits, and the canary, as clauses in the plan's second
+    /// sentence.
+    private var planDetails: [String] {
+        let defaults = PairOptions.defaults
+        var clauses: [String] = []
+        if options.syncPermissions != defaults.syncPermissions {
+            clauses.append(options.syncPermissions
+                ? String(localized: "permissions and access lists sync")
+                : String(localized: "permissions and access lists don't sync"))
+        }
+        if options.syncExtendedAttributes != defaults.syncExtendedAttributes {
+            clauses.append(options.syncExtendedAttributes
+                ? String(localized: "tags and other extended attributes sync")
+                : String(localized: "tags and other extended attributes don't sync"))
+        }
+        if options.syncModificationTimes != defaults.syncModificationTimes {
+            clauses.append(options.syncModificationTimes
+                ? String(localized: "modification dates sync")
+                : String(localized: "modification dates don't sync"))
+        }
+        var skipped: [String] = []
+        let rules = options.filters.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        if !rules.isEmpty {
+            skipped.append(String(localized: "\(rules.count) rules"))
+        }
+        if let sizeLimit = options.sizeLimit {
+            skipped.append(String(localized: "files larger than \(PairSyncViewModel.byteText(sizeLimit))"))
+        }
+        if let ageLimit = options.ageLimit {
+            skipped.append(String(localized: "files unchanged for more than \(ageLimit) days"))
+        }
+        if !skipped.isEmpty {
+            clauses.append(String(localized: "skipped: \(skipped.joined(separator: ", "))"))
+        }
+        if let canary = options.canary {
+            clauses.append(String(localized: "the canary file \(String(decoding: canary, as: UTF8.self)) must stay unchanged in both folders"))
+        }
+        return clauses
     }
 
     /// A daily schedule needs at least one weekday; the engine rejects an

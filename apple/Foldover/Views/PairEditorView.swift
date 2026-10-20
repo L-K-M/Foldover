@@ -115,6 +115,8 @@ struct PairEditorView: View {
                     Text("Automatic syncs start after the first sync you run yourself. They stop instead of asking when they would archive many items.")
                         .font(.callout).foregroundStyle(.secondary)
                 }
+                // The plan sentence rewrites itself as settings change (PLAN.md §3.8).
+                Text(viewModel.planText).foregroundStyle(.secondary)
                 Section("Durability") {
                     Picker("Write safety", selection: $viewModel.options.durability) {
                         ForEach(viewModel.durabilityChoices, id: \.self) { durability in
