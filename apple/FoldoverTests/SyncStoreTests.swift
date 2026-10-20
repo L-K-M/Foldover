@@ -1938,3 +1938,19 @@ func workingJobsShowLiveCountsWithoutCountingAsNewStates() async {
     await refresh.value
     #expect(viewModel.progressFraction == nil)
 }
+
+@Test
+func quickLookShowsTheFileAChangeWouldCopyOnlyWhereItIsOnThisMac() {
+    let local = PairSettings(name: "Docs", left: SelectedFolder(bytes: Data("/Users/a/Docs".utf8)),
+                             right: SelectedFolder(bytes: Data("sftp://nas/docs".utf8)),
+                             mode: pair().settings.mode, options: pair().settings.options)
+    let toServer = PlannedChange(path: Data("a/report.pdf".utf8), action: .copy(to: .b))
+    #expect(PairSyncViewModel.lookURL(toServer, settings: local)?.path == "/Users/a/Docs/a/report.pdf")
+    // The file a copy from the server would bring is not on this Mac yet.
+    let fromServer = PlannedChange(path: Data("b.txt".utf8), action: .copy(to: .a))
+    #expect(PairSyncViewModel.lookURL(fromServer, settings: local) == nil)
+    #expect(PairSyncViewModel.lookURL(PlannedChange(path: Data("c".utf8), action: .archive(on: .a)),
+                                      settings: local)?.lastPathComponent == "c")
+    #expect(PairSyncViewModel.lookURL(PlannedChange(path: Data("d".utf8), action: .blocked),
+                                      settings: local) == nil)
+}
