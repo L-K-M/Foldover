@@ -15,6 +15,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
@@ -129,6 +130,9 @@ pub struct PeerLink {
     host: Arc<dyn PeerHost>,
     /// Where blocking callers run their streams.
     runtime: Handle,
+    /// Set as the link goes away, so answers that wait on their own, such
+    /// as folder watches, stop before the runtime does.
+    closing: Arc<AtomicBool>,
 }
 
 /// How this Mac finds, and is found by, others on the network.
@@ -204,6 +208,7 @@ impl PeerLink {
             state: Mutex::default(),
             host,
             runtime: Handle::current(),
+            closing: Arc::default(),
         });
         link.announce();
         let answering = Arc::downgrade(&link);
@@ -617,6 +622,7 @@ impl PeerLink {
 
 impl Drop for PeerLink {
     fn drop(&mut self) {
+        self.closing.store(true, Ordering::Relaxed);
         let state = self.state.get_mut().unwrap_or_else(PoisonError::into_inner);
         if let Some(window) = state.window.take() {
             window.node.close();
@@ -755,14 +761,17 @@ async fn answer_one(
             return;
         }
     };
-    let Some((host, runtime)) = link
-        .upgrade()
-        .map(|link| (Arc::clone(&link.host), link.runtime.clone()))
-    else {
+    let Some((host, runtime, closing)) = link.upgrade().map(|link| {
+        (
+            Arc::clone(&link.host),
+            link.runtime.clone(),
+            Arc::clone(&link.closing),
+        )
+    }) else {
         return;
     };
     let answered = tokio::task::spawn_blocking(move || {
-        let mut answer = Answer::new(runtime, send, recv);
+        let mut answer = Answer::new(runtime, send, recv, closing);
         host.serve(device, request.call, &mut answer);
         answer.into_send()
     })

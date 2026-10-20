@@ -32,6 +32,8 @@ use crate::{
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
 /// How often a quiet watch says it is still there.
 const WATCH_HEARTBEAT: Duration = Duration::from_secs(60);
+/// How often a watch looks whether this Mac is shutting down.
+const WATCH_TICK: Duration = Duration::from_millis(250);
 /// How long a burst of changes may last before it is reported.
 const CHANGE_QUIET: Duration = Duration::from_millis(500);
 /// Longest label a kept copy's name may carry.
@@ -354,18 +356,29 @@ fn watch(root: &LocalRoot, answer: &mut Answer) {
     }
     let mut reply = PeerReply::Watching;
     loop {
-        if answer.reply(&reply).is_err() {
+        if answer.closing() || answer.reply(&reply).is_err() {
             return;
         }
-        reply = match changes.recv_timeout(WATCH_HEARTBEAT) {
-            Ok(()) => {
-                // One report per burst, e.g. a folder of files copied in.
-                std::thread::sleep(CHANGE_QUIET);
-                while changes.try_recv().is_ok() {}
-                PeerReply::Changed
+        let sent = Instant::now();
+        // Short waits, so this Mac shutting down never waits for the
+        // next heartbeat.
+        reply = loop {
+            if answer.closing() {
+                return;
             }
-            Err(RecvTimeoutError::Timeout) => PeerReply::Watching,
-            Err(RecvTimeoutError::Disconnected) => return,
+            match changes.recv_timeout(WATCH_TICK) {
+                Ok(()) => {
+                    // One report per burst, e.g. a folder of files copied in.
+                    std::thread::sleep(CHANGE_QUIET);
+                    while changes.try_recv().is_ok() {}
+                    break PeerReply::Changed;
+                }
+                Err(RecvTimeoutError::Timeout) if sent.elapsed() >= WATCH_HEARTBEAT => {
+                    break PeerReply::Watching;
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
         };
     }
 }
