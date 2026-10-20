@@ -14,6 +14,7 @@ pub struct HistoryRow {
     pub trigger: String,
     pub outcome: String,
     pub copied: i64,
+    pub moved: i64,
     pub updated: i64,
     pub archived: i64,
     pub recovered: i64,
@@ -42,8 +43,8 @@ impl Database {
             return Err(Error::PairNotFound);
         }
         transaction.execute(
-            "INSERT OR REPLACE INTO run_history (pair_id,started_ms,finished_ms,trigger,outcome,copied,updated,archived,recovered,conflicts,failures,archive,message)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            "INSERT OR REPLACE INTO run_history (pair_id,started_ms,finished_ms,trigger,outcome,copied,updated,archived,recovered,conflicts,failures,archive,message,moved)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             params![
                 pair,
                 row.started_ms,
@@ -57,7 +58,8 @@ impl Database {
                 row.conflicts,
                 row.failures,
                 row.archive,
-                row.message
+                row.message,
+                row.moved
             ],
         )?;
         transaction.execute(
@@ -73,7 +75,7 @@ impl Database {
     pub fn history(&self, pair: &[u8], limit: usize) -> Result<Vec<HistoryRow>, Error> {
         let limit = i64::try_from(limit).map_err(|_| Error::InvalidState("history limit"))?;
         let mut statement = self.connection.prepare(
-            "SELECT started_ms,finished_ms,trigger,outcome,copied,updated,archived,recovered,conflicts,failures,archive,message
+            "SELECT started_ms,finished_ms,trigger,outcome,copied,updated,archived,recovered,conflicts,failures,archive,message,moved
              FROM run_history WHERE pair_id=?1 ORDER BY started_ms DESC LIMIT ?2",
         )?;
         let rows = statement.query_map(params![pair, limit], |row| {
@@ -90,6 +92,7 @@ impl Database {
                 failures: row.get(9)?,
                 archive: row.get(10)?,
                 message: row.get(11)?,
+                moved: row.get(12)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -108,6 +111,7 @@ mod tests {
             trigger: "manual".into(),
             outcome: "completed".into(),
             copied: 1,
+            moved: 0,
             updated: 0,
             archived: 0,
             recovered: 0,

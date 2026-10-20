@@ -546,6 +546,33 @@ impl Root {
         Ok(())
     }
 
+    /// Move the file or link at `from`, which must still match `expected`,
+    /// to `to`, creating missing folders. Nothing at `to` is ever replaced.
+    pub fn move_entry(
+        &self,
+        from: &SyncPath,
+        expected: &EntryMetadata,
+        to: &SyncPath,
+        durability: Durability,
+    ) -> Result<(), WriteError> {
+        if expected.kind() == NodeKind::Directory {
+            return Err(WriteError::UnsupportedEntry);
+        }
+        let (parent, name) = self.parent_of(from)?;
+        if EntryMetadata::at(&parent, &name)? != *expected {
+            return Err(WriteError::Changed);
+        }
+        let (target, target_name) = self.create_parents(to, Parents::Default)?;
+        match rename::rename_exclusive(&parent, &name, &target, &target_name) {
+            Ok(()) => {}
+            Err(Errno::EXIST) => return Err(WriteError::Exists),
+            Err(error) => return Err(error.into()),
+        }
+        sync_directory(&target, durability)?;
+        sync_directory(&parent, durability)?;
+        Ok(())
+    }
+
     /// Move an archived entry back to `destination`, creating missing
     /// folders. Nothing at the destination is ever replaced.
     pub fn restore(

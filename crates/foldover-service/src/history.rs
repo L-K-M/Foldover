@@ -62,6 +62,7 @@ pub(crate) fn record(
         trigger,
         outcome,
         copied: 0,
+        moved: 0,
         updated: 0,
         archived: 0,
         recovered: 0,
@@ -78,6 +79,7 @@ pub(crate) fn record(
                 HistoryOutcome::Completed
             },
             copied: result.copied,
+            moved: result.moved,
             updated: result.updated,
             archived: result.archived,
             recovered: result.recovered,
@@ -133,6 +135,7 @@ fn wire(entry: &HistoryEntry) -> HistoryRecord {
             HistoryOutcome::Failed => foldover_proto::local::HistoryOutcome::Failed,
         },
         copied: entry.copied,
+        moved: entry.moved,
         updated: entry.updated,
         archived: entry.archived,
         recovered: entry.recovered,

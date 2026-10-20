@@ -24,6 +24,9 @@ enum ChangeAction: Equatable, Sendable {
     case conflict(ConflictReason)
     case blocked
     case keep
+    /// Renamed in `on` from `PlannedChange.movedFrom`: the other folder
+    /// moved it, so nothing is copied.
+    case move(on: FolderSide)
 }
 
 struct PlannedChange: Equatable, Sendable {
@@ -31,6 +34,8 @@ struct PlannedChange: Equatable, Sendable {
     let action: ChangeAction
     /// File data the change copies; 0 for everything else.
     var bytes: UInt64 = 0
+    /// For a move, where it comes from.
+    var movedFrom: Data? = nil
 }
 
 struct DeletionCheck: Equatable, Sendable {
@@ -58,8 +63,9 @@ struct PreviewSummary: Equatable, Sendable {
     /// The pair revision this plan was made for; a different current
     /// revision makes the plan obsolete.
     let pairRevision: UInt64
+    var moves: UInt64 = 0
 
-    var total: UInt64 { copies + updates + archives + conflicts + blocked + kept }
+    var total: UInt64 { copies + updates + archives + conflicts + blocked + kept + moves }
 }
 
 struct RunFailure: Equatable, Sendable {
@@ -77,6 +83,8 @@ struct RunSummary: Equatable, Sendable {
     let failures: [RunFailure]
     let failureCount: UInt64
     let archive: String
+    /// Files and links renamed for moves the other folder made.
+    var moved: UInt64 = 0
 }
 
 /// What undoing a pair's newest sync did.
@@ -100,6 +108,7 @@ enum ChangeFilter: CaseIterable, Hashable, Sendable {
     case updates
     case archives
     case conflicts
+    case moves
 }
 
 struct ChangePage: Equatable, Sendable {
@@ -145,6 +154,8 @@ struct RunRecord: Equatable, Sendable {
     let conflicts: UInt64
     let failures: UInt64
     let message: String?
+    /// Files and links renamed for moves the other folder made.
+    var moved: UInt64 = 0
 }
 
 enum SyncJob: Sendable {
@@ -262,13 +273,17 @@ private actor CoreSyncClient: SyncClient {
         case .updates: .update
         case .archives: .archive
         case .conflicts: .conflict
+        case .moves: .move
         case nil: nil
         }
         let page = try await FoldoverCore.syncChanges(
             id: id, after: after, filter: core, reviewToken: reviewToken
         )
         return ChangePage(
-            changes: page.changes.map { PlannedChange(path: $0.path, action: action($0.kind), bytes: $0.bytes) },
+            changes: page.changes.map {
+                PlannedChange(path: $0.path, action: action($0.kind), bytes: $0.bytes,
+                              movedFrom: $0.movedFrom)
+            },
             more: page.more
         )
     }
@@ -280,7 +295,7 @@ private actor CoreSyncClient: SyncClient {
                 trigger: trigger(entry.trigger), end: end(entry.outcome),
                 copied: entry.copied, updated: entry.updated, archived: entry.archived,
                 recovered: entry.recovered, conflicts: entry.conflicts, failures: entry.failures,
-                message: entry.message
+                message: entry.message, moved: entry.moved
             )
         }
     }
@@ -344,12 +359,14 @@ private actor CoreSyncClient: SyncClient {
     private func summary(_ preview: SyncPreviewSummary) -> PreviewSummary {
         PreviewSummary(
             changes: preview.changes.map {
-                PlannedChange(path: $0.path, action: action($0.kind), bytes: $0.bytes)
+                PlannedChange(path: $0.path, action: action($0.kind), bytes: $0.bytes,
+                              movedFrom: $0.movedFrom)
             },
             copies: preview.copies, updates: preview.updates, archives: preview.archives,
             conflicts: preview.conflicts, blocked: preview.blocked, kept: preview.kept,
             a: check(preview.left), b: check(preview.right), copyBytes: preview.copyBytes,
-            reviewToken: preview.reviewToken, pairRevision: preview.pairRevision
+            reviewToken: preview.reviewToken, pairRevision: preview.pairRevision,
+            moves: preview.moves
         )
     }
 
@@ -358,7 +375,7 @@ private actor CoreSyncClient: SyncClient {
             cancelled: result.cancelled, copied: result.copied, updated: result.updated,
             archived: result.archived, recovered: result.recovered, conflicts: result.conflicts,
             failures: result.failures.map { RunFailure(path: $0.path, message: $0.message) },
-            failureCount: result.failureCount, archive: result.archive
+            failureCount: result.failureCount, archive: result.archive, moved: result.moved
         )
     }
 
@@ -375,6 +392,7 @@ private actor CoreSyncClient: SyncClient {
         case .conflict(let reason): .conflict(conflict(reason))
         case .blocked: .blocked
         case .keep: .keep
+        case .move(let on): .move(on: side(on))
         }
     }
 

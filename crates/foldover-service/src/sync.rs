@@ -826,6 +826,7 @@ fn preview(preview: &Preview) -> SyncPreview {
             SyncAction::Conflict { .. } => counts.conflicts += 1,
             SyncAction::Blocked => counts.blocked += 1,
             SyncAction::Keep => counts.kept += 1,
+            SyncAction::Move { .. } => counts.moves += 1,
         }
         if items.len() < SYNC_ITEM_LIMIT {
             items.push(wire_item(item));
@@ -855,6 +856,7 @@ fn wire_item(item: &PreviewItem) -> SyncItem {
         path: item.path().as_bytes().to_vec(),
         action: action(item.action()),
         bytes: item.bytes(),
+        moved_from: item.moved_from().map(|path| path.as_bytes().to_vec()),
     }
 }
 
@@ -877,6 +879,7 @@ fn action(action: Action) -> SyncAction {
         },
         Action::Blocked => SyncAction::Blocked,
         Action::KeepTarget => SyncAction::Keep,
+        Action::Move { on } => SyncAction::Move { on: on.into() },
     }
 }
 
@@ -884,6 +887,7 @@ fn result(report: &RunReport) -> SyncResult {
     SyncResult {
         cancelled: report.completion() == Completion::Cancelled,
         copied: report.copied(),
+        moved: report.moved(),
         updated: report.updated(),
         archived: report.archived(),
         recovered: report.recovered(),

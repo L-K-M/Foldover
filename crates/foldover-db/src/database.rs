@@ -35,10 +35,10 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary, schedule_time, schedule_days, records";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 23] = [
+const MIGRATIONS: [&str; 24] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
     SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, SCHEMA_V15, SCHEMA_V16,
-    SCHEMA_V17, SCHEMA_V18, SCHEMA_V19, SCHEMA_V20, SCHEMA_V21, SCHEMA_V22, SCHEMA_V23,
+    SCHEMA_V17, SCHEMA_V18, SCHEMA_V19, SCHEMA_V20, SCHEMA_V21, SCHEMA_V22, SCHEMA_V23, SCHEMA_V24,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -351,6 +351,33 @@ CREATE TABLE watch_cursor (
 // hold them refuses, so the floor stays.
 const SCHEMA_V23: &str = "
 ALTER TABLE pair ADD COLUMN records TEXT NOT NULL DEFAULT 'both' CHECK(records IN ('both','source'));
+";
+
+// Moves (ADR 0042): a journal row can rename an entry back from `path` to
+// `source`, and history counts moves. Older readers cannot undo a move, so
+// the floor rises.
+const SCHEMA_V24: &str = "
+CREATE TABLE run_journal_next (
+    pair_id BLOB NOT NULL REFERENCES pair(id) ON DELETE CASCADE,
+    run TEXT NOT NULL CHECK(length(run) > 0),
+    seq INTEGER NOT NULL CHECK(seq >= 0),
+    path BLOB NOT NULL CHECK(length(path) > 0 AND substr(path,1,1) != x'2f' AND instr(path,x'00') = 0),
+    side TEXT NOT NULL CHECK(side IN ('left','right')),
+    action TEXT NOT NULL CHECK(action IN ('create','replace','metadata','archive','move')),
+    version BLOB NOT NULL,
+    base_left BLOB,
+    base_right BLOB,
+    source BLOB CHECK(source IS NULL OR (length(source) > 0 AND substr(source,1,1) != x'2f' AND instr(source,x'00') = 0)),
+    CHECK((base_left IS NULL) = (base_right IS NULL)),
+    CHECK((action = 'move') = (source IS NOT NULL)),
+    PRIMARY KEY (pair_id, run, seq)
+) STRICT, WITHOUT ROWID;
+INSERT INTO run_journal_next (pair_id,run,seq,path,side,action,version,base_left,base_right)
+    SELECT pair_id,run,seq,path,side,action,version,base_left,base_right FROM run_journal;
+DROP TABLE run_journal;
+ALTER TABLE run_journal_next RENAME TO run_journal;
+ALTER TABLE run_history ADD COLUMN moved INTEGER NOT NULL DEFAULT 0 CHECK(moved >= 0);
+UPDATE state_meta SET minimum_reader=max(minimum_reader,24) WHERE singleton=1;
 ";
 
 #[derive(Debug, thiserror::Error)]
@@ -1680,24 +1707,13 @@ pub(super) mod tests {
                 }],
             )
             .unwrap();
+        // The legacy schema has no move count, so the row goes in as such.
         legacy
-            .record_history(
-                &pair.id,
-                &HistoryRow {
-                    started_ms: 1,
-                    finished_ms: 2,
-                    trigger: "manual".into(),
-                    outcome: "completed".into(),
-                    copied: 3,
-                    updated: 4,
-                    archived: 5,
-                    recovered: 6,
-                    conflicts: 7,
-                    failures: 8,
-                    archive: Some("archive".into()),
-                    message: Some("Preserved history".into()),
-                },
-                100,
+            .connection
+            .execute(
+                "INSERT INTO run_history (pair_id,started_ms,finished_ms,trigger,outcome,copied,updated,archived,recovered,conflicts,failures,archive,message)
+                 VALUES (?1,1,2,'manual','completed',3,4,5,6,7,8,'archive','Preserved history')",
+                params![pair.id],
             )
             .unwrap();
         legacy
@@ -1744,10 +1760,9 @@ pub(super) mod tests {
         assert_eq!(minimum_reader(&legacy.connection), legacy_reader);
         drop(legacy);
 
-        // v21 raised the floor last; v22 and v23 only add a table and a
-        // column older readers ignore.
+        // v24 raised the floor last: older readers cannot undo a move.
         let mut database = Database::open(&location).unwrap();
-        assert_eq!(minimum_reader(&database.connection), 21);
+        assert_eq!(minimum_reader(&database.connection), 24);
         assert_eq!(
             database
                 .connection
@@ -1767,6 +1782,12 @@ pub(super) mod tests {
                         rusqlite::types::Value::Null,
                         rusqlite::types::Value::Text("both".into()),
                     ]);
+                }
+            }
+            if *table == "run_history" {
+                // V24's move count starts at zero.
+                for row in &mut expected {
+                    row.push(rusqlite::types::Value::Integer(0));
                 }
             }
             assert_eq!(

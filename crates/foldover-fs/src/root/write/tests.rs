@@ -205,6 +205,35 @@ fn folders_without_an_archive_delete_what_is_replaced_or_removed() {
 }
 
 #[test]
+fn moves_take_only_the_observed_entry_and_never_replace() {
+    let roots = roots();
+    let target = roots.target_directory.path();
+    fs::create_dir(target.join("new")).unwrap();
+    fs::write(target.join("old.txt"), b"moved").unwrap();
+    fs::write(target.join("taken.txt"), b"keep").unwrap();
+    let (old, moved, taken) = (path(b"old.txt"), path(b"new/moved.txt"), path(b"taken.txt"));
+    let observed = roots.target.metadata(&old).unwrap();
+
+    assert!(matches!(
+        roots.target.move_entry(&old, &observed, &taken, STANDARD),
+        Err(WriteError::Exists)
+    ));
+    fs::write(target.join("old.txt"), b"edited").unwrap();
+    assert!(matches!(
+        roots.target.move_entry(&old, &observed, &moved, STANDARD),
+        Err(WriteError::Changed)
+    ));
+    let observed = roots.target.metadata(&old).unwrap();
+    roots
+        .target
+        .move_entry(&old, &observed, &moved, STANDARD)
+        .unwrap();
+    assert_eq!(fs::read(target.join("new/moved.txt")).unwrap(), b"edited");
+    assert_eq!(fs::read(target.join("taken.txt")).unwrap(), b"keep");
+    assert!(!target.join("old.txt").exists());
+}
+
+#[test]
 fn replacing_a_missing_entry_fails_and_keeps_nothing() {
     let roots = roots();
     fs::write(roots._source_directory.path().join("file"), b"new").unwrap();

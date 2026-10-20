@@ -805,6 +805,7 @@ mod tests {
                 side: Side::Right,
                 action: JournalAction::Create(file(4, 4)),
                 before: None,
+                moved_from: None,
             },
             JournalEntry {
                 seq: 1,
@@ -812,6 +813,7 @@ mod tests {
                 side: Side::Left,
                 action: JournalAction::Replace(new.left()),
                 before: Some(old),
+                moved_from: None,
             },
             JournalEntry {
                 seq: 2,
@@ -819,6 +821,15 @@ mod tests {
                 side: Side::Right,
                 action: JournalAction::Archive(old.right()),
                 before: Some(old),
+                moved_from: None,
+            },
+            JournalEntry {
+                seq: 3,
+                path: path(b"moved/here"),
+                side: Side::Right,
+                action: JournalAction::Move(file(5, 5)),
+                before: Some(old),
+                moved_from: Some(path(b"was/there")),
             },
         ];
         store

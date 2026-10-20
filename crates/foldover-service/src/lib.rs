@@ -2654,6 +2654,7 @@ mod tests {
         SyncStatus::Finished {
             result: SyncResult {
                 cancelled: completion == Completion::Cancelled,
+                moved: 0,
                 copied: 0,
                 updated: 0,
                 archived: 0,

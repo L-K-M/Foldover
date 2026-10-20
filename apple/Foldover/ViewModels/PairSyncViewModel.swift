@@ -259,6 +259,7 @@ struct PairSyncViewModel {
         case .updates: String(localized: "Updates")
         case .archives: String(localized: "Archives")
         case .conflicts: String(localized: "Conflicts")
+        case .moves: String(localized: "Moves")
         }
     }
 
@@ -423,6 +424,8 @@ struct PairSyncViewModel {
         switch change.action {
         case .copy(let to), .update(let to): side = to == .a ? .b : .a
         case .archive(let on): side = on
+        // The moved file, where the other folder put it.
+        case .move(let on): side = on == .a ? .b : .a
         case .conflict: side = .a
         case .blocked, .keep: return nil
         }
@@ -447,7 +450,7 @@ struct PairSyncViewModel {
         case .archive(let on): String(localized: "Restore to \(folderName(on == .a ? .b : .a))")
         case .copy(let to): String(localized: "Archive in \(folderName(to == .a ? .b : .a))")
         case .update: String(localized: "Copy the Other Way")
-        case .conflict, .blocked, .keep: nil
+        case .conflict, .blocked, .keep, .move: nil
         }
     }
 
@@ -456,7 +459,7 @@ struct PairSyncViewModel {
     /// rename.
     static func choosable(_ action: ChangeAction) -> Bool {
         switch action {
-        case .blocked, .keep, .conflict(.nameClash): false
+        case .blocked, .keep, .move, .conflict(.nameClash): false
         default: true
         }
     }
@@ -466,7 +469,7 @@ struct PairSyncViewModel {
         switch action {
         case .copy(let to), .update(let to): to
         case .archive(let on): on
-        case .conflict, .blocked, .keep: nil
+        case .conflict, .blocked, .keep, .move: nil
         }
     }
 
@@ -511,6 +514,7 @@ struct PairSyncViewModel {
                 ? String(localized: "\(preview.copies) to copy (\(byteText(preview.copyBytes)))")
                 : String(localized: "\(preview.copies) to copy"))
         }
+        if preview.moves > 0 { parts.append(String(localized: "\(preview.moves) to move")) }
         if preview.updates > 0 { parts.append(String(localized: "\(preview.updates) metadata updates")) }
         if preview.archives > 0 { parts.append(String(localized: "\(preview.archives) to archive")) }
         if preview.conflicts > 0 { parts.append(String(localized: "\(preview.conflicts) conflicts")) }
@@ -523,6 +527,9 @@ struct PairSyncViewModel {
         var text = result.cancelled
             ? String(localized: "Sync cancelled after copying \(result.copied), updating \(result.updated) and archiving \(result.archived).")
             : String(localized: "Synced: copied \(result.copied), updated \(result.updated), archived \(result.archived).")
+        if result.moved > 0 {
+            text += " " + String(localized: "Moved \(result.moved) items the other folder moved.")
+        }
         if result.conflicts > 0 {
             text += " " + String(localized: "\(result.conflicts) conflicts were left untouched.")
         }
@@ -570,16 +577,20 @@ struct PairSyncViewModel {
         case .completed:
             break
         }
-        var text = run.copied + run.updated + run.archived == 0
+        var text = run.copied + run.updated + run.archived + run.moved == 0
             ? String(localized: "No changes.")
             : String(localized: "Copied \(run.copied), updated \(run.updated), archived \(run.archived).")
+        if run.moved > 0 { text += " " + String(localized: "Moved \(run.moved).") }
         if run.conflicts > 0 { text += " " + String(localized: "\(run.conflicts) conflicts.") }
         if run.failures > 0 { text += " " + String(localized: "\(run.failures) failed.") }
         return text
     }
 
     static func description(_ change: PlannedChange) -> String {
-        let action = description(change.action)
+        var action = description(change.action)
+        if let from = change.movedFrom {
+            action = String(localized: "\(action) from \(String(decoding: from, as: UTF8.self))")
+        }
         return change.bytes > 0 ? "\(action) · \(byteText(change.bytes))" : action
     }
 
@@ -599,6 +610,7 @@ struct PairSyncViewModel {
         case .conflict(.nameClash): String(localized: "Conflict: another item's name differs only in case or accents; rename one")
         case .blocked: String(localized: "Waiting on a conflict in an enclosing folder")
         case .keep: String(localized: "Left as it is")
+        case .move(let on): String(localized: "Move in \(folderName(on))")
         }
     }
 

@@ -1842,6 +1842,10 @@ public struct RunHistoryEntry: Equatable, Hashable {
     public var trigger: RunTriggerKind
     public var outcome: RunOutcomeKind
     public var copied: UInt64
+    /**
+     * Files and links renamed for moves the other folder made.
+     */
+    public var moved: UInt64
     public var updated: UInt64
     public var archived: UInt64
     public var recovered: UInt64
@@ -1858,7 +1862,10 @@ public struct RunHistoryEntry: Equatable, Hashable {
     public init(
         /**
          * Milliseconds since the Unix epoch.
-         */startedMs: UInt64, finishedMs: UInt64, trigger: RunTriggerKind, outcome: RunOutcomeKind, copied: UInt64, updated: UInt64, archived: UInt64, recovered: UInt64, conflicts: UInt64, failures: UInt64, 
+         */startedMs: UInt64, finishedMs: UInt64, trigger: RunTriggerKind, outcome: RunOutcomeKind, copied: UInt64, 
+        /**
+         * Files and links renamed for moves the other folder made.
+         */moved: UInt64, updated: UInt64, archived: UInt64, recovered: UInt64, conflicts: UInt64, failures: UInt64, 
         /**
          * The run's folder under `.foldover/archive`.
          */archive: String?, message: String?) {
@@ -1867,6 +1874,7 @@ public struct RunHistoryEntry: Equatable, Hashable {
         self.trigger = trigger
         self.outcome = outcome
         self.copied = copied
+        self.moved = moved
         self.updated = updated
         self.archived = archived
         self.recovered = recovered
@@ -1897,6 +1905,7 @@ public struct FfiConverterTypeRunHistoryEntry: FfiConverterRustBuffer {
                 trigger: FfiConverterTypeRunTriggerKind.read(from: &buf), 
                 outcome: FfiConverterTypeRunOutcomeKind.read(from: &buf), 
                 copied: FfiConverterUInt64.read(from: &buf), 
+                moved: FfiConverterUInt64.read(from: &buf), 
                 updated: FfiConverterUInt64.read(from: &buf), 
                 archived: FfiConverterUInt64.read(from: &buf), 
                 recovered: FfiConverterUInt64.read(from: &buf), 
@@ -1913,6 +1922,7 @@ public struct FfiConverterTypeRunHistoryEntry: FfiConverterRustBuffer {
         FfiConverterTypeRunTriggerKind.write(value.trigger, into: &buf)
         FfiConverterTypeRunOutcomeKind.write(value.outcome, into: &buf)
         FfiConverterUInt64.write(value.copied, into: &buf)
+        FfiConverterUInt64.write(value.moved, into: &buf)
         FfiConverterUInt64.write(value.updated, into: &buf)
         FfiConverterUInt64.write(value.archived, into: &buf)
         FfiConverterUInt64.write(value.recovered, into: &buf)
@@ -2029,16 +2039,24 @@ public struct SyncChange: Equatable, Hashable {
      * File data the change copies; 0 for everything else.
      */
     public var bytes: UInt64
+    /**
+     * For a move, the path it comes from.
+     */
+    public var movedFrom: Data?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(path: Data, kind: SyncChangeKind, 
         /**
          * File data the change copies; 0 for everything else.
-         */bytes: UInt64) {
+         */bytes: UInt64, 
+        /**
+         * For a move, the path it comes from.
+         */movedFrom: Data?) {
         self.path = path
         self.kind = kind
         self.bytes = bytes
+        self.movedFrom = movedFrom
     }
 
     
@@ -2059,7 +2077,8 @@ public struct FfiConverterTypeSyncChange: FfiConverterRustBuffer {
             try SyncChange(
                 path: FfiConverterData.read(from: &buf), 
                 kind: FfiConverterTypeSyncChangeKind.read(from: &buf), 
-                bytes: FfiConverterUInt64.read(from: &buf)
+                bytes: FfiConverterUInt64.read(from: &buf), 
+                movedFrom: FfiConverterOptionData.read(from: &buf)
         )
     }
 
@@ -2067,6 +2086,7 @@ public struct FfiConverterTypeSyncChange: FfiConverterRustBuffer {
         FfiConverterData.write(value.path, into: &buf)
         FfiConverterTypeSyncChangeKind.write(value.kind, into: &buf)
         FfiConverterUInt64.write(value.bytes, into: &buf)
+        FfiConverterOptionData.write(value.movedFrom, into: &buf)
     }
 }
 
@@ -2215,6 +2235,7 @@ public struct SyncPreviewSummary: Equatable, Hashable {
     public var conflicts: UInt64
     public var blocked: UInt64
     public var kept: UInt64
+    public var moves: UInt64
     public var left: SyncSideDeletions
     public var right: SyncSideDeletions
     /**
@@ -2237,7 +2258,7 @@ public struct SyncPreviewSummary: Equatable, Hashable {
          */changes: [SyncChange], 
         /**
          * File data all copies move, in bytes.
-         */copyBytes: UInt64, copies: UInt64, updates: UInt64, archives: UInt64, conflicts: UInt64, blocked: UInt64, kept: UInt64, left: SyncSideDeletions, right: SyncSideDeletions, 
+         */copyBytes: UInt64, copies: UInt64, updates: UInt64, archives: UInt64, conflicts: UInt64, blocked: UInt64, kept: UInt64, moves: UInt64, left: SyncSideDeletions, right: SyncSideDeletions, 
         /**
          * Fingerprint of the exact preview shown. Capture it with this
          * summary and present it back to approve, resolve or page — a plan
@@ -2255,6 +2276,7 @@ public struct SyncPreviewSummary: Equatable, Hashable {
         self.conflicts = conflicts
         self.blocked = blocked
         self.kept = kept
+        self.moves = moves
         self.left = left
         self.right = right
         self.reviewToken = reviewToken
@@ -2285,6 +2307,7 @@ public struct FfiConverterTypeSyncPreviewSummary: FfiConverterRustBuffer {
                 conflicts: FfiConverterUInt64.read(from: &buf), 
                 blocked: FfiConverterUInt64.read(from: &buf), 
                 kept: FfiConverterUInt64.read(from: &buf), 
+                moves: FfiConverterUInt64.read(from: &buf), 
                 left: FfiConverterTypeSyncSideDeletions.read(from: &buf), 
                 right: FfiConverterTypeSyncSideDeletions.read(from: &buf), 
                 reviewToken: FfiConverterString.read(from: &buf), 
@@ -2301,6 +2324,7 @@ public struct FfiConverterTypeSyncPreviewSummary: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.conflicts, into: &buf)
         FfiConverterUInt64.write(value.blocked, into: &buf)
         FfiConverterUInt64.write(value.kept, into: &buf)
+        FfiConverterUInt64.write(value.moves, into: &buf)
         FfiConverterTypeSyncSideDeletions.write(value.left, into: &buf)
         FfiConverterTypeSyncSideDeletions.write(value.right, into: &buf)
         FfiConverterString.write(value.reviewToken, into: &buf)
@@ -2327,6 +2351,7 @@ public func FfiConverterTypeSyncPreviewSummary_lower(_ value: SyncPreviewSummary
 public struct SyncRunSummary: Equatable, Hashable {
     public var cancelled: Bool
     public var copied: UInt64
+    public var moved: UInt64
     public var updated: UInt64
     public var archived: UInt64
     public var recovered: UInt64
@@ -2337,9 +2362,10 @@ public struct SyncRunSummary: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(cancelled: Bool, copied: UInt64, updated: UInt64, archived: UInt64, recovered: UInt64, conflicts: UInt64, failures: [SyncFailureItem], failureCount: UInt64, archive: String) {
+    public init(cancelled: Bool, copied: UInt64, moved: UInt64, updated: UInt64, archived: UInt64, recovered: UInt64, conflicts: UInt64, failures: [SyncFailureItem], failureCount: UInt64, archive: String) {
         self.cancelled = cancelled
         self.copied = copied
+        self.moved = moved
         self.updated = updated
         self.archived = archived
         self.recovered = recovered
@@ -2367,6 +2393,7 @@ public struct FfiConverterTypeSyncRunSummary: FfiConverterRustBuffer {
             try SyncRunSummary(
                 cancelled: FfiConverterBool.read(from: &buf), 
                 copied: FfiConverterUInt64.read(from: &buf), 
+                moved: FfiConverterUInt64.read(from: &buf), 
                 updated: FfiConverterUInt64.read(from: &buf), 
                 archived: FfiConverterUInt64.read(from: &buf), 
                 recovered: FfiConverterUInt64.read(from: &buf), 
@@ -2380,6 +2407,7 @@ public struct FfiConverterTypeSyncRunSummary: FfiConverterRustBuffer {
     public static func write(_ value: SyncRunSummary, into buf: inout [UInt8]) {
         FfiConverterBool.write(value.cancelled, into: &buf)
         FfiConverterUInt64.write(value.copied, into: &buf)
+        FfiConverterUInt64.write(value.moved, into: &buf)
         FfiConverterUInt64.write(value.updated, into: &buf)
         FfiConverterUInt64.write(value.archived, into: &buf)
         FfiConverterUInt64.write(value.recovered, into: &buf)
@@ -3655,6 +3683,7 @@ public enum SyncChangeFilter: Equatable, Hashable {
     case conflict
     case blocked
     case keep
+    case move
 
 
 
@@ -3688,6 +3717,8 @@ public struct FfiConverterTypeSyncChangeFilter: FfiConverterRustBuffer {
         
         case 6: return .keep
         
+        case 7: return .move
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -3718,6 +3749,10 @@ public struct FfiConverterTypeSyncChangeFilter: FfiConverterRustBuffer {
         
         case .keep:
             writeInt(&buf, Int32(6))
+        
+        
+        case .move:
+            writeInt(&buf, Int32(7))
         
         }
     }
@@ -3753,6 +3788,11 @@ public enum SyncChangeKind: Equatable, Hashable {
     )
     case blocked
     case keep
+    /**
+     * Renamed on `on` from `SyncChange::moved_from`.
+     */
+    case move(on: SyncSide
+    )
 
 
 
@@ -3790,6 +3830,9 @@ public struct FfiConverterTypeSyncChangeKind: FfiConverterRustBuffer {
         
         case 6: return .keep
         
+        case 7: return .move(on: try FfiConverterTypeSyncSide.read(from: &buf)
+        )
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -3825,6 +3868,11 @@ public struct FfiConverterTypeSyncChangeKind: FfiConverterRustBuffer {
         case .keep:
             writeInt(&buf, Int32(6))
         
+        
+        case let .move(on):
+            writeInt(&buf, Int32(7))
+            FfiConverterTypeSyncSide.write(on, into: &buf)
+            
         }
     }
 }

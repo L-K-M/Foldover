@@ -4,7 +4,7 @@
 //! these invariants:
 //!
 //! - nothing is lost: a file version a run replaced or removed is in its
-//!   folder's archive, except on a Backup target that keeps no records,
+//!   folder's archive, or at another path there when the run moved it, except on a Backup target that keeps no records,
 //!   which never gains an archive;
 //! - a finished run leaves both folders equal outside the conflicts it
 //!   reported, comparing names the way the folders do; a Backup leaves
@@ -575,8 +575,11 @@ impl Simulation {
                 continue;
             }
             let (after, archive) = (self.files(*folder), self.kept(*folder));
+            // Every write has its own content, so the same content at
+            // another path is this version, moved there (PLAN.md §4.7).
+            let kept_here: BTreeSet<&Vec<u8>> = after.values().collect();
             for (path, content) in before {
-                if after.get(path) == Some(content) {
+                if after.get(path) == Some(content) || kept_here.contains(content) {
                     continue;
                 }
                 assert!(

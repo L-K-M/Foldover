@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- A file moved or renamed in one folder is moved the same way in the
+  other instead of being copied again and archived; the preview lists it
+  as a move, and Undo moves it back. Folders on another Mac still copy.
+
 - Names reach SFTP servers in composed Unicode (NFC), as Linux and
   Windows expect, even from a disk that stores them decomposed, and
   Foldover finds a server's file in either spelling.
