@@ -147,7 +147,8 @@ accounts that do not exist here, or to the wrong ones. A folder's own
 ACLs, set by its owner on that Mac, are left as they are. A new entry
 gets what the receiving folder gives new files, including ACL entries
 the folder marks for inheritance; its mode bits travel only when the
-pair syncs permissions.
+pair syncs permissions, except a file's executable bit, which always
+follows the source.
 
 ### Local API (protocol 9)
 
