@@ -421,6 +421,9 @@ fn values(draft: &PairDraft) -> PairValues {
             FolderRecords::SourceOnly => RECORDS_IN_SOURCE,
         }
         .to_owned(),
+        bandwidth_limit: options
+            .bandwidth_limit()
+            .map(|rate| i64::try_from(rate).unwrap_or(i64::MAX)),
     }
 }
 
@@ -515,6 +518,11 @@ fn from_row(row: PairRow) -> Result<PairConfig, Error> {
         .canary
         .map(|bytes| SyncPath::try_from(bytes).map_err(|_| Error::InvalidStored("canary")))
         .transpose()?;
+    let bandwidth_limit = row
+        .values
+        .bandwidth_limit
+        .map(|rate| u64::try_from(rate).map_err(|_| Error::InvalidStored("bandwidth limit")))
+        .transpose()?;
     let draft = PairDraft::new(
         row.values.name,
         PairRoot::from_bytes(row.values.left_root)?,
@@ -526,7 +534,8 @@ fn from_row(row: PairRow) -> Result<PairConfig, Error> {
             .with_schedule(schedule)
             .with_filters(filters)
             .with_canary(canary)?
-            .with_records(records),
+            .with_records(records)
+            .with_bandwidth_limit(bandwidth_limit)?,
     );
     let revision = u64::try_from(row.revision).map_err(|_| Error::InvalidStored("revision"))?;
     Ok(PairConfig::from_stored(id, revision, draft)?)
@@ -669,6 +678,7 @@ mod tests {
                 schedule_time: None,
                 schedule_days: None,
                 records: RECORDS_IN_BOTH.into(),
+                bandwidth_limit: None,
             })
             .unwrap();
         drop(database);
@@ -702,6 +712,7 @@ mod tests {
                 schedule_time: None,
                 schedule_days: None,
                 records: RECORDS_IN_BOTH.into(),
+                bandwidth_limit: None,
             })
             .unwrap();
         let id = PairId::from_bytes(row.id.try_into().unwrap()).unwrap();
@@ -910,7 +921,9 @@ mod tests {
             SyncPath::try_from(b"docs/canary.txt".as_slice()).unwrap(),
         ))
         .unwrap()
-        .with_records(FolderRecords::SourceOnly);
+        .with_records(FolderRecords::SourceOnly)
+        .with_bandwidth_limit(Some(2_500_000))
+        .unwrap();
         let pair = store
             .create(&draft(SyncMode::Sync).with_options(options.clone()))
             .unwrap();

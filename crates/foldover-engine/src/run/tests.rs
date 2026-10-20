@@ -21,6 +21,7 @@ struct Fixture {
     canary: Option<SyncPath>,
     durability: foldover_types::Durability,
     records: foldover_types::FolderRecords,
+    bandwidth_limit: Option<u64>,
     right_kind: RightKind,
     journal: Option<foldover_state::Journal>,
     /// In-memory folders that replace both temporary directories.
@@ -67,6 +68,7 @@ fn fixture(mode: SyncMode) -> Fixture {
         canary: None,
         durability: foldover_types::Durability::Standard,
         records: foldover_types::FolderRecords::Both,
+        bandwidth_limit: None,
         right_kind: RightKind::Local,
         journal: None,
         memory: None,
@@ -182,7 +184,9 @@ impl Fixture {
             .with_filters(filters)
             .with_canary(self.canary.clone())
             .unwrap()
-            .with_records(self.records),
+            .with_records(self.records)
+            .with_bandwidth_limit(self.bandwidth_limit)
+            .unwrap(),
         );
         let pair =
             PairConfig::from_stored(PairId::from_bytes([1; 16]).unwrap(), self.revision, draft)
@@ -967,6 +971,38 @@ fn break_off(pair: &mut Fixture) -> std::path::PathBuf {
     let partial = kept.next().expect("a kept partial");
     assert!(kept.next().is_none());
     partial
+}
+
+/// PLAN.md §4.9: a pair's bandwidth limit paces its copies, local and
+/// streamed alike, across all of a run's files.
+#[test]
+fn a_bandwidth_limit_paces_copies() {
+    const LIMIT: u64 = 1_000_000;
+    const FILE_BYTES: usize = 2_000_000;
+    // Two files' data at the limit takes 4 s, well beyond a run's own
+    // cost; allow for clock grain.
+    const AT_LEAST: Duration = Duration::from_millis(3_950);
+    for kind in [RightKind::Local, RightKind::Sftp] {
+        if kind == RightKind::Sftp && sftp_server().is_none() {
+            eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
+            continue;
+        }
+        let mut pair = fixture(SyncMode::Sync);
+        pair.right_kind = kind;
+        pair.bandwidth_limit = Some(LIMIT);
+        for name in ["a.bin", "b.bin"] {
+            fs::write(pair.left.path().join(name), vec![7; FILE_BYTES]).unwrap();
+        }
+
+        let started = std::time::Instant::now();
+        let report = pair.sync();
+        assert_eq!(report.copied(), 2, "{:?}", report.failures());
+        assert!(started.elapsed() >= AT_LEAST, "{:?}", started.elapsed());
+        assert_eq!(
+            fs::read(pair.right.path().join("b.bin")).unwrap().len(),
+            FILE_BYTES
+        );
+    }
 }
 
 /// PLAN.md §4.9: a large copy that breaks off keeps what arrived, and the

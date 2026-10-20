@@ -177,6 +177,7 @@ pub enum InvalidPair {
     Schedule,
     Filters,
     Canary,
+    BandwidthLimit,
 }
 
 impl fmt::Display for InvalidPair {
@@ -199,6 +200,7 @@ impl fmt::Display for InvalidPair {
                 "A canary file needs a relative path inside the synced folders, outside \
                  .foldover"
             }
+            Self::BandwidthLimit => "A bandwidth limit needs at least 100 kB per second",
         })
     }
 }

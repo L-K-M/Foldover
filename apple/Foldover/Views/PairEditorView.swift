@@ -110,6 +110,14 @@ struct PairEditorView: View {
                     Text("A file that must stay in both folders unchanged. If it goes missing or changes, syncs stop before writing anything.")
                         .font(.callout).foregroundStyle(.secondary)
                 }
+                Section("Speed") {
+                    Toggle("Limit bandwidth", isOn: $viewModel.limitsBandwidth)
+                    if viewModel.limitsBandwidth {
+                        TextField("At most (MB/s)", value: $viewModel.bandwidthLimitMegabytesPerSecond, format: .number)
+                        Text("All of this pair's copies together stay under this rate.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                }
                 Section("Schedule") {
                     Picker("Sync automatically", selection: $viewModel.options.schedule) {
                         ForEach(viewModel.scheduleChoices, id: \.self) { schedule in

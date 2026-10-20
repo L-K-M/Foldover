@@ -350,6 +350,23 @@ func sizeLimitsAreWholeMegabytes() {
 
 @MainActor
 @Test
+func bandwidthLimitsAreWholeMegabytesPerSecond() {
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()))
+    #expect(!editor.limitsBandwidth)
+    editor.limitsBandwidth = true
+    #expect(editor.options.bandwidthLimit == 10_000_000)
+    editor.bandwidthLimitMegabytesPerSecond = 0
+    #expect(editor.options.bandwidthLimit == 1_000_000)
+    editor.bandwidthLimitMegabytesPerSecond = 25
+    #expect(editor.bandwidthLimitMegabytesPerSecond == 25)
+    editor.bandwidthLimitMegabytesPerSecond = .max
+    #expect(editor.options.bandwidthLimit! > 0)
+    editor.limitsBandwidth = false
+    #expect(editor.options.bandwidthLimit == nil)
+}
+
+@MainActor
+@Test
 func ageLimitsAreWholeDaysUpToACentury() {
     let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()))
     #expect(!editor.limitsAge)

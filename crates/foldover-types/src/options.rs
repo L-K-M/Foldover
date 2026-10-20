@@ -320,6 +320,9 @@ impl Filters {
     }
 }
 
+/// The slowest bandwidth limit a pair takes, in bytes per second.
+pub const MIN_BANDWIDTH_LIMIT: u64 = 100_000;
+
 /// Per-pair settings beyond roots and mode.
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct PairOptions {
@@ -329,6 +332,8 @@ pub struct PairOptions {
     filters: Filters,
     canary: Option<SyncPath>,
     records: FolderRecords,
+    /// File data bytes per second the pair's copies share at most.
+    bandwidth_limit: Option<u64>,
 }
 
 impl PairOptions {
@@ -344,6 +349,7 @@ impl PairOptions {
             },
             canary: None,
             records: FolderRecords::Both,
+            bandwidth_limit: None,
         }
     }
 
@@ -378,6 +384,23 @@ impl PairOptions {
 
     pub fn canary(&self) -> Option<&SyncPath> {
         self.canary.as_ref()
+    }
+
+    /// Copy at most `bytes_per_second` of file data, across all of a run's
+    /// copies (PLAN.md §4.9); `None` copies as fast as the folders go.
+    /// Below `MIN_BANDWIDTH_LIMIT` a run of a few files would take hours.
+    pub fn with_bandwidth_limit(self, bytes_per_second: Option<u64>) -> Result<Self, InvalidPair> {
+        if bytes_per_second.is_some_and(|rate| rate < MIN_BANDWIDTH_LIMIT) {
+            return Err(InvalidPair::BandwidthLimit);
+        }
+        Ok(Self {
+            bandwidth_limit: bytes_per_second,
+            ..self
+        })
+    }
+
+    pub const fn bandwidth_limit(&self) -> Option<u64> {
+        self.bandwidth_limit
     }
 
     pub const fn metadata(&self) -> MetadataPolicy {
@@ -488,6 +511,29 @@ mod tests {
         assert_eq!(
             rules.with_size_limit(Some(1)).unwrap().size_limit(),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn bandwidth_limits_must_leave_room_to_copy() {
+        let options = PairOptions::default();
+        assert_eq!(options.bandwidth_limit(), None);
+        assert!(
+            options
+                .clone()
+                .with_bandwidth_limit(Some(MIN_BANDWIDTH_LIMIT - 1))
+                .is_err()
+        );
+        let limited = options
+            .with_bandwidth_limit(Some(MIN_BANDWIDTH_LIMIT))
+            .unwrap();
+        assert_eq!(limited.bandwidth_limit(), Some(MIN_BANDWIDTH_LIMIT));
+        assert_eq!(
+            limited
+                .with_bandwidth_limit(None)
+                .unwrap()
+                .bandwidth_limit(),
+            None
         );
     }
 

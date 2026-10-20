@@ -1196,6 +1196,10 @@ public struct LocalPairOptions: Equatable, Hashable {
      */
     public var canary: Data?
     public var records: FolderRecords
+    /**
+     * File data bytes per second the pair's copies share at most.
+     */
+    public var bandwidthLimit: UInt64?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1213,7 +1217,10 @@ public struct LocalPairOptions: Equatable, Hashable {
         /**
          * A file kept unchanged in both folders that proves the right ones
          * are mounted.
-         */canary: Data?, records: FolderRecords) {
+         */canary: Data?, records: FolderRecords, 
+        /**
+         * File data bytes per second the pair's copies share at most.
+         */bandwidthLimit: UInt64?) {
         self.modificationTimes = modificationTimes
         self.extendedAttributes = extendedAttributes
         self.permissions = permissions
@@ -1224,6 +1231,7 @@ public struct LocalPairOptions: Equatable, Hashable {
         self.ageLimit = ageLimit
         self.canary = canary
         self.records = records
+        self.bandwidthLimit = bandwidthLimit
     }
 
     
@@ -1251,7 +1259,8 @@ public struct FfiConverterTypeLocalPairOptions: FfiConverterRustBuffer {
                 sizeLimit: FfiConverterOptionUInt64.read(from: &buf), 
                 ageLimit: FfiConverterOptionUInt32.read(from: &buf), 
                 canary: FfiConverterOptionData.read(from: &buf), 
-                records: FfiConverterTypeFolderRecords.read(from: &buf)
+                records: FfiConverterTypeFolderRecords.read(from: &buf), 
+                bandwidthLimit: FfiConverterOptionUInt64.read(from: &buf)
         )
     }
 
@@ -1266,6 +1275,7 @@ public struct FfiConverterTypeLocalPairOptions: FfiConverterRustBuffer {
         FfiConverterOptionUInt32.write(value.ageLimit, into: &buf)
         FfiConverterOptionData.write(value.canary, into: &buf)
         FfiConverterTypeFolderRecords.write(value.records, into: &buf)
+        FfiConverterOptionUInt64.write(value.bandwidthLimit, into: &buf)
     }
 }
 

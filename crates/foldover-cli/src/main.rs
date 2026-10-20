@@ -16,7 +16,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-/// `--max-size` counts decimal megabytes, as Finder does.
+/// `--max-size` and `--bandwidth-limit` count decimal megabytes, as
+/// Finder does.
 const BYTES_PER_MEGABYTE: u64 = 1_000_000;
 /// How a usage failure exits.
 const USAGE_EXIT: u8 = 2;
@@ -161,6 +162,8 @@ struct OptionChanges {
     /// `Some(None)` removes the canary.
     canary: Option<Option<SyncPath>>,
     records: Option<FolderRecords>,
+    /// `Some(None)` removes the limit.
+    bandwidth_limit: Option<Option<u64>>,
 }
 
 impl OptionChanges {
@@ -189,6 +192,8 @@ impl OptionChanges {
         .with_canary(self.canary.unwrap_or_else(|| base.canary().cloned()))
         .expect("the canary is checked when parsed")
         .with_records(self.records.unwrap_or(base.records()))
+        .with_bandwidth_limit(self.bandwidth_limit.unwrap_or(base.bandwidth_limit()))
+        .expect("the bandwidth limit is checked when parsed")
     }
 }
 
@@ -276,7 +281,7 @@ async fn main() -> ExitCode {
         },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs check NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover automation [low-power pause|run] [--socket PATH]\n       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]\n       foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]\n       foldover servers [--socket PATH]\nLEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --records (both | source: a backup-* target that cannot hold .foldover keeps nothing, archives nothing); --schedule (manual | changes | MINUTES | daily@HH:MM[:DAYS]); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --canary (PATH | none)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs check NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover automation [low-power pause|run] [--socket PATH]\n       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]\n       foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]\n       foldover servers [--socket PATH]\nLEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --records (both | source: a backup-* target that cannot hold .foldover keeps nothing, archives nothing); --schedule (manual | changes | MINUTES | daily@HH:MM[:DAYS]); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --bandwidth-limit (MEGABYTES per second | none); --canary (PATH | none)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -533,6 +538,19 @@ fn option_changes(args: &[OsString]) -> Option<OptionChanges> {
                         days.parse::<u32>()
                             .ok()
                             .filter(|days| (1..=Filters::MAX_AGE_DAYS).contains(days))?,
+                    ),
+                })
+                .is_some(),
+            "--bandwidth-limit" => changes
+                .bandwidth_limit
+                .replace(match value {
+                    "none" => None,
+                    megabytes => Some(
+                        megabytes
+                            .parse::<u64>()
+                            .ok()
+                            .filter(|megabytes| *megabytes > 0)?
+                            .checked_mul(BYTES_PER_MEGABYTE)?,
                     ),
                 })
                 .is_some(),
@@ -1380,6 +1398,8 @@ mod tests {
             "500",
             "--max-age",
             "90",
+            "--bandwidth-limit",
+            "10",
             "--socket",
             "/tmp/s",
         ]) else {
@@ -1390,6 +1410,7 @@ mod tests {
         assert_eq!(draft.options().filters().rules(), ["*.tmp", "build/"]);
         assert_eq!(draft.options().filters().size_limit(), Some(500_000_000));
         assert_eq!(draft.options().filters().age_limit(), Some(90));
+        assert_eq!(draft.options().bandwidth_limit(), Some(10_000_000));
         assert_eq!(
             draft.options().schedule(),
             Schedule::Every(ScheduleInterval::from_minutes(15).unwrap())
@@ -1477,6 +1498,58 @@ mod tests {
         for value in ["0", "-1", "lots"] {
             assert!(matches!(
                 req(&["pairs", "add", "P", "/a", "/b", "sync", "--max-size", value]),
+                Request::Usage
+            ));
+        }
+
+        let capped = PairOptions::default()
+            .with_bandwidth_limit(Some(5_000_000))
+            .unwrap();
+        let Request::Pairs(_, PairCommand::Update { options, .. }) = req(&[
+            "pairs",
+            "update",
+            id,
+            "1",
+            "Photos",
+            "/a",
+            "/b",
+            "sync",
+            "--bandwidth-limit",
+            "10",
+        ]) else {
+            panic!("expected an update command");
+        };
+        assert_eq!(
+            options.apply(capped.clone()).bandwidth_limit(),
+            Some(10_000_000)
+        );
+        let Request::Pairs(_, PairCommand::Update { options, .. }) = req(&[
+            "pairs",
+            "update",
+            id,
+            "1",
+            "Photos",
+            "/a",
+            "/b",
+            "sync",
+            "--bandwidth-limit",
+            "none",
+        ]) else {
+            panic!("expected an update command");
+        };
+        assert_eq!(options.apply(capped).bandwidth_limit(), None);
+        for value in ["0", "-1", "fast"] {
+            assert!(matches!(
+                req(&[
+                    "pairs",
+                    "add",
+                    "P",
+                    "/a",
+                    "/b",
+                    "sync",
+                    "--bandwidth-limit",
+                    value
+                ]),
                 Request::Usage
             ));
         }
