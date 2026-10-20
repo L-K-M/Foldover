@@ -28,7 +28,8 @@ use foldover_state::{
 };
 use foldover_types::{
     BaselineEntry, ChangeKind, ConflictKind, Durability, EndpointId, EntryContent, EntryDecision,
-    EntryVersion, PairConfig, PairId, Resolution, ReviewToken, ScanControl, Side, Skip, SyncPath,
+    EntryKind, EntryVersion, PairConfig, PairId, Resolution, ReviewToken, ScanControl, Side, Skip,
+    SyncPath,
 };
 
 use crate::{
@@ -86,6 +87,18 @@ pub enum RunError {
          choose standard durability for this pair"
     )]
     UnsupportedDurability { side: Side },
+    #[error(
+        "The canary file “{}” is missing from the {side:?} folder, so nothing was written. \
+         Put it back, or change the pair's canary.",
+        String::from_utf8_lossy(path.as_bytes())
+    )]
+    CanaryMissing { side: Side, path: SyncPath },
+    #[error(
+        "The canary file “{}” changed in the {side:?} folder since the last sync, so nothing was \
+         written. Check that the right disk is connected, or change the pair's canary.",
+        String::from_utf8_lossy(path.as_bytes())
+    )]
+    CanaryChanged { side: Side, path: SyncPath },
     #[error(
         "The {side:?} folder's disk has {available} bytes free; this sync needs {needed} plus a \
          256 MiB reserve. Free space and sync again."
@@ -817,6 +830,36 @@ impl PairRun {
                 && matches!(self.endpoints.endpoint(side), Endpoint::Sftp(_))
             {
                 return Err(RunError::UnsupportedDurability { side });
+            }
+        }
+
+        // PLAN.md §3.6: the canary proves the right folders are mounted;
+        // a missing or changed one means a different folder, so the run
+        // refuses before any gate, identity or lease touches the folders.
+        if let Some(canary) = options.canary() {
+            for side in [Side::Left, Side::Right] {
+                let observed = self
+                    .observation(side)
+                    .entries()
+                    .get(canary)
+                    .map(ObservedEntry::version)
+                    .filter(|version| version.kind() == EntryKind::File);
+                let Some(observed) = observed else {
+                    return Err(RunError::CanaryMissing {
+                        side,
+                        path: canary.clone(),
+                    });
+                };
+                let recorded = self.base.get(canary).map(|entry| match side {
+                    Side::Left => entry.left(),
+                    Side::Right => entry.right(),
+                });
+                if recorded.is_some_and(|version| observed.content() != version.content()) {
+                    return Err(RunError::CanaryChanged {
+                        side,
+                        path: canary.clone(),
+                    });
+                }
             }
         }
 

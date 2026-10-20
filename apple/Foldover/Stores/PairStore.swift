@@ -41,6 +41,9 @@ struct PairOptions: Equatable, Sendable {
     var sizeLimit: UInt64?
     /// Files unchanged for more than this many days in both folders are skipped.
     var ageLimit: UInt32?
+    /// A file kept unchanged in both folders that proves the right ones
+    /// are mounted; syncs stop before writing if it is missing or changed.
+    var canary: Data?
 
     /// The engine's defaults, so the app never restates them.
     static var defaults: PairOptions { pairOptions(FoldoverCore.defaultPairOptions()) }
@@ -157,7 +160,8 @@ private func pairOptions(_ options: LocalPairOptions) -> PairOptions {
         schedule: syncSchedule(options.schedule),
         filters: options.filters,
         sizeLimit: options.sizeLimit,
-        ageLimit: options.ageLimit
+        ageLimit: options.ageLimit,
+        canary: options.canary
     )
 }
 
@@ -191,7 +195,8 @@ private func corePairOptions(_ options: PairOptions) -> LocalPairOptions {
         schedule: coreSchedule(options.schedule),
         filters: options.filters,
         sizeLimit: options.sizeLimit,
-        ageLimit: options.ageLimit
+        ageLimit: options.ageLimit,
+        canary: options.canary
     )
 }
 

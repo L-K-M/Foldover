@@ -1,4 +1,4 @@
-use crate::{InvalidPair, MetadataPolicy};
+use crate::{InvalidPair, MetadataPolicy, SyncPath};
 
 /// When the agent syncs a pair without being asked.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -120,6 +120,7 @@ pub struct PairOptions {
     durability: Durability,
     schedule: Schedule,
     filters: Filters,
+    canary: Option<SyncPath>,
 }
 
 impl PairOptions {
@@ -133,6 +134,7 @@ impl PairOptions {
                 size_limit: None,
                 age_limit: None,
             },
+            canary: None,
         }
     }
 
@@ -142,6 +144,23 @@ impl PairOptions {
 
     pub fn with_filters(self, filters: Filters) -> Self {
         Self { filters, ..self }
+    }
+
+    /// A file kept unchanged in both folders that proves the right ones
+    /// are mounted. Inside `.foldover` it would check Foldover's own
+    /// state, so it is refused.
+    pub fn with_canary(self, canary: Option<SyncPath>) -> Result<Self, InvalidPair> {
+        if canary
+            .as_ref()
+            .is_some_and(|path| path.components().next() == Some(b".foldover"))
+        {
+            return Err(InvalidPair::Canary);
+        }
+        Ok(Self { canary, ..self })
+    }
+
+    pub fn canary(&self) -> Option<&SyncPath> {
+        self.canary.as_ref()
     }
 
     pub const fn metadata(&self) -> MetadataPolicy {
@@ -198,5 +217,23 @@ mod tests {
             rules.with_size_limit(Some(1)).unwrap().size_limit(),
             Some(1)
         );
+    }
+
+    #[test]
+    fn a_canary_lives_outside_the_internal_directory() {
+        let options = PairOptions::default();
+        let canary = |bytes: &[u8]| SyncPath::try_from(bytes).unwrap();
+        assert_eq!(options.canary(), None);
+        for internal in [b".foldover".as_slice(), b".foldover/id"] {
+            assert_eq!(
+                options.clone().with_canary(Some(canary(internal))),
+                Err(InvalidPair::Canary)
+            );
+        }
+        let kept = options
+            .with_canary(Some(canary(b"docs/canary.txt")))
+            .unwrap();
+        assert_eq!(kept.canary(), Some(&canary(b"docs/canary.txt")));
+        assert_eq!(kept.with_canary(None).unwrap().canary(), None);
     }
 }

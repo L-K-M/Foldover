@@ -18,6 +18,7 @@ struct Fixture {
     filters: Vec<String>,
     size_limit: Option<u64>,
     age_limit: Option<u32>,
+    canary: Option<SyncPath>,
     durability: foldover_types::Durability,
     right_kind: RightKind,
     journal: Option<foldover_state::Journal>,
@@ -59,6 +60,7 @@ fn fixture(mode: SyncMode) -> Fixture {
         filters: Vec::new(),
         size_limit: None,
         age_limit: None,
+        canary: None,
         durability: foldover_types::Durability::Standard,
         right_kind: RightKind::Local,
         journal: None,
@@ -170,7 +172,9 @@ impl Fixture {
                 foldover_types::MetadataPolicy::default(),
                 self.durability,
             )
-            .with_filters(filters),
+            .with_filters(filters)
+            .with_canary(self.canary.clone())
+            .unwrap(),
         );
         let pair =
             PairConfig::from_stored(PairId::from_bytes([1; 16]).unwrap(), self.revision, draft)
@@ -1154,6 +1158,88 @@ fn a_suddenly_empty_folder_needs_review_before_the_other_side_is_emptied() {
     backup.sync();
     fs::remove_file(backup.right.path().join("kept")).unwrap();
     assert_eq!(backup.sync().copied(), 1);
+}
+
+/// PLAN.md §3.6: the canary proves the right folders are mounted; a
+/// missing or changed one stops the run before anything writes.
+#[test]
+fn a_missing_or_changed_canary_stops_the_run_before_any_write() {
+    let mut pair = fixture(SyncMode::Sync);
+    pair.canary = Some(path(b"docs/canary.txt"));
+    fs::create_dir(pair.left.path().join("docs")).unwrap();
+    fs::write(pair.left.path().join("docs/canary.txt"), b"canary").unwrap();
+    fs::write(pair.left.path().join("file"), b"x").unwrap();
+
+    // Missing on the right: nothing is written, even fully reviewed.
+    let error = pair
+        .prepare()
+        .execute(
+            Approval::default(),
+            RunContext::Reviewed,
+            STARTED,
+            &mut |_, _| panic!("nothing may commit"),
+            &mut proceed,
+            &NoProgress,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            RunError::CanaryMissing {
+                side: Side::Right,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(fs::read_dir(pair.right.path()).unwrap().count(), 0);
+    assert!(!pair.left.path().join(".foldover").exists());
+
+    // Kept unchanged in both folders, it lets the run proceed. The right's
+    // copy carries the left's mtime, like a preserved copy would, so the
+    // first sync records the canary in the base.
+    fs::create_dir(pair.right.path().join("docs")).unwrap();
+    fs::write(pair.right.path().join("docs/canary.txt"), b"canary").unwrap();
+    let modified = fs::metadata(pair.left.path().join("docs/canary.txt"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    fs::File::open(pair.right.path().join("docs/canary.txt"))
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    pair.sync();
+    assert_eq!(fs::read(pair.right.path().join("file")).unwrap(), b"x");
+
+    // Changed on a side since the base: CanaryChanged, again no writes.
+    fs::write(pair.right.path().join("docs/canary.txt"), b"changed").unwrap();
+    fs::write(pair.left.path().join("new"), b"n").unwrap();
+    let error = pair
+        .prepare()
+        .execute(
+            Approval::default(),
+            RunContext::Interactive,
+            STARTED,
+            &mut |_, _| panic!("nothing may commit"),
+            &mut proceed,
+            &NoProgress,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            RunError::CanaryChanged {
+                side: Side::Right,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert!(!pair.right.path().join("new").exists());
+    assert_eq!(
+        fs::read(pair.right.path().join("docs/canary.txt")).unwrap(),
+        b"changed"
+    );
 }
 
 #[test]

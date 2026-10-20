@@ -41,7 +41,7 @@ pub use foldover_types::{DeviceId, ShareId};
 pub use foldover_types::{
     Durability, Filters, InvalidPair, InvalidReviewToken, LocalRoot, MetadataPolicy, PairConfig,
     PairDraft, PairId, PairOptions, PairRoot, Propagation, ReviewToken, Schedule, ScheduleInterval,
-    Side, SyncMode,
+    Side, SyncMode, SyncPath,
 };
 use serde_json::Value;
 use serde_json::json;

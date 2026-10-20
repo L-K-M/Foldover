@@ -1027,6 +1027,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_missing_canary_fails_the_sync_before_anything_writes() {
+        let (directory, service) = fixture();
+        let mut invalid = input(directory.path(), "Bad");
+        invalid["options"]["canary"] = json!(b".foldover/id".as_slice());
+        assert_eq!(
+            service
+                .handle(Request::call(0, PAIR_CREATE, Some(invalid)))
+                .await
+                .unwrap_err()
+                .code(),
+            INVALID_PARAMS
+        );
+
+        let mut input = input(directory.path(), "Docs");
+        input["options"]["canary"] = json!(b"docs/canary.txt".as_slice());
+        let left = directory.path().join("Docs-left");
+        let right = directory.path().join("Docs-right");
+        fs::create_dir(left.join("docs")).unwrap();
+        fs::write(left.join("docs/canary.txt"), b"canary").unwrap();
+        fs::write(left.join("file"), b"data").unwrap();
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        assert_eq!(
+            created["configuration"]["options"]["canary"],
+            json!(b"docs/canary.txt".as_slice())
+        );
+        let key = json!({"id": created["id"]});
+
+        // Missing on the right: the run fails before any write, even the
+        // identity files a first run would record.
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        let failed = settled(&service, &key).await;
+        assert_eq!(failed["state"], "failed", "{failed}");
+        assert!(
+            failed["message"]
+                .as_str()
+                .unwrap()
+                .contains("missing from the Right folder"),
+            "{failed}"
+        );
+        assert!(!right.join(".foldover").exists());
+        assert!(!right.join("file").exists());
+
+        // Kept unchanged in both folders, the pair previews and syncs. The
+        // right's copy carries the left's mtime, like a preserved copy would.
+        fs::create_dir(right.join("docs")).unwrap();
+        fs::write(right.join("docs/canary.txt"), b"canary").unwrap();
+        let modified = fs::metadata(left.join("docs/canary.txt"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        fs::File::open(right.join("docs/canary.txt"))
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        let finished = first_sync(&service, &key).await;
+        assert_eq!(finished["state"], "finished", "{finished}");
+        assert_eq!(fs::read(right.join("file")).unwrap(), b"data");
+    }
+
+    #[tokio::test]
     async fn archived_items_are_listed_and_put_back_on_their_side() {
         let (directory, service) = fixture();
         let created = service

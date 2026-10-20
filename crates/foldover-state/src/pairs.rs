@@ -399,6 +399,7 @@ fn values(draft: &PairDraft) -> PairValues {
             .size_limit()
             .map(|bytes| i64::try_from(bytes).unwrap_or(i64::MAX)),
         age_limit: options.filters().age_limit().map(i64::from),
+        canary: options.canary().map(|path| path.as_bytes().to_vec()),
     }
 }
 
@@ -470,6 +471,11 @@ fn from_row(row: PairRow) -> Result<PairConfig, Error> {
         FULL_DURABILITY => Durability::Full,
         _ => return Err(Error::InvalidStored("durability")),
     };
+    let canary = row
+        .values
+        .canary
+        .map(|bytes| SyncPath::try_from(bytes).map_err(|_| Error::InvalidStored("canary")))
+        .transpose()?;
     let draft = PairDraft::new(
         row.values.name,
         PairRoot::from_bytes(row.values.left_root)?,
@@ -479,7 +485,8 @@ fn from_row(row: PairRow) -> Result<PairConfig, Error> {
     .with_options(
         PairOptions::new(metadata, durability)
             .with_schedule(schedule)
-            .with_filters(filters),
+            .with_filters(filters)
+            .with_canary(canary)?,
     );
     let revision = u64::try_from(row.revision).map_err(|_| Error::InvalidStored("revision"))?;
     Ok(PairConfig::from_stored(id, revision, draft)?)
@@ -618,6 +625,7 @@ mod tests {
                 filters: String::new(),
                 size_limit: None,
                 age_limit: None,
+                canary: None,
             })
             .unwrap();
         drop(database);
@@ -647,6 +655,7 @@ mod tests {
                 filters: String::new(),
                 size_limit: None,
                 age_limit: None,
+                canary: None,
             })
             .unwrap();
         let id = PairId::from_bytes(row.id.try_into().unwrap()).unwrap();
@@ -839,7 +848,11 @@ mod tests {
                 .and_then(|filters| filters.with_size_limit(Some(5_000_000)))
                 .and_then(|filters| filters.with_age_limit(Some(90)))
                 .unwrap(),
-        );
+        )
+        .with_canary(Some(
+            SyncPath::try_from(b"docs/canary.txt".as_slice()).unwrap(),
+        ))
+        .unwrap();
         let pair = store
             .create(&draft(SyncMode::Sync).with_options(options.clone()))
             .unwrap();

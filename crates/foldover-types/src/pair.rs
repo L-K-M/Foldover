@@ -167,6 +167,7 @@ pub enum InvalidPair {
     Revision,
     Schedule,
     Filters,
+    Canary,
 }
 
 impl fmt::Display for InvalidPair {
@@ -182,6 +183,10 @@ impl fmt::Display for InvalidPair {
             Self::Revision => "Pair revision is outside the supported range",
             Self::Schedule => "A sync interval must be from 1 minute to 1 week",
             Self::Filters => "Filters allow at most 256 single-line rules of at most 1024 bytes",
+            Self::Canary => {
+                "A canary file needs a relative path inside the synced folders, outside \
+                 .foldover"
+            }
         })
     }
 }
