@@ -15,9 +15,9 @@ use std::sync::{Arc, Mutex};
 use foldover_engine::{Approval, Engine, ErrorKind, StateLocation};
 use foldover_proto::local::{
     ARCHIVE_ITEMS, ARCHIVE_PUT_BACK, ARCHIVE_PUT_BACK_ALL, ARCHIVE_RUNS, AUTOMATION_PAUSE,
-    AUTOMATION_RESUME, AUTOMATION_STATUS, HISTORY_LIST, PAIR_REMOVE, PEER_CANCEL, PEER_CONFIRM,
-    PEER_PAIR, PEER_PAIRING_CLOSE, PEER_PAIRING_OPEN, PEER_REVOKE, PEER_SHARES, PEER_START,
-    PEER_STATUS, PairRevision, SHARE_ADD, SHARE_LIST, SHARE_REMOVE,
+    AUTOMATION_RESUME, AUTOMATION_SETTINGS, AUTOMATION_STATUS, HISTORY_LIST, PAIR_REMOVE,
+    PEER_CANCEL, PEER_CONFIRM, PEER_PAIR, PEER_PAIRING_CLOSE, PEER_PAIRING_OPEN, PEER_REVOKE,
+    PEER_SHARES, PEER_START, PEER_STATUS, PairRevision, SHARE_ADD, SHARE_LIST, SHARE_REMOVE,
 };
 use foldover_proto::local::{
     AgentCapability, DAEMON_STATUS, DaemonStatus, Hello, INTERNAL_ERROR, INVALID_PARAMS,
@@ -109,7 +109,7 @@ impl Service {
         }
         if matches!(
             request.method(),
-            AUTOMATION_STATUS | AUTOMATION_PAUSE | AUTOMATION_RESUME
+            AUTOMATION_STATUS | AUTOMATION_PAUSE | AUTOMATION_RESUME | AUTOMATION_SETTINGS
         ) {
             return automation::handle(&self.engine, &request).await;
         }
@@ -413,7 +413,7 @@ async fn health(request: Request) -> Result<Value, RpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use foldover_engine::Completion;
+    use foldover_engine::{Completion, Environment, MountSources, NetworkCost, PowerMode};
     use foldover_proto::local::SyncProgress;
     use foldover_proto::local::{
         SyncCounts, SyncDeletions, SyncJob, SyncPreview, SyncResult, SyncStatus,
@@ -757,6 +757,18 @@ mod tests {
         let mut started = service.run_due(at);
         probes_idle(service).await;
         started.extend(service.run_due(at));
+        started
+    }
+
+    /// `run_due_started` with the environment injected.
+    async fn run_due_started_in(
+        service: &Service,
+        at: std::time::Instant,
+        environment: Environment,
+    ) -> Vec<PairId> {
+        let mut started = service.run_due_in(at, environment);
+        probes_idle(service).await;
+        started.extend(service.run_due_in(at, environment));
         started
     }
 
@@ -2251,7 +2263,13 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(paused, json!({"paused": true, "until_ms": null}));
+        assert_eq!(paused["paused"], true);
+        assert_eq!(paused["until_ms"], Value::Null);
+        assert_eq!(paused["low_power"], "pause");
+        assert!(matches!(
+            paused["held_by"].as_str(),
+            None | Some("lowPowerMode" | "expensiveNetwork" | "constrainedNetwork")
+        ));
         assert!(service.run_due(at(61)).is_empty());
 
         let resumed = service
@@ -2277,6 +2295,130 @@ mod tests {
                 .await
                 .unwrap(),
             timed
+        );
+    }
+
+    /// PLAN.md §3.5: an environment hold keeps a due pair waiting
+    /// without consuming its schedule; the pair runs once it lifts.
+    /// Manual starts and the pause are untouched.
+    #[tokio::test]
+    async fn the_environment_holds_automatic_syncs() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Held");
+        input["options"]["schedule"] = json!({"kind": "every", "minutes": 1});
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        let key = json!({"id": created["id"]});
+        first_sync(&service, &key).await;
+        let start = service.scheduler.started();
+        let at = |seconds| start + std::time::Duration::from_secs(seconds);
+        let normal = Environment {
+            power: PowerMode::Normal,
+            network: Some(NetworkCost::Unrestricted),
+        };
+        let low_power = Environment {
+            power: PowerMode::LowPower,
+            network: Some(NetworkCost::Unrestricted),
+        };
+        let constrained = Environment {
+            power: PowerMode::Normal,
+            network: Some(NetworkCost::Constrained),
+        };
+
+        // A local pair waits for Low Power Mode, not for the network.
+        assert!(service.run_due_in(at(61), low_power).is_empty());
+        assert_eq!(
+            run_due_started_in(&service, at(62), constrained).await,
+            [id]
+        );
+        settled(&service, &key).await;
+
+        // Opting in releases the low-power hold.
+        let status = service
+            .handle(Request::call(
+                2,
+                AUTOMATION_SETTINGS,
+                Some(json!({"low_power": "run"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(status["low_power"], "run");
+        assert_eq!(run_due_started_in(&service, at(123), low_power).await, [id]);
+        settled(&service, &key).await;
+
+        // A local root Foldover mounted makes the pair wait on a
+        // constrained network; it runs when the hold lifts.
+        let revision = service
+            .handle(Request::call(
+                3,
+                PAIR_GET,
+                Some(json!({"id": created["id"]})),
+            ))
+            .await
+            .unwrap()["revision"]
+            .as_u64()
+            .unwrap();
+        service
+            .engine
+            .lock()
+            .unwrap()
+            .record_mounts(
+                id,
+                revision,
+                &MountSources {
+                    left: Some("smb://nas/photos".into()),
+                    right: None,
+                },
+            )
+            .unwrap();
+        assert!(service.run_due_in(at(200), constrained).is_empty());
+        assert_eq!(run_due_started_in(&service, at(201), normal).await, [id]);
+        settled(&service, &key).await;
+    }
+
+    #[tokio::test]
+    async fn automation_settings_round_trip_through_the_status() {
+        let (_directory, service) = fixture();
+        let status = service
+            .handle(Request::call(1, AUTOMATION_STATUS, None))
+            .await
+            .unwrap();
+        assert_eq!(status["low_power"], "pause");
+
+        for params in [
+            json!({}),
+            json!({"low_power": "sometimes"}),
+            json!({"low_power": "run", "extra": 1}),
+        ] {
+            assert_eq!(
+                service
+                    .handle(Request::call(2, AUTOMATION_SETTINGS, Some(params)))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                INVALID_PARAMS
+            );
+        }
+        assert_eq!(status["low_power"], "pause");
+
+        let set = service
+            .handle(Request::call(
+                3,
+                AUTOMATION_SETTINGS,
+                Some(json!({"low_power": "run"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(set["low_power"], "run");
+        assert_eq!(
+            service
+                .handle(Request::call(4, AUTOMATION_STATUS, None))
+                .await
+                .unwrap()["low_power"],
+            "run"
         );
     }
 

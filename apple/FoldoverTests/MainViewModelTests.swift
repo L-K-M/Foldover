@@ -225,9 +225,11 @@ private actor SyncProbe: SyncClient {
 /// Keeps monitor()'s per-tick automation read off the real core while
 /// every other client is mocked.
 private actor AutomationProbe: AutomationClient {
-    func state() async throws -> AutomationState { .running }
-    func pause(minutes: UInt32?) async throws -> AutomationState { .running }
-    func resume() async throws -> AutomationState { .running }
+    private let running = AutomationStatus(state: .running)
+    func state() async throws -> AutomationStatus { running }
+    func pause(minutes: UInt32?) async throws -> AutomationStatus { running }
+    func resume() async throws -> AutomationStatus { running }
+    func setLowPower(_ syncs: LowPowerSyncs) async throws -> AutomationStatus { running }
 }
 
 private func monitorPair(_ id: String, _ name: String) -> SyncPair {

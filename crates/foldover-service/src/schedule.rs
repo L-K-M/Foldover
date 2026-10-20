@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
-use foldover_engine::{PairWatcher, Reach};
+use foldover_engine::{Environment, PairWatcher, Reach};
 use foldover_types::{PairConfig, PairId, Schedule, Side};
 
 use crate::Service;
@@ -298,8 +298,15 @@ impl Service {
     }
 
     /// Start every due pair's unattended run; returns the pairs started.
+    /// The environment is read once per tick so every candidate is
+    /// judged against the same moment.
     pub(crate) fn run_due(&self, now: Instant) -> Vec<PairId> {
-        let candidates = {
+        self.run_due_in(now, Environment::now())
+    }
+
+    /// `run_due` with the environment given; tests inject one.
+    pub(crate) fn run_due_in(&self, now: Instant, environment: Environment) -> Vec<PairId> {
+        let (candidates, held) = {
             let Ok(engine) = self.engine.lock() else {
                 return Vec::new();
             };
@@ -313,13 +320,21 @@ impl Service {
             let Ok(pairs) = engine.pairs() else {
                 return Vec::new();
             };
-            pairs
+            let candidates = pairs
                 .into_iter()
                 .filter(|pair| pair.draft().options().schedule() != Schedule::Manual)
                 .filter(|pair| engine.first_synced(pair.id()).unwrap_or(false))
                 // After an undo; an unreadable hold counts as held.
                 .filter(|pair| !engine.automation_held(pair.id()).unwrap_or(true))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            // Held by Low Power Mode or a costly network: still watched,
+            // so changes meanwhile make them due when the hold lifts.
+            let held: HashSet<PairId> = candidates
+                .iter()
+                .filter(|pair| engine.automatic_hold(pair, environment).is_some())
+                .map(PairConfig::id)
+                .collect();
+            (candidates, held)
         };
         let changing: Vec<_> = candidates
             .iter()
@@ -335,7 +350,7 @@ impl Service {
 
         let mut started = Vec::new();
         for pair in candidates {
-            if !self.scheduler.due(&pair, now) {
+            if held.contains(&pair.id()) || !self.scheduler.due(&pair, now) {
                 continue;
             }
             match self.scheduler.gate(pair.id(), now) {

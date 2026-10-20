@@ -4,6 +4,7 @@ import SwiftUI
 struct SettingsView: View {
     let viewModel: SettingsViewModel
     let macToMac: MacToMacViewModel
+    let automation: AutomationStore
 
     var body: some View {
         TabView {
@@ -23,12 +24,23 @@ struct SettingsView: View {
             if let error = viewModel.error {
                 Text(error).foregroundStyle(.red).textSelection(.enabled)
             }
+            Section("Automatic Syncs") {
+                Toggle("Sync automatically in Low Power Mode", isOn: Binding(
+                    get: { automation.lowPower == .run },
+                    set: { run in Task { await automation.setLowPower(run ? .run : .pause) } }
+                ))
+                Text("When off, automatic syncs wait until Low Power Mode ends. Syncs over the network always wait while the network is expensive or Low Data Mode is on.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
             Section("Folder Access") {
                 Text(viewModel.accessNote).font(.callout).foregroundStyle(.secondary)
                 Button("Open Full Disk Access Settings") { viewModel.openFullDiskAccess() }
             }
         }
         .formStyle(.grouped)
-        .onAppear { viewModel.refresh() }
+        .onAppear {
+            viewModel.refresh()
+            Task { await automation.refresh() }
+        }
     }
 }

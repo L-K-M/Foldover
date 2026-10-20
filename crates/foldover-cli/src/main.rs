@@ -40,6 +40,8 @@ enum Request {
     /// Pause automatic syncs for minutes, or until resumed.
     Pause(SocketLocation, Option<u32>),
     Resume(SocketLocation),
+    /// Automation status, or a choice from the environment policy.
+    Automation(SocketLocation, AutomationCommand),
     Peers(SocketLocation, PeerCommand),
     Shares(SocketLocation, ShareCommand),
     Usage,
@@ -74,6 +76,13 @@ enum PeerCommand {
     Revoke(DeviceId),
     /// The folders a paired Mac shares with this one.
     Shares(DeviceId),
+}
+
+/// The environment policy (ADR 0036).
+enum AutomationCommand {
+    Status,
+    /// Automatic syncs in Low Power Mode: `pause` (default) or `run`.
+    LowPower(foldover_client::LowPowerSyncs),
 }
 
 enum ArchiveCommand {
@@ -221,6 +230,14 @@ async fn main() -> ExitCode {
         Request::Resume(location) => {
             print_status(foldover_client::resume_automation(&location).await)
         }
+        Request::Automation(location, command) => match command {
+            AutomationCommand::Status => {
+                print_status(foldover_client::automation_status(&location).await)
+            }
+            AutomationCommand::LowPower(syncs) => {
+                print_status(foldover_client::set_low_power_syncs(&location, syncs).await)
+            }
+        },
         Request::History(location, id) => match history(&location, id).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
@@ -244,7 +261,7 @@ async fn main() -> ExitCode {
         },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]\n       foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]\nLEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --canary (PATH | none)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover automation [low-power pause|run] [--socket PATH]\n       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]\n       foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]\nLEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --canary (PATH | none)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -287,6 +304,23 @@ fn request(args: impl Iterator<Item = OsString>) -> Request {
             }
         }
         [command] if command == "resume" => Request::Resume(location),
+        [command] if command == "automation" => {
+            Request::Automation(location, AutomationCommand::Status)
+        }
+        [command, setting, value] if command == "automation" && setting == "low-power" => {
+            match value.to_str() {
+                Some("pause") => Request::Automation(
+                    location,
+                    AutomationCommand::LowPower(foldover_client::LowPowerSyncs::Pause),
+                ),
+                Some("run") => Request::Automation(
+                    location,
+                    AutomationCommand::LowPower(foldover_client::LowPowerSyncs::Run),
+                ),
+                _ => Request::Usage,
+            }
+        }
+        [command, ..] if command == "automation" => Request::Usage,
         [command, rest @ ..] if command == "peers" => match peer_command(rest) {
             Some(command) => Request::Peers(location, command),
             None => Request::Usage,
@@ -1121,9 +1155,30 @@ mod tests {
         assert!(matches!(req(&["pause", "60"]), Request::Pause(_, Some(60))));
         assert!(matches!(req(&["pause", "soon"]), Request::Usage));
         assert!(matches!(req(&["resume"]), Request::Resume(_)));
+        assert!(matches!(
+            req(&["automation"]),
+            Request::Automation(_, AutomationCommand::Status)
+        ));
+        assert!(matches!(
+            req(&["automation", "low-power", "pause"]),
+            Request::Automation(
+                _,
+                AutomationCommand::LowPower(foldover_client::LowPowerSyncs::Pause)
+            )
+        ));
+        assert!(matches!(
+            req(&["automation", "low-power", "run"]),
+            Request::Automation(
+                _,
+                AutomationCommand::LowPower(foldover_client::LowPowerSyncs::Run)
+            )
+        ));
         for args in [
             vec!["history"],
             vec!["history", "bad"],
+            vec!["automation", "low-power"],
+            vec!["automation", "low-power", "sometimes"],
+            vec!["automation", "bogus", "pause"],
             vec!["archive", id],
             vec!["archive", id, "a"],
             vec!["archive", "bad", "left"],

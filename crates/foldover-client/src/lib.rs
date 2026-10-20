@@ -9,8 +9,8 @@ use foldover_proto::local::{
     ArchiveKey, ArchivePlaced, ArchivePutBack, ArchiveRunKey,
 };
 use foldover_proto::local::{
-    AUTOMATION_PAUSE, AUTOMATION_RESUME, AUTOMATION_STATUS, AutomationPause, HISTORY_LIST,
-    PAIR_REMOVE, PairRevision,
+    AUTOMATION_PAUSE, AUTOMATION_RESUME, AUTOMATION_SETTINGS, AUTOMATION_STATUS, AutomationPause,
+    AutomationSettings, HISTORY_LIST, PAIR_REMOVE, PairRevision,
 };
 pub use foldover_proto::local::{
     AgentCapability, ArchiveItem, ArchiveItems, ArchiveRestored, ArchiveRun, ArchiveRuns,
@@ -18,7 +18,9 @@ pub use foldover_proto::local::{
     SyncConflict, SyncCounts, SyncDeletions, SyncFailure, SyncItem, SyncJob, SyncPreview,
     SyncProgress, SyncResult, SyncStatus, UndoResult,
 };
-pub use foldover_proto::local::{AutomationStatus, SyncItemKind, SyncItemPage};
+pub use foldover_proto::local::{
+    AutomationHold, AutomationStatus, LowPowerSyncs, SyncItemKind, SyncItemPage,
+};
 use foldover_proto::local::{
     ConflictKeep, SYNC_CANCEL, SYNC_ITEMS, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS,
     SYNC_UNDO, SyncItemQuery, SyncKey, SyncResolve, SyncRun,
@@ -201,6 +203,17 @@ pub async fn pause_automation(
 pub async fn resume_automation(location: &SocketLocation) -> Result<AutomationStatus, Error> {
     Ok(serde_json::from_value(
         call(location, AUTOMATION_RESUME, None).await?,
+    )?)
+}
+
+/// Set the person's choice for automatic syncs in Low Power Mode.
+pub async fn set_low_power_syncs(
+    location: &SocketLocation,
+    syncs: LowPowerSyncs,
+) -> Result<AutomationStatus, Error> {
+    let params = serde_json::to_value(AutomationSettings { low_power: syncs })?;
+    Ok(serde_json::from_value(
+        call(location, AUTOMATION_SETTINGS, Some(params)).await?,
     )?)
 }
 

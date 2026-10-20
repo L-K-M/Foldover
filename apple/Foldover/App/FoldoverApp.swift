@@ -10,12 +10,16 @@ struct FoldoverApp: App {
     @State private var viewModel: MainViewModel
     @State private var settings = SettingsStore()
     @State private var macToMac: MacToMacStore
+    @State private var automation = AutomationStore()
 
     init() {
-        // One store, so the pair editor sees the Macs Settings paired.
+        // One store each, so the pair editor sees the Macs Settings
+        // paired and Settings sees the menu bar's automation state.
         let macToMac = MacToMacStore()
         _macToMac = State(initialValue: macToMac)
-        let viewModel = MainViewModel(appInfo: AppInfoStore(), macToMac: macToMac)
+        let automation = AutomationStore()
+        _automation = State(initialValue: automation)
+        let viewModel = MainViewModel(appInfo: AppInfoStore(), automation: automation, macToMac: macToMac)
         _viewModel = State(initialValue: viewModel)
         // Shortcuts actions run in the app and share its state.
         AppDependencyManager.shared.add(dependency: viewModel)
@@ -39,7 +43,8 @@ struct FoldoverApp: App {
 
         Settings {
             SettingsView(viewModel: SettingsViewModel(store: settings),
-                         macToMac: MacToMacViewModel(store: macToMac))
+                         macToMac: MacToMacViewModel(store: macToMac),
+                         automation: automation)
         }
     }
 }

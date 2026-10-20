@@ -70,6 +70,11 @@ All notable changes to this project are documented here. The format follows
   password saved in the Keychain and no dialog.
 - Pause automatic syncs for an hour, four hours or until resumed, from the
   menu bar, Shortcuts or `foldover pause`; the pause survives restarts.
+- Automatic syncs wait while Low Power Mode is on, unless "Sync
+  automatically in Low Power Mode" is on in Settings
+  (`foldover automation low-power run`), and syncs that reach folders
+  over the network wait while the network is expensive or Low Data Mode
+  is on. Syncs you start yourself always run.
 - Every previewed change can be listed, 100 at a time, and filtered to
   copies, updates, archives or conflicts.
 - Skip large files: a size limit per pair, in the editor and as
