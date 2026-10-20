@@ -26,10 +26,37 @@ use crate::{Filter, LocalEndpoint, ObserveStep, ObservedEntry};
 /// that the asking Mac gave up.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
 
-/// The latest observation of each shared folder, so an unchanged file is
-/// not read again on the next scan.
+/// The latest observation of each shared folder under each metadata
+/// policy, so an unchanged file is not read again on the next scan.
+/// Versions carry the policy's metadata digest, so a scan builds only on
+/// one made under the same policy.
 #[derive(Default)]
-pub struct FolderCache(Mutex<HashMap<Vec<u8>, BTreeMap<SyncPath, ObservedEntry>>>);
+pub struct FolderCache(Mutex<HashMap<CacheKey, BTreeMap<SyncPath, ObservedEntry>>>);
+
+type CacheKey = (Vec<u8>, MetadataPolicy);
+
+impl FolderCache {
+    /// The observation to build on for `root` scanned under `policy`.
+    fn take(&self, root: &LocalRoot, policy: MetadataPolicy) -> BTreeMap<SyncPath, ObservedEntry> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&(root.as_bytes().to_vec(), policy))
+            .unwrap_or_default()
+    }
+
+    fn keep(
+        &self,
+        root: &LocalRoot,
+        policy: MetadataPolicy,
+        entries: BTreeMap<SyncPath, ObservedEntry>,
+    ) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert((root.as_bytes().to_vec(), policy), entries);
+    }
+}
 
 /// Answer one operation on the shared folder at `root`.
 pub fn serve_folder(root: &LocalRoot, op: FolderOp, cache: &FolderCache, answer: &mut Answer) {
@@ -120,12 +147,7 @@ fn observe(
         scan.extended_attributes.into(),
         scan.permissions.into(),
     );
-    let previous = cache
-        .0
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .remove(root.as_bytes())
-        .unwrap_or_default();
+    let previous = cache.take(root, policy);
 
     // The asking Mac gives up by dropping the request; the next progress
     // report then fails and the scan stops.
@@ -185,14 +207,43 @@ fn observe(
             })
             .is_ok();
     if sent {
-        cache
-            .0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(root.as_bytes().to_vec(), observation.entries().clone());
+        cache.keep(root, policy, observation.entries().clone());
     }
 }
 
 fn failed(answer: &mut Answer, error: FolderError) {
     let _ = answer.reply(&PeerReply::Failed { error });
+}
+
+#[cfg(test)]
+mod tests {
+    use foldover_types::{Digest, EntryContent, EntryVersion, Propagation};
+
+    use super::*;
+
+    /// Review: two pairs scanning one share under different metadata
+    /// policies shared one cache, so one reused versions the other's
+    /// policy had computed.
+    #[test]
+    fn a_scan_builds_only_on_one_made_under_the_same_policy() {
+        let root = LocalRoot::from_bytes(b"/Users/b/Photos".to_vec()).unwrap();
+        let with_times =
+            MetadataPolicy::new(Propagation::Sync, Propagation::Ignore, Propagation::Ignore);
+        let without = MetadataPolicy::new(
+            Propagation::Ignore,
+            Propagation::Ignore,
+            Propagation::Ignore,
+        );
+        let entry = ObservedEntry::for_tests(
+            EntryVersion::new(EntryContent::Directory, Digest::from_bytes([1; 32])),
+            0,
+        );
+        let entries = BTreeMap::from([(SyncPath::try_from(&b"album"[..]).unwrap(), entry)]);
+        let cache = FolderCache::default();
+
+        cache.keep(&root, with_times, entries.clone());
+        assert!(cache.take(&root, without).is_empty());
+        cache.keep(&root, with_times, entries.clone());
+        assert_eq!(cache.take(&root, with_times), entries);
+    }
 }
