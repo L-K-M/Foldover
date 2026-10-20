@@ -1,6 +1,6 @@
 use std::{fmt, str::FromStr};
 
-use crate::{PairOptions, PairRoot, SyncMode};
+use crate::{FolderRecords, PairOptions, PairRoot, Side, SyncMode};
 
 pub const MAX_PAIR_NAME_BYTES: usize = 1024;
 pub const MAX_LOCAL_ROOT_BYTES: usize = 4096;
@@ -125,6 +125,15 @@ impl PairDraft {
     }
     pub fn options(&self) -> &PairOptions {
         &self.options
+    }
+
+    /// The folder Foldover keeps no records in: a Backup's target whose
+    /// records stay with the source.
+    pub fn unrecorded(&self) -> Option<Side> {
+        match (self.mode, self.options.records()) {
+            (SyncMode::Backup { source }, FolderRecords::SourceOnly) => Some(source.other()),
+            _ => None,
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 use foldover_types::{
-    DailySchedule, Durability, Filters, InvalidPair, MetadataPolicy, PairConfig, PairDraft,
-    PairOptions, PairRoot, Propagation, Schedule, ScheduleInterval, Side, SyncMode, SyncPath,
-    TimeOfDay, Weekday, Weekdays,
+    DailySchedule, Durability, Filters, FolderRecords, InvalidPair, MetadataPolicy, PairConfig,
+    PairDraft, PairOptions, PairRoot, Propagation, Schedule, ScheduleInterval, Side, SyncMode,
+    SyncPath, TimeOfDay, Weekday, Weekdays,
 };
 use serde::{Deserialize, Serialize};
 
@@ -89,6 +89,23 @@ pub enum PairDurability {
     Full,
 }
 
+/// Which folders hold Foldover's records (`.foldover`).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PairRecords {
+    #[default]
+    Both,
+    /// Only a Backup's source: the target cannot hold `.foldover`, and
+    /// what a run replaces there is deleted, not archived.
+    SourceOnly,
+}
+
+impl PairRecords {
+    fn is_both(&self) -> bool {
+        *self == Self::Both
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairSettings {
@@ -108,6 +125,8 @@ pub struct PairSettings {
     /// are mounted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canary: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "PairRecords::is_both")]
+    pub records: PairRecords,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -209,6 +228,10 @@ impl From<&PairOptions> for PairSettings {
             size_limit: options.filters().size_limit(),
             age_limit: options.filters().age_limit(),
             canary: options.canary().map(|path| path.as_bytes().to_vec()),
+            records: match options.records() {
+                FolderRecords::Both => PairRecords::Both,
+                FolderRecords::SourceOnly => PairRecords::SourceOnly,
+            },
         }
     }
 }
@@ -257,6 +280,12 @@ impl TryFrom<PairSettings> for PairOptions {
                 .transpose()
                 .map_err(|_| InvalidPair::Canary)?,
         )
+        .map(|options| {
+            options.with_records(match settings.records {
+                PairRecords::Both => FolderRecords::Both,
+                PairRecords::SourceOnly => FolderRecords::SourceOnly,
+            })
+        })
     }
 }
 
@@ -377,6 +406,9 @@ pub enum PairWarning {
     MetadataUnsupported { side: PairSide },
     /// One side ignores name case and the other does not.
     NamesDiffer { side: PairSide },
+    /// This side cannot hold Foldover's `.foldover` records, so it can
+    /// only be a Backup target that keeps none.
+    RecordsUnsupported { side: PairSide },
 }
 
 #[cfg(test)]

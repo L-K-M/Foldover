@@ -32,13 +32,13 @@ const PERMISSION_BITS: u32 = 0o777;
 const DATABASE_NAME: &str = "state.db";
 const WRITER_LOCK: &str = "writer.lock";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary, schedule_time, schedule_days";
+const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary, schedule_time, schedule_days, records";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 22] = [
+const MIGRATIONS: [&str; 23] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
     SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, SCHEMA_V15, SCHEMA_V16,
-    SCHEMA_V17, SCHEMA_V18, SCHEMA_V19, SCHEMA_V20, SCHEMA_V21, SCHEMA_V22,
+    SCHEMA_V17, SCHEMA_V18, SCHEMA_V19, SCHEMA_V20, SCHEMA_V21, SCHEMA_V22, SCHEMA_V23,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -346,6 +346,13 @@ CREATE TABLE watch_cursor (
 ) STRICT;
 ";
 
+// Which folders hold a pair's records (ADR 0040). Older readers ignore
+// the column and keep records in both folders, which a target that cannot
+// hold them refuses, so the floor stays.
+const SCHEMA_V23: &str = "
+ALTER TABLE pair ADD COLUMN records TEXT NOT NULL DEFAULT 'both' CHECK(records IN ('both','source'));
+";
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("State I/O: {0}")]
@@ -467,6 +474,7 @@ pub struct PairValues {
     pub canary: Option<Vec<u8>>,
     pub schedule_time: Option<i64>,
     pub schedule_days: Option<i64>,
+    pub records: String,
 }
 
 #[derive(Clone, Debug)]
@@ -561,7 +569,7 @@ impl Database {
     pub fn create_pair(&mut self, values: &PairValues) -> Result<PairRow, Error> {
         let id = uuid::Uuid::new_v4().into_bytes();
         self.connection.execute(
-            "INSERT INTO pair (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,schedule,schedule_minutes,filters,size_limit,age_limit,canary,schedule_time,schedule_days) VALUES (?1,1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+            "INSERT INTO pair (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,schedule,schedule_minutes,filters,size_limit,age_limit,canary,schedule_time,schedule_days,records) VALUES (?1,1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
             params![
                 id.as_slice(),
                 values.name,
@@ -579,7 +587,8 @@ impl Database {
                 values.age_limit,
                 values.canary,
                 values.schedule_time,
-                values.schedule_days
+                values.schedule_days,
+                values.records
             ],
         )?;
         self.pair(&id)?
@@ -644,7 +653,10 @@ impl Database {
         }
         let changed = transaction.execute(
             // A changed root is a different endpoint; forget its identity.
-            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,schedule=?11,schedule_minutes=?12,filters=?13,size_limit=?14,age_limit=?15,canary=?16,schedule_time=?17,schedule_days=?18,left_identity=CASE WHEN left_root=?4 THEN left_identity END,right_identity=CASE WHEN right_root=?5 THEN right_identity END,left_mount=CASE WHEN left_root=?4 THEN left_mount END,right_mount=CASE WHEN right_root=?5 THEN right_mount END WHERE id=?1 AND revision=?2",
+            // So do changed records, or a changed mode while records stay
+            // with the source: a folder without records has an identity
+            // only this agent knows.
+            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,schedule=?11,schedule_minutes=?12,filters=?13,size_limit=?14,age_limit=?15,canary=?16,schedule_time=?17,schedule_days=?18,records=?19,left_identity=CASE WHEN left_root=?4 AND records=?19 AND (records='both' OR mode=?6) THEN left_identity END,right_identity=CASE WHEN right_root=?5 AND records=?19 AND (records='both' OR mode=?6) THEN right_identity END,left_mount=CASE WHEN left_root=?4 THEN left_mount END,right_mount=CASE WHEN right_root=?5 THEN right_mount END WHERE id=?1 AND revision=?2",
             params![
                 id,
                 revision,
@@ -663,7 +675,8 @@ impl Database {
                 values.age_limit,
                 values.canary,
                 values.schedule_time,
-                values.schedule_days
+                values.schedule_days,
+                values.records
             ],
         )?;
         if changed == 0 {
@@ -1080,6 +1093,7 @@ fn pair_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairRow> {
             canary: row.get(15)?,
             schedule_time: row.get(16)?,
             schedule_days: row.get(17)?,
+            records: row.get(18)?,
         },
     })
 }
@@ -1116,6 +1130,7 @@ pub(super) mod tests {
             canary: None,
             schedule_time: None,
             schedule_days: None,
+            records: "both".into(),
         }
     }
 
@@ -1728,8 +1743,8 @@ pub(super) mod tests {
         assert_eq!(minimum_reader(&legacy.connection), legacy_reader);
         drop(legacy);
 
-        // v21 raised the floor last; v22 only adds a table older readers
-        // ignore.
+        // v21 raised the floor last; v22 and v23 only add a table and a
+        // column older readers ignore.
         let mut database = Database::open(&location).unwrap();
         assert_eq!(minimum_reader(&database.connection), 21);
         assert_eq!(
@@ -1743,12 +1758,13 @@ pub(super) mod tests {
             let mut expected = expected.clone();
             if *table == "pair" {
                 // V19's canary and V21's schedule columns read NULL on
-                // every migrated row.
+                // every migrated row, and V23's records their default.
                 for row in &mut expected {
                     row.extend([
                         rusqlite::types::Value::Null,
                         rusqlite::types::Value::Null,
                         rusqlite::types::Value::Null,
+                        rusqlite::types::Value::Text("both".into()),
                     ]);
                 }
             }
@@ -1866,6 +1882,55 @@ pub(super) mod tests {
             database.identities(&[9; 16]),
             Err(Error::PairNotFound)
         ));
+    }
+
+    #[test]
+    fn identities_are_forgotten_when_records_move() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let mut backup = values();
+        backup.mode = "backup-left".into();
+        let pair = database.create_pair(&backup).unwrap();
+        let recorded = |database: &mut Database, revision| {
+            database
+                .record_identities(&pair.id, revision, &[1; 16], &[2; 16])
+                .unwrap();
+        };
+        let both = IdentityRow {
+            left: Some(vec![1; 16]),
+            right: Some(vec![2; 16]),
+        };
+
+        // Records leaving a folder, or coming back, forget both identities.
+        recorded(&mut database, 1);
+        let mut source_only = backup.clone();
+        source_only.records = "source".into();
+        database.update_pair(&pair.id, 1, &source_only).unwrap();
+        assert_eq!(
+            database.identities(&pair.id).unwrap(),
+            IdentityRow::default()
+        );
+
+        // A rename keeps them; reversing the Backup does not.
+        recorded(&mut database, 2);
+        let mut renamed = source_only.clone();
+        renamed.name = "renamed".into();
+        database.update_pair(&pair.id, 2, &renamed).unwrap();
+        assert_eq!(database.identities(&pair.id).unwrap(), both);
+        let mut reversed = renamed.clone();
+        reversed.mode = "backup-right".into();
+        database.update_pair(&pair.id, 3, &reversed).unwrap();
+        assert_eq!(
+            database.identities(&pair.id).unwrap(),
+            IdentityRow::default()
+        );
+
+        recorded(&mut database, 4);
+        database.update_pair(&pair.id, 4, &backup).unwrap();
+        assert_eq!(
+            database.identities(&pair.id).unwrap(),
+            IdentityRow::default()
+        );
     }
 
     #[test]

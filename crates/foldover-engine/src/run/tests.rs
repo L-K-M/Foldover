@@ -20,6 +20,7 @@ struct Fixture {
     age_limit: Option<u32>,
     canary: Option<SyncPath>,
     durability: foldover_types::Durability,
+    records: foldover_types::FolderRecords,
     right_kind: RightKind,
     journal: Option<foldover_state::Journal>,
     /// In-memory folders that replace both temporary directories.
@@ -65,6 +66,7 @@ fn fixture(mode: SyncMode) -> Fixture {
         age_limit: None,
         canary: None,
         durability: foldover_types::Durability::Standard,
+        records: foldover_types::FolderRecords::Both,
         right_kind: RightKind::Local,
         journal: None,
         memory: None,
@@ -179,7 +181,8 @@ impl Fixture {
             )
             .with_filters(filters)
             .with_canary(self.canary.clone())
-            .unwrap(),
+            .unwrap()
+            .with_records(self.records),
         );
         let pair =
             PairConfig::from_stored(PairId::from_bytes([1; 16]).unwrap(), self.revision, draft)
@@ -1438,6 +1441,86 @@ impl Fixture {
             )
             .unwrap()
     }
+}
+
+/// PLAN.md §3.6: a Backup target that cannot hold `.foldover` gets
+/// nothing of Foldover's: no identity, lease or archive. What a run
+/// replaces there is deleted, leftovers too, and undo is refused.
+#[test]
+fn a_backup_target_without_records_keeps_nothing_of_foldovers() {
+    for kind in [RightKind::Local, RightKind::Sftp] {
+        if kind == RightKind::Sftp && sftp_server().is_none() {
+            eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
+            continue;
+        }
+        backup_without_records(kind);
+    }
+
+    // Kept in both folders, the records stop the first run before it
+    // writes anything.
+    let mut both = fixture(SyncMode::Backup { source: Side::Left });
+    fs::write(both.right.path().join(".foldover"), b"").unwrap();
+    fs::write(both.left.path().join("file"), b"x").unwrap();
+    let prepared = both.prepare();
+    let mut store = both.store();
+    let refused = prepared.execute(
+        Approval::default(),
+        RunContext::Reviewed,
+        STARTED,
+        &mut |planned, commit| store.apply(planned, commit),
+        &mut proceed,
+        &NoProgress,
+    );
+    assert!(matches!(
+        refused,
+        Err(RunError::IdentityWrite {
+            side: Side::Right,
+            ..
+        })
+    ));
+    assert!(!both.right.path().join("file").exists());
+}
+
+fn backup_without_records(kind: RightKind) {
+    let mut backup = fixture(SyncMode::Backup { source: Side::Left });
+    backup.records = foldover_types::FolderRecords::SourceOnly;
+    backup.right_kind = kind;
+    let target = backup.right.path().to_owned();
+    // A file where `.foldover` would go: the folder cannot hold one.
+    fs::write(target.join(".foldover"), b"").unwrap();
+    fs::write(backup.left.path().join("edited"), b"first").unwrap();
+    let report = backup.sync();
+    assert_eq!(report.copied(), 1);
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    assert!(backup.identities.side(Side::Right).is_some());
+
+    fs::write(backup.left.path().join("edited"), b"second version").unwrap();
+    fs::write(target.join(".foldover-tmp-deadbeef"), b"left behind").unwrap();
+    let report = backup.sync();
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    assert_eq!((report.copied(), report.recovered()), (1, 1));
+    assert_eq!(fs::read(target.join("edited")).unwrap(), b"second version");
+    let mut names: Vec<_> = fs::read_dir(&target)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    names.sort();
+    assert_eq!(names, [".foldover", "edited"]);
+    assert_eq!(fs::read(target.join(".foldover")).unwrap(), b"");
+
+    let journal = backup.journal.clone().expect("a journaled run");
+    let prepared = backup.prepare();
+    let mut store = backup.store();
+    let undo = prepared.undo(
+        journal,
+        STARTED,
+        &mut |planned, commit| store.apply(planned, commit),
+        &mut proceed,
+    );
+    assert!(matches!(
+        undo,
+        Err(RunError::UndoUnavailable { side: Side::Right })
+    ));
 }
 
 #[test]
