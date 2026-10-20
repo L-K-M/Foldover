@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -22,11 +23,19 @@ use foldover_types::{
 
 use super::wire;
 use crate::link::Answer;
-use crate::{Expected, Filter, LocalEndpoint, LocalEntry, ObserveStep, ObservedEntry, RunScope};
+use crate::{
+    Expected, Filter, LocalEndpoint, LocalEntry, ObserveStep, ObservedEntry, RootWatcher, RunScope,
+};
 
 /// How often a scan reports progress, which is also how soon it notices
 /// that the asking Mac gave up.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
+/// How often a quiet watch says it is still there.
+const WATCH_HEARTBEAT: Duration = Duration::from_secs(60);
+/// How often a watch looks whether this Mac is shutting down.
+const WATCH_TICK: Duration = Duration::from_millis(250);
+/// How long a burst of changes may last before it is reported.
+const CHANGE_QUIET: Duration = Duration::from_millis(500);
 /// Longest label a kept copy's name may carry.
 const MAX_LABEL_BYTES: usize = 64;
 /// PLAN.md §4: archives keep 30 days.
@@ -66,6 +75,9 @@ impl FolderCache {
 
 /// Answer one operation on the shared folder at `root`.
 pub fn serve_folder(root: &LocalRoot, op: FolderOp, cache: &FolderCache, answer: &mut Answer) {
+    if op == FolderOp::Watch {
+        return watch(root, answer);
+    }
     let endpoint = match LocalEndpoint::open(Path::new(OsStr::from_bytes(root.as_bytes())))
         .and_then(|endpoint| endpoint.probe_access().map(|()| endpoint))
     {
@@ -108,6 +120,7 @@ pub fn serve_folder(root: &LocalRoot, op: FolderOp, cache: &FolderCache, answer:
             .map(|bytes| PeerReply::Space { bytes })
             .map_err(|error| wire::scan_failure(&error)),
         FolderOp::Observe { scan } => return observe(&endpoint, root, scan, cache, answer),
+        FolderOp::Watch => unreachable!("answered before opening the folder"),
         FolderOp::Read { path, entry, run } => return read(&endpoint, &path, &entry, run, answer),
         FolderOp::Receive { path, entry } => receive(&endpoint, &path, entry, answer),
         FolderOp::Metadata { path, entry, run } => {
@@ -323,6 +336,58 @@ fn observe(
             .is_ok();
     if sent {
         cache.keep(root, policy, observation.entries().clone());
+    }
+}
+
+/// Report changes in the folder until the asking Mac gives up: a burst of
+/// notifications is one `changed`, and `watching` every minute without
+/// changes proves the request is still wanted.
+fn watch(root: &LocalRoot, answer: &mut Answer) {
+    let (sender, changes) = mpsc::channel();
+    let watcher = RootWatcher::new(move |()| {
+        let _ = sender.send(());
+    });
+    let mut watcher = match watcher {
+        Ok(watcher) => watcher,
+        Err(error) => return failed(answer, watch_failure(&error)),
+    };
+    if let Some((_, error)) = watcher.set_roots(&[(root.clone(), ())]).first() {
+        return failed(answer, watch_failure(error));
+    }
+    let mut reply = PeerReply::Watching;
+    loop {
+        if answer.closing() || answer.reply(&reply).is_err() {
+            return;
+        }
+        let sent = Instant::now();
+        // Short waits, so this Mac shutting down never waits for the
+        // next heartbeat.
+        reply = loop {
+            if answer.closing() {
+                return;
+            }
+            match changes.recv_timeout(WATCH_TICK) {
+                Ok(()) => {
+                    // One report per burst, e.g. a folder of files copied in.
+                    std::thread::sleep(CHANGE_QUIET);
+                    while changes.try_recv().is_ok() {}
+                    break PeerReply::Changed;
+                }
+                Err(RecvTimeoutError::Timeout) if sent.elapsed() >= WATCH_HEARTBEAT => {
+                    break PeerReply::Watching;
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+        };
+    }
+}
+
+fn watch_failure(error: &std::io::Error) -> FolderError {
+    FolderError {
+        kind: FolderErrorKind::Other,
+        path: None,
+        message: format!("That Mac cannot watch the folder: {error}"),
     }
 }
 

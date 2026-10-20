@@ -54,6 +54,11 @@ impl Reach {
             link: Some(Arc::downgrade(link)),
         }
     }
+
+    /// The running link, if Mac-to-Mac is on.
+    pub fn link(&self) -> Option<Arc<PeerLink>> {
+        self.link.as_ref().and_then(Weak::upgrade)
+    }
 }
 
 impl Endpoint {
@@ -71,7 +76,7 @@ impl Endpoint {
                 Ok(Self::Sftp(endpoint))
             }
             PairRoot::Peer(root) => {
-                let link = reach.link.as_ref().and_then(Weak::upgrade).ok_or_else(|| {
+                let link = reach.link().ok_or_else(|| {
                     ScanError::MacUnreachable("Mac-to-Mac is off; turn it on in Settings".into())
                 })?;
                 Ok(Self::Peer(PeerEndpoint::open(link, root)?))

@@ -1,8 +1,8 @@
 # ADR 0031: Mac-to-Mac sync
 
-Status: Device trust, pairing, discovery, shared folders and the peer
-endpoint implemented; remote change hints and full metadata fidelity
-pending
+Status: Device trust, pairing, discovery, shared folders, the peer
+endpoint and change reports implemented; full metadata fidelity and
+resumed transfers pending
 
 ## Context
 
@@ -107,6 +107,16 @@ Mac's local endpoint at the share root:
 | `receive` (`path`, `entry`: kind, expected current entry, metadata, run) | Data frames and their end follow a file's request; `received`: the version stored, after staging and verifying the content against the plan |
 | `receiveMetadata`, `remove`, `recoverLeftover` | `received` or `done`, each only while the path holds the expected entry |
 | `pruneArchive`, `archivedRuns`, `archivedItems`, `putBack`, `keepCopy` | The folder's archive, as on a local root: `pruned`, `runs`, `items`, `placed` |
+| `watch` | `watching` once the folder is watched and every minute after; `changed` after each burst of changes (500 ms quiet); until the asking Mac drops the request |
+
+For pairs that run when files change, the asking Mac keeps one `watch`
+open per folder on another Mac, beside its local notifications. A broken
+watch is asked again after 30 seconds, and its next `watching` counts as
+a change, since changes in between are unknown. While Mac-to-Mac is off
+the folder counts as unwatchable: the scheduler retries every tick and
+the hourly verification run covers it, as for an unmounted disk. The
+sharing Mac's heartbeat lets it notice an asker that left while nothing
+changed.
 
 Failures come back as `failed` with a kind (missing, access denied,
 cancelled, changed, invalid, other), so the asking Mac waits for a

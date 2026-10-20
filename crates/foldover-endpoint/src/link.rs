@@ -15,6 +15,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
@@ -31,6 +32,9 @@ use tokio::task::JoinHandle;
 
 mod stream;
 pub use stream::{Answer, Exchange, Incoming};
+
+/// How long a broken watch waits before asking again.
+const WATCH_RETRY: Duration = Duration::from_secs(30);
 
 /// How long a person has to confirm a code once both Macs show it.
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -126,6 +130,9 @@ pub struct PeerLink {
     host: Arc<dyn PeerHost>,
     /// Where blocking callers run their streams.
     runtime: Handle,
+    /// Set as the link goes away, so answers that wait on their own, such
+    /// as folder watches, stop before the runtime does.
+    closing: Arc<AtomicBool>,
 }
 
 /// How this Mac finds, and is found by, others on the network.
@@ -201,6 +208,7 @@ impl PeerLink {
             state: Mutex::default(),
             host,
             runtime: Handle::current(),
+            closing: Arc::default(),
         });
         link.announce();
         let answering = Arc::downgrade(&link);
@@ -429,6 +437,42 @@ impl PeerLink {
         Ok(Exchange::new(self.runtime.clone(), send, recv))
     }
 
+    /// Keep `call`, a request answered with reports, open to `device`:
+    /// `report` runs for each reply, and when the request breaks. A broken
+    /// request is asked again after a pause; dropping the handle stops it.
+    pub fn watch(
+        self: &Arc<Self>,
+        device: DeviceId,
+        call: PeerCall,
+        report: impl Fn(Watched) + Send + Sync + 'static,
+    ) -> WatchHandle {
+        let link = Arc::downgrade(self);
+        let request = PeerRequest {
+            protocol: PEER_PROTOCOL,
+            call,
+        };
+        WatchHandle(self.runtime.spawn(async move {
+            loop {
+                let Some(asking) = link.upgrade() else {
+                    return;
+                };
+                let opened = asking.open(device, &request).await;
+                drop(asking);
+                if let Ok((mut send, mut recv)) = opened {
+                    let _ = send.finish();
+                    while let Ok(bytes) = stream::receive_json(&mut recv).await {
+                        match serde_json::from_slice(&bytes) {
+                            Ok(reply) => report(Watched::Reply(reply)),
+                            Err(_) => break,
+                        }
+                    }
+                }
+                report(Watched::Lost);
+                tokio::time::sleep(WATCH_RETRY).await;
+            }
+        }))
+    }
+
     /// A stream to `device` carrying `request`. A connection that went
     /// stale is replaced once.
     async fn open(
@@ -578,6 +622,7 @@ impl PeerLink {
 
 impl Drop for PeerLink {
     fn drop(&mut self) {
+        self.closing.store(true, Ordering::Relaxed);
         let state = self.state.get_mut().unwrap_or_else(PoisonError::into_inner);
         if let Some(window) = state.window.take() {
             window.node.close();
@@ -669,6 +714,23 @@ async fn settle(
     link.drain();
 }
 
+/// What a kept-open request reports.
+#[derive(Debug, Eq, PartialEq)]
+pub enum Watched {
+    Reply(PeerReply),
+    /// The request broke, e.g. the other Mac slept; it is asked again.
+    Lost,
+}
+
+/// A request kept open by `PeerLink::watch`; dropping it closes it.
+pub struct WatchHandle(JoinHandle<()>);
+
+impl Drop for WatchHandle {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Answer each request a paired device sends on `connection`.
 async fn answer(link: Weak<PeerLink>, connection: PeerConnection) {
     let device = DeviceId::from_bytes(*connection.device().as_bytes());
@@ -699,14 +761,17 @@ async fn answer_one(
             return;
         }
     };
-    let Some((host, runtime)) = link
-        .upgrade()
-        .map(|link| (Arc::clone(&link.host), link.runtime.clone()))
-    else {
+    let Some((host, runtime, closing)) = link.upgrade().map(|link| {
+        (
+            Arc::clone(&link.host),
+            link.runtime.clone(),
+            Arc::clone(&link.closing),
+        )
+    }) else {
         return;
     };
     let answered = tokio::task::spawn_blocking(move || {
-        let mut answer = Answer::new(runtime, send, recv);
+        let mut answer = Answer::new(runtime, send, recv, closing);
         host.serve(device, request.call, &mut answer);
         answer.into_send()
     })

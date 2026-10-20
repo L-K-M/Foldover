@@ -111,6 +111,10 @@ pub enum FolderOp {
         path: Vec<u8>,
         durability: PairDurability,
     },
+    /// Report changes until the asking Mac drops the request: `watching`
+    /// once the folder is watched and then every minute, `changed` after
+    /// each burst of changes.
+    Watch,
     /// Save `path`, which must still hold `version`, beside itself. `placed`.
     KeepCopy {
         path: Vec<u8>,
@@ -280,6 +284,11 @@ pub enum PeerReply {
     Placed {
         path: Vec<u8>,
     },
+    /// The folder is watched; also sent while nothing changes, so a Mac
+    /// that left is noticed.
+    Watching,
+    /// Something in the folder changed.
+    Changed,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
