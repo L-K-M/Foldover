@@ -30,13 +30,13 @@ const PERMISSION_BITS: u32 = 0o777;
 const DATABASE_NAME: &str = "state.db";
 const WRITER_LOCK: &str = "writer.lock";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary";
+const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary, schedule_time, schedule_days";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 20] = [
+const MIGRATIONS: [&str; 21] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
     SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, SCHEMA_V15, SCHEMA_V16,
-    SCHEMA_V17, SCHEMA_V18, SCHEMA_V19, SCHEMA_V20,
+    SCHEMA_V17, SCHEMA_V18, SCHEMA_V19, SCHEMA_V20, SCHEMA_V21,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -293,6 +293,45 @@ CREATE TABLE automation_setting (
 ) STRICT;
 ";
 
+// Calendar schedules (ADR 0039): a time of day in minutes and a weekday
+// bit set. Older readers cannot read 'daily', so the floor rises.
+const SCHEMA_V21: &str = "
+CREATE TABLE pair_next (
+    id BLOB PRIMARY KEY NOT NULL CHECK(length(id) = 16 AND id != zeroblob(16)),
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    name TEXT NOT NULL CHECK(length(trim(name)) > 0 AND instr(name, char(0)) = 0),
+    left_root BLOB NOT NULL CHECK(length(left_root) > 0 AND instr(left_root,x'00') = 0 AND
+        (substr(left_root,1,1) = x'2f' OR (length(left_root) > length('sftp://') AND substr(left_root,1,length('sftp://')) = CAST('sftp://' AS BLOB)) OR
+         (length(left_root) > length('peer://') AND substr(left_root,1,length('peer://')) = CAST('peer://' AS BLOB)))),
+    right_root BLOB NOT NULL CHECK(length(right_root) > 0 AND instr(right_root,x'00') = 0 AND
+        (substr(right_root,1,1) = x'2f' OR (length(right_root) > length('sftp://') AND substr(right_root,1,length('sftp://')) = CAST('sftp://' AS BLOB)) OR
+         (length(right_root) > length('peer://') AND substr(right_root,1,length('peer://')) = CAST('peer://' AS BLOB)))),
+    mode TEXT NOT NULL CHECK(mode IN ('sync','mirror-left','mirror-right','backup-left','backup-right')),
+    modification_times TEXT NOT NULL DEFAULT 'sync' CHECK(modification_times IN ('sync','ignore')),
+    extended_attributes TEXT NOT NULL DEFAULT 'sync' CHECK(extended_attributes IN ('sync','ignore')),
+    permissions TEXT NOT NULL DEFAULT 'ignore' CHECK(permissions IN ('sync','ignore')),
+    durability TEXT NOT NULL DEFAULT 'standard' CHECK(durability IN ('standard','full')),
+    left_identity BLOB CHECK(left_identity IS NULL OR length(left_identity) = 16),
+    right_identity BLOB CHECK(right_identity IS NULL OR length(right_identity) = 16),
+    schedule TEXT NOT NULL DEFAULT 'manual' CHECK(schedule IN ('manual','every','changes','daily')),
+    schedule_minutes INTEGER CHECK(schedule_minutes IS NULL OR schedule_minutes BETWEEN 1 AND 10080),
+    filters TEXT NOT NULL DEFAULT '' CHECK(instr(filters, char(0)) = 0),
+    size_limit INTEGER CHECK(size_limit IS NULL OR size_limit > 0),
+    left_mount TEXT CHECK(left_mount IS NULL OR length(left_mount) > 0),
+    right_mount TEXT CHECK(right_mount IS NULL OR length(right_mount) > 0),
+    age_limit INTEGER CHECK(age_limit IS NULL OR age_limit > 0),
+    canary BLOB CHECK(canary IS NULL OR length(canary) > 0),
+    schedule_time INTEGER CHECK(schedule_time IS NULL OR schedule_time BETWEEN 0 AND 1439),
+    schedule_days INTEGER CHECK(schedule_days IS NULL OR schedule_days BETWEEN 1 AND 127),
+    CHECK(left_root != right_root)
+) STRICT;
+INSERT INTO pair_next (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,left_identity,right_identity,schedule,schedule_minutes,filters,size_limit,left_mount,right_mount,age_limit,canary)
+    SELECT id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,left_identity,right_identity,schedule,schedule_minutes,filters,size_limit,left_mount,right_mount,age_limit,canary FROM pair;
+DROP TABLE pair;
+ALTER TABLE pair_next RENAME TO pair;
+UPDATE state_meta SET minimum_reader=max(minimum_reader,21) WHERE singleton=1;
+";
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("State I/O: {0}")]
@@ -412,6 +451,8 @@ pub struct PairValues {
     pub size_limit: Option<i64>,
     pub age_limit: Option<i64>,
     pub canary: Option<Vec<u8>>,
+    pub schedule_time: Option<i64>,
+    pub schedule_days: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -506,7 +547,7 @@ impl Database {
     pub fn create_pair(&mut self, values: &PairValues) -> Result<PairRow, Error> {
         let id = uuid::Uuid::new_v4().into_bytes();
         self.connection.execute(
-            "INSERT INTO pair (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,schedule,schedule_minutes,filters,size_limit,age_limit,canary) VALUES (?1,1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+            "INSERT INTO pair (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,schedule,schedule_minutes,filters,size_limit,age_limit,canary,schedule_time,schedule_days) VALUES (?1,1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
             params![
                 id.as_slice(),
                 values.name,
@@ -522,7 +563,9 @@ impl Database {
                 values.filters,
                 values.size_limit,
                 values.age_limit,
-                values.canary
+                values.canary,
+                values.schedule_time,
+                values.schedule_days
             ],
         )?;
         self.pair(&id)?
@@ -587,7 +630,7 @@ impl Database {
         }
         let changed = transaction.execute(
             // A changed root is a different endpoint; forget its identity.
-            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,schedule=?11,schedule_minutes=?12,filters=?13,size_limit=?14,age_limit=?15,canary=?16,left_identity=CASE WHEN left_root=?4 THEN left_identity END,right_identity=CASE WHEN right_root=?5 THEN right_identity END,left_mount=CASE WHEN left_root=?4 THEN left_mount END,right_mount=CASE WHEN right_root=?5 THEN right_mount END WHERE id=?1 AND revision=?2",
+            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,schedule=?11,schedule_minutes=?12,filters=?13,size_limit=?14,age_limit=?15,canary=?16,schedule_time=?17,schedule_days=?18,left_identity=CASE WHEN left_root=?4 THEN left_identity END,right_identity=CASE WHEN right_root=?5 THEN right_identity END,left_mount=CASE WHEN left_root=?4 THEN left_mount END,right_mount=CASE WHEN right_root=?5 THEN right_mount END WHERE id=?1 AND revision=?2",
             params![
                 id,
                 revision,
@@ -604,7 +647,9 @@ impl Database {
                 values.filters,
                 values.size_limit,
                 values.age_limit,
-                values.canary
+                values.canary,
+                values.schedule_time,
+                values.schedule_days
             ],
         )?;
         if changed == 0 {
@@ -1019,6 +1064,8 @@ fn pair_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairRow> {
             size_limit: row.get(13)?,
             age_limit: row.get(14)?,
             canary: row.get(15)?,
+            schedule_time: row.get(16)?,
+            schedule_days: row.get(17)?,
         },
     })
 }
@@ -1053,6 +1100,8 @@ pub(super) mod tests {
             size_limit: None,
             age_limit: None,
             canary: None,
+            schedule_time: None,
+            schedule_days: None,
         }
     }
 
@@ -1104,6 +1153,31 @@ pub(super) mod tests {
         update.mode = "unknown".into();
         assert!(database.create_pair(&update).is_err());
         assert_eq!(database.pairs().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn daily_schedule_columns_round_trip_within_their_bounds() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let mut input = values();
+        input.schedule = "daily".into();
+        input.schedule_time = Some(1080);
+        input.schedule_days = Some(0x1f);
+        let saved = database.create_pair(&input).unwrap();
+        let stored = database.pair(&saved.id).unwrap().unwrap();
+        assert_eq!(stored.values.schedule_time, Some(1080));
+        assert_eq!(stored.values.schedule_days, Some(0x1f));
+        for (time, days) in [
+            (Some(1440), Some(0x1f)),
+            (Some(0), Some(0)),
+            (Some(0), Some(128)),
+        ] {
+            let mut bad = values();
+            bad.schedule = "daily".into();
+            bad.schedule_time = time;
+            bad.schedule_days = days;
+            assert!(database.create_pair(&bad).is_err());
+        }
     }
 
     #[test]
@@ -1640,9 +1714,9 @@ pub(super) mod tests {
         assert_eq!(minimum_reader(&legacy.connection), legacy_reader);
         drop(legacy);
 
-        // v15, the newest step, raised the floor last.
+        // v21, the newest step, raised the floor last.
         let mut database = Database::open(&location).unwrap();
-        assert_eq!(minimum_reader(&database.connection), 18);
+        assert_eq!(minimum_reader(&database.connection), 21);
         assert_eq!(
             database
                 .connection
@@ -1653,9 +1727,14 @@ pub(super) mod tests {
         for (table, expected) in &before {
             let mut expected = expected.clone();
             if *table == "pair" {
-                // V19's canary column reads NULL on every migrated row.
+                // V19's canary and V21's schedule columns read NULL on
+                // every migrated row.
                 for row in &mut expected {
-                    row.push(rusqlite::types::Value::Null);
+                    row.extend([
+                        rusqlite::types::Value::Null,
+                        rusqlite::types::Value::Null,
+                        rusqlite::types::Value::Null,
+                    ]);
                 }
             }
             assert_eq!(

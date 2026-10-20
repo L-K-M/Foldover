@@ -1,11 +1,12 @@
 //! `foldover-cli` — client layer. The `foldover` CLI (`pairs`, `sync`,
 //! `status`). Depends on foldover-client. See PLAN.md §4.4.
 
-use foldover_client::{DeviceId, PeerStatus, ShareId, SyncStatus};
 use foldover_client::{
-    Durability, Filters, MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions, PairRoot,
-    Propagation, ReviewToken, Schedule, ScheduleInterval, Side, SocketLocation, SyncMode, SyncPath,
+    DailySchedule, Durability, Filters, MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions,
+    PairRoot, Propagation, ReviewToken, Schedule, ScheduleInterval, Side, SocketLocation, SyncMode,
+    SyncPath, TimeOfDay, Weekday, Weekdays,
 };
+use foldover_client::{DeviceId, PeerStatus, ShareId, SyncStatus};
 use foldover_proto::local::PairRecord;
 use std::env;
 use std::ffi::OsString;
@@ -264,7 +265,7 @@ async fn main() -> ExitCode {
         },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs check NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover automation [low-power pause|run] [--socket PATH]\n       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]\n       foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]\nLEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --canary (PATH | none)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs check NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover automation [low-power pause|run] [--socket PATH]\n       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]\n       foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]\nLEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES | daily@HH:MM[:DAYS]); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --canary (PATH | none)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -533,6 +534,7 @@ fn option_changes(args: &[OsString]) -> Option<OptionChanges> {
                 .replace(match value {
                     "manual" => Schedule::Manual,
                     "changes" => Schedule::OnChange,
+                    daily if daily.starts_with("daily@") => daily_schedule(&daily[6..])?,
                     minutes => {
                         Schedule::Every(ScheduleInterval::from_minutes(minutes.parse().ok()?).ok()?)
                     }
@@ -550,6 +552,61 @@ fn option_changes(args: &[OsString]) -> Option<OptionChanges> {
         changes.filters = Some(Filters::new(rules).ok()?);
     }
     Some(changes)
+}
+
+/// `--schedule daily@HH:MM[:DAYS]`: a local time of day on the given
+/// weekdays — a comma list or `mon-fri` range, every day when omitted.
+fn daily_schedule(spec: &str) -> Option<Schedule> {
+    let mut fields = spec.split(':');
+    let hour: u32 = fields.next()?.parse().ok()?;
+    let minute: u32 = fields.next()?.parse().ok()?;
+    if hour >= 24 || minute >= 60 {
+        return None;
+    }
+    let at = TimeOfDay::from_minutes(hour * 60 + minute).ok()?;
+    let days = match fields.next() {
+        Some(list) => day_list(list)?,
+        None => Weekdays::ALL,
+    };
+    if fields.next().is_some() {
+        return None;
+    }
+    Some(Schedule::Daily(DailySchedule::new(at, days)))
+}
+
+/// A comma-separated list of day names or `mon-fri` ranges.
+fn day_list(list: &str) -> Option<Weekdays> {
+    let mut days = Vec::new();
+    for item in list.split(',') {
+        match item.split_once('-') {
+            Some((from, to)) => {
+                let (from, to) = (weekday(from)?, weekday(to)?);
+                let mut day = from;
+                loop {
+                    days.push(day);
+                    if day == to {
+                        break;
+                    }
+                    day = Weekday::ALL[(day as usize + 1) % 7];
+                }
+            }
+            None => days.push(weekday(item)?),
+        }
+    }
+    Weekdays::of(&days).ok()
+}
+
+fn weekday(name: &str) -> Option<Weekday> {
+    Some(match name {
+        "mon" | "monday" => Weekday::Monday,
+        "tue" | "tuesday" => Weekday::Tuesday,
+        "wed" | "wednesday" => Weekday::Wednesday,
+        "thu" | "thursday" => Weekday::Thursday,
+        "fri" | "friday" => Weekday::Friday,
+        "sat" | "saturday" => Weekday::Saturday,
+        "sun" | "sunday" => Weekday::Sunday,
+        _ => return None,
+    })
 }
 
 fn peer_command(args: &[OsString]) -> Option<PeerCommand> {
@@ -1078,6 +1135,56 @@ mod tests {
                 "often",
             ],
             vec![
+                "pairs",
+                "add",
+                "Photos",
+                "/a",
+                "/b",
+                "sync",
+                "--schedule",
+                "daily@24:00",
+            ],
+            vec![
+                "pairs",
+                "add",
+                "Photos",
+                "/a",
+                "/b",
+                "sync",
+                "--schedule",
+                "daily@18:60",
+            ],
+            vec![
+                "pairs",
+                "add",
+                "Photos",
+                "/a",
+                "/b",
+                "sync",
+                "--schedule",
+                "daily@18:00:",
+            ],
+            vec![
+                "pairs",
+                "add",
+                "Photos",
+                "/a",
+                "/b",
+                "sync",
+                "--schedule",
+                "daily@18:00:funday",
+            ],
+            vec![
+                "pairs",
+                "add",
+                "Photos",
+                "/a",
+                "/b",
+                "sync",
+                "--schedule",
+                "daily@18:00:mon-",
+            ],
+            vec![
                 "pairs", "add", "Photos", "/a", "/b", "sync", "--times", "sync", "--times",
                 "ignore",
             ],
@@ -1249,6 +1356,44 @@ mod tests {
             draft.options().schedule(),
             Schedule::Every(ScheduleInterval::from_minutes(15).unwrap())
         );
+        for (value, expected) in [
+            (
+                "daily@18:00",
+                DailySchedule::new(TimeOfDay::from_minutes(18 * 60).unwrap(), Weekdays::ALL),
+            ),
+            (
+                "daily@7:30:mon-fri",
+                DailySchedule::new(
+                    TimeOfDay::from_minutes(7 * 60 + 30).unwrap(),
+                    Weekdays::MONDAY_TO_FRIDAY,
+                ),
+            ),
+            (
+                "daily@02:00:mon,wed,sun",
+                DailySchedule::new(
+                    TimeOfDay::from_minutes(2 * 60).unwrap(),
+                    Weekdays::of(&[Weekday::Monday, Weekday::Wednesday, Weekday::Sunday]).unwrap(),
+                ),
+            ),
+        ] {
+            let Request::Pairs(_, PairCommand::Add(draft)) = req(&[
+                "pairs",
+                "add",
+                "Photos",
+                "/a",
+                "/b",
+                "sync",
+                "--schedule",
+                value,
+            ]) else {
+                panic!("expected an add command for {value}");
+            };
+            assert_eq!(
+                draft.options().schedule(),
+                Schedule::Daily(expected),
+                "{value}"
+            );
+        }
         assert_eq!(draft.options().metadata().permissions(), Propagation::Sync);
         assert_eq!(
             draft.options().metadata().modification_times(),

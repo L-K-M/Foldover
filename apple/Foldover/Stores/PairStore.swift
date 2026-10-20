@@ -21,6 +21,19 @@ enum SyncSchedule: Hashable, Sendable {
     case every(minutes: UInt32)
     /// After files change, and hourly.
     case onChange
+    /// At `minutes` after local midnight, on each day in `days`.
+    case daily(minutes: UInt32, days: Set<SyncDay>)
+}
+
+/// A weekday in a daily schedule, Monday first.
+enum SyncDay: CaseIterable, Hashable, Sendable {
+    case monday
+    case tuesday
+    case wednesday
+    case thursday
+    case friday
+    case saturday
+    case sunday
 }
 
 enum PairDurability: CaseIterable, Hashable, Sendable {
@@ -201,6 +214,7 @@ private func syncSchedule(_ schedule: FoldoverCore.PairSchedule) -> SyncSchedule
     case .manual: .manual
     case .every(let minutes): .every(minutes: minutes)
     case .onChange: .onChange
+    case .daily(let minutes, let days): .daily(minutes: minutes, days: Set(days.map(syncDay)))
     }
 }
 
@@ -209,6 +223,31 @@ private func coreSchedule(_ schedule: SyncSchedule) -> FoldoverCore.PairSchedule
     case .manual: .manual
     case .every(let minutes): .every(minutes: minutes)
     case .onChange: .onChange
+    case .daily(let minutes, let days): .daily(minutes: minutes, days: days.map(coreDay))
+    }
+}
+
+private func syncDay(_ day: FoldoverCore.ScheduleDay) -> SyncDay {
+    switch day {
+    case .monday: .monday
+    case .tuesday: .tuesday
+    case .wednesday: .wednesday
+    case .thursday: .thursday
+    case .friday: .friday
+    case .saturday: .saturday
+    case .sunday: .sunday
+    }
+}
+
+private func coreDay(_ day: SyncDay) -> FoldoverCore.ScheduleDay {
+    switch day {
+    case .monday: .monday
+    case .tuesday: .tuesday
+    case .wednesday: .wednesday
+    case .thursday: .thursday
+    case .friday: .friday
+    case .saturday: .saturday
+    case .sunday: .sunday
     }
 }
 

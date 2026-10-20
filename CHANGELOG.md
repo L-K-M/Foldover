@@ -122,6 +122,11 @@ All notable changes to this project are documented here. The format follows
   release with install instructions.
 - Menu bar: every pair's status with Sync and Sync All; notifications when an
   automatic sync needs approval, fails, or leaves conflicts.
+- Daily schedules: a pair can sync at a time of day on chosen weekdays in
+  the Mac's local time zone, like "Weekdays at 18:00" or "Every day at
+  02:30". Choose Daily in the pair editor and set the time and days, or
+  use `--schedule daily@18:00:mon-fri`. A schedule missed while the Mac
+  slept or the agent was off runs once when they are back.
 - Filters: gitignore-style rules per pair and in `.foldoverignore` files,
   applied to both folders so excluded files are never deleted.
 - Sync when files change: pairs set to "When files change" watch both

@@ -1,9 +1,13 @@
 //! `foldover-os` — driver layer. Host facilities: power assertions,
 //! network path (expensive/constrained), Keychain and Secret Service,
-//! cloud-managed folder detection. Calls the OS directly; depends on no
-//! other Foldover crate. See PLAN.md §4.4.
+//! cloud-managed folder detection and local wall-clock time. Calls the
+//! OS directly; depends only on the vocabulary crate. See PLAN.md §4.4.
 
 mod cloud;
+
+#[allow(unsafe_code)]
+mod clock;
+
 mod peer_identity;
 
 pub use cloud::{CloudProvider, cloud_provider, current_cloud_provider};
@@ -26,6 +30,15 @@ mod environment;
 
 use std::io;
 use std::path::PathBuf;
+use std::time::SystemTime;
+
+use foldover_types::LocalDateTime;
+
+/// `at` in the machine's local time zone, for calendar schedules
+/// (PLAN.md §3.5); `None` when the C library cannot answer.
+pub fn local_time(at: SystemTime) -> Option<LocalDateTime> {
+    clock::local_time(at)
+}
 
 /// This computer's name for other Macs, e.g. "Studio-iMac" from
 /// `Studio-iMac.local`; "Mac" when the system reports none.

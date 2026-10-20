@@ -1,15 +1,17 @@
 //! Unattended runs. `Every` pairs are due one interval after their last
 //! scheduled start, or after the agent started. `OnChange` pairs are due
 //! once their folders have been quiet briefly after a change, and hourly,
-//! because change notifications can be missed. Pairs that never completed
-//! a first sync are skipped: their first run is reviewed by a person.
+//! because change notifications can be missed. `Daily` pairs are due once
+//! their latest scheduled local moment has passed the last run's start.
+//! Pairs that never completed a first sync are skipped: their first run
+//! is reviewed by a person.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
-use foldover_engine::{Environment, PairWatcher, Reach};
-use foldover_types::{PairConfig, PairId, Schedule, Side};
+use foldover_engine::{Environment, PairWatcher, Reach, local_time};
+use foldover_types::{LocalDateTime, PairConfig, PairId, Schedule, Side};
 
 use crate::Service;
 use crate::sync::Work;
@@ -100,7 +102,16 @@ impl Scheduler {
             .insert(id, at);
     }
 
-    fn due(&self, pair: &PairConfig, now: Instant) -> bool {
+    /// `last_run` is the pair's last recorded run start in local
+    /// wall-clock time; only `Daily` consults it, because `Instant`
+    /// survives neither restarts nor sleep.
+    fn due(
+        &self,
+        pair: &PairConfig,
+        now: Instant,
+        local_now: Option<LocalDateTime>,
+        last_run: Option<LocalDateTime>,
+    ) -> bool {
         let previous = self
             .last
             .lock()
@@ -124,6 +135,14 @@ impl Scheduler {
                 changed.is_some_and(|at| now.saturating_duration_since(at) >= QUIET)
                     || since >= VERIFY
             }
+            // The latest scheduled moment must be newer than the last
+            // run's start: a moment missed while the agent slept or was
+            // off is caught up once here, never replayed, and a pair
+            // with no recorded run is due once.
+            Schedule::Daily(daily) => match local_now {
+                Some(local) => last_run.is_none_or(|last| daily.latest_at_or_before(local) > last),
+                None => false,
+            },
         }
     }
 
@@ -306,7 +325,18 @@ impl Service {
 
     /// `run_due` with the environment given; tests inject one.
     pub(crate) fn run_due_in(&self, now: Instant, environment: Environment) -> Vec<PairId> {
-        let (candidates, held) = {
+        self.run_due_at(now, environment, local_time(SystemTime::now()))
+    }
+
+    /// `run_due_in` with the machine's local wall-clock time given;
+    /// `Daily` pairs compare it against their last recorded run start.
+    pub(crate) fn run_due_at(
+        &self,
+        now: Instant,
+        environment: Environment,
+        local_now: Option<LocalDateTime>,
+    ) -> Vec<PairId> {
+        let (candidates, held, last_run) = {
             let Ok(engine) = self.engine.lock() else {
                 return Vec::new();
             };
@@ -327,6 +357,16 @@ impl Service {
                 // After an undo; an unreadable hold counts as held.
                 .filter(|pair| !engine.automation_held(pair.id()).unwrap_or(true))
                 .collect::<Vec<_>>();
+            // The last run start lives in run history, so daily pairs
+            // stay correct across agent restarts and sleep.
+            let last_run: HashMap<PairId, LocalDateTime> = candidates
+                .iter()
+                .filter(|pair| matches!(pair.draft().options().schedule(), Schedule::Daily(_)))
+                .filter_map(|pair| {
+                    let started = engine.history(pair.id(), 1).ok()?.first()?.started;
+                    local_time(started).map(|at| (pair.id(), at))
+                })
+                .collect();
             // Held by Low Power Mode or a costly network: still watched,
             // so changes meanwhile make them due when the hold lifts.
             let held: HashSet<PairId> = candidates
@@ -334,7 +374,7 @@ impl Service {
                 .filter(|pair| engine.automatic_hold(pair, environment).is_some())
                 .map(PairConfig::id)
                 .collect();
-            (candidates, held)
+            (candidates, held, last_run)
         };
         let changing: Vec<_> = candidates
             .iter()
@@ -350,7 +390,11 @@ impl Service {
 
         let mut started = Vec::new();
         for pair in candidates {
-            if held.contains(&pair.id()) || !self.scheduler.due(&pair, now) {
+            if held.contains(&pair.id())
+                || !self
+                    .scheduler
+                    .due(&pair, now, local_now, last_run.get(&pair.id()).copied())
+            {
                 continue;
             }
             match self.scheduler.gate(pair.id(), now) {
@@ -441,7 +485,9 @@ mod tests {
     use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
 
-    use foldover_types::{LocalRoot, PairDraft, PairOptions, SyncMode};
+    use foldover_types::{
+        DailySchedule, LocalRoot, PairDraft, PairOptions, SyncMode, TimeOfDay, Weekday, Weekdays,
+    };
 
     use super::*;
 
@@ -466,12 +512,61 @@ mod tests {
         let at = |seconds| start + Duration::from_secs(seconds);
 
         scheduler.watch(std::slice::from_ref(&pair), &Reach::default(), at(1));
-        assert!(!scheduler.due(&pair, at(10)));
+        assert!(!scheduler.due(&pair, at(10), None, None));
 
         fs::create_dir(&right).unwrap();
         scheduler.watch(std::slice::from_ref(&pair), &Reach::default(), at(20));
-        assert!(!scheduler.due(&pair, at(21)));
-        assert!(scheduler.due(&pair, at(26)));
+        assert!(!scheduler.due(&pair, at(21), None, None));
+        assert!(scheduler.due(&pair, at(26), None, None));
+    }
+
+    #[test]
+    fn a_daily_pair_is_due_once_after_its_local_moment() {
+        let directory = tempfile::tempdir().unwrap();
+        let left = directory.path().join("left");
+        let right = directory.path().join("right");
+        fs::create_dir(&left).unwrap();
+        fs::create_dir(&right).unwrap();
+        let root =
+            |path: &Path| LocalRoot::from_bytes(path.as_os_str().as_bytes().to_vec()).unwrap();
+        let options = PairOptions::default().with_schedule(Schedule::Daily(DailySchedule::new(
+            TimeOfDay::from_minutes(18 * 60).unwrap(),
+            Weekdays::MONDAY_TO_FRIDAY,
+        )));
+        let draft = PairDraft::new("Work".into(), root(&left), root(&right), SyncMode::Sync)
+            .unwrap()
+            .with_options(options);
+        let pair =
+            PairConfig::from_stored(PairId::from_bytes([4; PairId::BYTE_LEN]).unwrap(), 1, draft)
+                .unwrap();
+        let start = Instant::now();
+        let scheduler = Scheduler::new(start);
+        let now = start + Duration::from_secs(30);
+        let local = |day, weekday, minute| Some(LocalDateTime::new(2026, 10, day, weekday, minute));
+
+        // Friday 17:00: today's 18:00 is still ahead.
+        assert!(!scheduler.due(
+            &pair,
+            now,
+            local(16, Weekday::Friday, 17 * 60),
+            local(15, Weekday::Thursday, 18 * 60),
+        ));
+        // Friday 18:01, last run Thursday 18:00: due once.
+        let friday = local(16, Weekday::Friday, 18 * 60 + 1);
+        assert!(scheduler.due(&pair, now, friday, local(15, Weekday::Thursday, 18 * 60)));
+        // The moment covered by a run at Friday 18:00 stays covered: the
+        // same tick sees an equal last start, not a newer moment.
+        assert!(!scheduler.due(&pair, now, friday, local(16, Weekday::Friday, 18 * 60)));
+        // A run later Friday evening already passed the moment too.
+        assert!(!scheduler.due(&pair, now, friday, local(16, Weekday::Friday, 19 * 60)));
+        // Saturday: the Friday moment is behind a Friday run either way.
+        let saturday = local(17, Weekday::Saturday, 9 * 60);
+        assert!(!scheduler.due(&pair, now, saturday, local(16, Weekday::Friday, 18 * 60)));
+        assert!(scheduler.due(&pair, now, saturday, local(15, Weekday::Thursday, 18 * 60)));
+        // No recorded run: the pair is due once at the next tick.
+        assert!(scheduler.due(&pair, now, friday, None));
+        // Without local time the pair cannot be due.
+        assert!(!scheduler.due(&pair, now, None, None));
     }
 
     #[test]

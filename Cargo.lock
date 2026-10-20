@@ -762,6 +762,8 @@ dependencies = [
  "block2",
  "core-foundation",
  "core-foundation-sys",
+ "foldover-types",
+ "libc",
  "objc2",
  "rustix",
  "security-framework",

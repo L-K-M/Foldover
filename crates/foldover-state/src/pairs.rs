@@ -5,9 +5,9 @@ use foldover_db::{
     BaseChange, Database, PairRow, PairValues, ResolutionRow, SnapshotRow, StateLocation,
 };
 use foldover_types::{
-    BaselineEntry, Durability, EndpointId, Filters, InvalidPair, LocalRoot, MetadataPolicy,
-    PairConfig, PairDraft, PairId, PairOptions, PairRoot, Propagation, Resolution, Schedule,
-    ScheduleInterval, Side, SyncMode, SyncPath,
+    BaselineEntry, DailySchedule, Durability, EndpointId, Filters, InvalidPair, LocalRoot,
+    MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions, PairRoot, Propagation, Resolution,
+    Schedule, ScheduleInterval, Side, SyncMode, SyncPath, TimeOfDay, Weekdays,
 };
 
 use crate::BaseUpdate;
@@ -39,6 +39,7 @@ const STANDARD_DURABILITY: &str = "standard";
 const MANUAL_SCHEDULE: &str = "manual";
 const INTERVAL_SCHEDULE: &str = "every";
 const CHANGE_SCHEDULE: &str = "changes";
+const DAILY_SCHEDULE: &str = "daily";
 const FULL_DURABILITY: &str = "full";
 
 #[derive(Debug, thiserror::Error)]
@@ -389,11 +390,20 @@ fn values(draft: &PairDraft) -> PairValues {
             Schedule::Manual => MANUAL_SCHEDULE,
             Schedule::Every(_) => INTERVAL_SCHEDULE,
             Schedule::OnChange => CHANGE_SCHEDULE,
+            Schedule::Daily(_) => DAILY_SCHEDULE,
         }
         .to_owned(),
         schedule_minutes: match options.schedule() {
             Schedule::Every(interval) => Some(i64::from(interval.minutes())),
-            Schedule::Manual | Schedule::OnChange => None,
+            _ => None,
+        },
+        schedule_time: match options.schedule() {
+            Schedule::Daily(daily) => Some(i64::from(daily.at().minutes())),
+            _ => None,
+        },
+        schedule_days: match options.schedule() {
+            Schedule::Daily(daily) => Some(i64::from(daily.days().bits())),
+            _ => None,
         },
         filters: options.filters().rules().join("\n"),
         size_limit: options
@@ -443,12 +453,25 @@ fn from_row(row: PairRow) -> Result<PairConfig, Error> {
         stored_propagation(&row.values.extended_attributes)?,
         stored_propagation(&row.values.permissions)?,
     );
-    let schedule = match (row.values.schedule.as_str(), row.values.schedule_minutes) {
-        (MANUAL_SCHEDULE, None) => Schedule::Manual,
-        (CHANGE_SCHEDULE, None) => Schedule::OnChange,
-        (INTERVAL_SCHEDULE, Some(minutes)) => Schedule::Every(ScheduleInterval::from_minutes(
-            u32::try_from(minutes).map_err(|_| Error::InvalidStored("schedule"))?,
-        )?),
+    let schedule = match (
+        row.values.schedule.as_str(),
+        row.values.schedule_minutes,
+        row.values.schedule_time,
+        row.values.schedule_days,
+    ) {
+        (MANUAL_SCHEDULE, None, None, None) => Schedule::Manual,
+        (CHANGE_SCHEDULE, None, None, None) => Schedule::OnChange,
+        (INTERVAL_SCHEDULE, Some(minutes), None, None) => {
+            Schedule::Every(ScheduleInterval::from_minutes(
+                u32::try_from(minutes).map_err(|_| Error::InvalidStored("schedule"))?,
+            )?)
+        }
+        (DAILY_SCHEDULE, None, Some(time), Some(days)) => Schedule::Daily(DailySchedule::new(
+            TimeOfDay::from_minutes(
+                u32::try_from(time).map_err(|_| Error::InvalidStored("schedule"))?,
+            )?,
+            Weekdays::from_bits(u8::try_from(days).map_err(|_| Error::InvalidStored("schedule"))?)?,
+        )),
         _ => return Err(Error::InvalidStored("schedule")),
     };
     // Rules are single lines, so an empty column means no rules.
@@ -628,6 +651,8 @@ mod tests {
                 size_limit: None,
                 age_limit: None,
                 canary: None,
+                schedule_time: None,
+                schedule_days: None,
             })
             .unwrap();
         drop(database);
@@ -658,6 +683,8 @@ mod tests {
                 size_limit: None,
                 age_limit: None,
                 canary: None,
+                schedule_time: None,
+                schedule_days: None,
             })
             .unwrap();
         let id = PairId::from_bytes(row.id.try_into().unwrap()).unwrap();
@@ -900,6 +927,31 @@ mod tests {
         let updated = store.update(pair.id(), 2, &defaults).unwrap();
         assert_eq!(updated.draft().options(), &PairOptions::default());
         assert!(store.base(pair.id()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_daily_schedule_round_trips() {
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        let daily = Schedule::Daily(DailySchedule::new(
+            TimeOfDay::from_minutes(18 * 60).unwrap(),
+            Weekdays::MONDAY_TO_FRIDAY,
+        ));
+        let pair = store
+            .create(
+                &draft(SyncMode::Sync).with_options(PairOptions::default().with_schedule(daily)),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .pair(pair.id())
+                .unwrap()
+                .unwrap()
+                .draft()
+                .options()
+                .schedule(),
+            daily
+        );
     }
 
     #[test]
