@@ -23,16 +23,16 @@ is skipped until its job ends.
   folders, such as unmounted disks, are covered by the hourly run.
   Unwatchable folders are retried every check; one that becomes watchable
   counts as changed, since it may have changed while it was away.
-- **Catch-up:** at the agent's first check every watchable folder counts
-  as changed once, since nothing watched it while the agent was not
-  running. Replaying FSEvents from a stored event ID would skip that run
-  when nothing changed; it is not implemented
-  ([ADR 0002](0002-change-detection.md)).
+- **Catch-up:** at the agent's first check each watchable folder's
+  volume event history is replayed from the event recorded when the pair
+  was last quiet. A change, or no usable record, counts as one change
+  ([ADR 0002](0002-change-detection.md#implementation)).
 - **Other computers' changes** reach no notification on shares and SFTP
   folders. Every 5 minutes the agent lists their root and up to 32
   recently active directories, one level each, and compares names,
-  kinds, sizes and modification times with the previous check; excluded
-  names and Foldover's own do not count. A directory whose entry changed
+  kinds, sizes and modification times with the previous check; names the
+  pair's rules or the folder's `.foldoverignore` exclude, and Foldover's
+  own, do not count. A directory whose entry changed
   is listed from then on, and when 32 are listed the least recently
   active one makes room. After any run the next check takes its listings
   as the new reference without comparing them, so the run's own writes

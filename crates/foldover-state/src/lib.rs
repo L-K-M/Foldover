@@ -10,5 +10,5 @@ pub use foldover_db::StateLocation;
 pub use pairs::{
     Device, Error, HISTORY_LIMIT, HistoryEntry, HistoryOutcome, Journal, JournalAction,
     JournalEntry, JournalUpdate, LowPowerSyncs, MountSources, PairStore, Pause, RecordedIdentities,
-    RunTrigger, Share, SnapshotEntry,
+    RunTrigger, Share, SnapshotEntry, WatchCursor,
 };

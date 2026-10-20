@@ -170,7 +170,20 @@ impl LocalEndpoint {
         if version.content() != EntryContent::File(resume.content) {
             return Err(ApplyError::ContentNotStored(path.clone()));
         }
-        self.place_received(staged.into_staged(), path, destination, run)?;
+        // The data arrived whole and checked out. If the file it replaces
+        // changed meanwhile, it is kept for the next attempt to place.
+        let placement = match self.placement(path, destination) {
+            Ok(placement) => placement,
+            Err(error) => {
+                let _ = self.root.keep_staged(
+                    staged.into_staged(),
+                    &resume.content,
+                    staged_metadata.size(),
+                );
+                return Err(error);
+            }
+        };
+        self.place(staged.into_staged(), path, placement, run)?;
         Ok(version)
     }
 
@@ -260,17 +273,33 @@ impl LocalEndpoint {
         destination: Option<&LocalEntry>,
         run: &RunScope,
     ) -> Result<(), ApplyError> {
-        let placement = match destination {
-            None => Placement::Create,
-            Some(destination) => {
-                if self.entry_at(path)?.map(|entry| entry.metadata)
-                    != Some(destination.metadata.clone())
-                {
-                    return Err(ApplyError::DestinationChanged(path.clone()));
-                }
-                Placement::Replace
-            }
+        let placement = self.placement(path, destination)?;
+        self.place(staged, path, placement, run)
+    }
+
+    /// How to place at `path` while it still holds what was verified:
+    /// beside nothing, or over `destination` unchanged.
+    fn placement(
+        &self,
+        path: &SyncPath,
+        destination: Option<&LocalEntry>,
+    ) -> Result<Placement, ApplyError> {
+        let Some(destination) = destination else {
+            return Ok(Placement::Create);
         };
+        if self.entry_at(path)?.map(|entry| entry.metadata) != Some(destination.metadata.clone()) {
+            return Err(ApplyError::DestinationChanged(path.clone()));
+        }
+        Ok(Placement::Replace)
+    }
+
+    fn place(
+        &self,
+        staged: foldover_fs::Staged,
+        path: &SyncPath,
+        placement: Placement,
+        run: &RunScope,
+    ) -> Result<(), ApplyError> {
         let durability = run.options().durability();
         let displaced = self
             .root
