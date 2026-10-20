@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use foldover_types::{
     BaselineEntry, ConflictKind, EntryDecision, EntryKind, EntryVersion, Resolution, ScanControl,
-    Side, SyncMode, SyncPath,
+    Side, Skip, SyncMode, SyncPath,
 };
 
 use crate::reconcile::resolve;
@@ -14,12 +14,9 @@ fn decide(
     left: Option<EntryVersion>,
     right: Option<EntryVersion>,
 ) -> EntryDecision {
-    match (decision, resolution) {
-        (EntryDecision::Conflict(_), Some(resolution)) => {
-            resolve(*resolution, left, right).unwrap_or(decision)
-        }
-        _ => decision,
-    }
+    resolution
+        .and_then(|resolution| resolve(*resolution, left, right))
+        .unwrap_or(decision)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -100,12 +97,13 @@ impl CandidatePlan {
     }
 }
 
-/// A choice made for a folder conflict — a folder deleted on one side while
-/// something inside it changed on the other — covers the folder and
-/// everything in it: the kept side wins each entry, as in a mirror from it.
-/// `resolve` cannot do this per entry, because a folder's own versions do
-/// not change when its contents do; without this the conflict would block
-/// its branch forever.
+/// A choice made for a folder present on one side only — a conflict where a
+/// folder was deleted on one side while something inside it changed on the
+/// other, or a folder about to be copied or archived — covers the folder
+/// and everything in it: the kept side wins each entry, as in a mirror from
+/// it. `resolve` cannot do this per entry, because a folder's own versions
+/// do not change when its contents do; without this a folder conflict
+/// would block its branch forever.
 ///
 /// ```text
 /// photos/        deleted on B, kept A   ─▶ create on B
@@ -133,7 +131,7 @@ fn settle_folder_choices(
             parent = path.parent();
         }
         if keep.is_none() {
-            keep = folder_choice(row, resolutions.get(&row.path), left, right);
+            keep = folder_choice(resolutions.get(&row.path), left, right);
             if let Some(side) = keep {
                 branches.insert(row.path.clone(), side);
             }
@@ -151,23 +149,51 @@ fn settle_folder_choices(
     Ok(())
 }
 
-/// The side a person chose for this folder conflict, while both sides still
-/// match what they saw.
+/// Leave each skipped change and everything inside it as it is: no write,
+/// no base change. A skip applies while both sides still hold what the
+/// person saw at the skipped path.
+fn skip_branches(
+    rows: &mut [PlanRow],
+    left: &BTreeMap<SyncPath, EntryVersion>,
+    right: &BTreeMap<SyncPath, EntryVersion>,
+    skips: &BTreeMap<SyncPath, Skip>,
+    control: &mut impl FnMut() -> ScanControl,
+) -> Result<(), PlanError> {
+    if skips.is_empty() {
+        return Ok(());
+    }
+    let mut skipped: Vec<SyncPath> = Vec::new();
+    for row in rows.iter_mut() {
+        check_control(control)?;
+        let inside = skipped.iter().any(|root| root.is_ancestor_of(&row.path));
+        let current = skips.get(&row.path).is_some_and(|skip| {
+            (left.get(&row.path).copied(), right.get(&row.path).copied())
+                == (skip.left(), skip.right())
+        });
+        if current {
+            skipped.push(row.path.clone());
+        }
+        if inside || current {
+            row.decision = CandidateDecision::Entry(EntryDecision::KeepTarget);
+        }
+    }
+    Ok(())
+}
+
+/// The side a person chose for this folder, present on one side only,
+/// while both sides still match what they saw.
 fn folder_choice(
-    row: &PlanRow,
     resolution: Option<&Resolution>,
     left: Option<EntryVersion>,
     right: Option<EntryVersion>,
 ) -> Option<Side> {
     let resolution = resolution?;
-    let folder = [left, right]
-        .into_iter()
-        .flatten()
-        .any(|version| version.kind() == EntryKind::Directory);
+    let folder = match (left, right) {
+        (Some(version), None) | (None, Some(version)) => version.kind() == EntryKind::Directory,
+        _ => false,
+    };
     let current = (left, right) == (resolution.left(), resolution.right());
-    let conflicted = row.decision
-        == CandidateDecision::Entry(EntryDecision::Conflict(ConflictKind::DeletedVersusEdited));
-    (folder && current && conflicted).then_some(resolution.keep())
+    (folder && current).then_some(resolution.keep())
 }
 
 /// Merge complete logical trees in exact byte-path order. Incomplete scans,
@@ -181,17 +207,27 @@ pub fn plan_candidates(
     right: &BTreeMap<SyncPath, EntryVersion>,
     control: &mut impl FnMut() -> ScanControl,
 ) -> Result<CandidatePlan, PlanError> {
-    plan_resolved(mode, base, left, right, &BTreeMap::new(), control)
+    plan_resolved(
+        mode,
+        base,
+        left,
+        right,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        control,
+    )
 }
 
-/// `plan_candidates`, with conflicts a person resolved turned into the
-/// chosen change while both sides still match what they saw.
+/// `plan_candidates`, with the side a person chose for a change or conflict
+/// turned into that side's change, and changes they skipped left alone,
+/// while both sides still match what they saw.
 pub fn plan_resolved(
     mode: SyncMode,
     base: &BTreeMap<SyncPath, BaselineEntry>,
     left: &BTreeMap<SyncPath, EntryVersion>,
     right: &BTreeMap<SyncPath, EntryVersion>,
     resolutions: &BTreeMap<SyncPath, Resolution>,
+    skips: &BTreeMap<SyncPath, Skip>,
     control: &mut impl FnMut() -> ScanControl,
 ) -> Result<CandidatePlan, PlanError> {
     validate_tree(base, TreeRole::Base, |entry| entry.left().kind(), control)?;
@@ -271,6 +307,7 @@ pub fn plan_resolved(
     }
 
     settle_folder_choices(&mut rows, base, left, right, resolutions, control)?;
+    skip_branches(&mut rows, left, right, skips, control)?;
 
     // Ancestors precede descendants. Suppression therefore propagates an outer
     // conflict through the whole branch without recursive traversal.

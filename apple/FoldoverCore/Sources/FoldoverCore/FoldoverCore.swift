@@ -3797,6 +3797,24 @@ public func syncRun(id: String, approvedLeftDeletions: UInt64, approvedRightDele
             errorHandler: FfiConverterTypeAgentError_lift
         )
 }
+/**
+ * Leave a previewed change, and everything inside it, alone in the next
+ * run. `review_token` must be the token of the preview it was shown in.
+ */
+public func syncSkipOnce(id: String, path: Data, reviewToken: String)async throws  -> SyncJobState  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_sync_skip_once(FfiConverterString.lower(id),FfiConverterData.lower(path),FfiConverterString.lower(reviewToken)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeSyncJobState_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
 public func syncStatus(id: String)async throws  -> SyncJobState  {
     return
         try  await uniffiRustCallAsync(
@@ -3906,6 +3924,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_sync_run() != 43269) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_sync_skip_once() != 16797) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_sync_status() != 35739) {

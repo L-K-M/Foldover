@@ -117,8 +117,9 @@ impl fmt::Display for BaselineMismatch {
 
 impl std::error::Error for BaselineMismatch {}
 
-/// A person's choice for one conflict. It applies only while both sides
-/// still hold exactly the versions that person saw.
+/// A person's choice of side for one previewed change or conflict. It
+/// applies only while both sides still hold exactly the versions that
+/// person saw.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Resolution {
     keep: Side,
@@ -133,6 +134,28 @@ impl Resolution {
 
     pub const fn keep(self) -> Side {
         self.keep
+    }
+
+    pub const fn left(self) -> Option<EntryVersion> {
+        self.left
+    }
+
+    pub const fn right(self) -> Option<EntryVersion> {
+        self.right
+    }
+}
+
+/// Leave one previewed change, and everything inside it, alone in the next
+/// run, while both sides still hold exactly the versions a person saw.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Skip {
+    left: Option<EntryVersion>,
+    right: Option<EntryVersion>,
+}
+
+impl Skip {
+    pub const fn new(left: Option<EntryVersion>, right: Option<EntryVersion>) -> Self {
+        Self { left, right }
     }
 
     pub const fn left(self) -> Option<EntryVersion> {

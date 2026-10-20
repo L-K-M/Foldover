@@ -19,6 +19,13 @@ struct ChangeRow: Identifiable, Equatable {
     var keepsBoth = false
     /// Raw path bytes, for skipping this item from now on.
     var skippable: Data?
+    /// Raw path bytes of a previewed change, for Skip Once.
+    var item: Data?
+    /// The side to keep to copy this change the other way: the folder it
+    /// would have changed.
+    var otherWay: FolderSide?
+    /// The menu title for that choice, e.g. "Restore to Folder A".
+    var otherWayTitle: String?
     /// The preview the row came from; nil for run results, which no
     /// review can act on.
     var review: ReviewContext?
@@ -219,6 +226,9 @@ struct PairSyncViewModel {
                               resolvable: Self.resolvable(change.action) ? change.path : nil,
                               keepsBoth: change.action == .conflict(.bothChanged),
                               skippable: PairStore.skipRule(for: change.path) == nil ? nil : change.path,
+                              item: Self.choosable(change.action) ? change.path : nil,
+                              otherWay: Self.otherWay(change.action),
+                              otherWayTitle: Self.otherWayTitle(change.action),
                               review: review)
                 }
         }
@@ -301,6 +311,49 @@ struct PairSyncViewModel {
     func keep(_ side: FolderSide, for row: ChangeRow) async {
         guard let path = row.resolvable, let review = row.review else { return }
         await store.resolve(pair.id, path: path, keep: side, reviewToken: review.token)
+    }
+
+    /// Copy a previewed change the other way: keep the version in the
+    /// folder it would have changed (PLAN.md §3.8 per-item override).
+    func copyOtherWay(_ row: ChangeRow) async {
+        guard let path = row.item, let side = row.otherWay, let review = row.review else { return }
+        await store.resolve(pair.id, path: path, keep: side, reviewToken: review.token)
+    }
+
+    /// Leave a previewed change alone in the next sync.
+    func skipOnce(_ row: ChangeRow) async {
+        guard let path = row.item, let review = row.review else { return }
+        await store.skipOnce(pair.id, path: path, reviewToken: review.token)
+    }
+
+    /// The menu title for copying a change the other way: an archive
+    /// becomes a restore into the folder it went missing from, and a new
+    /// item's copy an archive where it was created.
+    static func otherWayTitle(_ action: ChangeAction) -> String? {
+        switch action {
+        case .archive(let on): String(localized: "Restore to \(folderName(on == .a ? .b : .a))")
+        case .copy(let to): String(localized: "Archive in \(folderName(to == .a ? .b : .a))")
+        case .update: String(localized: "Copy the Other Way")
+        case .conflict, .blocked, .keep: nil
+        }
+    }
+
+    /// Changes a person can steer; blocked items wait for the conflict
+    /// above them, and kept ones change nothing.
+    static func choosable(_ action: ChangeAction) -> Bool {
+        switch action {
+        case .blocked, .keep: false
+        default: true
+        }
+    }
+
+    /// The folder a copy, update or archive would change.
+    static func otherWay(_ action: ChangeAction) -> FolderSide? {
+        switch action {
+        case .copy(let to), .update(let to): to
+        case .archive(let on): on
+        case .conflict, .blocked, .keep: nil
+        }
     }
 
     /// Skip this item from now on with a rule in the pair's filters, then
@@ -430,7 +483,7 @@ struct PairSyncViewModel {
         case .conflict(.typeMismatch): String(localized: "Conflict: a file in one folder, a folder in the other")
         case .conflict(.metadataOnly): String(localized: "Conflict: different metadata in both folders")
         case .blocked: String(localized: "Waiting on a conflict in an enclosing folder")
-        case .keep: String(localized: "Kept in the backup")
+        case .keep: String(localized: "Left as it is")
         }
     }
 

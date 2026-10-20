@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Per-item overrides in a preview: copy a change the other way, restore an
+  item a sync would archive, or skip a change for one sync.
+
 - Undo the last sync: what it created moves to the archive, and what it
   replaced or archived comes back. Anything changed since is left as it is
   and listed. Automatic syncs then wait until you sync again.

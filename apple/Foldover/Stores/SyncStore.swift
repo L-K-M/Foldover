@@ -182,6 +182,9 @@ protocol SyncClient: Sendable {
                  reviewToken: String) async throws -> PairSyncState
     /// Save B's version of a both-changed conflict beside it; A's wins.
     func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState
+    /// Leave a previewed change, and everything inside it, alone in the
+    /// next run.
+    func skipOnce(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState
     /// Finished runs, newest first.
     func history(_ id: String) async throws -> [RunRecord]
     /// A page of the latest preview's changes after `after`.
@@ -225,6 +228,10 @@ private actor CoreSyncClient: SyncClient {
 
     func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState {
         state(try await FoldoverCore.syncKeepBoth(id: id, path: path, reviewToken: reviewToken))
+    }
+
+    func skipOnce(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState {
+        state(try await FoldoverCore.syncSkipOnce(id: id, path: path, reviewToken: reviewToken))
     }
 
     func changes(_ id: String, after: Data?, filter: ChangeFilter?,
@@ -583,6 +590,12 @@ final class SyncStore {
     func keepBoth(_ id: String, path: Data, reviewToken: String) async {
         let client = client
         await choose(id) { try await client.keepBoth(id, path: path, reviewToken: reviewToken) }
+    }
+
+    /// Leave a previewed change alone in the next sync, then preview again.
+    func skipOnce(_ id: String, path: Data, reviewToken: String) async {
+        let client = client
+        await choose(id) { try await client.skipOnce(id, path: path, reviewToken: reviewToken) }
     }
 
     /// A conflict choice owns the pair like a start does: reads and

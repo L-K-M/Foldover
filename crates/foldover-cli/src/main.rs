@@ -72,6 +72,11 @@ enum SyncCommand {
         path: Vec<u8>,
         review: ReviewToken,
     },
+    /// Leave a previewed change alone in the next run.
+    Skip {
+        path: Vec<u8>,
+        review: ReviewToken,
+    },
 }
 
 enum PairCommand {
@@ -187,7 +192,7 @@ async fn main() -> ExitCode {
         },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\nLEFT, RIGHT: an absolute path, or sftp://[user@]host[:port]/path\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\nLEFT, RIGHT: an absolute path, or sftp://[user@]host[:port]/path\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -332,6 +337,10 @@ fn sync_command(args: &[OsString]) -> Option<SyncCommand> {
             })
         }
         [flag, path, rest @ ..] if flag == "--keep-both" => Some(SyncCommand::KeepBoth {
+            path: path.as_bytes().to_vec(),
+            review: review(rest)?,
+        }),
+        [flag, path, rest @ ..] if flag == "--skip" => Some(SyncCommand::Skip {
             path: path.as_bytes().to_vec(),
             review: review(rest)?,
         }),
@@ -517,6 +526,9 @@ async fn sync(
         }
         SyncCommand::KeepBoth { path, review } => {
             foldover_client::keep_both(location, id, &path, review).await?
+        }
+        SyncCommand::Skip { path, review } => {
+            foldover_client::skip_once(location, id, &path, review).await?
         }
     };
     while matches!(status, SyncStatus::Working { .. }) {
@@ -792,6 +804,10 @@ mod tests {
         assert!(matches!(
             req(&["sync", id, "--keep-both", "a.txt", "--review", &token]),
             Request::Sync(_, _, SyncCommand::KeepBoth { ref path, .. }) if path == b"a.txt"
+        ));
+        assert!(matches!(
+            req(&["sync", id, "--skip", "a.txt", "--review", &token]),
+            Request::Sync(_, _, SyncCommand::Skip { ref path, .. }) if path == b"a.txt"
         ));
         assert!(matches!(
             req(&["sync", id, "--approve", "60", "0", "--review", &token]),

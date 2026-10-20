@@ -14,6 +14,7 @@ struct Fixture {
     base: BTreeMap<SyncPath, BaselineEntry>,
     identities: RecordedIdentities,
     resolutions: BTreeMap<SyncPath, foldover_types::Resolution>,
+    skips: BTreeMap<SyncPath, foldover_types::Skip>,
     filters: Vec<String>,
     size_limit: Option<u64>,
     age_limit: Option<u32>,
@@ -54,6 +55,7 @@ fn fixture(mode: SyncMode) -> Fixture {
         base: BTreeMap::new(),
         identities: RecordedIdentities::default(),
         resolutions: BTreeMap::new(),
+        skips: BTreeMap::new(),
         filters: Vec::new(),
         size_limit: None,
         age_limit: None,
@@ -179,6 +181,7 @@ impl Fixture {
             self.identities,
             self.resolutions.clone(),
         )
+        .with_skips(self.skips.clone())
     }
 
     fn try_prepare(&self) -> Result<PairRun, RunError> {
@@ -1327,6 +1330,111 @@ fn undoing_again_after_a_cancel_picks_up_only_what_is_left() {
     assert_eq!(fs::read_dir(&right).unwrap().count(), count + 2);
     assert_eq!(pair.base, before);
     assert!(pair.journal.is_none());
+}
+
+impl Fixture {
+    /// The versions a fresh preview shows for `name`.
+    fn previewed(&self, name: &[u8]) -> (Option<EntryVersion>, Option<EntryVersion>) {
+        self.prepare()
+            .preview()
+            .items()
+            .iter()
+            .find(|item| item.path() == &path(name))
+            .unwrap()
+            .versions()
+    }
+
+    fn keep(&mut self, side: Side, name: &[u8]) {
+        let (left, right) = self.previewed(name);
+        self.resolutions.insert(
+            path(name),
+            foldover_types::Resolution::new(side, left, right),
+        );
+    }
+}
+
+/// PLAN.md §3.8 per-item override: keeping the side a change would have
+/// overwritten copies it the other way instead.
+#[test]
+fn keeping_the_target_side_copies_a_change_the_other_way() {
+    let mut pair = fixture(SyncMode::Sync);
+    let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+    fs::write(left.join("deleted"), b"d").unwrap();
+    fs::write(left.join("edited"), b"v1").unwrap();
+    fs::write(left.join("other"), b"o").unwrap();
+    pair.sync();
+    fs::remove_file(left.join("deleted")).unwrap();
+    fs::write(left.join("edited"), b"version 2").unwrap();
+
+    pair.keep(Side::Right, b"deleted");
+    pair.keep(Side::Right, b"edited");
+    let report = pair.sync();
+    assert_eq!((report.copied(), report.archived()), (2, 0));
+    // The deletion is undone in A instead of propagated to B.
+    assert_eq!(fs::read(left.join("deleted")).unwrap(), b"d");
+    // B's version wins in A; A's edit is in A's archive.
+    assert_eq!(fs::read(left.join("edited")).unwrap(), b"v1");
+    let archive = left.join(".foldover/archive/1970-01-01T00-00-00.000Z");
+    assert_eq!(fs::read(archive.join("edited")).unwrap(), b"version 2");
+    assert_eq!(fs::read(right.join("edited")).unwrap(), b"v1");
+    assert!(pair.prepare().preview().items().is_empty());
+}
+
+#[test]
+fn keeping_a_folder_a_deletion_would_archive_restores_it_with_its_files() {
+    let mut pair = fixture(SyncMode::Sync);
+    let left = pair.left.path().to_owned();
+    fs::write(left.join("keep"), b"k").unwrap();
+    fs::create_dir(left.join("dir")).unwrap();
+    fs::write(left.join("dir/a"), b"a").unwrap();
+    pair.sync();
+    fs::remove_dir_all(left.join("dir")).unwrap();
+
+    pair.keep(Side::Right, b"dir");
+    let report = pair.sync();
+    assert_eq!((report.copied(), report.archived()), (2, 0));
+    assert_eq!(fs::read(left.join("dir/a")).unwrap(), b"a");
+    assert!(pair.prepare().preview().items().is_empty());
+}
+
+#[test]
+fn a_skipped_change_and_everything_inside_it_waits_for_another_run() {
+    let mut pair = fixture(SyncMode::Sync);
+    let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+    fs::write(left.join("keep"), b"k").unwrap();
+    pair.sync();
+    fs::write(left.join("later"), b"l").unwrap();
+    fs::write(left.join("now"), b"n").unwrap();
+    fs::create_dir(left.join("folder")).unwrap();
+    fs::write(left.join("folder/inner"), b"i").unwrap();
+
+    for name in [b"later".as_slice(), b"folder"] {
+        let (left, right) = pair.previewed(name);
+        pair.skips
+            .insert(path(name), foldover_types::Skip::new(left, right));
+    }
+    let preview = pair.prepare().preview();
+    assert!(
+        preview
+            .items()
+            .iter()
+            .filter(|item| item.path() != &path(b"now"))
+            .all(|item| item.action() == Action::KeepTarget),
+        "{preview:?}"
+    );
+    assert_eq!(pair.sync().copied(), 1);
+    assert!(right.join("now").exists());
+    assert!(!right.join("later").exists() && !right.join("folder").exists());
+
+    // A skip covers what the person saw; an edit since makes it lapse.
+    fs::write(left.join("later"), b"edited").unwrap();
+    assert_eq!(pair.sync().copied(), 1);
+    assert!(right.join("later").exists());
+
+    // Without the skip the rest copies on the next run.
+    pair.skips.clear();
+    assert_eq!(pair.sync().copied(), 2);
+    assert!(right.join("folder/inner").exists());
 }
 
 /// Review: with only one identity recorded (the other root was changed),
