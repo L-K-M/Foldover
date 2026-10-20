@@ -55,9 +55,12 @@ publication. Until snapshots represent unavailable entries explicitly, silently
 skipping placeholders could misclassify them as deletions. This flag check does
 not replace an enforced non-materializing I/O policy or cloud-root readiness.
 
-Until native-xattr/AppleDouble capability classification exists, `._` names
-stop the scan with an explicit sidecar-classification error. They are neither
-silently omitted nor treated as ordinary content. The need for separate
+On a volume that declares no native extended attributes (exFAT, FAT),
+macOS keeps each file's attributes in its `._` sidecar and presents them
+as the file's own, moving and removing the sidecar with it, so a scan
+skips `._` names there. Elsewhere, including volumes that do not say,
+`._` names stop the scan with an explicit sidecar-classification error:
+they are neither silently omitted nor treated as ordinary content. The need for separate
 filesystem and operation-fidelity probes remains as recorded in
 [ADR 0005](0005-metadata-fidelity.md).
 

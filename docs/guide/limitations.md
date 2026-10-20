@@ -146,8 +146,10 @@ you might expect. Warnings never block saving
 - A folder deleted on one side cannot be removed on the other while it
   still holds excluded entries; that removal fails and is reported
   ([ADR 0024](../adr/0024-filters.md)).
-- AppleDouble sidecar files (`._*`) inside a synced folder stop the
-  scan; add a `._*` rule to skip them instead
+- AppleDouble sidecar files (`._*`) are skipped on volumes without
+  extended attributes, such as exFAT and FAT disks. Elsewhere, including
+  shares that do not say, they stop the scan; add a `._*` rule to skip
+  them instead
   ([ADR 0024](../adr/0024-filters.md),
   `crates/foldover-endpoint/src/local.rs`).
 

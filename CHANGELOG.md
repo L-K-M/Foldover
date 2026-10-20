@@ -228,6 +228,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Folders on exFAT and FAT disks no longer stop with an AppleDouble
+  error: the `._` files macOS keeps there for extended attributes are
+  skipped, as the attributes travel with their files.
+
 - A copy to another Mac whose source changed partway no longer waits
   forever for that Mac; asking another Mac gives up after 30 seconds.
 - Stopping a share asks first, since pairs on the other Mac that use it
