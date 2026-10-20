@@ -36,6 +36,11 @@ struct PairEditorView: View {
                         .font(.callout).foregroundStyle(.orange)
                         .textSelection(.enabled)
                 }
+                ForEach(viewModel.readinessWarnings, id: \.self) { warning in
+                    Text(warning)
+                        .font(.callout).foregroundStyle(.orange)
+                        .textSelection(.enabled)
+                }
                 Picker("Mode", selection: $viewModel.mode) {
                     ForEach(PairMode.allCases, id: \.self) { mode in Text(mode.title).tag(mode) }
                 }

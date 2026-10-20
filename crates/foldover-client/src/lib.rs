@@ -4,6 +4,7 @@
 //! foldover-ipc. See PLAN.md §4.4.
 
 pub use foldover_ipc::{Error, SocketLocation};
+pub use foldover_proto::local::PairWarning;
 use foldover_proto::local::{
     ARCHIVE_ITEMS, ARCHIVE_PUT_BACK, ARCHIVE_PUT_BACK_ALL, ARCHIVE_RUNS, ArchiveItemQuery,
     ArchiveKey, ArchivePlaced, ArchivePutBack, ArchiveRunKey,
@@ -27,8 +28,8 @@ use foldover_proto::local::{
 };
 use foldover_proto::local::{DAEMON_STATUS, Hello, PROTOCOL_VERSION, Request, SESSION_HELLO};
 use foldover_proto::local::{
-    PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_UPDATE, PairInput, PairKey, PairList,
-    PairRecord, PairUpdate,
+    PAIR_CHECK, PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_UPDATE, PairInput, PairKey,
+    PairList, PairRecord, PairUpdate, PairWarnings,
 };
 use foldover_proto::local::{
     PEER_CANCEL, PEER_CONFIRM, PEER_PAIR, PEER_PAIRING_CLOSE, PEER_PAIRING_OPEN, PEER_REVOKE,
@@ -358,6 +359,23 @@ pub async fn create_pair(
         )
         .await?,
     )
+}
+
+/// What will not work as a person might expect with `draft`'s folders
+/// (PLAN.md §3.6). Warnings never block saving.
+pub async fn check_pair(
+    location: &SocketLocation,
+    draft: &PairDraft,
+) -> Result<Vec<PairWarning>, Error> {
+    let warnings: PairWarnings = serde_json::from_value(
+        call(
+            location,
+            PAIR_CHECK,
+            Some(serde_json::to_value(PairInput::from(draft))?),
+        )
+        .await?,
+    )?;
+    Ok(warnings.warnings)
 }
 
 pub async fn update_pair(

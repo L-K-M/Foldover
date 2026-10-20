@@ -360,6 +360,65 @@ pub async fn pair_update(
     .into())
 }
 
+/// What a readiness check found on one side of a pair (PLAN.md §3.6).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum ReadinessWarningKind {
+    /// Another sync engine manages this folder; `provider` names it.
+    CloudManaged,
+    /// The pair syncs extended attributes this side cannot keep.
+    MetadataUnsupported,
+    /// One side ignores name case and the other does not.
+    NamesDiffer,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct ReadinessWarning {
+    pub side: SyncSide,
+    pub kind: ReadinessWarningKind,
+    /// The other sync engine's name, for `CloudManaged` only.
+    pub provider: Option<String>,
+}
+
+impl From<foldover_client::PairWarning> for ReadinessWarning {
+    fn from(warning: foldover_client::PairWarning) -> Self {
+        use foldover_client::{PairSide, PairWarning as Warning};
+        let sync_side = |side: PairSide| match side {
+            PairSide::Left => SyncSide::Left,
+            PairSide::Right => SyncSide::Right,
+        };
+        match warning {
+            Warning::CloudManaged { side, provider } => Self {
+                side: sync_side(side),
+                kind: ReadinessWarningKind::CloudManaged,
+                provider: Some(provider),
+            },
+            Warning::MetadataUnsupported { side } => Self {
+                side: sync_side(side),
+                kind: ReadinessWarningKind::MetadataUnsupported,
+                provider: None,
+            },
+            Warning::NamesDiffer { side } => Self {
+                side: sync_side(side),
+                kind: ReadinessWarningKind::NamesDiffer,
+                provider: None,
+            },
+        }
+    }
+}
+
+/// What will not work as a person might expect with `configuration`'s
+/// folders (PLAN.md §3.6). Warnings never block saving.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn check_pair(
+    configuration: LocalPairDraft,
+) -> Result<Vec<ReadinessWarning>, AgentError> {
+    let draft = configuration.try_into().map_err(invalid_configuration)?;
+    let warnings = foldover_client::check_pair(&foldover_client::SocketLocation::Default, &draft)
+        .await
+        .map_err(AgentError::from)?;
+    Ok(warnings.into_iter().map(Into::into).collect())
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn pair_remove(id: String, revision: u64) -> Result<LocalPairConfiguration, AgentError> {
     let id = id.parse().map_err(invalid_configuration)?;
@@ -420,6 +479,46 @@ mod tests {
             options: default_pair_options(),
         };
         assert!(foldover_client::PairDraft::try_from(invalid).is_err());
+    }
+
+    #[test]
+    fn readiness_warnings_keep_side_kind_and_provider() {
+        use foldover_client::{PairSide, PairWarning};
+        for (warning, expected) in [
+            (
+                PairWarning::CloudManaged {
+                    side: PairSide::Left,
+                    provider: "iCloud Drive".into(),
+                },
+                ReadinessWarning {
+                    side: SyncSide::Left,
+                    kind: ReadinessWarningKind::CloudManaged,
+                    provider: Some("iCloud Drive".into()),
+                },
+            ),
+            (
+                PairWarning::MetadataUnsupported {
+                    side: PairSide::Right,
+                },
+                ReadinessWarning {
+                    side: SyncSide::Right,
+                    kind: ReadinessWarningKind::MetadataUnsupported,
+                    provider: None,
+                },
+            ),
+            (
+                PairWarning::NamesDiffer {
+                    side: PairSide::Left,
+                },
+                ReadinessWarning {
+                    side: SyncSide::Left,
+                    kind: ReadinessWarningKind::NamesDiffer,
+                    provider: None,
+                },
+            ),
+        ] {
+            assert_eq!(ReadinessWarning::from(warning), expected);
+        }
     }
 
     #[test]

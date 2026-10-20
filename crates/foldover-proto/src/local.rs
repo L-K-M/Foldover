@@ -40,13 +40,13 @@ pub use sync::{
 
 mod pair;
 pub use pair::{
-    PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_REMOVE, PAIR_UPDATE, PairDurability,
-    PairInput, PairKey, PairList, PairMode, PairPage, PairPropagation, PairRecord, PairRevision,
-    PairSchedule, PairSettings, PairSide, PairUpdate,
+    PAIR_CHECK, PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_REMOVE, PAIR_UPDATE,
+    PairDurability, PairInput, PairKey, PairList, PairMode, PairPage, PairPropagation, PairRecord,
+    PairRevision, PairSchedule, PairSettings, PairSide, PairUpdate, PairWarning, PairWarnings,
 };
 
 pub const JSON_RPC_VERSION: &str = "2.0";
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 pub const SESSION_HELLO: &str = "session.hello";
 pub const DAEMON_STATUS: &str = "daemon.status";
 pub const PARSE_ERROR: i32 = -32700;

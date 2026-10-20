@@ -126,6 +126,9 @@ enum PairCommand {
     List,
     Show(PairId),
     Add(Box<PairDraft>),
+    /// Readiness warnings for a pair that has not been saved (PLAN.md
+    /// §3.6); same arguments as `add`.
+    Check(Box<PairDraft>),
     /// Options not named on the command line keep their current values.
     Update {
         id: PairId,
@@ -261,7 +264,7 @@ async fn main() -> ExitCode {
         },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover automation [low-power pause|run] [--socket PATH]\n       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]\n       foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]\nLEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --canary (PATH | none)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs check NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover automation [low-power pause|run] [--socket PATH]\n       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]\n       foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]\nLEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --canary (PATH | none)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -381,11 +384,16 @@ fn pair_command(args: &[OsString]) -> Option<PairCommand> {
                 .ok()
                 .filter(|revision| (1..=i64::MAX as u64).contains(revision))?,
         }),
-        [command, name, left, right, mode, options @ ..] if command == "add" => {
+        [command, name, left, right, mode, options @ ..]
+            if command == "add" || command == "check" =>
+        {
             let options = option_changes(options)?.apply(PairOptions::default());
-            Some(PairCommand::Add(Box::new(
-                draft(name, left, right, mode)?.with_options(options),
-            )))
+            let draft = Box::new(draft(name, left, right, mode)?.with_options(options));
+            Some(if command == "add" {
+                PairCommand::Add(draft)
+            } else {
+                PairCommand::Check(draft)
+            })
         }
         [command, id, revision, name, left, right, mode, options @ ..] if command == "update" => {
             let revision = revision
@@ -628,6 +636,14 @@ async fn pairs(
         PairCommand::Add(draft) => {
             warn_sftp([draft.left(), draft.right()]);
             print_pair(&foldover_client::create_pair(location, &draft).await?)
+        }
+        PairCommand::Check(draft) => {
+            warn_sftp([draft.left(), draft.right()]);
+            // JSON lines keep the machine-readable kinds and raw sides.
+            for warning in foldover_client::check_pair(location, &draft).await? {
+                println!("{}", serde_json::to_string(&warning)?);
+            }
+            Ok(())
         }
         PairCommand::Update {
             id,
@@ -1021,8 +1037,16 @@ mod tests {
             req(&["pairs", "update", id, "1", "Photos", "/a", "/b", "sync"]),
             Request::Pairs(_, PairCommand::Update { .. })
         ));
+        assert!(matches!(
+            req(&[
+                "pairs", "check", "Photos", "/a", "/b", "sync", "--times", "ignore"
+            ]),
+            Request::Pairs(_, PairCommand::Check(_))
+        ));
         for args in [
             vec!["pairs", "show", "bad"],
+            vec!["pairs", "check", "Photos", "relative", "/b", "sync"],
+            vec!["pairs", "check", "Photos", "/a", "/b"],
             vec!["pairs", "add", "Photos", "relative", "/b", "sync"],
             vec!["pairs", "update", id, "0", "Photos", "/a", "/b", "sync"],
             vec!["pairs", "add", "Photos", "/a", "/b", "unknown"],

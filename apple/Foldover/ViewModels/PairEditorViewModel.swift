@@ -19,12 +19,25 @@ final class PairEditorViewModel: Identifiable {
     private let editing: SyncPair?
     var name: String
     var mode: PairMode
-    var options: PairOptions
+    var options: PairOptions {
+        didSet {
+            if options.syncModificationTimes != oldValue.syncModificationTimes
+                || options.syncExtendedAttributes != oldValue.syncExtendedAttributes
+                || options.syncPermissions != oldValue.syncPermissions {
+                queueReadinessCheck()
+            }
+        }
+    }
     private(set) var left: SelectedFolder?
     private(set) var right: SelectedFolder?
     private(set) var isSaving = false
     private(set) var errorMessage: String?
     private(set) var savedPairID: String?
+    /// What the agent says will not work as expected with the picked
+    /// folders (PLAN.md §3.6); warnings never block saving.
+    private(set) var readinessWarnings: [String] = []
+    private var checkTask: Task<Void, Never>?
+    private var checkGeneration = 0
 
     init(store: PairStore, editing: SyncPair? = nil, macs: MacToMacStore? = nil) {
         self.store = store
@@ -35,6 +48,7 @@ final class PairEditorViewModel: Identifiable {
         options = editing?.settings.options ?? .defaults
         left = editing?.settings.left
         right = editing?.settings.right
+        queueReadinessCheck()
     }
 
     var title: String { editing == nil ? String(localized: "New Pair") : String(localized: "Edit Pair") }
@@ -210,6 +224,7 @@ final class PairEditorViewModel: Identifiable {
         case .right: right = folder
         }
         errorMessage = nil
+        queueReadinessCheck()
     }
 
     func chooseFolder(_ result: Result<[URL], Error>, side: PairFolderSide) {
@@ -221,6 +236,7 @@ final class PairEditorViewModel: Identifiable {
             case .right: right = folder
             }
             errorMessage = nil
+            queueReadinessCheck()
         } catch {
             errorMessage = PairStore.message(for: error)
         }
@@ -240,6 +256,47 @@ final class PairEditorViewModel: Identifiable {
         case .right: right = folder
         }
         errorMessage = nil
+        queueReadinessCheck()
+    }
+
+    /// Ask the agent what will not work as expected with the picked
+    /// folders. A failed check keeps the last answer: it is advisory,
+    /// and saving reports any real problem itself.
+    func refreshReadiness() async {
+        checkGeneration += 1
+        let generation = checkGeneration
+        guard let left, let right else {
+            readinessWarnings = []
+            return
+        }
+        let settings = PairSettings(name: name, left: left, right: right, mode: mode, options: options)
+        guard let warnings = try? await store.check(settings), generation == checkGeneration else { return }
+        readinessWarnings = warnings.map(text)
+    }
+
+    private func queueReadinessCheck() {
+        checkTask = Task { await refreshReadiness() }
+    }
+
+    /// Wait for a queued check; tests use it after changing a side or a
+    /// metadata choice.
+    func awaitReadinessCheck() async {
+        await checkTask?.value
+    }
+
+    private func text(for warning: PairReadinessWarning) -> String {
+        let side = warning.side
+        let other: FolderSide = side == .a ? .b : .a
+        switch warning.kind {
+        case .cloudManaged(let provider):
+            return String(localized: "\(PairSyncViewModel.folderName(side)) is in \(provider), which also syncs it. Two sync engines on one folder can undo each other's changes; prefer a folder outside it.")
+        case .metadataUnsupported where (side == .a ? left : right)?.isServerFolder == true:
+            return String(localized: "\(PairSyncViewModel.folderName(side)) is on an SFTP server, which keeps no tags or other extended attributes; they will not sync to it.")
+        case .metadataUnsupported:
+            return String(localized: "\(PairSyncViewModel.folderName(side)) cannot keep tags or other extended attributes; they will not sync to it.")
+        case .namesDiffer:
+            return String(localized: "\(PairSyncViewModel.folderName(side)) ignores the case of names and \(PairSyncViewModel.folderName(other)) does not: names that differ only in case become conflicts to rename.")
+        }
     }
 
     func save() async -> Bool {
