@@ -538,7 +538,7 @@ impl Simulation {
                     );
                 }
             }
-            for (path, _) in target_before {
+            for path in target_before.keys() {
                 let key = folded(path, self.names);
                 assert!(
                     affected(&key) || target.contains_key(&key),
