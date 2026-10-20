@@ -5,9 +5,6 @@ on:
     # After the nightly job, so the shared macOS runner is free.
     - cron: "47 4 * * *"
   workflow_dispatch:
-  # TEMPORARY: verifies the job before it lands; removed before merge.
-  push:
-    branches: [quality/device-matrix]
 
 permissions:
   contents: read
