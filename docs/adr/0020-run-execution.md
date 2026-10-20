@@ -78,6 +78,13 @@ the planned operation journal for local pairs; remote endpoints without
 atomic exchange may still need one. The run journal of
 [ADR 0029](0029-undo.md) records writes for Undo only.
 
+**Staying awake.** A prepared run holds a `PreventUserIdleSystemSleep`
+power assertion, named "Foldover is syncing <pair>", from before its scan
+until the run is dropped after the last write (PLAN.md §3.5). Sleep the
+person chooses still happens; the run then stops like any interrupted
+run. On macOS a failed assertion fails the run before it reads or writes
+either folder. Systems without power assertions (Linux) run without one.
+
 ## Consequences
 
 - A preview and its run are separate observations. The run re-plans and

@@ -2,7 +2,8 @@
 //! lock; only base commits go through it, bound to the pair's revision.
 //!
 //! ```text
-//! prepare: open roots ─▶ observe both sides ─▶ plan against the base
+//! prepare: keep the Mac awake ─▶ open roots ─▶ observe both sides
+//!          ─▶ plan against the base
 //! execute: first-run, emptiness and deletion gates ─▶ root identities
 //!          ─▶ archive leftovers
 //!          ─▶ forward pass (parents first): copies, metadata, base records
@@ -11,11 +12,15 @@
 //!             after both roots' identities are read again
 //! ```
 //!
+//! The power assertion lives as long as the run value: from before the
+//! scan until the last write.
+//!
 //! A crash loses at most an uncommitted batch. The next run then finds both
 //! sides equal and records them, or a leftover temporary and archives it.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io;
 use std::time::{Duration, SystemTime};
 
 use foldover_endpoint::{
@@ -23,6 +28,7 @@ use foldover_endpoint::{
     LeaseHolder, LeaseTiming, Observation, ObserveStep, ObservedEntry, PairRootError, Reach,
     RunScope, ScanError, access_denied,
 };
+use foldover_host::RunAwake;
 use foldover_state::{
     BaseUpdate, JournalAction, JournalEntry, MountSources, RecordedIdentities, SnapshotEntry,
 };
@@ -114,6 +120,8 @@ pub enum RunError {
     Plan(#[from] PlanError),
     #[error("Saving sync progress failed: {0}")]
     Commit(#[source] crate::Error),
+    #[error("Keeping the Mac awake for the sync failed: {0}")]
+    KeepAwake(#[source] io::Error),
     #[error("Run cancelled before planning finished")]
     Cancelled,
     #[error("This pair has no sync to undo: its newest sync changed nothing or was undone")]
@@ -559,6 +567,7 @@ pub struct PairRun {
     /// Whether the base remembered any entry the filters still include.
     remembers: Remembers,
     lease_timing: LeaseTiming,
+    _awake: RunAwake,
 }
 
 /// Whether a run's base held entries, which makes an empty side news.
@@ -600,6 +609,8 @@ impl PairRun {
             lease_timing,
         } = inputs;
         let draft = pair.draft();
+        // PLAN.md §3.5: idle sleep would stop a long scan or copy midway.
+        let awake = foldover_host::keep_awake(draft.name()).map_err(RunError::KeepAwake)?;
         for side in [Side::Left, Side::Right] {
             let Some(recorded) = identities.side(side) else {
                 continue;
@@ -720,6 +731,7 @@ impl PairRun {
             },
             base,
             lease_timing,
+            _awake: awake,
         })
     }
 
