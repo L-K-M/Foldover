@@ -166,6 +166,12 @@ pub enum LeaseAction {
 pub struct RunSettings {
     pub name: String,
     pub options: PairSettings,
+    /// `ignore` when the run leaves `com.apple.quarantine` alone, as when
+    /// a network share takes part (PLAN.md §4.10); absent, it syncs with
+    /// the other extended attributes. Off the wire unless set, so an
+    /// agent without the field reads the request as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quarantine: Option<PairPropagation>,
 }
 
 /// What a copy between Macs carries besides data: permissions,
