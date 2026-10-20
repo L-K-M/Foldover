@@ -267,6 +267,9 @@ build_app() {
 
 # ---------------------------------------------------------------------------
 APPLICATIONS_DIR="${FOLDOVER_APPLICATIONS_DIR:-/Applications}"
+# Drop trailing slashes: macOS reports the running app as
+# ~/Applications/Foldover.app, which ~/Applications//Foldover.app misses.
+APPLICATIONS_DIR="${APPLICATIONS_DIR%"${APPLICATIONS_DIR##*[!/]}"}"
 AGENT_LABEL="ch.lkmc.foldover.agent"
 APP_QUIT_SECONDS=10
 
@@ -347,28 +350,36 @@ install_app() {
   # new bundle whenever it next launches, so it is left alone. The state
   # is captured first: grep -q would cut launchctl off mid-write and fail
   # the pipeline under pipefail.
-  local agent_state
+  local agent_state agent_restarted=true
   agent_state="$(launchctl print "$agent" 2>/dev/null)"
   if [[ "$agent_state" == *"state = running"* ]]; then
     echo "-- restarting the background agent"
     if ! launchctl kickstart -k "$agent"; then
       echo "!! install app: the background agent did not restart" >&2
-      record "install app: FAILED (installed $dest, but the agent did not restart; choose Enable Background Agent in Foldover)"
-      return 1
+      agent_restarted=false
     fi
   else
     echo "-- background agent not running; nothing to restart"
   fi
 
+  # Reopen even when the agent failed: the install itself succeeded, and
+  # the app was only quit to make room for it.
+  local reopened=true
   if $reopen; then
     echo "-- reopening Foldover"
     if ! open "$dest"; then
       echo "!! install app: Foldover did not reopen" >&2
-      record "install app: ok ($dest), but Foldover did not reopen"
-      return 0
+      reopened=false
     fi
   fi
-  record "install app: ok ($dest)"
+
+  local not_reopened=""
+  $reopened || not_reopened=", but Foldover did not reopen"
+  if ! $agent_restarted; then
+    record "install app: FAILED (installed $dest, but the agent did not restart; choose Enable Background Agent in Foldover)$not_reopened"
+    return 1
+  fi
+  record "install app: ok ($dest)$not_reopened"
 }
 
 install_core() {

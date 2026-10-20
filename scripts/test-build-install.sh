@@ -93,6 +93,7 @@ installed="$apps/Foldover.app/Contents/MacOS/Foldover"
 
 # run NAME [STATE...] -- ARGS: reset the fakes, preinstall an old app,
 # run build.sh, and keep its output in $out and exit status in $status.
+# applications_dir=... before run passes another FOLDOVER_APPLICATIONS_DIR.
 run() {
   name="$1"; shift
   rm -rf "$state" "$apps" "$repo/dist" "$repo/build" "$repo/target" "$log"
@@ -111,7 +112,7 @@ run() {
   fi
   echo "== $name"
   status=0
-  out="$(PATH="$fakes:$PATH" FOLDOVER_APPLICATIONS_DIR="$apps" \
+  out="$(PATH="$fakes:$PATH" FOLDOVER_APPLICATIONS_DIR="${applications_dir:-$apps}" \
     "$BASH" "$repo/scripts/build.sh" "$@" 2>&1)" || status=$?
   touch "$log"
 }
@@ -196,6 +197,18 @@ run "reports an agent that does not restart" agent-running kickstart-fails -- ap
 expect_status 1
 expect_installed new
 expect_out "the agent did not restart"
+
+run "reopens the app when the agent does not restart" app-running agent-running kickstart-fails -- app --install
+expect_status 1
+expect_installed new
+expect_out "the agent did not restart"
+expect_call "open $apps/Foldover.app"
+
+applications_dir="$apps/" run "quits the app under a trailing-slash directory" app-running -- app --install
+expect_status 0
+expect_installed new
+[[ ! -e "$state/app-running" ]] || fail "$name: the running app was not quit"
+expect_out "install app: ok ($apps/Foldover.app)"
 
 run "skips core, which the app embeds" -- core --install
 expect_status 0
