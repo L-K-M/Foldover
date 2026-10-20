@@ -242,6 +242,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Syncing to disks formatted HFS+ (Mac OS Extended), exFAT or FAT32
+  works: every copy to them failed with "Operation not supported".
+
 - A file copied to a folder that stores names decomposed, such as an
   HFS+ disk, no longer makes the next sync rename it on the other
   folder.
@@ -249,9 +252,6 @@ All notable changes to this project are documented here. The format follows
 - A name in conflict now blocks copying its other Unicode or case
   spelling into a folder that stores both as one file; the copy landed
   on the conflicted file.
-
-- Syncing to disks formatted HFS+ (Mac OS Extended), exFAT or FAT32
-  works: every copy to them failed with "Operation not supported".
 
 - Folders on exFAT and FAT disks no longer stop with an AppleDouble
   error: the `._` files macOS keeps there for extended attributes are

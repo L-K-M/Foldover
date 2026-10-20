@@ -6,7 +6,9 @@
 //! - nothing is lost: a file version a run replaced or removed is in its
 //!   folder's archive;
 //! - a finished run leaves both folders equal outside the conflicts it
-//!   reported, comparing names the way the folders do;
+//!   reported, comparing names the way the folders do; a Backup leaves
+//!   every source file on its target;
+//! - a one-way run never writes its source;
 //! - on in-memory folders, a run right after a finished one writes
 //!   nothing, so no quirk feeds a copy loop.
 //!
@@ -19,7 +21,7 @@
 //! folders on chosen volumes, as the nightly device matrix does with disk
 //! images of each file system.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
@@ -161,6 +163,16 @@ fn rounds(paths: usize, faults: Faults) -> impl Strategy<Value = Vec<Round>> {
     prop::collection::vec(round, 1..8)
 }
 
+/// How the pair syncs; most histories two-way.
+fn mode() -> impl Strategy<Value = SyncMode> {
+    let side = prop_oneof![Just(Side::Left), Just(Side::Right)];
+    prop_oneof![
+        2 => Just(SyncMode::Sync),
+        1 => side.clone().prop_map(|source| SyncMode::Mirror { source }),
+        1 => side.prop_map(|source| SyncMode::Backup { source }),
+    ]
+}
+
 /// One folder's file system, drawn from those Foldover meets.
 fn quirks() -> impl Strategy<Value = Quirks> {
     let names = prop_oneof![
@@ -244,6 +256,10 @@ enum Attributes {
 struct Simulation {
     pair: Fixture,
     attributes: Attributes,
+    mode: SyncMode,
+    /// A Backup's source files after the last finished run, by folded
+    /// name: what the target was last brought up to.
+    backed_up: BTreeMap<Vec<u8>, Vec<u8>>,
     paths: &'static [&'static str],
     /// How the pair compares names: as its stricter folder does.
     names: NameMatching,
@@ -282,6 +298,8 @@ impl Simulation {
         Self {
             pair,
             attributes,
+            mode: SyncMode::Sync,
+            backed_up: BTreeMap::new(),
             paths: PATHS,
             names,
             writes: 0,
@@ -290,12 +308,18 @@ impl Simulation {
     }
 
     fn in_memory(left: Quirks, right: Quirks) -> Self {
-        let mut pair = fixture(SyncMode::Sync);
+        Self::in_memory_as(SyncMode::Sync, left, right)
+    }
+
+    fn in_memory_as(mode: SyncMode, left: Quirks, right: Quirks) -> Self {
+        let mut pair = fixture(mode);
         pair.memory = Some([MemoryEndpoint::new(left), MemoryEndpoint::new(right)]);
         pair.leases = MEMORY_LEASES;
         Self {
             pair,
             attributes: Attributes::None,
+            mode,
+            backed_up: BTreeMap::new(),
             paths: PATHS,
             names: left.names.either(right.names),
             writes: 0,
@@ -536,9 +560,40 @@ impl Simulation {
         }
     }
 
+    /// The folder a one-way mode copies from.
+    fn source(&self) -> Option<Folder> {
+        match self.mode {
+            SyncMode::Sync => None,
+            SyncMode::Mirror { source } | SyncMode::Backup { source } => Some(match source {
+                Side::Left => Folder::Left,
+                Side::Right => Folder::Right,
+            }),
+        }
+    }
+
+    /// A one-way run never writes its source.
+    fn check_source_untouched(&self, before: &[BTreeMap<Vec<u8>, Vec<u8>>; 2]) {
+        let Some(source) = self.source() else {
+            return;
+        };
+        let before = match source {
+            Folder::Left => &before[0],
+            Folder::Right => &before[1],
+        };
+        assert_eq!(
+            &self.files(source),
+            before,
+            "a one-way run wrote its source"
+        );
+    }
+
     /// Both folders match except where the run reported a conflict, with
-    /// names compared as the folders compare them.
-    fn check_converged(&self, report: &RunReport) {
+    /// names compared as the folders compare them. A Backup's target holds
+    /// every source file, with the source's content where the source
+    /// changed since the last finished run, and loses nothing it held
+    /// before this round's runs (`before`): it keeps its own edits and
+    /// extras.
+    fn check_converged(&mut self, report: &RunReport, before: &[BTreeMap<Vec<u8>, Vec<u8>>; 2]) {
         let conflicted: Vec<Vec<u8>> = report
             .conflicts()
             .iter()
@@ -561,6 +616,69 @@ impl Simulation {
             keyed
         };
         let (left, right) = (by_key(Folder::Left), by_key(Folder::Right));
+        if let SyncMode::Backup { source } = self.mode {
+            let (source, target, target_before) = match source {
+                Side::Left => (&left, &right, &before[1]),
+                Side::Right => (&right, &left, &before[0]),
+            };
+            // A byte-exact target may hold several spellings of a name the
+            // source folds together; any of them may be the copy.
+            let copies = |key: &[u8]| -> Vec<Vec<u8>> {
+                target
+                    .get(key)
+                    .map(|copies| copies.iter().map(|(_, content)| content.clone()).collect())
+                    .unwrap_or_default()
+            };
+            for key in source.keys().filter(|key| !affected(key)) {
+                let copied = copies(key);
+                assert!(
+                    !copied.is_empty(),
+                    "{} is missing from the backup",
+                    String::from_utf8_lossy(key)
+                );
+                let current = source[key].first().map(|(_, content)| content.clone());
+                if let Some(current) = current
+                    && self.backed_up.get(key) != Some(&current)
+                {
+                    assert!(
+                        copied.contains(&current),
+                        "{} changed in the source but not in the backup",
+                        String::from_utf8_lossy(key)
+                    );
+                }
+            }
+            let held: BTreeSet<Vec<u8>> = target_before
+                .keys()
+                .map(|path| folded(path, self.names))
+                .collect();
+            for key in &held {
+                assert!(
+                    affected(key) || target.contains_key(key),
+                    "the backup lost {}",
+                    String::from_utf8_lossy(key)
+                );
+            }
+            // Review: nor does it make up names the source never had.
+            for key in target.keys().filter(|key| !affected(key)) {
+                assert!(
+                    source.contains_key(key) || held.contains(key),
+                    "the backup gained {}",
+                    String::from_utf8_lossy(key)
+                );
+            }
+            // What the run brought the target up to. A name in conflict, or
+            // spelled several ways in the source, was not brought up, and
+            // one the source lost keeps its last content, as the base does:
+            // it comes back unchanged if the source gets it back.
+            for (key, copies) in source {
+                if let [(_, content)] = copies.as_slice()
+                    && !affected(key)
+                {
+                    self.backed_up.insert(key.clone(), content.clone());
+                }
+            }
+            return;
+        }
         for key in left.keys().chain(right.keys()) {
             if affected(key) {
                 continue;
@@ -617,21 +735,24 @@ impl Simulation {
         let before = self.snapshot();
         let mut ended = self.run(round.interruption, RunContext::Interactive);
         self.check_nothing_lost(&before);
+        self.check_source_untouched(&before);
         // An interrupted run is followed by one that finishes, and a run a
         // gate held back by one a person reviewed.
         if !matches!(round.interruption, Interruption::None) {
             ended = self.run(Interruption::None, RunContext::Interactive);
             self.check_nothing_lost(&before);
+            self.check_source_untouched(&before);
         }
         if matches!(ended, Ended::NeedsReview) {
             ended = self.run(Interruption::None, RunContext::Reviewed);
             self.check_nothing_lost(&before);
+            self.check_source_untouched(&before);
         }
         match ended {
             Ended::Finished(report)
                 if report.completion() == Completion::Finished && report.failures().is_empty() =>
             {
-                self.check_converged(&report);
+                self.check_converged(&report, &before);
                 // What interrupted writes left is archived by now.
                 for folder in [Folder::Left, Folder::Right] {
                     if let Some(memory) = self.memory(folder) {
@@ -649,13 +770,16 @@ impl Simulation {
         if self.pair.memory.is_some() {
             self.check_settled();
             self.check_nothing_lost(&before);
+            self.check_source_untouched(&before);
         }
     }
 
-    /// Some content to start from, synced once.
+    /// Some content to start from, in the source if there is one, synced
+    /// once.
     fn start(&mut self) {
+        let folder = self.source().unwrap_or(Folder::Left);
         for path in 0..3 {
-            self.apply(&Edit::Write(Folder::Left, path));
+            self.apply(&Edit::Write(folder, path));
         }
         self.play(&Round {
             edits: Vec::new(),
@@ -686,11 +810,12 @@ proptest! {
 
     #[test]
     fn quirky_folders_lose_nothing_converge_and_settle(
+        mode in mode(),
         left in quirks(),
         right in quirks(),
         rounds in rounds(PATHS.len(), Faults::On),
     ) {
-        let mut simulation = Simulation::in_memory(left, right);
+        let mut simulation = Simulation::in_memory_as(mode, left, right);
         simulation.start();
         for round in &rounds {
             simulation.play(round);
