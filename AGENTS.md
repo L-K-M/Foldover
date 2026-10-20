@@ -42,6 +42,8 @@ The roadmap is PLAN.md §7.
 | Dependency licenses and advisories | `cargo deny check` |
 | Generate the Xcode project | `xcodegen generate --spec apple/project.yml` |
 | Build everything this host can → `dist/` | `scripts/build.sh [core] [app] [--debug] [--clean] [--check]` |
+| Build, then install the app into `/Applications` (restarts a running agent) | `scripts/build.sh app --install` |
+| Test `--install` against a fake macOS toolchain | `bash scripts/test-build-install.sh` |
 | Release (macOS, X.Y.Z only; the pushed tag publishes the app zip) | `scripts/release.sh X.Y.Z [--push]` |
 | Package the ad-hoc-signed app zip (macOS) | `bash scripts/package-app.sh OUT.zip DERIVED_DATA` |
 | Doc links, anchors, fences, tables | `python3 tools/doccheck/checkdocs.py .` |
