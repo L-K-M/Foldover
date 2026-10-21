@@ -21,7 +21,7 @@ use foldover_fs::{ForeignMetadata, NativeMetadata, WriteError};
 use foldover_proto::local::{PairDurability, PairPropagation};
 use foldover_proto::peer::{
     FolderOp, IncomingKind, LeaseAction, LeaseFile, NameCase, NameUnicode, PeerCall, PeerReply,
-    ScanSettings,
+    ScanSettings, VolumeKind,
 };
 use foldover_types::{
     CaseMatching, Digest, Durability, EndpointId, EntryVersion, MetadataPolicy, NameMatching,
@@ -134,6 +134,15 @@ impl PeerEndpoint {
     pub fn available_space(&self) -> Result<u64, ScanError> {
         match self.reply(FolderOp::Space)? {
             PeerReply::Space { bytes } => Ok(bytes),
+            _ => Err(unexpected()),
+        }
+    }
+
+    /// Whether the other Mac keeps the folder on one of its network
+    /// volumes.
+    pub fn on_network_volume(&self) -> Result<bool, ScanError> {
+        match self.reply(FolderOp::Volume)? {
+            PeerReply::Volume { volume } => Ok(volume == VolumeKind::Network),
             _ => Err(unexpected()),
         }
     }

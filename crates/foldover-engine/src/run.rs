@@ -632,7 +632,7 @@ impl PairRun {
                 return Err(RunError::IdentityChanged { side });
             }
         }
-        let options = run_options(draft.options(), &endpoints);
+        let options = run_options(draft.options(), &endpoints)?;
         let policy = options.metadata();
         // One filter for both sides, so an exclusion never looks like a deletion.
         let mut rules: Vec<String> = draft.options().filters().rules().to_vec();
@@ -1433,21 +1433,22 @@ pub use undo::UndoReport;
 /// The pair's options as a run on `endpoints` applies them. Gatekeeper's
 /// download mark is never written to a network volume (PLAN.md §4.10),
 /// so it leaves both folders' versions when either is one; otherwise one
-/// side would always differ.
-fn run_options(options: &PairOptions, endpoints: &EndpointPair) -> PairOptions {
-    let networked = [Side::Left, Side::Right].into_iter().any(|side| {
-        endpoints
+/// side would always differ. A folder that cannot tell fails the run
+/// rather than risk writing the mark to a share.
+fn run_options(options: &PairOptions, endpoints: &EndpointPair) -> Result<PairOptions, RunError> {
+    let mut quarantine = Propagation::Sync;
+    for side in [Side::Left, Side::Right] {
+        let networked = endpoints
             .endpoint(side)
-            .network_source()
-            .is_ok_and(|source| source.is_some())
-    });
-    let quarantine = match networked {
-        true => Propagation::Ignore,
-        false => Propagation::Sync,
-    };
-    options
+            .on_network_volume()
+            .map_err(|source| observe_error(side, source))?;
+        if networked {
+            quarantine = Propagation::Ignore;
+        }
+    }
+    Ok(options
         .clone()
-        .with_metadata(options.metadata().with_quarantine(quarantine))
+        .with_metadata(options.metadata().with_quarantine(quarantine)))
 }
 
 #[cfg(test)]

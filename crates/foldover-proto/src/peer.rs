@@ -59,6 +59,9 @@ pub enum FolderOp {
     NameMatching,
     /// `space`: bytes free.
     Space,
+    /// `volume`: whether the folder is on a network volume of the
+    /// answering Mac.
+    Volume,
     /// `progress` replies while scanning, entries as data frames, then
     /// `observed`.
     Observe { scan: ScanSettings },
@@ -259,6 +262,13 @@ pub enum NameUnicode {
     Normalized,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VolumeKind {
+    Local,
+    Network,
+}
+
 /// Why a folder operation failed, so the asking Mac can treat it like
 /// its own endpoint's error.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -313,6 +323,9 @@ pub enum PeerReply {
     },
     Space {
         bytes: u64,
+    },
+    Volume {
+        volume: VolumeKind,
     },
     /// Entries found and versioned so far.
     Progress {

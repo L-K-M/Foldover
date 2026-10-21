@@ -15,7 +15,7 @@ use foldover_fs::Resume;
 use foldover_proto::local::PairDurability;
 use foldover_proto::peer::{
     FolderError, FolderErrorKind, FolderOp, Incoming, IncomingKind, LeaseAction, LeaseFile,
-    NameCase, NameUnicode, PeerReply, RunSettings, ScanSettings, WireItem, WireRun,
+    NameCase, NameUnicode, PeerReply, RunSettings, ScanSettings, VolumeKind, WireItem, WireRun,
 };
 use foldover_types::{
     CaseMatching, Digest, Durability, EntryVersion, LocalRoot, MetadataPolicy, PairOptions,
@@ -121,6 +121,15 @@ pub fn serve_folder(root: &LocalRoot, op: FolderOp, cache: &FolderCache, answer:
         FolderOp::Space => endpoint
             .available_space()
             .map(|bytes| PeerReply::Space { bytes })
+            .map_err(|error| wire::scan_failure(&error)),
+        FolderOp::Volume => endpoint
+            .network_source()
+            .map(|source| PeerReply::Volume {
+                volume: match source {
+                    Some(_) => VolumeKind::Network,
+                    None => VolumeKind::Local,
+                },
+            })
             .map_err(|error| wire::scan_failure(&error)),
         FolderOp::Observe { scan } => return observe(&endpoint, root, scan, cache, answer),
         FolderOp::Watch => unreachable!("answered before opening the folder"),
