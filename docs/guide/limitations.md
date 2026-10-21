@@ -33,6 +33,11 @@ What you need to know before trusting a pair with your data.
   your approval stays stopped until you sync by hand. The app notifies
   you while it is running; with the app closed, nothing alerts you
   ([ADR 0022](../adr/0022-scheduled-runs.md)).
+- **Time Machine skips Foldover's state.** A restored, older state could
+  read changes in your folders as deletions to carry over, so it is
+  never backed up. A Mac set up from a backup starts without pairs; add
+  them again, and each first sync shows its preview
+  ([ADR 0009](../adr/0009-pair-state-storage.md)).
 
 ## Readiness warnings
 
