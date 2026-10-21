@@ -864,13 +864,26 @@ impl SftpEndpoint {
         if attributes.kind() == FileKind::Directory {
             return Err(ApplyError::Unsupported(from.clone()));
         }
+        // Missing folders come composed, inside those that remain in the
+        // spelling they have.
         if let Some(parent) = to.parent()
             && self.attributes(&parent)?.is_none()
         {
-            self.make_directories(&spelling::compose(parent.as_bytes()), DEFAULT_DIRECTORY)
+            let folders = self.creatable(parent.as_bytes());
+            self.make_directories(&folders, DEFAULT_DIRECTORY)
                 .map_err(|source| write_error(to, source))?;
         }
-        let moved = self.session().rename(&stored, &self.fresh(to.as_bytes()));
+        // Making folders took round trips: the entry must still be the one
+        // verified, or the move would take a replacement.
+        let still = self
+            .lookup(from)?
+            .is_some_and(|(_, now)| stat_key(&now) == stat_key(&attributes));
+        if !still {
+            return Err(ApplyError::DestinationChanged(from.clone()));
+        }
+        // Found before the session is held: finding it may use it.
+        let target = self.fresh(to.as_bytes());
+        let moved = self.session().rename(&stored, &target);
         if let Err(source) = moved {
             return Err(match self.attributes(to) {
                 Ok(Some(_)) => ApplyError::DestinationChanged(to.clone()),

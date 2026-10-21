@@ -809,6 +809,53 @@ fn keep_copy_in_a_folder_with_another_spelling_finishes() {
     );
 }
 
+/// Review of moves: a move into a folder stored in another spelling made
+/// a composed twin of it, then held the session while finding it, which
+/// needs the session too, and hung.
+#[test]
+fn a_move_into_a_folder_with_another_spelling_lands_inside_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    let options = PairOptions::default();
+    let run = RunScope::new(SystemTime::now(), options.clone());
+    let decomposed = "cafe\u{301}";
+    fs::create_dir(directory.path().join(decomposed)).unwrap();
+    fs::write(directory.path().join("menu.txt"), b"soup").unwrap();
+    let observed = remote
+        .observe_from(
+            options.metadata(),
+            &Filter::none(),
+            &std::collections::BTreeMap::new(),
+            &mut proceed,
+        )
+        .unwrap();
+    let from = path(b"menu.txt");
+    let current = observed.entries()[&from].clone();
+    let to = path("caf\u{e9}/old/menu.txt".as_bytes());
+
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let moved = remote.move_entry(&from, &current, &to, &run, &mut proceed);
+        let _ = done.send(moved.map_err(|error| error.to_string()));
+    });
+    assert_eq!(
+        finished.recv_timeout(std::time::Duration::from_secs(20)),
+        Ok(Ok(()))
+    );
+    let names: Vec<String> = fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name != ".foldover")
+        .collect();
+    assert_eq!(names, [decomposed]);
+    assert_eq!(
+        fs::read(directory.path().join(decomposed).join("old/menu.txt")).unwrap(),
+        b"soup"
+    );
+}
+
 /// macOS CI: a server that ignores normalization, as a Mac's does, finds
 /// an entry by either spelling, so a replacement took the spelling it
 /// asked by. Its folder's listing tells the one stored.

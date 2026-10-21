@@ -45,5 +45,5 @@ and every old path went through the deletion fuse.
 - File identity (inode) is not used, so a move whose content also
   changed is still an archive and a copy.
 - The simulation's random renames now run as moves on every folder kind
-  it models; nothing lost accepts a version found at another path of the
-  same folder, as each write has its own content.
+  it models; its check that nothing was lost accepts a version found at
+  another path of the same folder, as each write has its own content.
