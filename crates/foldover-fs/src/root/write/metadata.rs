@@ -23,6 +23,9 @@ const MAX_VALUE_BYTES: usize = 16 * 1024 * 1024;
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
 /// Most attribute bytes a copy between Macs carries; its messages hold them.
 const MAX_NATIVE_BYTES: usize = 2 * 1024 * 1024;
+/// Tries at reading an attribute another process keeps rewriting.
+#[cfg(target_os = "macos")]
+const ATTRIBUTE_READS: usize = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Destination {
@@ -339,18 +342,31 @@ fn copy_access_control(
     }
 }
 
-/// The value of `name` on `file`, or `None` without it.
+/// The value of `name` on `file`, or `None` without it. Another process
+/// may remove or rewrite it between asking its size and reading it: gone
+/// counts as absent, and a value that grew is read again.
 #[cfg(target_os = "macos")]
 fn attribute_value(file: &impl AsFd, name: &CStr) -> io::Result<Option<Vec<u8>>> {
-    let size = match rustix::fs::fgetxattr(file, name, &mut [0_u8; 0][..]) {
-        Ok(size) => size,
-        Err(rustix::io::Errno::NOATTR) => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    let mut value = vec![0; size];
-    let size = rustix::fs::fgetxattr(file, name, &mut value)?;
-    value.truncate(size);
-    Ok(Some(value))
+    for _ in 0..ATTRIBUTE_READS {
+        let size = match rustix::fs::fgetxattr(file, name, &mut [0_u8; 0][..]) {
+            Ok(size) => size,
+            Err(rustix::io::Errno::NOATTR) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let mut value = vec![0; size];
+        match rustix::fs::fgetxattr(file, name, &mut value) {
+            Ok(size) => {
+                value.truncate(size);
+                return Ok(Some(value));
+            }
+            Err(rustix::io::Errno::NOATTR) => return Ok(None),
+            Err(rustix::io::Errno::RANGE) => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(io::Error::other(
+        "an extended attribute kept changing while read",
+    ))
 }
 
 /// Linux ACLs live in privileged xattr namespaces, which are not copied.
