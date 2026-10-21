@@ -23,11 +23,11 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1.53.2", features = ["rt", "sync", "time", "macros"] }
 uuid = { version = "1", features = ["v4"] }
-unicode-normalization = { version = "0.1.26", optional = true }
+unicode-normalization = "0.1.26"
 
 [features]
 # In-memory folders with file system quirks, for simulations (ADR 0038).
-simulation = ["dep:unicode-normalization"]
+simulation = []
 
 [[bench]]
 name = "scan"

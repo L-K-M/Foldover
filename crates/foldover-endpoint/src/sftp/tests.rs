@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use foldover_net::sftp::Session;
-use foldover_types::{Durability, PairOptions};
+use foldover_types::{CaseMatching, Durability, NameMatching, PairOptions, UnicodeMatching};
 
 use super::*;
 use crate::{Endpoint, Expected, Filter, LocalEndpoint};
@@ -535,6 +535,110 @@ fn copies_both_ways_keep_content_and_archive_what_they_replace() {
     );
 }
 
+/// PLAN.md §4.10: names reach the server composed, and entries are
+/// found by any spelling, whichever the server holds.
+#[test]
+fn decomposed_names_are_written_composed_and_found_in_either_spelling() {
+    let local_directory = tempfile::tempdir().unwrap();
+    let remote_directory = tempfile::tempdir().unwrap();
+    let Some(remote) = remote(remote_directory.path()) else {
+        return;
+    };
+    assert_eq!(
+        remote.name_matching(),
+        NameMatching::new(CaseMatching::Exact, UnicodeMatching::Normalized)
+    );
+    let local = Endpoint::Local(LocalEndpoint::open(local_directory.path()).unwrap());
+    let options = PairOptions::default();
+    let policy = options.metadata();
+    let run = RunScope::new(UNIX_EPOCH, options.clone());
+    let observe = |endpoint: &Endpoint| {
+        endpoint
+            .observe_from(
+                policy,
+                &Filter::none(),
+                &std::collections::BTreeMap::new(),
+                &mut proceed,
+                &mut |_| {},
+            )
+            .unwrap()
+    };
+    let (folder, file) = ("cafe\u{301}", "cafe\u{301}/re\u{301}sume\u{301}.txt");
+    let composed_file = "caf\u{e9}/r\u{e9}sum\u{e9}.txt";
+    fs::create_dir(local_directory.path().join(folder)).unwrap();
+    fs::write(local_directory.path().join(file), b"first").unwrap();
+
+    let here = observe(&local);
+    for name in [folder, file] {
+        let name = path(name.as_bytes());
+        remote
+            .copy_from(
+                &local,
+                &name,
+                &here.entries()[&name],
+                Expected::Absent,
+                &run,
+                &mut proceed,
+            )
+            .unwrap();
+    }
+    let names = |directory: &Path| {
+        let mut names: Vec<String> = fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(names(remote_directory.path()), ["caf\u{e9}"]);
+    assert_eq!(
+        fs::read(remote_directory.path().join(composed_file)).unwrap(),
+        b"first"
+    );
+
+    // The pair's decomposed name replaces and removes the composed file.
+    fs::write(local_directory.path().join(file), b"second").unwrap();
+    let here = observe(&local);
+    let there = observe(&remote);
+    let name = path(file.as_bytes());
+    let stored = &there.entries()[&path(composed_file.as_bytes())];
+    remote
+        .copy_from(
+            &local,
+            &name,
+            &here.entries()[&name],
+            Expected::Present(stored),
+            &run,
+            &mut proceed,
+        )
+        .unwrap();
+    assert_eq!(
+        names(&remote_directory.path().join("caf\u{e9}")),
+        ["r\u{e9}sum\u{e9}.txt"]
+    );
+    assert_eq!(
+        fs::read(remote_directory.path().join(composed_file)).unwrap(),
+        b"second"
+    );
+    let there = observe(&remote);
+    let stored = &there.entries()[&path(composed_file.as_bytes())];
+    let later = RunScope::new(UNIX_EPOCH + Duration::from_secs(1), options.clone());
+    remote.remove(&name, stored, &later, &mut proceed).unwrap();
+    assert!(names(&remote_directory.path().join("caf\u{e9}")).is_empty());
+
+    // A name the server holds decomposed is found by its composed form.
+    fs::write(remote_directory.path().join("nai\u{308}ve.txt"), b"x").unwrap();
+    let Endpoint::Sftp(sftp) = &remote else {
+        unreachable!()
+    };
+    assert!(
+        sftp.attributes(&path("na\u{ef}ve.txt".as_bytes()))
+            .unwrap()
+            .is_some()
+    );
+    assert!(sftp.attributes(&path(b"naive.txt")).unwrap().is_none());
+}
+
 #[test]
 fn identities_removals_and_pruning_follow_the_local_rules() {
     let directory = tempfile::tempdir().unwrap();
@@ -584,6 +688,144 @@ fn identities_removals_and_pruning_follow_the_local_rules() {
         .unwrap();
     assert_eq!(pruned, 1);
     assert!(remote.archived_runs().unwrap().is_empty());
+}
+
+/// Review of composed names: put back found an archived item in either
+/// spelling but renamed the spelling given, which failed.
+#[test]
+fn put_back_finds_an_archived_name_in_either_spelling() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = remote(directory.path()) else {
+        return;
+    };
+    let options = PairOptions::default();
+    let run = RunScope::new(SystemTime::now(), options.clone());
+    let (decomposed, composed) = ("cafe\u{301}.txt", "caf\u{e9}.txt");
+    fs::write(directory.path().join(decomposed), b"kept").unwrap();
+    let observed = remote
+        .observe_from(
+            options.metadata(),
+            &Filter::none(),
+            &std::collections::BTreeMap::new(),
+            &mut proceed,
+            &mut |_| {},
+        )
+        .unwrap();
+    let name = path(decomposed.as_bytes());
+    remote
+        .remove(&name, &observed.entries()[&name], &run, &mut proceed)
+        .unwrap();
+
+    let placed = remote
+        .put_back(run.name(), &path(composed.as_bytes()), Durability::Standard)
+        .unwrap();
+    assert_eq!(placed, path(composed.as_bytes()));
+    assert_eq!(fs::read(directory.path().join(composed)).unwrap(), b"kept");
+}
+
+/// Review of nfc-writes: putting back a file whose folder is gone made
+/// that folder's whole path composed, so a parent stored decomposed got
+/// a composed twin beside it.
+#[test]
+fn put_back_remakes_a_missing_folder_inside_the_stored_spelling() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = remote(directory.path()) else {
+        return;
+    };
+    let options = PairOptions::default();
+    let run = RunScope::new(SystemTime::now(), options.clone());
+    let decomposed = "cafe\u{301}";
+    fs::create_dir_all(directory.path().join(decomposed).join("jobs")).unwrap();
+    fs::write(
+        directory.path().join(decomposed).join("jobs/a.txt"),
+        b"kept",
+    )
+    .unwrap();
+    let observed = remote
+        .observe_from(
+            options.metadata(),
+            &Filter::none(),
+            &std::collections::BTreeMap::new(),
+            &mut proceed,
+            &mut |_| {},
+        )
+        .unwrap();
+    let name = path(format!("{decomposed}/jobs/a.txt").as_bytes());
+    remote
+        .remove(&name, &observed.entries()[&name], &run, &mut proceed)
+        .unwrap();
+    fs::remove_dir(directory.path().join(decomposed).join("jobs")).unwrap();
+
+    remote
+        .put_back(
+            run.name(),
+            &path("caf\u{e9}/jobs/a.txt".as_bytes()),
+            Durability::Standard,
+        )
+        .unwrap();
+    let names: Vec<String> = fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name != ".foldover")
+        .collect();
+    assert_eq!(names, [decomposed]);
+    assert_eq!(
+        fs::read(directory.path().join(decomposed).join("jobs/a.txt")).unwrap(),
+        b"kept"
+    );
+}
+
+/// Review of nfc-writes: a copy kept beside a file in a folder with
+/// another spelling held the session while finding that folder, which
+/// needs the session too, and hung; so did a put-back there.
+#[test]
+fn keep_copy_in_a_folder_with_another_spelling_finishes() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    let options = PairOptions::default();
+    fs::create_dir(directory.path().join("cafe\u{301}")).unwrap();
+    fs::write(directory.path().join("cafe\u{301}/menu.txt"), b"soup").unwrap();
+    let observed = remote
+        .observe_from(
+            options.metadata(),
+            &Filter::none(),
+            &std::collections::BTreeMap::new(),
+            &mut proceed,
+        )
+        .unwrap();
+    let name = path("cafe\u{301}/menu.txt".as_bytes());
+    let version = observed.entries()[&name].version();
+
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let kept = remote.keep_copy(&name, version, "Folder B", &options, &mut proceed);
+        let _ = done.send(kept.is_ok());
+    });
+    assert_eq!(
+        finished.recv_timeout(std::time::Duration::from_secs(20)),
+        Ok(true)
+    );
+}
+
+/// macOS CI: a server that ignores normalization, as a Mac's does, finds
+/// an entry by either spelling, so a replacement took the spelling it
+/// asked by. Its folder's listing tells the one stored.
+#[test]
+fn a_replaced_entry_keeps_the_spelling_its_folder_lists() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(sftp) = sftp(directory.path()) else {
+        return;
+    };
+    let (decomposed, composed) = ("cafe\u{301}.txt", "caf\u{e9}.txt");
+    fs::write(directory.path().join(composed), b"kept").unwrap();
+
+    // Found by the other spelling, as on a Mac.
+    let asked = sftp.remote(decomposed.as_bytes());
+    let stored = sftp.remote(composed.as_bytes());
+    assert_eq!(sftp.listed(&asked), stored);
+    assert_eq!(sftp.listed(&stored), stored);
 }
 
 /// `Durability::Full` cannot be promised over SFTP at all: namespace

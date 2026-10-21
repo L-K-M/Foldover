@@ -79,15 +79,19 @@ fn a_dead_lease_is_taken_over_and_its_holder_learns_it_lost() {
 fn a_live_holder_keeps_its_lease_while_beating() {
     let (_directory, a, b) = folder();
     let held = take(&a, holder("a/run", "Laptop"), QUICK, &mut proceed).unwrap();
+    // A TTL well past a busy machine's stalls between beats, and a wait
+    // long enough to take over a holder that stopped beating.
+    let patient = LeaseTiming {
+        ttl: Duration::from_secs(1),
+        wait: Duration::from_millis(2_500),
+        ..QUICK
+    };
     let waiting = std::thread::scope(|scope| {
-        let short = LeaseTiming {
-            wait: Duration::from_millis(400),
-            ..QUICK
-        };
         let waiting =
-            scope.spawn(move || take(&b, holder("b/run", "Studio"), short, &mut proceed).is_ok());
-        // The holder beats from its own thread, as a run does.
-        for _ in 0..30 {
+            scope.spawn(move || take(&b, holder("b/run", "Studio"), patient, &mut proceed).is_ok());
+        // The holder beats from its own thread, as a run does, until the
+        // other gives up.
+        while !waiting.is_finished() {
             held.renew().unwrap();
             std::thread::sleep(Duration::from_millis(20));
         }

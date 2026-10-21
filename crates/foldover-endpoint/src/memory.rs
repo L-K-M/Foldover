@@ -2,7 +2,8 @@
 //! fast enough for many thousands of seeded histories, and able to act
 //! like the file systems Foldover meets. Quirks a folder can have:
 //!
-//! - names that ignore case, or that it stores decomposed (NFD);
+//! - names that ignore case, or that it stores decomposed (NFD), or
+//!   composed (NFC) as Foldover writes to SFTP servers;
 //! - modification times kept only to a coarse resolution, as on FAT;
 //! - replacing a file in two steps (old out, new in) instead of one swap,
 //!   as on plain SFTP servers;
@@ -83,6 +84,8 @@ pub enum NameStorage {
     AsGiven,
     /// Unicode decomposed, as HFS+ does.
     Decomposed,
+    /// Unicode composed, as Foldover writes to SFTP servers.
+    Composed,
 }
 
 /// How a folder replaces an existing file.
@@ -111,6 +114,8 @@ struct Folder {
     /// Steps from this count on fail.
     fault: Option<u64>,
     temporaries: u64,
+    /// Folded paths kept only in the cloud, as iCloud evicts them.
+    evicted: std::collections::BTreeSet<Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
@@ -200,6 +205,7 @@ impl MemoryEndpoint {
                 steps: 0,
                 fault: None,
                 temporaries: 0,
+                evicted: std::collections::BTreeSet::new(),
             })),
         }
     }
@@ -273,6 +279,22 @@ impl MemoryEndpoint {
                 modified,
             },
         )
+    }
+
+    /// Keep the entry at `path` only in the cloud, as iCloud does with
+    /// files it evicts: observations leave it, and what is below it,
+    /// unread.
+    pub fn evict(&self, path: &[u8]) {
+        let mut folder = self.folder();
+        let key = folder.key(path);
+        folder.evicted.insert(key);
+    }
+
+    /// Bring an evicted entry back, as downloading it does.
+    pub fn download(&self, path: &[u8]) {
+        let mut folder = self.folder();
+        let key = folder.key(path);
+        folder.evicted.remove(&key);
     }
 
     /// Delete a file or link as a person would; absent paths are fine.
@@ -429,11 +451,18 @@ impl MemoryEndpoint {
                 observation.leftovers.push(path);
                 continue;
             }
+            // The filter first, as on disk: what it leaves out is never
+            // reported, evicted or not.
             let directory = matches!(stored.node, Node::Directory { .. });
             if filter.excludes(&path, directory) {
                 if directory {
                     skipped.push(stored.path.clone());
                 }
+                continue;
+            }
+            if folder.evicted.contains(&folder.key(&stored.path)) {
+                observation.unavailable.push(path);
+                skipped.push(stored.path.clone());
                 continue;
             }
             if let Node::File { data, modified, .. } = &stored.node {
@@ -856,6 +885,10 @@ impl Folder {
             NameStorage::AsGiven => name.to_vec(),
             NameStorage::Decomposed => match std::str::from_utf8(name) {
                 Ok(text) => text.nfd().collect::<String>().into_bytes(),
+                Err(_) => name.to_vec(),
+            },
+            NameStorage::Composed => match std::str::from_utf8(name) {
+                Ok(text) => text.nfc().collect::<String>().into_bytes(),
                 Err(_) => name.to_vec(),
             },
         };
