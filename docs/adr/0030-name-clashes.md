@@ -16,7 +16,9 @@ failed on every run, or would have stored two files where a person sees one.
 - Each folder declares how it compares names: a local root on macOS ignores
   normalization, and ignores case unless its volume declares case-sensitive
   names (an unreported answer counts as ignoring case, which flags more
-  clashes, never fewer). SFTP folders and Linux roots match bytes exactly.
+  clashes, never fewer). Linux roots match bytes exactly; SFTP folders
+  keep case but ignore normalization
+  ([ADR 0041](0041-composed-names-on-sftp.md)).
 - Each path's key under a folder's rule is its name in composed Unicode
   (NFC) where normalization is ignored, lower case where case is; names
   that are not UTF-8 compare as bytes, with ASCII letters folded.
@@ -52,8 +54,8 @@ A renames Report.txt → report.txt              B archives Report.txt and
 
 - Two macOS folders whose files differ only in Unicode spelling (one from
   an old HFS+ disk, one created later) show conflicts until one is
-  renamed; writing new files in NFC on foreign filesystems remains
-  PLAN.md §4.10 work.
+  renamed. SFTP folders write new names composed and find either
+  spelling ([ADR 0041](0041-composed-names-on-sftp.md)).
 - Case folding uses Unicode lower-casing, which approximates but does not
   equal each filesystem's own folding tables.
 - Pairs whose folders both match names exactly skip the check entirely.

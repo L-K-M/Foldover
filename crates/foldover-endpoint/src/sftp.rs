@@ -12,6 +12,7 @@
 //! - `Durability::Full` is refused, not downgraded: namespace changes
 //!   have no protocol flush.
 
+mod spelling;
 mod transfer;
 
 pub(crate) use transfer::{copy, update_metadata};
@@ -224,11 +225,11 @@ impl SftpEndpoint {
         directory: Option<&SyncPath>,
         filter: &Filter,
     ) -> Result<Option<Vec<ListedEntry>>, ScanError> {
-        let remote = match directory {
-            None => self.root.clone(),
-            Some(path) => self.remote(path.as_bytes()),
+        let entries = match directory {
+            None => self.session().read_dir(&self.root),
+            Some(path) => self.on_stored(path.as_bytes(), |remote| self.session().read_dir(remote)),
         };
-        let entries = match self.session().read_dir(&remote) {
+        let entries = match entries {
             Ok(entries) => entries,
             Err(error)
                 if matches!(
@@ -396,7 +397,7 @@ impl SftpEndpoint {
         content: &[u8],
     ) -> io::Result<Vec<u8>> {
         self.make_directories_on(session, INTERNAL_DIRECTORY, PRIVATE_DIRECTORY)?;
-        let temporary = self.remote(&temporary_beside(file.path()));
+        let temporary = self.beside(file.path());
         write_new(session, temporary, PRIVATE_FILE, |sink| sink(content))
     }
 
@@ -522,7 +523,6 @@ impl SftpEndpoint {
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<EntryVersion, ScanError> {
         let observed = observed(attributes)?;
-        let remote = self.remote(path.as_bytes());
         match attributes.kind() {
             FileKind::File => {
                 let digest = self.read_file(path, attributes, control, &mut |_| Ok(()))?;
@@ -530,10 +530,7 @@ impl SftpEndpoint {
             }
             FileKind::Directory => Ok(entry_version(Payload::Directory, &observed, policy)),
             FileKind::Symlink => {
-                let target = self
-                    .session()
-                    .read_link(&remote)
-                    .map_err(|source| at(Some(path), source))?;
+                let target = self.read_link(path)?;
                 Ok(entry_version(Payload::Symlink(&target), &observed, policy))
             }
             FileKind::Other => Err(ScanError::UnsupportedEntry(path.clone())),
@@ -575,11 +572,14 @@ impl SftpEndpoint {
         control: &mut impl FnMut() -> ScanControl,
         sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
     ) -> Result<Digest, ScanError> {
-        let remote = self.remote(path.as_bytes());
-        let mut session = self.session();
-        let handle = session
-            .open_read(&remote)
+        let (handle, remote) = self
+            .on_stored(path.as_bytes(), |remote| {
+                self.session()
+                    .open_read(remote)
+                    .map(|handle| (handle, remote.to_vec()))
+            })
             .map_err(|source| at(Some(path), source))?;
+        let mut session = self.session();
         let mut hasher = blake3::Hasher::new();
         let mut taken = from;
         let mut cancelled = false;
@@ -622,11 +622,7 @@ impl SftpEndpoint {
 
     /// The current attributes at `path`, or `None` when nothing is there.
     pub(crate) fn attributes(&self, path: &SyncPath) -> Result<Option<Attributes>, ScanError> {
-        match self.session().lstat(&self.remote(path.as_bytes())) {
-            Ok(attributes) => Ok(Some(attributes)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(at(Some(path), error)),
-        }
+        Ok(self.lookup(path)?.map(|(_, attributes)| attributes))
     }
 
     /// Prove `path` still holds `expected` and return its attributes.
@@ -637,17 +633,28 @@ impl SftpEndpoint {
         policy: MetadataPolicy,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<Attributes, ApplyError> {
+        self.verified_at(path, expected, policy, control)
+            .map(|(_, attributes)| attributes)
+    }
+
+    /// `verified`, with where the entry is stored.
+    fn verified_at(
+        &self,
+        path: &SyncPath,
+        expected: &ObservedEntry,
+        policy: MetadataPolicy,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(Vec<u8>, Attributes), ApplyError> {
         let changed = || ApplyError::DestinationChanged(path.clone());
-        let attributes = self.attributes(path)?.ok_or_else(changed)?;
+        let (stored, attributes) = self.lookup(path)?.ok_or_else(changed)?;
         if self.version(path, &attributes, policy, control)? != expected.version {
             return Err(changed());
         }
-        Ok(attributes)
+        Ok((stored, attributes))
     }
 
     pub(crate) fn read_link(&self, path: &SyncPath) -> Result<Vec<u8>, ScanError> {
-        self.session()
-            .read_link(&self.remote(path.as_bytes()))
+        self.on_stored(path.as_bytes(), |remote| self.session().read_link(remote))
             .map_err(|source| at(Some(path), source))
     }
 
@@ -688,7 +695,7 @@ impl SftpEndpoint {
                 "SFTP cannot guarantee full durability",
             ));
         }
-        let temporary = self.remote(&temporary_beside(path));
+        let temporary = self.beside(path);
         write_new(&mut self.session(), temporary, permissions, produce)
     }
 
@@ -752,21 +759,23 @@ impl SftpEndpoint {
         )
     }
 
-    /// Create a folder at `path` with `permissions`.
+    /// Create a folder at `path` with `permissions`, named composed.
     pub(crate) fn make_directory(&self, path: &SyncPath, permissions: u32) -> io::Result<()> {
-        self.session()
-            .make_directory(&self.remote(path.as_bytes()), permissions)
+        let remote = self.fresh(path.as_bytes());
+        self.session().make_directory(&remote, permissions)
     }
 
     /// Create a link beside `path` and return its server path.
     pub(crate) fn stage_link(&self, path: &[u8], target: &[u8]) -> io::Result<Vec<u8>> {
-        let temporary = self.remote(&temporary_beside(path));
+        let temporary = self.beside(path);
         self.session().symlink(target, &temporary)?;
         Ok(temporary)
     }
 
-    /// Move a staged temporary to `path`. Creating never replaces; a
-    /// replacement first sets the current entry aside.
+    /// Move a staged temporary to `path`. Creating never replaces, and
+    /// names the entry composed beside the temporary; a replacement first
+    /// sets the current entry aside and takes its spelling, as its folder
+    /// lists it.
     pub(crate) fn place(
         &self,
         temporary: &[u8],
@@ -774,20 +783,32 @@ impl SftpEndpoint {
         replacing: Option<&Attributes>,
         run: &RunScope,
     ) -> Result<(), ApplyError> {
-        if let Some(expected) = replacing {
-            let current = self.attributes(path)?;
-            if current.as_ref().map(stat_key) != Some(stat_key(expected)) {
-                let _ = self.session().remove_file(temporary);
-                return Err(ApplyError::DestinationChanged(path.clone()));
+        let target = match replacing {
+            Some(expected) => {
+                let current = self.lookup(path)?;
+                let Some((stored, _)) =
+                    current.filter(|(_, current)| stat_key(current) == stat_key(expected))
+                else {
+                    let _ = self.session().remove_file(temporary);
+                    return Err(ApplyError::DestinationChanged(path.clone()));
+                };
+                let target = self.listed(&stored);
+                if let Err(error) = self.set_aside(&stored, path, run) {
+                    let _ = self.session().remove_file(temporary);
+                    return Err(error);
+                }
+                target
             }
-            if let Err(error) = self.set_aside(path, run) {
-                let _ = self.session().remove_file(temporary);
-                return Err(error);
+            None => {
+                let folder = &temporary[..temporary
+                    .iter()
+                    .rposition(|byte| *byte == b'/')
+                    .expect("temporaries are inside the root")];
+                let name = path.components().last().expect("paths have a name");
+                [folder, b"/".as_slice(), &spelling::compose(name)].concat()
             }
-        }
-        let placed = self
-            .session()
-            .rename(temporary, &self.remote(path.as_bytes()));
+        };
+        let placed = self.session().rename(temporary, &target);
         if let Err(source) = placed {
             let _ = self.session().remove_file(temporary);
             return Err(match self.attributes(path) {
@@ -798,15 +819,16 @@ impl SftpEndpoint {
         Ok(())
     }
 
-    /// Move `path` to the run's archive, creating its folders there, or
-    /// delete it where the run keeps no archive. Only files and links come
-    /// here: `remove` takes folders when empty, and `place` never replaces
-    /// a folder, since a file meeting one is a type conflict.
-    fn set_aside(&self, path: &SyncPath, run: &RunScope) -> Result<(), ApplyError> {
+    /// Move `path`, stored at `stored`, to the run's archive, creating its
+    /// folders there, or delete it where the run keeps no archive. Only
+    /// files and links come here: `remove` takes folders when empty, and
+    /// `place` never replaces a folder, since a file meeting one is a type
+    /// conflict.
+    fn set_aside(&self, stored: &[u8], path: &SyncPath, run: &RunScope) -> Result<(), ApplyError> {
         if run.archiving() == Archiving::Off {
             return self
                 .session()
-                .remove_file(&self.remote(path.as_bytes()))
+                .remove_file(stored)
                 .map_err(|source| write_error(path, source));
         }
         let archived = run.archive_path(path)?;
@@ -815,10 +837,7 @@ impl SftpEndpoint {
                 .map_err(|source| write_error(path, source))?;
         }
         self.session()
-            .rename(
-                &self.remote(path.as_bytes()),
-                &self.remote(archived.as_bytes()),
-            )
+            .rename(stored, &self.remote(archived.as_bytes()))
             .map_err(|source| write_error(path, source))
     }
 
@@ -832,8 +851,8 @@ impl SftpEndpoint {
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<(), ApplyError> {
         check_durability(run.options().durability(), path)?;
-        let attributes = self
-            .verified(path, current, run.options().metadata(), control)
+        let (remote, attributes) = self
+            .verified_at(path, current, run.options().metadata(), control)
             .map_err(|error| match error {
                 ApplyError::Scan(ScanError::Changed(_)) => {
                     ApplyError::DestinationChanged(path.clone())
@@ -841,9 +860,8 @@ impl SftpEndpoint {
                 error => error,
             })?;
         if attributes.kind() != FileKind::Directory {
-            return self.set_aside(path, run);
+            return self.set_aside(&remote, path, run);
         }
-        let remote = self.remote(path.as_bytes());
         let mut session = self.session();
         match session.remove_directory(&remote) {
             Ok(()) => Ok(()),
@@ -858,7 +876,7 @@ impl SftpEndpoint {
     /// where the run keeps no archive.
     pub fn recover_leftover(&self, leftover: &SyncPath, run: &RunScope) -> Result<(), ApplyError> {
         check_durability(run.options().durability(), leftover)?;
-        self.set_aside(leftover, run)
+        self.set_aside(&self.remote(leftover.as_bytes()), leftover, run)
     }
 
     /// Give `path` new synced metadata; the content stays.
@@ -869,8 +887,10 @@ impl SftpEndpoint {
         metadata: crate::ForeignMetadata,
         policy: MetadataPolicy,
     ) -> Result<(), ApplyError> {
-        self.set_metadata(&self.remote(path.as_bytes()), kind, metadata, policy)
-            .map_err(|source| write_error(path, source))
+        self.on_stored(path.as_bytes(), |remote| {
+            self.set_metadata(remote, kind, metadata, policy)
+        })
+        .map_err(|source| write_error(path, source))
     }
 
     /// The metadata a copy to another system carries.
@@ -1000,11 +1020,17 @@ impl SftpEndpoint {
         }
         let folder = crate::local::archive::run_folder(run).ok_or(ScanError::UnknownArchiveRun)?;
         let archived = crate::local::archive::join(&folder, path.as_bytes())?;
-        if self.attributes(&archived)?.is_none() {
+        // Found in whichever spelling it is stored; that is what moves.
+        let Some((stored, _)) = self.lookup(&archived)? else {
             return Err(ApplyError::NotArchived(path.clone()));
-        }
-        if let Some(parent) = path.parent() {
-            self.make_directories(parent.as_bytes(), DEFAULT_DIRECTORY)
+        };
+        // A missing folder comes back composed, as new names do, inside
+        // the folders that remain in the spelling they have.
+        if let Some(parent) = path.parent()
+            && self.attributes(&parent)?.is_none()
+        {
+            let folders = self.creatable(parent.as_bytes());
+            self.make_directories(&folders, DEFAULT_DIRECTORY)
                 .map_err(|source| write_error(path, source))?;
         }
         for attempt in 0..PUT_BACK_ATTEMPTS {
@@ -1015,12 +1041,11 @@ impl SftpEndpoint {
             if self.attributes(&destination)?.is_some() {
                 continue;
             }
+            // Found before the session is held: finding it may use it.
+            let target = self.fresh(destination.as_bytes());
             return self
                 .session()
-                .rename(
-                    &self.remote(archived.as_bytes()),
-                    &self.remote(destination.as_bytes()),
-                )
+                .rename(&stored, &target)
                 .map(|()| destination.clone())
                 .map_err(|source| write_error(&destination, source));
         }
@@ -1069,9 +1094,8 @@ impl SftpEndpoint {
                 return Err(ApplyError::Unsupported(path.clone()));
             }
         };
-        let placed = self
-            .session()
-            .rename(&temporary, &self.remote(copy.as_bytes()));
+        let target = self.fresh(copy.as_bytes());
+        let placed = self.session().rename(&temporary, &target);
         if let Err(source) = placed {
             let _ = self.session().remove_file(&temporary);
             return Err(write_error(&copy, source));
@@ -1100,8 +1124,10 @@ impl SftpEndpoint {
         let size = attributes
             .size
             .ok_or_else(|| ApplyError::Unsupported(path.clone()))?;
-        let source_remote = self.remote(path.as_bytes());
-        let temporary = self.remote(&temporary_beside(copy.as_bytes()));
+        let (source_remote, _) = self
+            .lookup(path)?
+            .ok_or_else(|| ApplyError::SourceChanged(path.clone()))?;
+        let temporary = self.beside(copy.as_bytes());
         let permissions = attributes.permissions.unwrap_or(DEFAULT_FILE) & PERMISSION_BITS;
         let mut hasher = blake3::Hasher::new();
         let mut cancelled = false;
@@ -1261,16 +1287,13 @@ pub(crate) fn check_durability(durability: Durability, path: &SyncPath) -> Resul
 }
 
 /// `path`'s parent with a fresh temporary name, e.g. `docs/.foldover-tmp-…`.
-fn temporary_beside(path: &[u8]) -> Vec<u8> {
-    let name = [
+/// A new temporary's name.
+fn temporary_name() -> Vec<u8> {
+    [
         TEMPORARY_PREFIX,
         uuid::Uuid::new_v4().simple().to_string().as_bytes(),
     ]
-    .concat();
-    match path.iter().rposition(|byte| *byte == b'/') {
-        Some(slash) => [&path[..=slash], name.as_slice()].concat(),
-        None => name,
-    }
+    .concat()
 }
 
 /// Available stat fields, useful as observations but not unchanged-data proof.

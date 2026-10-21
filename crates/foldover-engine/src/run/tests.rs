@@ -1077,6 +1077,46 @@ fn a_broken_off_copy_from_a_server_resumes_where_it_stopped() {
     assert!(!partial.exists());
 }
 
+/// PLAN.md §4.10: a decomposed name reaches an SFTP server composed; the
+/// next run finds nothing to do, and an edit there comes back to the
+/// spelling the pair knows.
+#[test]
+fn decomposed_names_reach_a_server_composed_and_stay_in_sync() {
+    if sftp_server().is_none() {
+        eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
+        return;
+    }
+    let mut pair = fixture(SyncMode::Sync);
+    pair.right_kind = RightKind::Sftp;
+    let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+    let (decomposed, composed) = ("cafe\u{301}", "caf\u{e9}");
+    fs::create_dir(left.join(decomposed)).unwrap();
+    fs::write(left.join(decomposed).join("menu.txt"), b"soup").unwrap();
+
+    let report = pair.sync();
+    assert_eq!(report.copied(), 2, "{:?}", report.failures());
+    let names = |folder: &Path| -> Vec<std::ffi::OsString> {
+        fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name != ".foldover")
+            .collect()
+    };
+    assert_eq!(names(&right), [composed]);
+    assert!(pair.prepare().preview().items().is_empty());
+
+    fs::write(right.join(composed).join("menu.txt"), b"soup and bread").unwrap();
+    let report = pair.sync();
+    assert_eq!(report.copied(), 1, "{:?}", report.failures());
+    assert_eq!(names(&left), [decomposed]);
+    assert_eq!(
+        fs::read(left.join(decomposed).join("menu.txt")).unwrap(),
+        b"soup and bread"
+    );
+    assert_eq!(names(&right), [composed]);
+    assert!(pair.prepare().preview().items().is_empty());
+}
+
 /// A kept part that no longer matches fails its copy once, then the copy
 /// starts over.
 #[test]

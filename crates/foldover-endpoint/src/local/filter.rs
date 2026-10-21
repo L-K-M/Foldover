@@ -1,6 +1,7 @@
 //! Exclusion rules, gitignore-style. The same filter applies to both
 //! folders of a pair, so an excluded entry is absent on both sides and is
-//! forgotten rather than deleted.
+//! forgotten rather than deleted. Rules and names compare composed (NFC),
+//! as one folder may store a name decomposed and the other composed.
 
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
@@ -9,6 +10,7 @@ use std::time::SystemTime;
 
 use foldover_types::SyncPath;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use unicode_normalization::UnicodeNormalization;
 
 use super::{LocalEndpoint, ScanError, at};
 
@@ -48,7 +50,7 @@ impl Filter {
         for rule in rules {
             texts.push(rule.to_owned());
             builder
-                .add_line(None, rule)
+                .add_line(None, &rule.nfc().collect::<String>())
                 .map_err(|error| InvalidFilter {
                     rule: rule.to_owned(),
                     message: error.to_string(),
@@ -116,8 +118,13 @@ impl Filter {
     }
 
     pub(crate) fn excludes(&self, path: &SyncPath, directory: bool) -> bool {
+        let composed = std::str::from_utf8(path.as_bytes())
+            .ok()
+            .filter(|text| !unicode_normalization::is_nfc(text))
+            .map(|text| text.nfc().collect::<String>());
+        let bytes = composed.as_ref().map_or(path.as_bytes(), String::as_bytes);
         self.rules
-            .matched(Path::new(OsStr::from_bytes(path.as_bytes())), directory)
+            .matched(Path::new(OsStr::from_bytes(bytes)), directory)
             .is_ignore()
     }
 }
@@ -165,6 +172,24 @@ mod tests {
         assert!(!filter.excludes(&path(b"a.txt"), false));
         assert!(!Filter::none().excludes(&path(b"a.tmp"), false));
         assert!(Filter::new(["a{"]).is_err());
+    }
+
+    /// Review of composed names: a folder written composed on a server
+    /// and decomposed on a disk met a rule in only one spelling, so it
+    /// was left out on one side alone and looked deleted there.
+    #[test]
+    fn rules_match_names_in_either_unicode_spelling() {
+        let (composed, decomposed) = ("caf\u{e9}", "cafe\u{301}");
+        for rule in [composed, decomposed] {
+            let filter = Filter::new([format!("{rule}/tmp/").as_str()]).unwrap();
+            for name in [composed, decomposed] {
+                let folder = path(format!("{name}/tmp").as_bytes());
+                assert!(filter.excludes(&folder, true), "{rule:?} {name:?}");
+            }
+        }
+        // Texts go to other Macs as written.
+        let written = Filter::new([decomposed]).unwrap();
+        assert_eq!(written.texts(), [decomposed]);
     }
 
     /// The app skips one path with an anchored rule that escapes

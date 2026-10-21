@@ -192,6 +192,12 @@ fn quirks() -> impl Strategy<Value = Quirks> {
             NameMatching::new(CaseMatching::Insensitive, UnicodeMatching::Normalized),
             NameStorage::Decomposed,
         )),
+        // An SFTP server: case kept, names written composed and found in
+        // any spelling (PLAN.md §4.10).
+        Just((
+            NameMatching::new(CaseMatching::Exact, UnicodeMatching::Normalized),
+            NameStorage::Composed,
+        )),
     ];
     let times = prop_oneof![Just(Duration::ZERO), Just(Duration::from_secs(2))];
     let replace = prop_oneof![Just(Replace::Atomic), Just(Replace::TwoStep)];

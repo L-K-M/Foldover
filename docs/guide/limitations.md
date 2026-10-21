@@ -253,7 +253,11 @@ Planned in [PLAN.md](../../PLAN.md) but not implemented:
   differently turn clashing spellings into conflicts to rename; mapping
   one spelling onto the other is not implemented, so two folders whose
   files differ only in Unicode spelling show conflicts until one is
-  renamed ([ADR 0030](../adr/0030-name-clashes.md)).
+  renamed ([ADR 0030](../adr/0030-name-clashes.md)). New names on SFTP
+  servers are written composed
+  ([ADR 0041](../adr/0041-composed-names-on-sftp.md)).
+- **SFM names.** Characters Windows forbids, which a Mac stores on SMB
+  shares as private-use characters, are not decoded or flagged.
 - **FSEvents replay after remount.** Replay is a hint only; a remount or
   a changed store identity forces a full rescan, and replay continuity
   is unproven ([ADR 0002](../adr/0002-change-detection.md)).
