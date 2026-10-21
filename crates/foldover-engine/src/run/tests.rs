@@ -313,39 +313,45 @@ fn entries_kept_only_in_icloud_are_skipped_never_deleted() {
 /// missing, telling a person to put back a file that was there.
 #[test]
 fn a_canary_kept_only_in_icloud_stops_the_run_and_says_so() {
-    let mut pair = fixture(SyncMode::Sync);
-    let folders = [
-        foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default()),
-        foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default()),
-    ];
-    pair.memory = Some(folders.clone());
-    let [left, _] = &folders;
-    left.put_file(b"canary.txt", b"here").unwrap();
-    pair.sync();
-    pair.canary = Some(path(b"canary.txt"));
+    // Evicted alone, or with the folder that holds it.
+    for (canary, evicted) in [
+        (&b"canary.txt"[..], &b"canary.txt"[..]),
+        (b"proof/canary.txt", b"proof"),
+    ] {
+        let mut pair = fixture(SyncMode::Sync);
+        let folders = [
+            foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default()),
+            foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default()),
+        ];
+        pair.memory = Some(folders.clone());
+        let [left, _] = &folders;
+        left.put_file(canary, b"here").unwrap();
+        pair.sync();
+        pair.canary = Some(path(canary));
 
-    left.evict(b"canary.txt");
-    let error = pair
-        .prepare()
-        .execute(
-            Approval::default(),
-            RunContext::Interactive,
-            STARTED,
-            &mut |_, _| panic!("nothing may commit"),
-            &mut proceed,
-            &NoProgress,
-        )
-        .unwrap_err();
-    assert!(
-        matches!(
-            error,
-            RunError::CanaryUnavailable {
-                side: Side::Left,
-                ..
-            }
-        ),
-        "{error:?}"
-    );
+        left.evict(evicted);
+        let error = pair
+            .prepare()
+            .execute(
+                Approval::default(),
+                RunContext::Interactive,
+                STARTED,
+                &mut |_, _| panic!("nothing may commit"),
+                &mut proceed,
+                &NoProgress,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                RunError::CanaryUnavailable {
+                    side: Side::Left,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
 }
 
 #[test]

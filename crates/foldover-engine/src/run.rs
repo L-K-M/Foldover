@@ -890,14 +890,18 @@ impl PairRun {
                     .map(ObservedEntry::version)
                     .filter(|version| version.kind() == EntryKind::File);
                 let Some(observed) = observed else {
-                    // Evicted, it is there but cannot prove its content.
+                    // Evicted, alone or with a folder above it, it is
+                    // there but cannot prove its content.
+                    let evicted = self
+                        .observation(side)
+                        .unavailable()
+                        .iter()
+                        .any(|root| root == canary || root.is_ancestor_of(canary));
                     let path = canary.clone();
-                    return Err(
-                        match self.observation(side).unavailable().contains(canary) {
-                            true => RunError::CanaryUnavailable { side, path },
-                            false => RunError::CanaryMissing { side, path },
-                        },
-                    );
+                    return Err(match evicted {
+                        true => RunError::CanaryUnavailable { side, path },
+                        false => RunError::CanaryMissing { side, path },
+                    });
                 };
                 let recorded = self.base.get(canary).map(|entry| match side {
                     Side::Left => entry.left(),
