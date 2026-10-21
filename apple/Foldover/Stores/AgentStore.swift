@@ -57,8 +57,13 @@ final class AgentStore {
 
     /// Sync again after a crash loop.
     func leaveSafeMode() async {
+        // A status asked for before resuming must not put the app back in
+        // safe mode: this reply is newer.
+        generation += 1
         do {
-            note(try await leaveSafeModeRequest())
+            let report = try await leaveSafeModeRequest()
+            connection = .connected(version: report.version)
+            note(report)
             safeModeError = nil
         } catch {
             safeModeError = message(for: error)

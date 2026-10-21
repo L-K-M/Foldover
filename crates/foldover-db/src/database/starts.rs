@@ -12,6 +12,8 @@ use super::{Database, Error, private_file};
 
 const RUNNING: &str = "running";
 const UNCLEAN_STOPS: &str = "unclean-stops";
+/// A record being rewritten, beside the one it replaces.
+const STAGED_EXTENSION: &str = "new";
 /// Unclean stops remembered, newest last.
 const REMEMBERED: usize = 16;
 
@@ -76,8 +78,12 @@ fn read_times(path: &Path) -> Result<Vec<SystemTime>, Error> {
         .collect())
 }
 
+/// Replace the record whole: written beside it, then renamed over it, so
+/// an agent killed or a disk filled midway leaves the old record rather
+/// than an empty one, which would forget the stops safe mode counts.
 fn write_times(path: &Path, times: &[SystemTime]) -> Result<(), Error> {
-    let mut file = private_file(path)?;
+    let staged = path.with_extension(STAGED_EXTENSION);
+    let mut file = private_file(&staged)?;
     file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
     for time in times {
@@ -88,6 +94,7 @@ fn write_times(path: &Path, times: &[SystemTime]) -> Result<(), Error> {
         writeln!(file, "{milliseconds}")?;
     }
     file.sync_data()?;
+    fs::rename(&staged, path)?;
     Ok(())
 }
 
@@ -137,5 +144,8 @@ mod tests {
         let stops = database.note_start(at(1_000)).unwrap();
         assert_eq!(stops.len(), REMEMBERED);
         assert_eq!(stops.last(), Some(&at(1_000)));
+        // Each record is replaced whole, nothing staged left beside it.
+        let staged = record.with_extension(STAGED_EXTENSION);
+        assert!(!staged.exists());
     }
 }
