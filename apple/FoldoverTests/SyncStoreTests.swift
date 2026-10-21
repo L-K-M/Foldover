@@ -2151,5 +2151,5 @@ func movesNameTheirSourceAndCount() {
     #expect(preview.total == 1)
     let result = RunSummary(cancelled: false, copied: 0, updated: 0, archived: 0, recovered: 0,
                             conflicts: 0, failures: [], failureCount: 0, archive: "run", moved: 1)
-    #expect(PairSyncViewModel.summary(result).contains("Moved 1 items the other folder moved."))
+    #expect(PairSyncViewModel.summary(result).contains("Moved 1 as the other folder did."))
 }

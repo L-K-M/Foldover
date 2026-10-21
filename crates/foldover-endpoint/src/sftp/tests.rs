@@ -723,6 +723,139 @@ fn put_back_finds_an_archived_name_in_either_spelling() {
     assert_eq!(fs::read(directory.path().join(composed)).unwrap(), b"kept");
 }
 
+/// Review of nfc-writes: putting back a file whose folder is gone made
+/// that folder's whole path composed, so a parent stored decomposed got
+/// a composed twin beside it.
+#[test]
+fn put_back_remakes_a_missing_folder_inside_the_stored_spelling() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = remote(directory.path()) else {
+        return;
+    };
+    let options = PairOptions::default();
+    let run = RunScope::new(SystemTime::now(), options.clone());
+    let decomposed = "cafe\u{301}";
+    fs::create_dir_all(directory.path().join(decomposed).join("jobs")).unwrap();
+    fs::write(
+        directory.path().join(decomposed).join("jobs/a.txt"),
+        b"kept",
+    )
+    .unwrap();
+    let observed = remote
+        .observe_from(
+            options.metadata(),
+            &Filter::none(),
+            &std::collections::BTreeMap::new(),
+            &mut proceed,
+            &mut |_| {},
+        )
+        .unwrap();
+    let name = path(format!("{decomposed}/jobs/a.txt").as_bytes());
+    remote
+        .remove(&name, &observed.entries()[&name], &run, &mut proceed)
+        .unwrap();
+    fs::remove_dir(directory.path().join(decomposed).join("jobs")).unwrap();
+
+    remote
+        .put_back(
+            run.name(),
+            &path("caf\u{e9}/jobs/a.txt".as_bytes()),
+            Durability::Standard,
+        )
+        .unwrap();
+    let names: Vec<String> = fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name != ".foldover")
+        .collect();
+    assert_eq!(names, [decomposed]);
+    assert_eq!(
+        fs::read(directory.path().join(decomposed).join("jobs/a.txt")).unwrap(),
+        b"kept"
+    );
+}
+
+/// Review of nfc-writes: a copy kept beside a file in a folder with
+/// another spelling held the session while finding that folder, which
+/// needs the session too, and hung; so did a put-back there.
+#[test]
+fn keep_copy_in_a_folder_with_another_spelling_finishes() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    let options = PairOptions::default();
+    fs::create_dir(directory.path().join("cafe\u{301}")).unwrap();
+    fs::write(directory.path().join("cafe\u{301}/menu.txt"), b"soup").unwrap();
+    let observed = remote
+        .observe_from(
+            options.metadata(),
+            &Filter::none(),
+            &std::collections::BTreeMap::new(),
+            &mut proceed,
+        )
+        .unwrap();
+    let name = path("cafe\u{301}/menu.txt".as_bytes());
+    let version = observed.entries()[&name].version();
+
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let kept = remote.keep_copy(&name, version, "Folder B", &options, &mut proceed);
+        let _ = done.send(kept.is_ok());
+    });
+    assert_eq!(
+        finished.recv_timeout(std::time::Duration::from_secs(20)),
+        Ok(true)
+    );
+}
+
+/// Review of moves: a move into a folder stored in another spelling made
+/// a composed twin of it, then held the session while finding it, which
+/// needs the session too, and hung.
+#[test]
+fn a_move_into_a_folder_with_another_spelling_lands_inside_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    let options = PairOptions::default();
+    let run = RunScope::new(SystemTime::now(), options.clone());
+    let decomposed = "cafe\u{301}";
+    fs::create_dir(directory.path().join(decomposed)).unwrap();
+    fs::write(directory.path().join("menu.txt"), b"soup").unwrap();
+    let observed = remote
+        .observe_from(
+            options.metadata(),
+            &Filter::none(),
+            &std::collections::BTreeMap::new(),
+            &mut proceed,
+        )
+        .unwrap();
+    let from = path(b"menu.txt");
+    let current = observed.entries()[&from].clone();
+    let to = path("caf\u{e9}/old/menu.txt".as_bytes());
+
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let moved = remote.move_entry(&from, &current, &to, &run, &mut proceed);
+        let _ = done.send(moved.map_err(|error| error.to_string()));
+    });
+    assert_eq!(
+        finished.recv_timeout(std::time::Duration::from_secs(20)),
+        Ok(Ok(()))
+    );
+    let names: Vec<String> = fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name != ".foldover")
+        .collect();
+    assert_eq!(names, [decomposed]);
+    assert_eq!(
+        fs::read(directory.path().join(decomposed).join("old/menu.txt")).unwrap(),
+        b"soup"
+    );
+}
+
 /// macOS CI: a server that ignores normalization, as a Mac's does, finds
 /// an entry by either spelling, so a replacement took the spelling it
 /// asked by. Its folder's listing tells the one stored.

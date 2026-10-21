@@ -783,6 +783,40 @@ mod tests {
     }
 
     #[test]
+    /// A move without its source is refused when written (the schema
+    /// checks it), so every journal reads back.
+    fn a_move_without_its_source_is_never_journaled() {
+        use foldover_types::{Digest, EntryContent, EntryVersion};
+
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        let pair = store.create(&draft(SyncMode::Sync)).unwrap();
+        let version = EntryVersion::new(
+            EntryContent::File(Digest::from_bytes([5; Digest::BYTE_LEN])),
+            Digest::from_bytes([5; Digest::BYTE_LEN]),
+        );
+        let unsourced = JournalEntry {
+            seq: 0,
+            path: SyncPath::try_from(&b"moved/here"[..]).unwrap(),
+            side: Side::Right,
+            action: JournalAction::Move(version),
+            before: None,
+            moved_from: None,
+        };
+        let recorded = store.update_base(
+            pair.id(),
+            pair.revision(),
+            &[],
+            JournalUpdate::Record {
+                run: "2026-10-19T10-00-00.000Z",
+                entries: &[unsourced],
+            },
+        );
+        assert!(recorded.is_err());
+        assert_eq!(store.journal(pair.id()).unwrap(), None);
+    }
+
+    #[test]
     fn journals_round_trip_with_the_base_and_root_changes_discard_them() {
         use foldover_types::{Digest, EntryContent, EntryVersion};
 
