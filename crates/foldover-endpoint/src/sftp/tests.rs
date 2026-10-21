@@ -723,6 +723,25 @@ fn put_back_finds_an_archived_name_in_either_spelling() {
     assert_eq!(fs::read(directory.path().join(composed)).unwrap(), b"kept");
 }
 
+/// macOS CI: a server that ignores normalization, as a Mac's does, finds
+/// an entry by either spelling, so a replacement took the spelling it
+/// asked by. Its folder's listing tells the one stored.
+#[test]
+fn a_replaced_entry_keeps_the_spelling_its_folder_lists() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(sftp) = sftp(directory.path()) else {
+        return;
+    };
+    let (decomposed, composed) = ("cafe\u{301}.txt", "caf\u{e9}.txt");
+    fs::write(directory.path().join(composed), b"kept").unwrap();
+
+    // Found by the other spelling, as on a Mac.
+    let asked = sftp.remote(decomposed.as_bytes());
+    let stored = sftp.remote(composed.as_bytes());
+    assert_eq!(sftp.listed(&asked), stored);
+    assert_eq!(sftp.listed(&stored), stored);
+}
+
 /// `Durability::Full` cannot be promised over SFTP at all: namespace
 /// changes have no protocol flush. Every mutating entry point must
 /// reject it before touching the server, whatever the server offers.
