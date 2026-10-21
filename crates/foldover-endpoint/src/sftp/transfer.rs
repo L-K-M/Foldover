@@ -3,7 +3,7 @@
 //! temporary name, the content digest is checked against the plan, and
 //! only then is it placed.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io;
 
 use foldover_fs::{NativeMetadata, PARTIAL_MIN_BYTES, Resume};
@@ -75,12 +75,16 @@ impl Source<'_> {
         // up; the reader asks it between chunks, never during a wait.
         let control = RefCell::new(control);
         let mut checked = || (*control.borrow_mut())();
+        // A cancel during a wait reaches the source as a failed write, so
+        // it is noted here to come out as the cancel it is.
+        let cancelled = Cell::new(false);
         let mut paced = |chunk: &[u8]| {
             if let Some(pace) = run.pace()
                 && pace.wait(chunk.len() as u64, &mut || (*control.borrow_mut())())
                     == ScanControl::Cancel
             {
-                return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+                cancelled.set(true);
+                return Err(io::Error::other("cancelled"));
             }
             sink(chunk)
         };
@@ -98,7 +102,10 @@ impl Source<'_> {
             Self::Peer(source) => source.push(path, control, sink),
         };
         pushed.map_err(|failure| {
-            *error.borrow_mut() = Some(failure);
+            *error.borrow_mut() = Some(match cancelled.get() {
+                true => ApplyError::Scan(ScanError::Cancelled),
+                false => failure,
+            });
             io::Error::other("source failed")
         })
     }
