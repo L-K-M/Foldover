@@ -28,6 +28,10 @@ All notable changes to this project are documented here. The format follows
   you choose to keep nothing there: files replaced in it are deleted,
   not archived. The pair editor says when a folder refuses it.
 
+- `scripts/build.sh --install` installs the app it built into
+  `/Applications`, quitting and reopening a running Foldover and
+  restarting a running background agent so both use the new build.
+
 - "When files change" catches up on changes made while the agent was
   not running, syncs after 5 minutes of nonstop changes, and checks
   shares and SFTP servers for other computers' changes every 5 minutes.
