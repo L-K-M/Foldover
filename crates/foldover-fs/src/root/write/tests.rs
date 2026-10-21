@@ -165,6 +165,46 @@ fn replacement_displaces_the_old_entry_for_archiving() {
 }
 
 #[test]
+fn folders_without_an_archive_delete_what_is_replaced_or_removed() {
+    let roots = roots();
+    let target = roots.target_directory.path();
+    fs::write(roots._source_directory.path().join("file"), b"new").unwrap();
+    fs::write(target.join("file"), b"old").unwrap();
+    fs::write(target.join("other"), b"other").unwrap();
+    let (file, other) = (path(b"file"), path(b"other"));
+    let observed = roots.source.metadata(&file).unwrap();
+
+    let staged = roots
+        .target
+        .stage_file(&file, &roots.source, &observed, &ALL, &mut proceed)
+        .unwrap();
+    let displaced = roots
+        .target
+        .place(staged.into_staged(), &file, Placement::Replace, STANDARD)
+        .unwrap()
+        .unwrap();
+    roots.target.discard_displaced(displaced, STANDARD).unwrap();
+    assert_eq!(fs::read(target.join("file")).unwrap(), b"new");
+
+    // Only the observed entry is deleted, and never a folder.
+    let seen = roots.target.metadata(&other).unwrap();
+    fs::write(target.join("other"), b"edited").unwrap();
+    assert!(matches!(
+        roots.target.delete(&other, &seen, STANDARD),
+        Err(WriteError::Changed)
+    ));
+    let seen = roots.target.metadata(&other).unwrap();
+    roots.target.delete(&other, &seen, STANDARD).unwrap();
+    fs::create_dir(target.join("folder")).unwrap();
+    let folder = roots.target.metadata(&path(b"folder")).unwrap();
+    assert!(matches!(
+        roots.target.delete(&path(b"folder"), &folder, STANDARD),
+        Err(WriteError::UnsupportedEntry)
+    ));
+    assert_eq!(names(target), [b"file".to_vec(), b"folder".to_vec()]);
+}
+
+#[test]
 fn replacing_a_missing_entry_fails_and_keeps_nothing() {
     let roots = roots();
     fs::write(roots._source_directory.path().join("file"), b"new").unwrap();

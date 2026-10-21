@@ -15,8 +15,8 @@ use foldover_state::{
     SnapshotEntry, StateLocation, WatchCursor,
 };
 use foldover_types::{
-    DeviceId, Durability, LocalRoot, MAX_PAIR_NAME_BYTES, PairConfig, PairDraft, PairId, PairRoot,
-    Resolution, ShareId, Side, SyncPath,
+    DeviceId, Durability, FolderRecords, LocalRoot, MAX_PAIR_NAME_BYTES, PairConfig, PairDraft,
+    PairId, PairRoot, Resolution, ShareId, Side, SyncPath,
 };
 
 use crate::{Commit, RunInputs};
@@ -51,6 +51,10 @@ pub enum Error {
     CanaryExcluded,
     #[error("That folder is inside, or holds, a folder already shared with that Mac")]
     ShareOverlap,
+    #[error(
+        "Only a Backup's target can go without Foldover's records, and not a folder on another Mac"
+    )]
+    RecordsRequired,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,7 +80,8 @@ impl Error {
             Self::Filter(_)
             | Self::DurabilityUnsupported
             | Self::InvalidShareName
-            | Self::CanaryExcluded => ErrorKind::Invalid,
+            | Self::CanaryExcluded
+            | Self::RecordsRequired => ErrorKind::Invalid,
             Self::Roots(_) | Self::Endpoint(_) | Self::CatalogUnavailable { .. } => {
                 ErrorKind::Unavailable
             }
@@ -537,6 +542,18 @@ fn validate_options(draft: &PairDraft) -> Result<(), Error> {
     {
         return Err(Error::DurabilityUnsupported);
     }
+    // PLAN.md §3.6: only a Backup's target may go without records, and
+    // another Mac's folder always keeps them.
+    if draft.options().records() == FolderRecords::SourceOnly {
+        let target = match draft.unrecorded() {
+            Some(Side::Left) => draft.left(),
+            Some(Side::Right) => draft.right(),
+            None => return Err(Error::RecordsRequired),
+        };
+        if matches!(target, PairRoot::Peer(_)) {
+            return Err(Error::RecordsRequired);
+        }
+    }
     validate_filters(draft)
 }
 
@@ -733,6 +750,44 @@ mod tests {
             engine.update_pair(pair.id(), revision, &remote),
             Err(Error::DurabilityUnsupported)
         ));
+    }
+
+    /// PLAN.md §3.6: only a Backup's target may keep no records, and
+    /// never another Mac's folder.
+    #[test]
+    fn records_stay_in_both_folders_unless_a_backup_target_goes_without() {
+        let temporary = tempfile::tempdir().unwrap();
+        let location = StateLocation::Directory(temporary.path().join("state"));
+        let mut engine = Engine::open(&location).unwrap();
+        let (left, right) = (
+            temporary.path().join("left"),
+            temporary.path().join("right"),
+        );
+        fs::create_dir(&left).unwrap();
+        fs::create_dir(&right).unwrap();
+        let source_only =
+            foldover_types::PairOptions::default().with_records(FolderRecords::SourceOnly);
+        let draft = |right: PairRoot, mode| {
+            PairDraft::new("Pair".into(), root(&left), right, mode)
+                .unwrap()
+                .with_options(source_only.clone())
+        };
+        let mac = PairRoot::Peer(foldover_types::PeerRoot::new(
+            foldover_types::DeviceId::from_bytes([7; foldover_types::DeviceId::BYTE_LEN]),
+            foldover_types::ShareId::from_bytes([8; foldover_types::ShareId::BYTE_LEN]),
+        ));
+        for refused in [
+            draft(root(&right).into(), SyncMode::Sync),
+            draft(root(&right).into(), SyncMode::Mirror { source: Side::Left }),
+            draft(mac, SyncMode::Backup { source: Side::Left }),
+        ] {
+            let error = engine.create_pair(&refused).unwrap_err();
+            assert!(matches!(error, Error::RecordsRequired), "{error:?}");
+            assert_eq!(error.kind(), ErrorKind::Invalid);
+        }
+        let backup = draft(root(&right).into(), SyncMode::Backup { source: Side::Left });
+        let pair = engine.create_pair(&backup).unwrap();
+        assert_eq!(pair.draft().unrecorded(), Some(Side::Right));
     }
 
     /// Review of #84: filters that leave out the canary are refused when

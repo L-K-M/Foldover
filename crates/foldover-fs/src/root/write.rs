@@ -152,7 +152,8 @@ pub struct NativeMetadata {
 }
 
 /// The entry an exchange moved out of its path. It holds user data and is
-/// never removed automatically; archive it.
+/// never removed automatically: archive it, or discard it where the
+/// folder keeps no archive.
 pub struct Displaced {
     parent: Dir,
     name: PathBuf,
@@ -340,6 +341,38 @@ impl Root {
         durability: Durability,
     ) -> Result<(), WriteError> {
         self.move_into(&displaced.parent, &displaced.name, destination, durability)
+    }
+
+    /// Delete a displaced file or link, in a folder that keeps no archive
+    /// (a Backup target without `.foldover`, PLAN.md §3.6).
+    pub fn discard_displaced(
+        &self,
+        displaced: Displaced,
+        durability: Durability,
+    ) -> Result<(), WriteError> {
+        rustix::fs::unlinkat(&displaced.parent, &displaced.name, AtFlags::empty())?;
+        sync_directory(&displaced.parent, durability)?;
+        Ok(())
+    }
+
+    /// Delete the file or link at `path`, in a folder that keeps no
+    /// archive. It must still match `expected`.
+    pub fn delete(
+        &self,
+        path: &SyncPath,
+        expected: &EntryMetadata,
+        durability: Durability,
+    ) -> Result<(), WriteError> {
+        if expected.kind() == NodeKind::Directory {
+            return Err(WriteError::UnsupportedEntry);
+        }
+        let (parent, name) = self.parent_of(path)?;
+        if EntryMetadata::at(&parent, &name)? != *expected {
+            return Err(WriteError::Changed);
+        }
+        rustix::fs::unlinkat(&parent, &name, AtFlags::empty())?;
+        sync_directory(&parent, durability)?;
+        Ok(())
     }
 
     /// Create a directory at `path` carrying the pair's synced metadata from

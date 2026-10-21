@@ -30,6 +30,7 @@ use version::{Attribute, Observed, Payload, entry_version, metadata_version};
 
 use crate::{ListedEntry, ListedKind, ObserveStep};
 
+pub(crate) use apply::Archiving;
 pub use apply::{ApplyError, Expected, RunScope};
 pub use archive::{ArchivedItem, ArchivedRun, archive_name};
 pub use filter::{Filter, InvalidFilter};

@@ -12,7 +12,7 @@ use foldover_proto::peer::IncomingKind;
 use foldover_types::{EntryContent, EntryKind, EntryVersion, ScanControl, SyncPath};
 
 use super::{DEFAULT_DIRECTORY, DEFAULT_FILE, PERMISSION_BITS, SftpEndpoint, write_error};
-use crate::local::Carried;
+use crate::local::{Archiving, Carried};
 use crate::{ApplyError, Endpoint, Expected, ForeignMetadata, ObservedEntry, RunScope, ScanError};
 
 /// What a source provides for one entry.
@@ -102,8 +102,11 @@ pub(crate) fn copy(
         super::check_durability(run.options().durability(), path)?;
     }
     // PLAN.md §4.9: a large file continues after what a broken-off copy
-    // kept at the destination.
-    let kept = kept(to, planned);
+    // kept at the destination, unless the run keeps nothing there.
+    let kept = match run.archiving() {
+        Archiving::Kept => kept(to, planned),
+        Archiving::Off => 0,
+    };
     let source = source(from, path, planned, run, control, kept)?;
     let kind = planned.version().kind();
     let expected = planned.version().content();

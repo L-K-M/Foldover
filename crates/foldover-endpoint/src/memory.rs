@@ -37,7 +37,7 @@ use crate::lease::LockFile;
 use crate::local::archive::{ARCHIVE_ROOT, archive_time};
 use crate::local::filter::{IGNORE_FILE, parse_ignore_file};
 use crate::local::version::{Observed, Payload, entry_version, metadata_version};
-use crate::local::{Fingerprint, TEMPORARY_PREFIX, protected, temporary};
+use crate::local::{Archiving, Fingerprint, TEMPORARY_PREFIX, protected, temporary};
 use crate::{
     ApplyError, Expected, Filter, ListedEntry, ListedKind, NodeKind, Observation, ObserveStep,
     ObservedEntry, RunScope, ScanError,
@@ -582,13 +582,13 @@ impl MemoryEndpoint {
                 modified,
             },
         };
-        let archive = run.archive_path(path)?;
+        let archive = archived(run, path)?;
         folder
             .place(
                 path.as_bytes(),
                 node,
                 destination.is_some(),
-                archive.as_bytes(),
+                archive.as_ref().map(SyncPath::as_bytes),
             )
             .map_err(|source| write(path.as_bytes(), source))?;
         folder.version_at(path, policy)
@@ -667,10 +667,12 @@ impl MemoryEndpoint {
             folder.entries.remove(&key);
             return Ok(());
         }
-        let archive = run.archive_path(path)?;
+        let archive = archived(run, path)?;
         folder
             .step()
-            .and_then(|()| folder.relocate(path.as_bytes(), archive.as_bytes()))
+            .and_then(|()| {
+                folder.set_aside(path.as_bytes(), archive.as_ref().map(SyncPath::as_bytes))
+            })
             .map_err(|source| write(path.as_bytes(), source))
     }
 
@@ -679,11 +681,16 @@ impl MemoryEndpoint {
         leftover: &SyncPath,
         run: &RunScope,
     ) -> Result<(), ApplyError> {
-        let archive = run.archive_path(leftover)?;
+        let archive = archived(run, leftover)?;
         let mut folder = self.folder();
         folder
             .step()
-            .and_then(|()| folder.relocate(leftover.as_bytes(), archive.as_bytes()))
+            .and_then(|()| {
+                folder.set_aside(
+                    leftover.as_bytes(),
+                    archive.as_ref().map(SyncPath::as_bytes),
+                )
+            })
             .map_err(|source| write(leftover.as_bytes(), source))
     }
 
@@ -921,6 +928,19 @@ impl Folder {
         Ok(())
     }
 
+    /// Move the file or link at `path` to `archive`, or delete it without
+    /// one. Folders never come here: `remove` takes them only when empty.
+    fn set_aside(&mut self, path: &[u8], archive: Option<&[u8]>) -> io::Result<()> {
+        let Some(archive) = archive else {
+            let key = self.key(path);
+            return match self.entries.remove(&key) {
+                Some(_) => Ok(()),
+                None => Err(io::ErrorKind::NotFound.into()),
+            };
+        };
+        self.relocate(path, archive)
+    }
+
     /// Move the entry at `from`, and everything inside it, to `to`,
     /// creating `to`'s folders.
     fn relocate(&mut self, from: &[u8], to: &[u8]) -> io::Result<()> {
@@ -971,8 +991,15 @@ impl Folder {
         }
     }
 
-    /// Put `node` at `path`, archiving what it replaces at `archive`.
-    fn place(&mut self, path: &[u8], node: Node, replaces: bool, archive: &[u8]) -> io::Result<()> {
+    /// Put `node` at `path`, archiving what it replaces at `archive`, or
+    /// deleting it without one.
+    fn place(
+        &mut self,
+        path: &[u8],
+        node: Node,
+        replaces: bool,
+        archive: Option<&[u8]>,
+    ) -> io::Result<()> {
         if !replaces {
             if self.quirks.replace == Replace::TwoStep {
                 let temporary = self.temporary_beside(path);
@@ -992,14 +1019,14 @@ impl Folder {
                 self.relocate(path, &displaced)?;
                 self.put(path, node)?;
                 self.step()?;
-                self.relocate(&displaced, archive)
+                self.set_aside(&displaced, archive)
             }
             Replace::TwoStep => {
                 let temporary = self.temporary_beside(path);
                 self.step()?;
                 self.put(&temporary, node)?;
                 self.step()?;
-                self.relocate(path, archive)?;
+                self.set_aside(path, archive)?;
                 self.step()?;
                 self.relocate(&temporary, path)
             }
@@ -1092,6 +1119,14 @@ fn write(path: &[u8], source: io::Error) -> ApplyError {
             source: WriteError::Io(source),
         },
         Err(error) => ApplyError::InvalidPath(error),
+    }
+}
+
+/// Where the run archives `path` here; None where it keeps no archive.
+fn archived(run: &RunScope, path: &SyncPath) -> Result<Option<SyncPath>, ApplyError> {
+    match run.archiving() {
+        Archiving::Kept => Ok(Some(run.archive_path(path)?)),
+        Archiving::Off => Ok(None),
     }
 }
 

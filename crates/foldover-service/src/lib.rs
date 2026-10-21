@@ -366,6 +366,9 @@ fn readiness_warning(warning: foldover_engine::ReadinessWarning) -> PairWarning 
             PairWarning::MetadataUnsupported { side: side.into() }
         }
         Warning::NamesDiffer { side } => PairWarning::NamesDiffer { side: side.into() },
+        Warning::RecordsUnsupported { side } => {
+            PairWarning::RecordsUnsupported { side: side.into() }
+        }
     }
 }
 

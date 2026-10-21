@@ -10,7 +10,7 @@
 
 use std::time::SystemTime;
 
-use foldover_fs::{Placement, WriteError};
+use foldover_fs::{Displaced, Placement, WriteError};
 use foldover_types::{
     EntryContent, EntryKind, EntryVersion, InvalidSyncPath, PairOptions, SyncPath,
 };
@@ -28,12 +28,22 @@ pub enum Expected<'a> {
     Present(&'a ObservedEntry),
 }
 
+/// Whether a run keeps what it replaces or removes in a folder.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Archiving {
+    Kept,
+    /// The folder holds no `.foldover` (PLAN.md §3.6): what is replaced
+    /// or removed there is deleted, and no partial copy is kept.
+    Off,
+}
+
 /// Where one run's displaced and removed entries go, and how it writes.
 #[derive(Clone, Debug)]
 pub struct RunScope {
     name: String,
     archive: SyncPath,
     options: PairOptions,
+    archiving: Archiving,
 }
 
 impl RunScope {
@@ -47,6 +57,16 @@ impl RunScope {
             name,
             archive: SyncPath::try_from(archive).expect("run names are single path components"),
             options,
+            archiving: Archiving::Kept,
+        }
+    }
+
+    /// The same run in a folder that keeps no archive: what it replaces
+    /// or removes there is deleted.
+    pub fn without_archive(self) -> Self {
+        Self {
+            archiving: Archiving::Off,
+            ..self
         }
     }
 
@@ -62,6 +82,7 @@ impl RunScope {
             name: name.to_owned(),
             archive: SyncPath::try_from(archive).ok()?,
             options,
+            archiving: Archiving::Kept,
         })
     }
 
@@ -72,6 +93,10 @@ impl RunScope {
 
     pub(crate) fn options(&self) -> &PairOptions {
         &self.options
+    }
+
+    pub(crate) fn archiving(&self) -> Archiving {
+        self.archiving
     }
 
     pub(crate) fn archive_path(&self, path: &SyncPath) -> Result<SyncPath, InvalidSyncPath> {
@@ -114,7 +139,8 @@ pub enum ApplyError {
 
 impl LocalEndpoint {
     /// Make `path` hold the source's entry and return the version stored
-    /// here. Anything replaced is archived for this run.
+    /// here. Anything replaced is archived for this run, or deleted where
+    /// the run keeps no archive.
     pub fn copy_from(
         &self,
         source: &LocalEndpoint,
@@ -224,9 +250,7 @@ impl LocalEndpoint {
                 error => write_error(path, error),
             })?;
         if let Some(displaced) = displaced {
-            self.root
-                .archive_displaced(displaced, &run.archive_path(path)?, durability)
-                .map_err(|error| write_error(path, error))?;
+            self.set_aside(displaced, path, run)?;
         }
 
         match version {
@@ -289,8 +313,8 @@ impl LocalEndpoint {
         ))
     }
 
-    /// Archive the entry at `path` for this run; folders are removed only
-    /// when empty.
+    /// Archive the entry at `path` for this run, or delete it where the
+    /// run keeps no archive; folders are removed only when empty.
     pub fn remove(
         &self,
         path: &SyncPath,
@@ -307,9 +331,13 @@ impl LocalEndpoint {
                 self.root
                     .remove_directory(path, entry.metadata(), durability)
             }
-            _ => self
-                .root
-                .archive(path, entry.metadata(), &run.archive_path(path)?, durability),
+            _ => match run.archiving() {
+                Archiving::Kept => {
+                    self.root
+                        .archive(path, entry.metadata(), &run.archive_path(path)?, durability)
+                }
+                Archiving::Off => self.root.delete(path, entry.metadata(), durability),
+            },
         };
         result.map_err(|error| match error {
             WriteError::NotEmpty => ApplyError::NotEmpty(path.clone()),
@@ -319,7 +347,9 @@ impl LocalEndpoint {
     }
 
     /// Archive a temporary an interrupted write left behind. It may hold a
-    /// displaced original, so it is never deleted.
+    /// displaced original, so it is deleted only where the run keeps no
+    /// archive, as the person chose for that folder, even one an earlier,
+    /// archiving run left.
     pub fn recover_leftover(&self, leftover: &SyncPath, run: &RunScope) -> Result<(), ApplyError> {
         let metadata = self
             .root
@@ -328,14 +358,36 @@ impl LocalEndpoint {
                 path: Some(leftover.clone()),
                 source,
             })?;
-        self.root
-            .archive(
+        let durability = run.options.durability();
+        match run.archiving() {
+            Archiving::Kept => self.root.archive(
                 leftover,
                 &metadata,
                 &run.archive_path(leftover)?,
-                run.options.durability(),
-            )
-            .map_err(|error| write_error(leftover, error))
+                durability,
+            ),
+            Archiving::Off => self.root.delete(leftover, &metadata, durability),
+        }
+        .map_err(|error| write_error(leftover, error))
+    }
+
+    /// Archive what a placement displaced from `path`, or delete it where
+    /// the run keeps no archive.
+    pub(crate) fn set_aside(
+        &self,
+        displaced: Displaced,
+        path: &SyncPath,
+        run: &RunScope,
+    ) -> Result<(), ApplyError> {
+        let durability = run.options.durability();
+        match run.archiving() {
+            Archiving::Kept => {
+                self.root
+                    .archive_displaced(displaced, &run.archive_path(path)?, durability)
+            }
+            Archiving::Off => self.root.discard_displaced(displaced, durability),
+        }
+        .map_err(|error| write_error(path, error))
     }
 
     /// Re-observe `path` and prove it still holds the planned entry. An

@@ -14,6 +14,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- A Backup can go to a folder that cannot hold Foldover's `.foldover`
+  folder, such as a share that refuses names starting with a dot, once
+  you choose to keep nothing there: files replaced in it are deleted,
+  not archived. The pair editor says when a folder refuses it.
+
 - `scripts/build.sh --install` installs the app it built into
   `/Applications`, quitting and reopening a running Foldover and
   restarting a running background agent so both use the new build.
