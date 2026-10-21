@@ -90,6 +90,39 @@ impl SftpEndpoint {
             .map_or_else(|| stored.to_vec(), |listed| join(parent, &listed))
     }
 
+    /// Folder path `path` as folders made for it are named: components
+    /// that exist in the spelling stored, the rest composed, so a missing
+    /// folder never gets a twin of one stored in the other spelling.
+    pub(super) fn creatable(&self, path: &[u8]) -> Vec<u8> {
+        if !respellable(path) {
+            return path.to_vec();
+        }
+        let mut session = self.session();
+        let mut stored: Vec<u8> = Vec::new();
+        let mut missing = false;
+        for component in path.split(|byte| *byte == b'/') {
+            let within = |name: &[u8]| match stored.is_empty() {
+                true => name.to_vec(),
+                false => [stored.as_slice(), b"/", name].concat(),
+            };
+            let existing = match missing {
+                true => None,
+                false => spellings(component)
+                    .into_iter()
+                    .map(|spelling| within(&spelling))
+                    .find(|candidate| session.lstat(&self.remote(candidate)).is_ok()),
+            };
+            stored = match existing {
+                Some(existing) => existing,
+                None => {
+                    missing = true;
+                    within(&compose(component))
+                }
+            };
+        }
+        stored
+    }
+
     /// Where a new entry at `path` goes: in its parent as stored, under
     /// its composed name.
     pub(super) fn fresh(&self, path: &[u8]) -> Vec<u8> {

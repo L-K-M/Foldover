@@ -15,7 +15,6 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
@@ -27,7 +26,7 @@ use foldover_net::peer::{
 use foldover_proto::peer::{PEER_PROTOCOL, PairingMessage, PeerCall, PeerReply, PeerRequest};
 use foldover_types::DeviceId;
 use tokio::runtime::Handle;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 
 mod stream;
@@ -65,6 +64,8 @@ pub enum LinkError {
     NotPaired,
     #[error("That Mac is not on this network; check that it is awake and runs Foldover")]
     Unreachable,
+    #[error("This Mac stopped talking to other Macs")]
+    Closed,
 }
 
 /// Whether this Mac announces itself to other Macs on the local network.
@@ -132,9 +133,10 @@ pub struct PeerLink {
     host: Arc<dyn PeerHost>,
     /// Where blocking callers run their streams.
     runtime: Handle,
-    /// Set as the link goes away, so answers that wait on their own, such
-    /// as folder watches, stop before the runtime does.
-    closing: Arc<AtomicBool>,
+    /// Set as the link goes away, so answers stop before the runtime does:
+    /// those that wait on their own, such as folder watches, and those
+    /// waiting on their stream.
+    closing: watch::Sender<bool>,
 }
 
 /// How this Mac finds, and is found by, others on the network.
@@ -210,7 +212,7 @@ impl PeerLink {
             state: Mutex::default(),
             host,
             runtime: Handle::current(),
-            closing: Arc::default(),
+            closing: watch::Sender::new(false),
         });
         link.announce();
         let answering = Arc::downgrade(&link);
@@ -634,7 +636,7 @@ impl PeerLink {
 
 impl Drop for PeerLink {
     fn drop(&mut self) {
-        self.closing.store(true, Ordering::Relaxed);
+        self.closing.send_replace(true);
         let state = self.state.get_mut().unwrap_or_else(PoisonError::into_inner);
         if let Some(window) = state.window.take() {
             window.node.close();
@@ -777,7 +779,7 @@ async fn answer_one(
         (
             Arc::clone(&link.host),
             link.runtime.clone(),
-            Arc::clone(&link.closing),
+            link.closing.subscribe(),
         )
     }) else {
         return;

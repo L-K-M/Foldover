@@ -41,6 +41,10 @@ file operations, migrations and backups stay in `foldover-db`.
   writer guard for the server lifetime. Another socket cannot acquire the
 same store. Startup failures are explicit. Configuration dispatch is covered by
 [ADR 0011](0011-pair-configuration-api.md).
+- On macOS the state directory carries Time Machine's sticky exclusion
+  (PLAN.md §4.7), set when the store opens if missing: a restored base
+  older than the folders could carry stale deletions over. Setting it is
+  best effort; the store works without it.
 - WAL, FULL synchronous mode and foreign-key enforcement are required.
   macOS requires a local-volume flag. Linux currently supports ext-family,
   btrfs, XFS, overlay and tmpfs; unknown, network and FUSE storage is refused.

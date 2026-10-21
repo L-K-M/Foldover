@@ -234,6 +234,41 @@ fn moves_take_only_the_observed_entry_and_never_replace() {
 }
 
 #[test]
+fn moves_make_missing_folders_and_never_take_or_replace_a_folder() {
+    let roots = roots();
+    let target = roots.target_directory.path();
+    fs::write(target.join("file.txt"), b"moved").unwrap();
+    fs::create_dir(target.join("dir")).unwrap();
+    let (file, folder, deep) = (
+        path(b"file.txt"),
+        path(b"dir"),
+        path(b"missing/parent/moved.txt"),
+    );
+    let observed = roots.target.metadata(&file).unwrap();
+    let folder_metadata = roots.target.metadata(&folder).unwrap();
+
+    assert!(matches!(
+        roots.target.move_entry(&file, &observed, &folder, STANDARD),
+        Err(WriteError::Exists)
+    ));
+    assert!(matches!(
+        roots
+            .target
+            .move_entry(&folder, &folder_metadata, &deep, STANDARD),
+        Err(WriteError::UnsupportedEntry)
+    ));
+    roots
+        .target
+        .move_entry(&file, &observed, &deep, STANDARD)
+        .unwrap();
+    assert_eq!(
+        fs::read(target.join("missing/parent/moved.txt")).unwrap(),
+        b"moved"
+    );
+    assert!(!target.join("file.txt").exists());
+}
+
+#[test]
 fn replacing_a_missing_entry_fails_and_keeps_nothing() {
     let roots = roots();
     fs::write(roots._source_directory.path().join("file"), b"new").unwrap();

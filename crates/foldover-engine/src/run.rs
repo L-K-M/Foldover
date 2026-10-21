@@ -107,6 +107,12 @@ pub enum RunError {
     )]
     CanaryMissing { side: Side, path: SyncPath },
     #[error(
+        "The canary file “{}” is only in iCloud in the {side:?} folder, so nothing was written. \
+         Download it, or keep it downloaded.",
+        String::from_utf8_lossy(path.as_bytes())
+    )]
+    CanaryUnavailable { side: Side, path: SyncPath },
+    #[error(
         "The canary file “{}” changed in the {side:?} folder since the last sync, so nothing was \
          written. Check that the right disk is connected, or change the pair's canary.",
         String::from_utf8_lossy(path.as_bytes())
@@ -741,6 +747,7 @@ impl PairRun {
                 .copied()
                 .chain(left.oversized().iter().chain(right.oversized()))
                 .filter(|path| Some(*path) != canary)
+                .chain(unavailable(&left, &right, &base))
                 .cloned()
                 .collect()
         };
@@ -928,9 +935,17 @@ impl PairRun {
                     .map(ObservedEntry::version)
                     .filter(|version| version.kind() == EntryKind::File);
                 let Some(observed) = observed else {
-                    return Err(RunError::CanaryMissing {
-                        side,
-                        path: canary.clone(),
+                    // Evicted, alone or with a folder above it, it is
+                    // there but cannot prove its content.
+                    let evicted = self
+                        .observation(side)
+                        .unavailable()
+                        .iter()
+                        .any(|root| root == canary || root.is_ancestor_of(canary));
+                    let path = canary.clone();
+                    return Err(match evicted {
+                        true => RunError::CanaryUnavailable { side, path },
+                        false => RunError::CanaryMissing { side, path },
                     });
                 };
                 let recorded = self.base.get(canary).map(|entry| match side {
@@ -1693,6 +1708,33 @@ fn moves(endpoint: &Endpoint) -> Moves {
         true => Moves::Rename,
         false => Moves::Copy,
     }
+}
+
+/// Entries either folder keeps only in iCloud, with everything below them
+/// on either side or in the base: skipped in both folders rather than
+/// downloaded, and unchanged to the base (PLAN.md §4.10).
+fn unavailable<'a>(
+    left: &'a Observation,
+    right: &'a Observation,
+    base: &'a BTreeMap<SyncPath, BaselineEntry>,
+) -> impl Iterator<Item = &'a SyncPath> {
+    let roots: Vec<&SyncPath> = left
+        .unavailable()
+        .iter()
+        .chain(right.unavailable())
+        .collect();
+    let below = move |path: &&SyncPath| {
+        roots
+            .iter()
+            .any(|root| *root == *path || root.is_ancestor_of(path))
+    };
+    left.unavailable()
+        .iter()
+        .chain(right.unavailable())
+        .chain(left.entries().keys())
+        .chain(right.entries().keys())
+        .chain(base.keys())
+        .filter(below)
 }
 
 #[cfg(test)]
