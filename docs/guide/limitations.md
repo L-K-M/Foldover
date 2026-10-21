@@ -78,6 +78,16 @@ you might expect. Only the last one below blocks saving
   exclusive create: two Macs could both take a free lease
   ([ADR 0032](../adr/0032-root-leases.md)).
 
+## Moves
+
+- **Moves are found by content.** A file or link moved in one folder is
+  renamed in the other when its content is unchanged; one edited as well
+  is copied and the old path archived. A renamed folder is created anew
+  and its files moved into it
+  ([ADR 0042](../adr/0042-moves.md)).
+- **Another Mac's folder copies.** Moves toward a folder shared by
+  another Mac are still copies and archives.
+
 ## Mac-to-Mac
 
 - **ACLs stay on each Mac.** Their entries name accounts by identifiers

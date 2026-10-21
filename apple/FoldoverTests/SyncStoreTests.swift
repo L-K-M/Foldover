@@ -2135,3 +2135,24 @@ func theCompletionCardAppearsOnlyWhenARunLeavesWorkToReview() async throws {
     await viewModel.refresh()
     #expect(viewModel.completionCard == nil)
 }
+
+/// PLAN.md §4.7: a move names where it comes from, and summaries count it.
+@MainActor
+@Test
+func movesNameTheirSourceAndCount() {
+    let move = PlannedChange(path: Data("album/a.jpg".utf8), action: .move(on: .b),
+                             movedFrom: Data("photos/a.jpg".utf8))
+    #expect(PairSyncViewModel.description(move) == "Move in Folder B from photos/a.jpg")
+    #expect(!PairSyncViewModel.choosable(move.action))
+    let preview = PreviewSummary(
+        changes: [move], copies: 0, updates: 0, archives: 0, conflicts: 0, blocked: 0, kept: 0,
+        a: DeletionCheck(deletions: 0, paths: 1, needsApproval: false),
+        b: DeletionCheck(deletions: 0, paths: 1, needsApproval: false),
+        reviewToken: "token", pairRevision: 1, moves: 1
+    )
+    #expect(PairSyncViewModel.summary(preview) == "1 to move.")
+    #expect(preview.total == 1)
+    let result = RunSummary(cancelled: false, copied: 0, updated: 0, archived: 0, recovered: 0,
+                            conflicts: 0, failures: [], failureCount: 0, archive: "run", moved: 1)
+    #expect(PairSyncViewModel.summary(result).contains("Moved 1 as the other folder did."))
+}

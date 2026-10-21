@@ -677,6 +677,31 @@ impl MemoryEndpoint {
         ))
     }
 
+    /// Move the file or link at `from`, still `current`, to `to`, creating
+    /// missing folders; nothing at `to` is replaced.
+    pub(crate) fn move_entry(
+        &self,
+        from: &SyncPath,
+        current: &ObservedEntry,
+        to: &SyncPath,
+        run: &RunScope,
+    ) -> Result<(), ApplyError> {
+        let stored = self
+            .verified(from, current, run.options().metadata())
+            .map_err(|_| ApplyError::DestinationChanged(from.clone()))?;
+        if let Node::Directory { .. } = stored.node {
+            return Err(ApplyError::Unsupported(from.clone()));
+        }
+        let mut folder = self.folder();
+        if folder.get(to.as_bytes()).is_some() {
+            return Err(ApplyError::DestinationChanged(to.clone()));
+        }
+        folder
+            .step()
+            .and_then(|()| folder.relocate(from.as_bytes(), to.as_bytes()))
+            .map_err(|source| write(from.as_bytes(), source))
+    }
+
     pub(crate) fn remove(
         &self,
         path: &SyncPath,

@@ -18,8 +18,11 @@ pub struct JournalRow {
     /// What the run left at the path, or for an archive what it moved
     /// away.
     pub version: Vec<u8>,
-    /// The base before the run; None when the path had none.
+    /// The base before the run; None when the path had none. For a move,
+    /// the base of `source`, where the entry was.
     pub base: Option<(Vec<u8>, Vec<u8>)>,
+    /// For a move, where the entry came from.
+    pub source: Option<Vec<u8>>,
 }
 
 /// How a base change touches the journal.
@@ -82,8 +85,8 @@ pub(super) fn apply(
                 params![pair, run],
             )?;
             let mut insert = transaction.prepare(
-                "INSERT INTO run_journal (pair_id,run,seq,path,side,action,version,base_left,base_right)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                "INSERT INTO run_journal (pair_id,run,seq,path,side,action,version,base_left,base_right,source)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             )?;
             for row in rows {
                 let (left, right) = row.base.as_ref().map(|(l, r)| (l, r)).unzip();
@@ -96,7 +99,8 @@ pub(super) fn apply(
                     row.action,
                     row.version,
                     left,
-                    right
+                    right,
+                    row.source
                 ])?;
             }
             Ok(())
@@ -108,7 +112,7 @@ impl Database {
     /// The pair's journaled run and its entries in write order, if any.
     pub fn journal(&self, pair: &[u8]) -> Result<Option<(String, Vec<JournalRow>)>, Error> {
         let mut statement = self.connection.prepare(
-            "SELECT run,seq,path,side,action,version,base_left,base_right FROM run_journal
+            "SELECT run,seq,path,side,action,version,base_left,base_right,source FROM run_journal
              WHERE pair_id=?1 AND run=(SELECT max(run) FROM run_journal WHERE pair_id=?1)
              ORDER BY seq",
         )?;
@@ -127,6 +131,7 @@ impl Database {
                     action: row.get(4)?,
                     version: row.get(5)?,
                     base,
+                    source: row.get(8)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -148,7 +153,36 @@ mod tests {
             action: action.into(),
             version: vec![seq as u8],
             base: (action != "create").then(|| (vec![1], vec![2])),
+            source: (action == "move").then(|| b"from".to_vec()),
         }
+    }
+
+    #[test]
+    fn moves_keep_their_source_and_nothing_else_has_one() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        let record = |database: &mut Database, rows: &[JournalRow]| {
+            database.change_base(
+                &pair.id,
+                1,
+                &[],
+                JournalChange::Record {
+                    run: "2026-10-20T10-00-00.000Z",
+                    rows,
+                },
+            )
+        };
+        let moved = row(0, b"new/a", "move");
+        record(&mut database, std::slice::from_ref(&moved)).unwrap();
+        assert_eq!(database.journal(&pair.id).unwrap().unwrap().1, [moved]);
+
+        let mut sourceless = row(1, b"b", "move");
+        sourceless.source = None;
+        assert!(record(&mut database, &[sourceless]).is_err());
+        let mut sourced = row(1, b"c", "create");
+        sourced.source = Some(b"d".to_vec());
+        assert!(record(&mut database, &[sourced]).is_err());
     }
 
     #[test]

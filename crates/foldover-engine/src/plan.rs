@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, HashMap};
 use unicode_normalization::UnicodeNormalization;
 
 use foldover_types::{
-    BaselineEntry, CaseMatching, ConflictKind, EntryDecision, EntryKind, EntryVersion,
-    NameMatching, Resolution, ScanControl, Side, Skip, SyncMode, SyncPath, UnicodeMatching,
+    BaselineEntry, CaseMatching, ChangeKind, ConflictKind, EntryContent, EntryDecision, EntryKind,
+    EntryVersion, NameMatching, Resolution, ScanControl, Side, Skip, SyncMode, SyncPath,
+    UnicodeMatching,
 };
 
 use crate::reconcile::resolve;
@@ -78,6 +79,8 @@ impl PlanRow {
 #[derive(Debug)]
 pub struct CandidatePlan {
     rows: Vec<PlanRow>,
+    /// Each `Move` row's path, with the path it moves from.
+    moves: BTreeMap<SyncPath, SyncPath>,
     left_deletions: DeletionCounts,
     right_deletions: DeletionCounts,
 }
@@ -85,6 +88,11 @@ pub struct CandidatePlan {
 impl CandidatePlan {
     pub fn rows(&self) -> &[PlanRow] {
         &self.rows
+    }
+
+    /// Where the entry a `Move` row at `to` puts there comes from.
+    pub fn moved_from(&self, to: &SyncPath) -> Option<&SyncPath> {
+        self.moves.get(to)
     }
 
     pub fn deletion_review(&self, target: Side, context: RunContext) -> DeletionReview {
@@ -327,6 +335,17 @@ pub struct Choices<'a> {
     /// How each folder compares names.
     pub left_names: NameMatching,
     pub right_names: NameMatching,
+    /// Whether each folder takes renames for what the other side moved.
+    pub left_moves: Moves,
+    pub right_moves: Moves,
+}
+
+/// Whether a folder takes a rename for a file or link the other side
+/// moved, or a copy and an archive as for any new and removed file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Moves {
+    Rename,
+    Copy,
 }
 
 impl Choices<'static> {
@@ -335,6 +354,8 @@ impl Choices<'static> {
         skips: &BTreeMap::new(),
         left_names: NameMatching::EXACT,
         right_names: NameMatching::EXACT,
+        left_moves: Moves::Copy,
+        right_moves: Moves::Copy,
     };
 }
 
@@ -354,6 +375,8 @@ pub fn plan_resolved(
         skips,
         left_names,
         right_names,
+        left_moves,
+        right_moves,
     } = *choices;
     validate_tree(base, TreeRole::Base, |entry| entry.left().kind(), control)?;
     validate_tree(left, TreeRole::Left, |entry| entry.kind(), control)?;
@@ -458,6 +481,7 @@ pub fn plan_resolved(
             rows[index].decision = CandidateDecision::BlockedByAncestor(ancestor);
         }
     }
+    let moves = pair_moves(&mut rows, [left, right], [left_moves, right_moves]);
 
     let deletion_counts = |target: Side, paths: usize| -> Result<DeletionCounts, PlanError> {
         let deletions = rows
@@ -479,9 +503,70 @@ pub fn plan_resolved(
     check_control(control)?;
     Ok(CandidatePlan {
         rows,
+        moves,
         left_deletions,
         right_deletions,
     })
+}
+
+/// PLAN.md §4.7: a file or link one side moved arrives as a rename on the
+/// other, not as an archive and a copy. Each archive on a folder pairs
+/// with a create on that folder of the same content, one to one in path
+/// order. Rows in conflicts or blocked by one were settled before, and
+/// folders carry no content to pair, so their contents pair instead.
+///
+/// ```text
+/// left moved a/x.jpg to b/x.jpg; right still holds a/x.jpg
+/// a/x.jpg  Archive { right }              ─▶ MovedAway { right }
+/// b/x.jpg  Propagate { left, Create }     ─▶ Move { right }: rename a/x.jpg
+/// ```
+fn pair_moves(
+    rows: &mut [PlanRow],
+    trees: [&BTreeMap<SyncPath, EntryVersion>; 2],
+    moves: [Moves; 2],
+) -> BTreeMap<SyncPath, SyncPath> {
+    let takes = |side: Side| moves[side as usize] == Moves::Rename;
+    let movable = |side: Side, path: &SyncPath| {
+        trees[side as usize]
+            .get(path)
+            .map(|version| version.content())
+            .filter(|content| matches!(content, EntryContent::File(_) | EntryContent::Symlink(_)))
+    };
+    let mut gone: HashMap<(Side, EntryContent), Vec<usize>> = HashMap::new();
+    let mut came: HashMap<(Side, EntryContent), Vec<usize>> = HashMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        let CandidateDecision::Entry(decision) = &row.decision else {
+            continue;
+        };
+        match *decision {
+            EntryDecision::Archive { on } if takes(on) => {
+                if let Some(content) = movable(on, &row.path) {
+                    gone.entry((on, content)).or_default().push(index);
+                }
+            }
+            EntryDecision::Propagate {
+                from,
+                change: ChangeKind::Create,
+            } if takes(from.other()) => {
+                if let Some(content) = movable(from, &row.path) {
+                    came.entry((from.other(), content)).or_default().push(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut paired = BTreeMap::new();
+    for (&(on, content), sources) in &gone {
+        let Some(targets) = came.get(&(on, content)) else {
+            continue;
+        };
+        for (&from, &to) in sources.iter().zip(targets) {
+            rows[from].decision = CandidateDecision::Entry(EntryDecision::MovedAway { on });
+            rows[to].decision = CandidateDecision::Entry(EntryDecision::Move { on });
+            paired.insert(rows[to].path.clone(), rows[from].path.clone());
+        }
+    }
+    paired
 }
 
 fn validate_tree<T>(
@@ -568,6 +653,81 @@ mod tests {
         right: &BTreeMap<SyncPath, EntryVersion>,
     ) -> CandidatePlan {
         plan_candidates(mode, base, left, right, &mut || ScanControl::Continue).unwrap()
+    }
+
+    /// A plan where both folders take renames.
+    fn plan_moving(
+        mode: SyncMode,
+        base: &BTreeMap<SyncPath, BaselineEntry>,
+        left: &BTreeMap<SyncPath, EntryVersion>,
+        right: &BTreeMap<SyncPath, EntryVersion>,
+        right_moves: Moves,
+    ) -> CandidatePlan {
+        let choices = Choices {
+            left_moves: Moves::Rename,
+            right_moves,
+            ..Choices::NONE
+        };
+        plan_resolved(mode, base, left, right, &choices, &mut || {
+            ScanControl::Continue
+        })
+        .unwrap()
+    }
+
+    /// PLAN.md §4.7: what one folder moved, the other renames: an archive
+    /// and a create of the same content on a folder become one move.
+    #[test]
+    fn a_moved_file_pairs_its_archive_with_its_copy() {
+        let base = baseline(&tree(&[
+            (b"a", directory()),
+            (b"a/x", file(1)),
+            (b"a/y", file(2)),
+        ]));
+        let left = tree(&[
+            (b"a", directory()),
+            (b"a/y", file(2)),
+            (b"b", directory()),
+            (b"b/x", file(1)),
+            (b"b/z", file(2)),
+        ]);
+        let right = tree(&[(b"a", directory()), (b"a/x", file(1)), (b"a/y", file(2))]);
+        let moved = plan_moving(SyncMode::Sync, &base, &left, &right, Moves::Rename);
+        let entry = |decision| CandidateDecision::Entry(decision);
+        assert_eq!(
+            decision(&moved, b"a/x"),
+            entry(EntryDecision::MovedAway { on: Side::Right })
+        );
+        assert_eq!(
+            decision(&moved, b"b/x"),
+            entry(EntryDecision::Move { on: Side::Right })
+        );
+        assert_eq!(moved.moved_from(&path(b"b/x")), Some(&path(b"a/x")));
+        // A copy of content that stays where it was is a copy.
+        assert_eq!(
+            decision(&moved, b"b/z"),
+            entry(EntryDecision::Propagate {
+                from: Side::Left,
+                change: ChangeKind::Create,
+            })
+        );
+        assert_eq!(moved.deletions(Side::Right).deletions(), 0);
+
+        // A folder that takes no renames copies and archives.
+        let copied = plan_moving(SyncMode::Sync, &base, &left, &right, Moves::Copy);
+        assert_eq!(
+            decision(&copied, b"a/x"),
+            entry(EntryDecision::Archive { on: Side::Right })
+        );
+        assert_eq!(copied.moved_from(&path(b"b/x")), None);
+        // A Backup never removes, so it never moves.
+        let backup = plan_moving(
+            SyncMode::Backup { source: Side::Left },
+            &base,
+            &left,
+            &right,
+            Moves::Rename,
+        );
+        assert_eq!(backup.moved_from(&path(b"b/x")), None);
     }
 
     fn decision(plan: &CandidatePlan, name: &[u8]) -> CandidateDecision {
@@ -890,6 +1050,8 @@ mod tests {
             skips: &BTreeMap::new(),
             left_names,
             right_names,
+            left_moves: Moves::Copy,
+            right_moves: Moves::Copy,
         };
         plan_resolved(SyncMode::Sync, base, left, right, &choices, &mut || {
             ScanControl::Continue

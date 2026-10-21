@@ -40,8 +40,8 @@ use foldover_types::{
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
-    CandidateDecision, CandidatePlan, Choices, DeletionCounts, DeletionReview, PlanError, PlanRow,
-    RunContext, plan_resolved,
+    CandidateDecision, CandidatePlan, Choices, DeletionCounts, DeletionReview, Moves, PlanError,
+    PlanRow, RunContext, plan_resolved,
 };
 
 /// Base updates per commit: bounds the work a crash can make the next run redo.
@@ -282,6 +282,11 @@ pub enum Action {
     /// Backup keeps a target-only entry or edit, or a person skipped this
     /// change for one run.
     KeepTarget,
+    /// Rename on `on` what the other folder moved here, from
+    /// `PreviewItem::moved_from`.
+    Move {
+        on: Side,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -291,6 +296,7 @@ pub struct PreviewItem {
     left: Option<EntryVersion>,
     right: Option<EntryVersion>,
     bytes: u64,
+    moved_from: Option<SyncPath>,
 }
 
 impl PreviewItem {
@@ -310,6 +316,11 @@ impl PreviewItem {
     /// File data the item copies; 0 for everything else.
     pub fn bytes(&self) -> u64 {
         self.bytes
+    }
+
+    /// For a move, where the entry comes from.
+    pub fn moved_from(&self) -> Option<&SyncPath> {
+        self.moved_from.as_ref()
     }
 }
 
@@ -415,6 +426,14 @@ impl Preview {
                 Action::KeepTarget => {
                     hasher.update(&[4]);
                 }
+                Action::Move { on } => {
+                    hasher.update(&[5]);
+                    hasher.update(&[on as u8]);
+                }
+            }
+            if let Some(from) = &item.moved_from {
+                hasher.update(&(from.as_bytes().len() as u64).to_le_bytes());
+                hasher.update(from.as_bytes());
             }
             version(&mut hasher, item.left);
             version(&mut hasher, item.right);
@@ -455,6 +474,8 @@ pub struct RunReport {
     archive: String,
     pruned: u64,
     copied: u64,
+    /// Files and links renamed for moves the other folder made.
+    moved: u64,
     updated: u64,
     archived: u64,
     recovered: u64,
@@ -476,6 +497,9 @@ impl RunReport {
     }
     pub fn copied(&self) -> u64 {
         self.copied
+    }
+    pub fn moved(&self) -> u64 {
+        self.moved
     }
     pub fn updated(&self) -> u64 {
         self.updated
@@ -750,6 +774,8 @@ impl PairRun {
             skips: &skips,
             left_names: endpoints.endpoint(Side::Left).name_matching(),
             right_names: endpoints.endpoint(Side::Right).name_matching(),
+            left_moves: moves(endpoints.endpoint(Side::Left)),
+            right_moves: moves(endpoints.endpoint(Side::Right)),
         };
         let plan = plan_resolved(
             draft.mode(),
@@ -845,6 +871,9 @@ impl PairRun {
                         },
                         EntryDecision::Archive { on } => Action::Archive { on },
                         EntryDecision::Conflict(kind) => Action::Conflict(kind),
+                        EntryDecision::Move { on } => Action::Move { on },
+                        // Shown with the path it moves to.
+                        EntryDecision::MovedAway { .. } => return None,
                     },
                 };
                 let version = |side: Side| {
@@ -859,6 +888,7 @@ impl PairRun {
                     left: version(Side::Left),
                     right: version(Side::Right),
                     bytes: self.copied_bytes(row).map_or(0, |(_, bytes)| bytes),
+                    moved_from: self.plan.moved_from(row.path()).cloned(),
                 })
             })
             .collect();
@@ -1326,7 +1356,11 @@ fn require_space(side: Side, needed: u64, available: u64) -> Result<(), RunError
 fn writes(decision: &CandidateDecision) -> bool {
     matches!(
         decision,
-        CandidateDecision::Entry(EntryDecision::Propagate { .. } | EntryDecision::Archive { .. })
+        CandidateDecision::Entry(
+            EntryDecision::Propagate { .. }
+                | EntryDecision::Archive { .. }
+                | EntryDecision::Move { .. }
+        )
     )
 }
 
@@ -1411,6 +1445,65 @@ impl Executor<'_> {
                     Err(error) => self.fail(path, &error),
                 }
             }
+            // The row the entry moves to carries the move.
+            EntryDecision::MovedAway { .. } => {}
+            EntryDecision::Move { on } => self.move_here(path, on, control),
+        }
+    }
+
+    /// Rename on `on` the file or link the other folder moved to `to`:
+    /// same content, so nothing is copied or archived (PLAN.md §4.7). It
+    /// keeps this folder's metadata until brought to the source's.
+    fn move_here(&mut self, to: &SyncPath, on: Side, control: &mut impl FnMut() -> ScanControl) {
+        let run = self.run;
+        let Some(from) = run.plan.moved_from(to) else {
+            return self.fail_message(to, "Planned move has no source");
+        };
+        if self.failed.iter().any(|failed| failed.is_ancestor_of(from)) {
+            return;
+        }
+        let (Some(current), Some(source)) = (
+            run.observation(on).entries().get(from),
+            run.observation(on.other()).entries().get(to),
+        ) else {
+            return self.fail_message(to, "Planned move entry is missing");
+        };
+        let target = run.endpoints.endpoint(on);
+        if let Err(error) = target.move_entry(from, current, to, self.scope(on), control) {
+            return self.fail(to, &error);
+        }
+        // The old path is gone either way; its base goes with it.
+        self.pending.push(BaseUpdate::Forget(from.clone()));
+        let stored = if current.version() == source.version() {
+            Ok(current.version())
+        } else {
+            let from_side = run.endpoints.endpoint(on.other());
+            target.update_metadata_from(from_side, to, source, current, self.scope(on), control)
+        };
+        let journaled = *stored.as_ref().unwrap_or(&current.version());
+        self.journal.push(JournalEntry {
+            seq: self.written,
+            path: to.clone(),
+            side: on,
+            action: JournalAction::Move(journaled),
+            before: run.base.get(from).copied(),
+            moved_from: Some(from.clone()),
+        });
+        self.written += 1;
+        let stored = match stored {
+            Ok(stored) => stored,
+            Err(error) => return self.fail(to, &error),
+        };
+        let (left, right) = match on {
+            Side::Left => (stored, source.version()),
+            Side::Right => (source.version(), stored),
+        };
+        match BaselineEntry::new(left, right) {
+            Ok(base) => {
+                self.report.moved += 1;
+                self.pending.push(BaseUpdate::Record(to.clone(), base));
+            }
+            Err(_) => self.fail_message(to, "Moved content differs from the source"),
         }
     }
 
@@ -1475,6 +1568,7 @@ impl Executor<'_> {
             side,
             action,
             before: self.run.base.get(path).copied(),
+            moved_from: None,
         });
         self.written += 1;
     }
@@ -1494,6 +1588,15 @@ impl Executor<'_> {
 
 mod undo;
 pub use undo::UndoReport;
+
+/// Whether `endpoint` takes renames for moves; another Mac's folder takes
+/// copies, so an older agent there never meets a request it lacks.
+fn moves(endpoint: &Endpoint) -> Moves {
+    match endpoint.moves() {
+        true => Moves::Rename,
+        false => Moves::Copy,
+    }
+}
 
 /// The pair's options as a run on `endpoints` applies them. Gatekeeper's
 /// download mark is never written to a network volume (PLAN.md §4.10),

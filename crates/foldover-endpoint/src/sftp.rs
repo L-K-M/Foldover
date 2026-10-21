@@ -846,6 +846,58 @@ impl SftpEndpoint {
             .map_err(|source| write_error(path, source))
     }
 
+    /// Move the file or link at `from`, still `current`, to `to`, named
+    /// composed as new names are and creating missing folders. The
+    /// server's rename never replaces.
+    pub fn move_entry(
+        &self,
+        from: &SyncPath,
+        current: &ObservedEntry,
+        to: &SyncPath,
+        run: &RunScope,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), ApplyError> {
+        check_durability(run.options().durability(), from)?;
+        let (stored, attributes) = self
+            .verified_at(from, current, run.options().metadata(), control)
+            .map_err(|error| match error {
+                ApplyError::Scan(ScanError::Changed(_)) => {
+                    ApplyError::DestinationChanged(from.clone())
+                }
+                error => error,
+            })?;
+        if attributes.kind() == FileKind::Directory {
+            return Err(ApplyError::Unsupported(from.clone()));
+        }
+        // Missing folders come composed, inside those that remain in the
+        // spelling they have.
+        if let Some(parent) = to.parent()
+            && self.attributes(&parent)?.is_none()
+        {
+            let folders = self.creatable(parent.as_bytes());
+            self.make_directories(&folders, DEFAULT_DIRECTORY)
+                .map_err(|source| write_error(to, source))?;
+        }
+        // Making folders took round trips: the entry must still be the one
+        // verified, or the move would take a replacement.
+        let still = self
+            .lookup(from)?
+            .is_some_and(|(_, now)| stat_key(&now) == stat_key(&attributes));
+        if !still {
+            return Err(ApplyError::DestinationChanged(from.clone()));
+        }
+        // Found before the session is held: finding it may use it.
+        let target = self.fresh(to.as_bytes());
+        let moved = self.session().rename(&stored, &target);
+        if let Err(source) = moved {
+            return Err(match self.attributes(to) {
+                Ok(Some(_)) => ApplyError::DestinationChanged(to.clone()),
+                _ => write_error(from, source),
+            });
+        }
+        Ok(())
+    }
+
     /// Archive the entry at `path` for this run, or delete it where the
     /// run keeps no archive; folders are removed only when empty.
     pub fn remove(

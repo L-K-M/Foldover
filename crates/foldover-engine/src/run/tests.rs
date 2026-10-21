@@ -1646,6 +1646,100 @@ fn backup_without_records(kind: RightKind) {
     ));
 }
 
+/// PLAN.md §4.7: a file one folder moved arrives in the other as a
+/// rename, not a copy and an archive, and undo moves it back.
+#[test]
+fn moved_files_are_renamed_on_the_other_side_and_undo_moves_them_back() {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut pair = fixture(SyncMode::Sync);
+    let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+    fs::create_dir(left.join("photos")).unwrap();
+    fs::write(left.join("photos/a.jpg"), b"a").unwrap();
+    fs::write(left.join("photos/b.jpg"), b"b").unwrap();
+    pair.sync();
+    let inode = fs::metadata(right.join("photos/a.jpg")).unwrap().ino();
+
+    fs::create_dir(left.join("album")).unwrap();
+    fs::rename(left.join("photos/a.jpg"), left.join("album/a.jpg")).unwrap();
+    let preview = pair.prepare().preview();
+    let moved: Vec<_> = preview
+        .items()
+        .iter()
+        .filter(|item| matches!(item.action(), Action::Move { on: Side::Right }))
+        .map(|item| (item.path().clone(), item.moved_from().cloned()))
+        .collect();
+    assert_eq!(moved, [(path(b"album/a.jpg"), Some(path(b"photos/a.jpg")))]);
+    assert_eq!(preview.deletions(Side::Right).deletions(), 0);
+
+    let report = pair.ran(Approval::default(), at(1));
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    assert_eq!((report.moved(), report.archived()), (1, 0));
+    assert_eq!(
+        fs::metadata(right.join("album/a.jpg")).unwrap().ino(),
+        inode
+    );
+    assert!(!right.join("photos/a.jpg").exists());
+    assert!(pair.prepare().preview().items().is_empty());
+
+    let undone = pair.undo_at(at(2));
+    assert!(undone.not_undone().is_empty(), "{:?}", undone.not_undone());
+    assert_eq!(
+        fs::metadata(right.join("photos/a.jpg")).unwrap().ino(),
+        inode
+    );
+    assert!(!right.join("album/a.jpg").exists());
+}
+
+/// Review of moves: a move that also brought new metadata went back
+/// with it, as undo leaves metadata, but the old path got its base from
+/// before the run; the next preview called the moved-back file edited
+/// on one side and deleted on the other.
+#[test]
+fn undoing_a_move_that_brought_new_metadata_leaves_no_conflict() {
+    let mut pair = fixture(SyncMode::Sync);
+    let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+    fs::write(left.join("a.txt"), b"a").unwrap();
+    pair.sync();
+
+    // Same content, a new modification time and a new name.
+    let edited = std::time::SystemTime::now() - Duration::from_secs(3_600);
+    fs::File::options()
+        .write(true)
+        .open(left.join("a.txt"))
+        .unwrap()
+        .set_modified(edited)
+        .unwrap();
+    fs::rename(left.join("a.txt"), left.join("b.txt")).unwrap();
+    let report = pair.ran(Approval::default(), at(1));
+    assert_eq!(
+        (report.moved(), report.copied()),
+        (1, 0),
+        "{:?}",
+        report.failures()
+    );
+
+    let undone = pair.undo_at(at(2));
+    assert!(undone.not_undone().is_empty(), "{:?}", undone.not_undone());
+    assert!(right.join("a.txt").exists());
+
+    let preview = pair.prepare().preview();
+    let actions: Vec<_> = preview.items().iter().map(|item| item.action()).collect();
+    assert!(
+        !actions
+            .iter()
+            .any(|action| matches!(action, Action::Conflict(_))),
+        "{actions:?}"
+    );
+    // Syncing again redoes the move.
+    assert!(
+        actions
+            .iter()
+            .any(|action| matches!(action, Action::Move { on: Side::Right })),
+        "{actions:?}"
+    );
+}
+
 #[test]
 fn undo_reverts_the_newest_run_and_the_next_preview_shows_the_redo() {
     let mut pair = fixture(SyncMode::Sync);

@@ -30,6 +30,8 @@ pub struct RunHistoryEntry {
     pub trigger: RunTriggerKind,
     pub outcome: RunOutcomeKind,
     pub copied: u64,
+    /// Files and links renamed for moves the other folder made.
+    pub moved: u64,
     pub updated: u64,
     pub archived: u64,
     pub recovered: u64,
@@ -68,6 +70,7 @@ fn entries(history: History) -> Vec<RunHistoryEntry> {
                 HistoryOutcome::Failed => RunOutcomeKind::Failed,
             },
             copied: run.copied,
+            moved: run.moved,
             updated: run.updated,
             archived: run.archived,
             recovered: run.recovered,

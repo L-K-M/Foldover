@@ -282,6 +282,31 @@ impl Endpoint {
         }
     }
 
+    /// Move the file or link at `from`, still `current`, to `to`, creating
+    /// missing folders; nothing at `to` is replaced (PLAN.md §4.7).
+    /// Another Mac's folder takes no moves yet: its runs copy instead.
+    pub fn move_entry(
+        &self,
+        from: &SyncPath,
+        current: &ObservedEntry,
+        to: &SyncPath,
+        run: &RunScope,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), ApplyError> {
+        match self {
+            Self::Local(endpoint) => endpoint.move_entry(from, current, to, run, control),
+            Self::Sftp(endpoint) => endpoint.move_entry(from, current, to, run, control),
+            Self::Peer(_) => Err(ApplyError::Unsupported(from.clone())),
+            #[cfg(feature = "simulation")]
+            Self::Memory(endpoint) => endpoint.move_entry(from, current, to, run),
+        }
+    }
+
+    /// Whether this folder takes moves (`move_entry`).
+    pub fn moves(&self) -> bool {
+        !matches!(self, Self::Peer(_))
+    }
+
     pub fn remove(
         &self,
         path: &SyncPath,

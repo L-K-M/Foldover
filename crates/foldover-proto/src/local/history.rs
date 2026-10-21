@@ -33,6 +33,9 @@ pub struct HistoryRecord {
     pub trigger: HistoryTrigger,
     pub outcome: HistoryOutcome,
     pub copied: u64,
+    /// Files and links renamed for moves the other folder made.
+    #[serde(default)]
+    pub moved: u64,
     pub updated: u64,
     pub archived: u64,
     pub recovered: u64,

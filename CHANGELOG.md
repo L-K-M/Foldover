@@ -14,6 +14,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- A file moved or renamed in one folder is moved the same way in the
+  other instead of being copied again and archived; the preview lists it
+  as a move, and Undo moves it back. Folders on another Mac still copy.
+
 - The pair editor browses folders on an SFTP server, so you can walk to
   the folder to sync instead of typing its path.
 

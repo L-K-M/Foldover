@@ -203,6 +203,17 @@ pub enum EntryDecision {
     Archive {
         on: Side,
     },
+    /// Rename on `on` the file or link the plan pairs with this path
+    /// to here: the other side moved it, and its content is the same, so
+    /// nothing is copied or archived (PLAN.md §4.7).
+    Move {
+        on: Side,
+    },
+    /// The file or link here on `on` moves to the path the plan pairs it
+    /// with; that path's row carries the move.
+    MovedAway {
+        on: Side,
+    },
     Conflict(ConflictKind),
 }
 

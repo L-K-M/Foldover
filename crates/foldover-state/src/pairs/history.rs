@@ -46,6 +46,8 @@ pub struct HistoryEntry {
     pub trigger: RunTrigger,
     pub outcome: HistoryOutcome,
     pub copied: u64,
+    /// Files and links renamed for moves the other folder made.
+    pub moved: u64,
     pub updated: u64,
     pub archived: u64,
     pub recovered: u64,
@@ -78,6 +80,7 @@ impl PairStore {
             }
             .into(),
             copied: count(entry.copied),
+            moved: count(entry.moved),
             updated: count(entry.updated),
             archived: count(entry.archived),
             recovered: count(entry.recovered),
@@ -127,6 +130,7 @@ fn entry(row: HistoryRow) -> Result<HistoryEntry, Error> {
             _ => return Err(invalid()),
         },
         copied: count(row.copied)?,
+        moved: count(row.moved)?,
         updated: count(row.updated)?,
         archived: count(row.archived)?,
         recovered: count(row.recovered)?,
@@ -168,6 +172,7 @@ mod tests {
             trigger: RunTrigger::Scheduled,
             outcome,
             copied: 3,
+            moved: 4,
             updated: 1,
             archived: 2,
             recovered: 0,

@@ -32,12 +32,24 @@ pub enum SyncConflictKind {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
 pub enum SyncChangeKind {
-    Copy { to: SyncSide },
-    Update { to: SyncSide },
-    Archive { on: SyncSide },
-    Conflict { kind: SyncConflictKind },
+    Copy {
+        to: SyncSide,
+    },
+    Update {
+        to: SyncSide,
+    },
+    Archive {
+        on: SyncSide,
+    },
+    Conflict {
+        kind: SyncConflictKind,
+    },
     Blocked,
     Keep,
+    /// Renamed on `on` from `SyncChange::moved_from`.
+    Move {
+        on: SyncSide,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
@@ -46,6 +58,8 @@ pub struct SyncChange {
     pub kind: SyncChangeKind,
     /// File data the change copies; 0 for everything else.
     pub bytes: u64,
+    /// For a move, the path it comes from.
+    pub moved_from: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
@@ -67,6 +81,7 @@ pub struct SyncPreviewSummary {
     pub conflicts: u64,
     pub blocked: u64,
     pub kept: u64,
+    pub moves: u64,
     pub left: SyncSideDeletions,
     pub right: SyncSideDeletions,
     /// Fingerprint of the exact preview shown. Capture it with this
@@ -88,6 +103,7 @@ pub struct SyncFailureItem {
 pub struct SyncRunSummary {
     pub cancelled: bool,
     pub copied: u64,
+    pub moved: u64,
     pub updated: u64,
     pub archived: u64,
     pub recovered: u64,
@@ -243,6 +259,7 @@ pub enum SyncChangeFilter {
     Conflict,
     Blocked,
     Keep,
+    Move,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
@@ -271,6 +288,7 @@ pub async fn sync_changes(
         SyncChangeFilter::Conflict => SyncItemKind::Conflict,
         SyncChangeFilter::Blocked => SyncItemKind::Blocked,
         SyncChangeFilter::Keep => SyncItemKind::Keep,
+        SyncChangeFilter::Move => SyncItemKind::Move,
     });
     let page =
         foldover_client::sync_items(&SocketLocation::Default, id, token, after.as_deref(), kind)
@@ -289,6 +307,7 @@ impl From<SyncItemPage> for SyncChangePage {
                     path: item.path,
                     kind: item.action.into(),
                     bytes: item.bytes,
+                    moved_from: item.moved_from,
                 })
                 .collect(),
             more: page.more,
@@ -388,6 +407,7 @@ impl From<SyncPreview> for SyncPreviewSummary {
                     path: item.path,
                     kind: item.action.into(),
                     bytes: item.bytes,
+                    moved_from: item.moved_from,
                 })
                 .collect(),
             copy_bytes: preview.counts.copy_bytes,
@@ -397,6 +417,7 @@ impl From<SyncPreview> for SyncPreviewSummary {
             conflicts: preview.counts.conflicts,
             blocked: preview.counts.blocked,
             kept: preview.counts.kept,
+            moves: preview.counts.moves,
             left: preview.left.into(),
             right: preview.right.into(),
             review_token: preview.review_token,
@@ -420,6 +441,7 @@ impl From<SyncResult> for SyncRunSummary {
         Self {
             cancelled: result.cancelled,
             copied: result.copied,
+            moved: result.moved,
             updated: result.updated,
             archived: result.archived,
             recovered: result.recovered,
@@ -476,6 +498,7 @@ impl From<SyncAction> for SyncChangeKind {
             },
             SyncAction::Blocked => Self::Blocked,
             SyncAction::Keep => Self::Keep,
+            SyncAction::Move { on } => Self::Move { on: side(on) },
         }
     }
 }
@@ -505,11 +528,22 @@ mod tests {
     #[test]
     fn statuses_keep_every_count_path_byte_and_side() {
         let preview = SyncPreview {
-            items: vec![SyncItem {
-                path: b"a/\xff".to_vec(),
-                action: SyncAction::Archive { on: PairSide::Left },
-                bytes: 0,
-            }],
+            items: vec![
+                SyncItem {
+                    path: b"a/\xff".to_vec(),
+                    action: SyncAction::Archive { on: PairSide::Left },
+                    bytes: 0,
+                    moved_from: None,
+                },
+                SyncItem {
+                    path: b"b/moved".to_vec(),
+                    action: SyncAction::Move {
+                        on: PairSide::Right,
+                    },
+                    bytes: 0,
+                    moved_from: Some(b"a/moved".to_vec()),
+                },
+            ],
             counts: SyncCounts {
                 copy_bytes: 7,
                 copies: 1,
@@ -518,6 +552,7 @@ mod tests {
                 conflicts: 4,
                 blocked: 5,
                 kept: 6,
+                moves: 8,
             },
             left: SyncDeletions {
                 deletions: 3,
@@ -538,12 +573,24 @@ mod tests {
         };
         assert_eq!(
             preview.changes,
-            [SyncChange {
-                path: b"a/\xff".to_vec(),
-                kind: SyncChangeKind::Archive { on: SyncSide::Left },
-                bytes: 0,
-            }]
+            [
+                SyncChange {
+                    path: b"a/\xff".to_vec(),
+                    kind: SyncChangeKind::Archive { on: SyncSide::Left },
+                    bytes: 0,
+                    moved_from: None,
+                },
+                SyncChange {
+                    path: b"b/moved".to_vec(),
+                    kind: SyncChangeKind::Move {
+                        on: SyncSide::Right
+                    },
+                    bytes: 0,
+                    moved_from: Some(b"a/moved".to_vec()),
+                }
+            ]
         );
+        assert_eq!(preview.moves, 8);
         assert_eq!(preview.copy_bytes, 7);
         assert_eq!(
             (
@@ -561,6 +608,7 @@ mod tests {
             result: SyncResult {
                 cancelled: true,
                 copied: 1,
+                moved: 7,
                 updated: 2,
                 archived: 3,
                 recovered: 4,
@@ -578,7 +626,7 @@ mod tests {
             panic!("unexpected state");
         };
         assert!(result.cancelled);
-        assert_eq!(result.failure_count, 6);
+        assert_eq!((result.moved, result.failure_count), (7, 6));
         assert_eq!(result.failures[0].message, "failed");
 
         let undone: SyncJobState = SyncStatus::Undone {

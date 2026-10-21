@@ -313,6 +313,30 @@ impl LocalEndpoint {
         ))
     }
 
+    /// Move the file or link at `from`, still `current`, to `to`, creating
+    /// missing folders. Its content is untouched, so nothing is archived;
+    /// nothing at `to` is replaced.
+    pub fn move_entry(
+        &self,
+        from: &SyncPath,
+        current: &ObservedEntry,
+        to: &SyncPath,
+        run: &RunScope,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), ApplyError> {
+        let entry = self
+            .verified(from, current, run, control)
+            .map_err(|error| changed_as(error, ApplyError::DestinationChanged(from.clone())))?;
+        self.root
+            .move_entry(from, entry.metadata(), to, run.options.durability())
+            .map_err(|error| match error {
+                WriteError::Exists => ApplyError::DestinationChanged(to.clone()),
+                WriteError::Changed => ApplyError::DestinationChanged(from.clone()),
+                WriteError::UnsupportedEntry => ApplyError::Unsupported(from.clone()),
+                error => write_error(from, error),
+            })
+    }
+
     /// Archive the entry at `path` for this run, or delete it where the
     /// run keeps no archive; folders are removed only when empty.
     pub fn remove(
