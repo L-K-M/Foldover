@@ -313,6 +313,9 @@ pub enum PeerReply {
         leftovers: Vec<Vec<u8>>,
         oversized: Vec<Vec<u8>>,
         old: Vec<Vec<u8>>,
+        /// Entries kept only in iCloud there, left unread.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unavailable: Vec<Vec<u8>>,
     },
     /// An entry being read: its metadata, and a link's target.
     Reading {

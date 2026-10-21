@@ -528,7 +528,7 @@ struct PairSyncViewModel {
             ? String(localized: "Sync cancelled after copying \(result.copied), updating \(result.updated) and archiving \(result.archived).")
             : String(localized: "Synced: copied \(result.copied), updated \(result.updated), archived \(result.archived).")
         if result.moved > 0 {
-            text += " " + String(localized: "Moved \(result.moved) items the other folder moved.")
+            text += " " + String(localized: "Moved \(result.moved) as the other folder did.")
         }
         if result.conflicts > 0 {
             text += " " + String(localized: "\(result.conflicts) conflicts were left untouched.")
