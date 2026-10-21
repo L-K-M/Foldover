@@ -6,7 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Time Machine no longer backs up Foldover's state on this Mac: a
+  restored, older state could carry stale deletions over. A Mac set up
+  from a backup starts without pairs.
+
 ### Added
+
+- `scripts/build.sh --install` installs the app it built into
+  `/Applications`, quitting and reopening a running Foldover and
+  restarting a running background agent so both use the new build.
 
 - "When files change" catches up on changes made while the agent was
   not running, syncs after 5 minutes of nonstop changes, and checks
@@ -246,6 +256,10 @@ All notable changes to this project are documented here. The format follows
   mark (Gatekeeper's note that a file was downloaded) written there,
   nor do files in a pair that syncs permissions but not extended
   attributes, where copying the ACL carried it.
+
+- An edit that kept a file's size and modification time is found within
+  a week: each file's content is read again at least weekly, spread
+  over the week, instead of only when its size or time changes.
 
 - Syncing to disks formatted HFS+ (Mac OS Extended), exFAT or FAT32
   works: every copy to them failed with "Operation not supported".
