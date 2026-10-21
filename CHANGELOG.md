@@ -14,6 +14,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- The pair editor browses folders on an SFTP server, so you can walk to
+  the folder to sync instead of typing its path.
+
+- Names reach SFTP servers in composed Unicode (NFC), as Linux and
+  Windows expect, even from a disk that stores them decomposed, and
+  Foldover finds a server's file in either spelling.
+
 - A Backup can go to a folder that cannot hold Foldover's `.foldover`
   folder, such as a share that refuses names starting with a dot, once
   you choose to keep nothing there: files replaced in it are deleted,
@@ -261,6 +268,10 @@ All notable changes to this project are documented here. The format follows
   mark (Gatekeeper's note that a file was downloaded) written there,
   nor do files in a pair that syncs permissions but not extended
   attributes, where copying the ACL carried it.
+
+- A folder holding files iCloud keeps only in the cloud no longer stops
+  every sync: those files and folders are skipped in both folders until
+  you download them, and never taken for deletions.
 
 - An edit that kept a file's size and modification time is found within
   a week: each file's content is read again at least weekly, spread

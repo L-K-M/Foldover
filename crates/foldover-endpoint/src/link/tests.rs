@@ -283,3 +283,78 @@ async fn a_device_that_could_not_be_recorded_is_not_trusted() {
     // B decided not to pin once its record failed; nothing pins it later.
     assert!(!b.is_paired(a.device()));
 }
+
+/// Answers waiting for data that never comes; says when one starts.
+struct Waiting(std::sync::Mutex<std::sync::mpsc::Sender<()>>);
+
+impl PeerHost for Waiting {
+    fn paired(&self, _: DeviceId, _: String) -> Result<(), NotRecorded> {
+        Ok(())
+    }
+
+    fn serve(&self, _: DeviceId, _: PeerCall, answer: &mut Answer) {
+        let _ = self.0.lock().unwrap().send(());
+        let _ = answer.next_data();
+    }
+}
+
+/// Review: an answer waiting on its stream as its link went away kept
+/// waiting on a runtime that was stopping, so the runtime never stopped.
+#[test]
+fn a_link_going_away_ends_answers_that_wait() {
+    for _ in 0..20 {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let identities = [Identity::generate().unwrap(), Identity::generate().unwrap()];
+        let devices = identities
+            .each_ref()
+            .map(|identity| DeviceId::from_bytes(*identity.id().as_bytes()));
+        let [a_identity, b_identity] = identities;
+        let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+        let (started_tx, started) = std::sync::mpsc::channel();
+        let (asker, answerer) = runtime.block_on(async {
+            let b = PeerLink::start(
+                b_identity,
+                "Studio".into(),
+                loopback,
+                Presence::Unlisted,
+                [devices[0]],
+                Arc::new(Waiting(std::sync::Mutex::new(started_tx))),
+            )
+            .unwrap();
+            let (recorded, _) = mpsc::unbounded_channel();
+            let a = PeerLink::start(
+                a_identity,
+                "Laptop".into(),
+                loopback,
+                Presence::Unlisted,
+                [devices[1]],
+                Arc::new(Host {
+                    recorded,
+                    store: Store::Working,
+                }),
+            )
+            .unwrap();
+            a.reach(devices[1], b.address().unwrap());
+            (a, b)
+        });
+        let exchange = asker.ask(devices[1], PeerCall::Shares).unwrap();
+        started.recv_timeout(WAIT).unwrap();
+
+        let (stopped_tx, stopped) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(answerer);
+            drop(runtime);
+            let _ = stopped_tx.send(());
+        });
+        assert_eq!(
+            stopped.recv_timeout(WAIT),
+            Ok(()),
+            "the runtime never stopped"
+        );
+        drop(exchange);
+        drop(asker);
+    }
+}

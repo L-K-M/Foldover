@@ -1940,6 +1940,136 @@ public func FfiConverterTypeRunHistoryEntry_lower(_ value: RunHistoryEntry) -> R
 
 
 /**
+ * One folder on an SFTP server, as a pair side can name it.
+ */
+public struct ServerFolder: Equatable, Hashable {
+    public var name: String
+    public var root: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, root: Data) {
+        self.name = name
+        self.root = root
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ServerFolder: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeServerFolder: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ServerFolder {
+        return
+            try ServerFolder(
+                name: FfiConverterString.read(from: &buf), 
+                root: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ServerFolder, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterData.write(value.root, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeServerFolder_lift(_ buf: RustBuffer) throws -> ServerFolder {
+    return try FfiConverterTypeServerFolder.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeServerFolder_lower(_ value: ServerFolder) -> RustBuffer {
+    return FfiConverterTypeServerFolder.lower(value)
+}
+
+
+/**
+ * A folder on an SFTP server and the folders in it.
+ */
+public struct ServerFolderListing: Equatable, Hashable {
+    /**
+     * The folder listed, with `~` resolved.
+     */
+    public var root: Data
+    /**
+     * The folder above it; none at the server's `/`.
+     */
+    public var parent: Data?
+    public var folders: [ServerFolder]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The folder listed, with `~` resolved.
+         */root: Data, 
+        /**
+         * The folder above it; none at the server's `/`.
+         */parent: Data?, folders: [ServerFolder]) {
+        self.root = root
+        self.parent = parent
+        self.folders = folders
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ServerFolderListing: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeServerFolderListing: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ServerFolderListing {
+        return
+            try ServerFolderListing(
+                root: FfiConverterData.read(from: &buf), 
+                parent: FfiConverterOptionData.read(from: &buf), 
+                folders: FfiConverterSequenceTypeServerFolder.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ServerFolderListing, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.root, into: &buf)
+        FfiConverterOptionData.write(value.parent, into: &buf)
+        FfiConverterSequenceTypeServerFolder.write(value.folders, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeServerFolderListing_lift(_ buf: RustBuffer) throws -> ServerFolderListing {
+    return try FfiConverterTypeServerFolderListing.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeServerFolderListing_lower(_ value: ServerFolderListing) -> RustBuffer {
+    return FfiConverterTypeServerFolderListing.lower(value)
+}
+
+
+/**
  * A folder this Mac shares with one paired Mac.
  */
 public struct SharedFolder: Equatable, Hashable {
@@ -4705,6 +4835,31 @@ fileprivate struct FfiConverterSequenceTypeRunHistoryEntry: FfiConverterRustBuff
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeServerFolder: FfiConverterRustBuffer {
+    typealias SwiftType = [ServerFolder]
+
+    public static func write(_ value: [ServerFolder], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeServerFolder.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ServerFolder] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ServerFolder]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeServerFolder.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeSharedFolder: FfiConverterRustBuffer {
     typealias SwiftType = [SharedFolder]
 
@@ -5292,6 +5447,24 @@ public func stopSharing(id: String)async throws  -> [SharedFolder]  {
         )
 }
 /**
+ * The folders in the folder an `sftp://` root names; connecting to the
+ * server can take a few seconds.
+ */
+public func browseServer(root: Data)async throws  -> ServerFolderListing  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_browse_server(FfiConverterData.lower(root)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeServerFolderListing_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+/**
  * SMB file servers seen nearby; waits about two seconds while the
  * agent browses.
  */
@@ -5563,6 +5736,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_stop_sharing() != 48617) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_browse_server() != 54510) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_nearby_file_servers() != 31171) {
