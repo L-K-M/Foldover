@@ -252,6 +252,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- An edit that kept a file's size and modification time is found within
+  a week: each file's content is read again at least weekly, spread
+  over the week, instead of only when its size or time changes.
+
 - Syncing to disks formatted HFS+ (Mac OS Extended), exFAT or FAT32
   works: every copy to them failed with "Operation not supported".
 
