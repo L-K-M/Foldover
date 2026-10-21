@@ -14,6 +14,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- The pair editor browses folders on an SFTP server, so you can walk to
+  the folder to sync instead of typing its path.
+
 - Names reach SFTP servers in composed Unicode (NFC), as Linux and
   Windows expect, even from a disk that stores them decomposed, and
   Foldover finds a server's file in either spelling.
