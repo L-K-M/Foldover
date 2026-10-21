@@ -73,7 +73,10 @@ empty attribute list.
   complete stat is unchanged (state schema v7 stores each side's last
   observation). The stat must have been at least three seconds old when
   that version was computed, because coarse timestamps cannot show an edit
-  within one tick. Snapshots are discarded with the base when roots or
+  within one tick. A version is read again once it is three and a half to
+  seven days old, at an age fixed by its stat so a large folder spreads the
+  work: an edit that kept size and modification time is found within a
+  week (PLAN.md §4.8). Snapshots are discarded with the base when roots or
   metadata categories change.
 - A single entry changing during observation fails the run; the caller
   retries. Per-entry retry is pending.

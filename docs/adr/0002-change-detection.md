@@ -178,6 +178,15 @@ agent starts ──▶ replay each root from its cursor until HistoryDone
   volumes, SFTP, paired Macs, Linux) all count as a change, which costs
   one full observation.
 
+Drives coming and going: the agent does not subscribe to DiskArbitration
+yet. A "When files change" pair whose folder is on an unmounted disk
+retries its watch every 5-second scheduler tick and syncs once the disk
+is back, as it may have changed while away; a scheduled pair that is
+due rechecks a missing folder every 30 s. The spike measured
+DiskArbitration callbacks at 80 to 300 ms, so subscribing would save at
+most one tick, and runs already stop on a vanished root at the next
+batch's identity check.
+
 ## Consequences
 
 - `foldover-watch` owns change detection and mount lifecycle in the agent;
