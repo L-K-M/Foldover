@@ -79,7 +79,7 @@ impl PairRun {
         commit: &mut impl FnMut(u64, Commit<'_>) -> Result<(), crate::Error>,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<UndoReport, RunError> {
-        let options = self.pair.draft().options();
+        let options = &self.options;
         for side in [Side::Left, Side::Right] {
             if options.durability() == Durability::Full
                 && matches!(self.endpoints.endpoint(side), Endpoint::Sftp(_))

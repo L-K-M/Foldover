@@ -17,16 +17,20 @@ private actor PairFixtureClient: PairClient {
     private let outcome: SaveOutcome
     private let warnings: [PairReadinessWarning]
     private let servers: [NearbyServer]
+    private let listings: [String: ServerListing]
+    private(set) var browsed: [String] = []
     private(set) var updatedRevision: UInt64?
     private(set) var savedSettings: PairSettings?
     private(set) var removedRevision: UInt64?
 
     init(catalog: [SyncPair] = [], outcome: SaveOutcome = .succeeds,
-         warnings: [PairReadinessWarning] = [], servers: [NearbyServer] = []) {
+         warnings: [PairReadinessWarning] = [], servers: [NearbyServer] = [],
+         listings: [String: ServerListing] = [:]) {
         self.catalog = catalog
         self.outcome = outcome
         self.warnings = warnings
         self.servers = servers
+        self.listings = listings
     }
 
     func page(after: String?) async throws -> PairCatalogPage {
@@ -56,6 +60,12 @@ private actor PairFixtureClient: PairClient {
     func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { warnings }
 
     func servers() async throws -> [NearbyServer] { servers }
+
+    func browse(_ locator: String) async throws -> ServerListing {
+        browsed.append(locator)
+        guard let listing = listings[locator] else { throw PairFixtureError.changedElsewhere }
+        return listing
+    }
 }
 
 @MainActor
@@ -102,6 +112,7 @@ private actor DeferredPairClient: PairClient {
     func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
     func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { [] }
     func servers() async throws -> [NearbyServer] { [] }
+    func browse(_ locator: String) async throws -> ServerListing { throw PairFixtureError.changedElsewhere }
 }
 
 @MainActor
@@ -129,6 +140,7 @@ private actor FailingPairPageClient: PairClient {
     func remove(_ pair: SyncPair) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { throw PairFixtureError.changedElsewhere }
     func servers() async throws -> [NearbyServer] { throw PairFixtureError.changedElsewhere }
+    func browse(_ locator: String) async throws -> ServerListing { throw PairFixtureError.changedElsewhere }
 }
 
 @MainActor
@@ -481,6 +493,9 @@ private actor WarningOnAttributesClient: PairClient {
         settings.options.syncExtendedAttributes ? [warning] : []
     }
     func servers() async throws -> [NearbyServer] { [] }
+    func browse(_ locator: String) async throws -> ServerListing {
+        ServerListing(locator: locator, parent: nil, folders: [])
+    }
 }
 
 @MainActor
@@ -540,6 +555,7 @@ private actor RecordsRefusingClient: PairClient {
         return spared ? [] : [PairReadinessWarning(side: .b, kind: .recordsUnsupported)]
     }
     func servers() async throws -> [NearbyServer] { [] }
+    func browse(_ locator: String) async throws -> ServerListing { throw PairFixtureError.changedElsewhere }
 }
 
 @MainActor
@@ -569,6 +585,46 @@ func pairEditorListsServersFoundNearbyAndBuildsTheirConnectURLs() async {
     #expect(editor.nearbyServers == [nas, old])
     #expect(editor.serverURL(nas)?.absoluteString == "smb://nas.local")
     #expect(editor.serverURL(old)?.absoluteString == "smb://old.local:139")
+}
+
+@MainActor
+@Test
+func pairEditorWalksServerFoldersAndChoosesOne() async throws {
+    let home = ServerListing(
+        locator: "sftp://nas/home/alice", parent: "sftp://nas/home",
+        folders: [.init(name: "Photos", locator: "sftp://nas/home/alice/Photos")]
+    )
+    let photos = ServerListing(locator: "sftp://nas/home/alice/Photos", parent: home.locator, folders: [])
+    let client = PairFixtureClient(listings: ["sftp://nas/~": home, photos.locator: photos])
+    let editor = PairEditorViewModel(store: PairStore(client: client))
+
+    editor.serverLocator = "nas.local"
+    await editor.browseServer()
+    #expect(editor.serverBrowseError != nil)
+    #expect(await client.browsed.isEmpty)
+
+    editor.serverLocator = " sftp://nas/~ "
+    await editor.browseServer()
+    #expect(editor.serverListing == home)
+    #expect(editor.serverBrowseError == nil)
+    #expect(!editor.isBrowsingServer)
+
+    let folder = try #require(editor.serverListing?.folders.first)
+    await editor.openServerFolder(folder.locator)
+    #expect(editor.serverListing == photos)
+    #expect(editor.useServerFolder(side: .right))
+    #expect(editor.right == SelectedFolder(bytes: Data("sftp://nas/home/alice/Photos".utf8)))
+
+    // A server that does not answer leaves the last listing up.
+    await editor.openServerFolder("sftp://nas/gone")
+    #expect(editor.serverBrowseError != nil)
+    #expect(editor.serverListing == photos)
+
+    editor.resetServerBrowser()
+    #expect(editor.serverListing == nil && editor.serverLocator.isEmpty && editor.serverBrowseError == nil)
+    #expect(!editor.useServerFolder(side: .left))
+    #expect(editor.serverBrowseError != nil)
+    #expect(editor.left == nil)
 }
 
 @MainActor

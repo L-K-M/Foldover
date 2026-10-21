@@ -403,6 +403,11 @@ uint64_t uniffi_foldover_ffi_fn_func_start_mac_to_mac(void
 uint64_t uniffi_foldover_ffi_fn_func_stop_sharing(RustBuffer id
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_BROWSE_SERVER
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_BROWSE_SERVER
+uint64_t uniffi_foldover_ffi_fn_func_browse_server(RustBuffer root
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_NEARBY_FILE_SERVERS
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_NEARBY_FILE_SERVERS
 uint64_t uniffi_foldover_ffi_fn_func_nearby_file_servers(void
@@ -891,6 +896,12 @@ uint16_t uniffi_foldover_ffi_checksum_func_start_mac_to_mac(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_STOP_SHARING
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_STOP_SHARING
 uint16_t uniffi_foldover_ffi_checksum_func_stop_sharing(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_BROWSE_SERVER
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_BROWSE_SERVER
+uint16_t uniffi_foldover_ffi_checksum_func_browse_server(void
     
 );
 #endif

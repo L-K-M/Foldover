@@ -34,6 +34,9 @@ private actor OnePairClient: PairClient {
     func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
     func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { [] }
     func servers() async throws -> [NearbyServer] { [] }
+    func browse(_ locator: String) async throws -> ServerListing {
+        ServerListing(locator: locator, parent: nil, folders: [])
+    }
 }
 
 /// Every run finishes at once having copied two files.
@@ -102,6 +105,9 @@ private actor EmptyCatalogClient: PairClient {
     func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
     func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { [] }
     func servers() async throws -> [NearbyServer] { [] }
+    func browse(_ locator: String) async throws -> ServerListing {
+        ServerListing(locator: locator, parent: nil, folders: [])
+    }
 }
 
 private enum MonitorFixtureError: Error { case unreachable }
@@ -193,6 +199,9 @@ private actor CatalogProbe: PairClient {
     }
     func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { [] }
     func servers() async throws -> [NearbyServer] { [] }
+    func browse(_ locator: String) async throws -> ServerListing {
+        ServerListing(locator: locator, parent: nil, folders: [])
+    }
 
     func calls() async -> Int { await probe.count }
 }

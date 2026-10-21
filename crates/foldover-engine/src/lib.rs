@@ -4,6 +4,7 @@
 //! foldover-state and foldover-host. See PLAN.md §4.4.
 
 mod archive;
+mod browse;
 mod catch_up;
 mod configuration;
 mod conflict;
@@ -22,6 +23,7 @@ mod plan_properties;
 pub use archive::{
     ArchiveError, ArchiveErrorKind, ArchivedItem, ArchivedRun, PairArchive, PutBackReport,
 };
+pub use browse::{ServerFolder, browse_server};
 pub use catch_up::{changed_while_away, quiet_cursors};
 pub use configuration::{Engine, Error, ErrorKind};
 pub use conflict::{KeepBothError, keep_both};

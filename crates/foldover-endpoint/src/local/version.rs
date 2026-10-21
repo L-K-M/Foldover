@@ -147,9 +147,14 @@ fn metadata_digest(observed: &Observed<'_>, policy: MetadataPolicy) -> Digest {
             hasher.update(&[0]);
         }
         Some(attributes) => {
+            let quarantine = policy.quarantine() == Propagation::Sync;
             let tracked: Vec<_> = attributes
                 .iter()
-                .filter(|attribute| attribute.role == AttributeRole::Synced)
+                .filter(|attribute| match attribute.role {
+                    AttributeRole::Synced => true,
+                    AttributeRole::Quarantine => quarantine,
+                    _ => false,
+                })
                 .collect();
             hasher.update(&[1]);
             hasher.update(&(tracked.len() as u64).to_le_bytes());
@@ -228,6 +233,23 @@ mod tests {
 
     fn version(observed: &Observed<'_>) -> EntryVersion {
         entry_version(Payload::File(digest(1)), observed, ALL)
+    }
+
+    /// PLAN.md §4.10: Gatekeeper's mark counts only in runs it travels in,
+    /// so a network volume without it never looks changed.
+    #[test]
+    fn quarantine_counts_only_where_it_travels() {
+        const QUARANTINE: &[u8] = b"com.apple.quarantine";
+        let marked = file(vec![attribute(AttributeRole::Quarantine, QUARANTINE, 7)]);
+        let plain = file(Vec::new());
+        let left_alone = ALL.with_quarantine(Propagation::Ignore);
+        let at = |observed, policy| entry_version(Payload::File(digest(1)), observed, policy);
+        assert_ne!(at(&marked, ALL), at(&plain, ALL));
+        assert_eq!(at(&marked, left_alone), at(&plain, left_alone));
+        let ignored =
+            MetadataPolicy::new(Propagation::Sync, Propagation::Ignore, Propagation::Sync);
+        assert_eq!(ignored.quarantine(), Propagation::Ignore);
+        assert_eq!(ALL.quarantine(), Propagation::Sync);
     }
 
     #[test]

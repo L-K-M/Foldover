@@ -51,6 +51,8 @@ pub enum Error {
     CanaryExcluded,
     #[error("That folder is inside, or holds, a folder already shared with that Mac")]
     ShareOverlap,
+    #[error("The folder's path on the server is too long for Foldover")]
+    ServerPathTooLong,
     #[error(
         "Only a Backup's target can go without Foldover's records, and not a folder on another Mac"
     )]
@@ -81,6 +83,7 @@ impl Error {
             | Self::DurabilityUnsupported
             | Self::InvalidShareName
             | Self::CanaryExcluded
+            | Self::ServerPathTooLong
             | Self::RecordsRequired => ErrorKind::Invalid,
             Self::Roots(_) | Self::Endpoint(_) | Self::CatalogUnavailable { .. } => {
                 ErrorKind::Unavailable
