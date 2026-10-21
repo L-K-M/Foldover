@@ -81,6 +81,35 @@ impl SftpEndpoint {
         }
     }
 
+    /// `stored` in the spelling its folder lists. A server that ignores
+    /// normalization, as a Mac's does, finds an entry by either
+    /// spelling, so only the listing tells which one the entry has.
+    pub(super) fn listed(&self, stored: &[u8]) -> Vec<u8> {
+        let (Some(parent), name) = split(stored) else {
+            return stored.to_vec();
+        };
+        if !respellable(name) {
+            return stored.to_vec();
+        }
+        let parent = match parent.is_empty() {
+            true => b"/".as_slice(),
+            false => parent,
+        };
+        let Ok(entries) = self.session().read_dir(parent) else {
+            return stored.to_vec();
+        };
+        // Where both spellings are stored, as given wins.
+        let names: Vec<Vec<u8>> = entries.into_iter().map(|(name, _)| name).collect();
+        if names.iter().any(|listed| listed == name) {
+            return stored.to_vec();
+        }
+        let composed = compose(name);
+        names
+            .into_iter()
+            .find(|listed| compose(listed) == composed)
+            .map_or_else(|| stored.to_vec(), |listed| join(parent, &listed))
+    }
+
     /// Where a new entry at `path` goes: in its parent as stored, under
     /// its composed name.
     pub(super) fn fresh(&self, path: &[u8]) -> Vec<u8> {
