@@ -58,6 +58,18 @@ struct PairEditorView: View {
                     ForEach(PairMode.allCases, id: \.self) { mode in Text(mode.title).tag(mode) }
                 }
                 Text(viewModel.mode.explanation).foregroundStyle(.secondary)
+                if let warning = viewModel.recordsWarning {
+                    Text(warning)
+                        .font(.callout).foregroundStyle(.orange)
+                        .textSelection(.enabled)
+                }
+                if viewModel.offersKeepingNothing {
+                    Toggle(isOn: $viewModel.keepsNothingInTarget) {
+                        Text(viewModel.keepingNothingTitle)
+                    }
+                    Text(viewModel.keepingNothingExplanation)
+                        .font(.callout).foregroundStyle(.secondary)
+                }
                 Section("Metadata") {
                     Toggle("Modification dates", isOn: $viewModel.options.syncModificationTimes)
                     Toggle("Tags, Finder info and other extended attributes",

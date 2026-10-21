@@ -18,12 +18,20 @@ final class PairEditorViewModel: Identifiable {
     private let macs: MacToMacStore?
     private let editing: SyncPair?
     var name: String
-    var mode: PairMode
+    var mode: PairMode {
+        didSet {
+            guard mode != oldValue else { return }
+            // Only a Backup's target may go without records.
+            if backupTarget == nil { options.records = .both }
+            queueReadinessCheck()
+        }
+    }
     var options: PairOptions {
         didSet {
             if options.syncModificationTimes != oldValue.syncModificationTimes
                 || options.syncExtendedAttributes != oldValue.syncExtendedAttributes
-                || options.syncPermissions != oldValue.syncPermissions {
+                || options.syncPermissions != oldValue.syncPermissions
+                || options.records != oldValue.records {
                 queueReadinessCheck()
             }
         }
@@ -34,8 +42,11 @@ final class PairEditorViewModel: Identifiable {
     private(set) var errorMessage: String?
     private(set) var savedPairID: String?
     /// What the agent says will not work as expected with the picked
-    /// folders (PLAN.md §3.6); warnings never block saving.
+    /// folders (PLAN.md §3.6); these never block saving, unlike
+    /// `recordsWarning`.
     private(set) var readinessWarnings: [String] = []
+    /// Folders that cannot hold Foldover's `.foldover` records.
+    private(set) var recordsRefused: Set<FolderSide> = []
     /// SMB servers found on the local network (PLAN.md §3.8); empty
     /// until the browse answers.
     private(set) var nearbyServers: [NearbyServer] = []
@@ -66,7 +77,56 @@ final class PairEditorViewModel: Identifiable {
     }
 
     var title: String { editing == nil ? String(localized: "New Pair") : String(localized: "Edit Pair") }
-    var canSave: Bool { !isSaving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && left != nil && right != nil && durabilityWarning == nil && canaryWarning == nil && dailyWarning == nil }
+    var canSave: Bool { !isSaving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && left != nil && right != nil && durabilityWarning == nil && canaryWarning == nil && dailyWarning == nil && recordsWarning == nil }
+
+    /// The folder a Backup copies to; nil for Sync and Mirror.
+    private var backupTarget: FolderSide? {
+        switch mode {
+        case .backupLeft: .b
+        case .backupRight: .a
+        case .sync, .mirrorLeft, .mirrorRight: nil
+        }
+    }
+
+    /// The choice to keep nothing in a Backup's target, offered once the
+    /// target cannot hold Foldover's records, or once made.
+    var offersKeepingNothing: Bool {
+        guard let target = backupTarget else { return false }
+        return recordsRefused.contains(target) || options.records == .sourceOnly
+    }
+
+    var keepsNothingInTarget: Bool {
+        get { options.records == .sourceOnly }
+        set { options.records = newValue ? .sourceOnly : .both }
+    }
+
+    var keepingNothingTitle: String {
+        String(localized: "Keep nothing in \(PairSyncViewModel.folderName(backupTarget ?? .b))")
+    }
+
+    /// What a Backup target without records gives up (PLAN.md §3.6).
+    var keepingNothingExplanation: String {
+        let target = PairSyncViewModel.folderName(backupTarget ?? .b)
+        return String(localized: "Foldover keeps no .foldover folder in \(target): files a sync replaces there are deleted, not archived, Undo isn't available, and another Mac syncing to it at the same time goes unnoticed.")
+    }
+
+    /// A folder that cannot hold Foldover's records can only be a
+    /// Backup's target that keeps none (PLAN.md §3.6); until it is,
+    /// saving is blocked, since every sync would fail.
+    var recordsWarning: String? {
+        let refused = [FolderSide.a, .b].filter { side in
+            recordsRefused.contains(side) && !(side == backupTarget && options.records == .sourceOnly)
+        }
+        if refused.count > 1 {
+            return String(localized: "Neither folder can hold Foldover's .foldover folder, so they cannot be paired: a Backup's source needs one.")
+        }
+        guard let refused = refused.first else { return nil }
+        let name = PairSyncViewModel.folderName(refused)
+        if refused == backupTarget {
+            return String(localized: "\(name) can't hold Foldover's .foldover folder. To back up to it, turn on “Keep nothing in \(name)”.")
+        }
+        return String(localized: "\(name) can't hold Foldover's .foldover folder, so it can only be a Backup's target. Choose a Backup to \(name), then keep nothing in it.")
+    }
 
     /// Exclusion rules as editable text, one per line.
     var filterText: String {
@@ -317,6 +377,9 @@ final class PairEditorViewModel: Identifiable {
         if let canary = options.canary {
             clauses.append(String(localized: "the canary file \(String(decoding: canary, as: UTF8.self)) must stay unchanged in both folders"))
         }
+        if options.records == .sourceOnly, let target = backupTarget {
+            clauses.append(String(localized: "files replaced in \(PairSyncViewModel.folderName(target)) are deleted, not archived"))
+        }
         return clauses
     }
 
@@ -543,11 +606,14 @@ final class PairEditorViewModel: Identifiable {
         let generation = checkGeneration
         guard let left, let right else {
             readinessWarnings = []
+            recordsRefused = []
             return
         }
         let settings = PairSettings(name: name, left: left, right: right, mode: mode, options: options)
         guard let warnings = try? await store.check(settings), generation == checkGeneration else { return }
-        readinessWarnings = warnings.map(text)
+        // Refused records get their own, blocking warning.
+        recordsRefused = Set(warnings.filter { $0.kind == .recordsUnsupported }.map(\.side))
+        readinessWarnings = warnings.compactMap(text)
     }
 
     private func queueReadinessCheck() {
@@ -560,7 +626,7 @@ final class PairEditorViewModel: Identifiable {
         await checkTask?.value
     }
 
-    private func text(for warning: PairReadinessWarning) -> String {
+    private func text(for warning: PairReadinessWarning) -> String? {
         let side = warning.side
         let other: FolderSide = side == .a ? .b : .a
         switch warning.kind {
@@ -572,10 +638,19 @@ final class PairEditorViewModel: Identifiable {
             return String(localized: "\(PairSyncViewModel.folderName(side)) cannot keep tags or other extended attributes; they will not sync to it.")
         case .namesDiffer:
             return String(localized: "\(PairSyncViewModel.folderName(side)) ignores the case of names and \(PairSyncViewModel.folderName(other)) does not: names that differ only in case become conflicts to rename.")
+        case .recordsUnsupported:
+            // Shown as `recordsWarning` instead.
+            return nil
         }
     }
 
     func save() async -> Bool {
+        guard !isSaving else { return false }
+        // A folder that refuses records must be known before saving, or a
+        // pair that can never sync slips through while the check runs.
+        isSaving = true
+        await checkTask?.value
+        isSaving = false
         guard canSave, let left, let right else { return false }
         isSaving = true
         errorMessage = nil

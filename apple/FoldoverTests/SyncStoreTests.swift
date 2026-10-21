@@ -1867,6 +1867,25 @@ func stoppedUndosNeverReadAsComplete() async {
 
 @MainActor
 @Test
+func backupsThatKeepNothingInTheTargetOfferNoUndo() async {
+    let result = RunSummary(cancelled: false, copied: 2, updated: 0, archived: 0, recovered: 0,
+                            conflicts: 0, failures: [], failureCount: 0,
+                            archive: "2026-10-18T09-30-00.123Z")
+    var options = PairOptions.defaults
+    options.records = .sourceOnly
+    let backup = SyncPair(id: pair().id, revision: 1, settings: PairSettings(
+        name: "Photos", left: SelectedFolder(bytes: Data("/a".utf8)),
+        right: SelectedFolder(bytes: Data("/b".utf8)), mode: .backupLeft, options: options
+    ))
+    let store = SyncStore(client: ScriptedSyncClient([.finished(result)]), pollInterval: .milliseconds(1))
+    let viewModel = PairSyncViewModel(pair: backup, store: store, pairs: catalog(), agentConnected: true)
+
+    await viewModel.refresh()
+    #expect(!viewModel.canUndo)
+}
+
+@MainActor
+@Test
 func syncsThatChangedNothingOfferNoUndo() async {
     let nothing = RunSummary(cancelled: false, copied: 0, updated: 0, archived: 0, recovered: 0,
                              conflicts: 0, failures: [], failureCount: 0,

@@ -43,6 +43,9 @@ pub enum ReadinessWarning {
     /// One side ignores name case and the other does not; this side
     /// ignores it.
     NamesDiffer { side: Side },
+    /// This side's folder cannot hold Foldover's `.foldover` records, so
+    /// it can only be a Backup target that keeps none there.
+    RecordsUnsupported { side: Side },
 }
 
 impl Engine {
@@ -81,6 +84,10 @@ impl Engine {
             let syncs = draft.options().metadata().extended_attributes() == Propagation::Sync;
             if syncs && !keeps_extended_attributes(&endpoint)? {
                 warnings.push(ReadinessWarning::MetadataUnsupported { side });
+            }
+            // A Backup target already keeping no records is not written to.
+            if draft.unrecorded() != Some(side) && endpoint.probe_records().is_err() {
+                warnings.push(ReadinessWarning::RecordsUnsupported { side });
             }
             matching[side as usize] = Some(endpoint.name_matching());
         }
@@ -124,7 +131,7 @@ fn case_differs(left: NameMatching, right: NameMatching) -> Option<Side> {
 mod tests {
     use super::*;
     use foldover_endpoint::cloud_provider;
-    use foldover_types::{LocalRoot, SyncMode, UnicodeMatching};
+    use foldover_types::{FolderRecords, LocalRoot, PairOptions, SyncMode, UnicodeMatching};
     use std::fs;
 
     fn root(path: &Path) -> LocalRoot {
@@ -184,6 +191,29 @@ mod tests {
         let draft =
             PairDraft::new("Pair".into(), root(&left), root(&right), SyncMode::Sync).unwrap();
         assert_eq!(engine.check_pair(&draft).unwrap(), []);
+    }
+
+    #[test]
+    fn a_folder_without_room_for_records_is_named_until_a_backup_spares_it() {
+        let (temporary, engine) = engine();
+        let left = temporary.path().join("left");
+        let right = temporary.path().join("right");
+        fs::create_dir(&left).unwrap();
+        fs::create_dir(&right).unwrap();
+        // A file where `.foldover` would go stands in for a share that
+        // refuses the folder.
+        fs::write(right.join(".foldover"), b"").unwrap();
+        let backup = SyncMode::Backup { source: Side::Left };
+        let draft = PairDraft::new("Pair".into(), root(&left), root(&right), backup).unwrap();
+        assert_eq!(
+            engine.check_pair(&draft).unwrap(),
+            [ReadinessWarning::RecordsUnsupported { side: Side::Right }]
+        );
+
+        let options = PairOptions::default().with_records(FolderRecords::SourceOnly);
+        let spared = draft.with_options(options);
+        assert_eq!(engine.check_pair(&spared).unwrap(), []);
+        assert!(!left.join(".foldover").exists());
     }
 
     #[test]

@@ -27,6 +27,7 @@ use foldover_types::{
 };
 
 use crate::lease::{LEASE_LIMIT, LockFile};
+use crate::local::Archiving;
 use crate::local::archive::{ARCHIVE_ROOT, archive_time, date_name, sibling_name};
 use crate::local::filter::{IGNORE_FILE, IGNORE_FILE_LIMIT, parse_ignore_file};
 use crate::local::version::{Observed, Payload, entry_version, metadata_version};
@@ -276,6 +277,33 @@ impl SftpEndpoint {
         EndpointId::from_hex(text)
             .map(Some)
             .ok_or(ScanError::InvalidIdentity)
+    }
+
+    /// Whether this folder can hold Foldover's records, as a Backup
+    /// target without them need not (PLAN.md §3.6). A folder with an
+    /// identity holds them; otherwise a probe file is uploaded to
+    /// `.foldover` and removed, with `.foldover` itself if it was new.
+    pub fn probe_records(&self) -> Result<(), ApplyError> {
+        if self.identity()?.is_some() {
+            return Ok(());
+        }
+        let internal = SyncPath::try_from(INTERNAL_DIRECTORY).expect("the internal path is valid");
+        let existed = self.attributes(&internal)?.is_some();
+        self.make_directories(INTERNAL_DIRECTORY, PRIVATE_DIRECTORY)
+            .map_err(|source| write_error(&internal, source))?;
+        let mut probe = INTERNAL_DIRECTORY.to_vec();
+        probe.extend_from_slice(format!("/probe-{}", uuid::Uuid::new_v4().simple()).as_bytes());
+        let uploaded = self.upload(&probe, PRIVATE_FILE, Durability::Standard, |sink| sink(b""));
+        let mut session = self.session();
+        if let Ok(temporary) = &uploaded {
+            let _ = session.remove_file(temporary);
+        }
+        if !existed {
+            let _ = session.remove_directory(&self.remote(INTERNAL_DIRECTORY));
+        }
+        uploaded
+            .map(|_| ())
+            .map_err(|source| write_error(&internal, source))
     }
 
     /// The root's identity, writing a new one if it has none.
@@ -743,7 +771,7 @@ impl SftpEndpoint {
     }
 
     /// Move a staged temporary to `path`. Creating never replaces; a
-    /// replacement first moves the current entry to the run's archive.
+    /// replacement first sets the current entry aside.
     pub(crate) fn place(
         &self,
         temporary: &[u8],
@@ -757,7 +785,7 @@ impl SftpEndpoint {
                 let _ = self.session().remove_file(temporary);
                 return Err(ApplyError::DestinationChanged(path.clone()));
             }
-            if let Err(error) = self.archive(path, run) {
+            if let Err(error) = self.set_aside(path, run) {
                 let _ = self.session().remove_file(temporary);
                 return Err(error);
             }
@@ -775,8 +803,17 @@ impl SftpEndpoint {
         Ok(())
     }
 
-    /// Move `path` to the run's archive, creating its folders there.
-    fn archive(&self, path: &SyncPath, run: &RunScope) -> Result<(), ApplyError> {
+    /// Move `path` to the run's archive, creating its folders there, or
+    /// delete it where the run keeps no archive. Only files and links come
+    /// here: `remove` takes folders when empty, and `place` never replaces
+    /// a folder, since a file meeting one is a type conflict.
+    fn set_aside(&self, path: &SyncPath, run: &RunScope) -> Result<(), ApplyError> {
+        if run.archiving() == Archiving::Off {
+            return self
+                .session()
+                .remove_file(&self.remote(path.as_bytes()))
+                .map_err(|source| write_error(path, source));
+        }
         let archived = run.archive_path(path)?;
         if let Some(parent) = archived.parent() {
             self.make_directories(parent.as_bytes(), PRIVATE_DIRECTORY)
@@ -790,8 +827,8 @@ impl SftpEndpoint {
             .map_err(|source| write_error(path, source))
     }
 
-    /// Archive the entry at `path` for this run; folders are removed only
-    /// when empty.
+    /// Archive the entry at `path` for this run, or delete it where the
+    /// run keeps no archive; folders are removed only when empty.
     pub fn remove(
         &self,
         path: &SyncPath,
@@ -809,7 +846,7 @@ impl SftpEndpoint {
                 error => error,
             })?;
         if attributes.kind() != FileKind::Directory {
-            return self.archive(path, run);
+            return self.set_aside(path, run);
         }
         let remote = self.remote(path.as_bytes());
         let mut session = self.session();
@@ -822,10 +859,11 @@ impl SftpEndpoint {
         }
     }
 
-    /// Archive a temporary an interrupted write left behind.
+    /// Archive a temporary an interrupted write left behind, or delete it
+    /// where the run keeps no archive.
     pub fn recover_leftover(&self, leftover: &SyncPath, run: &RunScope) -> Result<(), ApplyError> {
         check_durability(run.options().durability(), leftover)?;
-        self.archive(leftover, run)
+        self.set_aside(leftover, run)
     }
 
     /// Give `path` new synced metadata; the content stays.

@@ -148,6 +148,18 @@ impl Endpoint {
         }
     }
 
+    /// Whether this folder can hold Foldover's records in `.foldover`.
+    /// Another Mac's folder always can: its agent keeps them.
+    pub fn probe_records(&self) -> Result<(), ApplyError> {
+        match self {
+            Self::Local(endpoint) => endpoint.probe_records(),
+            Self::Sftp(endpoint) => endpoint.probe_records(),
+            Self::Peer(_) => Ok(()),
+            #[cfg(feature = "simulation")]
+            Self::Memory(_) => Ok(()),
+        }
+    }
+
     pub fn ensure_identity(&self, durability: Durability) -> Result<EndpointId, ApplyError> {
         match self {
             Self::Local(endpoint) => endpoint.ensure_identity(durability),

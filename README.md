@@ -109,7 +109,10 @@ Modes: `sync`, `mirror-left`, `mirror-right`, `backup-left`, `backup-right`.
 The suffix selects the source. Options follow the mode:
 `--times`, `--attributes` and `--permissions` take `sync` or `ignore`
 (defaults: sync, sync, ignore); `--durability` takes `standard` (default) or
-`full`, which also survives power loss but is slower. `--schedule` takes
+`full`, which also survives power loss but is slower. `--records source`
+lets a `backup-*` target that cannot hold `.foldover` keep nothing: files
+replaced there are deleted, not archived, and Undo is unavailable
+(default `both`). `--schedule` takes
 `manual` (default), `changes` (sync shortly after files change, and hourly)
 or a number of minutes between automatic syncs, which start after the first
 sync you run yourself. `--exclude PATTERN` (repeatable) sets gitignore-style
