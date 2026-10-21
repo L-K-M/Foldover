@@ -238,7 +238,7 @@ impl Fingerprint {
     fn reread_after(&self) -> Duration {
         let hash = blake3::hash(&self.key);
         let spread = u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes"));
-        let half = REREAD.as_secs() / 2;
+        let half = (REREAD.as_secs() / 2).max(1);
         Duration::from_secs(half + spread % half)
     }
 
