@@ -1,8 +1,9 @@
-use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
@@ -38,6 +39,11 @@ const BACKUP_EXCLUSION: &str = "com.apple.metadata:com_apple_backup_excludeItem"
 /// `tmutil addexclusion` writes it.
 #[cfg(target_os = "macos")]
 const EXCLUDED_BY_BACKUPD: &[u8] = b"bplist00_\x10\x11com.apple.backupd\x08\0\0\0\0\0\0\x01\x01\0\0\0\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x1c";
+/// How long an open waits for the writer lock, and how often it tries: a
+/// child process this one starts holds a copy of the lock's descriptor
+/// until it runs its program, which a busy machine can stretch.
+const WRITER_WAIT: Duration = Duration::from_millis(500);
+const WRITER_RETRY: Duration = Duration::from_millis(20);
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary, schedule_time, schedule_days";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
@@ -514,9 +520,7 @@ impl Database {
         require_local(&held)?;
         exclude_from_backups(&held);
         let writer = private_file(&directory.join(WRITER_LOCK))?;
-        writer
-            .try_lock()
-            .map_err(|error| Error::WriterLocked(error.to_string()))?;
+        lock_writer(&writer)?;
         let path = directory.join(DATABASE_NAME);
         let file = private_file(&path)?;
         let shape = if file.metadata()?.len() == 0 {
@@ -923,6 +927,21 @@ fn current_user() -> u32 {
     rustix::process::geteuid().as_raw()
 }
 
+/// Take the writer lock, waiting briefly for a holder that is about to
+/// let go; another agent holds it for good and is refused.
+fn lock_writer(writer: &File) -> Result<(), Error> {
+    let deadline = Instant::now() + WRITER_WAIT;
+    loop {
+        match writer.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                thread::sleep(WRITER_RETRY);
+            }
+            Err(error) => return Err(Error::WriterLocked(error.to_string())),
+        }
+    }
+}
+
 fn private_file(path: &Path) -> Result<File, Error> {
     let file = OpenOptions::new()
         .read(true)
@@ -1147,6 +1166,24 @@ pub(super) mod tests {
             schedule_time: None,
             schedule_days: None,
         }
+    }
+
+    /// A child process this one starts holds a copy of the lock's
+    /// descriptor until it runs its program; an open in that moment waits
+    /// it out instead of reporting another agent.
+    #[test]
+    fn a_briefly_held_writer_lock_is_waited_for() {
+        let (directory, location) = location();
+        drop(Database::open(&location).unwrap());
+        let held = File::open(directory.path().join(WRITER_LOCK)).unwrap();
+        held.lock().unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(held);
+        });
+        let opened = Database::open(&location);
+        release.join().unwrap();
+        assert!(opened.is_ok(), "{:?}", opened.err());
     }
 
     #[test]
