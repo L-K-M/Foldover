@@ -81,6 +81,9 @@ jobs:
       - name: shellcheck scripts/*.sh
         run: shellcheck scripts/*.sh
 
+      - name: build.sh --install against a fake macOS toolchain
+        run: bash scripts/test-build-install.sh
+
   # Links, anchors, fences and tables in every tracked Markdown file, plus
   # every Mermaid diagram (tools/doccheck).
   docs:
@@ -141,6 +144,11 @@ jobs:
 
       - name: Update signature check
         run: bash scripts/test-verify-update.sh
+
+      # /bin/bash is 3.2 here, the oldest bash build.sh supports; the
+      # shellcheck job runs the same test on Linux's bash 5.
+      - name: build.sh --install on bash 3.2
+        run: /bin/bash scripts/test-build-install.sh
 
       # Builds the arm64 FoldoverCoreFFI.xcframework plus the Swift
       # bindings; the app links it below.
