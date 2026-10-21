@@ -43,9 +43,9 @@ pub use foldover_proto::local::{
 };
 pub use foldover_proto::local::{PeerShareList, PeerShareRecord, ShareList, ShareRecord};
 pub use foldover_types::{
-    DailySchedule, Durability, Filters, InvalidPair, InvalidReviewToken, LocalRoot, MetadataPolicy,
-    PairConfig, PairDraft, PairId, PairOptions, PairRoot, Propagation, ReviewToken, Schedule,
-    ScheduleInterval, Side, SyncMode, SyncPath, TimeOfDay, Weekday, Weekdays,
+    DailySchedule, Durability, Filters, FolderRecords, InvalidPair, InvalidReviewToken, LocalRoot,
+    MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions, PairRoot, Propagation, ReviewToken,
+    Schedule, ScheduleInterval, Side, SyncMode, SyncPath, TimeOfDay, Weekday, Weekdays,
 };
 pub use foldover_types::{DeviceId, ShareId};
 use serde_json::Value;

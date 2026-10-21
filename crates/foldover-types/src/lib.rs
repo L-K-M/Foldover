@@ -24,8 +24,8 @@ pub use endpoint_id::EndpointId;
 pub use metadata_policy::{MetadataPolicy, Propagation};
 pub use names::{CaseMatching, NameMatching, UnicodeMatching};
 pub use options::{
-    DailySchedule, Durability, Filters, LocalDateTime, PairOptions, Schedule, ScheduleInterval,
-    TimeOfDay, Weekday, Weekdays,
+    DailySchedule, Durability, Filters, FolderRecords, LocalDateTime, PairOptions, Schedule,
+    ScheduleInterval, TimeOfDay, Weekday, Weekdays,
 };
 pub use review::{InvalidReviewToken, ReviewToken};
 pub use root::{PairRoot, PeerRoot, SftpRoot};

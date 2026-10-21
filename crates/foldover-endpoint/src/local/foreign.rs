@@ -6,8 +6,8 @@ use foldover_fs::{Chunks, ForeignMetadata, NativeMetadata, Placement, Resume, Wr
 use foldover_types::{Digest, EntryContent, EntryVersion, SyncPath};
 
 use super::{
-    ApplyError, Expected, LocalEndpoint, LocalEntry, ObservedEntry, Payload, RunScope, ScanControl,
-    ScanError, entry_version, metadata_version, observed,
+    ApplyError, Archiving, Expected, LocalEndpoint, LocalEntry, ObservedEntry, Payload, RunScope,
+    ScanControl, ScanError, entry_version, metadata_version, observed,
 };
 
 /// What a streamed copy carries besides data: mode and time, and the
@@ -131,7 +131,8 @@ impl LocalEndpoint {
 
     /// Receive a file from pushed data, after what `resume` takes from a
     /// kept partial. Its content must come out as `resume.content`;
-    /// anything it replaces is archived for the run.
+    /// anything it replaces is archived for the run. A run that keeps no
+    /// archive here keeps no partial either.
     pub(crate) fn receive_file(
         &self,
         path: &SyncPath,
@@ -142,17 +143,21 @@ impl LocalEndpoint {
         produce: impl FnOnce(Chunks<'_>) -> std::io::Result<()>,
     ) -> Result<EntryVersion, ApplyError> {
         let options = run.options();
-        let staged = self
-            .root
-            .stage_resumable(
+        let staged = match run.archiving() {
+            Archiving::Kept => self.root.stage_resumable(
                 path,
                 resume,
                 carried.metadata,
                 carried.native,
                 options,
                 produce,
-            )
-            .map_err(|source| write_error(path, source))?;
+            ),
+            Archiving::Off => {
+                self.root
+                    .stage_stream(path, carried.metadata, carried.native, options, produce)
+            }
+        }
+        .map_err(|source| write_error(path, source))?;
         let staged_metadata = staged
             .metadata()
             .map_err(|source| write_error(path, source.into()))?;
@@ -175,11 +180,13 @@ impl LocalEndpoint {
         let placement = match self.placement(path, destination) {
             Ok(placement) => placement,
             Err(error) => {
-                let _ = self.root.keep_staged(
-                    staged.into_staged(),
-                    &resume.content,
-                    staged_metadata.size(),
-                );
+                if run.archiving() == Archiving::Kept {
+                    let _ = self.root.keep_staged(
+                        staged.into_staged(),
+                        &resume.content,
+                        staged_metadata.size(),
+                    );
+                }
                 return Err(error);
             }
         };
@@ -265,7 +272,7 @@ impl LocalEndpoint {
     }
 
     /// Put a staged entry at `path`: create, or replace the verified
-    /// `destination` and archive it.
+    /// `destination` and set it aside.
     fn place_received(
         &self,
         staged: foldover_fs::Staged,
@@ -311,9 +318,7 @@ impl LocalEndpoint {
                 source => write_error(path, source),
             })?;
         if let Some(displaced) = displaced {
-            self.root
-                .archive_displaced(displaced, &run.archive_path(path)?, durability)
-                .map_err(|source| write_error(path, source))?;
+            self.set_aside(displaced, path, run)?;
         }
         Ok(())
     }

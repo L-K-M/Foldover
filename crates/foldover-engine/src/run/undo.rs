@@ -87,6 +87,10 @@ impl PairRun {
                 return Err(RunError::UnsupportedDurability { side });
             }
         }
+        // Put back needs the archive a folder without records lacks.
+        if let Some(side) = self.pair.draft().unrecorded() {
+            return Err(RunError::UndoUnavailable { side });
+        }
         // Only a recorded first run can have written anything.
         let (Some(left), Some(right)) = (
             self.identities.side(Side::Left),

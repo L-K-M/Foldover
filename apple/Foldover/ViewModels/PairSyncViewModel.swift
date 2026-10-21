@@ -107,9 +107,11 @@ struct PairSyncViewModel {
     }
     /// The shown result is a sync that copied or archived something, which
     /// Undo can reverse while the agent still holds its journal; metadata
-    /// updates alone cannot be undone.
+    /// updates alone cannot be undone. A Backup target that keeps nothing
+    /// has no archive to put files back from.
     var canUndo: Bool {
-        guard canStart, case .finished(let result) = state else { return false }
+        guard canStart, pair.settings.options.records == .both,
+              case .finished(let result) = state else { return false }
         return result.copied + result.archived > 0
     }
     var canCancel: Bool {

@@ -139,6 +139,15 @@ pub enum WriteDurability {
     Full,
 }
 
+/// Which folders hold Foldover's records (`.foldover`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FolderRecords {
+    Both,
+    /// Only a Backup's source: its target cannot hold `.foldover`, and
+    /// what a sync replaces there is deleted, not archived.
+    SourceOnly,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct LocalPairOptions {
     pub modification_times: MetadataSync,
@@ -156,6 +165,7 @@ pub struct LocalPairOptions {
     /// A file kept unchanged in both folders that proves the right ones
     /// are mounted.
     pub canary: Option<Vec<u8>>,
+    pub records: FolderRecords,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -258,6 +268,10 @@ impl From<&foldover_client::PairOptions> for LocalPairOptions {
             size_limit: options.filters().size_limit(),
             age_limit: options.filters().age_limit(),
             canary: options.canary().map(|path| path.as_bytes().to_vec()),
+            records: match options.records() {
+                foldover_client::FolderRecords::Both => FolderRecords::Both,
+                foldover_client::FolderRecords::SourceOnly => FolderRecords::SourceOnly,
+            },
         }
     }
 }
@@ -308,6 +322,12 @@ impl TryFrom<LocalPairOptions> for foldover_client::PairOptions {
                 .transpose()
                 .map_err(|_| foldover_client::InvalidPair::Canary)?,
         )
+        .map(|converted| {
+            converted.with_records(match options.records {
+                FolderRecords::Both => foldover_client::FolderRecords::Both,
+                FolderRecords::SourceOnly => foldover_client::FolderRecords::SourceOnly,
+            })
+        })
     }
 }
 
@@ -431,6 +451,9 @@ pub enum ReadinessWarningKind {
     MetadataUnsupported,
     /// One side ignores name case and the other does not.
     NamesDiffer,
+    /// This folder cannot hold Foldover's `.foldover` records, so it can
+    /// only be a Backup target that keeps none.
+    RecordsUnsupported,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
@@ -462,6 +485,11 @@ impl From<foldover_client::PairWarning> for ReadinessWarning {
             Warning::NamesDiffer { side } => Self {
                 side: sync_side(side),
                 kind: ReadinessWarningKind::NamesDiffer,
+                provider: None,
+            },
+            Warning::RecordsUnsupported { side } => Self {
+                side: sync_side(side),
+                kind: ReadinessWarningKind::RecordsUnsupported,
                 provider: None,
             },
         }
@@ -528,6 +556,7 @@ mod tests {
                     size_limit: Some(1_000_000),
                     age_limit: Some(365),
                     canary: Some(b"docs/canary.txt".to_vec()),
+                    records: FolderRecords::SourceOnly,
                 },
             };
             let domain = foldover_client::PairDraft::try_from(draft.clone()).unwrap();
@@ -575,6 +604,16 @@ mod tests {
                 ReadinessWarning {
                     side: SyncSide::Left,
                     kind: ReadinessWarningKind::NamesDiffer,
+                    provider: None,
+                },
+            ),
+            (
+                PairWarning::RecordsUnsupported {
+                    side: PairSide::Right,
+                },
+                ReadinessWarning {
+                    side: SyncSide::Right,
+                    kind: ReadinessWarningKind::RecordsUnsupported,
                     provider: None,
                 },
             ),

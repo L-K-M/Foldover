@@ -1,6 +1,6 @@
 use std::{fmt, str::FromStr};
 
-use crate::{PairOptions, PairRoot, SyncMode};
+use crate::{FolderRecords, PairOptions, PairRoot, Side, SyncMode};
 
 pub const MAX_PAIR_NAME_BYTES: usize = 1024;
 pub const MAX_LOCAL_ROOT_BYTES: usize = 4096;
@@ -126,6 +126,15 @@ impl PairDraft {
     pub fn options(&self) -> &PairOptions {
         &self.options
     }
+
+    /// The folder Foldover keeps no records in: a Backup's target whose
+    /// records stay with the source.
+    pub fn unrecorded(&self) -> Option<Side> {
+        match (self.mode, self.options.records()) {
+            (SyncMode::Backup { source }, FolderRecords::SourceOnly) => Some(source.other()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -199,6 +208,32 @@ impl std::error::Error for InvalidPair {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_backup_target_goes_without_records() {
+        let draft = |mode| {
+            PairDraft::new(
+                "Pair".into(),
+                LocalRoot::from_bytes(b"/a".to_vec()).unwrap(),
+                LocalRoot::from_bytes(b"/b".to_vec()).unwrap(),
+                mode,
+            )
+            .unwrap()
+        };
+        let source_only = PairOptions::default().with_records(FolderRecords::SourceOnly);
+        let backup = SyncMode::Backup { source: Side::Left };
+        assert_eq!(
+            draft(backup).with_options(source_only.clone()).unrecorded(),
+            Some(Side::Right)
+        );
+        assert_eq!(draft(backup).unrecorded(), None);
+        for mode in [SyncMode::Sync, SyncMode::Mirror { source: Side::Left }] {
+            assert_eq!(
+                draft(mode).with_options(source_only.clone()).unrecorded(),
+                None
+            );
+        }
+    }
 
     #[test]
     fn rejects_invalid_configuration_and_preserves_raw_roots() {

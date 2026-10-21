@@ -1195,6 +1195,7 @@ public struct LocalPairOptions: Equatable, Hashable {
      * are mounted.
      */
     public var canary: Data?
+    public var records: FolderRecords
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1212,7 +1213,7 @@ public struct LocalPairOptions: Equatable, Hashable {
         /**
          * A file kept unchanged in both folders that proves the right ones
          * are mounted.
-         */canary: Data?) {
+         */canary: Data?, records: FolderRecords) {
         self.modificationTimes = modificationTimes
         self.extendedAttributes = extendedAttributes
         self.permissions = permissions
@@ -1222,6 +1223,7 @@ public struct LocalPairOptions: Equatable, Hashable {
         self.sizeLimit = sizeLimit
         self.ageLimit = ageLimit
         self.canary = canary
+        self.records = records
     }
 
     
@@ -1248,7 +1250,8 @@ public struct FfiConverterTypeLocalPairOptions: FfiConverterRustBuffer {
                 filters: FfiConverterSequenceString.read(from: &buf), 
                 sizeLimit: FfiConverterOptionUInt64.read(from: &buf), 
                 ageLimit: FfiConverterOptionUInt32.read(from: &buf), 
-                canary: FfiConverterOptionData.read(from: &buf)
+                canary: FfiConverterOptionData.read(from: &buf), 
+                records: FfiConverterTypeFolderRecords.read(from: &buf)
         )
     }
 
@@ -1262,6 +1265,7 @@ public struct FfiConverterTypeLocalPairOptions: FfiConverterRustBuffer {
         FfiConverterOptionUInt64.write(value.sizeLimit, into: &buf)
         FfiConverterOptionUInt32.write(value.ageLimit, into: &buf)
         FfiConverterOptionData.write(value.canary, into: &buf)
+        FfiConverterTypeFolderRecords.write(value.records, into: &buf)
     }
 }
 
@@ -2889,6 +2893,79 @@ public func FfiConverterTypeAutomationHold_lower(_ value: AutomationHold) -> Rus
 
 
 /**
+ * Which folders hold Foldover's records (`.foldover`).
+ */
+
+public enum FolderRecords: Equatable, Hashable {
+    
+    case both
+    /**
+     * Only a Backup's source: its target cannot hold `.foldover`, and
+     * what a sync replaces there is deleted, not archived.
+     */
+    case sourceOnly
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FolderRecords: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFolderRecords: FfiConverterRustBuffer {
+    typealias SwiftType = FolderRecords
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FolderRecords {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .both
+        
+        case 2: return .sourceOnly
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FolderRecords, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .both:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .sourceOnly:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFolderRecords_lift(_ buf: RustBuffer) throws -> FolderRecords {
+    return try FfiConverterTypeFolderRecords.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFolderRecords_lower(_ value: FolderRecords) -> RustBuffer {
+    return FfiConverterTypeFolderRecords.lower(value)
+}
+
+
+
+/**
  * The person's choice for automatic syncs in Low Power Mode.
  */
 
@@ -3224,6 +3301,11 @@ public enum ReadinessWarningKind: Equatable, Hashable {
      * One side ignores name case and the other does not.
      */
     case namesDiffer
+    /**
+     * This folder cannot hold Foldover's `.foldover` records, so it can
+     * only be a Backup target that keeps none.
+     */
+    case recordsUnsupported
 
 
 
@@ -3251,6 +3333,8 @@ public struct FfiConverterTypeReadinessWarningKind: FfiConverterRustBuffer {
         
         case 3: return .namesDiffer
         
+        case 4: return .recordsUnsupported
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -3269,6 +3353,10 @@ public struct FfiConverterTypeReadinessWarningKind: FfiConverterRustBuffer {
         
         case .namesDiffer:
             writeInt(&buf, Int32(3))
+        
+        
+        case .recordsUnsupported:
+            writeInt(&buf, Int32(4))
         
         }
     }

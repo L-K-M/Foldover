@@ -83,7 +83,10 @@ pub enum RunError {
         #[source]
         source: ScanError,
     },
-    #[error("Writing the {side:?} folder's identity failed: {source}")]
+    #[error(
+        "Writing the {side:?} folder's identity failed: {source}. A folder that cannot hold \
+         Foldover's .foldover folder can only be a Backup target that keeps none."
+    )]
     IdentityWrite {
         side: Side,
         #[source]
@@ -133,6 +136,11 @@ pub enum RunError {
     Cancelled,
     #[error("This pair has no sync to undo: its newest sync changed nothing or was undone")]
     NothingToUndo,
+    #[error(
+        "The {side:?} folder keeps no archive, so this pair's syncs cannot be undone; files \
+         replaced there are gone"
+    )]
+    UndoUnavailable { side: Side },
     #[error("{0}")]
     Lease(#[from] LeaseError),
 }
@@ -621,6 +629,10 @@ impl PairRun {
         // PLAN.md §3.5: idle sleep would stop a long scan or copy midway.
         let awake = foldover_host::keep_awake(draft.name()).map_err(RunError::KeepAwake)?;
         for side in [Side::Left, Side::Right] {
+            // A folder without records has an identity only this agent knows.
+            if draft.unrecorded() == Some(side) {
+                continue;
+            }
             let Some(recorded) = identities.side(side) else {
                 continue;
             };
@@ -948,6 +960,9 @@ impl PairRun {
         }
 
         let revision = self.pair.revision();
+        // PLAN.md §3.6: a Backup target without records gets an identity
+        // only this agent knows, and nothing of it is read or written there.
+        let unrecorded = self.pair.draft().unrecorded();
         let identities = match (
             self.identities.side(Side::Left),
             self.identities.side(Side::Right),
@@ -965,7 +980,13 @@ impl PairRun {
                 // side gets one written or adopted.
                 let ensure = |side: Side| {
                     let endpoint = self.endpoints.endpoint(side);
-                    let Some(recorded) = self.identities.side(side) else {
+                    let recorded = self.identities.side(side);
+                    if unrecorded == Some(side) {
+                        return Ok(recorded.unwrap_or_else(|| {
+                            EndpointId::from_bytes(*uuid::Uuid::new_v4().as_bytes())
+                        }));
+                    }
+                    let Some(recorded) = recorded else {
                         return endpoint
                             .ensure_identity(options.durability())
                             .map_err(|source| RunError::IdentityWrite { side, source });
@@ -986,6 +1007,13 @@ impl PairRun {
 
         let scope = RunScope::new(started, options.clone());
         let name = scope.name().to_owned();
+        // A folder without records keeps no archive: what the run replaces
+        // there is deleted.
+        let scope_on = |side| match unrecorded == Some(side) {
+            true => scope.clone().without_archive(),
+            false => scope.clone(),
+        };
+        let scopes = [scope_on(Side::Left), scope_on(Side::Right)];
         // PLAN.md §4: a run writes a folder only while it holds the
         // folder's lease, so two Macs never write one at once.
         let leases = self.take_leases(identities, &name, control, progress)?;
@@ -997,7 +1025,7 @@ impl PairRun {
                 archive: name.clone(),
                 ..RunReport::default()
             },
-            scope,
+            scopes,
             pending: Vec::new(),
             journal: Vec::new(),
             written: 0,
@@ -1021,7 +1049,7 @@ impl PairRun {
                 match self
                     .endpoints
                     .endpoint(side)
-                    .recover_leftover(leftover, &executor.scope)
+                    .recover_leftover(leftover, executor.scope(side))
                 {
                     Ok(()) => executor.report.recovered += 1,
                     Err(error) => executor.fail(leftover, &error),
@@ -1070,6 +1098,9 @@ impl PairRun {
         // Retention deletes data, so it runs only after a complete run.
         if executor.report.completion == Completion::Finished {
             for side in [Side::Left, Side::Right] {
+                if unrecorded == Some(side) {
+                    continue;
+                }
                 let endpoint = self.endpoints.endpoint(side);
                 match endpoint.prune_archive(ARCHIVE_RETENTION, started) {
                     Ok(pruned) => executor.report.pruned += pruned,
@@ -1106,6 +1137,11 @@ impl PairRun {
         };
         let mut leases = Vec::new();
         for (_, side) in sides {
+            // A folder without records holds no lease: another Mac could
+            // write it meanwhile (PLAN.md §3.6).
+            if self.pair.draft().unrecorded() == Some(side) {
+                continue;
+            }
             let endpoint = self.endpoints.endpoint(side);
             leases.push(HeldLease::take(
                 endpoint,
@@ -1124,9 +1160,18 @@ impl PairRun {
         })
     }
 
-    /// Both roots still hold `identities`, in left, right order.
+    /// Both roots still hold `identities`, in left, right order. A folder
+    /// without records holds none: reading its free space through the
+    /// held root still finds it gone.
     fn check_roots(&self, identities: [EndpointId; 2]) -> Result<(), RunError> {
         for (side, identity) in [Side::Left, Side::Right].into_iter().zip(identities) {
+            if self.pair.draft().unrecorded() == Some(side) {
+                self.endpoints
+                    .endpoint(side)
+                    .available_space()
+                    .map_err(|source| RunError::RootLost { side, source })?;
+                continue;
+            }
             let observed = self
                 .endpoints
                 .endpoint(side)
@@ -1279,7 +1324,8 @@ fn is_archive(decision: &CandidateDecision) -> bool {
 
 struct Executor<'a> {
     run: &'a PairRun,
-    scope: RunScope,
+    /// Each side's view of the run, left then right.
+    scopes: [RunScope; 2],
     report: RunReport,
     pending: Vec<BaseUpdate>,
     /// The writes behind `pending`, committed with it.
@@ -1291,6 +1337,10 @@ struct Executor<'a> {
 }
 
 impl Executor<'_> {
+    fn scope(&self, side: Side) -> &RunScope {
+        &self.scopes[side as usize]
+    }
+
     fn apply(
         &mut self,
         path: &SyncPath,
@@ -1336,7 +1386,7 @@ impl Executor<'_> {
                     .run
                     .endpoints
                     .endpoint(on)
-                    .remove(path, current, &self.scope, control)
+                    .remove(path, current, self.scope(on), control)
                 {
                     Ok(()) => {
                         self.report.archived += 1;
@@ -1363,11 +1413,11 @@ impl Executor<'_> {
         let to = endpoints.endpoint(target);
         match (change, current) {
             (ChangeKind::UpdateMetadata, Some(current)) => {
-                to.update_metadata_from(from, path, source, current, &self.scope, control)
+                to.update_metadata_from(from, path, source, current, self.scope(target), control)
             }
             (_, current) => {
                 let current = current.map_or(Expected::Absent, Expected::Present);
-                to.copy_from(from, path, source, current, &self.scope, control)
+                to.copy_from(from, path, source, current, self.scope(target), control)
             }
         }
     }

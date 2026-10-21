@@ -238,6 +238,18 @@ pub enum Durability {
     Full,
 }
 
+/// Where Foldover keeps a folder's records: its identity, lease, archive
+/// and resumable copies, all in the folder's `.foldover`.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum FolderRecords {
+    #[default]
+    Both,
+    /// Only in a Backup's source, for a target that cannot hold
+    /// `.foldover` (PLAN.md §3.6). What a run replaces or removes there is
+    /// deleted, not archived.
+    SourceOnly,
+}
+
 /// Gitignore-style exclusion rules, one per line, and an optional file
 /// size limit. They apply to both folders, so an excluded entry never
 /// looks deleted on one side.
@@ -316,6 +328,7 @@ pub struct PairOptions {
     schedule: Schedule,
     filters: Filters,
     canary: Option<SyncPath>,
+    records: FolderRecords,
 }
 
 impl PairOptions {
@@ -330,11 +343,20 @@ impl PairOptions {
                 age_limit: None,
             },
             canary: None,
+            records: FolderRecords::Both,
         }
     }
 
     pub fn with_metadata(self, metadata: MetadataPolicy) -> Self {
         Self { metadata, ..self }
+    }
+
+    pub fn with_records(self, records: FolderRecords) -> Self {
+        Self { records, ..self }
+    }
+
+    pub const fn records(&self) -> FolderRecords {
+        self.records
     }
 
     pub fn with_schedule(self, schedule: Schedule) -> Self {
