@@ -10,15 +10,17 @@
 //!
 //! Endpoints and agents call these from blocking threads; each call runs
 //! the stream on the link's runtime. Dropping a stream resets it, which
-//! is how either side gives up.
+//! is how either side gives up. An answer also gives up as its link goes
+//! away: the runtime may stop before the other Mac's next frame, and a
+//! call still waiting then would keep the runtime from stopping.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::future::Future;
 
 use foldover_net::peer::{PeerRecvStream, PeerSendStream, read_message, write_message};
 use foldover_proto::peer::PeerReply;
 use serde::Serialize;
 use tokio::runtime::Handle;
+use tokio::sync::watch;
 
 use super::LinkError;
 
@@ -40,20 +42,55 @@ struct Stream {
     runtime: Handle,
     send: PeerSendStream,
     recv: PeerRecvStream,
+    /// For an answer, whether its link is going away; a call gives up
+    /// then.
+    closing: Option<watch::Receiver<bool>>,
 }
 
 impl Stream {
     fn write(&mut self, tag: u8, payload: &[u8]) -> Result<(), LinkError> {
-        let send = &mut self.send;
-        Ok(self
-            .runtime
-            .block_on(write_message(send, &frame(tag, payload)))?)
+        let Self {
+            runtime,
+            send,
+            closing,
+            ..
+        } = self;
+        let frame = frame(tag, payload);
+        until_closing(runtime, closing, async {
+            Ok(write_message(send, &frame).await?)
+        })
     }
 
     fn next(&mut self) -> Result<Incoming, LinkError> {
-        let recv = &mut self.recv;
-        decode(self.runtime.block_on(read_message(recv))?)
+        let Self {
+            runtime,
+            recv,
+            closing,
+            ..
+        } = self;
+        decode(until_closing(runtime, closing, async {
+            Ok(read_message(recv).await?)
+        })?)
     }
+}
+
+/// Run `call` on `runtime` until it ends, or until `closing` says the
+/// link is going away.
+fn until_closing<T>(
+    runtime: &Handle,
+    closing: &mut Option<watch::Receiver<bool>>,
+    call: impl Future<Output = Result<T, LinkError>>,
+) -> Result<T, LinkError> {
+    runtime.block_on(async {
+        let Some(closing) = closing else {
+            return call.await;
+        };
+        tokio::select! {
+            result = call => result,
+            // A link dropped before saying so counts as going away too.
+            _ = closing.wait_for(|closing| *closing) => Err(LinkError::Closed),
+        }
+    })
 }
 
 /// A request this Mac sent, for reading replies and data and sending data.
@@ -65,6 +102,7 @@ impl Exchange {
             runtime,
             send,
             recv,
+            closing: None,
         })
     }
 
@@ -93,7 +131,6 @@ impl Exchange {
 /// data.
 pub struct Answer {
     stream: Stream,
-    closing: Arc<AtomicBool>,
 }
 
 impl Answer {
@@ -101,22 +138,25 @@ impl Answer {
         runtime: Handle,
         send: PeerSendStream,
         recv: PeerRecvStream,
-        closing: Arc<AtomicBool>,
+        closing: watch::Receiver<bool>,
     ) -> Self {
         Self {
             stream: Stream {
                 runtime,
                 send,
                 recv,
+                closing: Some(closing),
             },
-            closing,
         }
     }
 
     /// Whether this Mac's link is going away; an answer that waits on its
     /// own, such as a folder watch, stops then.
     pub fn closing(&self) -> bool {
-        self.closing.load(Ordering::Relaxed)
+        self.stream
+            .closing
+            .as_ref()
+            .is_some_and(|closing| *closing.borrow() || closing.has_changed().is_err())
     }
 
     pub fn reply(&mut self, reply: &PeerReply) -> Result<(), LinkError> {
