@@ -202,6 +202,11 @@ impl SftpEndpoint {
         result
     }
 
+    /// The root's absolute path on the server, `~` resolved.
+    pub fn path(&self) -> &[u8] {
+        &self.root
+    }
+
     /// The server path of `path` below the root.
     fn remote(&self, path: &[u8]) -> Vec<u8> {
         if self.root == b"/" {

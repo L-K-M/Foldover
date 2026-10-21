@@ -15,11 +15,11 @@ use foldover_fs::Resume;
 use foldover_proto::local::PairDurability;
 use foldover_proto::peer::{
     FolderError, FolderErrorKind, FolderOp, Incoming, IncomingKind, LeaseAction, LeaseFile,
-    NameCase, NameUnicode, PeerReply, RunSettings, ScanSettings, WireItem, WireRun,
+    NameCase, NameUnicode, PeerReply, RunSettings, ScanSettings, VolumeKind, WireItem, WireRun,
 };
 use foldover_types::{
     CaseMatching, Digest, Durability, EntryVersion, LocalRoot, MetadataPolicy, PairOptions,
-    ScanControl, SyncPath, UnicodeMatching,
+    Propagation, ScanControl, SyncPath, UnicodeMatching,
 };
 
 use super::wire;
@@ -121,6 +121,15 @@ pub fn serve_folder(root: &LocalRoot, op: FolderOp, cache: &FolderCache, answer:
         FolderOp::Space => endpoint
             .available_space()
             .map(|bytes| PeerReply::Space { bytes })
+            .map_err(|error| wire::scan_failure(&error)),
+        FolderOp::Volume => endpoint
+            .network_source()
+            .map(|source| PeerReply::Volume {
+                volume: match source {
+                    Some(_) => VolumeKind::Network,
+                    None => VolumeKind::Local,
+                },
+            })
             .map_err(|error| wire::scan_failure(&error)),
         FolderOp::Observe { scan } => return observe(&endpoint, root, scan, cache, answer),
         FolderOp::Watch => unreachable!("answered before opening the folder"),
@@ -290,7 +299,8 @@ fn observe(
         scan.modification_times.into(),
         scan.extended_attributes.into(),
         scan.permissions.into(),
-    );
+    )
+    .with_quarantine(scan.quarantine.map_or(Propagation::Sync, Into::into));
     let previous = cache.take(root, policy);
 
     // The asking Mac gives up by dropping the request; the next progress

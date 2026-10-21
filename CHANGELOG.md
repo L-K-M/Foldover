@@ -18,6 +18,9 @@ All notable changes to this project are documented here. The format follows
   other instead of being copied again and archived; the preview lists it
   as a move, and Undo moves it back. Folders on another Mac still copy.
 
+- The pair editor browses folders on an SFTP server, so you can walk to
+  the folder to sync instead of typing its path.
+
 - Names reach SFTP servers in composed Unicode (NFC), as Linux and
   Windows expect, even from a disk that stores them decomposed, and
   Foldover finds a server's file in either spelling.
@@ -264,6 +267,11 @@ All notable changes to this project are documented here. The format follows
   scripts, CI.
 
 ### Fixed
+
+- Files synced to a network share no longer get macOS's quarantine
+  mark (Gatekeeper's note that a file was downloaded) written there,
+  nor do files in a pair that syncs permissions but not extended
+  attributes, where copying the ACL carried it.
 
 - A folder holding files iCloud keeps only in the cloud no longer stops
   every sync: those files and folders are skipped in both folders until

@@ -14,6 +14,7 @@ pub struct MetadataPolicy {
     modification_times: Propagation,
     extended_attributes: Propagation,
     permissions: Propagation,
+    quarantine: Propagation,
 }
 
 impl MetadataPolicy {
@@ -26,6 +27,23 @@ impl MetadataPolicy {
             modification_times,
             extended_attributes,
             permissions,
+            quarantine: Propagation::Sync,
+        }
+    }
+
+    /// The same policy for a run that leaves `com.apple.quarantine`
+    /// alone: never written to network volumes (PLAN.md §4.10). Decided
+    /// per run from the folders, never stored.
+    pub const fn with_quarantine(self, quarantine: Propagation) -> Self {
+        Self { quarantine, ..self }
+    }
+
+    /// Whether Gatekeeper's download mark travels with the other extended
+    /// attributes; only when they do.
+    pub const fn quarantine(self) -> Propagation {
+        match self.extended_attributes {
+            Propagation::Sync => self.quarantine,
+            Propagation::Ignore => Propagation::Ignore,
         }
     }
 
