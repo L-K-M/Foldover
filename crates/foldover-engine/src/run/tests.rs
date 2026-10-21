@@ -1018,28 +1018,56 @@ const MIB: usize = 1024 * 1024;
 
 /// Content big enough to resume.
 fn resumable_content() -> Vec<u8> {
-    (0..20 * MIB).map(|index| (index % 253) as u8).collect()
+    (0..RESUMABLE_BYTES)
+        .map(|index| (index % 253) as u8)
+        .collect()
 }
 
-/// Run until about 18 MiB of 32 KiB reads went by, then cancel; returns
-/// the partial the broken-off copy kept.
+const RESUMABLE_BYTES: usize = 40 * MIB;
+/// The least a broken-off copy keeps (the driver's `PARTIAL_MIN_BYTES`).
+const PARTIAL_MIN_BYTES: u64 = 16 * MIB as u64;
+/// Paces `resumable_content` to 2.5 s. Copies on workers ask the control
+/// only every 100 ms, not once per read as on the run's thread; paced,
+/// a copy moves 1.6 MiB between two asks, never the whole rest.
+const RESUMABLE_PACE: u64 = 16 * MIB as u64;
+/// Where a test breaks the copy off: past the 16 MiB a kept partial
+/// needs, well before the end.
+const BREAK_OFF_AT: u64 = 20 * MIB as u64;
+
+/// Bytes a copy into `folder` staged so far.
+fn staged_bytes(folder: &Path) -> u64 {
+    fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".foldover-tmp-")
+        })
+        .filter_map(|entry| entry.metadata().ok())
+        .map(|metadata| metadata.len())
+        .sum()
+}
+
+/// Run a paced copy into the left folder, cancel it once `BREAK_OFF_AT`
+/// arrived, then lift the pace; returns the partial it kept.
 fn break_off(pair: &mut Fixture) -> std::path::PathBuf {
+    pair.bandwidth_limit = Some(RESUMABLE_PACE);
     let prepared = pair.prepare();
+    pair.bandwidth_limit = None;
+    let left = pair.left.path().to_owned();
     let mut store = pair.store();
-    let mut reads = 0;
     let outcome = prepared
         .execute(
             Approval::default(),
             RunContext::Reviewed,
             at(1),
             &mut |planned, commit| store.apply(planned, commit),
-            &mut || {
-                reads += 1;
-                if reads > 18 * 32 {
-                    ScanControl::Cancel
-                } else {
-                    ScanControl::Continue
-                }
+            &mut || match staged_bytes(&left) >= BREAK_OFF_AT {
+                true => ScanControl::Cancel,
+                false => ScanControl::Continue,
             },
             &NoProgress,
         )
@@ -1054,6 +1082,61 @@ fn break_off(pair: &mut Fixture) -> std::path::PathBuf {
     let partial = kept.next().expect("a kept partial");
     assert!(kept.next().is_none());
     partial
+}
+
+/// PLAN.md §4.9: copies to and from a server run on several sessions at
+/// once, each file whole and recorded once.
+#[test]
+fn many_files_reach_a_server_and_come_back_on_several_sessions() {
+    const FOLDERS: usize = 3;
+    const FILES: usize = 20;
+    if sftp_server().is_none() {
+        eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
+        return;
+    }
+    let mut pair = fixture(SyncMode::Sync);
+    pair.right_kind = RightKind::Sftp;
+    let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+    let file = |folder: usize, file: usize| format!("folder {folder}/file {file}.txt");
+    for folder in 0..FOLDERS {
+        fs::create_dir(left.join(format!("folder {folder}"))).unwrap();
+        for index in 0..FILES {
+            fs::write(
+                left.join(file(folder, index)),
+                file(folder, index).repeat(500),
+            )
+            .unwrap();
+        }
+    }
+
+    let report = pair.sync();
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    assert_eq!(report.copied(), (FOLDERS + FOLDERS * FILES) as u64);
+    for folder in 0..FOLDERS {
+        for index in 0..FILES {
+            let path = file(folder, index);
+            assert_eq!(
+                fs::read(right.join(&path)).unwrap(),
+                fs::read(left.join(&path)).unwrap()
+            );
+        }
+    }
+    assert!(pair.prepare().preview().items().is_empty());
+
+    // Back from the server: it is the source now.
+    for index in 0..FILES {
+        fs::write(right.join(file(0, index)), format!("edited {index}")).unwrap();
+    }
+    let report = pair.sync();
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    assert_eq!(report.copied(), FILES as u64);
+    for index in 0..FILES {
+        assert_eq!(
+            fs::read_to_string(left.join(file(0, index))).unwrap(),
+            format!("edited {index}")
+        );
+    }
+    assert!(pair.prepare().preview().items().is_empty());
 }
 
 /// PLAN.md §4.9: a pair's bandwidth limit paces its copies, local and
@@ -1104,7 +1187,10 @@ fn a_broken_off_copy_from_a_server_resumes_where_it_stopped() {
 
     let partial = break_off(&mut pair);
     let kept = fs::metadata(&partial).unwrap().len();
-    assert!((16 * MIB as u64..20 * MIB as u64).contains(&kept), "{kept}");
+    assert!(
+        (PARTIAL_MIN_BYTES..RESUMABLE_BYTES as u64).contains(&kept),
+        "{kept}"
+    );
     assert!(!left.join("big.bin").exists());
 
     let report = pair.sync();
@@ -1199,10 +1285,11 @@ fn a_whole_copy_that_cannot_be_placed_keeps_its_data() {
     let data = resumable_content();
     fs::write(right.join("big.bin"), &data).unwrap();
 
-    // Halfway through the copy, someone edits the file it replaces.
+    // Partway through the paced copy, someone edits the file it replaces.
+    pair.bandwidth_limit = Some(RESUMABLE_PACE);
     let prepared = pair.prepare();
     let mut store = pair.store();
-    let (mut reads, mut edited) = (0, false);
+    let mut edited = false;
     let outcome = prepared
         .execute(
             Approval::default(),
@@ -1210,8 +1297,7 @@ fn a_whole_copy_that_cannot_be_placed_keeps_its_data() {
             at(1),
             &mut |planned, commit| store.apply(planned, commit),
             &mut || {
-                reads += 1;
-                if reads == 10 * 32 {
+                if !edited && staged_bytes(&left) >= BREAK_OFF_AT {
                     fs::write(left.join("big.bin"), b"edited here").unwrap();
                     edited = true;
                 }
@@ -1223,10 +1309,7 @@ fn a_whole_copy_that_cannot_be_placed_keeps_its_data() {
     let RunOutcome::Ran(report) = outcome else {
         panic!("unexpected approval request");
     };
-    assert!(
-        edited,
-        "the copy ended before the edit; read in smaller steps"
-    );
+    assert!(edited, "the copy ended before the edit");
     assert_eq!(report.copied(), 0);
     assert_eq!(report.failures().len(), 1, "{:?}", report.failures());
     assert_eq!(fs::read(left.join("big.bin")).unwrap(), b"edited here");

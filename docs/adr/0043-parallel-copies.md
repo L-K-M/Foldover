@@ -1,6 +1,6 @@
 # ADR 0043: Parallel copies
 
-Status: Implemented for local disks and shares; SFTP servers and other
+Status: Implemented for local disks, shares and SFTP servers; other
 Macs copy one file at a time
 
 ## Context
@@ -24,7 +24,8 @@ time.
   | Solid-state disk | 4 |
   | Mounted share (SMB, NFS, AFP, WebDAV) | 4 |
   | Spinning disk, or one that does not say | 1 |
-  | SFTP server | 1: its one session takes requests in turn |
+  | SFTP server | 4, on up to five sessions (one per worker and the run's thread) and one for lease beats; 1 when Foldover cannot open more |
+  | Two SFTP servers in one pair | 1: a copy holds a session on each, and copies in opposite directions could wait on each other once a server refuses more sessions |
   | Another Mac | 1: its link's four streams also carry change reports and lease beats |
 
 - **One recorder.** The run's thread keeps planning order, the journal,
@@ -50,5 +51,10 @@ time.
   serial panic did.
 - In-memory folders can take several workers; a simulation over them
   runs on threads and a failing seed may not replay exactly.
-- Follow-ups: a session pool for SFTP servers, more streams on the
+- **SFTP sessions.** A server's sessions are pooled: a borrower takes
+  an idle one, opens another below the limit, or waits for one to come
+  back, and holds one at a time, so a handle stays on the session that
+  opened it. A server that refuses another session is shared by the
+  ones it took.
+- Follow-ups: more streams on the
   Mac-to-Mac link, and a budget shared by pairs on the same device.
