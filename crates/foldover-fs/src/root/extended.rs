@@ -69,6 +69,9 @@ pub enum AttributeRole {
     CompressionStorage,
     /// Maintained by the system per Mac or per access; never synced.
     SystemManaged,
+    /// Gatekeeper's mark on downloaded files: synced with user metadata,
+    /// except where a run leaves it alone (`MetadataPolicy::quarantine`).
+    Quarantine,
     /// User metadata such as tags, Finder info and comments.
     Synced,
 }
@@ -84,6 +87,8 @@ const SYSTEM_MANAGED: &[&[u8]] = &[
 ];
 #[cfg(target_os = "macos")]
 const COMPRESSION: &[u8] = b"com.apple.decmpfs";
+#[cfg(target_os = "macos")]
+const QUARANTINE: &[u8] = b"com.apple.quarantine";
 // Other Linux namespaces hold ACLs, security labels and kernel state that
 // need privileges to write.
 #[cfg(not(target_os = "macos"))]
@@ -94,6 +99,9 @@ impl EntryMetadata {
     pub fn attribute_role(&self, name: &[u8]) -> AttributeRole {
         if SYSTEM_MANAGED.contains(&name) {
             return AttributeRole::SystemManaged;
+        }
+        if name == QUARANTINE {
+            return AttributeRole::Quarantine;
         }
         let fork = name == RESOURCE_FORK.to_bytes();
         if name == COMPRESSION || (fork && self.is_compressed()) {
