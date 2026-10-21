@@ -223,3 +223,25 @@ fn a_listing_shows_one_directory_without_foldovers_names() {
             .is_none()
     );
 }
+
+/// Review of dataless entries: the in-memory folder reported a filtered
+/// evicted folder as unavailable where a disk leaves it out, so
+/// simulations kept its base while the real folder forgot it.
+#[test]
+fn what_the_filter_leaves_out_is_not_reported_evicted() {
+    let folder = MemoryEndpoint::new(Quirks::default());
+    folder.put_file(b"cache/blob", b"x").unwrap();
+    folder.put_file(b"notes.txt", b"n").unwrap();
+    folder.evict(b"cache");
+    folder.evict(b"notes.txt");
+    let observed = Endpoint::Memory(folder)
+        .observe_from(
+            MetadataPolicy::default(),
+            &Filter::new(["cache/"]).unwrap(),
+            &BTreeMap::new(),
+            &mut || ScanControl::Continue,
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(observed.unavailable(), [path("notes.txt")]);
+}

@@ -134,6 +134,8 @@ struct Folder {
     copying: usize,
     peak_copies: usize,
     temporaries: u64,
+    /// Folded paths kept only in the cloud, as iCloud evicts them.
+    evicted: std::collections::BTreeSet<Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
@@ -225,6 +227,7 @@ impl MemoryEndpoint {
                 copying: 0,
                 peak_copies: 0,
                 temporaries: 0,
+                evicted: std::collections::BTreeSet::new(),
             })),
         }
     }
@@ -311,6 +314,22 @@ impl MemoryEndpoint {
                 modified,
             },
         )
+    }
+
+    /// Keep the entry at `path` only in the cloud, as iCloud does with
+    /// files it evicts: observations leave it, and what is below it,
+    /// unread.
+    pub fn evict(&self, path: &[u8]) {
+        let mut folder = self.folder();
+        let key = folder.key(path);
+        folder.evicted.insert(key);
+    }
+
+    /// Bring an evicted entry back, as downloading it does.
+    pub fn download(&self, path: &[u8]) {
+        let mut folder = self.folder();
+        let key = folder.key(path);
+        folder.evicted.remove(&key);
     }
 
     /// Delete a file or link as a person would; absent paths are fine.
@@ -471,11 +490,18 @@ impl MemoryEndpoint {
                 observation.leftovers.push(path);
                 continue;
             }
+            // The filter first, as on disk: what it leaves out is never
+            // reported, evicted or not.
             let directory = matches!(stored.node, Node::Directory { .. });
             if filter.excludes(&path, directory) {
                 if directory {
                     skipped.push(stored.path.clone());
                 }
+                continue;
+            }
+            if folder.evicted.contains(&folder.key(&stored.path)) {
+                observation.unavailable.push(path);
+                skipped.push(stored.path.clone());
                 continue;
             }
             if let Node::File { data, modified, .. } = &stored.node {
