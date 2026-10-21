@@ -25,7 +25,7 @@ time.
   | Spinning disk, or one that does not say | 1 |
   | SFTP server | 4, on up to five sessions (one per worker and the run's thread) and one for lease beats; 1 when Foldover cannot open more |
   | Two SFTP servers in one pair | 1: a copy holds a session on each, and copies in opposite directions could wait on each other once a server refuses more sessions |
-  | Another Mac | 4, one link stream each; a link takes 16 streams, beside change reports and lease beats |
+  | Another Mac | 4, one link stream each; a link takes 64 streams, so change reports and lease beats always find one |
 
 - **One recorder.** The run's thread keeps planning order, the journal,
   the base, commits, progress and the control (cancel, lease beats). It
