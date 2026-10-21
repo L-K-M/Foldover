@@ -388,6 +388,48 @@ impl DirectoryEntry {
     }
 }
 
+/// What holds a root's volume, which sets how many writes it takes at
+/// once (PLAN.md §4.9).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Medium {
+    SolidState,
+    /// A spinning disk, which loses speed to every extra stream.
+    Rotational,
+    /// A share mounted from another computer.
+    Network,
+    /// Not reported, as by disk images and some USB enclosures.
+    Unknown,
+}
+
+/// A NUL-terminated C string field, such as `statfs`'s names.
+#[cfg(target_os = "macos")]
+fn field_text(field: &[std::ffi::c_char]) -> String {
+    let bytes: Vec<u8> = field
+        .iter()
+        .take_while(|byte| **byte != 0)
+        .map(|byte| byte.to_ne_bytes()[0])
+        .collect();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// The medium Linux reports for block device `major:minor`. A partition's
+/// queue is its disk's: `/sys/dev/block/8:1` links to `…/sda/sda1`.
+#[cfg(target_os = "linux")]
+fn block_medium(major: u32, minor: u32) -> Medium {
+    let device = PathBuf::from(format!("/sys/dev/block/{major}:{minor}"));
+    for queue in ["queue/rotational", "../queue/rotational"] {
+        match std::fs::read_to_string(device.join(queue))
+            .as_deref()
+            .map(str::trim)
+        {
+            Ok("0") => return Medium::SolidState,
+            Ok("1") => return Medium::Rotational,
+            _ => {}
+        }
+    }
+    Medium::Unknown
+}
+
 /// A network volume's mount source as a URL: SMB and AFP report
 /// `//user@server/share`, NFS `server:/export`, WebDAV a URL already.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -420,21 +462,39 @@ impl Root {
         #[cfg(target_os = "macos")]
         {
             let stat = rustix::fs::fstatfs(&self.directory)?;
-            let text = |field: &[std::ffi::c_char]| {
-                let bytes: Vec<u8> = field
-                    .iter()
-                    .take_while(|byte| **byte != 0)
-                    .map(|byte| byte.to_ne_bytes()[0])
-                    .collect();
-                String::from_utf8_lossy(&bytes).into_owned()
-            };
             Ok(source_url(
-                &text(&stat.f_fstypename),
-                &text(&stat.f_mntfromname),
+                &field_text(&stat.f_fstypename),
+                &field_text(&stat.f_mntfromname),
             ))
         }
         #[cfg(not(target_os = "macos"))]
         Ok(None)
+    }
+
+    /// What holds the root's volume: a share, else the disk it is mounted
+    /// from, e.g. `/dev/disk3s5`.
+    pub fn medium(&self) -> io::Result<Medium> {
+        if self.network_source()?.is_some() {
+            return Ok(Medium::Network);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let stat = rustix::fs::fstatfs(&self.directory)?;
+            let from = field_text(&stat.f_mntfromname);
+            Ok(from
+                .strip_prefix("/dev/")
+                .map_or(Medium::Unknown, crate::medium::of_disk))
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let device = rustix::fs::fstat(&self.directory)?.st_dev;
+            Ok(block_medium(
+                rustix::fs::major(device),
+                rustix::fs::minor(device),
+            ))
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        Ok(Medium::Unknown)
     }
 
     /// Bytes an unprivileged writer can still use on the held root's volume.
@@ -644,6 +704,20 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let root = Root::open(temporary.path()).unwrap();
         assert_eq!(root.network_source().unwrap(), None);
+    }
+
+    #[test]
+    fn local_volumes_report_a_disk_medium() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = Root::open(temporary.path()).unwrap();
+        let medium = root.medium().unwrap();
+        // Runners' virtual disks may not say which they are.
+        assert_ne!(medium, Medium::Network);
+        eprintln!("medium of {}: {medium:?}", temporary.path().display());
+        #[cfg(target_os = "macos")]
+        assert_eq!(crate::medium::of_disk("no-such-disk"), Medium::Unknown);
+        #[cfg(target_os = "linux")]
+        assert_eq!(block_medium(0, u32::MAX), Medium::Unknown);
     }
 
     #[test]

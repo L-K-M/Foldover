@@ -21,6 +21,9 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::{Duration, SystemTime};
 
 use foldover_endpoint::{
@@ -40,8 +43,8 @@ use foldover_types::{
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
-    CandidateDecision, CandidatePlan, Choices, DeletionCounts, DeletionReview, PlanError, PlanRow,
-    RunContext, plan_resolved,
+    CandidateDecision, CandidatePlan, Choices, DeletionCounts, DeletionReview, Moves, PlanError,
+    PlanRow, RunContext, plan_resolved,
 };
 
 /// Base updates per commit: bounds the work a crash can make the next run redo.
@@ -282,6 +285,11 @@ pub enum Action {
     /// Backup keeps a target-only entry or edit, or a person skipped this
     /// change for one run.
     KeepTarget,
+    /// Rename on `on` what the other folder moved here, from
+    /// `PreviewItem::moved_from`.
+    Move {
+        on: Side,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -291,6 +299,7 @@ pub struct PreviewItem {
     left: Option<EntryVersion>,
     right: Option<EntryVersion>,
     bytes: u64,
+    moved_from: Option<SyncPath>,
 }
 
 impl PreviewItem {
@@ -310,6 +319,11 @@ impl PreviewItem {
     /// File data the item copies; 0 for everything else.
     pub fn bytes(&self) -> u64 {
         self.bytes
+    }
+
+    /// For a move, where the entry comes from.
+    pub fn moved_from(&self) -> Option<&SyncPath> {
+        self.moved_from.as_ref()
     }
 }
 
@@ -415,6 +429,14 @@ impl Preview {
                 Action::KeepTarget => {
                     hasher.update(&[4]);
                 }
+                Action::Move { on } => {
+                    hasher.update(&[5]);
+                    hasher.update(&[on as u8]);
+                }
+            }
+            if let Some(from) = &item.moved_from {
+                hasher.update(&(from.as_bytes().len() as u64).to_le_bytes());
+                hasher.update(from.as_bytes());
             }
             version(&mut hasher, item.left);
             version(&mut hasher, item.right);
@@ -455,6 +477,8 @@ pub struct RunReport {
     archive: String,
     pruned: u64,
     copied: u64,
+    /// Files and links renamed for moves the other folder made.
+    moved: u64,
     updated: u64,
     archived: u64,
     recovered: u64,
@@ -476,6 +500,9 @@ impl RunReport {
     }
     pub fn copied(&self) -> u64 {
         self.copied
+    }
+    pub fn moved(&self) -> u64 {
+        self.moved
     }
     pub fn updated(&self) -> u64 {
         self.updated
@@ -750,6 +777,8 @@ impl PairRun {
             skips: &skips,
             left_names: endpoints.endpoint(Side::Left).name_matching(),
             right_names: endpoints.endpoint(Side::Right).name_matching(),
+            left_moves: moves(endpoints.endpoint(Side::Left)),
+            right_moves: moves(endpoints.endpoint(Side::Right)),
         };
         let plan = plan_resolved(
             draft.mode(),
@@ -845,6 +874,9 @@ impl PairRun {
                         },
                         EntryDecision::Archive { on } => Action::Archive { on },
                         EntryDecision::Conflict(kind) => Action::Conflict(kind),
+                        EntryDecision::Move { on } => Action::Move { on },
+                        // Shown with the path it moves to.
+                        EntryDecision::MovedAway { .. } => return None,
                     },
                 };
                 let version = |side: Side| {
@@ -859,6 +891,7 @@ impl PairRun {
                     left: version(Side::Left),
                     right: version(Side::Right),
                     bytes: self.copied_bytes(row).map_or(0, |(_, bytes)| bytes),
+                    moved_from: self.plan.moved_from(row.path()).cloned(),
                 })
             })
             .collect();
@@ -1032,7 +1065,15 @@ impl PairRun {
         // PLAN.md §4: a run writes a folder only while it holds the
         // folder's lease, so two Macs never write one at once.
         let leases = self.take_leases(identities, &name, control, progress)?;
-        let mut control = || leases.check(control);
+        // A stop the run's thread hears reaches the copy workers too.
+        let stop = AtomicBool::new(false);
+        let mut control = || {
+            let answer = leases.check(control);
+            if answer == ScanControl::Cancel {
+                stop.store(true, Ordering::Relaxed);
+            }
+            answer
+        };
         let control = &mut control;
         let mut executor = Executor {
             run: &self,
@@ -1040,7 +1081,7 @@ impl PairRun {
                 archive: name.clone(),
                 ..RunReport::default()
             },
-            scopes,
+            scopes: &scopes,
             pending: Vec::new(),
             journal: Vec::new(),
             written: 0,
@@ -1081,29 +1122,50 @@ impl PairRun {
         );
         let forward = rows.iter().filter(|row| !is_archive(row.decision()));
         let reverse = rows.iter().rev().filter(|row| is_archive(row.decision()));
-        for (index, row) in forward.chain(reverse).enumerate() {
-            if control() == ScanControl::Cancel {
-                executor.report.completion = Completion::Cancelled;
-                break;
+        let writer = executor.writer();
+        let stopped = thread::scope(|threads| {
+            let mut copies = Copies::start(threads, writer, self.workers(), &stop);
+            let mut stopped = false;
+            for (index, row) in forward.chain(reverse).enumerate() {
+                if control() == ScanControl::Cancel {
+                    stopped = true;
+                    break;
+                }
+                // PLAN.md §4.7: writes go through handles held on the roots,
+                // so an unmounted disk fails rather than taking writes at its
+                // old path. Reading both identities every batch stops the run
+                // at the first sign of that instead of failing entry by entry.
+                if index > 0
+                    && index % COMMIT_BATCH == 0
+                    && let Err(error) = self.check_roots(identities)
+                {
+                    copies.finish(&mut executor, control, progress);
+                    commit(&mut executor)?;
+                    return Err(error);
+                }
+                // Archives go children first, once every copy has landed.
+                if is_archive(row.decision()) {
+                    copies.finish(&mut executor, control, progress);
+                }
+                if copies.takes(&executor, row) {
+                    copies.hand(row, &mut executor, control, progress);
+                } else {
+                    executor.apply(row.path(), row.decision(), control);
+                    if writes(row.decision()) {
+                        progress.applied(executor.copied_bytes(row));
+                    }
+                }
+                copies.collect(&mut executor, progress);
+                if executor.pending.len().max(executor.journal.len()) >= COMMIT_BATCH {
+                    commit(&mut executor)?;
+                }
             }
-            // PLAN.md §4.7: writes go through handles held on the roots, so
-            // an unmounted disk fails rather than taking writes at its old
-            // path. Reading both identities every batch stops the run at the
-            // first sign of that instead of failing entry by entry.
-            if index > 0
-                && index % COMMIT_BATCH == 0
-                && let Err(error) = self.check_roots(identities)
-            {
-                commit(&mut executor)?;
-                return Err(error);
-            }
-            executor.apply(row.path(), row.decision(), control);
-            if writes(row.decision()) {
-                progress.applied(self.copied_bytes(row).map_or(0, |(_, bytes)| bytes));
-            }
-            if executor.pending.len().max(executor.journal.len()) >= COMMIT_BATCH {
-                commit(&mut executor)?;
-            }
+            copies.finish(&mut executor, control, progress);
+            // A copy a stop kept from starting leaves the plan undone too.
+            Ok::<_, RunError>(stopped || copies.skipped())
+        })?;
+        if stopped {
+            executor.report.completion = Completion::Cancelled;
         }
         commit(&mut executor)?;
         if let Some(error) = leases.failure() {
@@ -1226,6 +1288,23 @@ impl PairRun {
             .fold(0, u64::saturating_add)
     }
 
+    /// Copies the run makes at once: as many as the slower folder takes.
+    /// A copy between two servers holds a session on each, so two in
+    /// opposite directions could each wait for the other's server once a
+    /// server refuses more sessions: such pairs copy one at a time.
+    fn workers(&self) -> NonZeroUsize {
+        let endpoint = |side| self.endpoints.endpoint(side);
+        if matches!(
+            (endpoint(Side::Left), endpoint(Side::Right)),
+            (Endpoint::Sftp(_), Endpoint::Sftp(_))
+        ) {
+            return NonZeroUsize::MIN;
+        }
+        endpoint(Side::Left)
+            .workers()
+            .min(endpoint(Side::Right).workers())
+    }
+
     /// The side a row copies file data to, and how many bytes.
     fn copied_bytes(&self, row: &PlanRow) -> Option<(Side, u64)> {
         let CandidateDecision::Entry(EntryDecision::Propagate {
@@ -1326,7 +1405,11 @@ fn require_space(side: Side, needed: u64, available: u64) -> Result<(), RunError
 fn writes(decision: &CandidateDecision) -> bool {
     matches!(
         decision,
-        CandidateDecision::Entry(EntryDecision::Propagate { .. } | EntryDecision::Archive { .. })
+        CandidateDecision::Entry(
+            EntryDecision::Propagate { .. }
+                | EntryDecision::Archive { .. }
+                | EntryDecision::Move { .. }
+        )
     )
 }
 
@@ -1340,7 +1423,7 @@ fn is_archive(decision: &CandidateDecision) -> bool {
 struct Executor<'a> {
     run: &'a PairRun,
     /// Each side's view of the run, left then right.
-    scopes: [RunScope; 2],
+    scopes: &'a [RunScope; 2],
     report: RunReport,
     pending: Vec<BaseUpdate>,
     /// The writes behind `pending`, committed with it.
@@ -1351,67 +1434,34 @@ struct Executor<'a> {
     failed: Vec<SyncPath>,
 }
 
-impl Executor<'_> {
+/// What a write needs from the run, shared by the run's thread and the
+/// copy workers.
+#[derive(Clone, Copy)]
+struct Writer<'a> {
+    run: &'a PairRun,
+    scopes: &'a [RunScope; 2],
+}
+
+impl Writer<'_> {
     fn scope(&self, side: Side) -> &RunScope {
         &self.scopes[side as usize]
     }
 
-    fn apply(
-        &mut self,
-        path: &SyncPath,
-        decision: &CandidateDecision,
+    /// Make the copy `row` plans: the version stored.
+    fn copy(
+        &self,
+        row: &PlanRow,
         control: &mut impl FnMut() -> ScanControl,
-    ) {
-        let decision = match decision {
-            CandidateDecision::BlockedByAncestor(_) => return,
-            CandidateDecision::Entry(decision) => *decision,
+    ) -> Result<EntryVersion, ApplyError> {
+        let CandidateDecision::Entry(EntryDecision::Propagate { from, change }) = row.decision()
+        else {
+            unreachable!("only planned copies are handed out")
         };
-        if self.failed.iter().any(|failed| failed.is_ancestor_of(path)) {
-            return;
-        }
+        let path = row.path();
         let entry = |side: Side| self.run.observation(side).entries().get(path);
-        match decision {
-            EntryDecision::Unchanged | EntryDecision::KeepTarget => {}
-            EntryDecision::Conflict(kind) => self.report.conflicts.push((path.clone(), kind)),
-            EntryDecision::ForgetBase => self.pending.push(BaseUpdate::Forget(path.clone())),
-            EntryDecision::RecordBase => {
-                let versions = entry(Side::Left).zip(entry(Side::Right));
-                match versions
-                    .map(|(left, right)| BaselineEntry::new(left.version(), right.version()))
-                {
-                    Some(Ok(base)) => self.pending.push(BaseUpdate::Record(path.clone(), base)),
-                    _ => self.fail_message(path, "Planned base record has no matching sides"),
-                }
-            }
-            EntryDecision::Propagate { from, change } => {
-                let Some(source) = entry(from) else {
-                    return self.fail_message(path, "Planned source entry is missing");
-                };
-                let target = from.other();
-                match self.propagate(path, source, target, entry(target), change, control) {
-                    Ok(stored) => self.record(path, from, source.version(), stored, change),
-                    Err(error) => self.fail(path, &error),
-                }
-            }
-            EntryDecision::Archive { on } => {
-                let Some(current) = entry(on) else {
-                    return self.fail_message(path, "Planned archive entry is missing");
-                };
-                match self
-                    .run
-                    .endpoints
-                    .endpoint(on)
-                    .remove(path, current, self.scope(on), control)
-                {
-                    Ok(()) => {
-                        self.report.archived += 1;
-                        self.journal(path, on, JournalAction::Archive(current.version()));
-                        self.pending.push(BaseUpdate::Forget(path.clone()));
-                    }
-                    Err(error) => self.fail(path, &error),
-                }
-            }
-        }
+        let source = entry(*from).expect("handed-out copies have a source");
+        let target = from.other();
+        self.propagate(path, source, target, entry(target), *change, control)
     }
 
     fn propagate(
@@ -1434,6 +1484,173 @@ impl Executor<'_> {
                 let current = current.map_or(Expected::Absent, Expected::Present);
                 to.copy_from(from, path, source, current, self.scope(target), control)
             }
+        }
+    }
+}
+
+impl<'a> Executor<'a> {
+    fn scope(&self, side: Side) -> &RunScope {
+        &self.scopes[side as usize]
+    }
+
+    fn writer(&self) -> Writer<'a> {
+        Writer {
+            run: self.run,
+            scopes: self.scopes,
+        }
+    }
+
+    /// Whether `row` is a copy of a file or link a worker may make: its
+    /// folder exists by now, and nothing below it waits on it.
+    fn copies(&self, row: &PlanRow) -> bool {
+        let CandidateDecision::Entry(EntryDecision::Propagate { from, .. }) = row.decision() else {
+            return false;
+        };
+        let source = self.run.observation(*from).entries().get(row.path());
+        source.is_some_and(|source| source.version().kind() != EntryKind::Directory)
+            && !self.below_failure(row.path())
+    }
+
+    fn below_failure(&self, path: &SyncPath) -> bool {
+        self.failed.iter().any(|failed| failed.is_ancestor_of(path))
+    }
+
+    /// Record the copy a worker made for `row`.
+    fn landed(&mut self, row: &PlanRow, result: Result<EntryVersion, ApplyError>) {
+        let CandidateDecision::Entry(EntryDecision::Propagate { from, change }) = row.decision()
+        else {
+            unreachable!("only planned copies are handed out")
+        };
+        let source = self.run.observation(*from).entries().get(row.path());
+        let source = source.expect("handed-out copies have a source").version();
+        match result {
+            Ok(stored) => self.record(row.path(), *from, source, stored, *change),
+            Err(error) => self.fail(row.path(), &error),
+        }
+    }
+
+    /// Data bytes `row` copies.
+    fn copied_bytes(&self, row: &PlanRow) -> u64 {
+        self.run.copied_bytes(row).map_or(0, |(_, bytes)| bytes)
+    }
+
+    fn apply(
+        &mut self,
+        path: &SyncPath,
+        decision: &CandidateDecision,
+        control: &mut impl FnMut() -> ScanControl,
+    ) {
+        let decision = match decision {
+            CandidateDecision::BlockedByAncestor(_) => return,
+            CandidateDecision::Entry(decision) => *decision,
+        };
+        if self.below_failure(path) {
+            return;
+        }
+        let entry = |side: Side| self.run.observation(side).entries().get(path);
+        match decision {
+            EntryDecision::Unchanged | EntryDecision::KeepTarget => {}
+            EntryDecision::Conflict(kind) => self.report.conflicts.push((path.clone(), kind)),
+            EntryDecision::ForgetBase => self.pending.push(BaseUpdate::Forget(path.clone())),
+            EntryDecision::RecordBase => {
+                let versions = entry(Side::Left).zip(entry(Side::Right));
+                match versions
+                    .map(|(left, right)| BaselineEntry::new(left.version(), right.version()))
+                {
+                    Some(Ok(base)) => self.pending.push(BaseUpdate::Record(path.clone(), base)),
+                    _ => self.fail_message(path, "Planned base record has no matching sides"),
+                }
+            }
+            EntryDecision::Propagate { from, change } => {
+                let Some(source) = entry(from) else {
+                    return self.fail_message(path, "Planned source entry is missing");
+                };
+                let target = from.other();
+                let stored =
+                    self.writer()
+                        .propagate(path, source, target, entry(target), change, control);
+                match stored {
+                    Ok(stored) => self.record(path, from, source.version(), stored, change),
+                    Err(error) => self.fail(path, &error),
+                }
+            }
+            EntryDecision::Archive { on } => {
+                let Some(current) = entry(on) else {
+                    return self.fail_message(path, "Planned archive entry is missing");
+                };
+                match self
+                    .run
+                    .endpoints
+                    .endpoint(on)
+                    .remove(path, current, self.scope(on), control)
+                {
+                    Ok(()) => {
+                        self.report.archived += 1;
+                        self.journal(path, on, JournalAction::Archive(current.version()));
+                        self.pending.push(BaseUpdate::Forget(path.clone()));
+                    }
+                    Err(error) => self.fail(path, &error),
+                }
+            }
+            // The row the entry moves to carries the move.
+            EntryDecision::MovedAway { .. } => {}
+            EntryDecision::Move { on } => self.move_here(path, on, control),
+        }
+    }
+
+    /// Rename on `on` the file or link the other folder moved to `to`:
+    /// same content, so nothing is copied or archived (PLAN.md §4.7). It
+    /// keeps this folder's metadata until brought to the source's.
+    fn move_here(&mut self, to: &SyncPath, on: Side, control: &mut impl FnMut() -> ScanControl) {
+        let run = self.run;
+        let Some(from) = run.plan.moved_from(to) else {
+            return self.fail_message(to, "Planned move has no source");
+        };
+        if self.failed.iter().any(|failed| failed.is_ancestor_of(from)) {
+            return;
+        }
+        let (Some(current), Some(source)) = (
+            run.observation(on).entries().get(from),
+            run.observation(on.other()).entries().get(to),
+        ) else {
+            return self.fail_message(to, "Planned move entry is missing");
+        };
+        let target = run.endpoints.endpoint(on);
+        if let Err(error) = target.move_entry(from, current, to, self.scope(on), control) {
+            return self.fail(to, &error);
+        }
+        // The old path is gone either way; its base goes with it.
+        self.pending.push(BaseUpdate::Forget(from.clone()));
+        let stored = if current.version() == source.version() {
+            Ok(current.version())
+        } else {
+            let from_side = run.endpoints.endpoint(on.other());
+            target.update_metadata_from(from_side, to, source, current, self.scope(on), control)
+        };
+        let journaled = *stored.as_ref().unwrap_or(&current.version());
+        self.journal.push(JournalEntry {
+            seq: self.written,
+            path: to.clone(),
+            side: on,
+            action: JournalAction::Move(journaled),
+            before: run.base.get(from).copied(),
+            moved_from: Some(from.clone()),
+        });
+        self.written += 1;
+        let stored = match stored {
+            Ok(stored) => stored,
+            Err(error) => return self.fail(to, &error),
+        };
+        let (left, right) = match on {
+            Side::Left => (stored, source.version()),
+            Side::Right => (source.version(), stored),
+        };
+        match BaselineEntry::new(left, right) {
+            Ok(base) => {
+                self.report.moved += 1;
+                self.pending.push(BaseUpdate::Record(to.clone(), base));
+            }
+            Err(_) => self.fail_message(to, "Moved content differs from the source"),
         }
     }
 
@@ -1475,6 +1692,7 @@ impl Executor<'_> {
             side,
             action,
             before: self.run.base.get(path).copied(),
+            moved_from: None,
         });
         self.written += 1;
     }
@@ -1492,8 +1710,20 @@ impl Executor<'_> {
     }
 }
 
+mod copies;
+use copies::Copies;
+
 mod undo;
 pub use undo::UndoReport;
+
+/// Whether `endpoint` takes renames for moves; another Mac's folder takes
+/// copies, so an older agent there never meets a request it lacks.
+fn moves(endpoint: &Endpoint) -> Moves {
+    match endpoint.moves() {
+        true => Moves::Rename,
+        false => Moves::Copy,
+    }
+}
 
 /// The pair's options as a run on `endpoints` applies them. Gatekeeper's
 /// download mark is never written to a network volume (PLAN.md §4.10),

@@ -709,6 +709,8 @@ dependencies = [
  "blake3",
  "cap-fs-ext",
  "cap-std",
+ "core-foundation",
+ "core-foundation-sys",
  "criterion",
  "foldover-types",
  "libc",

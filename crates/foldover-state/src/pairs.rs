@@ -423,6 +423,9 @@ fn values(draft: &PairDraft) -> PairValues {
             FolderRecords::SourceOnly => RECORDS_IN_SOURCE,
         }
         .to_owned(),
+        bandwidth_limit: options
+            .bandwidth_limit()
+            .map(|rate| i64::try_from(rate).unwrap_or(i64::MAX)),
     }
 }
 
@@ -517,6 +520,11 @@ fn from_row(row: PairRow) -> Result<PairConfig, Error> {
         .canary
         .map(|bytes| SyncPath::try_from(bytes).map_err(|_| Error::InvalidStored("canary")))
         .transpose()?;
+    let bandwidth_limit = row
+        .values
+        .bandwidth_limit
+        .map(|rate| u64::try_from(rate).map_err(|_| Error::InvalidStored("bandwidth limit")))
+        .transpose()?;
     let draft = PairDraft::new(
         row.values.name,
         PairRoot::from_bytes(row.values.left_root)?,
@@ -528,7 +536,8 @@ fn from_row(row: PairRow) -> Result<PairConfig, Error> {
             .with_schedule(schedule)
             .with_filters(filters)
             .with_canary(canary)?
-            .with_records(records),
+            .with_records(records)
+            .with_bandwidth_limit(bandwidth_limit)?,
     );
     let revision = u64::try_from(row.revision).map_err(|_| Error::InvalidStored("revision"))?;
     Ok(PairConfig::from_stored(id, revision, draft)?)
@@ -671,6 +680,7 @@ mod tests {
                 schedule_time: None,
                 schedule_days: None,
                 records: RECORDS_IN_BOTH.into(),
+                bandwidth_limit: None,
             })
             .unwrap();
         drop(database);
@@ -704,6 +714,7 @@ mod tests {
                 schedule_time: None,
                 schedule_days: None,
                 records: RECORDS_IN_BOTH.into(),
+                bandwidth_limit: None,
             })
             .unwrap();
         let id = PairId::from_bytes(row.id.try_into().unwrap()).unwrap();
@@ -785,6 +796,40 @@ mod tests {
     }
 
     #[test]
+    /// A move without its source is refused when written (the schema
+    /// checks it), so every journal reads back.
+    fn a_move_without_its_source_is_never_journaled() {
+        use foldover_types::{Digest, EntryContent, EntryVersion};
+
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        let pair = store.create(&draft(SyncMode::Sync)).unwrap();
+        let version = EntryVersion::new(
+            EntryContent::File(Digest::from_bytes([5; Digest::BYTE_LEN])),
+            Digest::from_bytes([5; Digest::BYTE_LEN]),
+        );
+        let unsourced = JournalEntry {
+            seq: 0,
+            path: SyncPath::try_from(&b"moved/here"[..]).unwrap(),
+            side: Side::Right,
+            action: JournalAction::Move(version),
+            before: None,
+            moved_from: None,
+        };
+        let recorded = store.update_base(
+            pair.id(),
+            pair.revision(),
+            &[],
+            JournalUpdate::Record {
+                run: "2026-10-19T10-00-00.000Z",
+                entries: &[unsourced],
+            },
+        );
+        assert!(recorded.is_err());
+        assert_eq!(store.journal(pair.id()).unwrap(), None);
+    }
+
+    #[test]
     fn journals_round_trip_with_the_base_and_root_changes_discard_them() {
         use foldover_types::{Digest, EntryContent, EntryVersion};
 
@@ -807,6 +852,7 @@ mod tests {
                 side: Side::Right,
                 action: JournalAction::Create(file(4, 4)),
                 before: None,
+                moved_from: None,
             },
             JournalEntry {
                 seq: 1,
@@ -814,6 +860,7 @@ mod tests {
                 side: Side::Left,
                 action: JournalAction::Replace(new.left()),
                 before: Some(old),
+                moved_from: None,
             },
             JournalEntry {
                 seq: 2,
@@ -821,6 +868,15 @@ mod tests {
                 side: Side::Right,
                 action: JournalAction::Archive(old.right()),
                 before: Some(old),
+                moved_from: None,
+            },
+            JournalEntry {
+                seq: 3,
+                path: path(b"moved/here"),
+                side: Side::Right,
+                action: JournalAction::Move(file(5, 5)),
+                before: Some(old),
+                moved_from: Some(path(b"was/there")),
             },
         ];
         store
@@ -901,7 +957,9 @@ mod tests {
             SyncPath::try_from(b"docs/canary.txt".as_slice()).unwrap(),
         ))
         .unwrap()
-        .with_records(FolderRecords::SourceOnly);
+        .with_records(FolderRecords::SourceOnly)
+        .with_bandwidth_limit(Some(2_500_000))
+        .unwrap();
         let pair = store
             .create(&draft(SyncMode::Sync).with_options(options.clone()))
             .unwrap();

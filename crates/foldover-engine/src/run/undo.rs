@@ -68,6 +68,7 @@ const CHANGED: &str = "Changed since the sync; left as it is";
 const METADATA_ONLY: &str = "Only its metadata changed, and the earlier metadata is not kept";
 const NOT_ARCHIVED: &str = "The earlier version is no longer in the archive";
 const EMPTY_FOLDER: &str = "Empty folders are not recreated";
+const OCCUPIED: &str = "Something new holds the path it moved from; left as it is";
 
 impl PairRun {
     /// Undo `journal`, the pair's newest writing run. The run's roots must
@@ -150,7 +151,7 @@ impl PairRun {
             let restores: Vec<BaseUpdate> = steps
                 .iter()
                 .filter(|(_, step)| *step != Step::PutBackBeside)
-                .map(|(entry, _)| restore(entry))
+                .flat_map(|(entry, _)| restore(entry))
                 .collect();
             commit(revision, Commit::Undoing { updates: &restores }).map_err(RunError::Commit)?;
             let mut undid = Vec::new();
@@ -159,7 +160,8 @@ impl PairRun {
                     Ok(Placed::AtPath) if step == Step::Remove => report.removed += 1,
                     Ok(Placed::AtPath) => {
                         report.restored += 1;
-                        put_back.push((entry.side, entry.path.clone()));
+                        let restored = entry.moved_from.as_ref().unwrap_or(&entry.path);
+                        put_back.push((entry.side, restored.clone()));
                     }
                     Ok(Placed::Beside) => report.beside += 1,
                     Err(message) => {
@@ -201,7 +203,7 @@ impl PairRun {
                     })
                 {
                     report.restored += 1;
-                    refilled.push(restore(folder));
+                    refilled.extend(restore(folder));
                 } else {
                     report.not_undone.push(Failure {
                         path: folder.path.clone(),
@@ -235,6 +237,15 @@ impl PairRun {
             JournalAction::Create(_) | JournalAction::Replace(_) => Err(CHANGED),
             JournalAction::Archive(_) if current.is_none() => Ok(Step::PutBack),
             JournalAction::Archive(_) => Ok(Step::PutBackBeside),
+            // A move goes back only where the old path is still free.
+            JournalAction::Move(version) if left_by_run(version) => {
+                let from = entry.moved_from.as_ref().ok_or(CHANGED)?;
+                match self.observation(entry.side).entries().contains_key(from) {
+                    false => Ok(Step::MoveBack),
+                    true => Err(OCCUPIED),
+                }
+            }
+            JournalAction::Move(_) => Err(CHANGED),
         }
     }
 
@@ -280,7 +291,14 @@ impl PairRun {
                 })
             }
             (Step::PutBack | Step::PutBackBeside, _) => put_back(run),
-            (Step::Remove | Step::Replace, None) => Err(CHANGED.to_owned()),
+            (Step::MoveBack, Some(current)) => {
+                let from = entry.moved_from.as_ref().ok_or(CHANGED)?;
+                endpoint
+                    .move_entry(&entry.path, current, from, scope, control)
+                    .map(|()| Placed::AtPath)
+                    .map_err(message)
+            }
+            (Step::Remove | Step::Replace | Step::MoveBack, None) => Err(CHANGED.to_owned()),
         }
     }
 }
@@ -296,6 +314,8 @@ enum Step {
     PutBack,
     /// Something holds the path now: put back beside it; the base stays.
     PutBackBeside,
+    /// Rename what the run moved back to where it was.
+    MoveBack,
 }
 
 /// Where an undone entry ended up.
@@ -305,10 +325,33 @@ enum Placed {
     Beside,
 }
 
-/// The base an undone path had before the run.
-fn restore(entry: &JournalEntry) -> BaseUpdate {
-    match entry.before {
-        Some(base) => BaseUpdate::Record(entry.path.clone(), base),
-        None => BaseUpdate::Forget(entry.path.clone()),
+/// The base an undone path had before the run; a move's new path had
+/// none, and its old one gets back what it had.
+fn restore(entry: &JournalEntry) -> Vec<BaseUpdate> {
+    let path = entry.moved_from.as_ref().unwrap_or(&entry.path);
+    let mut updates = Vec::new();
+    if entry.moved_from.is_some() {
+        updates.push(BaseUpdate::Forget(entry.path.clone()));
     }
+    updates.push(match before(entry) {
+        Some(base) => BaseUpdate::Record(path.clone(), base),
+        None => BaseUpdate::Forget(path.clone()),
+    });
+    updates
+}
+
+/// What the undone path's base was before the run, as far as the folder
+/// still holds it. A move goes back as the run left it: metadata it
+/// brought stays, as undo leaves metadata-only changes, so its side
+/// records that version. Same content on both sides keeps the pair.
+fn before(entry: &JournalEntry) -> Option<BaselineEntry> {
+    let base = entry.before?;
+    let JournalAction::Move(moved) = entry.action else {
+        return Some(base);
+    };
+    let (left, right) = match entry.side {
+        Side::Left => (moved, base.right()),
+        Side::Right => (base.left(), moved),
+    };
+    Some(BaselineEntry::new(left, right).unwrap_or(base))
 }

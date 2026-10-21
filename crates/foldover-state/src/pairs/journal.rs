@@ -15,6 +15,7 @@ const CREATE: &str = "create";
 const REPLACE: &str = "replace";
 const METADATA: &str = "metadata";
 const ARCHIVE: &str = "archive";
+const MOVE: &str = "move";
 
 /// What a run did to one path on one side, with what it left there.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -28,6 +29,9 @@ pub enum JournalAction {
     /// Moved this file or link into the run's archive, or removed this
     /// empty folder.
     Archive(EntryVersion),
+    /// Moved this file or link here from `JournalEntry::moved_from`, with
+    /// the version it has here now.
+    Move(EntryVersion),
 }
 
 /// One write a run made, in write order.
@@ -37,8 +41,10 @@ pub struct JournalEntry {
     pub path: SyncPath,
     pub side: Side,
     pub action: JournalAction,
-    /// The base before the run.
+    /// The base before the run; for a move, the base of `moved_from`.
     pub before: Option<BaselineEntry>,
+    /// For a move, where the entry was.
+    pub moved_from: Option<SyncPath>,
 }
 
 /// A run's writes, named by its archive folder, e.g.
@@ -131,6 +137,7 @@ fn row(entry: &JournalEntry) -> Result<JournalRow, Error> {
         JournalAction::Replace(version) => (REPLACE, version),
         JournalAction::Metadata(version) => (METADATA, version),
         JournalAction::Archive(version) => (ARCHIVE, version),
+        JournalAction::Move(version) => (MOVE, version),
     };
     Ok(JournalRow {
         seq: i64::try_from(entry.seq).map_err(|_| Error::InvalidStored("journal sequence"))?,
@@ -145,6 +152,10 @@ fn row(entry: &JournalEntry) -> Result<JournalRow, Error> {
         base: entry
             .before
             .map(|base| (encode(base.left()).to_vec(), encode(base.right()).to_vec())),
+        source: entry
+            .moved_from
+            .as_ref()
+            .map(|path| path.as_bytes().to_vec()),
     })
 }
 
@@ -156,8 +167,16 @@ fn entry(row: JournalRow) -> Result<JournalEntry, Error> {
         REPLACE => JournalAction::Replace(version),
         METADATA => JournalAction::Metadata(version),
         ARCHIVE => JournalAction::Archive(version),
+        MOVE => JournalAction::Move(version),
         _ => return Err(invalid()),
     };
+    let moved_from = row
+        .source
+        .map(|path| SyncPath::try_from(path).map_err(|_| invalid()))
+        .transpose()?;
+    if matches!(action, JournalAction::Move(_)) != moved_from.is_some() {
+        return Err(invalid());
+    }
     Ok(JournalEntry {
         seq: u64::try_from(row.seq).map_err(|_| invalid())?,
         path: SyncPath::try_from(row.path).map_err(|_| invalid())?,
@@ -171,5 +190,6 @@ fn entry(row: JournalRow) -> Result<JournalEntry, Error> {
             .base
             .map(|(left, right)| decode_entry(&left, &right))
             .transpose()?,
+        moved_from,
     })
 }

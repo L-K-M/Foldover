@@ -47,8 +47,8 @@ pub use peers::{
     peer_identity, serve_folder,
 };
 pub use plan::{
-    CandidateDecision, CandidatePlan, Choices, PlanError, PlanRow, TreeRole, plan_candidates,
-    plan_resolved,
+    CandidateDecision, CandidatePlan, Choices, Moves, PlanError, PlanRow, TreeRole,
+    plan_candidates, plan_resolved,
 };
 pub use poll::{ChangePoll, PollMode, Polled};
 pub use readiness::{ReadinessWarning, missing_side, reconnect};

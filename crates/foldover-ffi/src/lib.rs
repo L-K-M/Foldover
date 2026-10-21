@@ -185,6 +185,8 @@ pub struct LocalPairOptions {
     /// are mounted.
     pub canary: Option<Vec<u8>>,
     pub records: FolderRecords,
+    /// File data bytes per second the pair's copies share at most.
+    pub bandwidth_limit: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -291,6 +293,7 @@ impl From<&foldover_client::PairOptions> for LocalPairOptions {
                 foldover_client::FolderRecords::Both => FolderRecords::Both,
                 foldover_client::FolderRecords::SourceOnly => FolderRecords::SourceOnly,
             },
+            bandwidth_limit: options.bandwidth_limit(),
         }
     }
 }
@@ -346,7 +349,8 @@ impl TryFrom<LocalPairOptions> for foldover_client::PairOptions {
                 FolderRecords::Both => foldover_client::FolderRecords::Both,
                 FolderRecords::SourceOnly => foldover_client::FolderRecords::SourceOnly,
             })
-        })
+        })?
+        .with_bandwidth_limit(options.bandwidth_limit)
     }
 }
 
@@ -576,6 +580,7 @@ mod tests {
                     age_limit: Some(365),
                     canary: Some(b"docs/canary.txt".to_vec()),
                     records: FolderRecords::SourceOnly,
+                    bandwidth_limit: Some(2_000_000),
                 },
             };
             let domain = foldover_client::PairDraft::try_from(draft.clone()).unwrap();

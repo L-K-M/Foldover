@@ -105,6 +105,11 @@ pub enum SyncAction {
     Blocked,
     /// Backup keeps a target-only entry or edit.
     Keep,
+    /// Renamed on `on` from the item's `moved_from`: the other folder
+    /// moved it, so nothing is copied.
+    Move {
+        on: super::PairSide,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -114,6 +119,9 @@ pub struct SyncItem {
     pub action: SyncAction,
     /// File data the item copies; 0 for everything else.
     pub bytes: u64,
+    /// For a move, the path it comes from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_from: Option<Vec<u8>>,
 }
 
 /// What an item does, for listing one kind at a time.
@@ -126,6 +134,7 @@ pub enum SyncItemKind {
     Conflict,
     Blocked,
     Keep,
+    Move,
 }
 
 impl SyncItemKind {
@@ -137,6 +146,7 @@ impl SyncItemKind {
             SyncAction::Conflict { .. } => Self::Conflict,
             SyncAction::Blocked => Self::Blocked,
             SyncAction::Keep => Self::Keep,
+            SyncAction::Move { .. } => Self::Move,
         }
     }
 }
@@ -173,6 +183,8 @@ pub struct SyncCounts {
     pub conflicts: u64,
     pub blocked: u64,
     pub kept: u64,
+    #[serde(default)]
+    pub moves: u64,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -215,6 +227,9 @@ pub struct SyncFailure {
 pub struct SyncResult {
     pub cancelled: bool,
     pub copied: u64,
+    /// Files and links renamed for moves the other folder made.
+    #[serde(default)]
+    pub moved: u64,
     pub updated: u64,
     pub archived: u64,
     /// Leftovers of interrupted runs, moved to the archive.
@@ -320,12 +335,14 @@ mod tests {
         let path = vec![u8::MAX; 1024];
         let preview = SyncPreview {
             items: vec![
+                // A move names two paths, the most an item carries.
                 SyncItem {
                     path: path.clone(),
-                    action: SyncAction::Conflict {
-                        conflict: SyncConflict::DeletedVersusEdited,
+                    action: SyncAction::Move {
+                        on: PairSide::Right,
                     },
                     bytes: u64::MAX,
+                    moved_from: Some(path.clone()),
                 };
                 SYNC_ITEM_LIMIT
             ],
@@ -350,6 +367,7 @@ mod tests {
             result: SyncResult {
                 cancelled: false,
                 copied: 1,
+                moved: 0,
                 updated: 0,
                 archived: 0,
                 recovered: 0,

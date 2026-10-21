@@ -51,7 +51,11 @@ const TLS13_ONLY: &[&rustls::SupportedProtocolVersion] = &[&rustls::version::TLS
 const SEND_WINDOW: u64 = 64 * 1024 * 1024;
 const RECEIVE_WINDOW: u32 = 64 * 1024 * 1024;
 const STREAM_WINDOW: u32 = 16 * 1024 * 1024;
-const MAX_BIDI_STREAMS: u32 = 4;
+/// Requests a paired Mac may open at once: each pair's copies (four at a
+/// time), its change report and lease beats. Room for a dozen pairs, so
+/// copies never hold up a lease beat; the receive window, not this
+/// count, bounds the memory they take.
+const MAX_BIDI_STREAMS: u32 = 64;
 const FRAME_CHUNK_BYTES: usize = 64 * 1024;
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
 const PAIRING_TIMEOUT: Duration = Duration::from_secs(15);

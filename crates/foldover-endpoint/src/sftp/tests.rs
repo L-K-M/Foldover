@@ -403,6 +403,88 @@ fn keep_copy_streams_a_file_beside_the_original_and_cancels_cleanly() {
     ));
 }
 
+/// PLAN.md §4.9: copies from several threads go out on several sessions
+/// at once and come back the same way, each file whole.
+#[test]
+fn copies_from_several_threads_use_their_own_sessions() {
+    const FILES: usize = 32;
+    let Some(server) = server() else {
+        eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
+        return;
+    };
+    let (local_directory, back_directory) =
+        (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let remote_directory = tempfile::tempdir().unwrap();
+    let remote = Endpoint::Sftp(
+        SftpEndpoint::spawn(
+            &server,
+            &[OsStr::new("-d"), OsStr::new("/")],
+            remote_directory.path().as_os_str().as_encoded_bytes(),
+        )
+        .unwrap(),
+    );
+    assert_eq!(remote.workers().get(), 4);
+    let local = Endpoint::Local(LocalEndpoint::open(local_directory.path()).unwrap());
+    let back = Endpoint::Local(LocalEndpoint::open(back_directory.path()).unwrap());
+    let options = PairOptions::default();
+    let run = RunScope::new(UNIX_EPOCH, options.clone());
+    let content = |index: usize| format!("file {index} ").repeat(4_000).into_bytes();
+    for index in 0..FILES {
+        fs::write(
+            local_directory.path().join(format!("{index}.txt")),
+            content(index),
+        )
+        .unwrap();
+    }
+    let observe = |endpoint: &Endpoint| {
+        endpoint
+            .observe_from(
+                options.metadata(),
+                &Filter::none(),
+                &std::collections::BTreeMap::new(),
+                &mut proceed,
+                &mut |_| {},
+            )
+            .unwrap()
+    };
+    let copy_all = |to: &Endpoint, from: &Endpoint| {
+        let observed = observe(from);
+        let names: Vec<_> = observed.entries().keys().cloned().collect();
+        std::thread::scope(|threads| {
+            for share in names.chunks(FILES / 4) {
+                let (observed, run) = (&observed, &run);
+                threads.spawn(move || {
+                    for name in share {
+                        to.copy_from(
+                            from,
+                            name,
+                            &observed.entries()[name],
+                            Expected::Absent,
+                            run,
+                            &mut proceed,
+                        )
+                        .unwrap();
+                    }
+                });
+            }
+        });
+    };
+
+    copy_all(&remote, &local);
+    copy_all(&back, &remote);
+    for index in 0..FILES {
+        let name = format!("{index}.txt");
+        assert_eq!(
+            fs::read(remote_directory.path().join(&name)).unwrap(),
+            content(index)
+        );
+        assert_eq!(
+            fs::read(back_directory.path().join(&name)).unwrap(),
+            content(index)
+        );
+    }
+}
+
 #[test]
 fn copies_both_ways_keep_content_and_archive_what_they_replace() {
     let local_directory = tempfile::tempdir().unwrap();
@@ -809,6 +891,53 @@ fn keep_copy_in_a_folder_with_another_spelling_finishes() {
     );
 }
 
+/// Review of moves: a move into a folder stored in another spelling made
+/// a composed twin of it, then held the session while finding it, which
+/// needs the session too, and hung.
+#[test]
+fn a_move_into_a_folder_with_another_spelling_lands_inside_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    let options = PairOptions::default();
+    let run = RunScope::new(SystemTime::now(), options.clone());
+    let decomposed = "cafe\u{301}";
+    fs::create_dir(directory.path().join(decomposed)).unwrap();
+    fs::write(directory.path().join("menu.txt"), b"soup").unwrap();
+    let observed = remote
+        .observe_from(
+            options.metadata(),
+            &Filter::none(),
+            &std::collections::BTreeMap::new(),
+            &mut proceed,
+        )
+        .unwrap();
+    let from = path(b"menu.txt");
+    let current = observed.entries()[&from].clone();
+    let to = path("caf\u{e9}/old/menu.txt".as_bytes());
+
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let moved = remote.move_entry(&from, &current, &to, &run, &mut proceed);
+        let _ = done.send(moved.map_err(|error| error.to_string()));
+    });
+    assert_eq!(
+        finished.recv_timeout(std::time::Duration::from_secs(20)),
+        Ok(Ok(()))
+    );
+    let names: Vec<String> = fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name != ".foldover")
+        .collect();
+    assert_eq!(names, [decomposed]);
+    assert_eq!(
+        fs::read(directory.path().join(decomposed).join("old/menu.txt")).unwrap(),
+        b"soup"
+    );
+}
+
 /// macOS CI: a server that ignores normalization, as a Mac's does, finds
 /// an entry by either spelling, so a replacement took the spelling it
 /// asked by. Its folder's listing tells the one stored.
@@ -996,4 +1125,51 @@ fn lock_files_are_created_exclusively_and_replaced_by_a_promoted_claim() {
     remote.remove_lock_file(LockFile::Lock).unwrap();
     let left = fs::read_dir(directory.path().join(".foldover")).unwrap();
     assert_eq!(left.count(), 0, "temporary files were left behind");
+}
+
+/// Review of bandwidth: a cancel that came while a streamed copy waited
+/// for its share of the pair's limit failed the copy instead of
+/// cancelling it.
+#[test]
+fn a_cancel_during_a_bandwidth_wait_cancels_the_copy() {
+    let local_directory = tempfile::tempdir().unwrap();
+    let remote_directory = tempfile::tempdir().unwrap();
+    let Some(remote) = remote(remote_directory.path()) else {
+        return;
+    };
+    let local = Endpoint::Local(LocalEndpoint::open(local_directory.path()).unwrap());
+    // Ten seconds of data at the lowest limit.
+    let options = PairOptions::default()
+        .with_bandwidth_limit(Some(100_000))
+        .unwrap();
+    fs::write(local_directory.path().join("big.bin"), vec![7; 1_000_000]).unwrap();
+    let here = local
+        .observe_from(
+            options.metadata(),
+            &Filter::none(),
+            &std::collections::BTreeMap::new(),
+            &mut proceed,
+            &mut |_| {},
+        )
+        .unwrap();
+    let run = RunScope::new(UNIX_EPOCH, options);
+    let name = path(b"big.bin");
+
+    // The first chunk's wait outlasts the cancel.
+    let started = std::time::Instant::now();
+    let copied = remote.copy_from(
+        &local,
+        &name,
+        &here.entries()[&name],
+        Expected::Absent,
+        &run,
+        &mut || match started.elapsed() > std::time::Duration::from_millis(150) {
+            true => ScanControl::Cancel,
+            false => ScanControl::Continue,
+        },
+    );
+    assert!(
+        matches!(copied, Err(ApplyError::Scan(ScanError::Cancelled))),
+        "{copied:?}"
+    );
 }

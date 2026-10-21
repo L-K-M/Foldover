@@ -12,13 +12,17 @@
 //! - `Durability::Full` is refused, not downgraded: namespace changes
 //!   have no protocol flush.
 
+mod sessions;
 mod spelling;
 mod transfer;
 
 pub(crate) use transfer::{copy, update_metadata};
 
+use sessions::{Borrowed, Connect, Sessions};
+
 use std::io;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::num::NonZeroUsize;
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use foldover_net::sftp::{Attributes, FileKind, Handle, Session, SshTarget};
@@ -55,17 +59,20 @@ const PUT_BACK_ATTEMPTS: u32 = 100;
 const RESTORED: &str = "restored";
 const SSH_PORT: u16 = 22;
 
-/// Opens another session to the same server.
-type Connect = Box<dyn Fn() -> io::Result<Session> + Send + Sync>;
+/// Copies a server takes at once when Foldover can open more sessions
+/// to it (PLAN.md §4.9).
+const PARALLEL_COPIES: NonZeroUsize = NonZeroUsize::new(4).expect("four is not zero");
+/// Sessions per server: one per copy worker, and the run's own thread.
+const SESSIONS: usize = PARALLEL_COPIES.get() + 1;
 
 pub struct SftpEndpoint {
-    session: Mutex<Box<Session>>,
+    sessions: Sessions,
     /// Leases beat over their own session, opened on first use: a transfer
-    /// holds `session` while it calls back into the run, and a beat must
+    /// holds a session while it calls back into the run, and a beat must
     /// neither wait for the transfer nor deadlock with it.
     lease: Mutex<Option<Box<Session>>>,
-    /// How to open that session; without one, as for a session made
-    /// elsewhere, leases share `session`.
+    /// How to open more sessions; without one, as for a session made
+    /// elsewhere, everything shares that one.
     connect: Option<Connect>,
     /// `host:port`, to tell whether two roots can overlap; unknown for
     /// sessions made elsewhere.
@@ -170,7 +177,7 @@ impl SftpEndpoint {
             Err(error) => return Err(io_error(error)),
         }
         Ok(Self {
-            session: Mutex::new(Box::new(session)),
+            sessions: Sessions::new(session, SESSIONS),
             lease: Mutex::new(None),
             connect: None,
             server: None,
@@ -178,8 +185,19 @@ impl SftpEndpoint {
         })
     }
 
-    fn session(&self) -> MutexGuard<'_, Box<Session>> {
-        self.session.lock().unwrap_or_else(PoisonError::into_inner)
+    /// A session to use alone until it drops. Hold one at a time: a
+    /// handle opened on it is valid only there.
+    fn session(&self) -> Borrowed<'_> {
+        self.sessions.borrow(self.connect.as_ref())
+    }
+
+    /// How many copies the server takes at once: one without a way to
+    /// open more sessions.
+    pub fn workers(&self) -> NonZeroUsize {
+        match self.connect {
+            Some(_) => PARALLEL_COPIES,
+            None => NonZeroUsize::MIN,
+        }
     }
 
     /// Run `request` over the lease session, opening it first if needed;
@@ -577,14 +595,15 @@ impl SftpEndpoint {
         control: &mut impl FnMut() -> ScanControl,
         sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
     ) -> Result<Digest, ScanError> {
+        // The handle is valid only on the session that opened it.
+        let mut session = self.session();
         let (handle, remote) = self
-            .on_stored(path.as_bytes(), |remote| {
-                self.session()
+            .on_stored_with(&mut session, path.as_bytes(), |session, remote| {
+                session
                     .open_read(remote)
                     .map(|handle| (handle, remote.to_vec()))
             })
             .map_err(|source| at(Some(path), source))?;
-        let mut session = self.session();
         let mut hasher = blake3::Hasher::new();
         let mut taken = from;
         let mut cancelled = false;
@@ -844,6 +863,58 @@ impl SftpEndpoint {
         self.session()
             .rename(stored, &self.remote(archived.as_bytes()))
             .map_err(|source| write_error(path, source))
+    }
+
+    /// Move the file or link at `from`, still `current`, to `to`, named
+    /// composed as new names are and creating missing folders. The
+    /// server's rename never replaces.
+    pub fn move_entry(
+        &self,
+        from: &SyncPath,
+        current: &ObservedEntry,
+        to: &SyncPath,
+        run: &RunScope,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), ApplyError> {
+        check_durability(run.options().durability(), from)?;
+        let (stored, attributes) = self
+            .verified_at(from, current, run.options().metadata(), control)
+            .map_err(|error| match error {
+                ApplyError::Scan(ScanError::Changed(_)) => {
+                    ApplyError::DestinationChanged(from.clone())
+                }
+                error => error,
+            })?;
+        if attributes.kind() == FileKind::Directory {
+            return Err(ApplyError::Unsupported(from.clone()));
+        }
+        // Missing folders come composed, inside those that remain in the
+        // spelling they have.
+        if let Some(parent) = to.parent()
+            && self.attributes(&parent)?.is_none()
+        {
+            let folders = self.creatable(parent.as_bytes());
+            self.make_directories(&folders, DEFAULT_DIRECTORY)
+                .map_err(|source| write_error(to, source))?;
+        }
+        // Making folders took round trips: the entry must still be the one
+        // verified, or the move would take a replacement.
+        let still = self
+            .lookup(from)?
+            .is_some_and(|(_, now)| stat_key(&now) == stat_key(&attributes));
+        if !still {
+            return Err(ApplyError::DestinationChanged(from.clone()));
+        }
+        // Found before the session is held: finding it may use it.
+        let target = self.fresh(to.as_bytes());
+        let moved = self.session().rename(&stored, &target);
+        if let Err(source) = moved {
+            return Err(match self.attributes(to) {
+                Ok(Some(_)) => ApplyError::DestinationChanged(to.clone()),
+                _ => write_error(from, source),
+            });
+        }
+        Ok(())
     }
 
     /// Archive the entry at `path` for this run, or delete it where the

@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
+use std::num::NonZeroUsize;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::{Arc, Weak};
@@ -23,6 +24,9 @@ use crate::{
     ApplyError, ArchivedItem, ArchivedRun, Expected, Filter, LocalEndpoint, Observation,
     ObservedEntry, RootRelation, RunScope, ScanError,
 };
+
+/// Copies another Mac's folder takes at once.
+const PEER_COPIES: NonZeroUsize = NonZeroUsize::new(4).expect("four is not zero");
 
 /// One directory entry as a quick change check sees it (PLAN.md §4.8):
 /// enough to tell that something changed, not what.
@@ -279,6 +283,43 @@ impl Endpoint {
             Self::Peer(endpoint) => endpoint.recover_leftover(leftover, run),
             #[cfg(feature = "simulation")]
             Self::Memory(endpoint) => endpoint.recover_leftover(leftover, run),
+        }
+    }
+
+    /// Move the file or link at `from`, still `current`, to `to`, creating
+    /// missing folders; nothing at `to` is replaced (PLAN.md §4.7).
+    /// Another Mac's folder takes no moves yet: its runs copy instead.
+    pub fn move_entry(
+        &self,
+        from: &SyncPath,
+        current: &ObservedEntry,
+        to: &SyncPath,
+        run: &RunScope,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), ApplyError> {
+        match self {
+            Self::Local(endpoint) => endpoint.move_entry(from, current, to, run, control),
+            Self::Sftp(endpoint) => endpoint.move_entry(from, current, to, run, control),
+            Self::Peer(_) => Err(ApplyError::Unsupported(from.clone())),
+            #[cfg(feature = "simulation")]
+            Self::Memory(endpoint) => endpoint.move_entry(from, current, to, run),
+        }
+    }
+
+    /// Whether this folder takes moves (`move_entry`).
+    pub fn moves(&self) -> bool {
+        !matches!(self, Self::Peer(_))
+    }
+
+    /// How many copies into or out of this folder may run at once (PLAN.md
+    /// §4.9). Each copy to or from another Mac is one stream on its link.
+    pub fn workers(&self) -> NonZeroUsize {
+        match self {
+            Self::Local(endpoint) => endpoint.workers(),
+            Self::Sftp(endpoint) => endpoint.workers(),
+            Self::Peer(_) => PEER_COPIES,
+            #[cfg(feature = "simulation")]
+            Self::Memory(endpoint) => endpoint.workers(),
         }
     }
 

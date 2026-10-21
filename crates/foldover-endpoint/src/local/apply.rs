@@ -8,6 +8,7 @@
 //!                                      ─▶ archive what was displaced
 //! ```
 
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use foldover_fs::{Displaced, Placement, WriteError};
@@ -20,6 +21,7 @@ use super::{
     LocalEndpoint, LocalEntry, NodeKind, ObservedEntry, Payload, ScanControl, ScanError,
     entry_version, metadata_version, observed,
 };
+use crate::pace::Pace;
 
 /// What the plan observed on one side of a path.
 #[derive(Clone, Copy, Debug)]
@@ -44,6 +46,9 @@ pub struct RunScope {
     archive: SyncPath,
     options: PairOptions,
     archiving: Archiving,
+    /// The pair's bandwidth limit, shared by every copy of the run and
+    /// by both sides' views of it.
+    pace: Option<Arc<Pace>>,
 }
 
 impl RunScope {
@@ -56,6 +61,9 @@ impl RunScope {
         Self {
             name,
             archive: SyncPath::try_from(archive).expect("run names are single path components"),
+            pace: options
+                .bandwidth_limit()
+                .map(|bytes_per_second| Arc::new(Pace::new(bytes_per_second))),
             options,
             archiving: Archiving::Kept,
         }
@@ -78,11 +86,13 @@ impl RunScope {
         let mut archive = ARCHIVE_ROOT.to_vec();
         archive.push(b'/');
         archive.extend_from_slice(name.as_bytes());
+        // The asking Mac paces the data it sends or reads.
         Some(Self {
             name: name.to_owned(),
             archive: SyncPath::try_from(archive).ok()?,
             options,
             archiving: Archiving::Kept,
+            pace: None,
         })
     }
 
@@ -97,6 +107,10 @@ impl RunScope {
 
     pub(crate) fn archiving(&self) -> Archiving {
         self.archiving
+    }
+
+    pub(crate) fn pace(&self) -> Option<&Pace> {
+        self.pace.as_deref()
     }
 
     pub(crate) fn archive_path(&self, path: &SyncPath) -> Result<SyncPath, InvalidSyncPath> {
@@ -183,7 +197,18 @@ impl LocalEndpoint {
                 return Ok(self.entry_version(&created, policy, control)?);
             }
             EntryKind::File => {
-                let mut checkpoint = |_| control();
+                // PLAN.md §4.9: the pair's bandwidth limit paces the data
+                // as it is read; `total` counts what was read so far.
+                let mut paced = 0;
+                let mut checkpoint = |total: u64| {
+                    if let Some(pace) = run.pace()
+                        && pace.wait(total.saturating_sub(paced), control) == ScanControl::Cancel
+                    {
+                        return ScanControl::Cancel;
+                    }
+                    paced = paced.max(total);
+                    control()
+                };
                 let staged = self
                     .root
                     .stage_file(
@@ -311,6 +336,30 @@ impl LocalEndpoint {
             &observed(&updated.metadata, extended.as_ref()),
             run.options.metadata(),
         ))
+    }
+
+    /// Move the file or link at `from`, still `current`, to `to`, creating
+    /// missing folders. Its content is untouched, so nothing is archived;
+    /// nothing at `to` is replaced.
+    pub fn move_entry(
+        &self,
+        from: &SyncPath,
+        current: &ObservedEntry,
+        to: &SyncPath,
+        run: &RunScope,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), ApplyError> {
+        let entry = self
+            .verified(from, current, run, control)
+            .map_err(|error| changed_as(error, ApplyError::DestinationChanged(from.clone())))?;
+        self.root
+            .move_entry(from, entry.metadata(), to, run.options.durability())
+            .map_err(|error| match error {
+                WriteError::Exists => ApplyError::DestinationChanged(to.clone()),
+                WriteError::Changed => ApplyError::DestinationChanged(from.clone()),
+                WriteError::UnsupportedEntry => ApplyError::Unsupported(from.clone()),
+                error => write_error(from, error),
+            })
     }
 
     /// Archive the entry at `path` for this run, or delete it where the

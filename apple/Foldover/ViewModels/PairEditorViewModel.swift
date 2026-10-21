@@ -158,6 +158,26 @@ final class PairEditorViewModel: Identifiable {
         }
     }
 
+    /// Copy rates in whole decimal megabytes per second.
+    private static let suggestedBandwidthMegabytesPerSecond: UInt64 = 10
+
+    var limitsBandwidth: Bool {
+        get { options.bandwidthLimit != nil }
+        set {
+            options.bandwidthLimit = newValue
+                ? options.bandwidthLimit ?? Self.suggestedBandwidthMegabytesPerSecond * Self.bytesPerMegabyte
+                : nil
+        }
+    }
+
+    var bandwidthLimitMegabytesPerSecond: Int {
+        get { Int(clamping: (options.bandwidthLimit ?? 0) / Self.bytesPerMegabyte) }
+        set {
+            let megabytes = min(UInt64(max(1, newValue)), UInt64.max / Self.bytesPerMegabyte)
+            options.bandwidthLimit = megabytes * Self.bytesPerMegabyte
+        }
+    }
+
     private static let suggestedAgeDays: UInt32 = 365
     private static let maxAgeDays: UInt32 = 36_500
 

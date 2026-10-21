@@ -4,7 +4,7 @@
 //! these invariants:
 //!
 //! - nothing is lost: a file version a run replaced or removed is in its
-//!   folder's archive, except on a Backup target that keeps no records,
+//!   folder's archive, or at another path there when the run moved it, except on a Backup target that keeps no records,
 //!   which never gains an archive;
 //! - a finished run leaves both folders equal outside the conflicts it
 //!   reported, comparing names the way the folders do; a Backup leaves
@@ -24,6 +24,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::time::Duration;
 
@@ -37,6 +38,8 @@ use super::*;
 /// Cases per test run; CI keeps them short, the nightly run raises them.
 const DISK_CASES: u32 = 8;
 const MEMORY_CASES: u32 = 64;
+/// Copies a parallel in-memory folder takes at once.
+const PARALLEL: NonZeroUsize = NonZeroUsize::new(4).expect("four is not zero");
 
 fn cases(variable: &str, default: u32) -> u32 {
     std::env::var(variable)
@@ -206,7 +209,7 @@ fn quirks() -> impl Strategy<Value = Quirks> {
         storage,
         time_resolution,
         replace,
-        capacity: None,
+        ..Quirks::default()
     })
 }
 
@@ -575,8 +578,11 @@ impl Simulation {
                 continue;
             }
             let (after, archive) = (self.files(*folder), self.kept(*folder));
+            // Every write has its own content, so the same content at
+            // another path is this version, moved there (PLAN.md §4.7).
+            let kept_here: BTreeSet<&Vec<u8>> = after.values().collect();
             for (path, content) in before {
-                if after.get(path) == Some(content) {
+                if after.get(path) == Some(content) || kept_here.contains(content) {
                     continue;
                 }
                 assert!(
@@ -864,6 +870,103 @@ proptest! {
             simulation.play(round);
         }
     }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(
+        cases("FOLDOVER_MEMORY_SIMULATION_CASES", MEMORY_CASES),
+    ))]
+
+    /// The same with copies on several threads (PLAN.md §4.7). Threads
+    /// interleave freely, so a failing seed may not replay exactly.
+    #[test]
+    fn parallel_copies_lose_nothing_converge_and_settle(
+        mode in mode(),
+        left in quirks(),
+        right in quirks(),
+        rounds in rounds(PATHS.len(), Faults::On),
+    ) {
+        let parallel = |quirks| Quirks { workers: PARALLEL, ..quirks };
+        let mut simulation = Simulation::in_memory_as(mode, parallel(left), parallel(right));
+        simulation.start();
+        for round in &rounds {
+            simulation.play(round);
+        }
+    }
+}
+
+/// Siblings copy on several workers at once where both folders take
+/// them, each once, and a run after has nothing to do.
+#[test]
+fn siblings_copy_on_several_workers() {
+    const FILES: usize = 48;
+    const FOLDERS: usize = 3;
+    let parallel = Quirks {
+        workers: PARALLEL,
+        copy_time: Duration::from_millis(5),
+        ..Quirks::default()
+    };
+    let mut simulation = Simulation::in_memory(parallel, parallel);
+    let left = simulation.memory(Folder::Left).unwrap().clone();
+    for file in 0..FILES {
+        let path = format!("folder {}/file {file}.txt", file % FOLDERS);
+        left.put_file(path.as_bytes(), path.as_bytes()).unwrap();
+    }
+
+    let Ended::Finished(report) = simulation.run(Interruption::None, RunContext::Reviewed) else {
+        panic!("the first run did not finish");
+    };
+    assert_eq!(report.completion(), Completion::Finished);
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    assert_eq!(report.copied(), (FILES + FOLDERS) as u64);
+    assert_eq!(
+        simulation.files(Folder::Right),
+        simulation.files(Folder::Left)
+    );
+    // The run's own thread makes folders while the workers copy files.
+    let peak = simulation.memory(Folder::Right).unwrap().peak_copies();
+    assert!(
+        (2..=PARALLEL.get() + 1).contains(&peak),
+        "{peak} copies at once"
+    );
+    simulation.check_settled();
+}
+
+/// A run cancelled while copies are out records only those that landed,
+/// ends cancelled, and the next run brings the rest.
+#[test]
+fn a_cancel_stops_copies_still_waiting_for_a_worker() {
+    const FILES: usize = 48;
+    let parallel = Quirks {
+        workers: PARALLEL,
+        copy_time: Duration::from_millis(20),
+        ..Quirks::default()
+    };
+    let mut simulation = Simulation::in_memory(parallel, parallel);
+    simulation.start();
+    let left = simulation.memory(Folder::Left).unwrap().clone();
+    for file in 0..FILES {
+        let path = format!("many/file {file}.txt");
+        left.put_file(path.as_bytes(), path.as_bytes()).unwrap();
+    }
+    let before = simulation.snapshot();
+
+    let Ended::Finished(report) = simulation.run(Interruption::Cancel(4), RunContext::Interactive)
+    else {
+        panic!("a cancelled run is not an error");
+    };
+    assert_eq!(report.completion(), Completion::Cancelled);
+    let copied = simulation.files(Folder::Right).len() - before[1].len();
+    assert!(copied < FILES, "the cancel stopped nothing");
+    simulation.check_nothing_lost(&before);
+    simulation.play(&Round {
+        edits: Vec::new(),
+        interruption: Interruption::None,
+    });
+    assert_eq!(
+        simulation.files(Folder::Right),
+        simulation.files(Folder::Left)
+    );
 }
 
 /// A folder without room for a run and the free-space reserve stops it

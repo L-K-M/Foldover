@@ -60,6 +60,8 @@ pub use link::{
     Presence, WatchHandle,
 };
 
+mod pace;
+
 mod lease;
 pub use lease::{HeldLease, LeaseError, LeaseHolder, LeaseTiming, LockFile};
 

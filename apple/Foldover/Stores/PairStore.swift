@@ -67,6 +67,8 @@ struct PairOptions: Equatable, Sendable {
     /// are mounted; syncs stop before writing if it is missing or changed.
     var canary: Data?
     var records: PairRecords
+    /// File data bytes per second the pair's copies share at most.
+    var bandwidthLimit: UInt64?
 
     /// The engine's defaults, so the app never restates them.
     static var defaults: PairOptions { pairOptions(FoldoverCore.defaultPairOptions()) }
@@ -269,7 +271,8 @@ private func pairOptions(_ options: LocalPairOptions) -> PairOptions {
         sizeLimit: options.sizeLimit,
         ageLimit: options.ageLimit,
         canary: options.canary,
-        records: options.records == .sourceOnly ? .sourceOnly : .both
+        records: options.records == .sourceOnly ? .sourceOnly : .both,
+        bandwidthLimit: options.bandwidthLimit
     )
 }
 
@@ -331,7 +334,8 @@ private func corePairOptions(_ options: PairOptions) -> LocalPairOptions {
         sizeLimit: options.sizeLimit,
         ageLimit: options.ageLimit,
         canary: options.canary,
-        records: options.records == .sourceOnly ? .sourceOnly : .both
+        records: options.records == .sourceOnly ? .sourceOnly : .both,
+        bandwidthLimit: options.bandwidthLimit
     )
 }
 
