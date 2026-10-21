@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Time Machine no longer backs up Foldover's state on this Mac: a
+  restored, older state could carry stale deletions over. A Mac set up
+  from a backup starts without pairs.
+
 ### Added
 
 - A file moved or renamed in one folder is moved the same way in the
@@ -258,6 +264,14 @@ All notable changes to this project are documented here. The format follows
   scripts, CI.
 
 ### Fixed
+
+- A folder holding files iCloud keeps only in the cloud no longer stops
+  every sync: those files and folders are skipped in both folders until
+  you download them, and never taken for deletions.
+
+- An edit that kept a file's size and modification time is found within
+  a week: each file's content is read again at least weekly, spread
+  over the week, instead of only when its size or time changes.
 
 - Syncing to disks formatted HFS+ (Mac OS Extended), exFAT or FAT32
   works: every copy to them failed with "Operation not supported".

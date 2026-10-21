@@ -138,6 +138,7 @@ pub struct ScanStats {
     leftovers: Vec<SyncPath>,
     oversized: Vec<SyncPath>,
     old: Vec<SyncPath>,
+    unavailable: Vec<SyncPath>,
 }
 
 impl ScanStats {
@@ -184,6 +185,11 @@ impl Sidecars {
 /// How long after its last modification an entry's stat stays untrusted.
 /// Coarse timestamps (FAT, exFAT) cannot show an edit within the same tick.
 const RACY_WINDOW: Duration = Duration::from_secs(3);
+/// A version a stat proved unchanged is read again after half to all of
+/// this, so an edit that kept size and modification time is found within
+/// a week (PLAN.md §4.8). Each entry's share is spread by its stat, so a
+/// large folder is not reread in one run.
+const REREAD: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// The exact stat a version was derived from. An identical later stat proves
 /// the version unchanged without rereading data, outside the racy window.
@@ -226,7 +232,23 @@ impl Fingerprint {
             .observed_at
             .duration_since(modified)
             .is_ok_and(|age| age >= RACY_WINDOW);
-        settled && key == self.key
+        settled && key == self.key && self.read_within(self.reread_after(), SystemTime::now())
+    }
+
+    /// How long after it was read this version must be read again:
+    /// between half of `REREAD` and all of it, fixed by the stat.
+    fn reread_after(&self) -> Duration {
+        let hash = blake3::hash(&self.key);
+        let spread = u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes"));
+        let half = (REREAD.as_secs() / 2).max(1);
+        Duration::from_secs(half + spread % half)
+    }
+
+    /// Whether the version was read less than `limit` before `now`. A
+    /// read in the future, as after a clock change, counts as recent.
+    fn read_within(&self, limit: Duration, now: SystemTime) -> bool {
+        now.duration_since(self.observed_at)
+            .map_or(true, |age| age < limit)
     }
 
     fn to_bytes(&self) -> Vec<u8> {
@@ -304,6 +326,7 @@ pub struct Observation {
     pub(crate) leftovers: Vec<SyncPath>,
     pub(crate) oversized: Vec<SyncPath>,
     pub(crate) old: Vec<SyncPath>,
+    pub(crate) unavailable: Vec<SyncPath>,
 }
 
 impl Observation {
@@ -325,13 +348,24 @@ impl Observation {
         &self.old
     }
 
+    /// Entries macOS keeps only in iCloud (dataless), left unread with
+    /// everything below them: reading would download them.
+    pub fn unavailable(&self) -> &[SyncPath] {
+        &self.unavailable
+    }
+
     /// Report the entry at `from` under `to`: the same file, spelled as
     /// the pair knows it.
     pub fn respell(&mut self, from: &SyncPath, to: SyncPath) {
         if let Some(entry) = self.entries.remove(from) {
             self.entries.insert(to.clone(), entry);
         }
-        for listed in self.oversized.iter_mut().chain(&mut self.old) {
+        for listed in self
+            .oversized
+            .iter_mut()
+            .chain(&mut self.old)
+            .chain(&mut self.unavailable)
+        {
             if listed == from {
                 *listed = to.clone();
             }
@@ -643,9 +677,14 @@ impl LocalEndpoint {
             let at_path = Some(path.clone());
             let name = SyncPath::try_from(entry.name())?;
             let metadata = entry.metadata().clone();
-            // An unavailable entry is not absence. Stop rather than publish a
-            // complete inventory that could turn skipped placeholders into deletes.
-            reject_dataless(metadata.data_residency(), &at_path)?;
+            // An entry kept only in iCloud is not absence, and reading it
+            // would download it (PLAN.md §4.10): it is set aside unread,
+            // folders without their contents, for both folders to skip.
+            if metadata.data_residency() == DataResidency::Dataless {
+                stats.skipped += 1;
+                stats.unavailable.push(path);
+                continue;
+            }
             if metadata.identity().device() != self.identity.device() {
                 return Err(ScanError::NestedFilesystem(path));
             }
@@ -735,6 +774,7 @@ impl LocalEndpoint {
             leftovers: stats.leftovers,
             oversized: stats.oversized,
             old: stats.old,
+            unavailable: stats.unavailable,
         };
         for entry in entries {
             if control() == ScanControl::Cancel {
@@ -930,6 +970,29 @@ fn at<T>(path: &Option<SyncPath>, result: io::Result<T>) -> Result<T, ScanError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PLAN.md §4.8: an unchanged stat stands for a version only until it
+    /// is half a week to a week old, so same-size, same-time edits are
+    /// found within a week, and entries are not all reread at once.
+    #[test]
+    fn stats_prove_versions_for_at_most_a_week() {
+        let now = SystemTime::now();
+        let modified = now - Duration::from_secs(365 * 24 * 60 * 60);
+        let read = |ago: Duration| Fingerprint::from_key(b"key".to_vec(), 1, now - ago);
+        assert!(read(Duration::from_secs(60 * 60)).proves_unchanged_by(b"key", modified));
+        assert!(!read(REREAD).proves_unchanged_by(b"key", modified));
+        assert!(!read(Duration::from_secs(60 * 60)).proves_unchanged_by(b"other", modified));
+
+        let limits: std::collections::BTreeSet<Duration> = (0..64_u32)
+            .map(|key| Fingerprint::from_key(key.to_le_bytes().to_vec(), 1, now).reread_after())
+            .collect();
+        assert!(
+            limits
+                .iter()
+                .all(|limit| *limit >= REREAD / 2 && *limit < REREAD)
+        );
+        assert!(limits.len() > 32, "rereads are spread");
+    }
     #[cfg(target_os = "linux")]
     use std::ffi::OsStr;
     use std::fs;
@@ -938,7 +1001,7 @@ mod tests {
     use std::os::unix::net::UnixListener;
 
     #[test]
-    fn dataless_roots_and_entries_cannot_complete_an_inventory() {
+    fn dataless_roots_and_reads_are_refused() {
         for path in [
             None,
             Some(SyncPath::try_from(b"placeholder".as_slice()).unwrap()),
