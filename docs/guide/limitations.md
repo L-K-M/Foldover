@@ -199,6 +199,11 @@ you might expect. Only the last one below blocks saving
 
 ([ADR 0018](../adr/0018-local-entry-versions.md))
 
+Files and folders iCloud keeps only in the cloud are skipped in both
+folders rather than downloaded, and sync once you download them
+(Finder: Download Now); a removed local copy is never taken for a
+deletion ([ADR 0010](../adr/0010-local-metadata-inventory.md)).
+
 ## Watching and schedules
 
 - FSEvents events (inotify on Linux) are hints; each one starts a full

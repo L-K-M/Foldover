@@ -348,6 +348,7 @@ fn observe(
                 leftovers: bytes(observation.leftovers()),
                 oversized: bytes(observation.oversized()),
                 old: bytes(observation.old()),
+                unavailable: bytes(observation.unavailable()),
             })
             .is_ok();
     if sent {

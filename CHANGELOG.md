@@ -257,6 +257,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A folder holding files iCloud keeps only in the cloud no longer stops
+  every sync: those files and folders are skipped in both folders until
+  you download them, and never taken for deletions.
+
 - An edit that kept a file's size and modification time is found within
   a week: each file's content is read again at least weekly, spread
   over the week, instead of only when its size or time changes.

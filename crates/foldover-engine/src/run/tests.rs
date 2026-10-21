@@ -274,6 +274,89 @@ impl Fixture {
     }
 }
 
+/// PLAN.md §4.10: what iCloud keeps only in the cloud is skipped in both
+/// folders, folders with their contents, rather than downloaded; it is
+/// never taken for a deletion, and syncs again once it is back.
+#[test]
+fn entries_kept_only_in_icloud_are_skipped_never_deleted() {
+    let mut pair = fixture(SyncMode::Sync);
+    let folders = [
+        foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default()),
+        foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default()),
+    ];
+    pair.memory = Some(folders.clone());
+    let [left, right] = &folders;
+    for file in [b"notes.txt".as_slice(), b"photos/a.jpg", b"photos/b.jpg"] {
+        left.put_file(file, b"v1").unwrap();
+    }
+    pair.sync();
+    assert_eq!(right.user_files().len(), 3);
+
+    // Evicted on the left, and edited on the right meanwhile.
+    left.evict(b"notes.txt");
+    left.evict(b"photos");
+    right.put_file(b"photos/a.jpg", b"v2").unwrap();
+    right.put_file(b"photos/c.jpg", b"new").unwrap();
+    let report = pair.sync();
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    assert_eq!((report.copied(), report.archived()), (0, 0));
+    assert_eq!(right.user_files().len(), 4);
+
+    // Downloaded again, it syncs as usual.
+    left.download(b"photos");
+    let report = pair.sync();
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    assert_eq!(report.copied(), 2);
+    assert_eq!(left.user_files()[b"photos/a.jpg".as_slice()], b"v2");
+    assert_eq!(left.user_files()[b"photos/c.jpg".as_slice()], b"new");
+    assert_eq!(left.user_files()[b"notes.txt".as_slice()], b"v1");
+}
+
+/// Review of dataless entries: an evicted canary stopped every run as
+/// missing, telling a person to put back a file that was there.
+#[test]
+fn a_canary_kept_only_in_icloud_stops_the_run_and_says_so() {
+    // Evicted alone, or with the folder that holds it.
+    for (canary, evicted) in [
+        (&b"canary.txt"[..], &b"canary.txt"[..]),
+        (b"proof/canary.txt", b"proof"),
+    ] {
+        let mut pair = fixture(SyncMode::Sync);
+        let folders = [
+            foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default()),
+            foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default()),
+        ];
+        pair.memory = Some(folders.clone());
+        let [left, _] = &folders;
+        left.put_file(canary, b"here").unwrap();
+        pair.sync();
+        pair.canary = Some(path(canary));
+
+        left.evict(evicted);
+        let error = pair
+            .prepare()
+            .execute(
+                Approval::default(),
+                RunContext::Interactive,
+                STARTED,
+                &mut |_, _| panic!("nothing may commit"),
+                &mut proceed,
+                &NoProgress,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                RunError::CanaryUnavailable {
+                    side: Side::Left,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+}
+
 #[test]
 fn first_sync_copies_both_ways_and_a_second_run_has_nothing_to_do() {
     let mut pair = fixture(SyncMode::Sync);
