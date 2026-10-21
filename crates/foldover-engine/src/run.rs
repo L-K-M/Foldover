@@ -37,8 +37,8 @@ use foldover_state::{
 };
 use foldover_types::{
     BaselineEntry, ChangeKind, ConflictKind, Durability, EndpointId, EntryContent, EntryDecision,
-    EntryKind, EntryVersion, NameMatching, PairConfig, PairId, Resolution, ReviewToken,
-    ScanControl, Side, Skip, SyncPath, UnicodeMatching,
+    EntryKind, EntryVersion, NameMatching, PairConfig, PairId, PairOptions, Propagation,
+    Resolution, ReviewToken, ScanControl, Side, Skip, SyncPath, UnicodeMatching,
 };
 use unicode_normalization::UnicodeNormalization;
 
@@ -615,6 +615,8 @@ pub struct PairRun {
     /// Whether the base remembered any entry the filters still include.
     remembers: Remembers,
     lease_timing: LeaseTiming,
+    /// The pair's options as this run applies them: see `run_options`.
+    options: PairOptions,
     _awake: RunAwake,
 }
 
@@ -675,7 +677,8 @@ impl PairRun {
                 return Err(RunError::IdentityChanged { side });
             }
         }
-        let policy = draft.options().metadata();
+        let options = run_options(draft.options(), &endpoints)?;
+        let policy = options.metadata();
         // One filter for both sides, so an exclusion never looks like a deletion.
         let mut rules: Vec<String> = draft.options().filters().rules().to_vec();
         for side in [Side::Left, Side::Right] {
@@ -805,6 +808,7 @@ impl PairRun {
             },
             base,
             lease_timing,
+            options,
             _awake: awake,
         })
     }
@@ -911,7 +915,7 @@ impl PairRun {
         control: &mut impl FnMut() -> ScanControl,
         progress: &dyn RunProgress,
     ) -> Result<RunOutcome, RunError> {
-        let options = self.pair.draft().options();
+        let options = &self.options;
         // Full durability is a promise a generic SFTP server cannot
         // keep; refuse before anything — identities included — mutates
         // either folder.
@@ -1708,6 +1712,27 @@ fn moves(endpoint: &Endpoint) -> Moves {
         true => Moves::Rename,
         false => Moves::Copy,
     }
+}
+
+/// The pair's options as a run on `endpoints` applies them. Gatekeeper's
+/// download mark is never written to a network volume (PLAN.md §4.10),
+/// so it leaves both folders' versions when either is one; otherwise one
+/// side would always differ. A folder that cannot tell fails the run
+/// rather than risk writing the mark to a share.
+fn run_options(options: &PairOptions, endpoints: &EndpointPair) -> Result<PairOptions, RunError> {
+    let mut quarantine = Propagation::Sync;
+    for side in [Side::Left, Side::Right] {
+        let networked = endpoints
+            .endpoint(side)
+            .on_network_volume()
+            .map_err(|source| observe_error(side, source))?;
+        if networked {
+            quarantine = Propagation::Ignore;
+        }
+    }
+    Ok(options
+        .clone()
+        .with_metadata(options.metadata().with_quarantine(quarantine)))
 }
 
 /// Entries either folder keeps only in iCloud, with everything below them

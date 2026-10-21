@@ -353,6 +353,10 @@ impl PairOptions {
         }
     }
 
+    pub fn with_metadata(self, metadata: MetadataPolicy) -> Self {
+        Self { metadata, ..self }
+    }
+
     pub fn with_records(self, records: FolderRecords) -> Self {
         Self { records, ..self }
     }
