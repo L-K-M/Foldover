@@ -24,7 +24,7 @@ time.
   | Solid-state disk | 4 |
   | Mounted share (SMB, NFS, AFP, WebDAV) | 4 |
   | Spinning disk, or one that does not say | 1 |
-  | SFTP server | 4, on up to five sessions (one per worker and the run's thread); 1 when Foldover cannot open more |
+  | SFTP server | 4, on up to five sessions (one per worker and the run's thread) and one for lease beats; 1 when Foldover cannot open more |
   | Two SFTP servers in one pair | 1: a copy holds a session on each, and copies in opposite directions could wait on each other once a server refuses more sessions |
   | Another Mac | 1: its link's four streams also carry change reports and lease beats |
 
