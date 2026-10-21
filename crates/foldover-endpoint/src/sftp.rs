@@ -1024,11 +1024,13 @@ impl SftpEndpoint {
         let Some((stored, _)) = self.lookup(&archived)? else {
             return Err(ApplyError::NotArchived(path.clone()));
         };
-        // A missing folder comes back composed, as new names do.
+        // A missing folder comes back composed, as new names do, inside
+        // the folders that remain in the spelling they have.
         if let Some(parent) = path.parent()
             && self.attributes(&parent)?.is_none()
         {
-            self.make_directories(&spelling::compose(parent.as_bytes()), DEFAULT_DIRECTORY)
+            let folders = self.creatable(parent.as_bytes());
+            self.make_directories(&folders, DEFAULT_DIRECTORY)
                 .map_err(|source| write_error(path, source))?;
         }
         for attempt in 0..PUT_BACK_ATTEMPTS {
@@ -1039,9 +1041,11 @@ impl SftpEndpoint {
             if self.attributes(&destination)?.is_some() {
                 continue;
             }
+            // Found before the session is held: finding it may use it.
+            let target = self.fresh(destination.as_bytes());
             return self
                 .session()
-                .rename(&stored, &self.fresh(destination.as_bytes()))
+                .rename(&stored, &target)
                 .map(|()| destination.clone())
                 .map_err(|source| write_error(&destination, source));
         }
@@ -1090,9 +1094,8 @@ impl SftpEndpoint {
                 return Err(ApplyError::Unsupported(path.clone()));
             }
         };
-        let placed = self
-            .session()
-            .rename(&temporary, &self.fresh(copy.as_bytes()));
+        let target = self.fresh(copy.as_bytes());
+        let placed = self.session().rename(&temporary, &target);
         if let Err(source) = placed {
             let _ = self.session().remove_file(&temporary);
             return Err(write_error(&copy, source));
