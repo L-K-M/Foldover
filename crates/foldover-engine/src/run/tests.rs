@@ -943,28 +943,46 @@ fn resumable_content() -> Vec<u8> {
 const RESUMABLE_BYTES: usize = 40 * MIB;
 /// The least a broken-off copy keeps (the driver's `PARTIAL_MIN_BYTES`).
 const PARTIAL_MIN_BYTES: u64 = 16 * MIB as u64;
-/// Paces `resumable_content` to 5 s, so a test can act during its copy by
-/// the clock: copies on workers ask the control only every 100 ms, not
-/// once per read as on the run's thread.
-const RESUMABLE_PACE: u64 = 8 * MIB as u64;
-/// About 28 MiB in: past the 16 MiB a kept partial needs, before the end.
-const BREAK_OFF_AFTER: Duration = Duration::from_millis(3_500);
+/// Paces `resumable_content` to 2.5 s. Copies on workers ask the control
+/// only every 100 ms, not once per read as on the run's thread; paced,
+/// a copy moves 1.6 MiB between two asks, never the whole rest.
+const RESUMABLE_PACE: u64 = 16 * MIB as u64;
+/// Where a test breaks the copy off: past the 16 MiB a kept partial
+/// needs, well before the end.
+const BREAK_OFF_AT: u64 = 20 * MIB as u64;
 
-/// Run a paced copy, cancel it partway, then lift the pace; returns the
-/// partial the broken-off copy kept.
+/// Bytes a copy into `folder` staged so far.
+fn staged_bytes(folder: &Path) -> u64 {
+    fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".foldover-tmp-")
+        })
+        .filter_map(|entry| entry.metadata().ok())
+        .map(|metadata| metadata.len())
+        .sum()
+}
+
+/// Run a paced copy into the left folder, cancel it once `BREAK_OFF_AT`
+/// arrived, then lift the pace; returns the partial it kept.
 fn break_off(pair: &mut Fixture) -> std::path::PathBuf {
     pair.bandwidth_limit = Some(RESUMABLE_PACE);
     let prepared = pair.prepare();
     pair.bandwidth_limit = None;
+    let left = pair.left.path().to_owned();
     let mut store = pair.store();
-    let started = std::time::Instant::now();
     let outcome = prepared
         .execute(
             Approval::default(),
             RunContext::Reviewed,
             at(1),
             &mut |planned, commit| store.apply(planned, commit),
-            &mut || match started.elapsed() > BREAK_OFF_AFTER {
+            &mut || match staged_bytes(&left) >= BREAK_OFF_AT {
                 true => ScanControl::Cancel,
                 false => ScanControl::Continue,
             },
@@ -1184,11 +1202,11 @@ fn a_whole_copy_that_cannot_be_placed_keeps_its_data() {
     let data = resumable_content();
     fs::write(right.join("big.bin"), &data).unwrap();
 
-    // A second into the paced copy, someone edits the file it replaces.
+    // Partway through the paced copy, someone edits the file it replaces.
     pair.bandwidth_limit = Some(RESUMABLE_PACE);
     let prepared = pair.prepare();
     let mut store = pair.store();
-    let (started, mut edited) = (std::time::Instant::now(), false);
+    let mut edited = false;
     let outcome = prepared
         .execute(
             Approval::default(),
@@ -1196,7 +1214,7 @@ fn a_whole_copy_that_cannot_be_placed_keeps_its_data() {
             at(1),
             &mut |planned, commit| store.apply(planned, commit),
             &mut || {
-                if !edited && started.elapsed() > Duration::from_secs(1) {
+                if !edited && staged_bytes(&left) >= BREAK_OFF_AT {
                     fs::write(left.join("big.bin"), b"edited here").unwrap();
                     edited = true;
                 }
