@@ -24,6 +24,7 @@
 
 use std::collections::BTreeMap;
 use std::io;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -64,6 +65,11 @@ pub struct Quirks {
     pub replace: Replace,
     /// Bytes of file data the folder holds at most.
     pub capacity: Option<u64>,
+    /// Copies the folder takes at once; more than one runs them on
+    /// threads, so a seed no longer replays exactly.
+    pub workers: NonZeroUsize,
+    /// How long each copy into the folder takes, outside its lock.
+    pub copy_time: Duration,
 }
 
 impl Default for Quirks {
@@ -74,6 +80,8 @@ impl Default for Quirks {
             time_resolution: Duration::ZERO,
             replace: Replace::Atomic,
             capacity: None,
+            workers: NonZeroUsize::MIN,
+            copy_time: Duration::ZERO,
         }
     }
 }
@@ -97,6 +105,15 @@ pub enum Replace {
     TwoStep,
 }
 
+/// A copy into a folder, counted while it lives.
+struct Copying<'a>(&'a MemoryEndpoint);
+
+impl Drop for Copying<'_> {
+    fn drop(&mut self) {
+        self.0.folder().copying -= 1;
+    }
+}
+
 /// One folder in memory. Clones share the folder, so a simulation edits
 /// what the endpoint syncs.
 #[derive(Clone, Debug)]
@@ -113,6 +130,9 @@ struct Folder {
     steps: u64,
     /// Steps from this count on fail.
     fault: Option<u64>,
+    /// Copies into the folder in progress, and the most at once.
+    copying: usize,
+    peak_copies: usize,
     temporaries: u64,
     /// Folded paths kept only in the cloud, as iCloud evicts them.
     evicted: std::collections::BTreeSet<Vec<u8>>,
@@ -204,6 +224,8 @@ impl MemoryEndpoint {
                 clock: UNIX_EPOCH + Duration::from_secs(EPOCH_SECONDS),
                 steps: 0,
                 fault: None,
+                copying: 0,
+                peak_copies: 0,
                 temporaries: 0,
                 evicted: std::collections::BTreeSet::new(),
             })),
@@ -222,6 +244,19 @@ impl MemoryEndpoint {
 
     pub fn clear_fault(&self) {
         self.folder().fault = None;
+    }
+
+    /// The most copies into the folder that ran at once.
+    pub fn peak_copies(&self) -> usize {
+        self.folder().peak_copies
+    }
+
+    /// Count a copy into the folder until the guard drops.
+    fn copying(&self) -> Copying<'_> {
+        let mut folder = self.folder();
+        folder.copying += 1;
+        folder.peak_copies = folder.peak_copies.max(folder.copying);
+        Copying(self)
     }
 
     /// Change the size limit, e.g. to free space after a disk-full test.
@@ -416,6 +451,10 @@ impl MemoryEndpoint {
         self.folder().quirks.names
     }
 
+    pub(crate) fn workers(&self) -> NonZeroUsize {
+        self.folder().quirks.workers
+    }
+
     pub(crate) fn available_space(&self) -> u64 {
         let folder = self.folder();
         folder
@@ -551,12 +590,15 @@ impl MemoryEndpoint {
         current: Expected<'_>,
         run: &RunScope,
     ) -> Result<EntryVersion, ApplyError> {
+        let _copying = self.copying();
         let options = run.options();
         let policy = options.metadata();
         let source_node = source
             .verified(path, from, policy)
             .map_err(|_| ApplyError::SourceChanged(path.clone()))?
             .node;
+        let copy_time = self.folder().quirks.copy_time;
+        std::thread::sleep(copy_time);
         let mut folder = self.folder();
         let destination = folder.get(path.as_bytes()).cloned();
         match (current, &destination) {

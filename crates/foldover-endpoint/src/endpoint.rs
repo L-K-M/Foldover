@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
+use std::num::NonZeroUsize;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::{Arc, Weak};
@@ -305,6 +306,19 @@ impl Endpoint {
     /// Whether this folder takes moves (`move_entry`).
     pub fn moves(&self) -> bool {
         !matches!(self, Self::Peer(_))
+    }
+
+    /// How many copies into or out of this folder may run at once (PLAN.md
+    /// §4.9). An SFTP server's one session takes them in turn anyway, and
+    /// a paired Mac's link has few streams to spare beside change reports
+    /// and lease beats.
+    pub fn workers(&self) -> NonZeroUsize {
+        match self {
+            Self::Local(endpoint) => endpoint.workers(),
+            Self::Sftp(_) | Self::Peer(_) => NonZeroUsize::MIN,
+            #[cfg(feature = "simulation")]
+            Self::Memory(endpoint) => endpoint.workers(),
+        }
     }
 
     pub fn remove(

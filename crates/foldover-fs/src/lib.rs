@@ -24,6 +24,10 @@ mod volume;
 mod mac_metadata;
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod medium;
+
+#[cfg(target_os = "macos")]
 use materialization::prevent_materialization;
 
 #[cfg(not(target_os = "macos"))]
@@ -35,6 +39,6 @@ fn prevent_materialization() -> std::io::Result<()> {
 pub use root::{
     AccessControl, AttributeRole, Chunks, DataResidency, DirectoryEntry, DirectoryScope, Displaced,
     EntryMetadata, ExtendedAttribute, ExtendedMetadata, FileIdentity, ForeignMetadata, HashError,
-    MetadataReadError, NativeMetadata, NodeKind, PARTIAL_MIN_BYTES, Placement, Resume, Root,
-    RootRelation, Staged, StagedFile, WriteError,
+    Medium, MetadataReadError, NativeMetadata, NodeKind, PARTIAL_MIN_BYTES, Placement, Resume,
+    Root, RootRelation, Staged, StagedFile, WriteError,
 };

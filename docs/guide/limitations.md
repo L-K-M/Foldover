@@ -88,6 +88,14 @@ you might expect. Only the last one below blocks saving
 - **Another Mac's folder copies.** Moves toward a folder shared by
   another Mac are still copies and archives.
 
+## Copies at once
+
+- **Four at most, and only on fast disks.** Files copy four at a time
+  when both folders are on solid-state disks or mounted shares. Spinning
+  disks, disks that do not report their kind, SFTP servers and other
+  Macs take one file at a time. Two pairs on one disk each use its full
+  count ([ADR 0043](../adr/0043-parallel-copies.md)).
+
 ## Mac-to-Mac
 
 - **ACLs stay on each Mac.** Their entries name accounts by identifiers

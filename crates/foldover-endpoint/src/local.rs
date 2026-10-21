@@ -10,12 +10,13 @@ pub(crate) mod version;
 
 use std::collections::BTreeMap;
 use std::io;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use foldover_fs::{
     DataResidency, DirectoryEntry, DirectoryScope, EntryMetadata, ExtendedMetadata, FileIdentity,
-    FilesystemFeatures, HashError, MetadataReadError, NodeKind, Root, RootRelation,
+    FilesystemFeatures, HashError, Medium, MetadataReadError, NodeKind, Root, RootRelation,
 };
 #[cfg(target_os = "macos")]
 use foldover_fs::{DeclaredSupport, FilesystemFeature};
@@ -38,6 +39,8 @@ pub use filter::{Filter, InvalidFilter};
 const INTERNAL_DIRECTORY: &[u8] = b".foldover";
 pub(crate) const TEMPORARY_PREFIX: &[u8] = b".foldover-tmp-";
 const FINDER_STATE: &[u8] = b".DS_Store";
+/// Copies a solid-state disk or a share takes at once (PLAN.md §4.9).
+const PARALLEL_COPIES: NonZeroUsize = NonZeroUsize::new(4).expect("four is not zero");
 
 /// A held local root. Metadata inventory does not establish volume UUIDs,
 /// content equality, metadata fidelity or readiness to execute a sync.
@@ -429,6 +432,16 @@ impl LocalEndpoint {
     /// e.g. `smb://alice@nas.local/Photos`.
     pub fn network_source(&self) -> Result<Option<String>, ScanError> {
         at(&None, self.root.network_source())
+    }
+
+    /// How many copies the root's volume takes at once: a spinning disk
+    /// loses speed to every extra stream, and one that does not say may
+    /// be one.
+    pub fn workers(&self) -> NonZeroUsize {
+        match self.root.medium() {
+            Ok(Medium::SolidState | Medium::Network) => PARALLEL_COPIES,
+            Ok(Medium::Rotational | Medium::Unknown) | Err(_) => NonZeroUsize::MIN,
+        }
     }
 
     /// Read the root's first entry: macOS privacy protection and file
