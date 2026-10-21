@@ -240,6 +240,18 @@ impl Endpoint {
         }
     }
 
+    /// Whether the folder is on a network volume, of this Mac or of the
+    /// Mac serving it. An SFTP server's disks are its own business.
+    pub fn on_network_volume(&self) -> Result<bool, ScanError> {
+        match self {
+            Self::Local(endpoint) => Ok(endpoint.network_source()?.is_some()),
+            Self::Peer(endpoint) => endpoint.on_network_volume(),
+            Self::Sftp(_) => Ok(false),
+            #[cfg(feature = "simulation")]
+            Self::Memory(_) => Ok(false),
+        }
+    }
+
     /// One directory's entries the filter keeps, without recursion or
     /// Foldover's own names; `None` once the directory is gone. A paired
     /// Mac reports its own changes, so its folders are never listed this
