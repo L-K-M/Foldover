@@ -11,10 +11,11 @@ use std::io;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use foldover_fs::{ForeignMetadata, NativeMetadata};
+use foldover_proto::local::PairPropagation;
 use foldover_proto::peer::{
     FolderError, FolderErrorKind, RunSettings, WireAttribute, WireMetadata,
 };
-use foldover_types::{Digest, EntryContent, EntryVersion, PairOptions, SyncPath};
+use foldover_types::{Digest, EntryContent, EntryVersion, PairOptions, Propagation, SyncPath};
 
 use crate::{ApplyError, ObservedEntry, RunScope, ScanError};
 
@@ -167,16 +168,23 @@ pub(super) fn metadata_from(metadata: WireMetadata) -> (ForeignMetadata, Option<
 }
 
 pub(super) fn run_wire(run: &RunScope) -> RunSettings {
+    let policy = run.options().metadata();
     RunSettings {
         name: run.name().to_owned(),
         options: run.options().into(),
+        quarantine: (policy.extended_attributes() == Propagation::Sync
+            && policy.quarantine() == Propagation::Ignore)
+            .then_some(PairPropagation::Ignore),
     }
 }
 
-/// A run another Mac named, or None for an unusable name or options.
+/// A run another Mac named, or None for an unusable name or options. The
+/// quarantine decision comes along: it is made per run, never stored.
 pub(super) fn run_from(run: RunSettings) -> Option<RunScope> {
     let options = PairOptions::try_from(run.options).ok()?;
-    RunScope::named(&run.name, options)
+    let quarantine = run.quarantine.map_or(Propagation::Sync, Into::into);
+    let metadata = options.metadata().with_quarantine(quarantine);
+    RunScope::named(&run.name, options.with_metadata(metadata))
 }
 
 pub(super) fn milliseconds(time: SystemTime) -> u64 {
@@ -282,6 +290,25 @@ mod tests {
             if let Some(version) = version_from(&bytes) {
                 prop_assert_eq!(version_bytes(version), bytes);
             }
+        }
+    }
+
+    /// Review of quarantine: the Mac serving a folder rebuilt the run's
+    /// options without the decision to leave the quarantine mark alone,
+    /// so a metadata update there removed a file's mark.
+    #[test]
+    fn a_run_leaving_quarantine_alone_does_so_on_the_other_mac() {
+        let options = PairOptions::default();
+        let ignoring = options
+            .clone()
+            .with_metadata(options.metadata().with_quarantine(Propagation::Ignore));
+        for (sent, kept) in [
+            (options, Propagation::Sync),
+            (ignoring, Propagation::Ignore),
+        ] {
+            let run = RunScope::new(UNIX_EPOCH, sent);
+            let named = run_from(run_wire(&run)).unwrap();
+            assert_eq!(named.options().metadata().quarantine(), kept);
         }
     }
 

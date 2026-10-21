@@ -23,6 +23,9 @@ const MAX_VALUE_BYTES: usize = 16 * 1024 * 1024;
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
 /// Most attribute bytes a copy between Macs carries; its messages hold them.
 const MAX_NATIVE_BYTES: usize = 2 * 1024 * 1024;
+/// Tries at reading an attribute another process keeps rewriting.
+#[cfg(target_os = "macos")]
+const ATTRIBUTE_READS: usize = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Destination {
@@ -47,22 +50,18 @@ pub(super) fn apply(
     }
 
     if policy.extended_attributes() == Propagation::Sync {
-        if destination == Destination::Existing {
-            remove_attributes(target, &target_metadata, AttributeRole::Synced)?;
+        for role in synced_roles(policy) {
+            if destination == Destination::Existing {
+                remove_attributes(target, &target_metadata, role)?;
+            }
+            copy_attributes(source, source_metadata, target, role)?;
         }
-        copy_attributes(source, source_metadata, target, AttributeRole::Synced)?;
         if let Some(flags) = source_metadata.user_flags() {
             set_user_flags(target, &target_metadata, flags)?;
         }
     }
 
-    apply_permissions(
-        source,
-        source_metadata,
-        target,
-        &target_metadata,
-        policy.permissions(),
-    )?;
+    apply_permissions(source, source_metadata, target, &target_metadata, policy)?;
 
     if policy.modification_times() == Propagation::Sync && source_metadata.kind() == NodeKind::File
     {
@@ -85,6 +84,7 @@ pub(super) fn native(
         let wanted = match metadata.attribute_role(name.as_bytes()) {
             AttributeRole::ResourceFork => true,
             AttributeRole::Synced => synced,
+            AttributeRole::Quarantine => policy.quarantine() == Propagation::Sync,
             AttributeRole::CompressionStorage | AttributeRole::SystemManaged => false,
         };
         if !wanted {
@@ -120,12 +120,15 @@ pub(super) fn apply_native(
     let target_metadata = EntryMetadata::from_file(target)?;
     let synced = policy.extended_attributes() == Propagation::Sync;
     if synced && destination == Destination::Existing {
-        remove_attributes(target, &target_metadata, AttributeRole::Synced)?;
+        for role in synced_roles(policy) {
+            remove_attributes(target, &target_metadata, role)?;
+        }
     }
     for (name, value) in &native.attributes {
         let allowed = match target_metadata.attribute_role(name) {
             AttributeRole::ResourceFork => destination == Destination::New,
             AttributeRole::Synced => synced,
+            AttributeRole::Quarantine => policy.quarantine() == Propagation::Sync,
             AttributeRole::CompressionStorage | AttributeRole::SystemManaged => false,
         };
         if !allowed {
@@ -176,12 +179,12 @@ fn apply_permissions(
     source_metadata: &EntryMetadata,
     target: &impl AsFd,
     target_metadata: &EntryMetadata,
-    permissions: Propagation,
+    policy: MetadataPolicy,
 ) -> io::Result<()> {
     let current = target_metadata.permissions() & PERMISSION_BITS;
-    let wanted = match permissions {
+    let wanted = match policy.permissions() {
         Propagation::Sync => {
-            copy_access_control(source, target)?;
+            copy_access_control(source, target, policy.quarantine())?;
             source_metadata.permissions() & PERMISSION_BITS
         }
         // Like git: only whether a file is executable follows it. Execute is
@@ -199,6 +202,18 @@ fn apply_permissions(
         rustix::fs::fchmod(target, Mode::from_raw_mode(wanted as _))?;
     }
     Ok(())
+}
+
+/// The attribute roles a run syncing extended attributes replaces: user
+/// metadata, and Gatekeeper's mark unless the run leaves it alone.
+fn synced_roles(policy: MetadataPolicy) -> impl Iterator<Item = AttributeRole> {
+    let quarantine = policy.quarantine() == Propagation::Sync;
+    [
+        Some(AttributeRole::Synced),
+        quarantine.then_some(AttributeRole::Quarantine),
+    ]
+    .into_iter()
+    .flatten()
 }
 
 fn copy_attributes(
@@ -302,14 +317,61 @@ fn set_user_flags(_: &impl AsFd, _: &EntryMetadata, _: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// macOS's copyfile carries Gatekeeper's mark along with the ACL. Where
+/// the run leaves the mark alone, the target keeps its own, or none.
 #[cfg(target_os = "macos")]
-fn copy_access_control(source: &impl AsFd, target: &impl AsFd) -> io::Result<()> {
-    crate::mac_metadata::copy_access_control(source, target)
+fn copy_access_control(
+    source: &impl AsFd,
+    target: &impl AsFd,
+    quarantine: Propagation,
+) -> io::Result<()> {
+    const QUARANTINE: &CStr = c"com.apple.quarantine";
+    let kept = match quarantine {
+        Propagation::Sync => None,
+        Propagation::Ignore => Some(attribute_value(target, QUARANTINE)?),
+    };
+    crate::mac_metadata::copy_access_control(source, target)?;
+    match kept {
+        None => Ok(()),
+        Some(Some(value)) => rustix::fs::fsetxattr(target, QUARANTINE, &value, XattrFlags::empty())
+            .map_err(io::Error::from),
+        Some(None) => match rustix::fs::fremovexattr(target, QUARANTINE) {
+            Ok(()) | Err(rustix::io::Errno::NOATTR) => Ok(()),
+            Err(error) => Err(error.into()),
+        },
+    }
+}
+
+/// The value of `name` on `file`, or `None` without it. Another process
+/// may remove or rewrite it between asking its size and reading it: gone
+/// counts as absent, and a value that grew is read again.
+#[cfg(target_os = "macos")]
+fn attribute_value(file: &impl AsFd, name: &CStr) -> io::Result<Option<Vec<u8>>> {
+    for _ in 0..ATTRIBUTE_READS {
+        let size = match rustix::fs::fgetxattr(file, name, &mut [0_u8; 0][..]) {
+            Ok(size) => size,
+            Err(rustix::io::Errno::NOATTR) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let mut value = vec![0; size];
+        match rustix::fs::fgetxattr(file, name, &mut value) {
+            Ok(size) => {
+                value.truncate(size);
+                return Ok(Some(value));
+            }
+            Err(rustix::io::Errno::NOATTR) => return Ok(None),
+            Err(rustix::io::Errno::RANGE) => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(io::Error::other(
+        "an extended attribute kept changing while read",
+    ))
 }
 
 /// Linux ACLs live in privileged xattr namespaces, which are not copied.
 #[cfg(not(target_os = "macos"))]
-fn copy_access_control(_: &impl AsFd, _: &impl AsFd) -> io::Result<()> {
+fn copy_access_control(_: &impl AsFd, _: &impl AsFd, _: Propagation) -> io::Result<()> {
     Ok(())
 }
 

@@ -138,6 +138,23 @@ struct NearbyServer: Equatable, Sendable, Identifiable {
     var id: String { "\(host):\(port)" }
 }
 
+/// A folder on an SFTP server and the folders in it, to choose a pair
+/// side from (PLAN.md §4.3). Locators read like `sftp://nas/srv/photos`.
+struct ServerListing: Equatable, Sendable {
+    struct Folder: Equatable, Sendable, Identifiable {
+        let name: String
+        let locator: String
+
+        var id: String { locator }
+    }
+
+    /// The folder listed, with `~` resolved.
+    let locator: String
+    /// The folder above it; nil at the server's `/`.
+    let parent: String?
+    let folders: [Folder]
+}
+
 protocol PairClient: Sendable {
     func page(after: String?) async throws -> PairCatalogPage
     func create(_ settings: PairSettings) async throws -> SyncPair
@@ -146,6 +163,8 @@ protocol PairClient: Sendable {
     func check(_ settings: PairSettings) async throws -> [PairReadinessWarning]
     /// Waits about two seconds while the agent browses the network.
     func servers() async throws -> [NearbyServer]
+    /// Connecting to the server can take a few seconds.
+    func browse(_ locator: String) async throws -> ServerListing
 }
 
 // Keep generated async values inside one actor; only native Sendable records leave it.
@@ -177,6 +196,17 @@ private actor CorePairClient: PairClient {
         try await FoldoverCore.nearbyFileServers().map {
             NearbyServer(name: $0.name, host: $0.host, port: $0.port)
         }
+    }
+
+    func browse(_ locator: String) async throws -> ServerListing {
+        let listing = try await FoldoverCore.browseServer(root: Data(locator.utf8))
+        // Folder names are UTF-8; the agent leaves out any that are not.
+        let text = { (bytes: Data) in String(decoding: bytes, as: UTF8.self) }
+        return ServerListing(
+            locator: text(listing.root),
+            parent: listing.parent.map(text),
+            folders: listing.folders.map { .init(name: $0.name, locator: text($0.root)) }
+        )
     }
 
     private func warning(_ warning: ReadinessWarning) -> PairReadinessWarning {
@@ -378,6 +408,12 @@ final class PairStore {
     /// about two seconds while the agent browses.
     func nearbyServers() async throws -> [NearbyServer] {
         try await client.servers()
+    }
+
+    /// The folders in the folder an `sftp://` locator names, to choose a
+    /// pair side from; connecting can take a few seconds.
+    func browseServer(_ locator: String) async throws -> ServerListing {
+        try await client.browse(locator)
     }
 
     func save(_ settings: PairSettings, editing: SyncPair?) async throws -> SyncPair {

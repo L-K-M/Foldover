@@ -59,6 +59,9 @@ pub enum FolderOp {
     NameMatching,
     /// `space`: bytes free.
     Space,
+    /// `volume`: whether the folder is on a network volume of the
+    /// answering Mac.
+    Volume,
     /// `progress` replies while scanning, entries as data frames, then
     /// `observed`.
     Observe { scan: ScanSettings },
@@ -166,6 +169,12 @@ pub enum LeaseAction {
 pub struct RunSettings {
     pub name: String,
     pub options: PairSettings,
+    /// `ignore` when the run leaves `com.apple.quarantine` alone, as when
+    /// a network share takes part (PLAN.md §4.10); absent, it syncs with
+    /// the other extended attributes. Off the wire unless set, so an
+    /// agent without the field reads the request as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quarantine: Option<PairPropagation>,
 }
 
 /// What a copy between Macs carries besides data: permissions,
@@ -232,6 +241,11 @@ pub struct ScanSettings {
     pub size_limit: Option<u64>,
     /// Files older than this, in milliseconds since the Unix epoch, are old.
     pub cutoff_ms: Option<u64>,
+    /// `ignore` when the run leaves Gatekeeper's download mark alone, as
+    /// it does with a network volume in the pair; absent means it syncs
+    /// with the other attributes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quarantine: Option<PairPropagation>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -246,6 +260,13 @@ pub enum NameCase {
 pub enum NameUnicode {
     Exact,
     Normalized,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VolumeKind {
+    Local,
+    Network,
 }
 
 /// Why a folder operation failed, so the asking Mac can treat it like
@@ -302,6 +323,9 @@ pub enum PeerReply {
     },
     Space {
         bytes: u64,
+    },
+    Volume {
+        volume: VolumeKind,
     },
     /// Entries found and versioned so far.
     Progress {
@@ -377,4 +401,30 @@ pub struct WireItem {
 pub struct OfferedShare {
     pub id: String,
     pub name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scan that lets Gatekeeper's mark travel reads as before, so
+    /// both Macs agree on what an observation includes.
+    #[test]
+    fn quarantine_goes_on_the_wire_only_when_left_alone() {
+        let mut scan = ScanSettings {
+            modification_times: PairPropagation::Sync,
+            extended_attributes: PairPropagation::Sync,
+            permissions: PairPropagation::Ignore,
+            rules: Vec::new(),
+            size_limit: None,
+            cutoff_ms: None,
+            quarantine: None,
+        };
+        let json = serde_json::to_value(&scan).unwrap();
+        assert!(json.get("quarantine").is_none());
+        scan.quarantine = Some(PairPropagation::Ignore);
+        let json = serde_json::to_value(&scan).unwrap();
+        assert_eq!(json["quarantine"], "ignore");
+        assert_eq!(serde_json::from_value::<ScanSettings>(json).unwrap(), scan);
+    }
 }
