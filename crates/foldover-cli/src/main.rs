@@ -2,9 +2,9 @@
 //! `status`). Depends on foldover-client. See PLAN.md §4.4.
 
 use foldover_client::{
-    DailySchedule, Durability, Filters, MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions,
-    PairRoot, Propagation, ReviewToken, Schedule, ScheduleInterval, Side, SocketLocation, SyncMode,
-    SyncPath, TimeOfDay, Weekday, Weekdays,
+    DailySchedule, Durability, Filters, FolderRecords, MetadataPolicy, PairConfig, PairDraft,
+    PairId, PairOptions, PairRoot, Propagation, ReviewToken, Schedule, ScheduleInterval, Side,
+    SocketLocation, SyncMode, SyncPath, TimeOfDay, Weekday, Weekdays,
 };
 use foldover_client::{DeviceId, PeerStatus, ShareId, SyncStatus};
 use foldover_proto::local::PairRecord;
@@ -162,6 +162,7 @@ struct OptionChanges {
     age_limit: Option<Option<u32>>,
     /// `Some(None)` removes the canary.
     canary: Option<Option<SyncPath>>,
+    records: Option<FolderRecords>,
 }
 
 impl OptionChanges {
@@ -189,6 +190,7 @@ impl OptionChanges {
         )
         .with_canary(self.canary.unwrap_or_else(|| base.canary().cloned()))
         .expect("the canary is checked when parsed")
+        .with_records(self.records.unwrap_or(base.records()))
     }
 }
 
@@ -288,7 +290,7 @@ async fn main() -> ExitCode {
         },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs check NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover safe-mode off [--socket PATH]\n       foldover automation [low-power pause|run] [--socket PATH]\n       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]\n       foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]\n       foldover servers [--socket PATH]\nLEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --schedule (manual | changes | MINUTES | daily@HH:MM[:DAYS]); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --canary (PATH | none)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs check NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover safe-mode off [--socket PATH]\n       foldover automation [low-power pause|run] [--socket PATH]\n       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]\n       foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]\n       foldover servers [--socket PATH]\nLEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --records (both | source: a backup-* target that cannot hold .foldover keeps nothing, archives nothing); --schedule (manual | changes | MINUTES | daily@HH:MM[:DAYS]); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --canary (PATH | none)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -529,6 +531,14 @@ fn option_changes(args: &[OsString]) -> Option<OptionChanges> {
                 .replace(match value {
                     "standard" => Durability::Standard,
                     "full" => Durability::Full,
+                    _ => return None,
+                })
+                .is_some(),
+            "--records" => changes
+                .records
+                .replace(match value {
+                    "both" => FolderRecords::Both,
+                    "source" => FolderRecords::SourceOnly,
                     _ => return None,
                 })
                 .is_some(),
@@ -1535,12 +1545,46 @@ mod tests {
         };
         let current = PairOptions::default()
             .with_canary(SyncPath::try_from(b"old.txt".as_slice()).ok())
-            .unwrap();
+            .unwrap()
+            .with_records(FolderRecords::SourceOnly);
         let updated = options.apply(current.clone());
         assert_eq!(
             updated.canary(),
             Some(&SyncPath::try_from(b"docs/canary.txt".as_slice()).unwrap())
         );
+        assert_eq!(updated.records(), FolderRecords::SourceOnly);
+
+        let Request::Pairs(_, PairCommand::Update { options, .. }) = req(&[
+            "pairs",
+            "update",
+            id,
+            "1",
+            "Photos",
+            "/a",
+            "/b",
+            "backup-left",
+            "--records",
+            "both",
+        ]) else {
+            panic!("expected an update command");
+        };
+        assert_eq!(
+            options.apply(current.clone()).records(),
+            FolderRecords::Both
+        );
+        assert!(matches!(
+            req(&[
+                "pairs",
+                "add",
+                "P",
+                "/a",
+                "/b",
+                "backup-left",
+                "--records",
+                "target"
+            ]),
+            Request::Usage
+        ));
 
         let Request::Pairs(_, PairCommand::Update { options, .. }) = req(&[
             "pairs", "update", id, "1", "Photos", "/a", "/b", "sync", "--canary", "none",

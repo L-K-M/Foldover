@@ -30,7 +30,7 @@ use foldover_types::{
 
 use crate::lease::LockFile;
 use crate::link::{Exchange, Incoming, LinkError, PeerLink, WatchHandle, Watched};
-use crate::local::Carried;
+use crate::local::{Archiving, Carried};
 use crate::{
     ApplyError, ArchivedItem, ArchivedRun, Expected, Filter, Observation, ObserveStep,
     ObservedEntry, RootRelation, RunScope, ScanError,
@@ -308,6 +308,7 @@ impl PeerEndpoint {
         run: &RunScope,
         send: impl FnOnce(&mut dyn FnMut(&[u8]) -> io::Result<()>) -> io::Result<()>,
     ) -> Result<EntryVersion, ApplyError> {
+        archived(run, path)?;
         let file = matches!(kind, IncomingKind::File { .. });
         let current = match current {
             Expected::Absent => None,
@@ -394,6 +395,7 @@ impl PeerEndpoint {
         current: &ObservedEntry,
         run: &RunScope,
     ) -> Result<(), ApplyError> {
+        archived(run, path)?;
         let reply = self.reply(FolderOp::Remove {
             path: path.as_bytes().to_vec(),
             current: wire::entry_bytes(current),
@@ -403,6 +405,7 @@ impl PeerEndpoint {
     }
 
     pub fn recover_leftover(&self, leftover: &SyncPath, run: &RunScope) -> Result<(), ApplyError> {
+        archived(run, leftover)?;
         let reply = self.reply(FolderOp::RecoverLeftover {
             path: leftover.as_bytes().to_vec(),
             run: wire::run_wire(run),
@@ -644,6 +647,16 @@ fn unreachable(error: LinkError) -> ScanError {
 
 fn unexpected() -> ScanError {
     ScanError::Peer("The other Mac answered out of order".into())
+}
+
+/// Another Mac's folder always keeps its records, so a run that keeps no
+/// archive there was refused when the pair was saved; nothing goes over
+/// the wire that would archive anyway.
+fn archived(run: &RunScope, path: &SyncPath) -> Result<(), ApplyError> {
+    match run.archiving() {
+        Archiving::Kept => Ok(()),
+        Archiving::Off => Err(ApplyError::Unsupported(path.clone())),
+    }
 }
 
 #[cfg(test)]

@@ -5,9 +5,9 @@ use foldover_db::{
     BaseChange, Database, PairRow, PairValues, ResolutionRow, SnapshotRow, StateLocation,
 };
 use foldover_types::{
-    BaselineEntry, DailySchedule, Durability, EndpointId, Filters, InvalidPair, LocalRoot,
-    MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions, PairRoot, Propagation, Resolution,
-    Schedule, ScheduleInterval, Side, SyncMode, SyncPath, TimeOfDay, Weekdays,
+    BaselineEntry, DailySchedule, Durability, EndpointId, Filters, FolderRecords, InvalidPair,
+    LocalRoot, MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions, PairRoot, Propagation,
+    Resolution, Schedule, ScheduleInterval, Side, SyncMode, SyncPath, TimeOfDay, Weekdays,
 };
 
 use crate::BaseUpdate;
@@ -45,6 +45,8 @@ const INTERVAL_SCHEDULE: &str = "every";
 const CHANGE_SCHEDULE: &str = "changes";
 const DAILY_SCHEDULE: &str = "daily";
 const FULL_DURABILITY: &str = "full";
+const RECORDS_IN_BOTH: &str = "both";
+const RECORDS_IN_SOURCE: &str = "source";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -416,6 +418,11 @@ fn values(draft: &PairDraft) -> PairValues {
             .map(|bytes| i64::try_from(bytes).unwrap_or(i64::MAX)),
         age_limit: options.filters().age_limit().map(i64::from),
         canary: options.canary().map(|path| path.as_bytes().to_vec()),
+        records: match options.records() {
+            FolderRecords::Both => RECORDS_IN_BOTH,
+            FolderRecords::SourceOnly => RECORDS_IN_SOURCE,
+        }
+        .to_owned(),
     }
 }
 
@@ -500,6 +507,11 @@ fn from_row(row: PairRow) -> Result<PairConfig, Error> {
         FULL_DURABILITY => Durability::Full,
         _ => return Err(Error::InvalidStored("durability")),
     };
+    let records = match row.values.records.as_str() {
+        RECORDS_IN_BOTH => FolderRecords::Both,
+        RECORDS_IN_SOURCE => FolderRecords::SourceOnly,
+        _ => return Err(Error::InvalidStored("records")),
+    };
     let canary = row
         .values
         .canary
@@ -515,7 +527,8 @@ fn from_row(row: PairRow) -> Result<PairConfig, Error> {
         PairOptions::new(metadata, durability)
             .with_schedule(schedule)
             .with_filters(filters)
-            .with_canary(canary)?,
+            .with_canary(canary)?
+            .with_records(records),
     );
     let revision = u64::try_from(row.revision).map_err(|_| Error::InvalidStored("revision"))?;
     Ok(PairConfig::from_stored(id, revision, draft)?)
@@ -657,6 +670,7 @@ mod tests {
                 canary: None,
                 schedule_time: None,
                 schedule_days: None,
+                records: RECORDS_IN_BOTH.into(),
             })
             .unwrap();
         drop(database);
@@ -689,6 +703,7 @@ mod tests {
                 canary: None,
                 schedule_time: None,
                 schedule_days: None,
+                records: RECORDS_IN_BOTH.into(),
             })
             .unwrap();
         let id = PairId::from_bytes(row.id.try_into().unwrap()).unwrap();
@@ -885,7 +900,8 @@ mod tests {
         .with_canary(Some(
             SyncPath::try_from(b"docs/canary.txt".as_slice()).unwrap(),
         ))
-        .unwrap();
+        .unwrap()
+        .with_records(FolderRecords::SourceOnly);
         let pair = store
             .create(&draft(SyncMode::Sync).with_options(options.clone()))
             .unwrap();

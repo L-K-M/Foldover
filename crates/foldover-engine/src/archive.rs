@@ -66,11 +66,20 @@ impl PutBackReport {
     }
 }
 
+/// Whether a side keeps an archive. A Backup target without records
+/// keeps none, and its `.foldover` is never read (ADR 0040).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Kept {
+    Archive,
+    Nothing,
+}
+
 /// One side's archive. Opening it needs only the pair's configuration, so
 /// callers browse without holding the engine.
 pub struct PairArchive {
     endpoint: Endpoint,
     durability: Durability,
+    kept: Kept,
 }
 
 impl PairArchive {
@@ -80,14 +89,22 @@ impl PairArchive {
             Side::Right => pair.draft().right(),
         };
         let endpoint = Endpoint::open(root, reach)?;
+        let kept = match pair.draft().unrecorded() == Some(side) {
+            true => Kept::Nothing,
+            false => Kept::Archive,
+        };
         Ok(Self {
             endpoint,
             durability: pair.draft().options().durability(),
+            kept,
         })
     }
 
     /// Archived runs, newest first.
     pub fn runs(&self) -> Result<Vec<ArchivedRun>, ArchiveError> {
+        if self.kept == Kept::Nothing {
+            return Ok(Vec::new());
+        }
         Ok(self.endpoint.archived_runs()?)
     }
 
@@ -99,12 +116,18 @@ impl PairArchive {
         after: Option<&SyncPath>,
         limit: usize,
     ) -> Result<(Vec<ArchivedItem>, bool), ArchiveError> {
+        if self.kept == Kept::Nothing {
+            return Ok((Vec::new(), false));
+        }
         Ok(self.endpoint.archived_items(run, after, limit)?)
     }
 
     /// Move an item back to its original path, or beside it when that is
     /// taken, and return where it went. The next sync copies it across.
     pub fn put_back(&self, run: &str, path: &SyncPath) -> Result<SyncPath, ArchiveError> {
+        if self.kept == Kept::Nothing {
+            return Err(ApplyError::NotArchived(path.clone()).into());
+        }
         // A rename has no flush over SFTP, so a full-durability pair is
         // refused rather than silently downgraded.
         if self.durability == Durability::Full && matches!(self.endpoint, Endpoint::Sftp(_)) {
@@ -197,6 +220,33 @@ mod tests {
                 .kind(),
             ArchiveErrorKind::NotFound
         );
+
+        // A Backup target keeping no records shows nothing, even beside a
+        // `.foldover` that is not Foldover's.
+        let backup = PairDraft::new(
+            "Pair".into(),
+            root(&right),
+            root(&left),
+            SyncMode::Backup { source: Side::Left },
+        )
+        .unwrap()
+        .with_options(
+            foldover_types::PairOptions::default()
+                .with_records(foldover_types::FolderRecords::SourceOnly),
+        );
+        let backup = PairConfig::from_stored(
+            PairId::from_bytes([2; PairId::BYTE_LEN]).unwrap(),
+            1,
+            backup,
+        )
+        .unwrap();
+        let target = PairArchive::open(&backup, Side::Right, &Reach::default()).unwrap();
+        assert!(target.runs().unwrap().is_empty());
+        assert_eq!(target.items(&run, None, 10).unwrap(), (Vec::new(), false));
+        assert_eq!(
+            target.put_back(&run, items[0].path()).unwrap_err().kind(),
+            ArchiveErrorKind::NotFound
+        );
     }
 
     /// Putting an item back renames on the server; a pair asking for
@@ -234,6 +284,7 @@ mod tests {
         let archive = PairArchive {
             endpoint: Endpoint::Sftp(endpoint),
             durability: Durability::Full,
+            kept: Kept::Archive,
         };
         let path = SyncPath::try_from(b"note".as_slice()).unwrap();
         let error = archive.put_back(&run, &path).unwrap_err();
@@ -253,6 +304,7 @@ mod tests {
         let archive = PairArchive {
             endpoint: archive.endpoint,
             durability: Durability::Standard,
+            kept: Kept::Archive,
         };
         assert_eq!(archive.put_back(&run, &path).unwrap(), path);
         assert_eq!(fs::read(directory.path().join("note")).unwrap(), b"kept");

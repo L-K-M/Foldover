@@ -6,12 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Time Machine no longer backs up Foldover's state on this Mac: a
+  restored, older state could carry stale deletions over. A Mac set up
+  from a backup starts without pairs.
+
 ### Added
 
 - A background agent that stops unexpectedly three times in five minutes
   pauses all syncing instead of crashing again and again; the app shows
   why and notifies you, and Resume Syncing (or `foldover safe-mode off`)
   starts again.
+
+- A Backup can go to a folder that cannot hold Foldover's `.foldover`
+  folder, such as a share that refuses names starting with a dot, once
+  you choose to keep nothing there: files replaced in it are deleted,
+  not archived. The pair editor says when a folder refuses it.
 
 - `scripts/build.sh --install` installs the app it built into
   `/Applications`, quitting and reopening a running Foldover and
@@ -250,6 +261,10 @@ All notable changes to this project are documented here. The format follows
   scripts, CI.
 
 ### Fixed
+
+- An edit that kept a file's size and modification time is found within
+  a week: each file's content is read again at least weekly, spread
+  over the week, instead of only when its size or time changes.
 
 - Syncing to disks formatted HFS+ (Mac OS Extended), exFAT or FAT32
   works: every copy to them failed with "Operation not supported".
