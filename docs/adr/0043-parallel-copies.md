@@ -1,7 +1,6 @@
 # ADR 0043: Parallel copies
 
-Status: Implemented for local disks, shares and SFTP servers; other
-Macs copy one file at a time
+Status: Implemented
 
 ## Context
 
@@ -26,7 +25,7 @@ time.
   | Spinning disk, or one that does not say | 1 |
   | SFTP server | 4, on up to five sessions (one per worker and the run's thread) and one for lease beats; 1 when Foldover cannot open more |
   | Two SFTP servers in one pair | 1: a copy holds a session on each, and copies in opposite directions could wait on each other once a server refuses more sessions |
-  | Another Mac | 1: its link's four streams also carry change reports and lease beats |
+  | Another Mac | 4, one link stream each; a link takes 64 streams, so change reports and lease beats always find one |
 
 - **One recorder.** The run's thread keeps planning order, the journal,
   the base, commits, progress and the control (cancel, lease beats). It
@@ -56,5 +55,4 @@ time.
   back, and holds one at a time, so a handle stays on the session that
   opened it. A server that refuses another session is shared by the
   ones it took.
-- Follow-ups: more streams on the
-  Mac-to-Mac link, and a budget shared by pairs on the same device.
+- Follow-up: a budget shared by pairs on the same device.

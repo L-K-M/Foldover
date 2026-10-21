@@ -17,10 +17,10 @@ All notable changes to this project are documented here. The format follows
 - A pair can limit how fast it copies, in megabytes per second, so a
   large sync leaves room on the network for everything else.
 
-- Files copy four at a time between solid-state disks, mounted shares
-  and SFTP servers (over several sessions). Spinning disks, disks that
-  do not say what they are, pairs between two SFTP servers and other
-  Macs still take one file at a time.
+- Files copy four at a time between solid-state disks, mounted shares,
+  SFTP servers (over several sessions) and other Macs. Spinning disks,
+  disks that do not say what they are, and pairs between two SFTP
+  servers still take one file at a time.
 
 - A file moved or renamed in one folder is moved the same way in the
   other instead of being copied again and archived; the preview lists it

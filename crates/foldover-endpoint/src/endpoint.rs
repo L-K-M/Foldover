@@ -25,6 +25,9 @@ use crate::{
     ObservedEntry, RootRelation, RunScope, ScanError,
 };
 
+/// Copies another Mac's folder takes at once.
+const PEER_COPIES: NonZeroUsize = NonZeroUsize::new(4).expect("four is not zero");
+
 /// One directory entry as a quick change check sees it (PLAN.md §4.8):
 /// enough to tell that something changed, not what.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -309,13 +312,12 @@ impl Endpoint {
     }
 
     /// How many copies into or out of this folder may run at once (PLAN.md
-    /// §4.9). A paired Mac's link has few streams to spare beside change
-    /// reports and lease beats.
+    /// §4.9). Each copy to or from another Mac is one stream on its link.
     pub fn workers(&self) -> NonZeroUsize {
         match self {
             Self::Local(endpoint) => endpoint.workers(),
             Self::Sftp(endpoint) => endpoint.workers(),
-            Self::Peer(_) => NonZeroUsize::MIN,
+            Self::Peer(_) => PEER_COPIES,
             #[cfg(feature = "simulation")]
             Self::Memory(endpoint) => endpoint.workers(),
         }
