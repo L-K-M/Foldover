@@ -1044,3 +1044,50 @@ fn lock_files_are_created_exclusively_and_replaced_by_a_promoted_claim() {
     let left = fs::read_dir(directory.path().join(".foldover")).unwrap();
     assert_eq!(left.count(), 0, "temporary files were left behind");
 }
+
+/// Review of bandwidth: a cancel that came while a streamed copy waited
+/// for its share of the pair's limit failed the copy instead of
+/// cancelling it.
+#[test]
+fn a_cancel_during_a_bandwidth_wait_cancels_the_copy() {
+    let local_directory = tempfile::tempdir().unwrap();
+    let remote_directory = tempfile::tempdir().unwrap();
+    let Some(remote) = remote(remote_directory.path()) else {
+        return;
+    };
+    let local = Endpoint::Local(LocalEndpoint::open(local_directory.path()).unwrap());
+    // Ten seconds of data at the lowest limit.
+    let options = PairOptions::default()
+        .with_bandwidth_limit(Some(100_000))
+        .unwrap();
+    fs::write(local_directory.path().join("big.bin"), vec![7; 1_000_000]).unwrap();
+    let here = local
+        .observe_from(
+            options.metadata(),
+            &Filter::none(),
+            &std::collections::BTreeMap::new(),
+            &mut proceed,
+            &mut |_| {},
+        )
+        .unwrap();
+    let run = RunScope::new(UNIX_EPOCH, options);
+    let name = path(b"big.bin");
+
+    // The first chunk's wait outlasts the cancel.
+    let started = std::time::Instant::now();
+    let copied = remote.copy_from(
+        &local,
+        &name,
+        &here.entries()[&name],
+        Expected::Absent,
+        &run,
+        &mut || match started.elapsed() > std::time::Duration::from_millis(150) {
+            true => ScanControl::Cancel,
+            false => ScanControl::Continue,
+        },
+    );
+    assert!(
+        matches!(copied, Err(ApplyError::Scan(ScanError::Cancelled))),
+        "{copied:?}"
+    );
+}

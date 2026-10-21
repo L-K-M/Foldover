@@ -127,6 +127,9 @@ pub struct PairSettings {
     pub canary: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "PairRecords::is_both")]
     pub records: PairRecords,
+    /// File data bytes per second the pair's copies share at most.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bandwidth_limit: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -232,6 +235,7 @@ impl From<&PairOptions> for PairSettings {
                 FolderRecords::Both => PairRecords::Both,
                 FolderRecords::SourceOnly => PairRecords::SourceOnly,
             },
+            bandwidth_limit: options.bandwidth_limit(),
         }
     }
 }
@@ -285,7 +289,8 @@ impl TryFrom<PairSettings> for PairOptions {
                 PairRecords::Both => FolderRecords::Both,
                 PairRecords::SourceOnly => FolderRecords::SourceOnly,
             })
-        })
+        })?
+        .with_bandwidth_limit(settings.bandwidth_limit)
     }
 }
 
@@ -434,7 +439,9 @@ mod tests {
                 MetadataPolicy::new(Propagation::Ignore, Propagation::Sync, Propagation::Sync),
                 Durability::Full,
             )
-            .with_schedule(Schedule::Every(ScheduleInterval::from_minutes(30).unwrap()));
+            .with_schedule(Schedule::Every(ScheduleInterval::from_minutes(30).unwrap()))
+            .with_bandwidth_limit(Some(2_000_000))
+            .unwrap();
             let draft = PairDraft::new(
                 "Photos".into(),
                 LocalRoot::from_bytes(b"/a/\xff".to_vec()).unwrap(),
@@ -513,7 +520,7 @@ mod tests {
             let settings: PairSettings = serde_json::from_value(json!({
                 "modification_times":"sync","extended_attributes":"sync",
                 "permissions":"sync","durability":"standard","schedule":json,
-                "filters":[],"size_limit":null,"age_limit":null,
+                "filters":[],"size_limit":null,"age_limit":null,"bandwidth_limit":null,
             }))
             .unwrap_or_else(|_| panic!("{json}"));
             assert!(PairOptions::try_from(settings).is_err(), "{json}");
@@ -526,12 +533,14 @@ mod tests {
         );
     }
 
-    /// Records stay off the wire while in both folders, so settings read
-    /// as before; kept only in the source, they round-trip.
+    /// Records stay off the wire while in both folders, and so does an
+    /// unset bandwidth limit, so settings read as before on an agent
+    /// that knows neither; kept only in the source, records round-trip.
     #[test]
     fn records_travel_only_when_kept_in_the_source() {
         let both = serde_json::to_value(PairSettings::from(&PairOptions::default())).unwrap();
         assert!(both.get("records").is_none());
+        assert!(both.get("bandwidth_limit").is_none());
         let source_only = PairOptions::default().with_records(FolderRecords::SourceOnly);
         let settings = PairSettings::from(&source_only);
         let json = serde_json::to_value(&settings).unwrap();

@@ -3,7 +3,7 @@
 //! temporary name, the content digest is checked against the plan, and
 //! only then is it placed.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io;
 
 use foldover_fs::{NativeMetadata, PARTIAL_MIN_BYTES, Resume};
@@ -65,10 +65,30 @@ impl Source<'_> {
         &self,
         path: &SyncPath,
         from: u64,
+        run: &RunScope,
         control: &mut impl FnMut() -> ScanControl,
         sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
         error: &RefCell<Option<ApplyError>>,
     ) -> io::Result<()> {
+        // PLAN.md §4.9: the pair's bandwidth limit paces the data as it
+        // goes. The wait asks the control too, so a cancel is not held
+        // up; the reader asks it between chunks, never during a wait.
+        let control = RefCell::new(control);
+        let mut checked = || (*control.borrow_mut())();
+        // A cancel during a wait reaches the source as a failed write, so
+        // it is noted here to come out as the cancel it is.
+        let cancelled = Cell::new(false);
+        let mut paced = |chunk: &[u8]| {
+            if let Some(pace) = run.pace()
+                && pace.wait(chunk.len() as u64, &mut || (*control.borrow_mut())())
+                    == ScanControl::Cancel
+            {
+                cancelled.set(true);
+                return Err(io::Error::other("cancelled"));
+            }
+            sink(chunk)
+        };
+        let (control, sink) = (&mut checked, &mut paced);
         let pushed = match self {
             Self::Local(endpoint, entry) => {
                 endpoint.read_entry_from(entry, from, control, &mut |chunk| sink(chunk))
@@ -82,7 +102,10 @@ impl Source<'_> {
             Self::Peer(source) => source.push(path, control, sink),
         };
         pushed.map_err(|failure| {
-            *error.borrow_mut() = Some(failure);
+            *error.borrow_mut() = Some(match cancelled.get() {
+                true => ApplyError::Scan(ScanError::Cancelled),
+                false => failure,
+            });
             io::Error::other("source failed")
         })
     }
@@ -151,7 +174,7 @@ pub(crate) fn copy(
                         carried,
                         resume,
                         run,
-                        |sink| source.push(path, kept, control, sink, &failure),
+                        |sink| source.push(path, kept, run, control, sink, &failure),
                     );
                     received.map_err(|error| failure.into_inner().unwrap_or(error))
                 }
@@ -191,7 +214,7 @@ pub(crate) fn copy(
                 native: native.as_ref(),
             };
             let received = remote.receive(path, current, kind, carried, run, |sink| {
-                source.push(path, kept, control, sink, &failure)
+                source.push(path, kept, run, control, sink, &failure)
             });
             received.map_err(|error| failure.into_inner().unwrap_or(error))
         }
@@ -399,6 +422,7 @@ fn send(
                         source.push(
                             path,
                             0,
+                            run,
                             control,
                             &mut |chunk| {
                                 digest.borrow_mut().update(chunk);

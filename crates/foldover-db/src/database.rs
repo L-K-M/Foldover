@@ -44,13 +44,14 @@ const EXCLUDED_BY_BACKUPD: &[u8] = b"bplist00_\x10\x11com.apple.backupd\x08\0\0\
 /// until it runs its program, which a busy machine can stretch.
 const WRITER_WAIT: Duration = Duration::from_millis(500);
 const WRITER_RETRY: Duration = Duration::from_millis(20);
-const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary, schedule_time, schedule_days, records";
+const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary, schedule_time, schedule_days, records, bandwidth_limit";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 24] = [
+const MIGRATIONS: [&str; 25] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
     SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, SCHEMA_V15, SCHEMA_V16,
     SCHEMA_V17, SCHEMA_V18, SCHEMA_V19, SCHEMA_V20, SCHEMA_V21, SCHEMA_V22, SCHEMA_V23, SCHEMA_V24,
+    SCHEMA_V25,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -392,6 +393,13 @@ ALTER TABLE run_history ADD COLUMN moved INTEGER NOT NULL DEFAULT 0 CHECK(moved 
 UPDATE state_meta SET minimum_reader=max(minimum_reader,24) WHERE singleton=1;
 ";
 
+// The copy rate a pair's run shares across its copies (PLAN.md §4.9).
+// Older readers ignore the column and copy at full speed, so the floor
+// stays.
+const SCHEMA_V25: &str = "
+ALTER TABLE pair ADD COLUMN bandwidth_limit INTEGER CHECK(bandwidth_limit IS NULL OR bandwidth_limit >= 100000);
+";
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("State I/O: {0}")]
@@ -514,6 +522,7 @@ pub struct PairValues {
     pub schedule_time: Option<i64>,
     pub schedule_days: Option<i64>,
     pub records: String,
+    pub bandwidth_limit: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -608,7 +617,7 @@ impl Database {
     pub fn create_pair(&mut self, values: &PairValues) -> Result<PairRow, Error> {
         let id = uuid::Uuid::new_v4().into_bytes();
         self.connection.execute(
-            "INSERT INTO pair (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,schedule,schedule_minutes,filters,size_limit,age_limit,canary,schedule_time,schedule_days,records) VALUES (?1,1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+            "INSERT INTO pair (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,schedule,schedule_minutes,filters,size_limit,age_limit,canary,schedule_time,schedule_days,records,bandwidth_limit) VALUES (?1,1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
             params![
                 id.as_slice(),
                 values.name,
@@ -627,7 +636,8 @@ impl Database {
                 values.canary,
                 values.schedule_time,
                 values.schedule_days,
-                values.records
+                values.records,
+                values.bandwidth_limit
             ],
         )?;
         self.pair(&id)?
@@ -696,7 +706,7 @@ impl Database {
             // with the source: a folder without records has an identity
             // only this agent knows. SET expressions read the row as it
             // was, so `records=?19` and `mode=?6` hold only when unchanged.
-            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,schedule=?11,schedule_minutes=?12,filters=?13,size_limit=?14,age_limit=?15,canary=?16,schedule_time=?17,schedule_days=?18,records=?19,left_identity=CASE WHEN left_root=?4 AND records=?19 AND (records='both' OR mode=?6) THEN left_identity END,right_identity=CASE WHEN right_root=?5 AND records=?19 AND (records='both' OR mode=?6) THEN right_identity END,left_mount=CASE WHEN left_root=?4 THEN left_mount END,right_mount=CASE WHEN right_root=?5 THEN right_mount END WHERE id=?1 AND revision=?2",
+            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,schedule=?11,schedule_minutes=?12,filters=?13,size_limit=?14,age_limit=?15,canary=?16,schedule_time=?17,schedule_days=?18,records=?19,bandwidth_limit=?20,left_identity=CASE WHEN left_root=?4 AND records=?19 AND (records='both' OR mode=?6) THEN left_identity END,right_identity=CASE WHEN right_root=?5 AND records=?19 AND (records='both' OR mode=?6) THEN right_identity END,left_mount=CASE WHEN left_root=?4 THEN left_mount END,right_mount=CASE WHEN right_root=?5 THEN right_mount END WHERE id=?1 AND revision=?2",
             params![
                 id,
                 revision,
@@ -716,7 +726,8 @@ impl Database {
                 values.canary,
                 values.schedule_time,
                 values.schedule_days,
-                values.records
+                values.records,
+                values.bandwidth_limit
             ],
         )?;
         if changed == 0 {
@@ -1171,6 +1182,7 @@ fn pair_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairRow> {
             schedule_time: row.get(16)?,
             schedule_days: row.get(17)?,
             records: row.get(18)?,
+            bandwidth_limit: row.get(19)?,
         },
     })
 }
@@ -1208,6 +1220,7 @@ pub(super) mod tests {
             schedule_time: None,
             schedule_days: None,
             records: "both".into(),
+            bandwidth_limit: None,
         }
     }
 
@@ -1858,14 +1871,16 @@ pub(super) mod tests {
         for (table, expected) in &before {
             let mut expected = expected.clone();
             if *table == "pair" {
-                // V19's canary and V21's schedule columns read NULL on
-                // every migrated row, and V23's records their default.
+                // V19's canary, V21's schedule columns and V25's
+                // bandwidth limit read NULL on every migrated row, and
+                // V23's records their default.
                 for row in &mut expected {
                     row.extend([
                         rusqlite::types::Value::Null,
                         rusqlite::types::Value::Null,
                         rusqlite::types::Value::Null,
                         rusqlite::types::Value::Text("both".into()),
+                        rusqlite::types::Value::Null,
                     ]);
                 }
             }
