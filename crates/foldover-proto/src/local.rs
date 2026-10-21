@@ -14,6 +14,9 @@ pub use automation::{
     AutomationPause, AutomationSettings, AutomationStatus, LowPowerSyncs, MAX_PAUSE_MINUTES,
 };
 
+mod endpoint;
+pub use endpoint::{ENDPOINT_BROWSE, EndpointBrowse, ServerFolderList, ServerFolderRecord};
+
 mod history;
 pub use history::{HISTORY_LIST, History, HistoryOutcome, HistoryRecord, HistoryTrigger};
 
@@ -50,7 +53,7 @@ pub use pair::{
 };
 
 pub const JSON_RPC_VERSION: &str = "2.0";
-pub const PROTOCOL_VERSION: u32 = 15;
+pub const PROTOCOL_VERSION: u32 = 16;
 pub const SESSION_HELLO: &str = "session.hello";
 pub const DAEMON_STATUS: &str = "daemon.status";
 pub const PARSE_ERROR: i32 = -32700;

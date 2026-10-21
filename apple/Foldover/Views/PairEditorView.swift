@@ -8,7 +8,6 @@ struct PairEditorView: View {
     @State private var choosingSide = PairFolderSide.left
     @State private var choosingFolder = false
     @State private var enteringServer: PairFolderSide?
-    @State private var serverText = ""
     @State private var choosingOtherMac: PairFolderSide?
 
     var body: some View {
@@ -191,16 +190,8 @@ struct PairEditorView: View {
         .padding(24)
         .frame(width: 600)
         .interactiveDismissDisabled(viewModel.isSaving)
-        .alert("Folder on an SFTP Server", isPresented: Binding(
-            get: { enteringServer != nil }, set: { if !$0 { enteringServer = nil } }
-        )) {
-            TextField("sftp://user@host/path", text: $serverText)
-            Button("Use") {
-                if let side = enteringServer { viewModel.chooseServer(serverText, side: side) }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Foldover connects with your SSH keys, agent and ~/.ssh/config, like the ssh command; it cannot ask for a password. Use ~ for the home folder, for example sftp://nas.local/~/Photos. Use only trusted servers: changes on the server can redirect Foldover's access outside the folder you choose.")
+        .sheet(item: $enteringServer, onDismiss: { viewModel.resetServerBrowser() }) { side in
+            ServerFolderPicker(viewModel: viewModel, side: side)
         }
         .fileImporter(isPresented: $choosingFolder, allowedContentTypes: [.folder], allowsMultipleSelection: false) {
             viewModel.chooseFolder($0, side: choosingSide)
@@ -271,6 +262,57 @@ private struct OtherMacFolderPicker: View {
             folders = shared
             loading = false
         }
+    }
+}
+
+/// A folder on an SFTP server, typed or browsed to (PLAN.md §4.3).
+private struct ServerFolderPicker: View {
+    @Environment(\.dismiss) private var dismiss
+    @Bindable var viewModel: PairEditorViewModel
+    let side: PairFolderSide
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Folder on an SFTP Server").font(.headline)
+            HStack {
+                TextField("sftp://user@host/path", text: $viewModel.serverLocator)
+                    .onSubmit { Task { await viewModel.browseServer() } }
+                Button("Browse") { Task { await viewModel.browseServer() } }
+                    .disabled(viewModel.isBrowsingServer)
+            }
+            List {
+                if let parent = viewModel.serverListing?.parent {
+                    Button("Enclosing Folder") { Task { await viewModel.openServerFolder(parent) } }
+                }
+                ForEach(viewModel.serverListing?.folders ?? []) { folder in
+                    Button(folder.name) { Task { await viewModel.openServerFolder(folder.locator) } }
+                }
+            }
+            .overlay {
+                if viewModel.isBrowsingServer {
+                    ProgressView()
+                } else if viewModel.serverListing?.folders.isEmpty == true {
+                    Text("No folders inside this one.").foregroundStyle(.secondary)
+                }
+            }
+            if let error = viewModel.serverBrowseError {
+                Text(error).foregroundStyle(.red).textSelection(.enabled)
+            }
+            Text("Foldover connects with your SSH keys, agent and ~/.ssh/config, like the ssh command; it cannot ask for a password. Use ~ for the home folder, for example sftp://nas.local/~/Photos. Use only trusted servers: changes on the server can redirect Foldover's access outside the folder you choose.")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                Button("Use This Folder") {
+                    if viewModel.useServerFolder(side: side) { dismiss() }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(viewModel.serverLocator.isEmpty)
+            }
+        }
+        .padding()
+        .frame(width: 480, height: 440)
     }
 }
 

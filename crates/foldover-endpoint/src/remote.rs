@@ -18,14 +18,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use foldover_fs::{ForeignMetadata, NativeMetadata, WriteError};
-use foldover_proto::local::PairDurability;
+use foldover_proto::local::{PairDurability, PairPropagation};
 use foldover_proto::peer::{
     FolderOp, IncomingKind, LeaseAction, LeaseFile, NameCase, NameUnicode, PeerCall, PeerReply,
-    ScanSettings,
+    ScanSettings, VolumeKind,
 };
 use foldover_types::{
     CaseMatching, Digest, Durability, EndpointId, EntryVersion, MetadataPolicy, NameMatching,
-    PairOptions, PeerRoot, ScanControl, SyncPath, UnicodeMatching,
+    PairOptions, PeerRoot, Propagation, ScanControl, SyncPath, UnicodeMatching,
 };
 
 use crate::lease::LockFile;
@@ -138,6 +138,15 @@ impl PeerEndpoint {
         }
     }
 
+    /// Whether the other Mac keeps the folder on one of its network
+    /// volumes.
+    pub fn on_network_volume(&self) -> Result<bool, ScanError> {
+        match self.reply(FolderOp::Volume)? {
+            PeerReply::Volume { volume } => Ok(volume == VolumeKind::Network),
+            _ => Err(unexpected()),
+        }
+    }
+
     /// Observe the folder on the other Mac. Cancelling drops the request,
     /// which stops the scan there.
     pub fn observe_reporting(
@@ -154,6 +163,9 @@ impl PeerEndpoint {
             rules: filter.texts().to_vec(),
             size_limit: filter.size_limit(),
             cutoff_ms: filter.cutoff().map(wire::milliseconds),
+            quarantine: (policy.extended_attributes() == Propagation::Sync
+                && policy.quarantine() == Propagation::Ignore)
+                .then_some(PairPropagation::Ignore),
         };
         let mut exchange = self.ask(FolderOp::Observe { scan })?;
         let mut observation = Observation::default();

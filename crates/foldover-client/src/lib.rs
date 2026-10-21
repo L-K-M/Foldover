@@ -4,7 +4,6 @@
 //! foldover-ipc. See PLAN.md §4.4.
 
 pub use foldover_ipc::{Error, SocketLocation};
-pub use foldover_proto::local::NetworkServer;
 pub use foldover_proto::local::PairWarning;
 use foldover_proto::local::{
     ARCHIVE_ITEMS, ARCHIVE_PUT_BACK, ARCHIVE_PUT_BACK_ALL, ARCHIVE_RUNS, ArchiveItemQuery,
@@ -28,7 +27,8 @@ use foldover_proto::local::{
     SYNC_UNDO, SyncItemQuery, SyncKey, SyncResolve, SyncRun,
 };
 use foldover_proto::local::{DAEMON_STATUS, Hello, PROTOCOL_VERSION, Request, SESSION_HELLO};
-use foldover_proto::local::{NETWORK_SERVERS, NetworkServers};
+use foldover_proto::local::{ENDPOINT_BROWSE, EndpointBrowse, NETWORK_SERVERS, NetworkServers};
+pub use foldover_proto::local::{NetworkServer, ServerFolderList, ServerFolderRecord};
 use foldover_proto::local::{
     PAIR_CHECK, PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_UPDATE, PairInput, PairKey,
     PairList, PairRecord, PairUpdate, PairWarnings,
@@ -430,6 +430,20 @@ pub async fn network_servers(location: &SocketLocation) -> Result<Vec<NetworkSer
     let listed: NetworkServers =
         serde_json::from_value(call(location, NETWORK_SERVERS, None).await?)?;
     Ok(listed.servers)
+}
+
+/// The folders in the folder an `sftp://` root names, to choose a pair
+/// side from; connecting to the server can take a few seconds.
+pub async fn browse_server(
+    location: &SocketLocation,
+    root: &[u8],
+) -> Result<ServerFolderList, Error> {
+    let params = serde_json::to_value(EndpointBrowse {
+        root: root.to_vec(),
+    })?;
+    Ok(serde_json::from_value(
+        call(location, ENDPOINT_BROWSE, Some(params)).await?,
+    )?)
 }
 
 /// This Mac's device, its pairing window and the Macs paired with it;
