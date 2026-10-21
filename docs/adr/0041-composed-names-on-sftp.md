@@ -23,7 +23,8 @@ An SFTP folder behaves like a macOS volume that ignores normalization:
 
 - New names are written composed: folders, files, links, conflict
   copies and put-back items. A replacement keeps the name the server
-  already has.
+  already has, as its folder lists it: a server that ignores
+  normalization, as a Mac's does, finds the entry by either spelling.
 - An entry is looked up by its spelling as given first; only when that
   is missing, component by component in its composed and decomposed
   spellings. A name with one spelling, such as any ASCII name, costs no

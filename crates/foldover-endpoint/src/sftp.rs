@@ -774,7 +774,8 @@ impl SftpEndpoint {
 
     /// Move a staged temporary to `path`. Creating never replaces, and
     /// names the entry composed beside the temporary; a replacement first
-    /// sets the current entry aside and takes its spelling.
+    /// sets the current entry aside and takes its spelling, as its folder
+    /// lists it.
     pub(crate) fn place(
         &self,
         temporary: &[u8],
@@ -791,11 +792,12 @@ impl SftpEndpoint {
                     let _ = self.session().remove_file(temporary);
                     return Err(ApplyError::DestinationChanged(path.clone()));
                 };
+                let target = self.listed(&stored);
                 if let Err(error) = self.set_aside(&stored, path, run) {
                     let _ = self.session().remove_file(temporary);
                     return Err(error);
                 }
-                stored
+                target
             }
             None => {
                 let folder = &temporary[..temporary
