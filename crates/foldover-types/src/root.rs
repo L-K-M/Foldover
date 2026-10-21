@@ -180,7 +180,7 @@ impl SftpRoot {
         let slash = rest
             .iter()
             .position(|byte| *byte == b'/')
-            .expect("parsed locators name a path");
+            .ok_or(InvalidPair::Root)?;
         Self::from_bytes([SFTP_SCHEME, &rest[..slash], path].concat())
     }
 
