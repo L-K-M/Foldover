@@ -10,8 +10,33 @@ struct PairDetailView: View {
 
     var body: some View {
         let sync = viewModel.sync(for: pair)
+        // The split view sizes the detail, and a GeometryReader takes that
+        // size without reporting a minimum of its own. With the change
+        // table and the fixed-size segments inside, the column's minimum
+        // otherwise changed from one layout pass to the next until AppKit
+        // stopped the loop by throwing.
+        GeometryReader { _ in
+            layout(sync)
+        }
+        // The dialog acts on the request captured when it was presented,
+        // so a state change cannot redirect the tap to another plan.
+        .confirmationDialog("Approve Sync?", isPresented: Binding(
+            get: { sync.approvalRequest != nil },
+            set: { if !$0 { sync.declineApproval() } }
+        ), presenting: sync.approvalRequest) { request in
+            Button("Archive and Sync", role: .destructive) {
+                Task { await viewModel.approveInWindow(request) }
+            }
+            Button("Cancel", role: .cancel) { sync.declineApproval() }
+        } message: { request in
+            Text(request.message)
+        }
+        .task(id: pair.id) { await viewModel.sync(for: pair).refresh() }
+    }
+
+    private func layout(_ sync: PairSyncViewModel) -> some View {
         let rows = sync.rows
-        VStack(spacing: 0) {
+        return VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 12) {
                 folderHeader
                 statusBar(sync)
@@ -36,20 +61,6 @@ struct PairDetailView: View {
                 .padding(.vertical, 8)
             }
         }
-        // The dialog acts on the request captured when it was presented,
-        // so a state change cannot redirect the tap to another plan.
-        .confirmationDialog("Approve Sync?", isPresented: Binding(
-            get: { sync.approvalRequest != nil },
-            set: { if !$0 { sync.declineApproval() } }
-        ), presenting: sync.approvalRequest) { request in
-            Button("Archive and Sync", role: .destructive) {
-                Task { await viewModel.approveInWindow(request) }
-            }
-            Button("Cancel", role: .cancel) { sync.declineApproval() }
-        } message: { request in
-            Text(request.message)
-        }
-        .task(id: pair.id) { await viewModel.sync(for: pair).refresh() }
     }
 
     // MARK: Folders
@@ -210,7 +221,8 @@ struct PairDetailView: View {
         if !rows.isEmpty {
             changeTable(sync, rows: rows)
         } else if sync.isWorking || sync.isResolving {
-            ProgressView(sync.statusText)
+            // The status bar above carries the details.
+            ProgressView(sync.shortStatus)
                 .controlSize(.large)
         } else if let placeholder = sync.placeholder {
             ContentUnavailableView {
@@ -253,12 +265,14 @@ struct PairDetailView: View {
                     .truncationMode(.middle)
                     .help(row.path)
             }
+            .width(min: 120, ideal: 280)
             TableColumn("Change") { row in
                 Text(row.actionText)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .help(row.actionText)
             }
+            .width(min: 100, ideal: 200)
             TableColumn("Size") { row in
                 Text(row.sizeText)
                     .monospacedDigit()

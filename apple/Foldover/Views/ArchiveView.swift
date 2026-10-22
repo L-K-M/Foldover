@@ -110,12 +110,16 @@ struct ArchiveView: View {
 
     // MARK: Items
 
+    /// In a GeometryReader, so the table cannot make the split view's
+    /// column limits change from one layout pass to the next.
     private func detail(_ items: [ArchiveItemRow]) -> some View {
-        VStack(spacing: 0) {
-            content(items)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            Divider()
-            statusBar(items)
+        GeometryReader { _ in
+            VStack(spacing: 0) {
+                content(items)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                Divider()
+                statusBar(items)
+            }
         }
     }
 
@@ -146,6 +150,7 @@ struct ArchiveView: View {
                     .truncationMode(.middle)
                     .help(row.path)
             }
+            .width(min: 160, ideal: 420)
             TableColumn("Size") { row in
                 Text(row.size)
                     .monospacedDigit()
