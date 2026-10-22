@@ -5,12 +5,13 @@ import SwiftUI
 struct SetupView: View {
     let viewModel: MainViewModel
 
+    // Always in a scroll view: it scrolls in a short window, and the
+    // detail column's minimum size never depends on the text's wrapping.
     var body: some View {
-        // Centered when it fits, scrolling in a short window.
-        ViewThatFits(in: .vertical) {
+        ScrollView {
             guide
-            ScrollView { guide }
         }
+        .scrollBounceBehavior(.basedOnSize)
     }
 
     private var guide: some View {

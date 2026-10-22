@@ -169,7 +169,7 @@ struct ArchiveView: View {
     private func statusBar(_ items: [ArchiveItemRow]) -> some View {
         HStack(spacing: 12) {
             statusLine
-                .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(3)
                 .frame(maxWidth: .infinity, alignment: .leading)
             if viewModel.isLoading && !items.isEmpty {
                 ProgressView()

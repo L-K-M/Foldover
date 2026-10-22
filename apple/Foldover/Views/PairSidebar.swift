@@ -36,7 +36,6 @@ struct PairSidebar: View {
                 Divider()
                 SidebarAgentBar(viewModel: viewModel)
             }
-            .background(.bar)
         }
     }
 
@@ -124,8 +123,9 @@ private struct SidebarPairRow: View {
 private struct SidebarAgentBar: View {
     let viewModel: MainViewModel
 
-    // The text wraps in full and the button sits below it: beside it, a
-    // narrow sidebar would cut off a reason the agent gives.
+    // The button sits below the text: beside it, a narrow sidebar would
+    // cut off a reason the agent gives. Long reasons end in an ellipsis,
+    // with the full text in the tooltip.
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top, spacing: 8) {
@@ -137,7 +137,8 @@ private struct SidebarAgentBar: View {
                 Text(viewModel.agentStatusText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(4)
+                    .help(viewModel.agentStatusText)
                     .accessibilityAddTraits(.updatesFrequently)
             }
             if let action = viewModel.agentAction {

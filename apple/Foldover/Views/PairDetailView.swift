@@ -65,11 +65,14 @@ struct PairDetailView: View {
                 DetailFolderChip(viewModel: viewModel, folder: pair.settings.right, side: .b)
                 Spacer(minLength: 0)
             }
+            // No vertical fixedSize in a split-view column: a minimum height
+            // that depends on the width makes the column's size limits
+            // change on every layout pass, which AppKit ends with a crash.
             Text(viewModel.planText(for: pair))
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .lineLimit(3)
-                .fixedSize(horizontal: false, vertical: true)
+                .help(viewModel.planText(for: pair))
         }
     }
 
@@ -83,8 +86,8 @@ struct PairDetailView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(sync.statusText)
                         .font(.callout)
+                        .lineLimit(4)
                         .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
                         .accessibilityAddTraits(.updatesFrequently)
                     if let fraction = sync.progressFraction {
                         ProgressView(value: fraction)
@@ -162,16 +165,11 @@ struct PairDetailView: View {
 
     // MARK: Changes
 
-    /// Segments while they fit beside the hidden-rows caption; a pop-up
-    /// menu in a narrow detail, where six segments would be clipped.
+    /// The kinds of change as segments, with the hidden-rows caption
+    /// beside them. The segments keep their size, so the column's
+    /// minimum width stays the same while the bar shows (ViewThatFits
+    /// here would let it change with the width, a layout loop).
     private func scopeBar(_ sync: PairSyncViewModel) -> some View {
-        ViewThatFits(in: .horizontal) {
-            scopeRow(sync, style: .segmented)
-            scopeRow(sync, style: .menu)
-        }
-    }
-
-    private func scopeRow(_ sync: PairSyncViewModel, style: some PickerStyle) -> some View {
         HStack(spacing: 12) {
             Picker("Show", selection: Binding(
                 get: { sync.changeFilter },
@@ -182,7 +180,7 @@ struct PairDetailView: View {
                     Text(PairSyncViewModel.title(filter)).tag(ChangeFilter?.some(filter))
                 }
             }
-            .pickerStyle(style)
+            .pickerStyle(.segmented)
             .labelsHidden()
             .fixedSize()
             Spacer(minLength: 8)
@@ -198,6 +196,7 @@ struct PairDetailView: View {
                 Text(hidden)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
                 if sync.canLoadMoreChanges {
                     Button("Show More") { Task { await sync.loadMoreChanges() } }
                         .controlSize(.small)
