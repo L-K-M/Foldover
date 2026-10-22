@@ -823,10 +823,21 @@ impl SftpEndpoint {
         let made = self.session().make_directory(&remote, permissions);
         match &made {
             Ok(()) => self.note_added(&remote),
-            // The server refused: the folder was not made.
-            Err(error) if Self::answered(error) => {}
-            // A lost answer may mean the folder exists after all.
-            Err(_) => self.forget_parent(&remote),
+            Err(error) => {
+                // SFTP reports an existing folder as a generic failure,
+                // so a refusal is only definitive once lstat says the
+                // folder really is absent.
+                match self.session().lstat(&remote) {
+                    // It is there after all; its spelling belongs in
+                    // the view now.
+                    Ok(existing) if existing.kind() == FileKind::Directory => {
+                        self.note_added(&remote)
+                    }
+                    _ if Self::answered(error) => {}
+                    // A lost answer may mean the folder exists after all.
+                    _ => self.forget_parent(&remote),
+                }
+            }
         }
         made
     }
@@ -993,7 +1004,13 @@ impl SftpEndpoint {
             }
             Err(source) => match session.read_dir(&remote) {
                 Ok(entries) if !entries.is_empty() => Err(ApplyError::NotEmpty(path.clone())),
-                _ => Err(write_error(path, source)),
+                // The read failed too, so whether the folder is gone is
+                // unknown; drop the view rather than keep trusting it.
+                Err(_) => {
+                    self.forget_tree(&remote);
+                    Err(write_error(path, source))
+                }
+                Ok(_) => Err(write_error(path, source)),
             },
         }
     }

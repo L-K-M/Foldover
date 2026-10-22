@@ -986,6 +986,38 @@ fn a_renamed_folder_drops_its_cached_listing() {
     assert_eq!(sftp.listed(&asked_new), stored_new);
 }
 
+/// Renaming over an existing folder destroys its whole tree, so views
+/// cached under the target must not serve its old children.
+#[test]
+fn a_replacing_rename_drops_the_targets_cached_listings() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(sftp) = sftp(directory.path()) else {
+        return;
+    };
+    let (decomposed, composed) = ("cafe\u{301}.txt", "caf\u{e9}.txt");
+    fs::create_dir(directory.path().join("newer")).unwrap();
+    fs::create_dir(directory.path().join("victim")).unwrap();
+    fs::write(directory.path().join("victim").join(composed), b"old").unwrap();
+
+    // Fill the cache: resolve the decomposed ask inside `victim`.
+    let asked = sftp.remote(format!("victim/{decomposed}").as_bytes());
+    let stored = sftp.remote(format!("victim/{composed}").as_bytes());
+    assert_eq!(sftp.listed(&asked), stored);
+
+    if sftp
+        .rename_replacing(&sftp.remote(b"newer"), &sftp.remote(b"victim"))
+        .is_err()
+    {
+        // The server lacks posix-rename; the path is untested.
+        return;
+    }
+
+    // victim/ holds newer/'s tree now — empty. The cached child must
+    // not answer.
+    assert_eq!(sftp.listed(&asked), asked);
+    assert_eq!(sftp.listed(&stored), stored);
+}
+
 /// `Durability::Full` cannot be promised over SFTP at all: namespace
 /// changes have no protocol flush. Every mutating entry point must
 /// reject it before touching the server, whatever the server offers.

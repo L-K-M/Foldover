@@ -302,9 +302,17 @@ impl SftpEndpoint {
         error.get_ref().is_some_and(|inner| inner.is::<Refused>())
     }
 
+    /// A rename attempt whose request may never have landed: everything
+    /// it could have moved or left behind stops being trusted — both
+    /// entries' own views and their parents' go.
+    fn rename_lost(&self, from: &[u8], to: &[u8]) {
+        self.forget_tree(from);
+        self.forget_tree(to);
+    }
+
     /// Rename `from` to `to` over `session`, keeping the run's folder
     /// views exact. A refused rename changed nothing; a lost answer
-    /// may have applied, so both parents' views go.
+    /// may have applied.
     pub(super) fn renamed_on(
         &self,
         session: &mut Session,
@@ -315,10 +323,7 @@ impl SftpEndpoint {
         match &moved {
             Ok(()) => self.note_moved(from, to),
             Err(error) if Self::answered(error) => {}
-            Err(_) => {
-                self.forget_parent(from);
-                self.forget_parent(to);
-            }
+            Err(_) => self.rename_lost(from, to),
         }
         moved
     }
@@ -328,7 +333,8 @@ impl SftpEndpoint {
         self.renamed_on(&mut self.session(), from, to)
     }
 
-    /// Rename over the target if it exists, likewise tracked.
+    /// Rename over the target if it exists, likewise tracked; a finished
+    /// replace also drops the replaced tree's views.
     pub(super) fn rename_replacing_on(
         &self,
         session: &mut Session,
@@ -337,14 +343,21 @@ impl SftpEndpoint {
     ) -> io::Result<()> {
         let moved = session.rename_replacing(from, to);
         match &moved {
-            Ok(()) => self.note_moved(from, to),
-            Err(error) if Self::answered(error) => {}
-            Err(_) => {
-                self.forget_parent(from);
-                self.forget_parent(to);
+            Ok(()) => {
+                self.note_moved(from, to);
+                // `to`'s old tree was replaced wholesale.
+                self.mark_under(to);
             }
+            Err(error) if Self::answered(error) => {}
+            Err(_) => self.rename_lost(from, to),
         }
         moved
+    }
+
+    /// `rename_replacing_on` on a pooled session.
+    #[cfg(test)]
+    pub(super) fn rename_replacing(&self, from: &[u8], to: &[u8]) -> io::Result<()> {
+        self.rename_replacing_on(&mut self.session(), from, to)
     }
 
     /// Remove the file `remote` over `session`: its name leaves the
@@ -485,12 +498,14 @@ fn spellings(component: &[u8]) -> Vec<Vec<u8>> {
     spellings
 }
 
-/// `remote`'s parent's cache key, `/` when it has none.
+/// `remote`'s parent's cache key: the parent, or `/` for a bare name —
+/// `listed` caches the root listing under `/` too, so a root-level
+/// rename must dirty that key rather than skip it.
 fn parent_key(remote: &[u8]) -> Option<Vec<u8>> {
     let (parent, _) = split(remote);
-    parent.map(|parent| match parent.is_empty() {
-        true => b"/".to_vec(),
-        false => parent.to_vec(),
+    Some(match parent {
+        Some(parent) if !parent.is_empty() => parent.to_vec(),
+        _ => b"/".to_vec(),
     })
 }
 
