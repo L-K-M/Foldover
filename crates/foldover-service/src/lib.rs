@@ -459,15 +459,17 @@ async fn browse(params: EndpointBrowse) -> Result<Value, RpcError> {
             slot
         }
     };
+    // Waiting for a slot is bounded on its own: queue time behind a
+    // busy root is not the browse's, and the error says which ran out.
+    let permit = tokio::time::timeout(std::time::Duration::from_secs(30), browses.acquire_owned())
+        .await
+        .map_err(|_| RpcError::new(INTERNAL_ERROR, "Waiting for a browse slot timed out"))?
+        .expect("a browses semaphore is never closed");
     // The engine bounds each phase, but a black-holed server can still
     // outwait a person's patience; bound the wait too. The task itself
     // cannot be cancelled once it is on the blocking pool, so it also
     // holds a permit: abandoned browses pile up no deeper than BROWSES.
     let folder = tokio::time::timeout(std::time::Duration::from_secs(120), async move {
-        let permit = browses
-            .acquire_owned()
-            .await
-            .expect("a browses semaphore is never closed");
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             foldover_engine::browse_server(&root)

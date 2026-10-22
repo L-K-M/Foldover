@@ -283,7 +283,11 @@ mod tests {
             // It takes connects again; a probe finds the recovery.
             refusing.store(false, Ordering::SeqCst);
             let deadline = Instant::now() + 30 * RETRY;
-            while sessions.lock().limit < 2 && Instant::now() < deadline {
+            loop {
+                let recovered = sessions.lock().limit >= 2;
+                if recovered || Instant::now() >= deadline {
+                    break;
+                }
                 std::thread::sleep(RETRY / 4);
             }
             // Whether or not the probe already landed, the held
