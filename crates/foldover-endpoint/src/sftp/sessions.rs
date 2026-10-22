@@ -13,12 +13,21 @@
 
 use std::io;
 use std::ops::{Deref, DerefMut};
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use foldover_net::sftp::Session;
 
 /// Opens another session to the same server.
 pub(super) type Connect = Box<dyn Fn() -> io::Result<Session> + Send + Sync>;
+
+/// Refusals in a row before the server is taken at its word that it
+/// took all the sessions it will; one failure can be transient.
+const REFUSALS: usize = 3;
+
+/// Between connect retries, so a refusing server is not hammered.
+const RETRY: Duration = Duration::from_millis(200);
 
 pub(super) struct Sessions {
     pool: Mutex<Pool>,
@@ -29,19 +38,26 @@ struct Pool {
     idle: Vec<Session>,
     /// Sessions open, idle or borrowed.
     open: usize,
-    /// Sessions open at most; lowered to what the server took once it
-    /// refuses another.
+    /// Sessions open at most; a run of refusals lowers it to what the
+    /// server took, and a successful connect restores it.
     limit: usize,
+    /// What `limit` was asked for, so a recovered server gets it back.
+    wanted: usize,
+    /// Connects refused in a row; reset by one that succeeds.
+    refusals: usize,
 }
 
 impl Sessions {
     /// Start from `first`; at most `limit` sessions are ever open.
     pub(super) fn new(first: Session, limit: usize) -> Self {
+        let limit = limit.max(1);
         Self {
             pool: Mutex::new(Pool {
                 idle: vec![first],
                 open: 1,
-                limit: limit.max(1),
+                limit,
+                wanted: limit,
+                refusals: 0,
             }),
             returned: Condvar::new(),
         }
@@ -60,15 +76,31 @@ impl Sessions {
             {
                 pool.open += 1;
                 drop(pool);
-                match connect() {
-                    Ok(session) => return self.lend(session),
+                match panic::catch_unwind(AssertUnwindSafe(connect)) {
+                    Ok(Ok(session)) => {
+                        let mut pool = self.lock();
+                        pool.refusals = 0;
+                        pool.limit = pool.wanted;
+                        return self.lend(session);
+                    }
                     // The server takes no more: share the ones it took.
                     // One may have come back meanwhile, so look again.
-                    Err(_) => {
+                    Ok(Err(_)) => {
                         pool = self.lock();
                         pool.open -= 1;
-                        pool.limit = pool.open.max(1);
+                        pool.refusals += 1;
+                        if pool.refusals >= REFUSALS {
+                            pool.limit = pool.open.max(1);
+                        }
+                        pool = self.wait_for(pool, RETRY);
                         continue;
+                    }
+                    Err(payload) => {
+                        // Give the slot back before propagating, or the
+                        // pool shrinks for good.
+                        self.lock().open -= 1;
+                        self.returned.notify_one();
+                        panic::resume_unwind(payload);
                     }
                 }
             }
@@ -91,6 +123,13 @@ impl Sessions {
         self.returned
             .wait(pool)
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn wait_for<'a>(&self, pool: MutexGuard<'a, Pool>, within: Duration) -> MutexGuard<'a, Pool> {
+        self.returned
+            .wait_timeout(pool, within)
+            .unwrap_or_else(PoisonError::into_inner)
+            .0
     }
 }
 
@@ -119,7 +158,14 @@ impl Drop for Borrowed<'_> {
         let Some(session) = self.session.take() else {
             return;
         };
-        self.sessions.lock().idle.push(session);
+        let mut pool = self.sessions.lock();
+        // A session that desynchronized refuses every request; give its
+        // slot back rather than lend it to the next borrower.
+        if session.alive() {
+            pool.idle.push(session);
+        } else {
+            pool.open -= 1;
+        }
         self.sessions.returned.notify_one();
     }
 }
@@ -197,5 +243,22 @@ mod tests {
             assert!(waiter.join().unwrap());
         });
         assert_eq!(sessions.lock().limit, 1);
+    }
+
+    #[test]
+    fn a_panicking_connect_gives_its_slot_back() {
+        let Some(server) = server() else {
+            eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
+            return;
+        };
+        let panicking: Connect = Box::new(|| panic!("the connect failed loudly"));
+        let sessions = Sessions::new(spawn(&server).unwrap(), 2);
+        let _held = sessions.borrow(Some(&panicking));
+
+        let panicked = panic::catch_unwind(AssertUnwindSafe(|| {
+            sessions.borrow(Some(&panicking));
+        }));
+        assert!(panicked.is_err());
+        assert_eq!(sessions.lock().open, 1);
     }
 }

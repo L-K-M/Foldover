@@ -1156,8 +1156,14 @@ impl PairRun {
                     }
                 }
                 copies.collect(&mut executor, progress);
-                if executor.pending.len().max(executor.journal.len()) >= COMMIT_BATCH {
+                if executor.pending.len().max(executor.journal.len()) >= COMMIT_BATCH
+                    && let Err(error) = commit(&mut executor)
+                {
+                    // Landed copies must be journaled before this run
+                    // can fail, as the root check above does.
+                    copies.finish(&mut executor, control, progress);
                     commit(&mut executor)?;
+                    return Err(error);
                 }
             }
             copies.finish(&mut executor, control, progress);

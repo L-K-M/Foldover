@@ -419,10 +419,16 @@ async fn browse(params: EndpointBrowse) -> Result<Value, RpcError> {
             "Only folders on SFTP servers are browsed",
         ));
     };
-    let folder = tokio::task::spawn_blocking(move || foldover_engine::browse_server(&root))
-        .await
-        .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?
-        .map_err(engine_error)?;
+    // The engine bounds each phase, but a black-holed server can still
+    // outwait a person's patience; bound the request itself too.
+    let folder = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        tokio::task::spawn_blocking(move || foldover_engine::browse_server(&root)),
+    )
+    .await
+    .map_err(|_| RpcError::new(INTERNAL_ERROR, "Browsing the server timed out"))?
+    .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?
+    .map_err(engine_error)?;
     encode(ServerFolderList {
         root: folder.root.as_bytes().to_vec(),
         parent: folder.parent.map(|parent| parent.as_bytes().to_vec()),

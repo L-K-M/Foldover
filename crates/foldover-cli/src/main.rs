@@ -1111,6 +1111,10 @@ mod tests {
             panic!("expected a browse");
         };
         assert_eq!(root, b"sftp://nas/~");
+        assert!(matches!(
+            req(&["servers", "browse", "sftp://nas/~", "--socket", "/tmp/s"]),
+            Request::Browse(SocketLocation::Path(_), _)
+        ));
         assert!(matches!(req(&["servers", "browse"]), Request::Usage));
     }
 

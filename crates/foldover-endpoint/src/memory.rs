@@ -499,7 +499,15 @@ impl MemoryEndpoint {
                 }
                 continue;
             }
-            if folder.evicted.contains(&folder.key(&stored.path)) {
+            let key = folder.key(&stored.path);
+            // An evicted path also hides what is below it, as a real
+            // evicted folder yields nothing there — even one whose own
+            // entry is already gone.
+            let evicted = folder
+                .evicted
+                .iter()
+                .any(|up| *up == key || inside(&key, up));
+            if evicted {
                 observation.unavailable.push(path);
                 skipped.push(stored.path.clone());
                 continue;

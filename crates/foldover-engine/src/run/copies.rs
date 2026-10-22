@@ -23,7 +23,7 @@ use std::time::Duration;
 use foldover_endpoint::ApplyError;
 use foldover_types::{EntryVersion, ScanControl};
 
-use super::{Executor, RunProgress, Writer};
+use super::{Executor, RunProgress, Writer, writes};
 use crate::PlanRow;
 
 /// How often the run's thread asks its control while copies run, so a
@@ -168,8 +168,12 @@ impl<'a> Copies<'a> {
         self.busy -= 1;
         match landed {
             Landed::Copied(row, result) => {
+                // A failed copy wrote nothing the run counts.
+                let landed = result.is_ok() && writes(row.decision());
                 executor.landed(row, result);
-                progress.applied(executor.copied_bytes(row));
+                if landed {
+                    progress.applied(executor.copied_bytes(row));
+                }
             }
             Landed::Skipped => self.skipped = true,
             Landed::Crashed(payload) => {

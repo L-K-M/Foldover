@@ -625,6 +625,7 @@ func pairEditorWalksServerFoldersAndChoosesOne() async throws {
     #expect(editor.serverListing == home)
     #expect(editor.serverBrowseError == nil)
     #expect(!editor.isBrowsingServer)
+    #expect(await client.browsed == ["sftp://nas/~"])
 
     let folder = try #require(editor.serverListing?.folders.first)
     await editor.openServerFolder(folder.locator)
