@@ -426,14 +426,27 @@ async fn browse(params: EndpointBrowse) -> Result<Value, RpcError> {
             "Only folders on SFTP servers are browsed",
         ));
     };
-    // Only validated roots get a slot: the map never shrinks, so
-    // inserting first would leak one entry per bad root sent.
-    let browses = BROWSES
-        .lock()
-        .unwrap()
-        .entry(params.root)
-        .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(4)))
-        .clone();
+    // Only validated roots get a slot, but parsing does not bound the
+    // map: any distinct sftp:// root passes, so drop the slots no
+    // in-flight browse is holding before adding one, and refuse while
+    // that many are still going.
+    const MAX_ROOTS: usize = 256;
+    let browses = {
+        let mut browses_by_root = BROWSES.lock().unwrap();
+        if browses_by_root.len() >= MAX_ROOTS {
+            browses_by_root.retain(|_, slot| Arc::strong_count(slot) > 1);
+            if browses_by_root.len() >= MAX_ROOTS {
+                return Err(RpcError::new(
+                    INTERNAL_ERROR,
+                    "Too many servers are being browsed",
+                ));
+            }
+        }
+        browses_by_root
+            .entry(params.root)
+            .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(4)))
+            .clone()
+    };
     // The engine bounds each phase, but a black-holed server can still
     // outwait a person's patience; bound the wait too. The task itself
     // cannot be cancelled once it is on the blocking pool, so it also

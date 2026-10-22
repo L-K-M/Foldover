@@ -81,7 +81,11 @@ impl Sessions {
                     Ok(Ok(session)) => {
                         let mut pool = self.lock();
                         pool.refusals = 0;
-                        pool.limit = pool.wanted;
+                        // Grow back one slot per success rather than
+                        // straight to wanted: a server that stays
+                        // capped costs one probe per freed slot, not a
+                        // burst of refusals every recovery.
+                        pool.limit = pool.limit.saturating_add(1).min(pool.wanted);
                         drop(pool);
                         return self.lend(session);
                     }
