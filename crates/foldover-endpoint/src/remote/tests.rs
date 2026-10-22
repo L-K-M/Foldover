@@ -356,7 +356,7 @@ fn calls_on_a_link_whose_peer_went_away_fail_instead_of_hanging() {
     let other = Endpoint::Peer(PeerEndpoint::open(a, &root).unwrap());
     // The link must be proven up, or the calls below could fail for a
     // reason the test does not mean to exercise.
-    assert!(observe(&other).is_ok());
+    observe(&other).expect("the link must be proven up before the peer goes away");
     drop(b);
 
     let (done, result) = std::sync::mpsc::channel();
