@@ -20,6 +20,7 @@ public enum UpdatePrompt {
         // A launch check finds the app unfocused; bring its panel forward.
         NSApp.activate()
         let alert = NSAlert()
+        alert.alertStyle = .informational
         switch outcome {
         case .available(let release):
             alert.messageText = String(localized: "Foldover \(release.version) is available")
