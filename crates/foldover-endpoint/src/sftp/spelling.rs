@@ -185,9 +185,7 @@ impl SftpEndpoint {
     /// run never listed gets a Dirty mark instead, so a `read_dir`
     /// already in flight cannot store a pre-mutation snapshot.
     pub(super) fn note_added(&self, added: &[u8]) {
-        let Some(parent) = parent_key(added) else {
-            return;
-        };
+        let parent = parent_key(added);
         let (_, name) = split(added);
         match self
             .listings
@@ -212,9 +210,7 @@ impl SftpEndpoint {
 
     /// `gone`'s name left its parent's cached listing.
     pub(super) fn note_removed(&self, gone: &[u8]) {
-        let Some(parent) = parent_key(gone) else {
-            return;
-        };
+        let parent = parent_key(gone);
         let (_, name) = split(gone);
         match self
             .listings
@@ -260,9 +256,7 @@ impl SftpEndpoint {
     /// where a surgical name edit could lie about an entry still
     /// present.
     pub(super) fn forget_parent(&self, remote: &[u8]) {
-        if let Some(parent) = parent_key(remote) {
-            self.mark(&parent);
-        }
+        self.mark(&parent_key(remote));
     }
 
     /// Every view `remote`'s removal could have touched: its parent's,
@@ -303,8 +297,9 @@ impl SftpEndpoint {
     }
 
     /// A rename attempt whose request may never have landed: everything
-    /// it could have moved or left behind stops being trusted — both
-    /// entries' own views and their parents' go.
+    /// it could have moved or left behind stops being trusted —
+    /// `forget_tree` drops each entry's parent's view, its own and
+    /// every folder's below it.
     fn rename_lost(&self, from: &[u8], to: &[u8]) {
         self.forget_tree(from);
         self.forget_tree(to);
@@ -501,12 +496,12 @@ fn spellings(component: &[u8]) -> Vec<Vec<u8>> {
 /// `remote`'s parent's cache key: the parent, or `/` for a bare name —
 /// `listed` caches the root listing under `/` too, so a root-level
 /// rename must dirty that key rather than skip it.
-fn parent_key(remote: &[u8]) -> Option<Vec<u8>> {
+fn parent_key(remote: &[u8]) -> Vec<u8> {
     let (parent, _) = split(remote);
-    Some(match parent {
+    match parent {
         Some(parent) if !parent.is_empty() => parent.to_vec(),
         _ => b"/".to_vec(),
-    })
+    }
 }
 
 fn split(path: &[u8]) -> (Option<&[u8]>, &[u8]) {

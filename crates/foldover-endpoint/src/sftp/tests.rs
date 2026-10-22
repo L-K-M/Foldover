@@ -1004,6 +1004,11 @@ fn a_replacing_rename_drops_the_targets_cached_listings() {
     let stored = sftp.remote(format!("victim/{composed}").as_bytes());
     assert_eq!(sftp.listed(&asked), stored);
 
+    // POSIX rename only replaces an *empty* directory, so vacate
+    // `victim` behind the cache's back — the cached view still holds
+    // the child, which is exactly the stale entry `mark_under` drops.
+    fs::remove_file(directory.path().join("victim").join(composed)).unwrap();
+
     if sftp
         .rename_replacing(&sftp.remote(b"newer"), &sftp.remote(b"victim"))
         .is_err()
