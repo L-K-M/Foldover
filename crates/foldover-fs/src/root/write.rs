@@ -865,7 +865,14 @@ fn flush_device_cache(file: &impl AsFd) -> io::Result<()> {
 fn observed(parent: &Dir, name: &Path) -> Result<EntryMetadata, WriteError> {
     match EntryMetadata::at(parent, name) {
         Ok(metadata) => Ok(metadata),
-        Err(source) if source.kind() == io::ErrorKind::NotFound => Err(WriteError::Changed),
+        Err(source)
+            if matches!(
+                source.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Err(WriteError::Changed)
+        }
         Err(source) => Err(source.into()),
     }
 }
