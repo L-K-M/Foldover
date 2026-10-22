@@ -455,7 +455,19 @@ impl Jobs {
             }
             (status, reviewed)
         });
-        Ok(self.status(id))
+        Ok(Self::claimed(work))
+    }
+
+    /// The claim's acknowledgment: `claim` stored Working under the lock,
+    /// but the spawned job can publish a finished status before
+    /// `status(id)` is re-read here, which would answer a start request
+    /// with the job already done.
+    fn claimed(work: Work) -> SyncStatus {
+        SyncStatus::Working {
+            job: work.job(),
+            cancelling: false,
+            progress: SyncProgress::default(),
+        }
     }
 
     /// Start a test-provided job through the same claim and publish path.
@@ -468,7 +480,7 @@ impl Jobs {
     ) -> Result<SyncStatus, RpcError> {
         self.claim(id, work, &Arc::new(AtomicBool::new(false)))?;
         self.spawn(id, run);
-        Ok(self.status(id))
+        Ok(Self::claimed(work))
     }
 
     /// Overwrite the pair's recorded status, for job state machine tests.
