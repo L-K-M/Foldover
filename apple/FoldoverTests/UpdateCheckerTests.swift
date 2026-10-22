@@ -82,3 +82,20 @@ func theFeedSkipsTagsThatAreNotVersions() {
     #expect(UpdateChecker.newestRelease(in: feed)?.version == "2.1.0")
     #expect(UpdateChecker.newestRelease(in: "no tags here") == nil)
 }
+
+@Test
+func theFeedIgnoresReleaseLinksInReleaseNotes() {
+    // A release body linking to another repo's tag — or a tag we never
+    // published — must not pass as a newer Foldover release.
+    let feed = """
+        <feed>
+          <entry>
+            <link href="https://github.com/L-K-M/Foldover/releases/tag/v1.2.0"/>
+            <content type="html">Now using
+              &lt;a href="https://github.com/other/repo/releases/tag/v9.9.9"&gt;
+              repo 9.9.9&lt;/a&gt;.</content>
+          </entry>
+        </feed>
+        """
+    #expect(UpdateChecker.newestRelease(in: feed)?.version == "1.2.0")
+}

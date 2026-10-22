@@ -155,17 +155,19 @@ public struct UpdateChecker: Sendable {
     }
 
     /// The highest-versioned release `feed` links to, or nil when none
-    /// of its `/releases/tag/` links carries a parseable version.
+    /// of its tag links carries a parseable version.
     public static func newestRelease(in feed: String) -> AppRelease? {
         var newest: (release: AppRelease, version: ReleaseVersion)?
         var remaining = feed[...]
-        let marker = "/releases/tag/"
+        // Anchored to this repository so links inside release notes —
+        // other repos' releases, deleted tags — cannot pose as ours.
+        let marker = "https://github.com/L-K-M/Foldover/releases/tag/"
         while let at = remaining.range(of: marker) {
             remaining = remaining[at.upperBound...]
             let tag = String(remaining.prefix(while: Self.isTagChar))
             guard let version = ReleaseVersion(parsing: tag) else { continue }
             if newest.map({ version > $0.version }) ?? true,
-               let page = URL(string: "https://github.com/L-K-M/Foldover/releases/tag/\(tag)") {
+               let page = URL(string: marker + tag) {
                 newest = (AppRelease(version: version.description, downloadURL: page), version)
             }
         }
