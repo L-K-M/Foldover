@@ -407,25 +407,7 @@ impl Node {
         trust: Arc<TrustStore>,
         mode: PeerMode,
     ) -> Result<Self, PeerError> {
-        let provider = provider();
-        let verifier = Verifier {
-            accept: Accept::AnyDevice,
-            mode,
-            trust: Arc::clone(&trust),
-            provider: Arc::clone(&provider),
-        };
-        let mut crypto = rustls::ServerConfig::builder_with_provider(provider)
-            .with_protocol_versions(TLS13_ONLY)
-            .map_err(tls_error)?
-            .with_client_cert_verifier(Arc::new(verifier))
-            .with_single_cert(vec![identity.cert.clone()], identity.key.clone_key())
-            .map_err(tls_error)?;
-        crypto.alpn_protocols = vec![ALPN.to_vec()];
-        let mut server = ServerConfig::with_crypto(Arc::new(
-            QuicServerConfig::try_from(crypto).map_err(tls_error)?,
-        ));
-        server.transport = transport();
-        let endpoint = Endpoint::server(server, address)?;
+        let endpoint = Endpoint::server(server_config(&identity, &trust, mode)?, address)?;
         Ok(Self {
             identity,
             endpoint,
@@ -515,6 +497,34 @@ impl Node {
     pub fn close(&self) {
         self.endpoint.close(VarInt::from_u32(0), b"closed");
     }
+}
+
+/// Listening TLS for `mode`; `sim` builds Nodes over it without a real
+/// socket.
+fn server_config(
+    identity: &Identity,
+    trust: &Arc<TrustStore>,
+    mode: PeerMode,
+) -> Result<ServerConfig, PeerError> {
+    let provider = provider();
+    let verifier = Verifier {
+        accept: Accept::AnyDevice,
+        mode,
+        trust: Arc::clone(trust),
+        provider: Arc::clone(&provider),
+    };
+    let mut crypto = rustls::ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(TLS13_ONLY)
+        .map_err(tls_error)?
+        .with_client_cert_verifier(Arc::new(verifier))
+        .with_single_cert(vec![identity.cert.clone()], identity.key.clone_key())
+        .map_err(tls_error)?;
+    crypto.alpn_protocols = vec![ALPN.to_vec()];
+    let mut server = ServerConfig::with_crypto(Arc::new(
+        QuicServerConfig::try_from(crypto).map_err(tls_error)?,
+    ));
+    server.transport = transport();
+    Ok(server)
 }
 
 /// The device at the other end of a connection.
@@ -751,5 +761,7 @@ pub async fn read_message(recv: &mut PeerRecvStream) -> Result<Vec<u8>, PeerErro
     Ok(message)
 }
 
+#[cfg(test)]
+mod sim;
 #[cfg(test)]
 mod tests;

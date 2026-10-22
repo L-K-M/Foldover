@@ -63,3 +63,6 @@ jobs:
 
       - name: Simulate
         run: cargo test --locked --release -p foldover-engine -- simulation
+
+      - name: Chaos-simulate the peer transport
+        run: cargo test --locked --release -p foldover-net -- sim

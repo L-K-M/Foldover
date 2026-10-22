@@ -1,7 +1,8 @@
 # ADR 0038: Simulation
 
 Status: Implemented over local and in-memory quirk folders, with the
-100k-seed nightly run; network chaos and the 14-night record pending
+100k-seed nightly run; peer transport chaos runs over turmoil nightly;
+the 14-night record is still pending
 
 ## Context
 
@@ -97,12 +98,13 @@ The first runs found two engine bugs, both fixed
   violation; the nightly job runs the count, the record of nights is
   kept by CI history.
 - Not emulated: extended attributes in memory, volatile file identities, lost
-  change events, network chaos and the deterministic executor. SFTP and
-  peer folders are not simulated yet. Dead-peer coverage does not wait
-  on chaos tooling: request and delivery timeouts bound every remote
-  call and `calls_on_a_link_whose_peer_went_away_fail_instead_of_hanging`
-  proves a closed link fails fast. What network chaos (turmoil) would
-  still add is partial connectivity — asymmetric loss, delay and jitter
-  during bulk copies and pairing — which needs a quinn socket adapter
-  and the endpoint stack on turmoil's runtime; deferred until a release
-  blocker or field report justifies it.
+  change events and the deterministic executor. SFTP and peer folders are
+  not simulated yet. Dead-peer coverage does not wait on chaos tooling:
+  request and delivery timeouts bound every remote call and
+  `calls_on_a_link_whose_peer_went_away_fail_instead_of_hanging` proves a
+  closed link fails fast. Partial connectivity now runs nightly too:
+  `foldover-net`'s `sim` module puts quinn on turmoil's simulated UDP
+  (seeded loss, latency, jitter and partitions) and drives the real TLS
+  handshake, pairing exchange and bulk streams through it — asymmetric
+  and transient link failure during copies and pairing is covered;
+  application-level copies over the link still are not.
