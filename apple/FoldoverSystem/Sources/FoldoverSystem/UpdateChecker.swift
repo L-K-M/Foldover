@@ -159,8 +159,10 @@ public struct UpdateChecker: Sendable {
     public static func newestRelease(in feed: String) -> AppRelease? {
         var newest: (release: AppRelease, version: ReleaseVersion)?
         var remaining = feed[...]
-        // Anchored to this repository so links inside release notes —
-        // other repos' releases, deleted tags — cannot pose as ours.
+        // Anchored to this repository so links inside release notes to
+        // other repos cannot pose as ours. A same-repo tag URL quoted in
+        // note text still matches; notes are maintainer-written, so that
+        // residual risk is accepted.
         let marker = "https://github.com/L-K-M/Foldover/releases/tag/"
         while let at = remaining.range(of: marker) {
             remaining = remaining[at.upperBound...]
