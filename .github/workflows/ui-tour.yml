@@ -83,6 +83,14 @@ jobs:
           PY
           ls "$RUNNER_TEMP/tour"
 
+      # A crash in the app under test leaves its report here.
+      - name: Collect crash reports
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/tour/crashes"
+          cp ~/Library/Logs/DiagnosticReports/Foldover* "$RUNNER_TEMP/tour/crashes/" 2>/dev/null || true
+          ls -la "$RUNNER_TEMP/tour/crashes"
+
       - name: Upload the tour
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
