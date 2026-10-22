@@ -17,9 +17,13 @@ VERSION="${RELEASE_NEW_VERSION:-}"
 [[ -n "$VERSION" ]] \
   || die "RELEASE_NEW_VERSION is not set - this script is driven by scripts/release.sh"
 # The value goes straight into a sed replacement, and Cargo needs all
-# three components (release.sh rejects anything else up front).
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
-  || die "RELEASE_NEW_VERSION must look like X.Y.Z, got '$VERSION'"
+# three components (release.sh rejects anything else up front). The
+# optional -suffix carries pre-releases.
+SHAPE="${RELEASE_VERSION_REGEX:-$(bash "$ROOT/scripts/version-shape.sh")}" \
+  || die "failed to read the version shape"
+[[ -n "$SHAPE" ]] || die "version-shape.sh printed nothing"
+[[ "$VERSION" =~ $SHAPE ]] \
+  || die "RELEASE_NEW_VERSION must look like X.Y.Z or X.Y.Z-suffix, got '$VERSION'"
 
 TOML="Cargo.toml"
 [[ -f "$TOML" ]] || die "$TOML not found"
