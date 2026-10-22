@@ -266,13 +266,16 @@ deletion ([ADR 0010](../adr/0010-local-metadata-inventory.md)).
 
 ## Updates
 
-- **Check for Updates…** in the app menu. Updates arrive through Sparkle
-  and each must carry the release key's signature
-  ([ADR 0035](../adr/0035-sparkle-updates.md)).
-- Builds from before the release keys existed cannot update themselves;
-  download the next release by hand for those. Each update replaces the
-  app and its embedded agent together
-  ([ADR 0035](../adr/0035-sparkle-updates.md)).
+- **Check for Updates…** in the app menu asks GitHub for a newer release;
+  the app also checks once when it opens. A newer release shows a message
+  with a link to its download page
+  ([ADR 0045](../adr/0045-github-update-check.md)).
+- Updating is manual: download the release, replace the app and run the
+  documented `xattr` activation again. The embedded agent restarts from
+  the new bundle ([ADR 0045](../adr/0045-github-update-check.md)).
+- Nothing in the app verifies the download; the release page over HTTPS
+  is the only authenticity check, so download only from the official
+  repository's releases page.
 
 ## Not yet
 

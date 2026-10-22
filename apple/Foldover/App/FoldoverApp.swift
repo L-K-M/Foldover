@@ -3,6 +3,7 @@
 // and view models.
 
 import AppIntents
+import Foundation
 import SwiftUI
 
 @main
@@ -11,7 +12,7 @@ struct FoldoverApp: App {
     @State private var settings = SettingsStore()
     @State private var macToMac: MacToMacStore
     @State private var automation = AutomationStore()
-    @State private var updates = UpdateStore()
+    @State private var updates: UpdateStore
 
     init() {
         // One store each, so the pair editor sees the Macs Settings
@@ -20,12 +21,21 @@ struct FoldoverApp: App {
         _macToMac = State(initialValue: macToMac)
         let automation = AutomationStore()
         _automation = State(initialValue: automation)
+        let updates = UpdateStore()
+        _updates = State(initialValue: updates)
         let viewModel = MainViewModel(appInfo: AppInfoStore(), automation: automation, macToMac: macToMac)
         _viewModel = State(initialValue: viewModel)
         // Shortcuts actions run in the app and share its state.
         AppDependencyManager.shared.add(dependency: viewModel)
         // Runs for the app's lifetime, with or without an open window.
         Task { await viewModel.monitor() }
+        // A test host is not a launch: a modal prompt there would stall
+        // the suite. UI-test launches carry no test environment and opt
+        // out with a launch argument instead.
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil,
+           !CommandLine.arguments.contains("-foldover-skip-update-check") {
+            Task { await updates.checkAtLaunch() }
+        }
     }
 
     var body: some Scene {
@@ -35,8 +45,8 @@ struct FoldoverApp: App {
         }
         .commands {
             CommandGroup(after: .appInfo) {
-                Button("Check for Updates…") { updates.checkForUpdates() }
-                    .disabled(!updates.canUpdate)
+                Button("Check for Updates…") { Task { await updates.checkForUpdates() } }
+                    .disabled(updates.checking)
             }
         }
 

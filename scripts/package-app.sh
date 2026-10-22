@@ -21,18 +21,20 @@ xcodebuild -project "$ROOT/apple/Foldover.xcodeproj" \
   -derivedDataPath "$DERIVED" \
   -configuration Release \
   CODE_SIGN_IDENTITY=- \
-  ${SPARKLE_PUBLIC_KEY:+"SPARKLE_PUBLIC_KEY=$SPARKLE_PUBLIC_KEY"} \
   build
 app="$DERIVED/Build/Products/Release/Foldover.app"
-
-# A release build carries the key its updates are checked against.
-if [[ -n "${SPARKLE_PUBLIC_KEY:-}" ]]; then
-  test "$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$app/Contents/Info.plist")" = "$SPARKLE_PUBLIC_KEY"
-fi
 
 # Apple silicon only, macOS 27+, ad hoc signed inside out (PLAN.md §6).
 test "$(lipo -archs "$app/Contents/MacOS/Foldover")" = "$ARCHITECTURE"
 test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")" = "$MINIMUM_SYSTEM"
+# The update check compares this version against release tags; anything
+# else can never be compared, so every check would report failure
+# instead of a real answer (ADR 0045).
+version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
+if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+  echo "error: CFBundleShortVersionString '$version' is not X.Y.Z; the update check could never compare it" >&2
+  exit 1
+fi
 codesign --verify --deep --strict --verbose=2 "$app"
 codesign -d --verbose=4 "$app" 2>&1 | grep -Fx 'Signature=adhoc'
 for executable in foldoverd foldover; do
