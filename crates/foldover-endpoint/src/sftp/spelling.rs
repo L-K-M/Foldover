@@ -277,7 +277,12 @@ impl SftpEndpoint {
 
     /// Every listing view keyed below `remote` may not match.
     fn mark_under(&self, remote: &[u8]) {
-        let below = [remote, b"/"].concat();
+        // A `remote` ending in `/` (the root) already prefixes its
+        // children — appending another slash would match none of them.
+        let below = match remote.ends_with(b"/") {
+            true => remote.to_vec(),
+            false => [remote, b"/"].concat(),
+        };
         for (folder, view) in self
             .listings
             .lock()
