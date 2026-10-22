@@ -95,6 +95,11 @@ fn write_times(path: &Path, times: &[SystemTime]) -> Result<(), Error> {
     }
     file.sync_data()?;
     fs::rename(&staged, path)?;
+    // The rename moved a directory entry, which a machine crash can roll
+    // back; flush the directory too, as `backup` does.
+    if let Some(directory) = path.parent() {
+        fs::File::open(directory)?.sync_all()?;
+    }
     Ok(())
 }
 

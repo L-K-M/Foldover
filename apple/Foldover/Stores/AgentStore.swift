@@ -60,12 +60,15 @@ final class AgentStore {
         // A status asked for before resuming must not put the app back in
         // safe mode: this reply is newer.
         generation += 1
+        let request = generation
         do {
             let report = try await leaveSafeModeRequest()
+            guard generation == request else { return }
             connection = .connected(version: report.version)
             note(report)
             safeModeError = nil
         } catch {
+            guard generation == request else { return }
             safeModeError = message(for: error)
         }
     }
