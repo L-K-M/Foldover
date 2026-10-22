@@ -14,6 +14,7 @@ struct MainView: View {
     /// The pair the window showed last, restored once the catalog has it.
     @SceneStorage("main.pair") private var restoredPairID = ""
     @FocusState private var searchFocused: Bool
+    @FocusState private var paneFocus: MainPane?
 
     var body: some View {
         splitView
@@ -55,7 +56,7 @@ struct MainView: View {
 
     private var splitView: some View {
         NavigationSplitView {
-            PairSidebar(viewModel: viewModel)
+            PairSidebar(viewModel: viewModel, focus: $paneFocus)
         } detail: {
             detail
                 .navigationTitle(viewModel.selectedPair?.settings.name ?? viewModel.title)
@@ -72,7 +73,7 @@ struct MainView: View {
     @ViewBuilder
     private var detail: some View {
         if let pair = viewModel.selectedPair {
-            PairDetailView(viewModel: viewModel, pair: pair)
+            PairDetailView(viewModel: viewModel, pair: pair, focus: $paneFocus)
                 .id(pair.id)
         } else {
             emptyDetail
@@ -189,4 +190,13 @@ struct MainView: View {
         }
         undoManager.setActionName(sync.actionName)
     }
+}
+
+/// The main window's panes that take the keyboard. Choosing a pair
+/// focuses the sidebar and choosing a change the table, so Delete,
+/// Space and the arrow keys act where the person last chose something,
+/// whatever the click left as first responder.
+enum MainPane: Hashable {
+    case sidebar
+    case changes
 }

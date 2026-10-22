@@ -138,7 +138,14 @@ final class TourTests: XCTestCase {
         tour.pause(4)
         tour.snap("11-synced")
 
-        checkMenu(tour, "Edit", "Undo Sync of", enabled: true, snap: "menu-edit-undo")
+        // AppKit retitles Undo when the menu opens, after the query reads
+        // it, so the item is found by its action.
+        if tour.click(app.menuBars.menuBarItems["Edit"], "Edit menu") {
+            let undo = app.menuBars.menuItems["undo:"].firstMatch
+            XCTAssertTrue(undo.waitForExistence(timeout: 3) && undo.isEnabled, "Edit › Undo is enabled")
+            tour.snap("menu-edit-undo")
+            tour.key(.escape)
+        }
         tour.key("z", .command)
         tour.pause(2)
         tour.snap("12-undone")
@@ -242,11 +249,18 @@ final class TourTests: XCTestCase {
         tour.pause(1)
         tour.snap("26-window-closed")
         XCTAssertTrue(app.menuBars.menuBarItems["Pair"].exists, "The app keeps running")
-        let dock = XCUIApplication(bundleIdentifier: "com.apple.dock")
-        tour.click(dock.icons["Foldover"].firstMatch, "Foldover in the Dock")
+        // The Dock's own item if the query reaches it, else the menu bar
+        // extra's Open Foldover; either must bring the window back.
+        let dockItem = XCUIApplication(bundleIdentifier: "com.apple.dock")
+            .descendants(matching: .any)["Foldover"].firstMatch
+        if dockItem.waitForExistence(timeout: 3) {
+            dockItem.click()
+        } else if tour.click(app.statusItems.firstMatch, "menu bar extra") {
+            tour.click(app.buttons["Open Foldover"].firstMatch, "Open Foldover")
+        }
         tour.pause(1.5)
         tour.snap("27-window-reopened")
-        XCTAssertTrue(app.windows["Foldover"].exists || app.windows.count > 0, "The Dock reopens the window")
+        XCTAssertTrue(app.windows.count > 0, "The window comes back")
 
         tour.key("f", [.command, .control])
         tour.pause(2.5)

@@ -32,9 +32,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- Edit › Undo reverses the last sync started from the window, named
-  after its pair, and Edit › Find, Copy and Space for Quick Look work in
-  the list of changes. The window remembers the selected pair.
+- Edit › Undo reverses the last Sync Now from the window, named after
+  its pair. Edit › Find filters the list of changes, Edit › Copy copies
+  the selected change's path, and Space shows its file in Quick Look.
+  The window remembers the selected pair and whether the inspector is
+  shown.
+
+- The Pair menu also pauses and resumes automatic syncs and reviews the
+  conflicts a sync left, which only buttons offered before.
 
 - A pair can limit how fast it copies, in megabytes per second, so a
   large sync leaves room on the network for everything else.

@@ -7,6 +7,7 @@ import SwiftUI
 struct PairDetailView: View {
     @Bindable var viewModel: MainViewModel
     let pair: SyncPair
+    let focus: FocusState<MainPane?>.Binding
 
     var body: some View {
         let sync = viewModel.sync(for: pair)
@@ -239,10 +240,15 @@ struct PairDetailView: View {
                         .font(.caption)
                 }
             } actions: {
-                if let action = placeholder.action {
-                    placeholderButton(action, sync: sync)
+                // Each button at its own width; spread evenly, the longer
+                // titles were cut short.
+                HStack(spacing: 12) {
+                    if let action = placeholder.action {
+                        placeholderButton(action, sync: sync)
+                    }
+                    statusButtons(sync)
                 }
-                statusButtons(sync)
+                .fixedSize()
             }
         } else if sync.showsSearch {
             // Last: a search left in the field must not hide progress or
@@ -291,6 +297,11 @@ struct PairDetailView: View {
             .width(min: 70, ideal: 80, max: 90)
         }
         .alternatingRowBackgrounds()
+        // Choosing a change puts the keys here: Space, ⌘C and the arrows.
+        .focused(focus, equals: .changes)
+        .onChange(of: viewModel.selectedChangeID) { _, change in
+            if change != nil { focus.wrappedValue = .changes }
+        }
         .contextMenu(forSelectionType: ChangeRow.ID.self) { ids in
             if let row = rows.first(where: { ids.contains($0.id) }) {
                 ChangeRowActions(viewModel: viewModel, sync: sync, row: row)

@@ -153,6 +153,7 @@ private struct PairMenuItems: View {
         Button("Sync All") { Task { await viewModel.syncAll() } }
             .keyboardShortcut("s", modifiers: [.command, .option])
             .disabled(!viewModel.canSyncAll)
+        AutomaticSyncItems(viewModel: viewModel)
         Divider()
         ChangeMenuItems(window: window, sync: sync)
         Divider()
@@ -174,6 +175,13 @@ private struct PairMenuItems: View {
         Button("Stop") { Task { await window?.stopSelected() } }
             .keyboardShortcut(".")
             .disabled(!(sync?.canCancel ?? false))
+        // The completion card's Review button: preview again, listing
+        // only the conflicts the sync left.
+        Button("Review Conflicts") {
+            guard let sync else { return }
+            Task { await sync.reviewConflicts() }
+        }
+        .disabled(!(sync?.canStart ?? false) || (sync?.completionCard?.conflicts ?? 0) == 0)
     }
 
     @ViewBuilder
@@ -206,6 +214,24 @@ private struct PairMenuItems: View {
     private var canConfigure: Bool {
         guard let window, window.selectedPair != nil, window.editor == nil else { return false }
         return window.canConfigurePairs
+    }
+}
+
+/// Pause or resume every pair's automatic syncs, as in the menu bar
+/// extra; app-wide, so they work whichever window is in front.
+private struct AutomaticSyncItems: View {
+    let viewModel: MainViewModel
+
+    var body: some View {
+        if viewModel.isPaused {
+            Button("Resume Automatic Syncs") { Task { await viewModel.resume() } }
+        } else {
+            Menu("Pause Automatic Syncs") {
+                ForEach(PauseLength.allCases, id: \.self) { length in
+                    Button(MainViewModel.title(length)) { Task { await viewModel.pause(length) } }
+                }
+            }
+        }
     }
 }
 

@@ -6,8 +6,8 @@ import UniformTypeIdentifiers
 
 struct PairSidebar: View {
     @Bindable var viewModel: MainViewModel
+    let focus: FocusState<MainPane?>.Binding
     @Environment(\.openWindow) private var openWindow
-    @FocusState private var listFocused: Bool
 
     var body: some View {
         List(selection: $viewModel.selectedPairID) {
@@ -26,11 +26,9 @@ struct PairSidebar: View {
                 ProgressView()
             }
         }
-        // Choosing a pair, by click or from the menu bar, puts the keys
-        // here as in Mail; otherwise they stay in a search field clicked
-        // earlier, and Delete edits its text instead.
-        .focused($listFocused)
-        .onChange(of: viewModel.selectedPairID) { listFocused = true }
+        // Choosing a pair puts the keys here, as in Mail.
+        .focused(focus, equals: .sidebar)
+        .onChange(of: viewModel.selectedPairID) { focus.wrappedValue = .sidebar }
         // Delete and Edit > Delete ask first: removal cannot be undone.
         .onDeleteCommand { viewModel.requestRemoval() }
         .onKeyPress(keys: [.delete, .deleteForward]) { _ in
