@@ -237,7 +237,10 @@ mod tests {
         let first = sessions.borrow(Some(&refused));
         std::thread::scope(|threads| {
             let waiter = threads.spawn(|| sessions.borrow(Some(&refused)).real_path(b"/").is_ok());
-            std::thread::sleep(Duration::from_millis(100));
+            // A few refused connects go by before the cap is learned;
+            // hold the session out past them or the waiter takes it
+            // and the server is never asked again.
+            std::thread::sleep(RETRY * (REFUSALS as u32 + 2));
             assert!(!waiter.is_finished());
             drop(first);
             assert!(waiter.join().unwrap());
