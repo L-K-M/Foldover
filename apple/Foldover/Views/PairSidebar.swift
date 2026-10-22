@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 struct PairSidebar: View {
     @Bindable var viewModel: MainViewModel
     @Environment(\.openWindow) private var openWindow
+    @FocusState private var listFocused: Bool
 
     var body: some View {
         List(selection: $viewModel.selectedPairID) {
@@ -25,8 +26,18 @@ struct PairSidebar: View {
                 ProgressView()
             }
         }
+        // Choosing a pair, by click or from the menu bar, puts the keys
+        // here as in Mail; otherwise they stay in a search field clicked
+        // earlier, and Delete edits its text instead.
+        .focused($listFocused)
+        .onChange(of: viewModel.selectedPairID) { listFocused = true }
         // Delete and Edit > Delete ask first: removal cannot be undone.
         .onDeleteCommand { viewModel.requestRemoval() }
+        .onKeyPress(keys: [.delete, .deleteForward]) { _ in
+            guard viewModel.selectedPair != nil else { return .ignored }
+            viewModel.requestRemoval()
+            return .handled
+        }
         // Drag one or two folders in to create a pair (PLAN.md §3.8).
         .dropDestination(for: URL.self) { urls, _ in
             viewModel.newPair(dropping: urls)

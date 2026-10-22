@@ -3,6 +3,7 @@
 // their commands; state lives in the stores and view models.
 
 import AppIntents
+import AppKit
 import Foundation
 import SwiftUI
 
@@ -54,6 +55,10 @@ struct FoldoverApp: App {
     /// Every store wired to the canned clients in Fixtures.swift.
     private static func fixtureStores() -> AppStores {
         Fixtures.prepareFolders()
+        // A tour's dark pass; the system's own appearance stays as it is.
+        if ProcessInfo.processInfo.arguments.contains(Fixtures.darkArgument) {
+            NSApplication.shared.appearance = NSAppearance(named: .darkAqua)
+        }
         let pairs = FixturePairClient()
         let macToMac = MacToMacStore(client: FixtureMacToMacClient())
         let automation = AutomationStore(client: FixtureAutomationClient())

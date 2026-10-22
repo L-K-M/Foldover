@@ -9,6 +9,8 @@ import Foundation
 
 enum Fixtures {
     static let launchArgument = "-foldover-fixtures"
+    /// Shows the app in Dark Mode whatever the system uses.
+    static let darkArgument = "-foldover-dark"
 
     static var isEnabled: Bool { ProcessInfo.processInfo.arguments.contains(launchArgument) }
 

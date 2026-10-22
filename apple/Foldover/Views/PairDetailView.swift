@@ -15,8 +15,9 @@ struct PairDetailView: View {
         // table and the fixed-size segments inside, the column's minimum
         // otherwise changed from one layout pass to the next until AppKit
         // stopped the loop by throwing.
-        GeometryReader { _ in
+        GeometryReader { proxy in
             layout(sync)
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
         }
         // The dialog acts on the request captured when it was presented,
         // so a state change cannot redirect the tap to another plan.
@@ -36,10 +37,15 @@ struct PairDetailView: View {
 
     private func layout(_ sync: PairSyncViewModel) -> some View {
         let rows = sync.rows
+        // A placeholder says what the status bar would, with its buttons;
+        // the bar stays only to show a failed request beside it.
+        let placeholderSpeaks = rows.isEmpty && sync.placeholder != nil && sync.requestError == nil
         return VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 12) {
                 folderHeader
-                statusBar(sync)
+                if !placeholderSpeaks {
+                    statusBar(sync)
+                }
                 if sync.showsChangeFilter {
                     scopeBar(sync)
                 }
@@ -176,10 +182,10 @@ struct PairDetailView: View {
 
     // MARK: Changes
 
-    /// The kinds of change as segments, with the hidden-rows caption
-    /// beside them. The segments keep their size, so the column's
-    /// minimum width stays the same while the bar shows (ViewThatFits
-    /// here would let it change with the width, a layout loop).
+    /// Which kinds of change the table lists, as a pop-up that fits the
+    /// narrowest detail (six segments do not beside the inspector), with
+    /// the hidden-rows caption beside it. View › Show has the same
+    /// choices with ⌘1 to ⌘6.
     private func scopeBar(_ sync: PairSyncViewModel) -> some View {
         HStack(spacing: 12) {
             Picker("Show", selection: Binding(
@@ -191,8 +197,7 @@ struct PairDetailView: View {
                     Text(PairSyncViewModel.title(filter)).tag(ChangeFilter?.some(filter))
                 }
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
+            .pickerStyle(.menu)
             .fixedSize()
             Spacer(minLength: 8)
             hiddenRows(sync)
@@ -229,10 +234,15 @@ struct PairDetailView: View {
                 Label(placeholder.title, systemImage: placeholder.symbol)
             } description: {
                 Text(placeholder.message)
+                if let note = sync.archiveNote {
+                    Text(note)
+                        .font(.caption)
+                }
             } actions: {
                 if let action = placeholder.action {
                     placeholderButton(action, sync: sync)
                 }
+                statusButtons(sync)
             }
         } else if sync.showsSearch {
             // Last: a search left in the field must not hide progress or

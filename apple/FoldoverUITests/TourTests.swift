@@ -29,7 +29,7 @@ final class TourTests: XCTestCase {
         tour.click(sidebarRow(app, "Photos"), "Photos in the sidebar")
         tour.key("r", .command)
         tour.pause(5)
-        tour.click(app.tables.firstMatch.tableRows.element(boundBy: 0), "first change")
+        tour.click(text(app, "2026/Trip/header.txt"), "header.txt change")
         tour.snap("01-preview")
         tour.key("i", .command)
         tour.pause(1)
@@ -55,6 +55,12 @@ final class TourTests: XCTestCase {
         app.outlines.firstMatch.staticTexts[name].firstMatch
     }
 
+    /// A row of a table found by the text it shows, such as a path.
+    @MainActor
+    private func text(_ app: XCUIApplication, _ label: String) -> XCUIElement {
+        app.windows.staticTexts[label].firstMatch
+    }
+
     /// Whether the menu-bar menu `menu` offers `item` enabled; the menu
     /// is opened, captured and closed.
     @MainActor
@@ -63,7 +69,9 @@ final class TourTests: XCTestCase {
                            snap name: String? = nil) -> Bool {
         let app = tour.app
         guard tour.click(app.menuBars.menuBarItems[menu], "\(menu) menu") else { return false }
-        let element = app.menuBars.menuItems[item]
+        // By prefix: titles like Undo's name the pair in typographic quotes.
+        let element = app.menuBars.menuItems
+            .matching(NSPredicate(format: "title BEGINSWITH %@", item)).firstMatch
         let found = element.waitForExistence(timeout: 3)
         XCTAssertTrue(found, "\(menu) › \(item) is missing")
         if found {
@@ -91,8 +99,7 @@ final class TourTests: XCTestCase {
         tour.snap("04-preview")
         checkMenu(tour, "Pair", "Sync Now", enabled: true, snap: "menu-pair")
 
-        let table = app.tables.firstMatch
-        tour.click(table.tableRows.element(boundBy: 0), "first change")
+        tour.click(text(app, "2026/Trip/header.txt"), "header.txt change")
         tour.snap("05-change-selected")
         checkMenu(tour, "Pair", "Keep Folder A’s Version", enabled: true)
 
@@ -101,14 +108,14 @@ final class TourTests: XCTestCase {
         tour.snap("06-quick-look")
         tour.key(.escape)
 
-        let row = table.tableRows.element(boundBy: 3)
+        let row = text(app, "2026/Trip/day2/IMG_2041.txt")
         if row.waitForExistence(timeout: 3) {
             row.rightClick()
             tour.pause(0.6)
             tour.snap("07-change-menu")
             tour.key(.escape)
         } else {
-            XCTFail("Missing: fourth change")
+            XCTFail("Missing: IMG_2041 change")
         }
 
         tour.key("5", .command)
@@ -131,7 +138,7 @@ final class TourTests: XCTestCase {
         tour.pause(4)
         tour.snap("11-synced")
 
-        checkMenu(tour, "Edit", "Undo Sync of “Photos”", enabled: true, snap: "menu-edit-undo")
+        checkMenu(tour, "Edit", "Undo Sync of", enabled: true, snap: "menu-edit-undo")
         tour.key("z", .command)
         tour.pause(2)
         tour.snap("12-undone")
@@ -166,7 +173,7 @@ final class TourTests: XCTestCase {
         }
         tour.pause(1.5)
         tour.snap("16-archive-folder-b")
-        tour.click(app.tables.firstMatch.tableRows.element(boundBy: 0), "first archived item")
+        tour.click(text(app, "2024/drafts/old-banner.psd"), "first archived item")
         tour.click(app.toolbars.buttons["Put Back"].firstMatch, "Put Back button")
         tour.pause(1)
         tour.snap("17-archive-put-back")
@@ -186,6 +193,9 @@ final class TourTests: XCTestCase {
         tour.pause(1)
         tour.snap("19-projects")
 
+        // Choosing a pair moves the keys to the sidebar, so Delete removes
+        // it (after asking) instead of editing the search field.
+        checkMenu(tour, "Edit", "Delete", enabled: true)
         tour.key(.delete)
         tour.pause(1)
         tour.snap("20-remove-confirmation")
@@ -224,7 +234,7 @@ final class TourTests: XCTestCase {
         }
     }
 
-    /// Close the main window, reopen it from the Window menu, and go full screen.
+    /// Close the main window, reopen it from the Dock, and go full screen.
     @MainActor
     private func windows(_ tour: Tour) {
         let app = tour.app
@@ -232,11 +242,11 @@ final class TourTests: XCTestCase {
         tour.pause(1)
         tour.snap("26-window-closed")
         XCTAssertTrue(app.menuBars.menuBarItems["Pair"].exists, "The app keeps running")
-        if tour.click(app.menuBars.menuBarItems["Window"], "Window menu") {
-            tour.click(app.menuBars.menuItems["Foldover"].firstMatch, "Window › Foldover")
-        }
+        let dock = XCUIApplication(bundleIdentifier: "com.apple.dock")
+        tour.click(dock.icons["Foldover"].firstMatch, "Foldover in the Dock")
         tour.pause(1.5)
         tour.snap("27-window-reopened")
+        XCTAssertTrue(app.windows["Foldover"].exists || app.windows.count > 0, "The Dock reopens the window")
 
         tour.key("f", [.command, .control])
         tour.pause(2.5)

@@ -92,6 +92,8 @@ struct MenuBarView: View {
                 }
                 .contentShape(Rectangle())
             }
+            // Plain keeps the name in the primary color, like a menu item.
+            .buttonStyle(.plain)
             .help("Show \(row.name) in Foldover")
 
             if row.activity == .working {

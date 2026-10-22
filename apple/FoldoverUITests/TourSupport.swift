@@ -21,8 +21,8 @@ struct Tour {
         self.test = test
         self.appearance = appearance
         app.launchArguments = ["-foldover-fixtures", "-foldover-skip-update-check",
-                               "-ApplePersistenceIgnoreState", "YES",
-                               "-AppleInterfaceStyle", appearance == .dark ? "Dark" : "Light"]
+                               "-ApplePersistenceIgnoreState", "YES"]
+        if appearance == .dark { app.launchArguments.append("-foldover-dark") }
     }
 
     func launch() {
