@@ -85,9 +85,9 @@ pub struct SftpEndpoint {
     /// mutations: a bulk replace in one folder lists it once, not once
     /// per respellable name. Updating a hit in place is exact because
     /// only the names matter; a mutation that cannot be tracked exactly
-    /// drops the folder's entry instead — a stale hit could write a
-    /// path in the wrong spelling, a drop costs one `read_dir`.
-    listings: Mutex<HashMap<Vec<u8>, Vec<Vec<u8>>>>,
+    /// marks the folder Dirty instead — a stale hit could write a path
+    /// in the wrong spelling, a refetch costs one `read_dir`.
+    listings: Mutex<HashMap<Vec<u8>, spelling::FolderView>>,
 }
 
 impl SftpEndpoint {
@@ -431,13 +431,18 @@ impl SftpEndpoint {
     ) -> io::Result<Vec<u8>> {
         self.make_directories_on(session, INTERNAL_DIRECTORY, PRIVATE_DIRECTORY)?;
         let temporary = self.beside(file.path());
-        self.forget_parent(&temporary);
-        match write_new(session, temporary, PRIVATE_FILE, |sink| sink(content)) {
+        match write_new(session, temporary.clone(), PRIVATE_FILE, |sink| {
+            sink(content)
+        }) {
             Ok(written) => {
                 self.note_added(&written);
                 Ok(written)
             }
-            Err(error) => Err(error),
+            // A failed write may have left a partial file behind.
+            Err(error) => {
+                self.forget_parent(&temporary);
+                Err(error)
+            }
         }
     }
 
@@ -737,15 +742,18 @@ impl SftpEndpoint {
             ));
         }
         let temporary = self.beside(path);
-        self.forget_parent(&temporary);
         let mut session = self.session();
-        match write_new(&mut session, temporary, permissions, produce) {
+        match write_new(&mut session, temporary.clone(), permissions, produce) {
             // A written temporary joined its parent's listing.
             Ok(written) => {
                 self.note_added(&written);
                 Ok(written)
             }
-            Err(error) => Err(error),
+            // A failed write may have left a partial file behind.
+            Err(error) => {
+                self.forget_parent(&temporary);
+                Err(error)
+            }
         }
     }
 
@@ -813,8 +821,12 @@ impl SftpEndpoint {
     pub(crate) fn make_directory(&self, path: &SyncPath, permissions: u32) -> io::Result<()> {
         let remote = self.fresh(path.as_bytes());
         let made = self.session().make_directory(&remote, permissions);
-        if made.is_ok() {
-            self.note_added(&remote);
+        match &made {
+            Ok(()) => self.note_added(&remote),
+            // The server refused: the folder was not made.
+            Err(error) if Self::answered(error) => {}
+            // A lost answer may mean the folder exists after all.
+            Err(_) => self.forget_parent(&remote),
         }
         made
     }
@@ -822,10 +834,12 @@ impl SftpEndpoint {
     /// Create a link beside `path` and return its server path.
     pub(crate) fn stage_link(&self, path: &[u8], target: &[u8]) -> io::Result<Vec<u8>> {
         let temporary = self.beside(path);
-        self.forget_parent(&temporary);
         let made = self.session().symlink(target, &temporary);
         if made.is_ok() {
             self.note_added(&temporary);
+        } else {
+            // A lost response may mean the link exists after all.
+            self.forget_parent(&temporary);
         }
         made?;
         Ok(temporary)
@@ -1258,7 +1272,13 @@ impl SftpEndpoint {
                 Err(error) => return Err(at(Some(path), error).into()),
             };
             let staged = (|| -> io::Result<(u64, Attributes)> {
-                let target = session.create_new(&temporary, permissions)?;
+                let target = match session.create_new(&temporary, permissions) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        self.forget_parent(&temporary);
+                        return Err(error);
+                    }
+                };
                 self.note_added(&temporary);
                 let copied = session.copy_data(&source, &target, size, &mut |chunk| {
                     if control() == ScanControl::Cancel {

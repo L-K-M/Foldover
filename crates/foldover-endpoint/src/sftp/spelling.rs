@@ -15,9 +15,11 @@
 //! A name with a single spelling, such as any ASCII name, is looked up
 //! once, as before.
 
+use std::collections::hash_map::Entry;
 use std::io;
+use std::sync::Arc;
 
-use foldover_net::sftp::{Attributes, Session};
+use foldover_net::sftp::{Attributes, Refused, Session};
 use foldover_types::SyncPath;
 use unicode_normalization::UnicodeNormalization;
 
@@ -27,6 +29,18 @@ use crate::ScanError;
 /// How many folder listings a run may hold before the cache starts
 /// over rather than grow without bound.
 const LISTED_FOLDERS: usize = 512;
+
+/// One folder's listing as the run's mutations left it.
+pub(super) enum FolderView {
+    /// What `read_dir` last showed, kept exact by the run's `note_*`.
+    Cached(Arc<Vec<Vec<u8>>>),
+    /// A `read_dir` is in flight; its snapshot stores only if no
+    /// mutation marked the folder meanwhile.
+    Fetching,
+    /// The run changed the folder while uncached or mid-read, or a
+    /// mutation's outcome is unknown: the next listing must refetch.
+    Dirty,
+}
 
 impl SftpEndpoint {
     /// Run `op` on where `path` is stored: as given, or in another
@@ -108,58 +122,91 @@ impl SftpEndpoint {
         }
         let composed = compose(name);
         names
-            .into_iter()
+            .iter()
             .find(|listed| compose(listed) == composed)
-            .map_or_else(|| stored.to_vec(), |listed| join(parent, &listed))
+            .map_or_else(|| stored.to_vec(), |listed| join(parent, listed))
     }
 
     /// The names `read_dir` last showed for `parent`, or `None` when it
     /// failed to read it. Fetched once and kept exact by the run's
     /// mutations (`note_*`, `forget_*`), so a bulk replace in one
-    /// folder pays one listing, not one per respellable name.
-    fn listing(&self, parent: &[u8]) -> Option<Vec<Vec<u8>>> {
-        let listings = self
-            .listings
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if let Some(names) = listings.get(parent) {
-            return Some(names.clone());
+    /// folder pays one listing, not one per respellable name. Views
+    /// track this run's own writes; another client's changes stay
+    /// unseen until the run ends.
+    fn listing(&self, parent: &[u8]) -> Option<Arc<Vec<Vec<u8>>>> {
+        {
+            let mut listings = self
+                .listings
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(FolderView::Cached(names)) = listings.get(parent) {
+                return Some(Arc::clone(names));
+            }
+            // Bounded: past this many folders the map clears rather
+            // than hold every listing the run ever read.
+            if listings.len() >= LISTED_FOLDERS {
+                listings.clear();
+            }
+            listings.insert(parent.to_vec(), FolderView::Fetching);
         }
-        drop(listings);
-        let names: Vec<Vec<u8>> = self
+        let names: Option<Vec<Vec<u8>>> = self
             .session()
             .read_dir(parent)
-            .ok()?
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect();
+            .ok()
+            .map(|entries| entries.into_iter().map(|(name, _)| name).collect());
+        let Some(names) = names else {
+            // A failed read leaves the folder marked Dirty so the next
+            // call tries again rather than trusting nothing.
+            self.listings
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(parent.to_vec(), FolderView::Dirty);
+            return None;
+        };
         let mut listings = self
             .listings
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        // Bounded: past this many folders the map clears rather than
-        // hold every listing the run ever read.
-        if listings.len() >= LISTED_FOLDERS {
-            listings.clear();
+        match listings.entry(parent.to_vec()) {
+            // Untouched while read_dir ran: the snapshot is exact.
+            Entry::Occupied(mut slot) if matches!(slot.get(), FolderView::Fetching) => {
+                let names = Arc::new(names);
+                *slot.get_mut() = FolderView::Cached(Arc::clone(&names));
+                Some(names)
+            }
+            // Changed meanwhile — serve what was read but keep the
+            // Dirty mark so the next call refetches rather than
+            // trust a snapshot taken mid-mutation.
+            _ => Some(Arc::new(names)),
         }
-        Some(listings.entry(parent.to_vec()).or_insert(names).clone())
     }
 
-    /// `added`'s name joined its parent's cached listing.
+    /// `added`'s name joined its parent's cached listing. A parent the
+    /// run never listed gets a Dirty mark instead, so a `read_dir`
+    /// already in flight cannot store a pre-mutation snapshot.
     pub(super) fn note_added(&self, added: &[u8]) {
         let Some(parent) = parent_key(added) else {
             return;
         };
-        let mut listings = self
+        let (_, name) = split(added);
+        match self
             .listings
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let Some(names) = listings.get_mut(&parent) else {
-            return;
-        };
-        let (_, name) = split(added);
-        if !names.iter().any(|listed| listed == name) {
-            names.push(name.to_vec());
+            .unwrap_or_else(|error| error.into_inner())
+            .entry(parent)
+        {
+            Entry::Occupied(mut slot) => match slot.get_mut() {
+                FolderView::Cached(names) => {
+                    let names = Arc::make_mut(names);
+                    if !names.iter().any(|listed| listed == name) {
+                        names.push(name.to_vec());
+                    }
+                }
+                view => *view = FolderView::Dirty,
+            },
+            Entry::Vacant(slot) => {
+                slot.insert(FolderView::Dirty);
+            }
         }
     }
 
@@ -168,43 +215,44 @@ impl SftpEndpoint {
         let Some(parent) = parent_key(gone) else {
             return;
         };
-        let mut listings = self
+        let (_, name) = split(gone);
+        match self
             .listings
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let Some(names) = listings.get_mut(&parent) else {
-            return;
-        };
-        let (_, name) = split(gone);
-        names.retain(|listed| listed != name);
+            .unwrap_or_else(|error| error.into_inner())
+            .entry(parent)
+        {
+            Entry::Occupied(mut slot) => match slot.get_mut() {
+                FolderView::Cached(names) => Arc::make_mut(names).retain(|listed| listed != name),
+                view => *view = FolderView::Dirty,
+            },
+            Entry::Vacant(slot) => {
+                slot.insert(FolderView::Dirty);
+            }
+        }
     }
 
     /// `from` moved to `to`: the name left one listing and joined the
-    /// other's.
+    /// other's, and a moved folder keeps its children, so listings
+    /// keyed at or below the old path no longer describe it.
     pub(super) fn note_moved(&self, from: &[u8], to: &[u8]) {
         self.note_removed(from);
         self.note_added(to);
+        self.mark_under(from);
     }
 
     /// `remote` itself is gone: its name leaves the parent and its own
     /// cached listing dies with it. For a completed removal.
     pub(super) fn note_gone(&self, remote: &[u8]) {
         self.note_removed(remote);
-        self.listings
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(remote);
+        self.mark(remote);
     }
 
     /// `remote` and everything under it is gone. For a completed
     /// subtree removal.
     pub(super) fn note_gone_tree(&self, remote: &[u8]) {
         self.note_removed(remote);
-        let below = [remote, b"/"].concat();
-        self.listings
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .retain(|folder, _| folder.as_slice() != remote && !folder.starts_with(&below));
+        self.mark_under(remote);
     }
 
     /// `remote`'s parent may not hold what the cache claims — the
@@ -212,32 +260,51 @@ impl SftpEndpoint {
     /// where a surgical name edit could lie about an entry still
     /// present.
     pub(super) fn forget_parent(&self, remote: &[u8]) {
-        let Some(parent) = parent_key(remote) else {
-            return;
-        };
-        self.listings
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(&parent);
+        if let Some(parent) = parent_key(remote) {
+            self.mark(&parent);
+        }
     }
 
     /// Every view `remote`'s removal could have touched: its parent's,
     /// its own and every folder's below it. For a removal that may have
     /// stopped partway.
     pub(super) fn forget_tree(&self, remote: &[u8]) {
+        self.forget_parent(remote);
+        self.mark_under(remote);
+    }
+
+    /// `remote`'s own listing view may not match the server.
+    fn mark(&self, remote: &[u8]) {
+        self.listings
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(remote.to_vec(), FolderView::Dirty);
+    }
+
+    /// Every listing view keyed below `remote` may not match.
+    fn mark_under(&self, remote: &[u8]) {
         let below = [remote, b"/"].concat();
-        let mut listings = self
+        for (folder, view) in self
             .listings
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if let Some(parent) = parent_key(remote) {
-            listings.remove(&parent);
+            .unwrap_or_else(|error| error.into_inner())
+            .iter_mut()
+        {
+            if folder.as_slice() == remote || folder.starts_with(&below) {
+                *view = FolderView::Dirty;
+            }
         }
-        listings.retain(|folder, _| folder.as_slice() != remote && !folder.starts_with(&below));
+    }
+
+    /// Whether `error` is the server's own answer — authoritative —
+    /// rather than a lost response whose request may have applied.
+    pub(super) fn answered(error: &io::Error) -> bool {
+        error.get_ref().is_some_and(|inner| inner.is::<Refused>())
     }
 
     /// Rename `from` to `to` over `session`, keeping the run's folder
-    /// views exact. A failed rename changed nothing, so views stay.
+    /// views exact. A refused rename changed nothing; a lost answer
+    /// may have applied, so both parents' views go.
     pub(super) fn renamed_on(
         &self,
         session: &mut Session,
@@ -245,8 +312,13 @@ impl SftpEndpoint {
         to: &[u8],
     ) -> io::Result<()> {
         let moved = session.rename(from, to);
-        if moved.is_ok() {
-            self.note_moved(from, to);
+        match &moved {
+            Ok(()) => self.note_moved(from, to),
+            Err(error) if Self::answered(error) => {}
+            Err(_) => {
+                self.forget_parent(from);
+                self.forget_parent(to);
+            }
         }
         moved
     }
@@ -264,19 +336,31 @@ impl SftpEndpoint {
         to: &[u8],
     ) -> io::Result<()> {
         let moved = session.rename_replacing(from, to);
-        if moved.is_ok() {
-            self.note_moved(from, to);
+        match &moved {
+            Ok(()) => self.note_moved(from, to),
+            Err(error) if Self::answered(error) => {}
+            Err(_) => {
+                self.forget_parent(from);
+                self.forget_parent(to);
+            }
         }
         moved
     }
 
     /// Remove the file `remote` over `session`: its name leaves the
-    /// parent's listing, and a failure drops the parent's view since
-    /// the entry may remain.
+    /// parent's listing, a confirmed refusal leaves views exact, and
+    /// a lost answer drops the parent's view since the entry may be
+    /// gone after all.
     pub(super) fn removed_file_on(&self, session: &mut Session, remote: &[u8]) -> io::Result<()> {
         let removed = session.remove_file(remote);
         match &removed {
             Ok(()) => self.note_removed(remote),
+            // The server confirmed the entry absent.
+            Err(error) if error.kind() == io::ErrorKind::NotFound && Self::answered(error) => {
+                self.note_removed(remote)
+            }
+            // The server refused: the entry stays, views stay exact.
+            Err(error) if Self::answered(error) => {}
             Err(_) => self.forget_parent(remote),
         }
         removed

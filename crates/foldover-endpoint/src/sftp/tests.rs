@@ -957,6 +957,35 @@ fn a_replaced_entry_keeps_the_spelling_its_folder_lists() {
     assert_eq!(sftp.listed(&stored), stored);
 }
 
+/// A renamed folder keeps its children on the server, so listings the
+/// run cached under its old path must not answer for names that moved
+/// with it.
+#[test]
+fn a_renamed_folder_drops_its_cached_listing() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(sftp) = sftp(directory.path()) else {
+        return;
+    };
+    let (decomposed, composed) = ("cafe\u{301}.txt", "caf\u{e9}.txt");
+    fs::create_dir(directory.path().join("old")).unwrap();
+    fs::write(directory.path().join("old").join(composed), b"x").unwrap();
+
+    // Fill the cache: the decomposed ask resolves through old/'s listing.
+    let asked_old = sftp.remote(format!("old/{decomposed}").as_bytes());
+    let stored_old = sftp.remote(format!("old/{composed}").as_bytes());
+    assert_eq!(sftp.listed(&asked_old), stored_old);
+
+    sftp.renamed(&sftp.remote(b"old"), &sftp.remote(b"new"))
+        .unwrap();
+
+    // The old path is gone: its cached names must not answer for it.
+    assert_eq!(sftp.listed(&asked_old), asked_old);
+    // The new path resolves freshly.
+    let asked_new = sftp.remote(format!("new/{decomposed}").as_bytes());
+    let stored_new = sftp.remote(format!("new/{composed}").as_bytes());
+    assert_eq!(sftp.listed(&asked_new), stored_new);
+}
+
 /// `Durability::Full` cannot be promised over SFTP at all: namespace
 /// changes have no protocol flush. Every mutating entry point must
 /// reject it before touching the server, whatever the server offers.

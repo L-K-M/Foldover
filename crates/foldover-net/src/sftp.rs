@@ -916,7 +916,26 @@ fn is_eof(body: &[u8]) -> bool {
         && matches!(reader.u32(), Ok(wire::STATUS_EOF))
 }
 
-/// A status answer as a result.
+/// A failure status the server answered with. The answer is
+/// authoritative: the request did not apply. Transport failures may
+/// have applied unseen, so callers that track remote state treat the
+/// two differently (`error.get_ref()` downcasts to this).
+#[derive(Debug)]
+pub struct Refused {
+    /// The server's SSH_FXP status code.
+    pub code: u32,
+    /// The server's explanation.
+    pub message: String,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(out, "SFTP: {}", self.message)
+    }
+}
+
+impl std::error::Error for Refused {}
+
 fn status(body: &[u8]) -> io::Result<()> {
     let mut reader = Reader::new(body);
     if reader.u8()? != wire::STATUS {
@@ -936,7 +955,7 @@ fn status(body: &[u8]) -> io::Result<()> {
         wire::STATUS_EOF => io::ErrorKind::UnexpectedEof,
         _ => io::ErrorKind::Other,
     };
-    Err(io::Error::new(kind, format!("SFTP: {message}")))
+    Err(io::Error::new(kind, Refused { code, message }))
 }
 
 fn unsupported(extension: &str) -> io::Error {
