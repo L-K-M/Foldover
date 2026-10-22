@@ -454,6 +454,41 @@ fn changed_sources_are_not_staged() {
     ));
 }
 
+#[test]
+fn a_symlink_swapped_for_the_observed_entry_reads_as_changed() {
+    let roots = roots();
+    let source = roots._source_directory.path();
+    let target = roots.target_directory.path();
+    fs::write(source.join("file"), b"data").unwrap();
+    fs::write(target.join("file"), b"data").unwrap();
+    let file = path(b"file");
+    let source_observed = roots.source.metadata(&file).unwrap();
+    let observed = roots.target.metadata(&file).unwrap();
+    fs::remove_file(target.join("file")).unwrap();
+    symlink("file", target.join("file")).unwrap();
+    assert!(matches!(
+        roots
+            .target
+            .update_metadata(&file, &observed, &roots.source, &source_observed, &ALL),
+        Err(WriteError::Changed)
+    ));
+
+    // An observed folder swapped for a file fails its open the same way.
+    fs::create_dir(source.join("folder")).unwrap();
+    fs::create_dir(target.join("folder")).unwrap();
+    let folder = path(b"folder");
+    let source_observed = roots.source.metadata(&folder).unwrap();
+    let observed = roots.target.metadata(&folder).unwrap();
+    fs::remove_dir(target.join("folder")).unwrap();
+    fs::write(target.join("folder"), b"data").unwrap();
+    assert!(matches!(
+        roots
+            .target
+            .update_metadata(&folder, &observed, &roots.source, &source_observed, &ALL),
+        Err(WriteError::Changed)
+    ));
+}
+
 fn mode_of(path: &Path) -> u32 {
     fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
 }

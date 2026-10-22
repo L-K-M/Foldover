@@ -100,7 +100,9 @@ fn take_version(bytes: &mut &[u8]) -> Option<EntryVersion> {
     let metadata = Digest::from_bytes(take(bytes, Digest::BYTE_LEN)?.try_into().ok()?);
     let content = match kind {
         FILE => EntryContent::File(content),
-        DIRECTORY => EntryContent::Directory,
+        DIRECTORY if content == Digest::from_bytes([0; Digest::BYTE_LEN]) => {
+            EntryContent::Directory
+        }
         SYMLINK => EntryContent::Symlink(content),
         _ => return None,
     };

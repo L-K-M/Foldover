@@ -516,7 +516,9 @@ impl Root {
         let file =
             match rustix::fs::openat(&parent, &name, open_flags(expected.kind()), Mode::empty()) {
                 Ok(file) => file,
-                Err(Errno::NOENT) => return Err(WriteError::Changed),
+                Err(Errno::NOENT) | Err(Errno::NOTDIR) | Err(Errno::LOOP) => {
+                    return Err(WriteError::Changed);
+                }
                 Err(error) => return Err(error.into()),
             };
         if EntryMetadata::from_file(&file)? != *expected {
@@ -869,7 +871,7 @@ fn observed(parent: &Dir, name: &Path) -> Result<EntryMetadata, WriteError> {
             if matches!(
                 source.kind(),
                 io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-            ) =>
+            ) || source.raw_os_error() == Some(Errno::LOOP.raw_os_error()) =>
         {
             Err(WriteError::Changed)
         }
