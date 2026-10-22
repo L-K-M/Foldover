@@ -1,7 +1,7 @@
 // Shared steps for the UI tour: launch the Debug app on its canned
-// agent answers and keep a screenshot of each stop. Screenshots go to
-// the folder in FOLDOVER_TOUR_DIR (xcodebuild passes it on from
-// TEST_RUNNER_FOLDOVER_TOUR_DIR) and into the result bundle.
+// agent answers and keep a screenshot of each stop as a result-bundle
+// attachment named "<appearance>-<stop>" (the ui-tour workflow
+// exports them as PNGs under those names).
 
 import XCTest
 
@@ -44,9 +44,6 @@ struct Tour {
         attachment.name = fileName
         attachment.lifetime = .keepAlways
         test.add(attachment)
-        guard let folder = ProcessInfo.processInfo.environment["FOLDOVER_TOUR_DIR"] else { return }
-        let url = URL(fileURLWithPath: folder).appendingPathComponent("\(fileName).png")
-        try? shot.pngRepresentation.write(to: url)
     }
 
     /// Click `element` when it appears; a missing one fails the step but
