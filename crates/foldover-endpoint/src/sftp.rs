@@ -1380,7 +1380,14 @@ impl SftpEndpoint {
                     Ok(existing) if existing.kind() == FileKind::Directory => {
                         self.note_added(&remote)
                     }
-                    _ => return Err(error),
+                    // A lost answer may mean the folder exists after
+                    // all; a definitive refusal changed nothing.
+                    _ => {
+                        if !Self::answered(&error) {
+                            self.forget_parent(&remote);
+                        }
+                        return Err(error);
+                    }
                 }
             } else {
                 self.note_added(&remote);
