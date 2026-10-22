@@ -393,8 +393,9 @@ struct PairSyncViewModel {
     }
 
     /// The listed changes a search can narrow: the previewed plan's
-    /// rows, or a finished or undone run's failures.
-    private var listedRows: [ChangeRow] {
+    /// rows, or a finished or undone run's failures. The main window
+    /// keeps a row selected while a search hides it.
+    var listedRows: [ChangeRow] {
         if let preview = reviewable {
             let review = ReviewContext(token: preview.reviewToken,
                                        pairRevision: preview.pairRevision)

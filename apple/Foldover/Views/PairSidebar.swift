@@ -143,11 +143,11 @@ private struct SidebarAgentBar: View {
                     .frame(width: 8, height: 8)
                     .padding(.top, 3)
                     .accessibilityHidden(true)
-                Text(viewModel.agentStatusText)
+                Text(viewModel.agentSummary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(4)
-                    .help(viewModel.agentStatusText)
+                    .help(viewModel.agentSummary)
                     .accessibilityAddTraits(.updatesFrequently)
             }
             if let action = viewModel.agentAction {

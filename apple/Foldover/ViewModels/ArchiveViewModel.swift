@@ -29,7 +29,8 @@ struct ArchiveViewModel {
     var side: FolderSide { store.side }
     var selectedRun: String? { store.run }
     var isLoading: Bool { store.isLoading }
-    var canPutBack: Bool { agentConnected && !store.isLoading }
+    /// One put-back batch at a time; the next waits until it ends.
+    var canPutBack: Bool { agentConnected && !store.isLoading && !store.isPuttingBack }
     var canLoadMore: Bool { store.hasMoreItems && !store.isLoading }
     var error: String? { store.error }
 
@@ -87,25 +88,25 @@ struct ArchiveViewModel {
         return String(localized: "Put back as \(PairSyncViewModel.pathText(placed)). The next sync copies it to the other folder.")
     }
 
-    /// What the last put-back did, for the window's status line.
-    var statusText: String? { restoreText ?? placedText }
+    /// What the last put-back did, for the window's status line: a
+    /// whole run, several items, or where one item went.
+    var statusText: String? {
+        if let restoreText { return restoreText }
+        guard store.placedCount > 1 else { return placedText }
+        return String(localized: "Put back \(store.placedCount) items. The next sync copies them to the other folder.")
+    }
 
     func load() async { await store.open(pair.id, side: store.side) }
     func show(_ side: FolderSide) async { await store.open(pair.id, side: side) }
     func select(_ run: String) async { await store.select(run) }
     func loadMore() async { await store.loadMore() }
 
-    func putBack(_ row: ArchiveItemRow) async {
-        guard let item = store.items.first(where: { $0.path == row.id }) else { return }
-        await store.putBack(item)
-    }
+    func putBack(_ row: ArchiveItemRow) async { await putBack([row]) }
 
-    /// Put back each row in turn, stopping at the first failure so its
-    /// error stays shown.
+    /// Put back the rows' items as one batch in the shown run; see
+    /// `ArchiveStore.putBack(_:)` for where it stops.
     func putBack(_ rows: [ArchiveItemRow]) async {
-        for row in rows {
-            await putBack(row)
-            if store.error != nil { return }
-        }
+        let items = rows.compactMap { row in store.items.first { $0.path == row.id } }
+        await store.putBack(items)
     }
 }

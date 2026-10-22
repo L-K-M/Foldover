@@ -82,12 +82,20 @@ private actor WindowSyncClient: SyncClient {
     private var states: [String: PairSyncState] = [:]
     private var runs = 0
     private var runReply = RunReply.finish
+    /// Status requests fail, as while the agent does not answer.
+    private var statusFails = false
+    private var undoFails = false
 
     func set(_ state: PairSyncState, for id: String) { states[id] = state }
     func setRunReply(_ reply: RunReply) { runReply = reply }
+    func setStatusFails(_ fails: Bool) { statusFails = fails }
+    func setUndoFails(_ fails: Bool) { undoFails = fails }
 
     func preview(_ id: String) async throws -> PairSyncState { states[id] ?? .idle }
-    func status(_ id: String) async throws -> PairSyncState { states[id] ?? .idle }
+    func status(_ id: String) async throws -> PairSyncState {
+        if statusFails { throw WindowFixtureError.unexpected }
+        return states[id] ?? .idle
+    }
     func run(_ id: String, approvedA: UInt64, approvedB: UInt64,
              reviewToken: String?) async throws -> PairSyncState {
         runs += 1
@@ -103,6 +111,7 @@ private actor WindowSyncClient: SyncClient {
         return state
     }
     func undo(_ id: String) async throws -> PairSyncState {
+        if undoFails { throw WindowFixtureError.unexpected }
         let state = PairSyncState.undone(undoSummary())
         states[id] = state
         return state
@@ -131,13 +140,61 @@ private final class RevealRecorder {
     func record(_ urls: [URL]) { paths.append(urls.map(\.path)) }
 }
 
+/// Set when a task the test started has returned.
+@MainActor
+private final class Completion {
+    var done = false
+}
+
+/// An agent the test can stop and start again.
+private actor SwitchableAgent {
+    private var running = true
+
+    func set(running: Bool) { self.running = running }
+
+    func report() throws -> AgentReport {
+        guard running else { throw WindowFixtureError.unexpected }
+        return AgentReport(version: "1.0")
+    }
+}
+
+/// A health check that answers at once, or holds its next answer until
+/// the test releases it.
+private actor HeldHealthCheck {
+    private let stops: UInt32?
+    private var holdsNext = false
+    private var held: CheckedContinuation<Void, Never>?
+
+    init(safeModeStops stops: UInt32? = nil) { self.stops = stops }
+
+    func holdNext() { holdsNext = true }
+
+    func waitUntilHeld() async {
+        while held == nil { await Task.yield() }
+    }
+
+    func release() {
+        held?.resume()
+        held = nil
+    }
+
+    func report() async -> AgentReport {
+        if holdsNext {
+            holdsNext = false
+            await withCheckedContinuation { held = $0 }
+        }
+        return AgentReport(version: "1.0", safeModeStops: stops)
+    }
+}
+
 /// A main window view model connected to an agent serving `pairs`.
 @MainActor
 private func windowModel(_ pairs: [SyncPair], sync: WindowSyncClient = WindowSyncClient(),
                          pollInterval: Duration = .milliseconds(1),
+                         agent: AgentStore = AgentStore(statusRequest: { AgentReport(version: "1.0") }),
                          reveal: @escaping @MainActor ([URL]) -> Void = { _ in }) async -> MainViewModel {
     let viewModel = MainViewModel(
-        appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { AgentReport(version: "1.0") }),
+        appInfo: AppInfoStore(), agent: agent,
         pairs: PairStore(client: WindowCatalog(pairs), reveal: reveal),
         sync: SyncStore(client: sync, pollInterval: pollInterval, alert: { _ in })
     )
@@ -567,3 +624,231 @@ func archiveWindowsGetTheirOwnStoreAndFindAsksForFocus() async {
     viewModel.requestFind()
     #expect(viewModel.findRequests == before + 1)
 }
+
+// Edit > Undo has spent its action by the time the undo runs. One the
+// agent cannot take now must say why and be offered again: the record
+// would otherwise keep its value, so the window would never register
+// Undo again, even once the agent is back.
+@MainActor
+@Test
+func anUndoThatCannotRunSaysWhyAndIsOfferedAgain() async throws {
+    let photos = windowPair(photosWindowID, "Photos")
+    let agent = SwitchableAgent()
+    let client = WindowSyncClient()
+    let viewModel = await windowModel([photos], sync: client,
+                                      agent: AgentStore(statusRequest: { try await agent.report() }))
+    await viewModel.syncInWindow(photos.id)
+    let offered = try #require(viewModel.undoableSync)
+
+    await agent.set(running: false)
+    await viewModel.refreshAgent()
+    #expect(viewModel.undoableSync == offered)
+    await viewModel.undoSync(pairID: photos.id)
+    #expect(viewModel.operationError == "The sync of “Photos” can’t be undone right now. Try again when the background agent is connected and the pair is idle.")
+    let again = try #require(viewModel.undoableSync)
+    #expect(again.pairID == photos.id)
+    #expect(again.serial != offered.serial)
+
+    await agent.set(running: true)
+    await viewModel.refreshAgent()
+    await viewModel.undoSync(pairID: photos.id)
+    #expect(viewModel.undoableSync == nil)
+    #expect(viewModel.operationError == nil)
+}
+
+// An undo request that fails leaves the run on screen; Edit > Undo
+// offers it again, and the pair's status shows what went wrong.
+@MainActor
+@Test
+func aFailedUndoIsOfferedAgain() async throws {
+    let photos = windowPair(photosWindowID, "Photos")
+    let client = WindowSyncClient()
+    let viewModel = await windowModel([photos], sync: client)
+    await viewModel.syncInWindow(photos.id)
+    let offered = try #require(viewModel.undoableSync)
+
+    await client.setUndoFails(true)
+    await viewModel.undoSync(pairID: photos.id)
+    #expect(viewModel.sync(for: photos).requestError != nil)
+    let again = try #require(viewModel.undoableSync)
+    #expect(again.serial != offered.serial)
+    #expect(viewModel.operationError == nil)
+}
+
+// When the run's poll fails, nothing follows the job any more. The
+// window's sync used to sleep in a loop until the job's state changed,
+// which nothing does while the agent is away; it now asks once and stops.
+@MainActor
+@Test
+func aWindowSyncStopsWaitingWhenTheAgentStopsAnswering() async {
+    let photos = windowPair(photosWindowID, "Photos")
+    let client = WindowSyncClient()
+    let viewModel = await windowModel([photos], sync: client)
+    await client.setRunReply(.work)
+    await client.setStatusFails(true)
+
+    let completion = Completion()
+    let syncing = Task {
+        await viewModel.syncInWindow(photos.id)
+        completion.done = true
+    }
+    #expect(await eventuallyInWindow { completion.done })
+    syncing.cancel()
+    await syncing.value
+    #expect(viewModel.sync(for: photos).requestError != nil)
+    #expect(viewModel.undoableSync == nil)
+}
+
+// The detail's refresh can take a run's poller over and then go away
+// when another pair is selected. The window's sync follows the job
+// itself instead of waiting for the next health check.
+@MainActor
+@Test
+func aWindowSyncFollowsItsJobWhenTheRefreshThatTookItOverGoesAway() async throws {
+    let photos = windowPair(photosWindowID, "Photos")
+    let client = WindowSyncClient()
+    await client.setRunReply(.work)
+    let viewModel = await windowModel([photos], sync: client, pollInterval: .milliseconds(100))
+
+    let completion = Completion()
+    let syncing = Task {
+        await viewModel.syncInWindow(photos.id)
+        completion.done = true
+    }
+    #expect(await eventuallyInWindow { viewModel.sync(for: photos).isWorking })
+    let refreshing = Task { await viewModel.sync(for: photos).refresh() }
+    // Let the refresh take over and the run's poller notice and end.
+    try await Task.sleep(for: .milliseconds(250))
+    refreshing.cancel()
+    await refreshing.value
+
+    await client.set(.finished(runSummary(archive: "followed")), for: photos.id)
+    #expect(await eventuallyInWindow { completion.done })
+    syncing.cancel()
+    await syncing.value
+    #expect(viewModel.undoableSync?.pairID == photos.id)
+}
+
+// A selection is remembered by file: a new listing reuses row numbers
+// for other files, and the Pair menu must not act on whatever moved into
+// the selected row.
+@MainActor
+@Test
+func theSelectedChangeFollowsItsFileWhenTheListingChanges() async {
+    let photos = windowPair(photosWindowID, "Photos")
+    let client = WindowSyncClient()
+    let first = PlannedChange(path: Data("a.txt".utf8), action: .conflict(.bothChanged))
+    let second = PlannedChange(path: Data("b.txt".utf8), action: .conflict(.bothChanged))
+    let copy = PlannedChange(path: Data("c.txt".utf8), action: .copy(to: .b))
+    await client.set(.previewed(plan([first, second, copy], conflicts: 2)), for: photos.id)
+    let viewModel = await windowModel([photos], sync: client)
+    let sync = viewModel.sync(for: photos)
+    await sync.preview()
+    viewModel.selectedPairID = photos.id
+    viewModel.selectedChangeID = 0
+    #expect(viewModel.selectedChange?.path == "a.txt")
+
+    // A new change lists first: the file moves down a row, and so does
+    // the selection.
+    let added = PlannedChange(path: Data("new.txt".utf8), action: .copy(to: .b))
+    await show(.previewed(plan([added, first, second, copy], conflicts: 2)), on: sync, via: client)
+    #expect(viewModel.selectedChangeID == 1)
+    #expect(viewModel.selectedChange?.path == "a.txt")
+
+    // A search that hides the row leaves the selection alone, so typing
+    // never changes it; nothing hidden is acted on meanwhile.
+    sync.searchText = "new"
+    #expect(viewModel.selectedChangeID == 1)
+    #expect(viewModel.selectedChange == nil)
+    sync.searchText = ""
+    #expect(viewModel.selectedChange?.path == "a.txt")
+
+    // Resolved, the conflict leaves the list; b.txt, now in its old row,
+    // is not selected in its place.
+    await show(.previewed(plan([second, copy], conflicts: 1)), on: sync, via: client)
+    #expect(viewModel.selectedChangeID == nil)
+    #expect(viewModel.selectedChange == nil)
+}
+
+// A health check that fails reads as off and offers Turn On. Approval in
+// Login Items is not covered: it needs a real SMAppService registration.
+@MainActor
+@Test
+func aFailedHealthCheckReadsAsOffAndOffersTurnOn() async {
+    let failing = MainViewModel(appInfo: AppInfoStore(),
+                                agent: AgentStore(statusRequest: { throw WindowFixtureError.unexpected }))
+    await failing.refreshAgent()
+    #expect(failing.agentState == .off)
+    #expect(failing.agentAction == .turnOn)
+    #expect(failing.agentStatusText.hasPrefix("Background agent unavailable"))
+    #expect(failing.agentSummary == failing.agentStatusText)
+    #expect(failing.menuBarSymbol == "exclamationmark.arrow.triangle.2.circlepath")
+}
+
+// The monitor checks the agent every few seconds, and the agent reads as
+// connecting until each check answers. The status surfaces keep the last
+// answer meanwhile, safe mode's way out included, instead of flickering.
+@MainActor
+@Test
+func aHealthCheckInFlightKeepsShowingTheLastAnswer() async {
+    let health = HeldHealthCheck(safeModeStops: 3)
+    let viewModel = MainViewModel(
+        appInfo: AppInfoStore(),
+        agent: AgentStore(statusRequest: { await health.report() }, alert: { _, _ in }),
+        pairs: PairStore(client: WindowCatalog([]))
+    )
+
+    // With no answer yet, connecting reads as connecting.
+    await health.holdNext()
+    let first = Task { await viewModel.refreshAgent() }
+    await health.waitUntilHeld()
+    #expect(viewModel.agentState == .connecting)
+    #expect(viewModel.agentAction == nil)
+    #expect(viewModel.agentStatusText == "Connecting to the background agent…")
+    await health.release()
+    await first.value
+    #expect(viewModel.agentState == .attention)
+    #expect(viewModel.agentAction == .resumeSyncing)
+    let safeMode = viewModel.safeModeText
+    #expect(safeMode != nil)
+    #expect(viewModel.agentSummary == safeMode)
+
+    await health.holdNext()
+    let check = Task { await viewModel.refreshAgent() }
+    await health.waitUntilHeld()
+    #expect(viewModel.agentState == .attention)
+    #expect(viewModel.agentAction == .resumeSyncing)
+    #expect(viewModel.agentStatusText == "Agent 1.0 connected")
+    #expect(viewModel.agentSummary == safeMode)
+    #expect(viewModel.menuBarSymbol == "exclamationmark.arrow.triangle.2.circlepath")
+    await health.release()
+    await check.value
+}
+
+#if DEBUG
+// The tour's runs need names of their own, like the engine's. With one
+// name for every run, a window sync after a menu-bar sync finished with
+// an identical result, so Edit > Undo never offered it.
+@MainActor
+@Test
+func tourRunsAreToldApartSoWindowSyncsStayUndoable() async throws {
+    let pairs = FixturePairClient()
+    let viewModel = MainViewModel(
+        appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { AgentReport(version: "0.1.0") }),
+        pairs: PairStore(client: pairs, reveal: { _ in }),
+        sync: SyncStore(client: FixtureSyncClient(pairs: pairs), pollInterval: .milliseconds(1), alert: { _ in })
+    )
+    await viewModel.refreshAgent()
+    await viewModel.syncPair(id: Fixtures.documentsID)
+    await viewModel.syncInWindow(Fixtures.documentsID)
+    #expect(viewModel.undoableSync?.pairID == Fixtures.documentsID)
+
+    // Projects' Folder B is on this Mac, so Show in Finder has a folder to show.
+    Fixtures.prepareFolders()
+    let projects = try #require(Fixtures.pairs().first { $0.id == Fixtures.projectsID })
+    let backup = try #require(PairStore.localURL(projects.settings.right))
+    var isDirectory: ObjCBool = false
+    #expect(FileManager.default.fileExists(atPath: backup.path, isDirectory: &isDirectory))
+    #expect(isDirectory.boolValue)
+}
+#endif

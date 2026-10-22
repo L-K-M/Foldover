@@ -268,7 +268,7 @@ struct PairDetailView: View {
     }
 
     private func changeTable(_ sync: PairSyncViewModel, rows: [ChangeRow]) -> some View {
-        Table(rows, selection: $viewModel.selectedChangeID) {
+        Table(rows, selection: changeSelection) {
             TableColumn("") { row in
                 Image(systemName: row.symbol)
                     .foregroundStyle(Self.color(row.tone))
@@ -297,11 +297,7 @@ struct PairDetailView: View {
             .width(min: 70, ideal: 80, max: 90)
         }
         .alternatingRowBackgrounds()
-        // Choosing a change puts the keys here: Space, ⌘C and the arrows.
         .focused(focus, equals: .changes)
-        .onChange(of: viewModel.selectedChangeID) { _, change in
-            if change != nil { focus.wrappedValue = .changes }
-        }
         .contextMenu(forSelectionType: ChangeRow.ID.self) { ids in
             if let row = rows.first(where: { ids.contains($0.id) }) {
                 ChangeRowActions(viewModel: viewModel, sync: sync, row: row)
@@ -322,6 +318,19 @@ struct PairDetailView: View {
             guard let path = viewModel.selectedChange?.path else { return [] }
             return [NSItemProvider(object: path as NSString)]
         }
+    }
+
+    /// Choosing a change puts the keys in the table: Space, ⌘C and the
+    /// arrows. Only a choice made here moves focus; a refreshed listing
+    /// that moves the selected file to another row leaves it alone.
+    private var changeSelection: Binding<ChangeRow.ID?> {
+        Binding(
+            get: { viewModel.selectedChangeID },
+            set: { change in
+                viewModel.selectedChangeID = change
+                if change != nil { focus.wrappedValue = .changes }
+            }
+        )
     }
 
     private static func color(_ tone: ChangeTone) -> Color {

@@ -48,25 +48,43 @@ struct MenuBarView: View {
         .frame(width: 300)
     }
 
-    /// The menu bar symbol, the catalog and the background agent.
+    /// The menu bar symbol, the catalog and the background agent, with
+    /// the way out of safe mode while syncing waits in it.
     private var header: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: viewModel.menuBarSymbol)
-                .font(.title2)
-                .foregroundStyle(.tint)
-                .frame(width: 24)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(viewModel.statusLine)
-                    .font(.headline)
-                Text(viewModel.agentStatusText)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: viewModel.menuBarSymbol)
+                    .font(.title2)
+                    .foregroundStyle(.tint)
+                    .frame(width: 24)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(viewModel.statusLine)
+                        .font(.headline)
+                    Text(viewModel.agentSummary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityAddTraits(.updatesFrequently)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            // Outside the combined element, so VoiceOver reaches it.
+            if viewModel.agentAction == .resumeSyncing {
+                Button("Resume Syncing") { Task { await viewModel.perform(.resumeSyncing) } }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .padding(.leading, 34)
+            }
+            // A failed resume stays beside the button that retries it.
+            if let error = viewModel.safeModeError {
+                Text(error)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityAddTraits(.updatesFrequently)
+                    .padding(.leading, 34)
             }
         }
-        .accessibilityElement(children: .combine)
     }
 
     /// The pair's name and status open it in the main window; the

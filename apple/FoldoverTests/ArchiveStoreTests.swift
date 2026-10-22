@@ -162,7 +162,8 @@ func puttingBackSeveralRowsGoesOneAtATime() async {
     #expect(await client.putBacks == [Data("a".utf8), Data("b".utf8)])
     #expect(viewModel.itemRows.isEmpty)
     #expect(viewModel.placedText?.hasPrefix("Put back as b (restored).") == true)
-    #expect(viewModel.statusText == viewModel.placedText)
+    // The status line counts the batch instead of naming its last item.
+    #expect(viewModel.statusText == "Put back 2 items. The next sync copies them to the other folder.")
     #expect(viewModel.pairName == "Docs")
     #expect(ArchiveViewModel.sideTitle(.a) == "Folder A")
     #expect(ArchiveViewModel.sideTitle(.b) == "Folder B")
@@ -197,4 +198,97 @@ func siblingStoresShareTheClientButNotTheState() async {
     #expect(sibling.runs.map(\.name) == ["new", "old"])
     #expect(store.run == "new")
     #expect(await client.sides == [.b, .b])
+}
+
+private enum TwoRunFixtureError: Error { case refused }
+
+/// Two runs of one side that both archived b.txt, as a file edited
+/// between syncs is; a put-back can be held, or refused by name.
+private actor TwoRunArchiveClient: ArchiveClient {
+    /// "run/name" per put-back, in request order.
+    private(set) var putBacks: [String] = []
+    private var refused: Set<String> = []
+    private var holdsNext = false
+    private var held: CheckedContinuation<Void, Never>?
+
+    func refusePutBack(of name: String) { refused.insert(name) }
+    func holdNextPutBack() { holdsNext = true }
+
+    func waitForHeldPutBack() async {
+        while held == nil { await Task.yield() }
+    }
+
+    func releasePutBack() {
+        held?.resume()
+        held = nil
+    }
+
+    func runs(_ id: String, side: FolderSide) async throws -> ArchiveRuns {
+        ArchiveRuns(runs: [ArchiveRun(name: "new", started: Date(timeIntervalSince1970: 2)),
+                           ArchiveRun(name: "old", started: Date(timeIntervalSince1970: 1))],
+                    more: false)
+    }
+
+    func items(_ id: String, side: FolderSide, run: String, after: Data?) async throws -> ArchivePage {
+        let names = run == "new" ? ["a.txt", "b.txt", "c.txt"] : ["b.txt", "c.txt"]
+        return ArchivePage(items: names.map { ArchiveItem(path: Data($0.utf8), size: 1) }, more: false)
+    }
+
+    func putBack(_ id: String, side: FolderSide, run: String, path: Data) async throws -> Data {
+        let name = String(decoding: path, as: UTF8.self)
+        putBacks.append("\(run)/\(name)")
+        if holdsNext {
+            holdsNext = false
+            await withCheckedContinuation { held = $0 }
+        }
+        if refused.contains(name) { throw TwoRunFixtureError.refused }
+        return path
+    }
+
+    func putBackAll(_ id: String, side: FolderSide, run: String) async throws -> RunRestore {
+        RunRestore(restored: 0, beside: 0, failures: 0)
+    }
+}
+
+// A batch belongs to the run it started in. Choosing another run while
+// it works used to continue there, putting back that run's b.txt, which
+// nobody selected; Put Back now also waits until the batch ends.
+@MainActor
+@Test
+func aPutBackBatchStaysInTheRunItStartedIn() async {
+    let client = TwoRunArchiveClient()
+    let viewModel = ArchiveViewModel(pair: docs(), store: ArchiveStore(client: client), agentConnected: true)
+    await viewModel.show(.b)
+    let rows = viewModel.itemRows
+
+    await client.holdNextPutBack()
+    let putting = Task { await viewModel.putBack(rows) }
+    await client.waitForHeldPutBack()
+    #expect(!viewModel.canPutBack)
+    #expect(!viewModel.canPutBackAll)
+
+    await viewModel.select("old")
+    await client.releasePutBack()
+    await putting.value
+    #expect(await client.putBacks == ["new/a.txt"])
+    #expect(viewModel.itemRows.map(\.path) == ["b.txt", "c.txt"])
+    #expect(viewModel.canPutBack)
+}
+
+// The first failure ends the batch, so its error stays shown.
+@MainActor
+@Test
+func aPutBackBatchStopsAtTheFirstFailure() async {
+    let client = TwoRunArchiveClient()
+    await client.refusePutBack(of: "b.txt")
+    let viewModel = ArchiveViewModel(pair: docs(), store: ArchiveStore(client: client), agentConnected: true)
+    await viewModel.show(.b)
+
+    await viewModel.putBack(viewModel.itemRows)
+    #expect(await client.putBacks == ["new/a.txt", "new/b.txt"])
+    #expect(viewModel.error != nil)
+    #expect(viewModel.itemRows.map(\.path) == ["b.txt", "c.txt"])
+    // One item went back before the failure.
+    #expect(viewModel.statusText == viewModel.placedText)
+    #expect(viewModel.canPutBack)
 }

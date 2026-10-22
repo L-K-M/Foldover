@@ -97,6 +97,11 @@ final class ArchiveStore {
     private(set) var error: String?
     /// Where the last put-back went.
     private(set) var placed: Data?
+    /// How many items the last put-back batch returned; `placed` is the
+    /// last one's new place.
+    private(set) var placedCount = 0
+    /// A put-back batch is under way; another waits until it ends.
+    private(set) var isPuttingBack = false
     /// What the last whole-run put-back did.
     private(set) var restore: RunRestore?
     /// Bumped whenever the item list starts over, so a page asked for
@@ -126,6 +131,7 @@ final class ArchiveStore {
         hasMoreItems = false
         error = nil
         placed = nil
+        placedCount = 0
         isLoading = true
         defer { isLoading = false }
         do {
@@ -146,6 +152,7 @@ final class ArchiveStore {
         items = []
         hasMoreItems = false
         placed = nil
+        placedCount = 0
         restore = nil
         await loadItems(after: nil)
     }
@@ -170,18 +177,32 @@ final class ArchiveStore {
         await loadItems(after: last.path)
     }
 
-    func putBack(_ item: ArchiveItem) async {
-        guard let pairID, let run else { return }
+    func putBack(_ item: ArchiveItem) async { await putBack([item]) }
+
+    /// Put back `items` from the selected run, one at a time. The batch
+    /// belongs to the pair, side and run it started in: it stops as soon
+    /// as another is chosen, since a later item's path may name another
+    /// run's copy, and at the first failure, so its error stays shown.
+    func putBack(_ items: [ArchiveItem]) async {
+        guard !isPuttingBack, !items.isEmpty, let pairID, let run else { return }
         let side = side
+        isPuttingBack = true
+        defer { isPuttingBack = false }
         error = nil
         placed = nil
-        do {
-            let path = try await client.putBack(pairID, side: side, run: run, path: item.path)
+        placedCount = 0
+        for item in items {
             guard self.pairID == pairID, self.side == side, self.run == run else { return }
-            items.removeAll { $0 == item }
-            placed = path
-        } catch {
-            self.error = PairStore.message(for: error)
+            do {
+                let path = try await client.putBack(pairID, side: side, run: run, path: item.path)
+                guard self.pairID == pairID, self.side == side, self.run == run else { return }
+                self.items.removeAll { $0 == item }
+                placed = path
+                placedCount += 1
+            } catch {
+                self.error = PairStore.message(for: error)
+                return
+            }
         }
     }
 

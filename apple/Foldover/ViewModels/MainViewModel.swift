@@ -124,8 +124,10 @@ final class MainViewModel {
     var quickLookURL: URL?
     /// Bumped by Find (⌘F); the window focuses its search field on change.
     private(set) var findRequests = 0
-    /// The change row selected in each pair's table, by pair ID.
-    private var changeSelections: [String: ChangeRow.ID] = [:]
+    /// The path of the change selected in each pair's table, by pair ID.
+    /// A path, not a row index: a new listing reuses indexes for other
+    /// files.
+    private var changeSelections: [String: String] = [:]
     /// A sync the main window started, with the result it finished with.
     private struct WindowSync {
         let pairID: String
@@ -247,8 +249,17 @@ final class MainViewModel {
 
     var coreVersionText: String { "Core \(appInfo.coreVersion)" }
 
+    /// The connection the status surfaces show. A health check in flight
+    /// keeps showing the last settled answer, so the status bar does not
+    /// flicker on every `monitor` tick; with no answer yet, connecting
+    /// shows as connecting.
+    private var shownConnection: AgentConnection {
+        if agent.connection == .connecting, let settled = agent.lastSettled { return settled }
+        return agent.connection
+    }
+
     var agentStatusText: String {
-        switch agent.connection {
+        switch shownConnection {
         case .disconnected: String(localized: "Background agent is off")
         case .connecting: String(localized: "Connecting to the background agent…")
         case .approvalRequired: String(localized: "Approve Foldover in Login Items")
@@ -264,6 +275,13 @@ final class MainViewModel {
     }
 
     var safeModeError: String? { agent.safeModeError }
+
+    /// The agent in a line for the sidebar and the menu bar: in safe
+    /// mode why nothing syncs, otherwise the connection.
+    var agentSummary: String {
+        guard agentAction == .resumeSyncing, let safeModeText else { return agentStatusText }
+        return safeModeText
+    }
 
     func leaveSafeMode() async {
         await agent.leaveSafeMode()
@@ -294,7 +312,7 @@ final class MainViewModel {
     }
 
     var agentState: AgentIndicator {
-        switch agent.connection {
+        switch shownConnection {
         case .connected: agent.safeModeStops == nil ? .connected : .attention
         case .connecting: .connecting
         case .approvalRequired: .attention
@@ -305,7 +323,7 @@ final class MainViewModel {
     /// The trailing action the status bar offers, if any; a healthy
     /// agent needs none.
     var agentAction: AgentAction? {
-        switch agent.connection {
+        switch shownConnection {
         case .disconnected, .failed: .turnOn
         case .approvalRequired: .openLoginItems
         case .connected: agent.safeModeStops == nil ? nil : .resumeSyncing
@@ -329,21 +347,31 @@ final class MainViewModel {
     var selectedSync: PairSyncViewModel? { selectedPair.map { sync(for: $0) } }
 
     /// The change row selected in the main window's table, remembered
-    /// per pair so switching pairs keeps each one's selection.
+    /// per pair so switching pairs keeps each one's selection. It follows
+    /// the file: when a new listing moves it to another row, that row is
+    /// selected, and when the file is no longer listed, none is. A search
+    /// that hides the row leaves the selection as it is, so typing in the
+    /// search field does not make it change.
     var selectedChangeID: ChangeRow.ID? {
-        get { selectedPairID.flatMap { changeSelections[$0] } }
+        get {
+            guard let path = selectedChangePath else { return nil }
+            return selectedSync?.listedRows.first { $0.path == path }?.id
+        }
         set {
             guard let selectedPairID else { return }
-            changeSelections[selectedPairID] = newValue
+            changeSelections[selectedPairID] = newValue.flatMap { id in
+                selectedSync?.listedRows.first { $0.id == id }?.path
+            }
         }
     }
 
-    /// The selected row, if the listed rows still reach it: a new listing
-    /// reuses indexes and may be shorter.
+    /// The selected row, while it is listed and no search hides it.
     var selectedChange: ChangeRow? {
-        guard let selectedChangeID else { return nil }
-        return selectedSync?.rows.first { $0.id == selectedChangeID }
+        guard let path = selectedChangePath else { return nil }
+        return selectedSync?.rows.first { $0.path == path }
     }
+
+    private var selectedChangePath: String? { selectedPairID.flatMap { changeSelections[$0] } }
 
     /// Find (⌘F) asks the window to focus its search field.
     func requestFind() { findRequests += 1 }
@@ -395,10 +423,32 @@ final class MainViewModel {
                             serial: windowSync.serial)
     }
 
-    /// Undo the named pair's last sync if it still can be.
+    /// Undo the named pair's last sync if it still can be. Edit > Undo
+    /// has spent its action by the time this runs, and stays offered
+    /// whatever the agent connection; an undo that cannot run says why,
+    /// and one that cannot run or fails is offered again rather than
+    /// vanishing from the menu.
     func undoSync(pairID: String) async {
         guard let pair = pairs.first(where: { $0.id == pairID }) else { return }
-        await sync(for: pair).undo()
+        let pairSync = sync(for: pair)
+        guard pairSync.canUndo else {
+            operationError = String(localized: "The sync of “\(pair.settings.name)” can’t be undone right now. Try again when the background agent is connected and the pair is idle.")
+            rearmWindowSync(pairID)
+            return
+        }
+        await pairSync.undo()
+        // A request that failed leaves the same result on screen.
+        rearmWindowSync(pairID)
+    }
+
+    /// Offer the window's sync again under a fresh serial while the pair
+    /// still shows its result, so the window registers Edit > Undo anew.
+    private func rearmWindowSync(_ pairID: String) {
+        guard let windowSync, windowSync.pairID == pairID,
+              let pair = pairs.first(where: { $0.id == pairID }),
+              sync(for: pair).undoableResult == windowSync.result else { return }
+        windowSyncSerial += 1
+        self.windowSync = WindowSync(pairID: pairID, result: windowSync.result, serial: windowSyncSerial)
     }
 
     func canUndoSync(pairID: String) -> Bool {

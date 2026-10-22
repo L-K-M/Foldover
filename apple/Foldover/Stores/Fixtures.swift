@@ -32,9 +32,15 @@ enum Fixtures {
         "Music": ["Playlists/Running.txt"],
     ]
 
+    /// Local folders a pair points at that start out empty.
+    private static let emptyFolders = ["Backup SSD/Projects"]
+
     /// Create the tour's folders; existing files are left alone.
     static func prepareFolders() {
         let manager = FileManager.default
+        for folder in emptyFolders {
+            try? manager.createDirectory(at: root.appending(path: folder), withIntermediateDirectories: true)
+        }
         for (folder, paths) in files {
             for path in paths {
                 let url = root.appending(path: folder).appending(path: path)
@@ -255,6 +261,9 @@ actor FixtureSyncClient: SyncClient {
     private var excluded: [String: Set<Data>] = [:]
     private var jobs: [String: (job: Job, polls: Int)] = [:]
     private var tokens = 0
+    /// Runs finished so far; each names its own archive folder, as the
+    /// engine's millisecond run names do.
+    private var runs = 0
     private static let polls = 6
 
     init(pairs: FixturePairClient) {
@@ -327,13 +336,16 @@ actor FixtureSyncClient: SyncClient {
         let archived = count { if case .archive = $0 { true } else { false } }
         let conflicts = count { if case .conflict = $0 { true } else { false } }
         let started = Date()
+        runs += 1
+        let millis = String(runs % 1_000)
+        let archive = "2026-10-22T10-15-00.\(String(repeating: "0", count: 3 - millis.count))\(millis)Z"
         histories[id, default: []].insert(RunRecord(
             started: started, finished: started, trigger: .manual, end: cancelled ? .cancelled : .completed,
             copied: copied, updated: updated, archived: archived, recovered: 0, conflicts: conflicts,
             failures: 0, message: nil), at: 0)
         return RunSummary(cancelled: cancelled, copied: copied, updated: updated, archived: archived,
                           recovered: 0, conflicts: conflicts, failures: [], failureCount: 0,
-                          archive: "2026-10-22T10-15-00Z")
+                          archive: archive)
     }
 
     func cancel(_ id: String) async throws -> PairSyncState {

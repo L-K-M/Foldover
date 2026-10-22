@@ -29,7 +29,15 @@ final class AgentStore {
     private let startupTimeout: Duration = .seconds(10)
     private let startupPoll: Duration = .milliseconds(250)
     private var generation = 0
-    private(set) var connection: AgentConnection = .disconnected
+    private(set) var connection: AgentConnection = .disconnected {
+        didSet {
+            if connection != .connecting { lastSettled = connection }
+        }
+    }
+    /// The newest answer that was not `.connecting`; nil until one
+    /// arrives. A health check in flight can show this instead of
+    /// flickering to "connecting" on every check.
+    private(set) var lastSettled: AgentConnection?
     /// The unclean stops behind crash-loop safe mode; nil while the agent
     /// syncs.
     private(set) var safeModeStops: UInt32?
@@ -113,6 +121,9 @@ final class AgentStore {
                 connection = .approvalRequired
                 return
             }
+            // Turning the agent on is not a background check: show that it
+            // is connecting rather than the answer it replaces.
+            lastSettled = nil
             connection = .connecting
             let deadline = ContinuousClock.now.advanced(by: startupTimeout)
             while ContinuousClock.now < deadline {
