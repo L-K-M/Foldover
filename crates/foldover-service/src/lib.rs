@@ -1439,7 +1439,7 @@ mod tests {
         let replayed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         service.scheduler.set_away({
             let replayed = std::sync::Arc::clone(&replayed);
-            move |pair, _| {
+            move |pair, _, _| {
                 assert_eq!(pair.id(), id);
                 replayed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 false

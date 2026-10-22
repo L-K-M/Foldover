@@ -221,6 +221,7 @@ impl LocalEndpoint {
         run: &RunScope,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<EntryVersion, ApplyError> {
+        self.guarded(path)?;
         self.root
             .create_foreign_directory(path, carried.metadata, carried.native, run.options())
             .map_err(|source| match source {
@@ -307,6 +308,7 @@ impl LocalEndpoint {
         placement: Placement,
         run: &RunScope,
     ) -> Result<(), ApplyError> {
+        self.guarded_subtree(path)?;
         let durability = run.options().durability();
         let displaced = self
             .root

@@ -238,6 +238,7 @@ impl LocalEndpoint {
         path: &SyncPath,
         durability: Durability,
     ) -> Result<SyncPath, ApplyError> {
+        self.guarded(path)?;
         if path.components().any(protected) {
             return Err(ApplyError::Unsupported(path.clone()));
         }

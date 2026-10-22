@@ -15,27 +15,36 @@ use foldover_watch::{Change, Watcher};
 
 use crate::local::is_internal_name;
 
+/// What a watched root reports, and the agent state directory it holds:
+/// its events are Foldover's own writes and never count as changes.
+struct Watched<K> {
+    keys: Vec<K>,
+    protected: Option<PathBuf>,
+}
+
 /// Watches roots and reports the keys of those that changed.
 pub struct RootWatcher<K> {
     watcher: Watcher,
-    roots: Arc<Mutex<BTreeMap<PathBuf, Vec<K>>>>,
+    roots: Arc<Mutex<BTreeMap<PathBuf, Watched<K>>>>,
 }
 
 impl<K: Clone + Eq + Send + 'static> RootWatcher<K> {
     /// `changed` runs on the notification thread, once per affected key.
     pub fn new(changed: impl Fn(K) + Send + 'static) -> io::Result<Self> {
-        let roots: Arc<Mutex<BTreeMap<PathBuf, Vec<K>>>> = Arc::default();
+        let roots: Arc<Mutex<BTreeMap<PathBuf, Watched<K>>>> = Arc::default();
         let watched = Arc::clone(&roots);
         let watcher = Watcher::new(move |change| {
             let roots = watched.lock().unwrap_or_else(PoisonError::into_inner);
             let mut affected: Vec<K> = Vec::new();
-            for (root, keys) in roots.iter() {
+            for (root, watched) in roots.iter() {
                 let hit = match &change {
                     Change::Unknown => true,
-                    Change::Paths(paths) => paths.iter().any(|path| relevant(root, path)),
+                    Change::Paths(paths) => paths
+                        .iter()
+                        .any(|path| relevant(root, path) && unprotected(watched, path)),
                 };
                 if hit {
-                    for key in keys {
+                    for key in &watched.keys {
                         if !affected.contains(key) {
                             affected.push(key.clone());
                         }
@@ -50,16 +59,32 @@ impl<K: Clone + Eq + Send + 'static> RootWatcher<K> {
         Ok(Self { watcher, roots })
     }
 
-    /// Watch exactly these roots. A root that cannot be watched, such as an
-    /// unmounted disk, is skipped and returned; schedules still cover it.
-    pub fn set_roots(&mut self, wanted: &[(LocalRoot, K)]) -> Vec<(LocalRoot, io::Error)> {
+    /// Watch exactly these roots, ignoring `state` — the agent's own state
+    /// directory — where a root holds it, so state writes never trigger a
+    /// run. A root that cannot be watched, such as an unmounted disk, is
+    /// skipped and returned; schedules still cover it.
+    pub fn set_roots(
+        &mut self,
+        wanted: &[(LocalRoot, K)],
+        state: Option<&Path>,
+    ) -> Vec<(LocalRoot, io::Error)> {
+        let state = state.and_then(|path| path.canonicalize().ok());
         let mut failures = Vec::new();
-        let mut next: BTreeMap<PathBuf, Vec<K>> = BTreeMap::new();
+        let mut next: BTreeMap<PathBuf, Watched<K>> = BTreeMap::new();
         for (root, key) in wanted {
             let path = Path::new(OsStr::from_bytes(root.as_bytes()));
             // Notifications report resolved paths, e.g. /private/var for /var.
             match path.canonicalize() {
-                Ok(path) => next.entry(path).or_default().push(key.clone()),
+                Ok(path) => {
+                    let watched = next.entry(path.clone()).or_insert_with(|| Watched {
+                        keys: Vec::new(),
+                        protected: state
+                            .as_ref()
+                            .filter(|state| state.starts_with(&path))
+                            .cloned(),
+                    });
+                    watched.keys.push(key.clone());
+                }
                 Err(error) => failures.push((root.clone(), error)),
             }
         }
@@ -80,10 +105,10 @@ impl<K: Clone + Eq + Send + 'static> RootWatcher<K> {
             }
         }
         let mut watched = BTreeMap::new();
-        for (path, keys) in next {
+        for (path, held) in next {
             if current.contains(&path) || self.watcher.watch(&path).is_ok() {
-                watched.insert(path, keys);
-            } else if let Some((root, _)) = wanted.iter().find(|(_, key)| keys.contains(key)) {
+                watched.insert(path, held);
+            } else if let Some((root, _)) = wanted.iter().find(|(_, key)| held.keys.contains(key)) {
                 failures.push((root.clone(), io::Error::other("Cannot watch this folder")));
             }
         }
@@ -105,12 +130,24 @@ pub fn event_history(root: &LocalRoot) -> io::Result<Option<String>> {
 }
 
 /// Whether anything but Foldover's own bookkeeping changed in `root`
-/// after event `since`, by its volume's history. Fails when the history
-/// cannot tell, as on systems without one.
-pub fn changed_since_event(root: &LocalRoot, since: u64, timeout: Duration) -> io::Result<bool> {
+/// after event `since`, by its volume's history; `state`, the agent's
+/// state directory, does not count where the root holds it. Fails when
+/// the history cannot tell, as on systems without one.
+pub fn changed_since_event(
+    root: &LocalRoot,
+    since: u64,
+    timeout: Duration,
+    state: Option<&Path>,
+) -> io::Result<bool> {
     // Events carry resolved paths, e.g. /private/var for /var.
     let path = Path::new(OsStr::from_bytes(root.as_bytes())).canonicalize()?;
-    foldover_watch::changed_since(&path, since, timeout, |changed| relevant(&path, changed))
+    let state = state.and_then(|state| state.canonicalize().ok());
+    foldover_watch::changed_since(&path, since, timeout, |changed| {
+        relevant(&path, changed)
+            && state
+                .as_deref()
+                .is_none_or(|state| !changed.starts_with(state))
+    })
 }
 
 /// A change inside `root` that is not Foldover's own bookkeeping. Scanning
@@ -124,6 +161,14 @@ fn relevant(root: &Path, path: &Path) -> bool {
         Component::Normal(name) => !is_internal_name(name.as_bytes()),
         _ => true,
     })
+}
+
+/// `path` is not the agent's state directory or inside it.
+fn unprotected<K>(watched: &Watched<K>, path: &Path) -> bool {
+    watched
+        .protected
+        .as_deref()
+        .is_none_or(|state| !path.starts_with(state))
 }
 
 #[cfg(test)]
@@ -160,11 +205,14 @@ mod tests {
         })
         .unwrap();
         let missing = first.path().join("missing");
-        let failures = watcher.set_roots(&[
-            (root(first.path()), 1),
-            (root(second.path()), 2),
-            (root(&missing), 3),
-        ]);
+        let failures = watcher.set_roots(
+            &[
+                (root(first.path()), 1),
+                (root(second.path()), 2),
+                (root(&missing), 3),
+            ],
+            None,
+        );
         assert_eq!(failures.len(), 1);
 
         std::fs::create_dir(first.path().join(".foldover")).unwrap();
@@ -175,7 +223,7 @@ mod tests {
         assert!(keys.contains(&2), "{keys:?}");
 
         // Unwatched roots stop reporting.
-        watcher.set_roots(&[]);
+        watcher.set_roots(&[], None);
         while receiver.try_recv().is_ok() {}
         std::fs::write(second.path().join("later"), b"x").unwrap();
         assert!(receiver.recv_timeout(Duration::from_secs(2)).is_err());

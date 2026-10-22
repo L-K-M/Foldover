@@ -12,6 +12,7 @@
 //! is reviewed by a person.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -64,8 +65,10 @@ enum Probe {
 type FolderCheck = dyn Fn(&PairConfig, &Reach) -> Option<Side> + Send + Sync;
 
 /// Whether a pair's folders changed while the agent was not watching,
-/// `changed_while_away` by default.
-type AwayCheck = dyn Fn(&PairConfig, &[Option<WatchCursor>; 2]) -> bool + Send + Sync;
+/// `changed_while_away` by default; the last argument is the agent's
+/// state directory, whose own writes never count.
+type AwayCheck =
+    dyn Fn(&PairConfig, &[Option<WatchCursor>; 2], Option<&Path>) -> bool + Send + Sync;
 
 /// What a due pair may do this tick.
 enum Gate {
@@ -528,7 +531,10 @@ impl Scheduler {
     #[cfg(test)]
     pub(crate) fn set_away(
         &self,
-        away: impl Fn(&PairConfig, &[Option<WatchCursor>; 2]) -> bool + Send + Sync + 'static,
+        away: impl Fn(&PairConfig, &[Option<WatchCursor>; 2], Option<&Path>) -> bool
+        + Send
+        + Sync
+        + 'static,
     ) {
         *self.away.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(away);
     }
@@ -695,11 +701,16 @@ impl Service {
     fn catch_up(&self, pairs: &[PairConfig], away: &[PairId], now: Instant) {
         for pair in pairs.iter().filter(|pair| away.contains(&pair.id())) {
             let id = pair.id();
-            let cursors = self
+            let (cursors, state) = self
                 .engine
                 .lock()
                 .ok()
-                .and_then(|engine| engine.watch_cursors(id).ok())
+                .map(|engine| {
+                    (
+                        engine.watch_cursors(id).ok().unwrap_or_default(),
+                        engine.state_path().to_path_buf(),
+                    )
+                })
                 .unwrap_or_default();
             self.scheduler
                 .catching_up
@@ -714,7 +725,7 @@ impl Service {
             let replay = move || {
                 // A replay that blew up proves nothing: count it as a change.
                 let changed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    check(&pair, &cursors)
+                    check(&pair, &cursors, Some(&state))
                 }))
                 .unwrap_or(true);
                 if changed {

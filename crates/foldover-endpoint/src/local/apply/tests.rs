@@ -288,3 +288,91 @@ fn settled_fingerprints_still_catch_rewrites_that_restore_size_and_mtime() {
     ));
     assert_eq!(fs::read(&target).unwrap(), b"odd");
 }
+
+/// A root may hold the agent's state directory: writes at or below it
+/// are refused, and so is removing, replacing or renaming a folder that
+/// holds it. Scans leave the subtree out entirely.
+#[test]
+fn the_state_directory_and_its_ancestors_are_never_changed() {
+    let pair = pair();
+    let home = pair.right_directory.path();
+    let state = home.join("Library/Application Support/Foldover");
+    fs::create_dir_all(&state).unwrap();
+    fs::write(state.join("pairs.sqlite"), b"records").unwrap();
+    fs::write(home.join("mine.txt"), b"mine").unwrap();
+    let protected = LocalEndpoint::open_protecting(home, Some(&state)).unwrap();
+    let observed = observe(&protected);
+
+    // The state directory never appears in an observation: it cannot be
+    // planned against, and nothing planned takes it for deleted.
+    let prefix = b"Library/Application Support/Foldover";
+    assert!(!observed.entries().keys().any(|path| {
+        path.as_bytes() == prefix
+            || path
+                .as_bytes()
+                .starts_with(b"Library/Application Support/Foldover/")
+    }));
+    assert!(observed.entries().contains_key(&path(b"Library")));
+
+    let entry = ObservedEntry::for_tests(
+        EntryVersion::new(
+            foldover_types::EntryContent::Directory,
+            foldover_types::Digest::from_bytes([1; foldover_types::Digest::BYTE_LEN]),
+        ),
+        0,
+    );
+    let file = path(b"Library/Application Support/Foldover/pairs.sqlite");
+    let support = path(b"Library/Application Support");
+    let library = path(b"Library");
+    let state_dir = path(prefix);
+
+    // Reads of the state directory and its contents are refused.
+    for inside in [&file, &state_dir] {
+        assert!(matches!(
+            protected.entry_at(inside).map(|_| ()),
+            Err(ScanError::ProtectedPath(_))
+        ));
+    }
+
+    // So are removals, copies, moves and metadata writes at or below it,
+    // and removing or moving an ancestor that holds it.
+    for target in [&file, &state_dir, &support, &library] {
+        assert!(matches!(
+            protected.remove(target, &entry, &pair.run, &mut proceed),
+            Err(ApplyError::Scan(ScanError::ProtectedPath(_)))
+        ));
+        assert!(matches!(
+            protected.move_entry(target, &entry, &path(b"moved"), &pair.run, &mut proceed,),
+            Err(ApplyError::Scan(ScanError::ProtectedPath(_)))
+        ));
+    }
+    assert!(matches!(
+        protected.copy_from(
+            &pair.left,
+            &file,
+            &entry,
+            Expected::Absent,
+            &pair.run,
+            &mut proceed,
+        ),
+        Err(ApplyError::Scan(ScanError::ProtectedPath(_)))
+    ));
+    assert!(matches!(
+        protected.move_entry(&path(b"mine.txt"), &entry, &file, &pair.run, &mut proceed,),
+        Err(ApplyError::Scan(ScanError::ProtectedPath(_)))
+    ));
+    assert!(matches!(
+        protected.update_metadata_from(&pair.left, &file, &entry, &entry, &pair.run, &mut proceed,),
+        Err(ApplyError::Scan(ScanError::ProtectedPath(_)))
+    ));
+
+    // Everything outside it still works.
+    let mine = path(b"mine.txt");
+    let kept = protected.entry_at(&mine).unwrap().unwrap();
+    protected
+        .remove(&mine, &observed.entries()[&mine], &pair.run, &mut proceed)
+        .unwrap();
+    assert!(!home.join("mine.txt").exists());
+    assert_eq!(fs::read(state.join("pairs.sqlite")).unwrap(), b"records");
+    drop(kept);
+}

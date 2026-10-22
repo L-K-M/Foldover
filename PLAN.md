@@ -119,6 +119,10 @@ during runs.
     a File Provider domain) gets a warning that another sync engine manages
     it;
   - roots that overlap another pair's root are blocked;
+  - a root inside the agent's state directory is blocked, but a root that
+    holds it — such as the home folder — is allowed: the state subtree is
+    left out of scans, refused to reads, writes and peers, and its own
+    changes never start a run;
   - a target where `.foldover/` can't be created can only be a Backup
     target, and only after the user accepts that files replaced there are
     not archived.
@@ -343,7 +347,8 @@ The read-only local metadata inventory is implemented in
 contract and remaining snapshot gates are recorded in
 [ADR 0010](docs/adr/0010-local-metadata-inventory.md).
 `LocalPair::open` rejects equal or nested selected roots through held-directory
-identities. Configuration also checks the pair catalog and agent state directory.
+identities. Configuration also checks the pair catalog and keeps the agent
+state directory out of any root that holds it.
 Execution-time readiness remains pending.
 
 Observed regular-file data-fork hashing is available below the agent API;

@@ -103,8 +103,11 @@ A folder may also be on an SFTP server, written
 connects with your SSH keys, agent and `~/.ssh/config`, and never asks for
 a password ([ADR 0028](docs/adr/0028-sftp-endpoints.md)).
 
-Both selected folders must exist. Roots must be disjoint from each other,
-every configured pair and Foldover's state directory. Reconnect unavailable
+Both selected folders must exist. Roots must be disjoint from each other
+and every configured pair, and may not be or sit inside Foldover's state
+directory — but a folder that *holds* it, such as your home folder, syncs
+fine: the state directory is left out of scans, refused to reads and
+writes, and never shared with a paired Mac. Reconnect unavailable
 configured roots before adding or changing pairs, so overlap checks can finish.
 Configuration does not scan contents or authorize sync execution.
 

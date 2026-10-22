@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::num::NonZeroUsize;
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime};
 
@@ -97,12 +97,14 @@ pub enum Endpoint {
 }
 
 /// What opening a root may need beyond its bytes: the running peer link,
-/// for folders on paired Macs. Opening those blocks on the link. It does
-/// not keep the link running: the agent owns it, and the link's host
-/// holds the engine, which holds this.
+/// for folders on paired Macs, and the agent's state directory, so a
+/// local root that holds it opens with that subtree protected. Opening
+/// peer roots blocks on the link. It does not keep the link running: the
+/// agent owns it, and the link's host holds the engine, which holds this.
 #[derive(Clone, Default)]
 pub struct Reach {
     link: Option<Weak<PeerLink>>,
+    state: Option<PathBuf>,
 }
 
 impl Reach {
@@ -110,12 +112,26 @@ impl Reach {
     pub fn through(link: &Arc<PeerLink>) -> Self {
         Self {
             link: Some(Arc::downgrade(link)),
+            state: None,
         }
+    }
+
+    /// The agent's state directory: a local root that holds it protects
+    /// it, so a pair rooted at the home directory never reads, carries or
+    /// damages the agent's own records.
+    pub fn with_state(mut self, state: PathBuf) -> Self {
+        self.state = Some(state);
+        self
     }
 
     /// The running link, if Mac-to-Mac is on.
     pub fn link(&self) -> Option<Arc<PeerLink>> {
         self.link.as_ref().and_then(Weak::upgrade)
+    }
+
+    /// The agent's state directory, for `LocalEndpoint::open_protecting`.
+    pub fn state(&self) -> Option<&Path> {
+        self.state.as_deref()
     }
 }
 
@@ -124,7 +140,10 @@ impl Endpoint {
     pub fn open(root: &PairRoot, reach: &Reach) -> Result<Self, ScanError> {
         match root {
             PairRoot::Local(root) => {
-                let endpoint = LocalEndpoint::open(Path::new(OsStr::from_bytes(root.as_bytes())))?;
+                let endpoint = LocalEndpoint::open_protecting(
+                    Path::new(OsStr::from_bytes(root.as_bytes())),
+                    reach.state(),
+                )?;
                 endpoint.probe_access()?;
                 Ok(Self::Local(endpoint))
             }
