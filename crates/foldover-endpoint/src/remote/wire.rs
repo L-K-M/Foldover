@@ -272,6 +272,8 @@ pub(super) fn scan_error(error: FolderError) -> ScanError {
 mod tests {
     use proptest::prelude::*;
 
+    use foldover_types::MetadataPolicy;
+
     use super::*;
 
     proptest! {
@@ -299,9 +301,16 @@ mod tests {
     #[test]
     fn a_run_leaving_quarantine_alone_does_so_on_the_other_mac() {
         let options = PairOptions::default();
-        let ignoring = options
-            .clone()
-            .with_metadata(options.metadata().with_quarantine(Propagation::Ignore));
+        let ignoring = options.clone().with_metadata(
+            // The gate fires only when attributes sync, so say so
+            // rather than lean on the default.
+            MetadataPolicy::new(
+                options.metadata().modification_times(),
+                Propagation::Sync,
+                options.metadata().permissions(),
+            )
+            .with_quarantine(Propagation::Ignore),
+        );
         for (sent, kept) in [
             (options, Propagation::Sync),
             (ignoring, Propagation::Ignore),

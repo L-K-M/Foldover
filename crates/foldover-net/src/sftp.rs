@@ -798,6 +798,12 @@ impl Session {
         Ok(())
     }
 
+    /// Whether this session still answers requests; one that
+    /// desynchronized refuses them, so a pool should not lend it out.
+    pub fn alive(&self) -> bool {
+        !self.failed
+    }
+
     /// A session that once desynchronized must not be trusted again.
     fn check_alive(&self) -> io::Result<()> {
         if self.failed {

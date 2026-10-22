@@ -332,6 +332,17 @@ impl MemoryEndpoint {
         folder.evicted.remove(&key);
     }
 
+    /// Drop a directory's own entry while leaving what it held, as a
+    /// store keying entries by path can: only its children know it
+    /// was there.
+    #[cfg(test)]
+    pub fn delete_folder(&self, path: &[u8]) {
+        let mut folder = self.folder();
+        folder.tick();
+        let key = folder.key(path);
+        folder.entries.remove(&key);
+    }
+
     /// Delete a file or link as a person would; absent paths are fine.
     pub fn delete_file(&self, path: &[u8]) {
         let mut folder = self.folder();
@@ -499,7 +510,15 @@ impl MemoryEndpoint {
                 }
                 continue;
             }
-            if folder.evicted.contains(&folder.key(&stored.path)) {
+            let key = folder.key(&stored.path);
+            // An evicted path also hides what is below it, as a real
+            // evicted folder yields nothing there — even one whose own
+            // entry is already gone.
+            let evicted = folder
+                .evicted
+                .iter()
+                .any(|up| *up == key || inside(&key, up));
+            if evicted {
                 observation.unavailable.push(path);
                 skipped.push(stored.path.clone());
                 continue;

@@ -693,6 +693,8 @@ impl LocalEndpoint {
             // An entry kept only in iCloud is not absence, and reading it
             // would download it (PLAN.md §4.10): it is set aside unread,
             // folders without their contents, for both folders to skip.
+            // run.rs's `unavailable` treats everything below one as
+            // unknown, never as absent.
             if metadata.data_residency() == DataResidency::Dataless {
                 stats.skipped += 1;
                 stats.unavailable.push(path);

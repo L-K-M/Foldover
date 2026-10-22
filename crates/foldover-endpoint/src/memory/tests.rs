@@ -245,3 +245,52 @@ fn what_the_filter_leaves_out_is_not_reported_evicted() {
         .unwrap();
     assert_eq!(observed.unavailable(), [path("notes.txt")]);
 }
+
+/// An evicted folder reports nothing below it either, as a real one
+/// yields nothing there: its subtree is unobserved, not absent.
+#[test]
+fn an_evicted_folder_hides_what_is_below_it() {
+    let folder = MemoryEndpoint::new(Quirks::default());
+    folder.put_file(b"cache/blob", b"x").unwrap();
+    folder.put_file(b"cache/deep/leaf", b"y").unwrap();
+    folder.put_file(b"notes.txt", b"n").unwrap();
+    folder.evict(b"cache");
+    let observed = Endpoint::Memory(folder)
+        .observe_from(
+            MetadataPolicy::default(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut || ScanControl::Continue,
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(observed.unavailable(), [path("cache")]);
+    for evicted in [path("cache"), path("cache/blob"), path("cache/deep/leaf")] {
+        assert!(!observed.entries().contains_key(&evicted), "{evicted:?}");
+    }
+    assert!(observed.entries().contains_key(&path("notes.txt")));
+}
+
+/// The evicted folder's own entry can be gone while a child's
+/// survives; hiding must not rely on the folder's entry pruning the
+/// walk before the child is reached.
+#[test]
+fn an_evicted_folder_without_its_own_entry_hides_below_it() {
+    let folder = MemoryEndpoint::new(Quirks::default());
+    folder.put_file(b"cache/blob", b"x").unwrap();
+    folder.put_file(b"notes.txt", b"n").unwrap();
+    folder.evict(b"cache");
+    folder.delete_folder(b"cache");
+    let observed = Endpoint::Memory(folder)
+        .observe_from(
+            MetadataPolicy::default(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut || ScanControl::Continue,
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(observed.unavailable(), [path("cache/blob")]);
+    assert!(!observed.entries().contains_key(&path("cache/blob")));
+    assert!(observed.entries().contains_key(&path("notes.txt")));
+}
