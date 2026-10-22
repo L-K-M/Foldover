@@ -3,6 +3,7 @@
 // and view models.
 
 import AppIntents
+import Foundation
 import SwiftUI
 
 @main
@@ -26,6 +27,11 @@ struct FoldoverApp: App {
         AppDependencyManager.shared.add(dependency: viewModel)
         // Runs for the app's lifetime, with or without an open window.
         Task { await viewModel.monitor() }
+        // A test host is not a launch: a modal prompt there would stall
+        // the suite.
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
+            Task { await updates.checkAtLaunch() }
+        }
     }
 
     var body: some Scene {
@@ -35,8 +41,8 @@ struct FoldoverApp: App {
         }
         .commands {
             CommandGroup(after: .appInfo) {
-                Button("Check for Updates…") { updates.checkForUpdates() }
-                    .disabled(!updates.canUpdate)
+                Button("Check for Updates…") { Task { await updates.checkForUpdates() } }
+                    .disabled(updates.checking)
             }
         }
 

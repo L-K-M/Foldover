@@ -8,8 +8,8 @@ design; [`docs/research`](docs/research/README.md) holds the evidence.
 
 **Status:** P2–P5 implemented, P6 in progress. Local, SFTP and
 Mac-to-Mac pairs preview, sync, archive, resolve conflicts, undo and run
-on schedules or changes, guarded by leases, canaries and gates; Sparkle
-updates wait for the owner's keys. Release qualification (device
+on schedules or changes, guarded by leases, canaries and gates; update
+checks read the GitHub release feed. Release qualification (device
 matrix, 100k-seed nights, beta) remains.
 Measurements and limits live in `docs/adr/`.
 The roadmap is PLAN.md §7.

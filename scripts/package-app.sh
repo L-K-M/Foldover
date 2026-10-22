@@ -21,14 +21,8 @@ xcodebuild -project "$ROOT/apple/Foldover.xcodeproj" \
   -derivedDataPath "$DERIVED" \
   -configuration Release \
   CODE_SIGN_IDENTITY=- \
-  ${SPARKLE_PUBLIC_KEY:+"SPARKLE_PUBLIC_KEY=$SPARKLE_PUBLIC_KEY"} \
   build
 app="$DERIVED/Build/Products/Release/Foldover.app"
-
-# A release build carries the key its updates are checked against.
-if [[ -n "${SPARKLE_PUBLIC_KEY:-}" ]]; then
-  test "$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$app/Contents/Info.plist")" = "$SPARKLE_PUBLIC_KEY"
-fi
 
 # Apple silicon only, macOS 27+, ad hoc signed inside out (PLAN.md §6).
 test "$(lipo -archs "$app/Contents/MacOS/Foldover")" = "$ARCHITECTURE"

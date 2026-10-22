@@ -1,6 +1,7 @@
 # ADR 0035: Sparkle updates
 
-Status: Implemented; releases need the owner's EdDSA keys
+Status: Superseded by [ADR 0045](0045-github-update-check.md); the owner
+chose not to ship an updater framework or keep signing keys (2026-10-22)
 
 ## Context
 

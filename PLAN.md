@@ -21,7 +21,7 @@ and AppKit now, GTK4/libadwaita on Linux later.
 | Sync model | Three-way reconciliation against a stored last-synced base | The only reliable way to tell "deleted here" from "created there" |
 | NAS shares | SMB and NFS through OS mounts that Foldover manages | Pure-Rust SMB clients are 0.x; revisit after 1.0 |
 | Mac-to-Mac | Built-in peer mode: Bonjour discovery, code pairing, encrypted QUIC | Top unmet need; competitors charge extra or need an account |
-| Distribution | Ad-hoc-signed downloads, explicit `xattr` activation, Sparkle 2 updates; no Mac App Store | Owner decision: no Developer ID or notarization |
+| Distribution | Ad-hoc-signed downloads, explicit `xattr` activation, update checks against GitHub releases; no Mac App Store | Owner decision: no Developer ID or notarization |
 | Minimum OS | macOS 27, Apple silicon only | Owner decision; no Intel build |
 | Price | Free and open-source, no sponsorships or paid features | Owner decision; public-domain code |
 
@@ -64,7 +64,7 @@ Details in [competitors.md](docs/research/competitors.md).
 4. **Quiet, glanceable trust.** Silent success, loud failure; one menu-bar
    line answers "are we good?" (the Time Machine contract).
 5. **A real Mac app.** Native controls, keyboard-complete, VoiceOver-clean,
-   Quick Look, localizable from day one.
+   Quick Look. English-only.
 6. **Fast you can see.** Results stream in as the scan runs; live counters;
    honest throughput and ETA.
 7. **Honest about limits.** Every target declares what it can store (tags,
@@ -331,7 +331,7 @@ execution and the remaining surfaces are pending.
 `Views → View models → Stores → FoldoverCore`. Stores (`PairStore`,
 `ActivityStore`, `ConflictStore`, …) own the client session and turn API
 messages into view state. A sibling `System` module beside FoldoverCore wraps
-`SMAppService`, notifications, Sparkle and permission probes. Views never call
+`SMAppService`, notifications, update checks and permission probes. Views never call
 FoldoverCore or `System` directly. UniFFI's Swift 6 support is partial (async
 code is not fully `Sendable`), so all callbacks enter through one actor, and
 the API favors event streams over many small calls.
@@ -660,7 +660,7 @@ Foldover/
 ├── crates/            # §4.4
 ├── apple/             # Xcode project: app, agent embedding, extensions, FoldoverCore package
 ├── linux/             # later: GTK app, Flatpak manifest
-├── packaging/         # entitlements, LaunchAgent plist, appcast template, deb/systemd
+├── packaging/         # entitlements, LaunchAgent plist, deb/systemd
 ├── scripts/           # build.sh (multi-target orchestrator), release.sh (lkm-release stub)
 ├── docs/              # research, ADRs
 └── .github/           # ci.yml, release.yml, nightly.yml, dependabot.yml, zai-code-review.yml
@@ -684,7 +684,7 @@ Foldover/
   - nightly simulation and device matrix.
 - **Release:** `release.yml` runs on `v*` tags. Order: test → build → ad-hoc
   sign innermost-out (embedded code, agent, extensions, app) → verify
-  signatures → archive → Sparkle appcast (EdDSA) → GitHub release. Publish
+  signatures → archive → GitHub release. Publish
   explicit quarantine-removal instructions. No Developer ID, notarization
   or stapling. Pre-release tags never become "latest".
 - **Pinned:** `rust-toolchain.toml`, Xcode version, UniFFI version, action
@@ -702,7 +702,7 @@ Rough sizes assume one developer with AI agents; the spikes recalibrate them.
 | **P3 Agent + Mac app** → v0.2 | ~5 wk | `foldoverd`, service, IPC, client, UniFFI. Main window, pair creation, streamed preview with per-item overrides, menu bar, history, onboarding | App quit mid-sync → agent finishes; 200k-row preview at 60 fps; a new user creates a first pair in < 3 min |
 | **P4 Shares, SFTP, automation** → v0.3 | ~6 wk | `share` and `sftp` endpoints. Mount management, capability and readiness warnings, full filters. Watchers, triggers, scheduler. Conflict center, archive browser, Undo, notifications, App Intents | SMB (Samba ± fruit, macOS server), NFS and SFTP pairs run unattended for 7 days; unplug or sleep mid-run loses nothing |
 | **P5 Mac-to-Mac** → v0.4 | ~4 wk | Discovery, pairing, scope and ownership, QUIC transport, `peer` endpoint, remote changes, block resume | Two Macs pair in < 60 s; packet capture shows no plaintext; unshared roots are unreachable; sleep, wake and network switches resume; 24 h fuzz clean |
-| **P6 Beta → 1.0** | ~6–8 wk | Public beta via Sparkle, docs (capability matrix, NAS guide, limitations), localization, accessibility, perf budgets enforced | §5 gates green; ≥ 6 weeks of beta with no open data-loss bug; crash-free sessions > 99.5 % |
+| **P6 Beta → 1.0** | ~6–8 wk | Public beta via GitHub releases, docs (capability matrix, NAS guide, limitations), accessibility, perf budgets enforced | §5 gates green; ≥ 6 weeks of beta with no open data-loss bug; crash-free sessions > 99.5 % |
 
 After 1.0, in order of expected value:
 - **1.1** speed: delta transfer, and an in-app SMB client if S2 favors it.
@@ -735,8 +735,9 @@ Engine correctness gates are never traded for dates.
 Direct downloads for macOS 27 on Apple silicon, signed ad hoc. No Developer
 ID, notarization or stapling. The installation instructions explain how to
 remove `com.apple.quarantine` from the installed app before opening it.
-Sparkle 2 updates require their own EdDSA signature; ad-hoc code signing
-does not authenticate a downloaded update.
+The app checks GitHub's latest release and, when it finds a newer version,
+shows a message with a link to the download page; replacing the app is
+manual, like the first install (ADR 0045).
 
 Foldover is free and open-source under the Unlicense. No sponsorships,
 subscriptions, paid builds, gated features or license checks. No account or
@@ -759,3 +760,7 @@ Resolved by the owner, 2026-10-17:
    servers, with checks and a visible warning about server-side symlink races.
    This qualifies the strict root-isolation guarantee for SFTP only; a jailed
    account or Foldover helper is not required.
+8. **Updates** (2026-10-22): no updater framework; the app checks the
+   GitHub release feed and links a newer version to its download.
+9. **Localization** (2026-10-22): the UI is English-only; localization
+   is out of scope.

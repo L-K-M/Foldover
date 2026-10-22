@@ -1,9 +1,7 @@
 name: release
 
 # A version tag (vX.Y.Z, from scripts/release.sh --push) publishes the
-# ad-hoc-signed app and its Sparkle appcast as a GitHub release
-# (ADR 0035). Needs the SPARKLE_PUBLIC_KEY variable and the
-# SPARKLE_PRIVATE_KEY secret.
+# ad-hoc-signed app as a GitHub release (ADR 0045).
 on:
   push:
     tags: ["v*"]
@@ -23,7 +21,6 @@ jobs:
       contents: write
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
-      SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -36,18 +33,6 @@ jobs:
           grep -Ex "    MARKETING_VERSION: \"?${version//./\\.}\"?" apple/project.yml
           grep -Fx "version = \"$version\"" Cargo.toml
           echo "VERSION=$version" >> "$GITHUB_ENV"
-
-      # Without both keys, the app could never update itself.
-      - name: Check the update keys
-        env:
-          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-        run: |
-          for key in SPARKLE_PUBLIC_KEY SPARKLE_PRIVATE_KEY; do
-            if [[ -z "${!key}" ]]; then
-              echo "::error::$key is not set; see docs/adr/0035-sparkle-updates.md"
-              exit 1
-            fi
-          done
 
       - name: Build the XCFramework
         run: cargo xtask ffi
@@ -66,16 +51,9 @@ jobs:
       - name: Build, verify and zip the app
         run: bash scripts/package-app.sh "$RUNNER_TEMP/Foldover-$VERSION.zip" "$RUNNER_TEMP/DerivedData"
 
-      # Fails when the private key is not the shipped public key's pair.
-      - name: Sign and check the update
-        env:
-          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-        run: bash scripts/appcast.sh "$RUNNER_TEMP/Foldover-$VERSION.zip" "$VERSION" "$RUNNER_TEMP/appcast.xml"
-
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/release-notes.py "$VERSION" > "$RUNNER_TEMP/notes.md" &&
           gh release create "$GITHUB_REF_NAME" "$RUNNER_TEMP/Foldover-$VERSION.zip"
-          "$RUNNER_TEMP/appcast.xml"
           --title "Foldover $VERSION" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag
