@@ -846,11 +846,12 @@ impl SftpEndpoint {
     pub(crate) fn stage_link(&self, path: &[u8], target: &[u8]) -> io::Result<Vec<u8>> {
         let temporary = self.beside(path);
         let made = self.session().symlink(target, &temporary);
-        if made.is_ok() {
-            self.note_added(&temporary);
-        } else {
-            // A lost response may mean the link exists after all.
-            self.forget_parent(&temporary);
+        match &made {
+            Ok(()) => self.note_added(&temporary),
+            // A lost response may mean the link exists after all; a
+            // definitive refusal changed nothing worth forgetting.
+            Err(error) if !Self::answered(error) => self.forget_parent(&temporary),
+            Err(_) => {}
         }
         made?;
         Ok(temporary)

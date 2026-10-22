@@ -917,7 +917,8 @@ fn is_eof(body: &[u8]) -> bool {
 }
 
 /// A failure status the server answered with. The answer is
-/// authoritative: the request did not apply. Transport failures may
+/// authoritative: the request did not apply — except EOF, where a
+/// read legitimately reached end-of-stream. Transport failures may
 /// have applied unseen, so callers that track remote state treat the
 /// two differently (`error.get_ref()` downcasts to this).
 #[derive(Debug)]
