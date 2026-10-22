@@ -487,6 +487,18 @@ impl Root {
         }
         #[cfg(target_os = "linux")]
         {
+            // A share's magic says network before any block device does:
+            // NFS and SMB mounts have no `/sys` queue to read a medium
+            // from.
+            const NETWORK_MAGICS: [u64; 3] = [
+                0x0000_0000_0000_6969, // NFS_SUPER_MAGIC
+                0x0000_0000_ff53_4d42, // CIFS_MAGIC_NUMBER
+                0x0000_0000_fe53_4d42, // SMB2_SUPER_MAGIC
+            ];
+            let filesystem = rustix::fs::fstatfs(&self.directory)?.f_type as u64;
+            if NETWORK_MAGICS.contains(&filesystem) {
+                return Ok(Medium::Network);
+            }
             let device = rustix::fs::fstat(&self.directory)?.st_dev;
             Ok(block_medium(
                 rustix::fs::major(device),

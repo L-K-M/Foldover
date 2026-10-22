@@ -491,7 +491,7 @@ impl Root {
         durability: Durability,
     ) -> Result<(), WriteError> {
         let (parent, name) = self.parent_of(path)?;
-        let current = EntryMetadata::at(&parent, &name)?;
+        let current = observed(&parent, &name)?;
         if current.kind() != NodeKind::Directory || current.identity() != expected.identity() {
             return Err(WriteError::Changed);
         }
@@ -513,7 +513,12 @@ impl Root {
             return Err(WriteError::UnsupportedEntry);
         }
         let (parent, name) = self.parent_of(path)?;
-        let file = rustix::fs::openat(&parent, &name, open_flags(expected.kind()), Mode::empty())?;
+        let file =
+            match rustix::fs::openat(&parent, &name, open_flags(expected.kind()), Mode::empty()) {
+                Ok(file) => file,
+                Err(Errno::NOENT) => return Err(WriteError::Changed),
+                Err(error) => return Err(error.into()),
+            };
         if EntryMetadata::from_file(&file)? != *expected {
             return Err(WriteError::Changed);
         }
@@ -559,7 +564,7 @@ impl Root {
             return Err(WriteError::UnsupportedEntry);
         }
         let (parent, name) = self.parent_of(from)?;
-        if EntryMetadata::at(&parent, &name)? != *expected {
+        if observed(&parent, &name)? != *expected {
             return Err(WriteError::Changed);
         }
         let (target, target_name) = self.create_parents(to, Parents::Default)?;
@@ -853,6 +858,16 @@ fn flush_device_cache(file: &impl AsFd) -> io::Result<()> {
 #[cfg(not(target_os = "macos"))]
 fn flush_device_cache(file: &impl AsFd) -> io::Result<()> {
     Ok(rustix::fs::fsync(file)?)
+}
+
+/// The entry at `name` as it was observed, `Changed` when it is gone:
+/// what was observed is no longer there.
+fn observed(parent: &Dir, name: &Path) -> Result<EntryMetadata, WriteError> {
+    match EntryMetadata::at(parent, name) {
+        Ok(metadata) => Ok(metadata),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Err(WriteError::Changed),
+        Err(source) => Err(source.into()),
+    }
 }
 
 #[cfg(test)]
