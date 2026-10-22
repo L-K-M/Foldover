@@ -41,6 +41,7 @@ The roadmap is PLAN.md §7.
 | Bindings + arm64 XCFramework (macOS) | `cargo xtask ffi` |
 | Dependency licenses and advisories | `cargo deny check` |
 | Generate the Xcode project | `xcodegen generate --spec apple/project.yml` |
+| UI tour: drive the Debug app on canned data, screenshot every stop (macOS; the `ui-tour` workflow uploads them) | `xcodebuild test -project apple/Foldover.xcodeproj -scheme FoldoverUITour` |
 | Build everything this host can → `dist/` | `scripts/build.sh [core] [app] [--debug] [--clean] [--check]` |
 | Build, then install the app into `/Applications` (restarts a running agent) | `scripts/build.sh app --install` |
 | Test `--install` against a fake macOS toolchain | `bash scripts/test-build-install.sh` |
@@ -64,6 +65,7 @@ tests, builds the XCFramework, and runs `xcodebuild build test`.
 | `apple/Foldover/` | The SwiftUI app: `App/`, `Intents/`, `Views/`, `ViewModels/`, `Stores/` |
 | `apple/FoldoverCore/` | Swift package over the Rust core (generated bindings) |
 | `apple/FoldoverSystem/` | Native service-registration boundary, imported only by stores |
+| `apple/FoldoverUITests/` | The UI tour; `-foldover-fixtures` (Debug only, `Stores/Fixtures.swift`) feeds it canned agent answers |
 | `scripts/` | Build/release orchestration, agent embedding and process smoke |
 | `tools/doccheck/` | Documentation checks run by CI |
 
