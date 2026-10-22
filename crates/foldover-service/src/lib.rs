@@ -10,7 +10,7 @@ mod schedule;
 mod share;
 mod sync;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use foldover_engine::{Approval, Engine, ErrorKind, StateLocation};
 use foldover_proto::local::{
@@ -407,15 +407,23 @@ fn parameters<T: DeserializeOwned>(request: &Request) -> Result<T, RpcError> {
     .map_err(|_| RpcError::new(INVALID_PARAMS, "Invalid method parameters"))
 }
 
-/// Server browses in flight at once; a timed-out browse keeps running
-/// on the blocking pool, so few enough that a pile of them cannot crowd
-/// other blocking work out.
-static BROWSES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+/// Server browses in flight at once, per server; a timed-out browse
+/// keeps running on the blocking pool, so few enough that a pile of
+/// them cannot crowd other blocking calls out — and scoped by root so
+/// one black-holed server cannot starve browsing the others.
+static BROWSES: LazyLock<Mutex<std::collections::HashMap<Vec<u8>, Arc<tokio::sync::Semaphore>>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 /// The folders in a folder on an SFTP server. Connecting can take
 /// seconds, so it waits off the runtime; it never touches the engine's
 /// state, so other requests go on.
 async fn browse(params: EndpointBrowse) -> Result<Value, RpcError> {
+    let browses = BROWSES
+        .lock()
+        .unwrap()
+        .entry(params.root.clone())
+        .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(4)))
+        .clone();
     let PairRoot::Sftp(root) = PairRoot::from_bytes(params.root)
         .map_err(|error| RpcError::new(INVALID_PARAMS, error.to_string()))?
     else {
@@ -428,11 +436,11 @@ async fn browse(params: EndpointBrowse) -> Result<Value, RpcError> {
     // outwait a person's patience; bound the wait too. The task itself
     // cannot be cancelled once it is on the blocking pool, so it also
     // holds a permit: abandoned browses pile up no deeper than BROWSES.
-    let folder = tokio::time::timeout(std::time::Duration::from_secs(120), async {
-        let permit = BROWSES
-            .acquire()
+    let folder = tokio::time::timeout(std::time::Duration::from_secs(120), async move {
+        let permit = browses
+            .acquire_owned()
             .await
-            .expect("the browses semaphore is never closed");
+            .expect("a browses semaphore is never closed");
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             foldover_engine::browse_server(&root)

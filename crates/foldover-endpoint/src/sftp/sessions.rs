@@ -248,6 +248,10 @@ mod tests {
                 }
                 std::thread::sleep(RETRY / 4);
             }
+            assert!(
+                sessions.lock().refusals >= REFUSALS,
+                "the refusal cap was never learned"
+            );
             assert!(!waiter.is_finished());
             drop(first);
             assert!(waiter.join().unwrap());
