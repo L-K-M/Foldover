@@ -12,7 +12,7 @@ struct FoldoverApp: App {
     @State private var settings = SettingsStore()
     @State private var macToMac: MacToMacStore
     @State private var automation = AutomationStore()
-    @State private var updates = UpdateStore()
+    @State private var updates: UpdateStore
 
     init() {
         // One store each, so the pair editor sees the Macs Settings
@@ -21,6 +21,8 @@ struct FoldoverApp: App {
         _macToMac = State(initialValue: macToMac)
         let automation = AutomationStore()
         _automation = State(initialValue: automation)
+        let updates = UpdateStore()
+        _updates = State(initialValue: updates)
         let viewModel = MainViewModel(appInfo: AppInfoStore(), automation: automation, macToMac: macToMac)
         _viewModel = State(initialValue: viewModel)
         // Shortcuts actions run in the app and share its state.
