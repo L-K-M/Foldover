@@ -433,19 +433,22 @@ async fn browse(params: EndpointBrowse) -> Result<Value, RpcError> {
     const MAX_ROOTS: usize = 256;
     let browses = {
         let mut browses_by_root = BROWSES.lock().unwrap();
-        if browses_by_root.len() >= MAX_ROOTS {
-            browses_by_root.retain(|_, slot| Arc::strong_count(slot) > 1);
+        if let Some(slot) = browses_by_root.get(&params.root) {
+            slot.clone()
+        } else {
             if browses_by_root.len() >= MAX_ROOTS {
-                return Err(RpcError::new(
-                    INTERNAL_ERROR,
-                    "Too many servers are being browsed",
-                ));
+                browses_by_root.retain(|_, slot| Arc::strong_count(slot) > 1);
+                if browses_by_root.len() >= MAX_ROOTS {
+                    return Err(RpcError::new(
+                        INTERNAL_ERROR,
+                        "Too many servers are being browsed",
+                    ));
+                }
             }
+            let slot = Arc::new(tokio::sync::Semaphore::new(4));
+            browses_by_root.insert(params.root, slot.clone());
+            slot
         }
-        browses_by_root
-            .entry(params.root)
-            .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(4)))
-            .clone()
     };
     // The engine bounds each phase, but a black-holed server can still
     // outwait a person's patience; bound the wait too. The task itself
