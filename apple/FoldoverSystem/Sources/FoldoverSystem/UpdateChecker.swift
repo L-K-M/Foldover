@@ -164,6 +164,7 @@ public struct UpdateChecker: Sendable {
     /// entries, so the stable check runs too and the newer of the two
     /// answers — a newer release cannot age off the page unseen.
     public func checkIncludingPrereleases() async throws -> AppRelease {
+        async let stableCheck = check()
         let (data, response) = try await session.data(for: request(to: Self.feed))
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
               let release = Self.newestRelease(in: String(decoding: data, as: UTF8.self))
@@ -172,7 +173,7 @@ public struct UpdateChecker: Sendable {
         }
         // A repo with no stable release yet answers `latest` with an
         // error; the feed's answer stands alone then.
-        if let stable = try? await check(),
+        if let stable = try? await stableCheck,
            let stableVersion = ReleaseVersion(parsing: stable.version),
            let feedVersion = ReleaseVersion(parsing: release.version),
            stableVersion > feedVersion {
