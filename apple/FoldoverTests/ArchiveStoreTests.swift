@@ -6,6 +6,8 @@ import Testing
 private actor ArchiveFixtureClient: ArchiveClient {
     private var stored = [Data("a".utf8), Data("b".utf8), Data("c".utf8)]
     private(set) var sides: [FolderSide] = []
+    /// Items put back one by one, in request order.
+    private(set) var putBacks: [Data] = []
     /// Requests for later pages, and the next one to hold until released.
     private(set) var pageRequests = 0
     private var holdsNextPage = false
@@ -44,6 +46,7 @@ private actor ArchiveFixtureClient: ArchiveClient {
     }
 
     func putBack(_ id: String, side: FolderSide, run: String, path: Data) async throws -> Data {
+        putBacks.append(path)
         stored.removeAll { $0 == path }
         return path + Data(" (restored)".utf8)
     }
@@ -146,4 +149,52 @@ func showMoreWhileAPageLoadsAsksOnce() async {
 
     #expect(viewModel.itemRows.map(\.path) == ["a", "b", "c"])
     #expect(await client.pageRequests == 1)
+}
+
+@MainActor
+@Test
+func puttingBackSeveralRowsGoesOneAtATime() async {
+    let client = ArchiveFixtureClient()
+    let viewModel = ArchiveViewModel(pair: docs(), store: ArchiveStore(client: client), agentConnected: true)
+    await viewModel.show(.b)
+
+    await viewModel.putBack(viewModel.itemRows)
+    #expect(await client.putBacks == [Data("a".utf8), Data("b".utf8)])
+    #expect(viewModel.itemRows.isEmpty)
+    #expect(viewModel.placedText?.hasPrefix("Put back as b (restored).") == true)
+    #expect(viewModel.statusText == viewModel.placedText)
+    #expect(viewModel.pairName == "Docs")
+    #expect(ArchiveViewModel.sideTitle(.a) == "Folder A")
+    #expect(ArchiveViewModel.sideTitle(.b) == "Folder B")
+}
+
+@MainActor
+@Test
+func aWholeRunPutBackOutranksTheLastItemInTheStatusLine() async {
+    let viewModel = ArchiveViewModel(pair: docs(), store: ArchiveStore(client: ArchiveFixtureClient()),
+                                     agentConnected: true)
+    await viewModel.show(.b)
+    #expect(viewModel.statusText == nil)
+
+    await viewModel.putBackAll()
+    #expect(viewModel.statusText == viewModel.restoreText)
+    #expect(viewModel.statusText != nil)
+}
+
+@MainActor
+@Test
+func siblingStoresShareTheClientButNotTheState() async {
+    let client = ArchiveFixtureClient()
+    let store = ArchiveStore(client: client)
+    await store.open(docs().id, side: .b)
+
+    let sibling = store.sibling()
+    #expect(sibling.runs.isEmpty)
+    #expect(sibling.side == .a)
+    #expect(sibling.run == nil)
+
+    await sibling.open(docs().id, side: .b)
+    #expect(sibling.runs.map(\.name) == ["new", "old"])
+    #expect(store.run == "new")
+    #expect(await client.sides == [.b, .b])
 }

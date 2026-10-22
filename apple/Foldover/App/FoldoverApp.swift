@@ -1,6 +1,6 @@
-// The app shell (PLAN.md §4.5): one main window plus the menu-bar
-// extra. This file only wires the scenes; state lives in the stores
-// and view models.
+// The app shell (PLAN.md §4.5): one main window, archive windows,
+// Settings and the menu-bar extra. This file only wires the scenes and
+// their commands; state lives in the stores and view models.
 
 import AppIntents
 import Foundation
@@ -73,22 +73,37 @@ struct FoldoverApp: App {
     #endif
 
     var body: some Scene {
-        // One configuration window shares the same selection and editor as the menu bar.
+        // The one main window (PLAN.md §7.1): everything is reachable
+        // from it, and the menu bar extra shares its selection and editor.
         Window("Foldover", id: "main") {
             MainView(viewModel: viewModel)
         }
+        .defaultSize(width: 1000, height: 640)
+        .windowToolbarStyle(.unified)
         .commands {
-            CommandGroup(after: .appInfo) {
-                Button("Check for Updates…") { Task { await updates.checkForUpdates() } }
-                    .disabled(updates.checking)
+            AppCommands(viewModel: viewModel, updates: updates)
+            ViewCommands()
+            PairCommands(viewModel: viewModel)
+        }
+
+        // One archive window per pair, opened with the pair's ID; each
+        // browses with its own store.
+        WindowGroup("Archive", id: "archive", for: String.self) { $pairID in
+            if let pairID = pairID {
+                ArchiveWindow(pairID: pairID, viewModel: viewModel)
             }
         }
+        .defaultSize(width: 760, height: 500)
 
         // .window style hosts a regular SwiftUI view instead of the
         // default menu rendering, which is what the status surfaces in
-        // PLAN.md §3.8 need.
-        MenuBarExtra("Foldover", systemImage: "arrow.triangle.2.circlepath") {
+        // PLAN.md §3.8 need. The symbol shows work, problems and pauses.
+        MenuBarExtra {
             MenuBarView(viewModel: viewModel)
+        } label: {
+            // The menu bar shows only the symbol; the title names the
+            // item for VoiceOver.
+            Label("Foldover", systemImage: viewModel.menuBarSymbol)
         }
         .menuBarExtraStyle(.window)
 

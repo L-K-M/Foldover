@@ -1,5 +1,6 @@
 import Darwin
 import FoldoverCore
+import FoldoverSystem
 import Foundation
 import Observation
 
@@ -359,6 +360,7 @@ private enum PairStoreError: LocalizedError {
 @MainActor
 final class PairStore {
     private let client: any PairClient
+    private let revealInFinder: @MainActor ([URL]) -> Void
     private var generation = 0
     private(set) var pairs: [SyncPair] = []
     private(set) var isLoading = false
@@ -366,8 +368,16 @@ final class PairStore {
     private(set) var hasLoaded = false
     private(set) var loadError: String?
 
-    init(client: any PairClient = CorePairClient()) {
+    init(client: any PairClient = CorePairClient(),
+         reveal: @escaping @MainActor ([URL]) -> Void = { FinderReveal.reveal($0) }) {
         self.client = client
+        revealInFinder = reveal
+    }
+
+    /// Select `urls` in Finder windows.
+    func reveal(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        revealInFinder(urls)
     }
 
     func refresh() async {
@@ -471,6 +481,18 @@ final class PairStore {
     func folder(from url: URL) throws -> SelectedFolder {
         guard let bytes = Self.folderBytes(url) else { throw PairStoreError.invalidFolder }
         return SelectedFolder(bytes: bytes)
+    }
+
+    /// A local folder's URL from its exact path bytes; nil for SFTP and
+    /// other-Mac locators, which are not absolute paths.
+    static func localURL(_ folder: SelectedFolder) -> URL? {
+        guard folder.bytes.first == UInt8(ascii: "/"), !folder.bytes.contains(0) else { return nil }
+        var path = folder.bytes
+        path.append(0)
+        return path.withUnsafeBytes { bytes in
+            URL(fileURLWithFileSystemRepresentation: bytes.baseAddress!.assumingMemoryBound(to: CChar.self),
+                isDirectory: true, relativeTo: nil)
+        }
     }
 
     /// A file URL's exact path bytes, as the agent takes them.

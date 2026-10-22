@@ -128,7 +128,7 @@ final class AgentStore {
                     guard generation == request else { return }
                 }
             }
-            connection = .failed(message: String(localized: "The registered agent did not start. Check Login Items and refresh."))
+            connection = .failed(message: String(localized: "The registered agent did not start. Check Login Items, then turn it on again."))
         } catch {
             guard generation == request else { return }
             connection = .failed(message: message(for: error))

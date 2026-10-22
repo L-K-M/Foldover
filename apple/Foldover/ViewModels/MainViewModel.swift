@@ -54,12 +54,54 @@ struct SetupStep: Identifiable, Equatable {
     let action: SetupAction?
 }
 
-/// One pair in the menu bar.
-struct MenuPairRow: Identifiable, Equatable {
+/// How a pair's latest state reads at a glance.
+enum PairActivity: Equatable, Sendable {
+    case idle
+    case working
+    case attention
+    case waiting
+}
+
+/// One pair in the sidebar and the menu bar.
+struct PairRow: Identifiable, Equatable {
     let id: String
     let name: String
+    /// One or two words, as `PairSyncViewModel.shortStatus` reads.
     let status: String
+    /// The direction its mode copies in.
+    let symbol: String
+    /// The mode's name, which the symbol stands for.
+    let modeTitle: String
+    let activity: PairActivity
+    /// Conflicts waiting for a decision; 0 hides the badge.
+    let conflicts: Int
     let canSync: Bool
+}
+
+/// The background agent's health as the status bar's dot shows it.
+enum AgentIndicator: Equatable, Sendable {
+    case connected
+    case connecting
+    /// Approval in Login Items, or syncing paused in safe mode.
+    case attention
+    case off
+}
+
+/// The one thing the status bar offers to do about the agent.
+enum AgentAction: Equatable, Sendable {
+    case turnOn
+    case openLoginItems
+    case resumeSyncing
+    case retry
+}
+
+/// The newest main-window sync Edit > Undo can still reverse. A fresh
+/// `serial` per sync tells two runs of the same pair apart.
+struct UndoableSync: Equatable, Sendable {
+    let pairID: String
+    /// "Sync of “Photos”", completing Edit > Undo's title.
+    let actionName: String
+    let serial: Int
 }
 
 /// Text for the main window and the menu-bar extra.
@@ -76,10 +118,22 @@ final class MainViewModel {
     private let macToMac: MacToMacStore
     var selectedPairID: String?
     private(set) var editor: PairEditorViewModel?
-    /// The pair whose archive browser is open.
-    private(set) var archivePair: SyncPair?
     private(set) var removalTarget: SyncPair?
     private(set) var operationError: String?
+    /// The file Quick Look shows for the main window.
+    var quickLookURL: URL?
+    /// Bumped by Find (⌘F); the window focuses its search field on change.
+    private(set) var findRequests = 0
+    /// The change row selected in each pair's table, by pair ID.
+    private var changeSelections: [String: ChangeRow.ID] = [:]
+    /// A sync the main window started, with the result it finished with.
+    private struct WindowSync {
+        let pairID: String
+        let result: RunSummary
+        let serial: Int
+    }
+    private var windowSync: WindowSync?
+    private var windowSyncSerial = 0
 
     /// Main-actor isolated like the rest of the class: `FoldoverApp`
     /// (an `App`, so main-actor isolated too) builds it in its `@State`
@@ -197,7 +251,7 @@ final class MainViewModel {
         switch agent.connection {
         case .disconnected: String(localized: "Background agent is off")
         case .connecting: String(localized: "Connecting to the background agent…")
-        case .approvalRequired: String(localized: "Approve Foldover in Login Items, then refresh")
+        case .approvalRequired: String(localized: "Approve Foldover in Login Items")
         case .connected(let version): String(localized: "Agent \(version) connected")
         case .failed(let message): String(localized: "Background agent unavailable: \(message)")
         }
@@ -215,15 +269,194 @@ final class MainViewModel {
         await agent.leaveSafeMode()
     }
 
-    var menuRows: [MenuPairRow] {
+    var pairRows: [PairRow] {
         pairs.map { pair in
-            let sync = sync(for: pair)
-            return MenuPairRow(id: pair.id, name: pair.settings.name, status: sync.shortStatus,
-                               canSync: sync.canSync)
+            let pairSync = sync(for: pair)
+            return PairRow(id: pair.id, name: pair.settings.name, status: pairSync.shortStatus,
+                           symbol: pair.settings.mode.symbol, modeTitle: pair.settings.mode.title,
+                           activity: pairSync.activity, conflicts: pairSync.conflictCount,
+                           canSync: pairSync.canSync)
         }
     }
 
-    var canSyncAll: Bool { menuRows.contains(where: \.canSync) }
+    var canSyncAll: Bool { pairRows.contains(where: \.canSync) }
+
+    /// The menu bar icon. A problem outranks work in progress, which
+    /// outranks a pause; connecting between health checks is no problem.
+    var menuBarSymbol: String {
+        let activities = pairRows.map(\.activity)
+        if agentState == .off || agentState == .attention || activities.contains(.attention) {
+            return "exclamationmark.arrow.triangle.2.circlepath"
+        }
+        if activities.contains(.working) { return "arrow.triangle.2.circlepath.circle.fill" }
+        if isPaused { return "pause.circle" }
+        return "arrow.triangle.2.circlepath"
+    }
+
+    var agentState: AgentIndicator {
+        switch agent.connection {
+        case .connected: agent.safeModeStops == nil ? .connected : .attention
+        case .connecting: .connecting
+        case .approvalRequired: .attention
+        case .disconnected, .failed: .off
+        }
+    }
+
+    /// The trailing action the status bar offers, if any; a healthy
+    /// agent needs none.
+    var agentAction: AgentAction? {
+        switch agent.connection {
+        case .disconnected, .failed: .turnOn
+        case .approvalRequired: .openLoginItems
+        case .connected: agent.safeModeStops == nil ? nil : .resumeSyncing
+        case .connecting: nil
+        }
+    }
+
+    func perform(_ action: AgentAction) async {
+        switch action {
+        case .turnOn: await enableAgent()
+        case .openLoginItems: openLoginItems()
+        case .resumeSyncing: await leaveSafeMode()
+        case .retry: await refreshAgent()
+        }
+    }
+
+    func clearOperationError() { operationError = nil }
+
+    var pairsLoaded: Bool { pairStore.hasLoaded }
+
+    var selectedSync: PairSyncViewModel? { selectedPair.map { sync(for: $0) } }
+
+    /// The change row selected in the main window's table, remembered
+    /// per pair so switching pairs keeps each one's selection.
+    var selectedChangeID: ChangeRow.ID? {
+        get { selectedPairID.flatMap { changeSelections[$0] } }
+        set {
+            guard let selectedPairID else { return }
+            changeSelections[selectedPairID] = newValue
+        }
+    }
+
+    /// The selected row, if the listed rows still reach it: a new listing
+    /// reuses indexes and may be shorter.
+    var selectedChange: ChangeRow? {
+        guard let selectedChangeID else { return nil }
+        return selectedSync?.rows.first { $0.id == selectedChangeID }
+    }
+
+    /// Find (⌘F) asks the window to focus its search field.
+    func requestFind() { findRequests += 1 }
+
+    /// Where a pair's folder is: this Mac, an external or network
+    /// volume, an SFTP server or another Mac.
+    func folderSymbol(_ folder: SelectedFolder) -> String { folder.symbolName }
+
+    /// A local folder's URL; nil for SFTP and other-Mac folders.
+    func localURL(_ folder: SelectedFolder) -> URL? { PairStore.localURL(folder) }
+
+    /// Show the selected pair's folder on `side` in Finder.
+    func reveal(_ side: FolderSide) {
+        guard let url = selectedFolderURL(side) else { return }
+        pairStore.reveal([url])
+    }
+
+    func canReveal(_ side: FolderSide) -> Bool { selectedFolderURL(side) != nil }
+
+    private func selectedFolderURL(_ side: FolderSide) -> URL? {
+        guard let settings = selectedPair?.settings else { return nil }
+        return localURL(side == .a ? settings.left : settings.right)
+    }
+
+    /// What the pair does, in the editor's words.
+    func planText(for pair: SyncPair) -> String {
+        PairEditorViewModel.planText(mode: pair.settings.mode, options: pair.settings.options)
+    }
+
+    /// The pair's skip rules and limits in a few words, e.g.
+    /// "3 rules, files larger than 1 GB".
+    func skipSummary(for pair: SyncPair) -> String {
+        let clauses = PairEditorViewModel.skipClauses(pair.settings.options)
+        guard !clauses.isEmpty else { return String(localized: "None") }
+        let joined = clauses.joined(separator: ", ")
+        return "\(joined.prefix(1).uppercased())\(joined.dropFirst())"
+    }
+
+    /// The newest sync the main window started, while Undo can still
+    /// reverse it: the pair still shows that run's result. Menu-bar and
+    /// Shortcuts syncs never count, and connecting between health checks
+    /// does not make it flicker.
+    var undoableSync: UndoableSync? {
+        guard let windowSync,
+              let pair = pairs.first(where: { $0.id == windowSync.pairID }),
+              sync(for: pair).undoableResult == windowSync.result else { return nil }
+        return UndoableSync(pairID: pair.id,
+                            actionName: String(localized: "Sync of “\(pair.settings.name)”"),
+                            serial: windowSync.serial)
+    }
+
+    /// Undo the named pair's last sync if it still can be.
+    func undoSync(pairID: String) async {
+        guard let pair = pairs.first(where: { $0.id == pairID }) else { return }
+        await sync(for: pair).undo()
+    }
+
+    func canUndoSync(pairID: String) -> Bool {
+        guard let pair = pairs.first(where: { $0.id == pairID }) else { return false }
+        return sync(for: pair).canUndo
+    }
+
+    /// Sync from the main window (toolbar, Pair menu, sidebar, detail).
+    /// Once the run finishes, Edit > Undo can reverse it. The detail's
+    /// refresh can take the run's poller over, so the sync call may
+    /// return while the run still works; the record waits for the run.
+    func syncInWindow(_ pairID: String) async {
+        guard let pair = pairs.first(where: { $0.id == pairID }) else { return }
+        let pairSync = sync(for: pair)
+        // A refused sync must not adopt an older run's result.
+        guard pairSync.canSync else { return }
+        let before = pairSync.undoableResult
+        await pairSync.sync()
+        await syncStore.waitWhileWorking(pairID)
+        recordWindowSync(pairID, after: before)
+    }
+
+    /// Run the plan the approval dialog presented; like Sync Now from the
+    /// window, Edit > Undo can then reverse it.
+    func approveInWindow(_ request: ApprovalRequest) async {
+        guard let pair = pairs.first(where: { $0.id == request.pairID }) else { return }
+        let pairSync = sync(for: pair)
+        let before = pairSync.undoableResult
+        await pairSync.approve(request)
+        await syncStore.waitWhileWorking(pair.id)
+        recordWindowSync(pair.id, after: before)
+    }
+
+    /// Remember a window sync that finished with something to undo. A
+    /// request that failed leaves `before`, a run the window may not have
+    /// started, on screen; that and a run with nothing to undo leave the
+    /// previous record, which still names the newest undoable run.
+    private func recordWindowSync(_ pairID: String, after before: RunSummary?) {
+        guard let pair = pairs.first(where: { $0.id == pairID }),
+              let result = sync(for: pair).undoableResult, result != before else { return }
+        windowSyncSerial += 1
+        windowSync = WindowSync(pairID: pairID, result: result, serial: windowSyncSerial)
+    }
+
+    func syncSelected() async {
+        guard let selectedPairID else { return }
+        await syncInWindow(selectedPairID)
+    }
+
+    func previewSelected() async {
+        guard let selectedSync, selectedSync.canStart else { return }
+        await selectedSync.preview()
+    }
+
+    func stopSelected() async {
+        guard let selectedSync, selectedSync.canCancel else { return }
+        await selectedSync.cancel()
+    }
 
     func syncPair(id: String) async {
         guard let pair = pairs.first(where: { $0.id == id }) else { return }
@@ -287,24 +520,24 @@ final class MainViewModel {
         }
     }
 
+    private var agentConnected: Bool {
+        if case .connected = agent.connection { return true }
+        return false
+    }
+
     func sync(for pair: SyncPair) -> PairSyncViewModel {
-        var connected = false
-        if case .connected = agent.connection { connected = true }
-        return PairSyncViewModel(pair: pair, store: syncStore, pairs: pairStore, agentConnected: connected)
+        PairSyncViewModel(pair: pair, store: syncStore, pairs: pairStore, agentConnected: agentConnected)
     }
 
-    func archive(for pair: SyncPair) -> ArchiveViewModel {
-        var connected = false
-        if case .connected = agent.connection { connected = true }
-        return ArchiveViewModel(pair: pair, store: archiveStore, agentConnected: connected)
-    }
+    /// A store for one archive window, so windows browse independently.
+    func makeArchiveStore() -> ArchiveStore { archiveStore.sibling() }
 
-    func openArchive() {
-        guard let selectedPair else { return }
-        archivePair = selectedPair
+    /// The archive browser for the pair with `pairID`; nil once the pair
+    /// is gone.
+    func archive(for pairID: String, store: ArchiveStore) -> ArchiveViewModel? {
+        guard let pair = pairStore.pairs.first(where: { $0.id == pairID }) else { return nil }
+        return ArchiveViewModel(pair: pair, store: store, agentConnected: agentConnected)
     }
-
-    func dismissArchive() { archivePair = nil }
 
     /// Shown instead of an empty detail until the first pair exists.
     var showsSetup: Bool { selectedPair == nil && pairs.isEmpty && !pairStore.isLoading }
@@ -314,7 +547,7 @@ final class MainViewModel {
         let agentStep = SetupStep(
             id: 1, title: String(localized: "Turn on the background agent"),
             detail: agentNeedsApproval
-                ? String(localized: "Allow Foldover in System Settings › General › Login Items, then refresh.")
+                ? String(localized: "Allow Foldover in System Settings › General › Login Items. Foldover connects once it is allowed.")
                 : String(localized: "It syncs your folders even when this window is closed."),
             progress: connected ? .done : .current,
             action: connected ? nil : (agentNeedsApproval ? .openLoginItems : .enableAgent)

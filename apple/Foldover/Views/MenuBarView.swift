@@ -1,5 +1,6 @@
 // The menu-bar surface (PLAN.md §3.8): every pair's status with a way to
-// sync it, Sync All, the main window, and Quit.
+// sync it, Sync All, automatic-sync controls, the main window, Settings
+// and Quit.
 
 import AppKit
 import SwiftUI
@@ -9,65 +10,143 @@ struct MenuBarView: View {
     let viewModel: MainViewModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(viewModel.statusLine)
-                .font(.headline)
+        let rows = viewModel.pairRows
+        VStack(alignment: .leading, spacing: 8) {
+            header
 
-            ForEach(viewModel.menuRows) { row in
-                HStack {
-                    VStack(alignment: .leading) {
-                        Text(row.name).lineLimit(1)
-                        Text(row.status).font(.caption).foregroundStyle(.secondary)
+            if !rows.isEmpty {
+                Divider()
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(rows) { row in
+                        pairRow(row)
                     }
-                    .accessibilityElement(children: .combine)
-                    Spacer()
-                    Button("Sync") { Task { await viewModel.syncPair(id: row.id) } }
-                        .disabled(!row.canSync)
-                        .accessibilityLabel("Sync \(row.name)")
                 }
-            }
-
-            if !viewModel.menuRows.isEmpty {
-                Button("Sync All") { Task { await viewModel.syncAll() } }
+                Divider()
+                Button { Task { await viewModel.syncAll() } } label: { rowLabel("Sync All") }
                     .disabled(!viewModel.canSyncAll)
             }
 
-            if let pause = viewModel.pauseText {
-                Text(pause).font(.caption)
-                Button("Resume Automatic Syncs") { Task { await viewModel.resume() } }
-            } else {
-                if let hold = viewModel.holdText {
-                    Text(hold).font(.caption)
-                }
-                Menu("Pause Automatic Syncs") {
-                    ForEach(PauseLength.allCases, id: \.self) { length in
-                        Button(MainViewModel.title(length)) { Task { await viewModel.pause(length) } }
-                    }
-                }
-            }
+            automaticSyncs
 
             if let error = viewModel.operationError {
-                Text(error).font(.caption).foregroundStyle(.red)
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-
-            Text(viewModel.agentStatusText)
-                .font(.caption)
-                .foregroundStyle(.secondary)
 
             Divider()
 
-            // The window's "main" id; if a window is already open
-            // it is brought forward instead.
-            Button("Open Foldover") {
-                openWindow(id: "main")
+            Button { openMainWindow() } label: { rowLabel("Open Foldover") }
+            SettingsLink { rowLabel("Settings…") }
+            Button { NSApplication.shared.terminate(nil) } label: { rowLabel("Quit Foldover") }
+                .keyboardShortcut("q")
+        }
+        // Rows like a menu's: no bezels, spanning the width.
+        .buttonStyle(.borderless)
+        .padding(12)
+        .frame(width: 300)
+    }
+
+    /// The menu bar symbol, the catalog and the background agent.
+    private var header: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: viewModel.menuBarSymbol)
+                .font(.title2)
+                .foregroundStyle(.tint)
+                .frame(width: 24)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(viewModel.statusLine)
+                    .font(.headline)
+                Text(viewModel.agentStatusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.updatesFrequently)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    /// The pair's name and status open it in the main window; the
+    /// trailing button syncs it from here.
+    private func pairRow(_ row: PairRow) -> some View {
+        HStack(spacing: 8) {
+            Button { openMainWindow(selecting: row.id) } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: row.symbol)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 18)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(row.name)
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        Text(row.status)
+                            .font(.caption)
+                            .foregroundStyle(row.activity == .attention ? Color.orange : Color.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .help("Show \(row.name) in Foldover")
+
+            if row.activity == .working {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Working")
             }
 
-            Button("Quit Foldover") {
-                NSApplication.shared.terminate(nil)
+            Button("Sync \(row.name)", systemImage: "arrow.triangle.2.circlepath") {
+                Task { await viewModel.syncPair(id: row.id) }
             }
-            .keyboardShortcut("q")
+            .labelStyle(.iconOnly)
+            .disabled(!row.canSync)
+            .help("Sync \(row.name)")
         }
-        .padding()
-        .frame(width: 280)
+    }
+
+    /// Pause or resume automatic syncs, with what holds them.
+    @ViewBuilder
+    private var automaticSyncs: some View {
+        if let pause = viewModel.pauseText {
+            note(pause)
+            Button { Task { await viewModel.resume() } } label: { rowLabel("Resume Automatic Syncs") }
+        } else {
+            if let hold = viewModel.holdText {
+                note(hold)
+            }
+            Menu("Pause Automatic Syncs") {
+                ForEach(PauseLength.allCases, id: \.self) { length in
+                    Button(MainViewModel.title(length)) { Task { await viewModel.pause(length) } }
+                }
+            }
+            .menuStyle(.button)
+            .fixedSize()
+        }
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func rowLabel(_ title: LocalizedStringKey) -> some View {
+        Text(title)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+    }
+
+    /// Bring the main window forward, showing `pairID` when given. The
+    /// extra does not activate the app by itself.
+    private func openMainWindow(selecting pairID: String? = nil) {
+        if let pairID { viewModel.selectedPairID = pairID }
+        openWindow(id: "main")
+        NSApplication.shared.activate()
     }
 }

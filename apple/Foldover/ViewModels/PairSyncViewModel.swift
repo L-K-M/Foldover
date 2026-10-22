@@ -8,6 +8,16 @@ struct ReviewContext: Equatable, Sendable {
     let pairRevision: UInt64
 }
 
+/// How a change row's symbol is tinted: by what the change does.
+enum ChangeTone: Equatable, Sendable {
+    case copy
+    case update
+    case archive
+    case conflict
+    case neutral
+    case failure
+}
+
 /// One planned or failed change, ready to render.
 struct ChangeRow: Identifiable, Equatable {
     let id: Int
@@ -31,6 +41,26 @@ struct ChangeRow: Identifiable, Equatable {
     var review: ReviewContext?
     /// The file Quick Look shows for this change, if it is on this Mac.
     var look: URL?
+    /// What the change does, as an SF Symbol name.
+    var symbol = "circle"
+    var tone: ChangeTone = .neutral
+    /// `description` without the size.
+    var actionText = ""
+    /// The data a copy moves; empty when there is none.
+    var sizeText = ""
+}
+
+/// What the content area shows instead of an empty table.
+struct PairPlaceholder: Equatable {
+    let title: String
+    let symbol: String
+    let message: String
+    let action: PlaceholderAction?
+}
+
+/// The button a placeholder offers.
+enum PlaceholderAction: Equatable, Sendable {
+    case preview
 }
 
 /// One finished run, ready to render.
@@ -109,16 +139,100 @@ struct PairSyncViewModel {
     /// Undo can reverse while the agent still holds its journal; metadata
     /// updates alone cannot be undone. A Backup target that keeps nothing
     /// has no archive to put files back from.
-    var canUndo: Bool {
-        guard canStart, pair.settings.options.records == .both,
-              case .finished(let result) = state else { return false }
-        return result.copied + result.archived > 0
+    var canUndo: Bool { canStart && undoableResult != nil }
+
+    /// The shown sync's result while Undo could reverse it, however busy
+    /// the pair or the agent connection is right now.
+    var undoableResult: RunSummary? {
+        guard pair.settings.options.records == .both,
+              case .finished(let result) = state,
+              result.copied + result.archived > 0 else { return nil }
+        return result
     }
     var canCancel: Bool {
         if case .working(_, let cancelling, _) = state { return !cancelling }
         return false
     }
     var requestError: String? { store.requestError(for: pair.id) }
+
+    /// How the pair reads at a glance in the sidebar and the menu bar.
+    var activity: PairActivity {
+        if isWorking || isResolving { return .working }
+        switch state {
+        case .idle, .working:
+            return .idle
+        case .waiting:
+            return .waiting
+        case .failed:
+            return .attention
+        case .needsApproval:
+            return reviewable == nil ? .idle : .attention
+        case .previewed(let preview):
+            return reviewable != nil && preview.conflicts > 0 ? .attention : .idle
+        case .finished(let result):
+            return result.conflicts > 0 || result.failureCount > 0 ? .attention : .idle
+        case .undone(let result):
+            return result.notUndoneCount > 0 ? .attention : .idle
+        }
+    }
+
+    /// Conflicts waiting for a decision: the shown preview's, or those
+    /// the last sync left.
+    var conflictCount: Int {
+        if let preview = reviewable { return Int(clamping: preview.conflicts) }
+        if case .finished(let result) = state { return Int(clamping: result.conflicts) }
+        return 0
+    }
+
+    /// What the content area shows instead of an empty table; nil while
+    /// a job works or when rows are listed.
+    var placeholder: PairPlaceholder? {
+        guard !isWorking, !isResolving, listedRows.isEmpty else { return nil }
+        switch state {
+        case .idle:
+            return PairPlaceholder(title: String(localized: "No Preview Yet"), symbol: "eye",
+                                   message: statusText, action: .preview)
+        case .previewed(let preview), .needsApproval(let preview):
+            guard reviewable != nil else {
+                return PairPlaceholder(title: String(localized: "Preview Is Out of Date"),
+                                       symbol: "clock.arrow.circlepath", message: statusText,
+                                       action: .preview)
+            }
+            if preview.total == 0 {
+                return PairPlaceholder(title: String(localized: "Folders Are in Sync"),
+                                       symbol: "checkmark.circle",
+                                       message: String(localized: "Nothing needs to change."), action: nil)
+            }
+            // A kind filter that matches none of the plan's changes.
+            return PairPlaceholder(
+                title: String(localized: "No Matching Changes"),
+                symbol: "line.3.horizontal.decrease.circle",
+                message: changeFilter == nil
+                    ? statusText : String(localized: "Choose All to list every change in this preview."),
+                action: nil)
+        case .finished(let result) where result.cancelled:
+            return PairPlaceholder(title: String(localized: "Sync Cancelled"), symbol: "xmark.circle",
+                                   message: statusText, action: .preview)
+        case .finished(let result):
+            let clean = result.conflicts == 0 && result.failureCount == 0
+            return PairPlaceholder(title: String(localized: "Sync Finished"),
+                                   symbol: clean ? "checkmark.circle" : "exclamationmark.triangle",
+                                   message: statusText, action: .preview)
+        case .undone:
+            return PairPlaceholder(title: String(localized: "Sync Undone"),
+                                   symbol: "arrow.uturn.backward.circle", message: statusText,
+                                   action: .preview)
+        case .failed:
+            return PairPlaceholder(title: String(localized: "Sync Stopped"),
+                                   symbol: "exclamationmark.octagon", message: statusText,
+                                   action: .preview)
+        case .waiting(let side):
+            return PairPlaceholder(title: String(localized: "\(Self.folderName(side)) Isn't Connected"),
+                                   symbol: "externaldrive.badge.xmark", message: statusText, action: nil)
+        case .working:
+            return nil
+        }
+    }
 
     /// One or two words for the menu bar.
     var shortStatus: String {
@@ -295,7 +409,11 @@ struct PairSyncViewModel {
                               otherWay: Self.otherWay(change.action),
                               otherWayTitle: Self.otherWayTitle(change.action),
                               review: review,
-                              look: Self.lookURL(change, settings: pair.settings))
+                              look: Self.lookURL(change, settings: pair.settings),
+                              symbol: Self.symbol(change.action),
+                              tone: Self.tone(change.action),
+                              actionText: Self.actionText(change),
+                              sizeText: change.bytes > 0 ? Self.byteText(change.bytes) : "")
                 }
         }
         let failures: [RunFailure] = switch state {
@@ -305,7 +423,8 @@ struct PairSyncViewModel {
         }
         return failures.enumerated().map { index, failure in
             ChangeRow(id: index, path: Self.pathText(failure.path), description: failure.message,
-                      resolvable: nil)
+                      resolvable: nil, symbol: "xmark.octagon.fill", tone: .failure,
+                      actionText: failure.message)
         }
     }
 
@@ -488,6 +607,12 @@ struct PairSyncViewModel {
         await store.preview(pair.id)
     }
 
+    /// Show the row's file in Finder, when it is on this Mac.
+    func reveal(_ row: ChangeRow) {
+        guard let look = row.look else { return }
+        pairs.reveal([look])
+    }
+
     /// Keep both versions; Folder B's is saved beside the item.
     func keepBoth(for row: ChangeRow) async {
         guard row.keepsBoth, let path = row.resolvable, let review = row.review else { return }
@@ -587,11 +712,39 @@ struct PairSyncViewModel {
     }
 
     static func description(_ change: PlannedChange) -> String {
-        var action = description(change.action)
-        if let from = change.movedFrom {
-            action = String(localized: "\(action) from \(String(decoding: from, as: UTF8.self))")
-        }
+        let action = actionText(change)
         return change.bytes > 0 ? "\(action) · \(byteText(change.bytes))" : action
+    }
+
+    /// What a change does, without its size.
+    static func actionText(_ change: PlannedChange) -> String {
+        let action = description(change.action)
+        guard let from = change.movedFrom else { return action }
+        return String(localized: "\(action) from \(String(decoding: from, as: UTF8.self))")
+    }
+
+    /// The SF Symbol for a change: its direction, or its kind.
+    static func symbol(_ action: ChangeAction) -> String {
+        switch action {
+        case .copy(let to): to == .b ? "arrow.right" : "arrow.left"
+        case .update: "tag"
+        case .archive: "archivebox"
+        case .conflict: "exclamationmark.triangle.fill"
+        case .blocked: "hourglass"
+        case .keep: "equal.circle"
+        case .move: "arrow.turn.up.right"
+        }
+    }
+
+    /// A move carries a copy's tone: the other folder's change arrives.
+    static func tone(_ action: ChangeAction) -> ChangeTone {
+        switch action {
+        case .copy, .move: .copy
+        case .update: .update
+        case .archive: .archive
+        case .conflict: .conflict
+        case .blocked, .keep: .neutral
+        }
     }
 
     static func byteText(_ bytes: UInt64) -> String {

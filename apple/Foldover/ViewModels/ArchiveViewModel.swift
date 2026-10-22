@@ -19,6 +19,9 @@ struct ArchiveViewModel {
     let agentConnected: Bool
 
     var title: String { String(localized: "Archive of \(pair.settings.name)") }
+    var pairName: String { pair.settings.name }
+
+    static func sideTitle(_ side: FolderSide) -> String { PairSyncViewModel.folderName(side) }
     var explanation: String {
         String(localized: "Items a sync replaced or removed stay in each folder's archive for 30 days. Put Back returns one to where it was; if something is there now, it goes beside it with \"(restored)\" in its name. The next sync copies it to the other folder.")
     }
@@ -84,6 +87,9 @@ struct ArchiveViewModel {
         return String(localized: "Put back as \(PairSyncViewModel.pathText(placed)). The next sync copies it to the other folder.")
     }
 
+    /// What the last put-back did, for the window's status line.
+    var statusText: String? { restoreText ?? placedText }
+
     func load() async { await store.open(pair.id, side: store.side) }
     func show(_ side: FolderSide) async { await store.open(pair.id, side: side) }
     func select(_ run: String) async { await store.select(run) }
@@ -92,5 +98,14 @@ struct ArchiveViewModel {
     func putBack(_ row: ArchiveItemRow) async {
         guard let item = store.items.first(where: { $0.path == row.id }) else { return }
         await store.putBack(item)
+    }
+
+    /// Put back each row in turn, stopping at the first failure so its
+    /// error stays shown.
+    func putBack(_ rows: [ArchiveItemRow]) async {
+        for row in rows {
+            await putBack(row)
+            if store.error != nil { return }
+        }
     }
 }

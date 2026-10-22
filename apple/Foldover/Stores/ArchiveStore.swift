@@ -110,6 +110,10 @@ final class ArchiveStore {
         self.client = client
     }
 
+    /// A store on the same client with fresh state, so each archive
+    /// window browses on its own.
+    func sibling() -> ArchiveStore { ArchiveStore(client: client) }
+
     /// Show `side`'s runs and the newest run's items.
     func open(_ pairID: String, side: FolderSide) async {
         self.pairID = pairID
