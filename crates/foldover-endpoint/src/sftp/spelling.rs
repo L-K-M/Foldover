@@ -24,6 +24,10 @@ use unicode_normalization::UnicodeNormalization;
 use super::SftpEndpoint;
 use crate::ScanError;
 
+/// How many folder listings a run may hold before the cache starts
+/// over rather than grow without bound.
+const LISTED_FOLDERS: usize = 512;
+
 impl SftpEndpoint {
     /// Run `op` on where `path` is stored: as given, or in another
     /// spelling when that is missing.
@@ -95,11 +99,10 @@ impl SftpEndpoint {
             true => b"/".as_slice(),
             false => parent,
         };
-        let Ok(entries) = self.session().read_dir(parent) else {
+        let Some(names) = self.listing(parent) else {
             return stored.to_vec();
         };
         // Where both spellings are stored, as given wins.
-        let names: Vec<Vec<u8>> = entries.into_iter().map(|(name, _)| name).collect();
         if names.iter().any(|listed| listed == name) {
             return stored.to_vec();
         }
@@ -108,6 +111,180 @@ impl SftpEndpoint {
             .into_iter()
             .find(|listed| compose(listed) == composed)
             .map_or_else(|| stored.to_vec(), |listed| join(parent, &listed))
+    }
+
+    /// The names `read_dir` last showed for `parent`, or `None` when it
+    /// failed to read it. Fetched once and kept exact by the run's
+    /// mutations (`note_*`, `forget_*`), so a bulk replace in one
+    /// folder pays one listing, not one per respellable name.
+    fn listing(&self, parent: &[u8]) -> Option<Vec<Vec<u8>>> {
+        let listings = self
+            .listings
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(names) = listings.get(parent) {
+            return Some(names.clone());
+        }
+        drop(listings);
+        let names: Vec<Vec<u8>> = self
+            .session()
+            .read_dir(parent)
+            .ok()?
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        let mut listings = self
+            .listings
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        // Bounded: past this many folders the map clears rather than
+        // hold every listing the run ever read.
+        if listings.len() >= LISTED_FOLDERS {
+            listings.clear();
+        }
+        Some(listings.entry(parent.to_vec()).or_insert(names).clone())
+    }
+
+    /// `added`'s name joined its parent's cached listing.
+    pub(super) fn note_added(&self, added: &[u8]) {
+        let Some(parent) = parent_key(added) else {
+            return;
+        };
+        let mut listings = self
+            .listings
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(names) = listings.get_mut(&parent) else {
+            return;
+        };
+        let (_, name) = split(added);
+        if !names.iter().any(|listed| listed == name) {
+            names.push(name.to_vec());
+        }
+    }
+
+    /// `gone`'s name left its parent's cached listing.
+    pub(super) fn note_removed(&self, gone: &[u8]) {
+        let Some(parent) = parent_key(gone) else {
+            return;
+        };
+        let mut listings = self
+            .listings
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(names) = listings.get_mut(&parent) else {
+            return;
+        };
+        let (_, name) = split(gone);
+        names.retain(|listed| listed != name);
+    }
+
+    /// `from` moved to `to`: the name left one listing and joined the
+    /// other's.
+    pub(super) fn note_moved(&self, from: &[u8], to: &[u8]) {
+        self.note_removed(from);
+        self.note_added(to);
+    }
+
+    /// `remote` itself is gone: its name leaves the parent and its own
+    /// cached listing dies with it. For a completed removal.
+    pub(super) fn note_gone(&self, remote: &[u8]) {
+        self.note_removed(remote);
+        self.listings
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(remote);
+    }
+
+    /// `remote` and everything under it is gone. For a completed
+    /// subtree removal.
+    pub(super) fn note_gone_tree(&self, remote: &[u8]) {
+        self.note_removed(remote);
+        let below = [remote, b"/"].concat();
+        self.listings
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .retain(|folder, _| folder.as_slice() != remote && !folder.starts_with(&below));
+    }
+
+    /// `remote`'s parent may not hold what the cache claims — the
+    /// version for a mutation whose outcome is unknown or half-applied,
+    /// where a surgical name edit could lie about an entry still
+    /// present.
+    pub(super) fn forget_parent(&self, remote: &[u8]) {
+        let Some(parent) = parent_key(remote) else {
+            return;
+        };
+        self.listings
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&parent);
+    }
+
+    /// Every view `remote`'s removal could have touched: its parent's,
+    /// its own and every folder's below it. For a removal that may have
+    /// stopped partway.
+    pub(super) fn forget_tree(&self, remote: &[u8]) {
+        let below = [remote, b"/"].concat();
+        let mut listings = self
+            .listings
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(parent) = parent_key(remote) {
+            listings.remove(&parent);
+        }
+        listings.retain(|folder, _| folder.as_slice() != remote && !folder.starts_with(&below));
+    }
+
+    /// Rename `from` to `to` over `session`, keeping the run's folder
+    /// views exact. A failed rename changed nothing, so views stay.
+    pub(super) fn renamed_on(
+        &self,
+        session: &mut Session,
+        from: &[u8],
+        to: &[u8],
+    ) -> io::Result<()> {
+        let moved = session.rename(from, to);
+        if moved.is_ok() {
+            self.note_moved(from, to);
+        }
+        moved
+    }
+
+    /// `renamed_on` on a pooled session.
+    pub(super) fn renamed(&self, from: &[u8], to: &[u8]) -> io::Result<()> {
+        self.renamed_on(&mut self.session(), from, to)
+    }
+
+    /// Rename over the target if it exists, likewise tracked.
+    pub(super) fn rename_replacing_on(
+        &self,
+        session: &mut Session,
+        from: &[u8],
+        to: &[u8],
+    ) -> io::Result<()> {
+        let moved = session.rename_replacing(from, to);
+        if moved.is_ok() {
+            self.note_moved(from, to);
+        }
+        moved
+    }
+
+    /// Remove the file `remote` over `session`: its name leaves the
+    /// parent's listing, and a failure drops the parent's view since
+    /// the entry may remain.
+    pub(super) fn removed_file_on(&self, session: &mut Session, remote: &[u8]) -> io::Result<()> {
+        let removed = session.remove_file(remote);
+        match &removed {
+            Ok(()) => self.note_removed(remote),
+            Err(_) => self.forget_parent(remote),
+        }
+        removed
+    }
+
+    /// `removed_file_on` on a pooled session.
+    pub(super) fn removed_file(&self, remote: &[u8]) -> io::Result<()> {
+        self.removed_file_on(&mut self.session(), remote)
     }
 
     /// Folder path `path` as folders made for it are named: components
@@ -222,6 +399,15 @@ fn spellings(component: &[u8]) -> Vec<Vec<u8>> {
         }
     }
     spellings
+}
+
+/// `remote`'s parent's cache key, `/` when it has none.
+fn parent_key(remote: &[u8]) -> Option<Vec<u8>> {
+    let (parent, _) = split(remote);
+    parent.map(|parent| match parent.is_empty() {
+        true => b"/".to_vec(),
+        false => parent.to_vec(),
+    })
 }
 
 fn split(path: &[u8]) -> (Option<&[u8]>, &[u8]) {
