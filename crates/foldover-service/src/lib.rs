@@ -436,7 +436,9 @@ async fn browse(params: EndpointBrowse) -> Result<Value, RpcError> {
     // that many are still going.
     const MAX_ROOTS: usize = 256;
     let browses = {
-        let mut browses_by_root = BROWSES.lock().unwrap();
+        let mut browses_by_root = BROWSES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(slot) = browses_by_root.get(&params.root) {
             slot.clone()
         } else {
