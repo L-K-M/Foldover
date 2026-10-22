@@ -414,6 +414,10 @@ fn parameters<T: DeserializeOwned>(request: &Request) -> Result<T, RpcError> {
 static BROWSES: LazyLock<Mutex<std::collections::HashMap<Vec<u8>, Arc<tokio::sync::Semaphore>>>> =
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
+/// Browses at once against one root; the map's reaping keeps a slot
+/// while any of this many permits is still out.
+const MAX_BROWSES_PER_ROOT: usize = 4;
+
 /// The folders in a folder on an SFTP server. Connecting can take
 /// seconds, so it waits off the runtime; it never touches the engine's
 /// state, so other requests go on.
@@ -440,8 +444,9 @@ async fn browse(params: EndpointBrowse) -> Result<Value, RpcError> {
                 // A permit an abandoned browse still holds pins its
                 // semaphore; reaping would mint four fresh permits for
                 // the same black-holed root on the next browse.
-                browses_by_root
-                    .retain(|_, slot| Arc::strong_count(slot) > 1 || slot.available_permits() < 4);
+                browses_by_root.retain(|_, slot| {
+                    Arc::strong_count(slot) > 1 || slot.available_permits() < MAX_BROWSES_PER_ROOT
+                });
                 if browses_by_root.len() >= MAX_ROOTS {
                     return Err(RpcError::new(
                         INTERNAL_ERROR,
@@ -449,7 +454,7 @@ async fn browse(params: EndpointBrowse) -> Result<Value, RpcError> {
                     ));
                 }
             }
-            let slot = Arc::new(tokio::sync::Semaphore::new(4));
+            let slot = Arc::new(tokio::sync::Semaphore::new(MAX_BROWSES_PER_ROOT));
             browses_by_root.insert(params.root, slot.clone());
             slot
         }

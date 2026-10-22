@@ -118,7 +118,9 @@ impl Sessions {
                     }
                 }
             }
-            pool = if pool.limit < pool.wanted {
+            // A timed wait only pays off with a connect to probe for
+            // the pool's recovery; without one it is pure polling.
+            pool = if connect.is_some() && pool.limit < pool.wanted {
                 self.wait_for(pool, RETRY)
             } else {
                 self.wait(pool)
