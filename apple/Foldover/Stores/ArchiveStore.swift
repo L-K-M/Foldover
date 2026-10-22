@@ -100,7 +100,8 @@ final class ArchiveStore {
     /// How many items the last put-back batch returned; `placed` is the
     /// last one's new place.
     private(set) var placedCount = 0
-    /// A put-back batch is under way; another waits until it ends.
+    /// A put-back batch is under way. Another call returns at once
+    /// rather than queueing; the view model disables Put Back meanwhile.
     private(set) var isPuttingBack = false
     /// What the last whole-run put-back did.
     private(set) var restore: RunRestore?

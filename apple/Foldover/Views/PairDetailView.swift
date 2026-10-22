@@ -161,7 +161,7 @@ struct PairDetailView: View {
             }
             if let card = sync.completionCard {
                 if card.conflicts > 0 {
-                    Button("Review \(card.conflicts) Conflicts") {
+                    Button(card.conflicts == 1 ? "Review 1 Conflict" : "Review \(card.conflicts) Conflicts") {
                         Task { await sync.reviewConflicts() }
                     }
                     .disabled(!sync.canStart)

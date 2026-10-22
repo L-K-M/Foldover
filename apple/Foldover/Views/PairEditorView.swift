@@ -11,6 +11,8 @@ struct PairEditorView: View {
     @State private var choosingFolder = false
     @State private var enteringServer: PairFolderSide?
     @State private var choosingOtherMac: PairFolderSide?
+    /// The folder row a drag is over, highlighted to take the drop.
+    @State private var dropTarget: PairFolderSide?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -51,7 +53,7 @@ struct PairEditorView: View {
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 24)
+        .padding(.horizontal, 20)
         .padding(.top, 20)
         .padding(.bottom, 4)
     }
@@ -107,8 +109,23 @@ struct PairEditorView: View {
             Spacer(minLength: 8)
             chooseMenu(side, folderName: name)
         }
+        .background {
+            if dropTarget == side {
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(Color.accentColor, lineWidth: 2)
+                    .background(Color.accentColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+                    .padding(-6)
+            }
+        }
         .dropDestination(for: URL.self) { urls, _ in
             viewModel.chooseDropped(urls, side: side)
+        } isTargeted: { targeted in
+            // A drag leaving one row must not clear the other's highlight.
+            if targeted {
+                dropTarget = side
+            } else if dropTarget == side {
+                dropTarget = nil
+            }
         }
     }
 
@@ -325,7 +342,8 @@ struct PairEditorView: View {
                 .disabled(!viewModel.canSave)
             }
         }
-        .padding(16)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
     }
 }
 
@@ -464,8 +482,8 @@ private struct OtherMacFolderPicker: View {
         // folders never show under another Mac.
         .task(id: mac) {
             selection = nil
+            folders = []
             guard let mac else {
-                folders = []
                 loading = false
                 return
             }
