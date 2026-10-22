@@ -957,6 +957,72 @@ fn a_replaced_entry_keeps_the_spelling_its_folder_lists() {
     assert_eq!(sftp.listed(&stored), stored);
 }
 
+/// A renamed folder keeps its children on the server, so listings the
+/// run cached under its old path must not answer for names that moved
+/// with it.
+#[test]
+fn a_renamed_folder_drops_its_cached_listing() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(sftp) = sftp(directory.path()) else {
+        return;
+    };
+    let (decomposed, composed) = ("cafe\u{301}.txt", "caf\u{e9}.txt");
+    fs::create_dir(directory.path().join("old")).unwrap();
+    fs::write(directory.path().join("old").join(composed), b"x").unwrap();
+
+    // Fill the cache: the decomposed ask resolves through old/'s listing.
+    let asked_old = sftp.remote(format!("old/{decomposed}").as_bytes());
+    let stored_old = sftp.remote(format!("old/{composed}").as_bytes());
+    assert_eq!(sftp.listed(&asked_old), stored_old);
+
+    sftp.renamed(&sftp.remote(b"old"), &sftp.remote(b"new"))
+        .unwrap();
+
+    // The old path is gone: its cached names must not answer for it.
+    assert_eq!(sftp.listed(&asked_old), asked_old);
+    // The new path resolves freshly.
+    let asked_new = sftp.remote(format!("new/{decomposed}").as_bytes());
+    let stored_new = sftp.remote(format!("new/{composed}").as_bytes());
+    assert_eq!(sftp.listed(&asked_new), stored_new);
+}
+
+/// Renaming over an existing folder destroys its whole tree, so views
+/// cached under the target must not serve its old children.
+#[test]
+fn a_replacing_rename_drops_the_targets_cached_listings() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(sftp) = sftp(directory.path()) else {
+        return;
+    };
+    let (decomposed, composed) = ("cafe\u{301}.txt", "caf\u{e9}.txt");
+    fs::create_dir(directory.path().join("newer")).unwrap();
+    fs::create_dir(directory.path().join("victim")).unwrap();
+    fs::write(directory.path().join("victim").join(composed), b"old").unwrap();
+
+    // Fill the cache: resolve the decomposed ask inside `victim`.
+    let asked = sftp.remote(format!("victim/{decomposed}").as_bytes());
+    let stored = sftp.remote(format!("victim/{composed}").as_bytes());
+    assert_eq!(sftp.listed(&asked), stored);
+
+    // POSIX rename only replaces an *empty* directory, so vacate
+    // `victim` behind the cache's back — the cached view still holds
+    // the child, which is exactly the stale entry `mark_under` drops.
+    fs::remove_file(directory.path().join("victim").join(composed)).unwrap();
+
+    if sftp
+        .rename_replacing(&sftp.remote(b"newer"), &sftp.remote(b"victim"))
+        .is_err()
+    {
+        // The server lacks posix-rename; the path is untested.
+        return;
+    }
+
+    // victim/ holds newer/'s tree now — empty. The cached child must
+    // not answer.
+    assert_eq!(sftp.listed(&asked), asked);
+    assert_eq!(sftp.listed(&stored), stored);
+}
+
 /// `Durability::Full` cannot be promised over SFTP at all: namespace
 /// changes have no protocol flush. Every mutating entry point must
 /// reject it before touching the server, whatever the server offers.
