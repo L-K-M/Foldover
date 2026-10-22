@@ -42,8 +42,8 @@ struct Stream {
     runtime: Handle,
     send: PeerSendStream,
     recv: PeerRecvStream,
-    /// For an answer, whether its link is going away; a call gives up
-    /// then.
+    /// Whether its link is going away; an answer and a call both give
+    /// up then.
     closing: Option<watch::Receiver<bool>>,
 }
 
@@ -97,12 +97,17 @@ fn until_closing<T>(
 pub struct Exchange(Stream);
 
 impl Exchange {
-    pub(super) fn new(runtime: Handle, send: PeerSendStream, recv: PeerRecvStream) -> Self {
+    pub(super) fn new(
+        runtime: Handle,
+        send: PeerSendStream,
+        recv: PeerRecvStream,
+        closing: watch::Receiver<bool>,
+    ) -> Self {
         Self(Stream {
             runtime,
             send,
             recv,
-            closing: None,
+            closing: Some(closing),
         })
     }
 

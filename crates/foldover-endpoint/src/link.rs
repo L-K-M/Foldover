@@ -448,7 +448,12 @@ impl PeerLink {
             call,
         };
         let (send, recv) = self.runtime.block_on(self.open(device, &request))?;
-        Ok(Exchange::new(self.runtime.clone(), send, recv))
+        Ok(Exchange::new(
+            self.runtime.clone(),
+            send,
+            recv,
+            self.closing.subscribe(),
+        ))
     }
 
     /// Keep `call`, a request answered with reports, open to `device`:
