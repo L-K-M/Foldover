@@ -11,6 +11,9 @@ All notable changes to this project are documented here. The format follows
 - Check for Updates… and the check the app makes when it opens now ask
   GitHub for the newest release and link to its download page instead of
   updating in place; the Sparkle updater and its signing keys are gone.
+  A beta install hears about the next beta — and the stable release that
+  ends the line — while a stable install is only ever told about stable
+  releases.
 
 - Time Machine no longer backs up Foldover's state on this Mac: a
   restored, older state could carry stale deletions over. A Mac set up

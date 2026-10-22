@@ -28,7 +28,8 @@ jobs:
       - name: Check the version
         run: |
           version="${GITHUB_REF_NAME#v}"
-          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          shape='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          [[ "$version" =~ $shape ]]
           # The release engine writes the version unquoted.
           grep -Ex "    MARKETING_VERSION: \"?${version//./\\.}\"?" apple/project.yml
           grep -Fx "version = \"$version\"" Cargo.toml
@@ -54,6 +55,11 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/release-notes.py "$VERSION" > "$RUNNER_TEMP/notes.md" &&
-          gh release create "$GITHUB_REF_NAME" "$RUNNER_TEMP/Foldover-$VERSION.zip"
-          --title "Foldover $VERSION" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag
+        run: |
+          python3 scripts/release-notes.py "$VERSION" > "$RUNNER_TEMP/notes.md"
+          flags=(--title "Foldover $VERSION" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag)
+          # A -suffix marks the tag a pre-release: `releases/latest` never
+          # names one, so stable installs stay on the redirect check while
+          # pre-release installs find them in the feed.
+          [[ "$VERSION" == *-* ]] && flags+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" "$RUNNER_TEMP/Foldover-$VERSION.zip" "${flags[@]}"

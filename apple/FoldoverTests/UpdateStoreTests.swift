@@ -98,3 +98,40 @@ func versionsCompareNumerically() {
     #expect(!UpdateStore.isNewer("beta", than: "1.1.0"))
     #expect(!UpdateStore.isNewer("1.2.3", than: ""))
 }
+
+@Test
+func preReleasesCompareAsSemver() {
+    #expect(UpdateStore.isNewer("1.0.0", than: "1.0.0-beta.9"))
+    #expect(UpdateStore.isNewer("1.0.0-beta.2", than: "1.0.0-beta.1"))
+    #expect(UpdateStore.isNewer("1.0.1-beta.1", than: "1.0.0"))
+    #expect(!UpdateStore.isNewer("1.0.0-beta.1", than: "1.0.0"))
+    #expect(!UpdateStore.isNewer("1.0.0-beta.1", than: "1.0.0-beta.1"))
+}
+
+@Test
+func onlyPreReleaseInstallsCheckThePreReleaseFeed() {
+    #expect(UpdateStore.checksPrereleases(installed: "1.0.0-beta.1"))
+    #expect(UpdateStore.checksPrereleases(installed: "v1.0.0-rc.2"))
+    #expect(!UpdateStore.checksPrereleases(installed: "1.0.0"))
+    #expect(!UpdateStore.checksPrereleases(installed: "dev-build"))
+}
+
+@MainActor
+@Test
+func aPreReleaseInstallSeesTheNextBeta() async {
+    let recorder = Recorder()
+    let store = store(
+        returning: release("1.0.0-beta.2"), installed: "1.0.0-beta.1", recorder: recorder)
+    await store.checkForUpdates()
+    #expect(recorder.outcomes == [.available(release("1.0.0-beta.2"))])
+}
+
+@MainActor
+@Test
+func aPreReleaseInstallSeesTheStableItPreceded() async {
+    let recorder = Recorder()
+    let store = store(
+        returning: release("1.0.0"), installed: "1.0.0-beta.9", recorder: recorder)
+    await store.checkForUpdates()
+    #expect(recorder.outcomes == [.available(release("1.0.0"))])
+}

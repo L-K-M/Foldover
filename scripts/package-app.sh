@@ -29,10 +29,11 @@ test "$(lipo -archs "$app/Contents/MacOS/Foldover")" = "$ARCHITECTURE"
 test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")" = "$MINIMUM_SYSTEM"
 # The update check compares this version against release tags; anything
 # else can never be compared, so every check would report failure
-# instead of a real answer (ADR 0045).
+# instead of a real answer (ADR 0045). The optional -suffix carries
+# pre-releases.
 version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
-if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-  echo "error: CFBundleShortVersionString '$version' is not X.Y.Z; the update check could never compare it" >&2
+if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'; then
+  echo "error: CFBundleShortVersionString '$version' is not X.Y.Z(-suffix); the update check could never compare it" >&2
   exit 1
 fi
 codesign --verify --deep --strict --verbose=2 "$app"

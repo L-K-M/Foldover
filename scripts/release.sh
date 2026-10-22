@@ -22,8 +22,10 @@ export RELEASE_INVOKED_AS="scripts/release.sh"
 export RELEASE_CI_NOTE="Pushing <tag> runs .github/workflows/release.yml, which publishes the ad-hoc-signed app zip as a GitHub release."
 export RELEASE_POST_BUMP="scripts/sync-cargo-version.sh"
 # Cargo needs all three components, so X.Y (which the xcode kind would
-# accept) is rejected up front instead of failing inside cargo.
-export RELEASE_VERSION_REGEX='^[0-9]+\.[0-9]+\.[0-9]+$'
+# accept) is rejected up front instead of failing inside cargo. The
+# optional -suffix carries pre-releases (semver order), which the
+# pipeline publishes as GitHub pre-releases.
+export RELEASE_VERSION_REGEX='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
 
 # Flag-only calls (--help, --version, --capabilities) touch nothing,
 # so they skip the project preparation below.
