@@ -4,9 +4,11 @@ name: ui-tour
 # on canned agent answers, walks its windows, menus and sheets with the
 # keyboard and mouse, and uploads a screenshot of every stop in light
 # and dark appearance as the `ui-tour` artifact.
+#
+# Pull requests that touch the app run it; it is not part of the ci
+# gate, since screenshots need a person to look at them.
 on:
-  push:
-    branches: [claude/macos-native-design-polish-91obbi]
+  pull_request:
     paths:
       - "apple/**"
       - ".github/workflows/ui-tour.yml"
