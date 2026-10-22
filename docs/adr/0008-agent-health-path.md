@@ -61,9 +61,29 @@ confirms a live app-to-agent health connection on the tested Mac. It does
 not establish clean-install approval behavior, login/restart persistence,
 file-access permissions or a sync workflow.
 
+### Crash-loop safe mode
+
+PLAN.md §4.2: an agent that keeps crashing, say on a file that crashes
+every run reading it, would restart into the same crash for ever. A
+`running` marker beside the state database is written at each start and
+removed on a clean stop (SIGTERM or Ctrl-C); a start that finds it records
+an unclean stop in `unclean-stops`. Three such starts within five minutes
+start safe mode: no scheduled runs, and previews, runs, undo, conflict
+choices and Put back are refused with `SAFE_MODE`; folders shared with
+other Macs are not served either, as their syncs may be what crashes the
+agent. The agent hears SIGTERM before it starts anything slow and clears
+the marker without waiting for the engine, so neither a stop during
+start-up nor a busy engine at shutdown counts as a crash. Recording a
+start never blocks it: a marker that cannot be read or written leaves
+the agent running outside safe mode, with a log line. `daemon.status`, which
+needs no authentication, reports `safe_mode` with the count, so the app
+shows a banner and posts one notification; `daemon.resume` (and
+`foldover safe-mode off`) forgets the stops and syncs again. The agent
+smoke test kills the agent three times and checks both.
+
 ## Remaining gates
 
-Clean-Mac registration/approval, TCC attribution, update/downgrade, crash-loop
-safe mode, native state-error guidance, privileged method/root scope,
+Clean-Mac registration/approval, TCC attribution, update/downgrade,
+native state-error guidance, privileged method/root scope,
 subscriptions, reconnect and all sync operations remain required. Packaging
 or health success does not close S6, S7, P2 or P3.

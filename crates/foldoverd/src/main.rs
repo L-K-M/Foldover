@@ -39,6 +39,10 @@ async fn main() -> ExitCode {
 }
 
 async fn run(location: foldover_ipc::SocketLocation) -> Result<(), Box<dyn std::error::Error>> {
+    // Hear a stop before starting anything slow, so one that comes while
+    // the agent starts still ends cleanly instead of counting as a crash.
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let listener = foldover_ipc::bind(&location)?;
     let service = foldover_service::Service::open()?;
     service.start_scheduler();
@@ -46,15 +50,18 @@ async fn run(location: foldover_ipc::SocketLocation) -> Result<(), Box<dyn std::
     if let Err(error) = service.start_peers().await {
         eprintln!("foldoverd: Mac-to-Mac is unavailable: {}", error.message());
     }
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let serving = service.clone();
     tokio::select! {
         result = foldover_ipc::serve(listener, move |request| {
-            let service = service.clone();
+            let service = serving.clone();
             async move { service.handle(request).await }
         }) => result?,
-        signal = tokio::signal::ctrl_c() => signal?,
+        _ = interrupt.recv() => (),
         _ = terminate.recv() => (),
     }
+    // A stop that gets here is clean; the next start must not count it
+    // toward crash-loop safe mode.
+    service.note_clean_stop()?;
     Ok(())
 }
 

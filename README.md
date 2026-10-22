@@ -143,6 +143,7 @@ foldover sync ID --skip PATH --review TOKEN        # leave a reviewed change for
 foldover sync ID --undo          # undo the newest sync that changed anything
 foldover history ID              # finished runs, newest first
 foldover pause [MINUTES]         # hold automatic syncs; `foldover resume` ends it
+foldover safe-mode off           # sync again after the agent kept crashing
 foldover archive ID left         # archived runs in folder A, newest first
 foldover archive ID left RUN     # items one run archived
 foldover archive ID left RUN --put-back PATH

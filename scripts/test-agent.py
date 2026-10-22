@@ -53,7 +53,8 @@ def start(agent, cli, endpoint, environment):
         while time.monotonic() < deadline:
             status = invoke(cli, endpoint)
             if status.returncode == 0:
-                if "sync available" not in status.stdout:
+                if not any(state in status.stdout
+                           for state in ("sync available", "syncing paused")):
                     raise RuntimeError(f"Unexpected CLI status: {status.stdout}")
                 return child
             if child.poll() is not None:
@@ -263,6 +264,24 @@ def main():
                 if saved.returncode != 0 or json.loads(saved.stdout) != pair:
                     raise RuntimeError(f"Configuration did not survive agent crash: {saved}")
                 remove_configuration(cli, endpoint, pair)
+
+            # Two more unclean stops make three in a few minutes: the agent
+            # starts in safe mode and syncs nothing until told to.
+            for _ in range(2):
+                child.kill()
+                child.wait(timeout=COMMAND_SECONDS)
+                child.stderr.close()
+                child = start(agent, cli, endpoint, environment)
+            paused = invoke(cli, endpoint)
+            if "syncing paused after 3 unexpected stops" not in paused.stdout:
+                raise RuntimeError(f"A crash loop did not start safe mode: {paused.stdout}")
+            resumed = invoke(cli, endpoint, ("safe-mode", "off"))
+            if arguments.configuration == "denied":
+                # Resuming is private: a client the agent cannot verify is refused.
+                if resumed.returncode == 0:
+                    raise RuntimeError("An unverified client ended safe mode")
+            elif resumed.returncode != 0 or "sync available" not in resumed.stdout:
+                raise RuntimeError(f"Safe mode did not end: {resumed.stdout} {resumed.stderr}")
             child.terminate()
             if child.wait(timeout=COMMAND_SECONDS) != 0:
                 raise RuntimeError("Agent did not shut down cleanly on SIGTERM")

@@ -56,6 +56,8 @@ pub const JSON_RPC_VERSION: &str = "2.0";
 pub const PROTOCOL_VERSION: u32 = 16;
 pub const SESSION_HELLO: &str = "session.hello";
 pub const DAEMON_STATUS: &str = "daemon.status";
+/// Leave crash-loop safe mode and sync again.
+pub const DAEMON_RESUME: &str = "daemon.resume";
 pub const PARSE_ERROR: i32 = -32700;
 pub const INVALID_REQUEST: i32 = -32600;
 pub const METHOD_NOT_FOUND: i32 = -32601;
@@ -75,6 +77,8 @@ pub const PREVIEW_REQUIRED: i32 = -32008;
 pub const ARCHIVE_NOT_FOUND: i32 = -32009;
 /// Mac-to-Mac is unavailable, or the other Mac could not be reached.
 pub const PEER_UNAVAILABLE: i32 = -32010;
+/// Syncing waits in crash-loop safe mode until resumed.
+pub const SAFE_MODE: i32 = -32011;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Hello {
@@ -95,6 +99,16 @@ pub enum AgentCapability {
 pub struct DaemonStatus {
     pub core_version: String,
     pub capability: AgentCapability,
+    /// Present while syncing waits in crash-loop safe mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safe_mode: Option<SafeMode>,
+}
+
+/// The agent stopped uncleanly this often in a few minutes, so it syncs
+/// nothing until a person resumes (PLAN.md §4.2).
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SafeMode {
+    pub unclean_stops: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

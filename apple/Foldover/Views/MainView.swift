@@ -26,6 +26,13 @@ struct MainView: View {
             .safeAreaInset(edge: .bottom) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(viewModel.agentStatusText).font(.caption)
+                    if let safeMode = viewModel.safeModeText {
+                        Text(safeMode).font(.caption).foregroundStyle(.orange)
+                        Button("Resume Syncing") { Task { await viewModel.leaveSafeMode() } }
+                        if let error = viewModel.safeModeError {
+                            Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                        }
+                    }
                     Button("Enable Background Agent") { Task { await viewModel.enableAgent() } }
                     if viewModel.agentNeedsApproval {
                         Button("Open Login Items") { viewModel.openLoginItems() }

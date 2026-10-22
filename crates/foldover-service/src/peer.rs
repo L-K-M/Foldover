@@ -21,6 +21,7 @@ use foldover_types::DeviceId;
 use serde_json::Value;
 use tokio::sync::OnceCell;
 
+use crate::safe_mode::SafeMode;
 use crate::{encode, parameters};
 
 const DEFAULT_PAIRING_MINUTES: u32 = 10;
@@ -38,11 +39,12 @@ pub(crate) type Peers = Arc<OnceCell<Arc<PeerLink>>>;
 pub(crate) async fn start_if_paired(
     engine: &Arc<Mutex<Engine>>,
     peers: &Peers,
+    safe_mode: &Arc<SafeMode>,
 ) -> Result<(), RpcError> {
     if devices(engine).await?.is_empty() {
         return Ok(());
     }
-    link(engine, peers).await.map(drop)
+    link(engine, peers, safe_mode).await.map(drop)
 }
 
 /// The running link, started with this Mac's identity (the Keychain's on
@@ -50,6 +52,7 @@ pub(crate) async fn start_if_paired(
 async fn link<'a>(
     engine: &Arc<Mutex<Engine>>,
     peers: &'a Peers,
+    safe_mode: &Arc<SafeMode>,
 ) -> Result<&'a Arc<PeerLink>, RpcError> {
     peers
         .get_or_try_init(|| async {
@@ -57,7 +60,7 @@ async fn link<'a>(
                 .await
                 .map_err(|_| RpcError::new(INTERNAL_ERROR, "The peer link failed to start"))?
                 .map_err(unavailable)?;
-            open(engine, identity, LISTEN, Presence::Announced).await
+            open(engine, identity, LISTEN, Presence::Announced, safe_mode).await
         })
         .await
 }
@@ -69,6 +72,7 @@ pub(crate) async fn open(
     identity: PeerIdentity,
     address: SocketAddr,
     presence: Presence,
+    safe_mode: &Arc<SafeMode>,
 ) -> Result<Arc<PeerLink>, RpcError> {
     let paired = devices(engine).await?;
     let link = PeerLink::start(
@@ -80,6 +84,7 @@ pub(crate) async fn open(
         Arc::new(Host {
             engine: Arc::clone(engine),
             folders: FolderCache::default(),
+            safe_mode: Arc::clone(safe_mode),
         }),
     )
     .map_err(unavailable)?;
@@ -96,6 +101,9 @@ pub(crate) async fn open(
 struct Host {
     engine: Arc<Mutex<Engine>>,
     folders: FolderCache,
+    /// In safe mode this Mac's folders are not served either: the work
+    /// that keeps crashing the agent may be another Mac's sync.
+    safe_mode: Arc<SafeMode>,
 }
 
 impl PeerHost for Host {
@@ -135,6 +143,12 @@ impl PeerHost for Host {
                 };
                 let _ = answer.reply(&reply);
             }
+            PeerCall::Folder { .. } if self.safe_mode.active().is_some() => {
+                let _ = answer.reply(&refused(
+                    "That Mac paused syncing after its agent stopped unexpectedly; resume it \
+                     there",
+                ));
+            }
             PeerCall::Folder { share, op } => {
                 // Only what is shared with the asking Mac; the engine lock is
                 // released before the folder is touched.
@@ -160,6 +174,7 @@ impl PeerHost for Host {
 pub(crate) async fn handle(
     engine: &Arc<Mutex<Engine>>,
     peers: &Peers,
+    safe_mode: &Arc<SafeMode>,
     request: &Request,
 ) -> Result<Value, RpcError> {
     if request.method() == PEER_STATUS {
@@ -168,7 +183,7 @@ pub(crate) async fn handle(
             None => encode(off(engine).await?),
         };
     }
-    let link = link(engine, peers).await?;
+    let link = link(engine, peers, safe_mode).await?;
     match request.method() {
         PEER_PAIRING_OPEN => {
             let params: PeerPairingOpen = parameters(request)?;

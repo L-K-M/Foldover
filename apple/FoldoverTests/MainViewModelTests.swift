@@ -67,7 +67,7 @@ private struct FinishingSyncClient: SyncClient {
 @Test
 func shortcutsLoadPairsThenSyncAndSayWhatChanged() async {
     let viewModel = MainViewModel(
-        appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { "1.0" }),
+        appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { AgentReport(version: "1.0") }),
         pairs: PairStore(client: OnePairClient()), sync: SyncStore(client: FinishingSyncClient())
     )
     #expect(await viewModel.intentPairs() == [IntentPair(id: docsID, name: "Docs")])
@@ -84,7 +84,7 @@ func setupGuidesFromAgentToFirstPair() async {
     #expect(offline.setupSteps[0].action == .enableAgent)
 
     let empty = MainViewModel(
-        appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { "1.0" }),
+        appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { AgentReport(version: "1.0") }),
         pairs: PairStore(client: EmptyCatalogClient())
     )
     await empty.refreshAgent()
@@ -280,7 +280,7 @@ func monitorRefreshesTheAgentAndCatalogAfterTheFirstLoad() async {
     let sync = SyncProbe()
     let viewModel = MainViewModel(
         appInfo: AppInfoStore(),
-        agent: AgentStore(statusRequest: { try await agent.status() }),
+        agent: AgentStore(statusRequest: { AgentReport(version: try await agent.status()) }),
         pairs: PairStore(client: catalog),
         sync: SyncStore(client: sync, pollInterval: .milliseconds(1)),
         automation: AutomationStore(client: AutomationProbe())
@@ -358,7 +358,7 @@ func droppingFoldersOpensANewPairWithThemInOrder() async throws {
     let fixture = try DropFixture()
     defer { fixture.clean() }
     let viewModel = MainViewModel(
-        appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { "test" }),
+        appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { AgentReport(version: "test") }),
         pairs: PairStore(client: EmptyCatalogClient())
     )
     await viewModel.refreshAgent()
@@ -375,7 +375,7 @@ func droppingOneFolderFillsOnlyFolderAAndFilesOpenNothing() async throws {
     let fixture = try DropFixture()
     defer { fixture.clean() }
     let viewModel = MainViewModel(
-        appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { "test" }),
+        appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { AgentReport(version: "test") }),
         pairs: PairStore(client: EmptyCatalogClient())
     )
     await viewModel.refreshAgent()
@@ -386,7 +386,7 @@ func droppingOneFolderFillsOnlyFolderAAndFilesOpenNothing() async throws {
     #expect(editor.folderText(.right) == "Choose a folder")
 
     let empty = MainViewModel(
-        appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { "test" }),
+        appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { AgentReport(version: "test") }),
         pairs: PairStore(client: EmptyCatalogClient())
     )
     await empty.refreshAgent()

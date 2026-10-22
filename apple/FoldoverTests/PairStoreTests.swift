@@ -147,7 +147,7 @@ private actor FailingPairPageClient: PairClient {
 @Test
 func incompleteCatalogIsNotPublishedOrReportedAsEmpty() async {
     let store = PairStore(client: FailingPairPageClient())
-    let viewModel = MainViewModel(appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { "test" }), pairs: store)
+    let viewModel = MainViewModel(appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { AgentReport(version: "test") }), pairs: store)
     await viewModel.refreshAgent()
     #expect(store.pairs.isEmpty)
     #expect(!store.hasLoaded)
@@ -202,7 +202,7 @@ func failedPairUpdateKeepsTheDraftRevisionAndRawPaths() async {
 func mainViewSelectsTheSavedPairAfterClosingItsEditor() async {
     let client = PairFixtureClient()
     let store = PairStore(client: client)
-    let viewModel = MainViewModel(appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { "test" }), pairs: store)
+    let viewModel = MainViewModel(appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { AgentReport(version: "test") }), pairs: store)
     await viewModel.refreshAgent()
     viewModel.newPair()
     let editor = viewModel.editor!
@@ -222,7 +222,7 @@ func removalUsesTheConfirmedRevisionAndClearsOnlyThatPair() async {
     let original = pairFixture()
     let client = PairFixtureClient(catalog: [original])
     let store = PairStore(client: client)
-    let viewModel = MainViewModel(appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { "test" }), pairs: store)
+    let viewModel = MainViewModel(appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { AgentReport(version: "test") }), pairs: store)
     await viewModel.refreshAgent()
     viewModel.selectedPairID = original.id
     viewModel.requestRemoval()

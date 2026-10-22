@@ -602,12 +602,22 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 public struct AgentHealth: Equatable, Hashable {
     public var coreVersion: String
     public var capability: AgentCapability
+    /**
+     * The unclean stops behind crash-loop safe mode, while syncing waits
+     * in it; `None` otherwise.
+     */
+    public var safeModeStops: UInt32?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(coreVersion: String, capability: AgentCapability) {
+    public init(coreVersion: String, capability: AgentCapability, 
+        /**
+         * The unclean stops behind crash-loop safe mode, while syncing waits
+         * in it; `None` otherwise.
+         */safeModeStops: UInt32?) {
         self.coreVersion = coreVersion
         self.capability = capability
+        self.safeModeStops = safeModeStops
     }
 
     
@@ -627,13 +637,15 @@ public struct FfiConverterTypeAgentHealth: FfiConverterRustBuffer {
         return
             try AgentHealth(
                 coreVersion: FfiConverterString.read(from: &buf), 
-                capability: FfiConverterTypeAgentCapability.read(from: &buf)
+                capability: FfiConverterTypeAgentCapability.read(from: &buf), 
+                safeModeStops: FfiConverterOptionUInt32.read(from: &buf)
         )
     }
 
     public static func write(_ value: AgentHealth, into buf: inout [UInt8]) {
         FfiConverterString.write(value.coreVersion, into: &buf)
         FfiConverterTypeAgentCapability.write(value.capability, into: &buf)
+        FfiConverterOptionUInt32.write(value.safeModeStops, into: &buf)
     }
 }
 
@@ -5114,6 +5126,23 @@ public func defaultPairOptions() -> LocalPairOptions  {
     )
 })
 }
+/**
+ * Leave crash-loop safe mode, so syncs run again.
+ */
+public func leaveSafeMode()async throws  -> AgentHealth  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_leave_safe_mode(
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeAgentHealth_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
 public func pairCreate(configuration: LocalPairDraft)async throws  -> LocalPairConfiguration  {
     return
         try  await uniffiRustCallAsync(
@@ -5719,6 +5748,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_default_pair_options() != 6735) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_leave_safe_mode() != 8641) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_pair_create() != 28129) {

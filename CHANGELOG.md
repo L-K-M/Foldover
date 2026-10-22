@@ -33,6 +33,11 @@ All notable changes to this project are documented here. The format follows
   Windows expect, even from a disk that stores them decomposed, and
   Foldover finds a server's file in either spelling.
 
+- A background agent that stops unexpectedly three times in five minutes
+  pauses all syncing instead of crashing again and again; the app shows
+  why and notifies you, and Resume Syncing (or `foldover safe-mode off`)
+  starts again.
+
 - A Backup can go to a folder that cannot hold Foldover's `.foldover`
   folder, such as a share that refuses names starting with a dot, once
   you choose to keep nothing there: files replaced in it are deleted,
