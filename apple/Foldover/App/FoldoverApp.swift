@@ -9,21 +9,19 @@ import SwiftUI
 @main
 struct FoldoverApp: App {
     @State private var viewModel: MainViewModel
-    @State private var settings = SettingsStore()
+    @State private var settings: SettingsStore
     @State private var macToMac: MacToMacStore
-    @State private var automation = AutomationStore()
+    @State private var automation: AutomationStore
     @State private var updates: UpdateStore
 
     init() {
-        // One store each, so the pair editor sees the Macs Settings
-        // paired and Settings sees the menu bar's automation state.
-        let macToMac = MacToMacStore()
-        _macToMac = State(initialValue: macToMac)
-        let automation = AutomationStore()
-        _automation = State(initialValue: automation)
+        let stores = Self.makeStores()
+        _settings = State(initialValue: stores.settings)
+        _macToMac = State(initialValue: stores.macToMac)
+        _automation = State(initialValue: stores.automation)
         let updates = UpdateStore()
         _updates = State(initialValue: updates)
-        let viewModel = MainViewModel(appInfo: AppInfoStore(), automation: automation, macToMac: macToMac)
+        let viewModel = stores.main
         _viewModel = State(initialValue: viewModel)
         // Shortcuts actions run in the app and share its state.
         AppDependencyManager.shared.add(dependency: viewModel)
@@ -37,6 +35,42 @@ struct FoldoverApp: App {
             Task { await updates.checkAtLaunch() }
         }
     }
+
+    /// One store each, so the pair editor sees the Macs Settings paired
+    /// and Settings sees the menu bar's automation state. A Debug build
+    /// launched for a UI tour gets canned agent answers instead.
+    private static func makeStores() -> AppStores {
+        #if DEBUG
+        if Fixtures.isEnabled { return fixtureStores() }
+        #endif
+        let macToMac = MacToMacStore()
+        let automation = AutomationStore()
+        return AppStores(
+            main: MainViewModel(appInfo: AppInfoStore(), automation: automation, macToMac: macToMac),
+            settings: SettingsStore(), macToMac: macToMac, automation: automation)
+    }
+
+    #if DEBUG
+    /// Every store wired to the canned clients in Fixtures.swift.
+    private static func fixtureStores() -> AppStores {
+        Fixtures.prepareFolders()
+        let pairs = FixturePairClient()
+        let macToMac = MacToMacStore(client: FixtureMacToMacClient())
+        let automation = AutomationStore(client: FixtureAutomationClient())
+        let main = MainViewModel(
+            appInfo: AppInfoStore(),
+            agent: AgentStore(statusRequest: { AgentReport(version: "0.1.0") },
+                              leaveSafeModeRequest: { AgentReport(version: "0.1.0") },
+                              alert: { _, _ in }),
+            pairs: PairStore(client: pairs),
+            sync: SyncStore(client: FixtureSyncClient(pairs: pairs), alert: { _ in }),
+            archive: ArchiveStore(client: FixtureArchiveClient()),
+            automation: automation, macToMac: macToMac)
+        return AppStores(main: main,
+                         settings: SettingsStore(loginItem: FixtureLoginItem(), showFullDiskAccess: {}),
+                         macToMac: macToMac, automation: automation)
+    }
+    #endif
 
     var body: some Scene {
         // One configuration window shares the same selection and editor as the menu bar.
@@ -64,4 +98,13 @@ struct FoldoverApp: App {
                          automation: automation)
         }
     }
+}
+
+/// The stores the app's scenes share.
+@MainActor
+struct AppStores {
+    let main: MainViewModel
+    let settings: SettingsStore
+    let macToMac: MacToMacStore
+    let automation: AutomationStore
 }

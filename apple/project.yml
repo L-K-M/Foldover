@@ -87,6 +87,22 @@ targets:
         TEST_HOST: $(BUILT_PRODUCTS_DIR)/Foldover.app/Contents/MacOS/Foldover
         BUNDLE_LOADER: $(TEST_HOST)
 
+  # The screenshot tour (FoldoverUITour scheme): drives the Debug app
+  # on canned agent answers (`-foldover-fixtures`). Kept out of the
+  # Foldover scheme so `xcodebuild test` there needs no UI automation.
+  FoldoverUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - FoldoverUITests
+    dependencies:
+      - target: Foldover
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ch.lkmc.foldover.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Foldover
+
 schemes:
   Foldover:
     build:
@@ -100,3 +116,13 @@ schemes:
       config: Debug
       targets:
         - FoldoverTests
+  FoldoverUITour:
+    build:
+      targets:
+        Foldover: all
+        FoldoverUITests:
+          - test
+    test:
+      config: Debug
+      targets:
+        - FoldoverUITests
