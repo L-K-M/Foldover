@@ -400,9 +400,9 @@ struct Directory {
 
 impl Directory {
     fn open(root: Root, path: Option<SyncPath>) -> Result<Self, ScanError> {
-        let before = at(&path, root.root_metadata())?;
+        let before = at_scan(&path, root.root_metadata())?;
         reject_dataless(before.data_residency(), &path)?;
-        let entries = Box::new(at(&path, root.entries(DirectoryScope::Root))?);
+        let entries = Box::new(at_scan(&path, root.entries(DirectoryScope::Root))?);
         Ok(Self {
             root,
             path,
@@ -473,7 +473,7 @@ impl LocalEndpoint {
         };
         let mut listed = Vec::new();
         for entry in entries {
-            let entry = at(&path, entry)?;
+            let entry = at_scan(&path, entry)?;
             if protected(entry.name()) {
                 continue;
             }
@@ -581,7 +581,7 @@ impl LocalEndpoint {
         &self,
         control: &mut impl FnMut(u64) -> ScanControl,
     ) -> Result<(EntryMetadata, ExtendedMetadata), ScanError> {
-        let observed = at(&None, self.root.root_metadata())?;
+        let observed = at_scan(&None, self.root.root_metadata())?;
         if observed.identity() != self.identity {
             return Err(ScanError::Changed(None));
         }
@@ -627,8 +627,8 @@ impl LocalEndpoint {
         filter: &Filter,
         sink: &mut impl FnMut(LocalEntry) -> ScanControl,
     ) -> Result<ScanStats, ScanError> {
-        let root = at(&None, self.root.try_clone())?;
-        if at(&None, root.root_metadata())?.identity() != self.identity {
+        let root = at_scan(&None, self.root.try_clone())?;
+        if at_scan(&None, root.root_metadata())?.identity() != self.identity {
             return Err(ScanError::Changed(None));
         }
         let sidecars = self.sidecars();
@@ -637,20 +637,20 @@ impl LocalEndpoint {
 
         while let Some(directory) = directories.last_mut() {
             let Some(entry) = directory.entries.next() else {
-                if at(&directory.path, directory.root.root_metadata())? != directory.before {
+                if at_scan(&directory.path, directory.root.root_metadata())? != directory.before {
                     return Err(ScanError::Changed(directory.path.clone()));
                 }
                 let finished = directories.pop().expect("the current directory exists");
                 if let Some(parent) = directories.last() {
                     let path = finished.path.as_ref().expect("a descendant has a path");
                     let name = SyncPath::try_from(path.file_name())?;
-                    if at(&finished.path, parent.root.metadata(&name))? != finished.before {
+                    if at_scan(&finished.path, parent.root.metadata(&name))? != finished.before {
                         return Err(ScanError::Changed(finished.path));
                     }
                 }
                 continue;
             };
-            let entry = at(&directory.path, entry)?;
+            let entry = at_scan(&directory.path, entry)?;
 
             if protected(entry.name()) {
                 stats.skipped += 1;
@@ -707,11 +707,11 @@ impl LocalEndpoint {
                 return Err(ScanError::UnsupportedEntry(path));
             }
             let link_target = if metadata.kind() == NodeKind::Symlink {
-                Some(at(&at_path, directory.root.read_link(&name))?)
+                Some(at_scan(&at_path, directory.root.read_link(&name))?)
             } else {
                 None
             };
-            if at(&at_path, directory.root.metadata(&name))? != metadata {
+            if at_scan(&at_path, directory.root.metadata(&name))? != metadata {
                 return Err(ScanError::Changed(at_path));
             }
             if sink(LocalEntry {
@@ -727,7 +727,7 @@ impl LocalEndpoint {
             if metadata.kind() != NodeKind::Directory {
                 continue;
             }
-            let child = at(&at_path, directory.root.open_directory(&name))?;
+            let child = at_scan(&at_path, directory.root.open_directory(&name))?;
             let child = Directory::open(child, at_path.clone())?;
             if child.before != metadata {
                 return Err(ScanError::Changed(at_path));
@@ -979,6 +979,15 @@ fn at<T>(path: &Option<SyncPath>, result: io::Result<T>) -> Result<T, ScanError>
     result.map_err(|source| ScanError::Io {
         path: path.clone(),
         source,
+    })
+}
+
+/// `at` inside a scan: a path that is gone means the tree moved under
+/// the listing — a change to rescan, not an I/O failure.
+fn at_scan<T>(path: &Option<SyncPath>, result: io::Result<T>) -> Result<T, ScanError> {
+    at(path, result).map_err(|error| match error {
+        ScanError::Io { ref source, .. } if gone(source) => ScanError::Changed(path.clone()),
+        error => error,
     })
 }
 
@@ -1256,7 +1265,7 @@ mod tests {
             symlink(outside.path(), temporary.path().join("directory")).unwrap();
             ScanControl::Continue
         });
-        assert!(matches!(result, Err(ScanError::Io { .. })));
+        assert!(matches!(result, Err(ScanError::Changed(_))));
         assert_eq!(
             paths,
             [SyncPath::try_from(b"directory".as_slice()).unwrap()]
@@ -1272,7 +1281,7 @@ mod tests {
             fs::remove_dir(temporary.path().join("directory")).unwrap();
             ScanControl::Continue
         });
-        assert!(matches!(result, Err(ScanError::Io { .. })));
+        assert!(matches!(result, Err(ScanError::Changed(_))));
 
         let _socket = UnixListener::bind(temporary.path().join("socket")).unwrap();
         assert!(matches!(

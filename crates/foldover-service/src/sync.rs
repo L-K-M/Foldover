@@ -158,6 +158,10 @@ struct Claim {
     held: Option<Reviewed>,
     skips: BTreeMap<SyncPath, Skip>,
     progress: Arc<Progress>,
+    /// The status stored under the lock, to answer the start request
+    /// with: a fast job can publish its result before `status(id)` is
+    /// re-read, so the acknowledgment is the claim-time value.
+    acknowledged: SyncStatus,
 }
 
 #[derive(Default)]
@@ -442,6 +446,7 @@ impl Jobs {
             held,
             skips,
             progress,
+            acknowledged,
         } = self.claim(id, work, &cancel)?;
         let engine = Arc::clone(engine);
         let jobs = Arc::clone(self);
@@ -455,7 +460,7 @@ impl Jobs {
             }
             (status, reviewed)
         });
-        Ok(self.status(id))
+        Ok(acknowledged)
     }
 
     /// Start a test-provided job through the same claim and publish path.
@@ -466,9 +471,11 @@ impl Jobs {
         work: Work,
         run: impl FnOnce() -> (SyncStatus, Option<Reviewed>) + Send + 'static,
     ) -> Result<SyncStatus, RpcError> {
-        self.claim(id, work, &Arc::new(AtomicBool::new(false)))?;
+        let acknowledged = self
+            .claim(id, work, &Arc::new(AtomicBool::new(false)))?
+            .acknowledged;
         self.spawn(id, run);
-        Ok(self.status(id))
+        Ok(acknowledged)
     }
 
     /// Overwrite the pair's recorded status, for job state machine tests.
@@ -568,6 +575,11 @@ impl Jobs {
             return Err(RpcError::new(SYNC_BUSY, message));
         }
         let progress = Arc::new(Progress::default());
+        let acknowledged = SyncStatus::Working {
+            job: work.job(),
+            cancelling: false,
+            progress: SyncProgress::default(),
+        };
         // The replaced job's held review is spent by this attempt: it moves
         // to the caller so a run can prove its plan is unchanged, and the
         // job's own result replaces it when published.
@@ -576,11 +588,7 @@ impl Jobs {
             .insert(
                 id,
                 Job {
-                    status: SyncStatus::Working {
-                        job: work.job(),
-                        cancelling: false,
-                        progress: SyncProgress::default(),
-                    },
+                    status: acknowledged.clone(),
                     cancel: Arc::clone(cancel),
                     reviewed: None,
                     progress: Arc::clone(&progress),
@@ -592,6 +600,7 @@ impl Jobs {
             held,
             skips,
             progress,
+            acknowledged,
         })
     }
 

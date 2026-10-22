@@ -98,4 +98,11 @@ The first runs found two engine bugs, both fixed
   kept by CI history.
 - Not emulated: extended attributes in memory, volatile file identities, lost
   change events, network chaos and the deterministic executor. SFTP and
-  peer folders are not simulated yet.
+  peer folders are not simulated yet. Dead-peer coverage does not wait
+  on chaos tooling: request and delivery timeouts bound every remote
+  call and `calls_on_a_link_whose_peer_went_away_fail_instead_of_hanging`
+  proves a closed link fails fast. What network chaos (turmoil) would
+  still add is partial connectivity — asymmetric loss, delay and jitter
+  during bulk copies and pairing — which needs a quinn socket adapter
+  and the endpoint stack on turmoil's runtime; deferred until a release
+  blocker or field report justifies it.
