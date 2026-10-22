@@ -159,13 +159,24 @@ public struct UpdateChecker: Sendable {
     /// The newest release including pre-releases — the check a
     /// pre-release install runs, since `/releases/latest` never names
     /// one. Feed entries arrive newest-published first, not
-    /// newest-versioned, so every tag is compared rather than the first.
+    /// newest-versioned, so every tag is compared rather than the
+    /// first; and the feed serves only a bounded window of the newest
+    /// entries, so the stable check runs too and the newer of the two
+    /// answers — a newer release cannot age off the page unseen.
     public func checkIncludingPrereleases() async throws -> AppRelease {
         let (data, response) = try await session.data(for: request(to: Self.feed))
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
               let release = Self.newestRelease(in: String(decoding: data, as: UTF8.self))
         else {
             throw UpdateError.unavailable
+        }
+        // A repo with no stable release yet answers `latest` with an
+        // error; the feed's answer stands alone then.
+        if let stable = try? await check(),
+           let stableVersion = ReleaseVersion(parsing: stable.version),
+           let feedVersion = ReleaseVersion(parsing: release.version),
+           stableVersion > feedVersion {
+            return stable
         }
         return release
     }

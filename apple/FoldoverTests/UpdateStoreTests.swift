@@ -34,7 +34,12 @@ private func store(failing recorder: Recorder) -> UpdateStore {
 /// Answers the release feed a stable install reads with a stable tag,
 /// and the pre-release feed with a beta tag — so which endpoint a fetch
 /// ran is visible in what it returns.
-private final class FeedStub: URLProtocol {
+private class FeedStub: URLProtocol {
+    /// What `/releases.atom` and `/releases/latest` answer.
+    class func tags() -> (feed: String, latest: String) {
+        ("v9.9.9-beta.1", "v1.0.0")
+    }
+
     override class func canInit(with request: URLRequest) -> Bool { true }
 
     override class func canonicalRequest(for request: URLRequest) -> URLRequest {
@@ -44,8 +49,8 @@ private final class FeedStub: URLProtocol {
     override func startLoading() {
         let url = request.url!
         let tag = url.absoluteString.hasSuffix("releases.atom")
-            ? "v9.9.9-beta.1"
-            : "v9.9.9"
+            ? Self.tags().feed
+            : Self.tags().latest
         let feed = """
             <?xml version="1.0"?>
             <feed><entry>
@@ -68,9 +73,19 @@ private final class FeedStub: URLProtocol {
     override func stopLoading() {}
 }
 
-private func stubbedChecker() -> UpdateChecker {
+/// The same feed, but the stable line outran the beta: `latest` names
+/// a release newer than anything on the feed page.
+private final class StableWinsStub: FeedStub {
+    override class func tags() -> (feed: String, latest: String) {
+        ("v9.9.9-beta.1", "v9.9.9")
+    }
+}
+
+private func stubbedChecker(
+    _ stub: URLProtocol.Type = FeedStub.self
+) -> UpdateChecker {
     let configuration = URLSessionConfiguration.ephemeral
-    configuration.protocolClasses = [FeedStub.self]
+    configuration.protocolClasses = [stub]
     return UpdateChecker(session: URLSession(configuration: configuration))
 }
 
@@ -160,8 +175,8 @@ func onlyPreReleaseInstallsCheckThePreReleaseFeed() {
 }
 
 /// The stub answers the feed endpoint with a beta tag and the latest
-/// endpoint with a stable one, so the returned version proves which
-/// endpoint the default fetch ran.
+/// endpoint with an older stable one, so the returned version proves
+/// which endpoint the default fetch ran — and that the feed was read.
 @Test
 func aPreReleaseInstallsDefaultFetchReadsThePreReleaseFeed() async throws {
     let beta = try await UpdateStore
@@ -169,7 +184,18 @@ func aPreReleaseInstallsDefaultFetchReadsThePreReleaseFeed() async throws {
     #expect(beta.version == "9.9.9-beta.1")
     let stable = try await UpdateStore
         .feedFetcher(forInstalled: "1.0.0", checker: stubbedChecker())()
-    #expect(stable.version == "9.9.9")
+    #expect(stable.version == "1.0.0")
+}
+
+/// The feed serves a bounded window, so a pre-release install also asks
+/// `latest`: a stable release newer than the page's best still wins.
+@Test
+func aNewerStableIsNotHiddenByTheFeedsWindow() async throws {
+    let release = try await UpdateStore
+        .feedFetcher(forInstalled: "9.9.9-beta.1", checker: stubbedChecker(StableWinsStub.self))()
+    #expect(release.version == "9.9.9")
+    #expect(release.downloadURL.absoluteString
+        == "https://github.com/L-K-M/Foldover/releases/tag/v9.9.9")
 }
 
 @MainActor
