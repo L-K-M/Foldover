@@ -26,7 +26,7 @@ export RELEASE_POST_BUMP="scripts/sync-cargo-version.sh"
 # optional -suffix carries pre-releases (semver order), which the
 # pipeline publishes as GitHub pre-releases. The shape lives in
 # scripts/version-shape.sh so every gate matches.
-RELEASE_VERSION_REGEX="$("$ROOT/scripts/version-shape.sh")"
+RELEASE_VERSION_REGEX="$(bash "$ROOT/scripts/version-shape.sh")"
 export RELEASE_VERSION_REGEX
 
 # Flag-only calls (--help, --version, --capabilities) touch nothing,
