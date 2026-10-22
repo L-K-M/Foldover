@@ -376,3 +376,60 @@ fn the_state_directory_and_its_ancestors_are_never_changed() {
     assert_eq!(fs::read(state.join("pairs.sqlite")).unwrap(), b"records");
     drop(kept);
 }
+
+/// The protected subtree is computed on canonical paths: a root reached
+/// through a symlink still leaves the state directory out.
+#[test]
+fn an_aliased_root_still_protects_the_state_directory() {
+    let pair = pair();
+    let home = pair.right_directory.path();
+    let state = home.join("Library/Application Support/Foldover");
+    fs::create_dir_all(&state).unwrap();
+    fs::write(state.join("pairs.sqlite"), b"records").unwrap();
+    fs::write(home.join("mine.txt"), b"mine").unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let alias = outside.path().join("alias");
+    symlink(home, &alias).unwrap();
+
+    let protected = LocalEndpoint::open_protecting(&alias, Some(&state)).unwrap();
+    let observed = observe(&protected);
+    assert!(!observed.entries().keys().any(|path| {
+        path.as_bytes()
+            .starts_with(b"Library/Application Support/Foldover")
+    }));
+    assert!(matches!(
+        protected
+            .entry_at(&path(b"Library/Application Support/Foldover/pairs.sqlite"))
+            .map(|_| ()),
+        Err(ScanError::ProtectedPath(_))
+    ));
+}
+
+/// A root that is the state directory, or sits inside it, protects every
+/// entry; a missing state directory protects nothing.
+#[test]
+fn a_root_at_or_below_the_state_directory_protects_everything() {
+    let pair = pair();
+    let home = pair.right_directory.path();
+    let state = home.join("state");
+    fs::create_dir_all(state.join("inside")).unwrap();
+    fs::write(state.join("pairs.sqlite"), b"records").unwrap();
+    fs::write(state.join("inside/deep.sqlite"), b"deep").unwrap();
+
+    for (root, inside) in [
+        (state.clone(), path(b"pairs.sqlite")),
+        (state.join("inside"), path(b"deep.sqlite")),
+    ] {
+        let endpoint = LocalEndpoint::open_protecting(&root, Some(&state)).unwrap();
+        assert!(observe(&endpoint).entries().is_empty());
+        assert!(matches!(
+            endpoint.entry_at(&inside).map(|_| ()),
+            Err(ScanError::ProtectedPath(_))
+        ));
+    }
+
+    // A state directory that does not exist has nothing to protect.
+    let gone = home.join("gone");
+    let endpoint = LocalEndpoint::open_protecting(home, Some(&gone)).unwrap();
+    assert!(!observe(&endpoint).entries().is_empty());
+}

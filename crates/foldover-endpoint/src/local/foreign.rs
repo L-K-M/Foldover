@@ -243,6 +243,7 @@ impl LocalEndpoint {
         run: &RunScope,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<EntryVersion, ApplyError> {
+        self.guarded(path)?;
         let destination = self
             .receiving(path, Expected::Present(current), run, control)?
             .ok_or_else(|| ApplyError::DestinationChanged(path.clone()))?;
