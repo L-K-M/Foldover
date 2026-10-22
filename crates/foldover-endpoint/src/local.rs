@@ -473,7 +473,7 @@ impl LocalEndpoint {
         };
         let mut listed = Vec::new();
         for entry in entries {
-            let entry = at(&path, entry)?;
+            let entry = at_scan(&path, entry)?;
             if protected(entry.name()) {
                 continue;
             }
@@ -581,7 +581,7 @@ impl LocalEndpoint {
         &self,
         control: &mut impl FnMut(u64) -> ScanControl,
     ) -> Result<(EntryMetadata, ExtendedMetadata), ScanError> {
-        let observed = at(&None, self.root.root_metadata())?;
+        let observed = at_scan(&None, self.root.root_metadata())?;
         if observed.identity() != self.identity {
             return Err(ScanError::Changed(None));
         }
@@ -627,8 +627,8 @@ impl LocalEndpoint {
         filter: &Filter,
         sink: &mut impl FnMut(LocalEntry) -> ScanControl,
     ) -> Result<ScanStats, ScanError> {
-        let root = at(&None, self.root.try_clone())?;
-        if at(&None, root.root_metadata())?.identity() != self.identity {
+        let root = at_scan(&None, self.root.try_clone())?;
+        if at_scan(&None, root.root_metadata())?.identity() != self.identity {
             return Err(ScanError::Changed(None));
         }
         let sidecars = self.sidecars();
