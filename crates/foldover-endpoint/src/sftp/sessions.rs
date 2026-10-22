@@ -15,7 +15,7 @@ use std::io;
 use std::ops::{Deref, DerefMut};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use foldover_net::sftp::Session;
 
@@ -45,6 +45,9 @@ struct Pool {
     wanted: usize,
     /// Connects refused in a row; reset by one that succeeds.
     refusals: usize,
+    /// Last connect tried under a clamp, so a recovered server is
+    /// found again even while the sessions it already took stay alive.
+    last_probe: Option<Instant>,
 }
 
 impl Sessions {
@@ -58,6 +61,7 @@ impl Sessions {
                 limit,
                 wanted: limit,
                 refusals: 0,
+                last_probe: None,
             }),
             returned: Condvar::new(),
         }
@@ -73,9 +77,12 @@ impl Sessions {
                 return self.lend(session);
             }
             if let Some(connect) = connect
-                && pool.open < pool.limit
+                && (pool.open < pool.limit
+                    || pool.limit < pool.wanted
+                        && pool.last_probe.is_none_or(|at| at.elapsed() >= RETRY))
             {
                 pool.open += 1;
+                pool.last_probe = Some(Instant::now());
                 drop(pool);
                 match panic::catch_unwind(AssertUnwindSafe(connect)) {
                     Ok(Ok(session)) => {
@@ -83,10 +90,11 @@ impl Sessions {
                         pool.refusals = 0;
                         // Grow back one slot per success rather than
                         // straight to wanted: a server that stays
-                        // capped costs one probe per freed slot, not a
-                        // burst of refusals every recovery.
+                        // capped costs one probe per RETRY below
+                        // wanted, not a burst of refusals on recovery.
                         pool.limit = pool.limit.saturating_add(1).min(pool.wanted);
                         drop(pool);
+                        self.returned.notify_one();
                         return self.lend(session);
                     }
                     // The server takes no more: share the ones it took.
@@ -110,7 +118,11 @@ impl Sessions {
                     }
                 }
             }
-            pool = self.wait(pool);
+            pool = if pool.limit < pool.wanted {
+                self.wait_for(pool, RETRY)
+            } else {
+                self.wait(pool)
+            };
         }
     }
 
@@ -181,7 +193,7 @@ mod tests {
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     use super::*;
@@ -229,6 +241,44 @@ mod tests {
         });
         drop(second);
         assert_eq!(opened.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_recovered_server_grows_its_pool_back() {
+        let Some(server) = server() else {
+            eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
+            return;
+        };
+        let refusing = Arc::new(AtomicBool::new(true));
+        let connect: Connect = {
+            let server = server.clone();
+            let refusing = refusing.clone();
+            Box::new(move || {
+                if refusing.load(Ordering::SeqCst) {
+                    Err(io::Error::other("too many sessions"))
+                } else {
+                    spawn(&server)
+                }
+            })
+        };
+        let sessions = Sessions::new(spawn(&server).unwrap(), 2);
+        let _held = sessions.borrow(Some(&connect));
+        std::thread::scope(|threads| {
+            let waiter = threads.spawn(|| sessions.borrow(Some(&connect)));
+            // Refusals clamp the pool to its one live session.
+            for _ in 0..100 {
+                let pool = sessions.lock();
+                if pool.limit == 1 && pool.refusals >= REFUSALS {
+                    break;
+                }
+                std::thread::sleep(RETRY / 4);
+            }
+            assert_eq!(sessions.lock().limit, 1);
+            // It takes connects again; a probe finds the recovery.
+            refusing.store(false, Ordering::SeqCst);
+            let _got = waiter.join().unwrap();
+        });
+        assert_eq!(sessions.lock().limit, 2);
     }
 
     #[test]
