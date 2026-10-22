@@ -6,15 +6,16 @@ SMB/NFS appliance's name handling and a second Mac's peer transport —
 stays manual (PLAN.md §5.2 "Test lab"). Run this checklist once per
 release candidate; log the outcome and the build's version beside it.
 
-A check that fails is a release blocker; a row you cannot run is a
-known gap — record either under the run's date, do not silently skip.
+A check that fails is a release blocker, except rows that record a
+finding instead (§A.6); a row you cannot run is a known gap — record
+either under the run's date, do not silently skip.
 
 ## A. Real NAS over SMB
 
 Setup: mount the share in Finder (`smb://nas.local/…`), save the
 credentials in Keychain, then pick the folder under `/Volumes/<share>`
-for one side of a pair. Repeat the marked rows with an NFS mount
-(`nfs://nas/…`) if the NAS offers both.
+for one side of a pair. Repeat every row in this section with an NFS
+mount (`nfs://nas/…`) if the NAS offers both.
 
 1. Preview a folder of a few hundred items with mixed content.
    - [ ] Scan completes; preview lists creates/copies/deletes correctly.
@@ -84,3 +85,7 @@ For each run: date, build version/commit, hardware (NAS model +
 protocol, Mac models + macOS), rows run, pass/fail per row, and for
 every failure the repro plus whether it is a blocker or a documented
 limitation.
+
+Keep the filled-in results with the release candidate's tracking issue
+(or append a dated section to this file) so each RC's evidence stays
+findable.

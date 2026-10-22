@@ -769,7 +769,8 @@ Resolved by the owner, 2026-10-17:
    is out of scope.
 10. **Release timing** (2026-10-22): the owner tags and ships releases.
     The §5.2 record of nightly runs and the "≥ 6 weeks of beta" rule in
-    §7 inform that call but do not gate it.
+    §7 inform that call but do not gate it; the other P6 criteria (no
+    open data-loss bug, crash-free sessions > 99.5 %) still block.
 11. **Hardware validation** (2026-10-22): the owner runs
     `docs/hardware-validation.md` against a real NAS and a second Mac
     per release candidate, and runs the VoiceOver pass personally.
