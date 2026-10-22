@@ -702,7 +702,7 @@ Rough sizes assume one developer with AI agents; the spikes recalibrate them.
 | **P3 Agent + Mac app** → v0.2 | ~5 wk | `foldoverd`, service, IPC, client, UniFFI. Main window, pair creation, streamed preview with per-item overrides, menu bar, history, onboarding | App quit mid-sync → agent finishes; 200k-row preview at 60 fps; a new user creates a first pair in < 3 min |
 | **P4 Shares, SFTP, automation** → v0.3 | ~6 wk | `share` and `sftp` endpoints. Mount management, capability and readiness warnings, full filters. Watchers, triggers, scheduler. Conflict center, archive browser, Undo, notifications, App Intents | SMB (Samba ± fruit, macOS server), NFS and SFTP pairs run unattended for 7 days; unplug or sleep mid-run loses nothing |
 | **P5 Mac-to-Mac** → v0.4 | ~4 wk | Discovery, pairing, scope and ownership, QUIC transport, `peer` endpoint, remote changes, block resume | Two Macs pair in < 60 s; packet capture shows no plaintext; unshared roots are unreachable; sleep, wake and network switches resume; 24 h fuzz clean |
-| **P6 Beta → 1.0** | ~6–8 wk | Public beta via GitHub releases, docs (capability matrix, NAS guide, limitations), accessibility, perf budgets enforced | §5 gates green; ≥ 6 weeks of beta with no open data-loss bug; crash-free sessions > 99.5 % |
+| **P6 Beta → 1.0** | ~6–8 wk | Public beta via GitHub releases, docs (capability matrix, NAS guide, limitations), accessibility, perf budgets enforced | §5 gates green; ≥ 6 weeks of beta with no open data-loss bug; crash-free sessions > 99.5 %; release timing is the owner's call (§10 item 10) |
 
 After 1.0, in order of expected value:
 - **1.1** speed: delta transfer, and an in-app SMB client if S2 favors it.
@@ -761,6 +761,16 @@ Resolved by the owner, 2026-10-17:
    This qualifies the strict root-isolation guarantee for SFTP only; a jailed
    account or Foldover helper is not required.
 8. **Updates** (2026-10-22): no updater framework; the app checks the
-   GitHub release feed and links a newer version to its download.
+   GitHub release feed and links a newer version to its download. A
+   prerelease install hears about newer betas as well as the stable
+   release that ends the line; a stable install is only offered stable
+   releases.
 9. **Localization** (2026-10-22): the UI is English-only; localization
    is out of scope.
+10. **Release timing** (2026-10-22): the owner tags and ships releases.
+    The §5.2 record of nightly runs and the "≥ 6 weeks of beta" rule in
+    §7 inform that call but do not gate it; the other P6 criteria (no
+    open data-loss bug, crash-free sessions > 99.5 %) still block.
+11. **Hardware validation** (2026-10-22): the owner runs
+    `docs/hardware-validation.md` against a real NAS and a second Mac
+    per release candidate, and runs the VoiceOver pass personally.
