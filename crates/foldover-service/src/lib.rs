@@ -407,6 +407,11 @@ fn parameters<T: DeserializeOwned>(request: &Request) -> Result<T, RpcError> {
     .map_err(|_| RpcError::new(INVALID_PARAMS, "Invalid method parameters"))
 }
 
+/// Server browses in flight at once; a timed-out browse keeps running
+/// on the blocking pool, so few enough that a pile of them cannot crowd
+/// other blocking work out.
+static BROWSES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
 /// The folders in a folder on an SFTP server. Connecting can take
 /// seconds, so it waits off the runtime; it never touches the engine's
 /// state, so other requests go on.
@@ -420,11 +425,20 @@ async fn browse(params: EndpointBrowse) -> Result<Value, RpcError> {
         ));
     };
     // The engine bounds each phase, but a black-holed server can still
-    // outwait a person's patience; bound the request itself too.
-    let folder = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        tokio::task::spawn_blocking(move || foldover_engine::browse_server(&root)),
-    )
+    // outwait a person's patience; bound the wait too. The task itself
+    // cannot be cancelled once it is on the blocking pool, so it also
+    // holds a permit: abandoned browses pile up no deeper than BROWSES.
+    let folder = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        let permit = BROWSES
+            .acquire()
+            .await
+            .expect("the browses semaphore is never closed");
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            foldover_engine::browse_server(&root)
+        })
+        .await
+    })
     .await
     .map_err(|_| RpcError::new(INTERNAL_ERROR, "Browsing the server timed out"))?
     .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?

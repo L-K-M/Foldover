@@ -60,10 +60,11 @@ impl Pace {
         let share = u128::from(bytes) * NANOS_PER_SECOND / u128::from(self.bytes_per_second);
         let share = Duration::from_nanos(u64::try_from(share).unwrap_or(u64::MAX));
         // ~95 years: past any real due, but inside every platform's
-        // clock, so the add below cannot overflow.
+        // clock. `due` still accumulates across calls, so the sum can
+        // overflow Instant's range: fall back rather than panic.
         let share = share.min(Duration::from_secs(3_000_000_000));
         let mut due = self.due.lock().unwrap_or_else(PoisonError::into_inner);
-        *due = (*due).max(now) + share;
+        *due = (*due).max(now).checked_add(share).unwrap_or(now);
         *due
     }
 }

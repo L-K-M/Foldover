@@ -69,6 +69,7 @@ impl Sessions {
         let mut pool = self.lock();
         loop {
             if let Some(session) = pool.idle.pop() {
+                drop(pool);
                 return self.lend(session);
             }
             if let Some(connect) = connect
@@ -81,6 +82,7 @@ impl Sessions {
                         let mut pool = self.lock();
                         pool.refusals = 0;
                         pool.limit = pool.wanted;
+                        drop(pool);
                         return self.lend(session);
                     }
                     // The server takes no more: share the ones it took.
@@ -238,9 +240,14 @@ mod tests {
         std::thread::scope(|threads| {
             let waiter = threads.spawn(|| sessions.borrow(Some(&refused)).real_path(b"/").is_ok());
             // A few refused connects go by before the cap is learned;
-            // hold the session out past them or the waiter takes it
-            // and the server is never asked again.
-            std::thread::sleep(RETRY * (REFUSALS as u32 + 2));
+            // hold the session out until they have, or the waiter takes
+            // it and the server is never asked again.
+            for _ in 0..100 {
+                if sessions.lock().refusals >= REFUSALS {
+                    break;
+                }
+                std::thread::sleep(RETRY / 4);
+            }
             assert!(!waiter.is_finished());
             drop(first);
             assert!(waiter.join().unwrap());
