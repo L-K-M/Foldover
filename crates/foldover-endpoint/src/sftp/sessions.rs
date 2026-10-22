@@ -272,7 +272,9 @@ mod tests {
             let deadline = Instant::now() + 30 * RETRY;
             while Instant::now() < deadline {
                 let pool = sessions.lock();
-                if pool.limit == 1 && pool.refusals >= REFUSALS {
+                let clamped = pool.limit == 1 && pool.refusals >= REFUSALS;
+                drop(pool);
+                if clamped {
                     break;
                 }
                 std::thread::sleep(RETRY / 4);
