@@ -81,6 +81,18 @@ private final class StableWinsStub: FeedStub {
     }
 }
 
+/// A repo that has only ever published pre-releases: `latest` fails,
+/// the feed answers.
+private final class NoStableYetStub: FeedStub {
+    override func startLoading() {
+        if request.url!.absoluteString.hasSuffix("releases.atom") {
+            super.startLoading()
+        } else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+        }
+    }
+}
+
 private func stubbedChecker(
     _ stub: URLProtocol.Type = FeedStub.self
 ) -> UpdateChecker {
@@ -196,6 +208,15 @@ func aNewerStableIsNotHiddenByTheFeedsWindow() async throws {
     #expect(release.version == "9.9.9")
     #expect(release.downloadURL.absoluteString
         == "https://github.com/L-K-M/Foldover/releases/tag/v9.9.9")
+}
+
+/// `latest` errors on a repo with only pre-releases; the feed's answer
+/// must survive that failure.
+@Test
+func theFeedAnswerStandsWhenLatestHasNoStableYet() async throws {
+    let release = try await UpdateStore
+        .feedFetcher(forInstalled: "1.0.0-beta.1", checker: stubbedChecker(NoStableYetStub.self))()
+    #expect(release.version == "9.9.9-beta.1")
 }
 
 @MainActor
