@@ -28,10 +28,11 @@ app="$DERIVED/Build/Products/Release/Foldover.app"
 test "$(lipo -archs "$app/Contents/MacOS/Foldover")" = "$ARCHITECTURE"
 test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")" = "$MINIMUM_SYSTEM"
 # The update check compares this version against release tags; anything
-# else would quietly count as current forever (ADR 0045).
+# else can never be compared, so every check would report failure
+# instead of a real answer (ADR 0045).
 version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
 if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-  echo "error: CFBundleShortVersionString '$version' is not X.Y.Z; the update check would treat this build as current" >&2
+  echo "error: CFBundleShortVersionString '$version' is not X.Y.Z; the update check could never compare it" >&2
   exit 1
 fi
 codesign --verify --deep --strict --verbose=2 "$app"
