@@ -24,12 +24,12 @@ final class UpdateStore {
     @ObservationIgnored private var launchChecked = false
     private(set) var checking = false
 
-    init(fetch: @escaping @Sendable () async throws -> AppRelease = { try await UpdateChecker().check() },
+    init(fetch: (@Sendable () async throws -> AppRelease)? = nil,
          installed: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
          present: @escaping @MainActor (UpdateOutcome, String) -> Void = UpdatePrompt.present) {
-        self.fetch = fetch
         self.installed = installed
         self.present = present
+        self.fetch = fetch ?? Self.feedFetcher(forInstalled: installed)
     }
 
     /// The one check made when the app opens.
@@ -49,7 +49,7 @@ final class UpdateStore {
         checking = true
         defer { checking = false }
         let outcome: UpdateOutcome
-        if UpdateChecker.components(of: installed) == nil {
+        if ReleaseVersion(parsing: installed) == nil {
             // Reporting "up to date" here would claim a comparison that
             // never ran.
             outcome = .failed
@@ -69,14 +69,31 @@ final class UpdateStore {
         }
     }
 
-    /// Whether `candidate` sorts after `installed`; both must be X.Y.Z
-    /// (a leading `v` is allowed). Unparseable versions report nothing.
-    nonisolated static func isNewer(_ candidate: String, than installed: String) -> Bool {
-        guard let newer = UpdateChecker.components(of: candidate),
-              let current = UpdateChecker.components(of: installed) else { return false }
-        for (part, other) in zip(newer, current) where part != other {
-            return part > other
+    /// Whether `installed` asks the feed that names pre-releases — a
+    /// pre-release install does, since `/releases/latest` only ever
+    /// names a stable one.
+    nonisolated static func checksPrereleases(installed: String) -> Bool {
+        ReleaseVersion(parsing: installed)?.isPrerelease ?? false
+    }
+
+    /// The default feed a build of `installed` reads: pre-releases
+    /// appear only in the release feed, never at `releases/latest`.
+    nonisolated static func feedFetcher(
+        forInstalled installed: String,
+        checker: UpdateChecker = UpdateChecker()
+    ) -> @Sendable () async throws -> AppRelease {
+        if checksPrereleases(installed: installed) {
+            return { try await checker.checkIncludingPrereleases() }
         }
-        return false
+        return { try await checker.check() }
+    }
+
+    /// Whether `candidate` sorts after `installed`; both must be X.Y.Z
+    /// with an optional `-suffix` (a leading `v` is allowed). Unparseable
+    /// versions report nothing.
+    nonisolated static func isNewer(_ candidate: String, than installed: String) -> Bool {
+        guard let newer = ReleaseVersion(parsing: candidate),
+              let current = ReleaseVersion(parsing: installed) else { return false }
+        return newer > current
     }
 }

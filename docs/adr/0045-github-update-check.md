@@ -32,6 +32,15 @@ app ─ github.com/releases/latest ─ 302 ─▶ /releases/tag/vX.Y.Z
   check stays outside the unauthenticated REST API's per-address rate
   limit, which a shared NAT can exhaust. Latest never names a draft or
   a pre-release, matching the tags `release.sh` writes.
+- **Pre-releases:** `release.sh` also accepts `vX.Y.Z-suffix` (semver
+  pre-release), which `release.yml` publishes with `--prerelease` so
+  `latest` never names it — a stable install is never told about a
+  beta. A pre-release install instead reads `releases.atom`, the plain
+  feed that lists every published release; `UpdateChecker` compares all
+  of its tags by semver and takes the highest, so a beta install hears
+  about the next beta and, once it ships, the stable release it
+  preceded (`1.0.0-beta.9` < `1.0.0`). Feed order is newest-published,
+  not newest-versioned, which is why the whole feed is compared.
 - **Checks:** `UpdateStore` runs the check once when the app opens and
   again for the app menu's Check for Updates…; `UpdatePrompt` shows the
   outcome in a panel whose Download button opens the release page. The
@@ -40,10 +49,11 @@ app ─ github.com/releases/latest ─ 302 ─▶ /releases/tag/vX.Y.Z
 - **Release:** `release.yml` needs no keys or secrets now. It builds,
   verifies and zips the app and attaches the zip to the release;
   `package-app.sh` refuses a build whose `CFBundleShortVersionString`
-  is not `X.Y.Z`.
-- **Versions:** a release is still `vX.Y.Z`; a feed answer that is not
-  three numbers and a build whose own version cannot be parsed both
-  report the check as failed — "up to date" only follows a real
+  is not `X.Y.Z` or `X.Y.Z-suffix`, and the same shape gates the tag,
+  `MARKETING_VERSION` and the Cargo workspace version.
+- **Versions:** a release is `vX.Y.Z` or `vX.Y.Z-suffix`; a feed answer
+  that does not parse and a build whose own version cannot be parsed
+  both report the check as failed — "up to date" only follows a real
   comparison.
 
 ## Consequences

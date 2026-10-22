@@ -22,8 +22,15 @@ export RELEASE_INVOKED_AS="scripts/release.sh"
 export RELEASE_CI_NOTE="Pushing <tag> runs .github/workflows/release.yml, which publishes the ad-hoc-signed app zip as a GitHub release."
 export RELEASE_POST_BUMP="scripts/sync-cargo-version.sh"
 # Cargo needs all three components, so X.Y (which the xcode kind would
-# accept) is rejected up front instead of failing inside cargo.
-export RELEASE_VERSION_REGEX='^[0-9]+\.[0-9]+\.[0-9]+$'
+# accept) is rejected up front instead of failing inside cargo. The
+# optional -suffix carries pre-releases (semver order), which the
+# pipeline publishes as GitHub pre-releases. The shape lives in
+# scripts/version-shape.sh so every gate matches.
+RELEASE_VERSION_REGEX="$(bash "$ROOT/scripts/version-shape.sh")" \
+  || { echo "error: version-shape.sh failed" >&2; exit 1; }
+[[ -n "$RELEASE_VERSION_REGEX" ]] \
+  || { echo "error: version-shape.sh printed nothing" >&2; exit 1; }
+export RELEASE_VERSION_REGEX
 
 # Flag-only calls (--help, --version, --capabilities) touch nothing,
 # so they skip the project preparation below.
