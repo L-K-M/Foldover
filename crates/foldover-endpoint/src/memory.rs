@@ -332,6 +332,17 @@ impl MemoryEndpoint {
         folder.evicted.remove(&key);
     }
 
+    /// Drop a directory's own entry while leaving what it held, as a
+    /// store keying entries by path can: only its children know it
+    /// was there.
+    #[cfg(test)]
+    pub fn delete_folder(&self, path: &[u8]) {
+        let mut folder = self.folder();
+        folder.tick();
+        let key = folder.key(path);
+        folder.entries.remove(&key);
+    }
+
     /// Delete a file or link as a person would; absent paths are fine.
     pub fn delete_file(&self, path: &[u8]) {
         let mut folder = self.folder();

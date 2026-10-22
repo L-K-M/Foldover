@@ -270,3 +270,27 @@ fn an_evicted_folder_hides_what_is_below_it() {
     }
     assert!(observed.entries().contains_key(&path("notes.txt")));
 }
+
+/// The evicted folder's own entry can be gone while a child's
+/// survives; hiding must not rely on the folder's entry pruning the
+/// walk before the child is reached.
+#[test]
+fn an_evicted_folder_without_its_own_entry_hides_below_it() {
+    let folder = MemoryEndpoint::new(Quirks::default());
+    folder.put_file(b"cache/blob", b"x").unwrap();
+    folder.put_file(b"notes.txt", b"n").unwrap();
+    folder.evict(b"cache");
+    folder.delete_folder(b"cache");
+    let observed = Endpoint::Memory(folder)
+        .observe_from(
+            MetadataPolicy::default(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut || ScanControl::Continue,
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(observed.unavailable(), [path("cache/blob")]);
+    assert!(!observed.entries().contains_key(&path("cache/blob")));
+    assert!(observed.entries().contains_key(&path("notes.txt")));
+}
