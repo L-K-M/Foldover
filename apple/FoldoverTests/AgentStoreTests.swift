@@ -83,7 +83,7 @@ func safeModeShowsNotifiesOnceAndResumes() async {
     #expect(viewModel.safeModeText?.contains("stopped unexpectedly 3 times") == true)
     // The notification is posted from its own task, after the refresh.
     for _ in 0..<1_000 where await alerts.posted.isEmpty {
-        await Task.yield()
+        try? await Task.sleep(for: .milliseconds(1))
     }
     #expect(await alerts.posted == ["Foldover paused syncing"])
 
