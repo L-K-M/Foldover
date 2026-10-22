@@ -105,6 +105,7 @@ The first runs found two engine bugs, both fixed
   closed link fails fast. Partial connectivity now runs nightly too:
   `foldover-net`'s `sim` module puts quinn on turmoil's simulated UDP
   (seeded loss, latency, jitter and partitions) and drives the real TLS
-  handshake, pairing exchange and bulk streams through it — asymmetric
-  and transient link failure during copies and pairing is covered;
-  application-level copies over the link still are not.
+  handshake, pairing exchange and bulk streams through it — transient
+  link failure during bulk transfers and pairing is covered; sustained
+  asymmetric rates and application-level copies over the link still
+  are not.

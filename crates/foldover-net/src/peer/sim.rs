@@ -10,6 +10,9 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+// The quinn udp trait surface (AsyncUdpSocket, UdpPoller, Transmit,
+// RecvMeta) has shifted within the 0.11.x series; a quinn bump may
+// require touching this adapter.
 use quinn::udp::{RecvMeta, Transmit};
 use quinn::{AsyncTimer, AsyncUdpSocket, Endpoint, EndpointConfig, Runtime, UdpPoller};
 use turmoil::net::UdpSocket;
@@ -342,7 +345,11 @@ fn sim_pairing_code_survives_packet_loss() {
             let node = bound_node(identity, trust, PeerMode::Pairing, true).await?;
             let connection = node.accept().await.expect("one pairing connection")?;
             let code = connection.pairing_code().await?;
-            assert_ne!(code, 0, "pairing code must be produced");
+            // The run ends when the client finishes, so hand the code
+            // over a stream: the client asserts on what was delivered.
+            let (mut send, _recv) = connection.open_bi().await?;
+            send.write_all(&code.to_be_bytes()).await?;
+            send.finish_delivered().await?;
             Ok(())
         }
     });
@@ -351,7 +358,14 @@ fn sim_pairing_code_survives_packet_loss() {
         let server = SocketAddr::new(turmoil::lookup("server"), PORT);
         let connection = node.dial(server, server_id).await?;
         let code = connection.pairing_code().await?;
-        assert_ne!(code, 0, "pairing code must be produced");
+        let (_send, mut recv) = connection.accept_bi().await?;
+        let mut bytes = [0; 4];
+        recv.read_exact(&mut bytes).await?;
+        assert_eq!(
+            u32::from_be_bytes(bytes),
+            code,
+            "both ends must derive the same code"
+        );
         Ok(())
     });
     sim.run().expect("pairing sim");
