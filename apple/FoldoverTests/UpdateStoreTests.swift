@@ -60,21 +60,30 @@ func aFailedCheckIsReportedWhenAsked() async {
 
 @MainActor
 @Test
-func theLaunchCheckAnnouncesOnlyANewerReleaseAndOnlyOnce() async {
+func aFailedLaunchCheckAnnouncesNothing() async {
     let recorder = Recorder()
     let store = store(failing: recorder)
-    await store.checkAtLaunch()
     await store.checkAtLaunch()
     #expect(recorder.outcomes.isEmpty)
 }
 
 @MainActor
 @Test
-func theLaunchCheckAnnouncesANewerRelease() async {
+func theLaunchCheckAnnouncesOnlyOnce() async {
     let recorder = Recorder()
     let store = store(returning: release("1.3.0"), recorder: recorder)
     await store.checkAtLaunch()
+    await store.checkAtLaunch()
     #expect(recorder.outcomes == [.available(release("1.3.0"))])
+}
+
+@MainActor
+@Test
+func anUnparseableInstalledVersionIsAFailureNotUpToDate() async {
+    let recorder = Recorder()
+    let store = store(returning: release("1.3.0"), installed: "dev-build", recorder: recorder)
+    await store.checkForUpdates()
+    #expect(recorder.outcomes == [.failed])
 }
 
 @Test

@@ -22,22 +22,29 @@ downloading and replacing the app stay manual, like the first install.
 
 ```text
 release tag ─▶ release.yml ─▶ app zip as the GitHub release's asset
-app ─ api.github.com/releases/latest ─▶ newer? ─▶ panel ─▶ download page
+app ─ github.com/releases/latest ─ 302 ─▶ /releases/tag/vX.Y.Z
 ```
 
-- **App:** `FoldoverSystem.UpdateChecker` reads
-  `repos/L-K-M/Foldover/releases/latest`, which never names a draft or
-  a pre-release, and compares its `vX.Y.Z` tag with
-  `CFBundleShortVersionString`. `UpdateStore` runs the check once when
-  the app opens and again for the app menu's Check for Updates…;
-  `UpdatePrompt` shows the outcome in a panel whose Download button
-  opens the release page. The launch check announces only a newer
-  release; the menu check also reports up-to-date and failure.
+- **App:** `FoldoverSystem.UpdateChecker` opens
+  `github.com/L-K-M/Foldover/releases/latest`, which redirects to the
+  newest release's tag page; the final URL carries both the version and
+  the download link. The plain web redirect needs no API call, so the
+  check stays outside the unauthenticated REST API's per-address rate
+  limit, which a shared NAT can exhaust. Latest never names a draft or
+  a pre-release, matching the tags `release.sh` writes.
+- **Checks:** `UpdateStore` runs the check once when the app opens and
+  again for the app menu's Check for Updates…; `UpdatePrompt` shows the
+  outcome in a panel whose Download button opens the release page. The
+  launch check announces only a newer release; the menu check also
+  reports up-to-date and failure. Test launches skip it.
 - **Release:** `release.yml` needs no keys or secrets now. It builds,
-  verifies and zips the app and attaches the zip to the release.
-- **Versions:** a release is still `vX.Y.Z`; anything the feed returns
-  that is not three numbers is ignored, and a build whose own version
-  cannot be parsed treats itself as current.
+  verifies and zips the app and attaches the zip to the release;
+  `package-app.sh` refuses a build whose `CFBundleShortVersionString`
+  is not `X.Y.Z`.
+- **Versions:** a release is still `vX.Y.Z`; a feed answer that is not
+  three numbers and a build whose own version cannot be parsed both
+  report the check as failed — "up to date" only follows a real
+  comparison.
 
 ## Consequences
 
@@ -49,7 +56,9 @@ app ─ api.github.com/releases/latest ─▶ newer? ─▶ panel ─▶ downloa
 - The download page is reached over HTTPS to github.com, the same trust
   the first install already placed in the release page; nothing about
   the check is signed, so the check itself proves only what GitHub says.
-- The check needs GitHub reachable at launch; a failure is silent unless
-  the person asked for it.
-- Updating relies on `releases/latest`, so a withdrawn or yanked release
-  simply stops being offered.
+- Every app open sends an unauthenticated request to github.com, so
+  GitHub sees opens from the requester's address. The launch check
+  needs GitHub reachable; a failure is silent, and only the menu item's
+  check reports one.
+- Updating relies on "latest", so a withdrawn or yanked release simply
+  stops being offered.

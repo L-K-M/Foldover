@@ -49,11 +49,17 @@ final class UpdateStore {
         checking = true
         defer { checking = false }
         let outcome: UpdateOutcome
-        do {
-            let release = try await fetch()
-            outcome = Self.isNewer(release.version, than: installed) ? .available(release) : .upToDate
-        } catch {
+        if UpdateChecker.components(of: installed) == nil {
+            // Reporting "up to date" here would claim a comparison that
+            // never ran.
             outcome = .failed
+        } else {
+            do {
+                let release = try await fetch()
+                outcome = Self.isNewer(release.version, than: installed) ? .available(release) : .upToDate
+            } catch {
+                outcome = .failed
+            }
         }
         switch (announcing, outcome) {
         case (.everyOutcome, _), (.onlyNewer, .available):

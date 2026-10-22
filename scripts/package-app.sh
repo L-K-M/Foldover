@@ -27,6 +27,13 @@ app="$DERIVED/Build/Products/Release/Foldover.app"
 # Apple silicon only, macOS 27+, ad hoc signed inside out (PLAN.md §6).
 test "$(lipo -archs "$app/Contents/MacOS/Foldover")" = "$ARCHITECTURE"
 test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")" = "$MINIMUM_SYSTEM"
+# The update check compares this version against release tags; anything
+# else would quietly count as current forever (ADR 0045).
+version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
+if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+  echo "error: CFBundleShortVersionString '$version' is not X.Y.Z; the update check would treat this build as current" >&2
+  exit 1
+fi
 codesign --verify --deep --strict --verbose=2 "$app"
 codesign -d --verbose=4 "$app" 2>&1 | grep -Fx 'Signature=adhoc'
 for executable in foldoverd foldover; do

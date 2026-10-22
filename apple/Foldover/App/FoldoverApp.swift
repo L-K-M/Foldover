@@ -28,8 +28,10 @@ struct FoldoverApp: App {
         // Runs for the app's lifetime, with or without an open window.
         Task { await viewModel.monitor() }
         // A test host is not a launch: a modal prompt there would stall
-        // the suite.
-        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
+        // the suite. UI-test launches carry no test environment and opt
+        // out with a launch argument instead.
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil,
+           !CommandLine.arguments.contains("-foldover-skip-update-check") {
             Task { await updates.checkAtLaunch() }
         }
     }

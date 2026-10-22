@@ -55,11 +55,10 @@ targets:
       - name: Embed the background agent and CLI
         basedOnDependencyAnalysis: false
         script: bash "$SRCROOT/../scripts/embed-agent.sh" "$TARGET_BUILD_DIR/$WRAPPER_NAME"
-    # Xcode writes the Info.plist from these settings, so no generated
-    # plist sits in the tree: an XcodeGen-written one would leave the tree
-    # dirty after every generate, which the release engine rejects.
-    # CFBundleShortVersionString and CFBundleVersion come from
-    # MARKETING_VERSION and CURRENT_PROJECT_VERSION.
+    # No INFOPLIST_FILE: Xcode generates the Info.plist into the build
+    # products (GENERATE_INFOPLIST_FILE), so no plist lands in the tree,
+    # which the release engine requires. CFBundleShortVersionString and
+    # CFBundleVersion come from MARKETING_VERSION and CURRENT_PROJECT_VERSION.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ch.lkmc.foldover

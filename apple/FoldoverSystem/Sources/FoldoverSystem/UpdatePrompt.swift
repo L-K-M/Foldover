@@ -17,6 +17,8 @@ public enum UpdateOutcome: Equatable {
 @MainActor
 public enum UpdatePrompt {
     public static func present(_ outcome: UpdateOutcome, installed: String) {
+        // A launch check finds the app unfocused; bring its panel forward.
+        NSApp.activate()
         let alert = NSAlert()
         switch outcome {
         case .available(let release):
@@ -33,7 +35,7 @@ public enum UpdatePrompt {
             alert.runModal()
         case .failed:
             alert.messageText = String(localized: "The update check failed")
-            alert.informativeText = String(localized: "Foldover could not reach GitHub. Check the connection and try again.")
+            alert.informativeText = String(localized: "Foldover could not check for a new release. Check the connection and try again.")
             alert.alertStyle = .warning
             alert.runModal()
         }
