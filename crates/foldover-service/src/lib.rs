@@ -437,7 +437,11 @@ async fn browse(params: EndpointBrowse) -> Result<Value, RpcError> {
             slot.clone()
         } else {
             if browses_by_root.len() >= MAX_ROOTS {
-                browses_by_root.retain(|_, slot| Arc::strong_count(slot) > 1);
+                // A permit an abandoned browse still holds pins its
+                // semaphore; reaping would mint four fresh permits for
+                // the same black-holed root on the next browse.
+                browses_by_root
+                    .retain(|_, slot| Arc::strong_count(slot) > 1 || slot.available_permits() < 4);
                 if browses_by_root.len() >= MAX_ROOTS {
                     return Err(RpcError::new(
                         INTERNAL_ERROR,
