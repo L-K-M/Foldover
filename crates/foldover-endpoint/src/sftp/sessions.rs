@@ -264,7 +264,7 @@ mod tests {
             })
         };
         let sessions = Sessions::new(spawn(&server).unwrap(), 2);
-        let _held = sessions.borrow(Some(&connect));
+        let held = sessions.borrow(Some(&connect));
         std::thread::scope(|threads| {
             let waiter = threads.spawn(|| sessions.borrow(Some(&connect)));
             // Refusals clamp the pool to its one live session; the
@@ -280,6 +280,13 @@ mod tests {
             assert_eq!(sessions.lock().limit, 1);
             // It takes connects again; a probe finds the recovery.
             refusing.store(false, Ordering::SeqCst);
+            let deadline = Instant::now() + 30 * RETRY;
+            while sessions.lock().limit < 2 && Instant::now() < deadline {
+                std::thread::sleep(RETRY / 4);
+            }
+            // Whether or not the probe already landed, the held
+            // session lets a parked waiter finish.
+            drop(held);
             let _got = waiter.join().unwrap();
         });
         assert_eq!(sessions.lock().limit, 2);
