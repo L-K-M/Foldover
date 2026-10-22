@@ -45,12 +45,13 @@ public struct ReleaseVersion: Comparable, CustomStringConvertible, Sendable {
         else { return nil }
         if let suffix {
             let fields = suffix.split(separator: ".", omittingEmptySubsequences: false)
-            guard fields.allSatisfy({ field in
-                !field.isEmpty && field.allSatisfy(Self.isPrereleaseChar)
-                    // A purely numeric identifier forbids leading zeros.
-                    && (!field.allSatisfy(Self.isDigit)
-                        || field.count == 1 || field.first != "0")
-            })
+            guard !fields.isEmpty,
+                  fields.allSatisfy({ field in
+                      !field.isEmpty && field.allSatisfy(Self.isPrereleaseChar)
+                          // A purely numeric identifier forbids leading zeros.
+                          && (!field.allSatisfy(Self.isDigit)
+                              || Self.isNumericField(field))
+                  })
             else { return nil }
         }
         self.major = major
@@ -108,7 +109,8 @@ public struct ReleaseVersion: Comparable, CustomStringConvertible, Sendable {
 
     /// A numeric version field: all digits, no leading zero.
     private static func isNumericField(_ field: Substring) -> Bool {
-        field.allSatisfy(isDigit) && (field.count == 1 || field.first != "0")
+        !field.isEmpty && field.allSatisfy(isDigit)
+            && (field.count == 1 || field.first != "0")
     }
 
     private static func isPrereleaseChar(_ char: Character) -> Bool {

@@ -32,7 +32,7 @@ test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Content
 # instead of a real answer (ADR 0045). The optional -suffix carries
 # pre-releases.
 version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
-if ! printf '%s' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$'; then
+if ! printf '%s' "$version" | grep -Eq "$("$ROOT/scripts/version-shape.sh")"; then
   echo "error: CFBundleShortVersionString '$version' is not X.Y.Z(-suffix); the update check could never compare it" >&2
   exit 1
 fi

@@ -13,7 +13,9 @@ All notable changes to this project are documented here. The format follows
   updating in place; the Sparkle updater and its signing keys are gone.
   A beta install hears about the next beta — and the stable release that
   ends the line — while a stable install is only ever told about stable
-  releases.
+  releases. Version strings now follow strict semantic versioning:
+  leading zeros such as `1.02.3` are rejected by the release pipeline
+  and by the update check.
 
 - Time Machine no longer backs up Foldover's state on this Mac: a
   restored, older state could carry stale deletions over. A Mac set up

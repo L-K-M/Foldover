@@ -24,8 +24,10 @@ export RELEASE_POST_BUMP="scripts/sync-cargo-version.sh"
 # Cargo needs all three components, so X.Y (which the xcode kind would
 # accept) is rejected up front instead of failing inside cargo. The
 # optional -suffix carries pre-releases (semver order), which the
-# pipeline publishes as GitHub pre-releases.
-export RELEASE_VERSION_REGEX='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$'
+# pipeline publishes as GitHub pre-releases. The shape lives in
+# scripts/version-shape.sh so every gate matches.
+RELEASE_VERSION_REGEX="$("$ROOT/scripts/version-shape.sh")"
+export RELEASE_VERSION_REGEX
 
 # Flag-only calls (--help, --version, --capabilities) touch nothing,
 # so they skip the project preparation below.
