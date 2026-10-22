@@ -19,7 +19,7 @@ VERSION="${RELEASE_NEW_VERSION:-}"
 # The value goes straight into a sed replacement, and Cargo needs all
 # three components (release.sh rejects anything else up front). The
 # optional -suffix carries pre-releases.
-SHAPE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+SHAPE="${RELEASE_VERSION_REGEX:-^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$}"
 [[ "$VERSION" =~ $SHAPE ]] \
   || die "RELEASE_NEW_VERSION must look like X.Y.Z or X.Y.Z-suffix, got '$VERSION'"
 

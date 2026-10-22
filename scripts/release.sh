@@ -25,7 +25,7 @@ export RELEASE_POST_BUMP="scripts/sync-cargo-version.sh"
 # accept) is rejected up front instead of failing inside cargo. The
 # optional -suffix carries pre-releases (semver order), which the
 # pipeline publishes as GitHub pre-releases.
-export RELEASE_VERSION_REGEX='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+export RELEASE_VERSION_REGEX='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$'
 
 # Flag-only calls (--help, --version, --capabilities) touch nothing,
 # so they skip the project preparation below.

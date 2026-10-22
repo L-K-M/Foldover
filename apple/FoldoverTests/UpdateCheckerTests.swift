@@ -17,6 +17,12 @@ func releaseVersionsParse() {
     #expect(ReleaseVersion(parsing: "1.2.3-beta 1") == nil)
     #expect(ReleaseVersion(parsing: "beta") == nil)
     #expect(ReleaseVersion(parsing: "") == nil)
+    // Semver forbids leading zeros in numeric fields.
+    #expect(ReleaseVersion(parsing: "1.02.3") == nil)
+    #expect(ReleaseVersion(parsing: "1.2.3-beta.01") == nil)
+    #expect(ReleaseVersion(parsing: "1.2.3-01") == nil)
+    #expect(ReleaseVersion(parsing: "1.2.3-0") != nil)
+    #expect(ReleaseVersion(parsing: "1.2.3-2024.1.15") != nil)
 }
 
 @Test
