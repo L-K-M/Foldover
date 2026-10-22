@@ -19,7 +19,8 @@ VERSION="${RELEASE_NEW_VERSION:-}"
 # The value goes straight into a sed replacement, and Cargo needs all
 # three components (release.sh rejects anything else up front). The
 # optional -suffix carries pre-releases.
-SHAPE="${RELEASE_VERSION_REGEX:-$(bash "$ROOT/scripts/version-shape.sh")}"
+SHAPE="${RELEASE_VERSION_REGEX:-$(bash "$ROOT/scripts/version-shape.sh")}" \
+  || die "failed to read the version shape"
 [[ "$VERSION" =~ $SHAPE ]] \
   || die "RELEASE_NEW_VERSION must look like X.Y.Z or X.Y.Z-suffix, got '$VERSION'"
 

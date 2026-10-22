@@ -93,7 +93,12 @@ public struct ReleaseVersion: Comparable, CustomStringConvertible, Sendable {
             let otherNumeric = otherField.allSatisfy(isDigit)
             switch (numeric, otherNumeric) {
             case (true, true):
-                return (Int(field) ?? 0) < (Int(otherField) ?? 0)
+                // Leading zeros are forbidden at parse time, so a
+                // longer field is the larger number and equal lengths
+                // compare lexically — no Int, nothing to overflow.
+                return field.count != otherField.count
+                    ? field.count < otherField.count
+                    : field.lexicographicallyPrecedes(otherField)
             case (true, false): return true
             case (false, true): return false
             case (false, false):

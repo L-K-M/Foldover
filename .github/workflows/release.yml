@@ -31,7 +31,7 @@ jobs:
           # On its own line so a failed read fails the step rather
           # than leave an empty pattern that matches every tag.
           shape="$(bash scripts/version-shape.sh)"
-          [[ "$version" =~ $shape ]]
+          [[ -n "$shape" && "$version" =~ $shape ]]
           # The release engine writes the version unquoted.
           grep -Ex "    MARKETING_VERSION: \"?${version//./\\.}\"?" apple/project.yml
           grep -Fx "version = \"$version\"" Cargo.toml

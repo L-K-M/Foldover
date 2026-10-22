@@ -32,9 +32,10 @@ test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Content
 # instead of a real answer (ADR 0045). The optional -suffix carries
 # pre-releases.
 version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
-# Read the shape on its own line: a failed substitution inside the
-# pipeline would leave an empty pattern that matches everything.
-shape="$(bash "$ROOT/scripts/version-shape.sh")"
+# Read the shape on its own line and fail loudly: a failed or silent
+# run would otherwise leave an empty pattern that matches everything.
+shape="$(bash "$ROOT/scripts/version-shape.sh")" || exit 1
+[[ -n "$shape" ]] || exit 1
 if ! printf '%s' "$version" | grep -Eq "$shape"; then
   echo "error: CFBundleShortVersionString '$version' is not X.Y.Z(-suffix); the update check could never compare it" >&2
   exit 1

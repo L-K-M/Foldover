@@ -37,6 +37,9 @@ func releaseVersionsOrder() {
     #expect(ReleaseVersion(parsing: "1.0.0-rc.1")! < ReleaseVersion(parsing: "1.0.0")!)
     #expect(ReleaseVersion(parsing: "2.0.0-beta.1")! > ReleaseVersion(parsing: "1.9.9")!)
     #expect(ReleaseVersion(parsing: "1.0.0")! == ReleaseVersion(parsing: "v1.0.0")!)
+    // A numeric field too long for Int still orders numerically.
+    #expect(ReleaseVersion(parsing: "1.0.0-beta.99999999999999999999")!
+        > ReleaseVersion(parsing: "1.0.0-beta.2")!)
 }
 
 @Test
