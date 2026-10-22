@@ -265,8 +265,10 @@ mod tests {
         let _held = sessions.borrow(Some(&connect));
         std::thread::scope(|threads| {
             let waiter = threads.spawn(|| sessions.borrow(Some(&connect)));
-            // Refusals clamp the pool to its one live session.
-            for _ in 0..100 {
+            // Refusals clamp the pool to its one live session; the
+            // deadline is generous so RETRY or REFUSALS can grow.
+            let deadline = Instant::now() + 30 * RETRY;
+            while Instant::now() < deadline {
                 let pool = sessions.lock();
                 if pool.limit == 1 && pool.refusals >= REFUSALS {
                     break;
