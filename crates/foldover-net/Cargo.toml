@@ -29,3 +29,4 @@ tokio = { version = "1.53.2", features = ["macros", "process", "rt", "sync", "ti
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "time"] }
+turmoil = "=0.7.2"
