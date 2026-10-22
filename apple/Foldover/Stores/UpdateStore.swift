@@ -79,9 +79,9 @@ final class UpdateStore {
     /// The default feed a build of `installed` reads: pre-releases
     /// appear only in the release feed, never at `releases/latest`.
     nonisolated static func feedFetcher(
-        forInstalled installed: String
+        forInstalled installed: String,
+        checker: UpdateChecker = UpdateChecker()
     ) -> @Sendable () async throws -> AppRelease {
-        let checker = UpdateChecker()
         if checksPrereleases(installed: installed) {
             return { try await checker.checkIncludingPrereleases() }
         }

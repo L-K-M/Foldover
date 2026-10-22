@@ -31,6 +31,49 @@ private func store(failing recorder: Recorder) -> UpdateStore {
     }
 }
 
+/// Answers the release feed a stable install reads with a stable tag,
+/// and the pre-release feed with a beta tag — so which endpoint a fetch
+/// ran is visible in what it returns.
+private final class FeedStub: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        let url = request.url!
+        let tag = url.absoluteString.hasSuffix("releases.atom")
+            ? "v9.9.9-beta.1"
+            : "v9.9.9"
+        let feed = """
+            <?xml version="1.0"?>
+            <feed><entry>
+              <link rel="alternate" type="text/html"
+                href="https://github.com/L-K-M/Foldover/releases/tag/\(tag)"/>
+            </entry></feed>
+            """
+        let page = URL(
+            string: "https://github.com/L-K-M/Foldover/releases/tag/\(tag)")!
+        let response = HTTPURLResponse(
+            url: url.absoluteString.hasSuffix("releases.atom") ? url : page,
+            statusCode: 200, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        if url.absoluteString.hasSuffix("releases.atom") {
+            client?.urlProtocol(self, didLoad: Data(feed.utf8))
+        }
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private func stubbedChecker() -> UpdateChecker {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [FeedStub.self]
+    return UpdateChecker(session: URLSession(configuration: configuration))
+}
+
 @MainActor
 @Test
 func aNewerReleaseIsAnnounced() async {
@@ -114,6 +157,19 @@ func onlyPreReleaseInstallsCheckThePreReleaseFeed() {
     #expect(UpdateStore.checksPrereleases(installed: "v1.0.0-rc.2"))
     #expect(!UpdateStore.checksPrereleases(installed: "1.0.0"))
     #expect(!UpdateStore.checksPrereleases(installed: "dev-build"))
+}
+
+/// The stub answers the feed endpoint with a beta tag and the latest
+/// endpoint with a stable one, so the returned version proves which
+/// endpoint the default fetch ran.
+@Test
+func aPreReleaseInstallsDefaultFetchReadsThePreReleaseFeed() async throws {
+    let beta = try await UpdateStore
+        .feedFetcher(forInstalled: "1.0.0-beta.1", checker: stubbedChecker())()
+    #expect(beta.version == "9.9.9-beta.1")
+    let stable = try await UpdateStore
+        .feedFetcher(forInstalled: "1.0.0", checker: stubbedChecker())()
+    #expect(stable.version == "9.9.9")
 }
 
 @MainActor
