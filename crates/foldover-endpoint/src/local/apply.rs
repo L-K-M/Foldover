@@ -164,6 +164,7 @@ impl LocalEndpoint {
         run: &RunScope,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<EntryVersion, ApplyError> {
+        self.guarded_subtree(path)?;
         let policy = run.options.metadata();
         let source_entry = source
             .verified(path, from, run, control)
@@ -301,6 +302,7 @@ impl LocalEndpoint {
         run: &RunScope,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<EntryVersion, ApplyError> {
+        self.guarded(path)?;
         if from.version.content() != current.version.content() {
             return Err(ApplyError::Unsupported(path.clone()));
         }
@@ -349,6 +351,8 @@ impl LocalEndpoint {
         run: &RunScope,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<(), ApplyError> {
+        self.guarded_subtree(from)?;
+        self.guarded_subtree(to)?;
         let entry = self
             .verified(from, current, run, control)
             .map_err(|error| changed_as(error, ApplyError::DestinationChanged(from.clone())))?;
@@ -371,6 +375,7 @@ impl LocalEndpoint {
         run: &RunScope,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<(), ApplyError> {
+        self.guarded_subtree(path)?;
         let entry = self
             .verified(path, current, run, control)
             .map_err(|error| changed_as(error, ApplyError::DestinationChanged(path.clone())))?;
@@ -400,6 +405,7 @@ impl LocalEndpoint {
     /// archive, as the person chose for that folder, even one an earlier,
     /// archiving run left.
     pub fn recover_leftover(&self, leftover: &SyncPath, run: &RunScope) -> Result<(), ApplyError> {
+        self.guarded(leftover)?;
         let metadata = self
             .root
             .metadata(leftover)

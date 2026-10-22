@@ -11,10 +11,12 @@ use crate::link::{Answer, NotRecorded, PeerHost, PeerLink, Presence};
 use crate::local::Carried;
 use crate::{Endpoint, Expected, RunScope};
 
-/// Serves one folder as every share, as the sharing Mac's agent does.
+/// Serves one folder as every share, as the sharing Mac's agent does;
+/// `state` is that agent's state directory, protected under the root.
 struct Sharing {
     root: LocalRoot,
     cache: FolderCache,
+    state: Option<std::path::PathBuf>,
 }
 
 impl PeerHost for Sharing {
@@ -24,7 +26,9 @@ impl PeerHost for Sharing {
 
     fn serve(&self, _: DeviceId, call: PeerCall, answer: &mut Answer) {
         match call {
-            PeerCall::Folder { op, .. } => serve_folder(&self.root, *op, &self.cache, answer),
+            PeerCall::Folder { op, .. } => {
+                serve_folder(&self.root, *op, &self.cache, answer, self.state.as_deref())
+            }
             PeerCall::Shares => {
                 let _ = answer.reply(&PeerReply::Shares { shares: Vec::new() });
             }
@@ -52,6 +56,7 @@ fn a_copy_whose_source_fails_partway_stops_instead_of_waiting() {
             root: LocalRoot::from_bytes(folder.path().as_os_str().as_encoded_bytes().to_vec())
                 .unwrap(),
             cache: FolderCache::default(),
+            state: None,
         });
         let b = PeerLink::start(
             b_identity,
@@ -71,6 +76,7 @@ fn a_copy_whose_source_fails_partway_stops_instead_of_waiting() {
             Arc::new(Sharing {
                 root: LocalRoot::from_bytes(b"/".to_vec()).unwrap(),
                 cache: FolderCache::default(),
+                state: None,
             }),
         )
         .unwrap();
@@ -154,6 +160,7 @@ fn a_folder_another_mac_keeps_on_a_network_volume_says_so() {
     let sharing = |path: &[u8]| Sharing {
         root: LocalRoot::from_bytes(path.to_vec()).unwrap(),
         cache: FolderCache::default(),
+        state: None,
     };
     let (a, _b) = runtime.block_on(async {
         let b = PeerLink::start(
@@ -209,6 +216,7 @@ fn copies_to_and_from_another_mac_run_at_once() {
         Arc::new(Sharing {
             root: LocalRoot::from_bytes(path.as_os_str().as_encoded_bytes().to_vec()).unwrap(),
             cache: FolderCache::default(),
+            state: None,
         })
     };
     let (a, _b) = runtime.block_on(async {
@@ -332,6 +340,7 @@ fn calls_on_a_link_whose_peer_went_away_fail_instead_of_hanging() {
                 root: LocalRoot::from_bytes(shared.path().as_os_str().as_encoded_bytes().to_vec())
                     .unwrap(),
                 cache: FolderCache::default(),
+                state: None,
             }),
         )
         .unwrap();
@@ -345,6 +354,7 @@ fn calls_on_a_link_whose_peer_went_away_fail_instead_of_hanging() {
                 root: LocalRoot::from_bytes(a_share.path().as_os_str().as_encoded_bytes().to_vec())
                     .unwrap(),
                 cache: FolderCache::default(),
+                state: None,
             }),
         )
         .unwrap();
@@ -368,4 +378,91 @@ fn calls_on_a_link_whose_peer_went_away_fail_instead_of_hanging() {
         .expect("a dead peer must answer within the request timeout");
     worker.join().expect("the observe thread must not panic");
     assert!(result.is_err());
+}
+
+/// A shared folder that holds the serving agent's state directory never
+/// exposes it to the asking Mac: the subtree is missing from scans, and
+/// reads and writes inside it are refused.
+#[test]
+fn a_shared_folder_never_serves_the_agent_state_directory() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let shared = tempfile::tempdir().unwrap();
+    let state = shared.path().join("Library/Application Support/Foldover");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(state.join("pairs.sqlite"), b"records").unwrap();
+    std::fs::write(shared.path().join("mine.txt"), b"mine").unwrap();
+    let identities = [Identity::generate().unwrap(), Identity::generate().unwrap()];
+    let devices = identities
+        .each_ref()
+        .map(|identity| DeviceId::from_bytes(*identity.id().as_bytes()));
+    let [a_identity, b_identity] = identities;
+    let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let a_share = tempfile::tempdir().unwrap();
+    let (a, _b) = runtime.block_on(async {
+        let b = PeerLink::start(
+            b_identity,
+            "Studio".into(),
+            loopback,
+            Presence::Unlisted,
+            [devices[0]],
+            Arc::new(Sharing {
+                root: LocalRoot::from_bytes(shared.path().as_os_str().as_encoded_bytes().to_vec())
+                    .unwrap(),
+                cache: FolderCache::default(),
+                state: Some(state.clone()),
+            }),
+        )
+        .unwrap();
+        let a = PeerLink::start(
+            a_identity,
+            "Laptop".into(),
+            loopback,
+            Presence::Unlisted,
+            [devices[1]],
+            Arc::new(Sharing {
+                root: LocalRoot::from_bytes(a_share.path().as_os_str().as_encoded_bytes().to_vec())
+                    .unwrap(),
+                cache: FolderCache::default(),
+                state: None,
+            }),
+        )
+        .unwrap();
+        a.reach(devices[1], b.address().unwrap());
+        (a, b)
+    });
+
+    let root = PeerRoot::new(devices[1], ShareId::from_bytes([7; ShareId::BYTE_LEN]));
+    let other = Endpoint::Peer(PeerEndpoint::open(a, &root).unwrap());
+    let seen = observe(&other).unwrap();
+    let prefix = b"Library/Application Support/Foldover";
+    assert!(!seen.entries().keys().any(|path| {
+        let bytes = path.as_bytes();
+        bytes == prefix || bytes.starts_with(b"Library/Application Support/Foldover/")
+    }));
+    assert!(
+        seen.entries()
+            .contains_key(&SyncPath::try_from(b"mine.txt".as_slice()).unwrap())
+    );
+
+    // A read or write inside the state directory is refused there.
+    let Endpoint::Peer(peer) = &other else {
+        unreachable!()
+    };
+    let run = RunScope::new(UNIX_EPOCH, PairOptions::default());
+    let entry = ObservedEntry::for_tests(
+        foldover_types::EntryVersion::new(
+            foldover_types::EntryContent::File(foldover_types::Digest::from_bytes(
+                [1; Digest::BYTE_LEN],
+            )),
+            foldover_types::Digest::from_bytes([1; Digest::BYTE_LEN]),
+        ),
+        1,
+    );
+    let inside =
+        SyncPath::try_from(b"Library/Application Support/Foldover/pairs.sqlite".as_slice())
+            .unwrap();
+    assert!(peer.read(&inside, &entry, &run, 0).is_err());
 }

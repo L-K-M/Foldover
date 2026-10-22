@@ -53,7 +53,7 @@ impl PairWatcher {
         }
         let mut unwatched: Vec<(PairId, io::Error)> = self
             .roots
-            .set_roots(&local)
+            .set_roots(&local, reach.state())
             .into_iter()
             .filter_map(|(root, error)| {
                 local

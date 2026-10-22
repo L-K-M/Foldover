@@ -76,17 +76,26 @@ impl FolderCache {
     }
 }
 
-/// Answer one operation on the shared folder at `root`.
-pub fn serve_folder(root: &LocalRoot, op: FolderOp, cache: &FolderCache, answer: &mut Answer) {
+/// Answer one operation on the shared folder at `root`. `state` is this
+/// agent's own state directory: where the shared folder holds it, that
+/// subtree is never listed, read or changed for another Mac.
+pub fn serve_folder(
+    root: &LocalRoot,
+    op: FolderOp,
+    cache: &FolderCache,
+    answer: &mut Answer,
+    state: Option<&Path>,
+) {
     if op == FolderOp::Watch {
-        return watch(root, answer);
+        return watch(root, state, answer);
     }
-    let endpoint = match LocalEndpoint::open(Path::new(OsStr::from_bytes(root.as_bytes())))
-        .and_then(|endpoint| endpoint.probe_access().map(|()| endpoint))
-    {
-        Ok(endpoint) => endpoint,
-        Err(error) => return failed(answer, wire::scan_failure(&error)),
-    };
+    let endpoint =
+        match LocalEndpoint::open_protecting(Path::new(OsStr::from_bytes(root.as_bytes())), state)
+            .and_then(|endpoint| endpoint.probe_access().map(|()| endpoint))
+        {
+            Ok(endpoint) => endpoint,
+            Err(error) => return failed(answer, wire::scan_failure(&error)),
+        };
     let reply = match op {
         FolderOp::Probe => Ok(PeerReply::Done),
         FolderOp::Identity => endpoint
@@ -399,7 +408,7 @@ fn lease(
 /// Report changes in the folder until the asking Mac gives up: a burst of
 /// notifications is one `changed`, and `watching` every minute without
 /// changes proves the request is still wanted.
-fn watch(root: &LocalRoot, answer: &mut Answer) {
+fn watch(root: &LocalRoot, state: Option<&Path>, answer: &mut Answer) {
     let (sender, changes) = mpsc::channel();
     let watcher = RootWatcher::new(move |()| {
         let _ = sender.send(());
@@ -408,7 +417,7 @@ fn watch(root: &LocalRoot, answer: &mut Answer) {
         Ok(watcher) => watcher,
         Err(error) => return failed(answer, watch_failure(&error)),
     };
-    if let Some((_, error)) = watcher.set_roots(&[(root.clone(), ())]).first() {
+    if let Some((_, error)) = watcher.set_roots(&[(root.clone(), ())], state).first() {
         return failed(answer, watch_failure(error));
     }
     let mut reply = PeerReply::Watching;

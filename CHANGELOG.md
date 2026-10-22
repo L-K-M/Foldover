@@ -22,6 +22,13 @@ All notable changes to this project are documented here. The format follows
 - The pair editor, Settings and the menu bar extra are more compact and
   fit small screens; the pair editor's Save button is always visible.
 
+- A pair or shared folder may be your home folder — or any folder that
+  holds Foldover's state directory. The state directory is left out of
+  scans, refused to reads, writes and paired Macs, and protected from
+  removals or replacements of the folders above it; its own bookkeeping
+  writes never count as changes. A root inside the state directory is
+  still rejected.
+
 - Check for Updates… and the check the app makes when it opens now ask
   GitHub for the newest release and link to its download page instead of
   updating in place; the Sparkle updater and its signing keys are gone.

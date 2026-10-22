@@ -45,7 +45,13 @@ pub fn quiet_cursors(pair: &PairConfig, event: u64) -> Vec<(Side, WatchCursor)> 
 
 /// Whether `pair`'s folders may have changed since `cursors` were saved.
 /// Replays volume histories, which can take seconds; call it off locks.
-pub fn changed_while_away(pair: &PairConfig, cursors: &[Option<WatchCursor>; 2]) -> bool {
+/// `state`, the agent's state directory, does not count where a folder
+/// holds it: replaying its writes must not wake the pair that holds it.
+pub fn changed_while_away(
+    pair: &PairConfig,
+    cursors: &[Option<WatchCursor>; 2],
+    state: Option<&std::path::Path>,
+) -> bool {
     [Side::Left, Side::Right].into_iter().any(|side| {
         let PairRoot::Local(root) = root(pair, side) else {
             return true;
@@ -61,7 +67,7 @@ pub fn changed_while_away(pair: &PairConfig, cursors: &[Option<WatchCursor>; 2])
         if !matches!(event_history(root), Ok(Some(history)) if history == cursor.history) {
             return true;
         }
-        changed_since_event(root, cursor.event, REPLAY_TIMEOUT).unwrap_or(true)
+        changed_since_event(root, cursor.event, REPLAY_TIMEOUT, state).unwrap_or(true)
     })
 }
 
@@ -98,7 +104,7 @@ mod tests {
     fn a_folder_without_a_usable_cursor_may_have_changed() {
         let directory = tempfile::tempdir().unwrap();
         let pair = pair(directory.path());
-        assert!(changed_while_away(&pair, &[None, None]));
+        assert!(changed_while_away(&pair, &[None, None], None));
 
         // A cursor taken for another folder says nothing about this one.
         let other = WatchCursor {
@@ -108,7 +114,8 @@ mod tests {
         };
         assert!(changed_while_away(
             &pair,
-            &[Some(other.clone()), Some(other)]
+            &[Some(other.clone()), Some(other)],
+            None
         ));
     }
 
@@ -138,10 +145,10 @@ mod tests {
         // Foldover's own bookkeeping is no change.
         fs::create_dir(directory.path().join("left/.foldover")).unwrap();
         std::thread::sleep(SETTLE);
-        assert!(!changed_while_away(&pair, &cursors));
+        assert!(!changed_while_away(&pair, &cursors, None));
 
         fs::write(directory.path().join("right/note.txt"), b"edited").unwrap();
         std::thread::sleep(SETTLE);
-        assert!(changed_while_away(&pair, &cursors));
+        assert!(changed_while_away(&pair, &cursors, None));
     }
 }

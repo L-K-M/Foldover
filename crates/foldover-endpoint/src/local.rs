@@ -47,6 +47,20 @@ const PARALLEL_COPIES: NonZeroUsize = NonZeroUsize::new(4).expect("four is not z
 pub struct LocalEndpoint {
     root: Root,
     identity: FileIdentity,
+    state: Option<ProtectedState>,
+}
+
+/// Where the agent's own state directory sits under this root. A root may
+/// hold it — one rooted at the home directory does — but its entries are
+/// never scanned, and operations that could reach or displace it fail, so
+/// an agent can neither carry its records to a peer nor damage them.
+struct ProtectedState {
+    /// The state directory's path below the root; empty when the root is
+    /// the state directory or inside it, protecting every entry.
+    prefix: Vec<u8>,
+    /// Its directory identity, which the prefix cannot see when the same
+    /// directory is reachable under another spelling, as a bind mount.
+    identity: FileIdentity,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -414,6 +428,12 @@ impl Directory {
 
 impl LocalEndpoint {
     pub fn open(path: &Path) -> Result<Self, ScanError> {
+        Self::open_protecting(path, None)
+    }
+
+    /// `open` that knows the agent's own state directory: when this root
+    /// holds it, that subtree is protected — see `ProtectedState`.
+    pub fn open_protecting(path: &Path, state: Option<&Path>) -> Result<Self, ScanError> {
         let root = match Root::open(path) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Err(ScanError::RootMissing);
@@ -421,7 +441,70 @@ impl LocalEndpoint {
             result => at(&None, result)?,
         };
         let identity = at(&None, root.root_metadata())?.identity();
-        Ok(Self { root, identity })
+        let state = protected_state(&root, path, state)?;
+        Ok(Self {
+            root,
+            identity,
+            state,
+        })
+    }
+
+    /// `path` is the state directory or inside it.
+    fn protects(&self, path: &SyncPath) -> bool {
+        let Some(state) = &self.state else {
+            return false;
+        };
+        if state.prefix.is_empty() {
+            return true;
+        }
+        path.as_bytes()
+            .strip_prefix(state.prefix.as_slice())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(b"/"))
+    }
+
+    /// `path` holds the state directory inside it: replacing, renaming or
+    /// removing it would take the agent's records too.
+    fn shelters(&self, path: &SyncPath) -> bool {
+        let Some(state) = &self.state else {
+            return false;
+        };
+        !state.prefix.is_empty()
+            && state
+                .prefix
+                .strip_prefix(path.as_bytes())
+                .is_some_and(|rest| rest.starts_with(b"/"))
+    }
+
+    /// The entry is the state directory itself, under any spelling.
+    fn is_state(&self, metadata: &EntryMetadata) -> bool {
+        self.state
+            .as_ref()
+            .is_some_and(|state| metadata.identity() == state.identity)
+    }
+
+    /// Refuse to read, list or write the agent's own state directory.
+    fn guarded(&self, path: &SyncPath) -> Result<(), ScanError> {
+        if self.protects(path) {
+            return Err(ScanError::ProtectedPath(path.clone()));
+        }
+        // An alias such as a bind mount names the state directory under a
+        // spelling the prefix does not carry; its identity does.
+        if self.state.is_some()
+            && let Ok(metadata) = self.root.metadata(path)
+            && self.is_state(&metadata)
+        {
+            return Err(ScanError::ProtectedPath(path.clone()));
+        }
+        Ok(())
+    }
+
+    /// `guarded`, and `path` must not be a directory holding the state
+    /// inside it: a removal or replacement of one takes the agent down.
+    fn guarded_subtree(&self, path: &SyncPath) -> Result<(), ScanError> {
+        if self.shelters(path) {
+            return Err(ScanError::ProtectedPath(path.clone()));
+        }
+        self.guarded(path)
     }
 
     pub fn relation_to(&self, other: &Self) -> Result<RootRelation, ScanError> {
@@ -462,6 +545,9 @@ impl LocalEndpoint {
         filter: &Filter,
     ) -> Result<Option<Vec<ListedEntry>>, ScanError> {
         let path = directory.cloned();
+        if let Some(directory) = directory {
+            self.guarded(directory)?;
+        }
         let scope = match directory {
             None => DirectoryScope::Root,
             Some(directory) => DirectoryScope::At(directory),
@@ -475,6 +561,11 @@ impl LocalEndpoint {
         for entry in entries {
             let entry = at_scan(&path, entry)?;
             if protected(entry.name()) {
+                continue;
+            }
+            if let Ok(path) = child_path(directory, entry.name())
+                && (self.protects(&path) || self.is_state(entry.metadata()))
+            {
                 continue;
             }
             let metadata = entry.metadata();
@@ -593,6 +684,9 @@ impl LocalEndpoint {
     }
 
     fn validate_content_access(&self, entry: &LocalEntry) -> Result<(), ScanError> {
+        if self.protects(&entry.path) || self.is_state(&entry.metadata) {
+            return Err(ScanError::ProtectedPath(entry.path.clone()));
+        }
         if entry.path.components().any(protected) {
             return Err(ScanError::ProtectedPath(entry.path.clone()));
         }
@@ -662,6 +756,10 @@ impl LocalEndpoint {
                 continue;
             }
             let path = child_path(directory.path.as_ref(), entry.name())?;
+            if self.protects(&path) || self.is_state(entry.metadata()) {
+                stats.skipped += 1;
+                continue;
+            }
             if filter.excludes(&path, entry.metadata().kind() == NodeKind::Directory) {
                 stats.skipped += 1;
                 continue;
@@ -953,6 +1051,44 @@ pub(crate) fn child_path(
 /// Foldover's own names, which never sync and never count as changes.
 pub(crate) fn is_internal_name(name: &[u8]) -> bool {
     protected(name)
+}
+
+/// The agent's state directory as this root sees it, for
+/// `open_protecting`. `None` when the state directory is disjoint from the
+/// root. Canonical paths spell components the way a scan descends through
+/// them; the spelled prefix is then proved to resolve to the state
+/// directory itself, so an aliased root cannot leave it reachable.
+fn protected_state(
+    root: &Root,
+    root_path: &Path,
+    state: Option<&Path>,
+) -> Result<Option<ProtectedState>, ScanError> {
+    let Some(state) = state else {
+        return Ok(None);
+    };
+    // A missing state directory has nothing to protect.
+    let held = match Root::open(state) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        result => at(&None, result)?,
+    };
+    let identity = at(&None, held.root_metadata())?.identity();
+    let root_path = at(&None, root_path.canonicalize())?;
+    let state_path = at(&None, state.canonicalize())?;
+    let prefix = match state_path.strip_prefix(&root_path) {
+        Ok(relative) => relative.as_os_str().as_encoded_bytes().to_vec(),
+        // The root is the state directory or inside it: protect all of it.
+        Err(_) if root_path.strip_prefix(&state_path).is_ok() => Vec::new(),
+        Err(_) => return Ok(None),
+    };
+    if prefix.is_empty() {
+        return Ok(Some(ProtectedState { prefix, identity }));
+    }
+    let path = SyncPath::try_from(prefix.as_slice())?;
+    let resolves = at(&Some(path.clone()), root.metadata(&path))?.identity() == identity;
+    if !resolves {
+        return Err(ScanError::ProtectedPath(path));
+    }
+    Ok(Some(ProtectedState { prefix, identity }))
 }
 
 pub(crate) fn protected(name: &[u8]) -> bool {

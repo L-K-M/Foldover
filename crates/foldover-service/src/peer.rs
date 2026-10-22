@@ -151,17 +151,24 @@ impl PeerHost for Host {
             }
             PeerCall::Folder { share, op } => {
                 // Only what is shared with the asking Mac; the engine lock is
-                // released before the folder is touched.
-                let root = share.parse().ok().and_then(|share| {
-                    self.engine
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
+                // released before the folder is touched. The agent's own
+                // state directory stays protected wherever it is shared.
+                let granted = share.parse().ok().and_then(|share| {
+                    let engine = self.engine.lock().unwrap_or_else(PoisonError::into_inner);
+                    engine
                         .shared_folder(device, share)
                         .ok()
                         .flatten()
+                        .map(|root| (root, engine.state_path().to_path_buf()))
                 });
-                match root {
-                    Some(root) => foldover_engine::serve_folder(&root, *op, &self.folders, answer),
+                match granted {
+                    Some((root, state)) => foldover_engine::serve_folder(
+                        &root,
+                        *op,
+                        &self.folders,
+                        answer,
+                        Some(&state),
+                    ),
                     None => {
                         let _ = answer.reply(&refused("That folder is not shared with this Mac"));
                     }

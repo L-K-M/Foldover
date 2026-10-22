@@ -60,8 +60,15 @@ batches are not transactions, so refresh state before retrying.
 
 Before creation or update, the engine opens both selected roots and compares
 held identities and ancestry. It rejects equal/nested/aliased roots, overlap
-with any other configured pair, and overlap with its state directory. Updating
-a pair excludes only that pair from catalog comparison. The current revision
+with any other configured pair, and a root that is or sits inside its state
+directory. A root that *holds* the state directory — the home folder is the
+case that matters — is allowed: the endpoint protects that subtree instead.
+Scans and listings leave it out, path-level reads and writes are refused, an
+operation that would replace or remove an ancestor of it is refused, watcher
+events from it never count as changes (so the agent's own writes cannot
+trigger runs), and a folder shared with a paired Mac enforces the same
+guard at the serving endpoint. Updating a pair excludes only that pair
+from catalog comparison. The current revision
 is checked before filesystem probes, then checked again by the storage driver.
 
 Catalog checks page through existing pairs and fail closed if any existing

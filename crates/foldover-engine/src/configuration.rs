@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -37,7 +37,9 @@ pub enum Error {
     CatalogOverlap(PairId),
     #[error("Reconnect the roots of pair {pair} before changing the catalog: {source}")]
     CatalogUnavailable { pair: PairId, source: PairRootError },
-    #[error("Selected root overlaps the agent's state directory")]
+    #[error(
+        "Selected root is inside the agent's state directory; a folder may hold it, but never be it or below it"
+    )]
     StateOverlap,
     #[error("SFTP folders cannot guarantee full durability; choose standard durability")]
     DurabilityUnsupported,
@@ -107,6 +109,9 @@ impl From<foldover_state::Error> for Error {
 pub struct Engine {
     pairs: PairStore,
     state_root: Endpoint,
+    /// Where the agent's records live; a pair root may hold it, but never
+    /// read, carry or damage it.
+    state_path: PathBuf,
     /// How folders on paired Macs are reached, once Mac-to-Mac is on.
     reach: Reach,
 }
@@ -115,13 +120,13 @@ impl Engine {
     pub fn open(location: &StateLocation) -> Result<Self, Error> {
         let pairs = PairStore::open(location)?;
         let root = pairs.root()?;
-        let state_root = Endpoint::Local(LocalEndpoint::open(Path::new(OsStr::from_bytes(
-            root.as_bytes(),
-        )))?);
+        let state_path = PathBuf::from(OsStr::from_bytes(root.as_bytes()));
+        let state_root = Endpoint::Local(LocalEndpoint::open(&state_path)?);
         Ok(Self {
             pairs,
             state_root,
-            reach: Reach::default(),
+            reach: Reach::default().with_state(state_path.clone()),
+            state_path,
         })
     }
 
@@ -164,12 +169,18 @@ impl Engine {
 
     /// Reach folders on paired Macs through `link`.
     pub fn reach_peers(&mut self, link: &Arc<PeerLink>) {
-        self.reach = Reach::through(link);
+        self.reach = Reach::through(link).with_state(self.state_path.clone());
     }
 
     /// How folders are reached, for work outside the engine lock.
     pub fn reach(&self) -> Reach {
         self.reach.clone()
+    }
+
+    /// Where the agent's records live; endpoints opened through `reach`
+    /// protect it, and peer-served folders refuse it.
+    pub fn state_path(&self) -> &Path {
+        &self.state_path
     }
 
     /// What a run reads from state, for work outside the engine lock.
@@ -298,7 +309,13 @@ impl Engine {
             return Err(Error::InvalidShareName);
         }
         let folder = Endpoint::open(&PairRoot::Local(root.clone()), &Reach::default())?;
-        if folder.relation_to(&self.state_root)? != RootRelation::Disjoint {
+        // A folder that holds the agent's state directory is fine: it is
+        // protected wherever the folder is read or written. The state
+        // directory itself, or somewhere inside it, never is.
+        if matches!(
+            folder.relation_to(&self.state_root)?,
+            RootRelation::Same | RootRelation::Within
+        ) {
             return Err(Error::StateOverlap);
         }
         // That Mac could otherwise pair two views of the same files.
@@ -496,7 +513,13 @@ impl Engine {
     fn validate_roots(&self, draft: &PairDraft, replacing: Option<PairId>) -> Result<(), Error> {
         let selected = EndpointPair::open(draft.left(), draft.right(), &self.reach)?;
         for side in [Side::Left, Side::Right] {
-            if selected.endpoint(side).relation_to(&self.state_root)? != RootRelation::Disjoint {
+            // A root may hold the agent's state directory — it is
+            // protected wherever the folder is read or written — but it
+            // may not be it, or live inside it.
+            if matches!(
+                selected.endpoint(side).relation_to(&self.state_root)?,
+                RootRelation::Same | RootRelation::Within
+            ) {
                 return Err(Error::StateOverlap);
             }
         }
@@ -643,11 +666,40 @@ mod tests {
             engine.create_pair(&draft(temporary.path(), &third)),
             Err(Error::Roots(_))
         ));
-        assert!(matches!(
-            engine.create_pair(&draft(&temporary.path().join("state"), &third)),
-            Err(Error::StateOverlap)
-        ));
+        let inside_state = temporary.path().join("state/inside");
+        fs::create_dir(&inside_state).unwrap();
+        for inside in [temporary.path().join("state"), inside_state] {
+            assert!(matches!(
+                engine.create_pair(&draft(&inside, &third)),
+                Err(Error::StateOverlap)
+            ));
+        }
         assert_eq!(engine.pairs_after(None, 10).unwrap(), vec![pair]);
+    }
+
+    /// The agent's records sit under the chosen folder, as under the
+    /// home directory: the folder pairs, and the state directory itself
+    /// stays out of the sync (endpoint tests prove the protection).
+    #[test]
+    fn a_root_may_hold_the_state_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let mut engine =
+            Engine::open(&StateLocation::Directory(temporary.path().join("state"))).unwrap();
+        let right = other.path().join("right");
+        fs::create_dir(&right).unwrap();
+
+        let pair = engine
+            .create_pair(&draft(temporary.path(), &right))
+            .unwrap();
+        assert_eq!(engine.pairs_after(None, 10).unwrap(), vec![pair]);
+
+        // A folder so shared is served to a paired Mac the same way.
+        let [mac] = [[7; 32]].map(DeviceId::from_bytes);
+        engine.add_device(mac, "Mac".into()).unwrap();
+        engine
+            .add_share(mac, root(temporary.path()), "Home")
+            .unwrap();
     }
 
     /// Review: two shares for one Mac could nest, so that Mac could pair
