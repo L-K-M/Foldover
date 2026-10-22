@@ -58,8 +58,10 @@ struct ProtectedState {
     /// The state directory's path below the root; empty when the root is
     /// the state directory or inside it, protecting every entry.
     prefix: Vec<u8>,
-    /// Its directory identity, which the prefix cannot see when the same
-    /// directory is reachable under another spelling, as a bind mount.
+    /// Held open, so spellings the prefix does not carry — bind mounts,
+    /// case-folded names — still compare by directory identity.
+    root: Root,
+    /// Its directory identity, matching a scanned entry costs nothing.
     identity: FileIdentity,
 }
 
@@ -487,24 +489,42 @@ impl LocalEndpoint {
         if self.protects(path) {
             return Err(ScanError::ProtectedPath(path.clone()));
         }
-        // An alias such as a bind mount names the state directory under a
-        // spelling the prefix does not carry; its identity does.
-        if self.state.is_some()
-            && let Ok(metadata) = self.root.metadata(path)
-            && self.is_state(&metadata)
-        {
-            return Err(ScanError::ProtectedPath(path.clone()));
-        }
-        Ok(())
+        self.alias_guard(path, false)
     }
 
     /// `guarded`, and `path` must not be a directory holding the state
     /// inside it: a removal or replacement of one takes the agent down.
     fn guarded_subtree(&self, path: &SyncPath) -> Result<(), ScanError> {
-        if self.shelters(path) {
+        if self.shelters(path) || self.protects(path) {
             return Err(ScanError::ProtectedPath(path.clone()));
         }
-        self.guarded(path)
+        self.alias_guard(path, true)
+    }
+
+    /// The prefix only sees the canonical spelling; an alias — a bind
+    /// mount, a firmlink, a case-folded name — resolves to the same
+    /// directories. `path` and each ancestor are opened and compared by
+    /// held-directory identity, which no spelling can evade.
+    fn alias_guard(&self, path: &SyncPath, subtree: bool) -> Result<(), ScanError> {
+        let Some(state) = &self.state else {
+            return Ok(());
+        };
+        let mut at_path = Some(path.clone());
+        while let Some(dir) = at_path {
+            if let Ok(held) = self.root.open_directory(&dir) {
+                match at(&Some(dir.clone()), held.relation_to(&state.root))? {
+                    RootRelation::Same | RootRelation::Within => {
+                        return Err(ScanError::ProtectedPath(path.clone()));
+                    }
+                    RootRelation::Contains if subtree => {
+                        return Err(ScanError::ProtectedPath(path.clone()));
+                    }
+                    _ => {}
+                }
+            }
+            at_path = dir.parent();
+        }
+        Ok(())
     }
 
     pub fn relation_to(&self, other: &Self) -> Result<RootRelation, ScanError> {
@@ -684,9 +704,10 @@ impl LocalEndpoint {
     }
 
     fn validate_content_access(&self, entry: &LocalEntry) -> Result<(), ScanError> {
-        if self.protects(&entry.path) || self.is_state(&entry.metadata) {
+        if self.is_state(&entry.metadata) {
             return Err(ScanError::ProtectedPath(entry.path.clone()));
         }
+        self.guarded(&entry.path)?;
         if entry.path.components().any(protected) {
             return Err(ScanError::ProtectedPath(entry.path.clone()));
         }
@@ -1080,15 +1101,19 @@ fn protected_state(
         Err(_) if root_path.strip_prefix(&state_path).is_ok() => Vec::new(),
         Err(_) => return Ok(None),
     };
-    if prefix.is_empty() {
-        return Ok(Some(ProtectedState { prefix, identity }));
+    if !prefix.is_empty() {
+        // The canonical prefix must resolve to the held state directory;
+        // an aliased root could otherwise leave it reachable.
+        let path = SyncPath::try_from(prefix.as_slice())?;
+        if at(&Some(path.clone()), root.metadata(&path))?.identity() != identity {
+            return Err(ScanError::ProtectedPath(path));
+        }
     }
-    let path = SyncPath::try_from(prefix.as_slice())?;
-    let resolves = at(&Some(path.clone()), root.metadata(&path))?.identity() == identity;
-    if !resolves {
-        return Err(ScanError::ProtectedPath(path));
-    }
-    Ok(Some(ProtectedState { prefix, identity }))
+    Ok(Some(ProtectedState {
+        prefix,
+        root: held,
+        identity,
+    }))
 }
 
 pub(crate) fn protected(name: &[u8]) -> bool {
