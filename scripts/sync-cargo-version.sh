@@ -21,6 +21,7 @@ VERSION="${RELEASE_NEW_VERSION:-}"
 # optional -suffix carries pre-releases.
 SHAPE="${RELEASE_VERSION_REGEX:-$(bash "$ROOT/scripts/version-shape.sh")}" \
   || die "failed to read the version shape"
+[[ -n "$SHAPE" ]] || die "version-shape.sh printed nothing"
 [[ "$VERSION" =~ $SHAPE ]] \
   || die "RELEASE_NEW_VERSION must look like X.Y.Z or X.Y.Z-suffix, got '$VERSION'"
 
