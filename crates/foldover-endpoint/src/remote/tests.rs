@@ -294,3 +294,69 @@ fn copies_to_and_from_another_mac_run_at_once() {
         );
     }
 }
+
+/// A peer that goes away answers errors, never hangs: once its link
+/// closes, remote calls on it fail instead of waiting on a dead Mac.
+#[test]
+fn calls_on_a_link_whose_peer_went_away_fail_instead_of_hanging() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let shared = tempfile::tempdir().unwrap();
+    let identities = [Identity::generate().unwrap(), Identity::generate().unwrap()];
+    let devices = identities
+        .each_ref()
+        .map(|identity| DeviceId::from_bytes(*identity.id().as_bytes()));
+    let [a_identity, b_identity] = identities;
+    let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let (a, b) = runtime.block_on(async {
+        let b = PeerLink::start(
+            b_identity,
+            "Studio".into(),
+            loopback,
+            Presence::Unlisted,
+            [devices[0]],
+            Arc::new(Sharing {
+                root: LocalRoot::from_bytes(shared.path().as_os_str().as_encoded_bytes().to_vec())
+                    .unwrap(),
+                cache: FolderCache::default(),
+            }),
+        )
+        .unwrap();
+        let a = PeerLink::start(
+            a_identity,
+            "Laptop".into(),
+            loopback,
+            Presence::Unlisted,
+            [devices[1]],
+            Arc::new(Sharing {
+                root: LocalRoot::from_bytes(b"/".to_vec()).unwrap(),
+                cache: FolderCache::default(),
+            }),
+        )
+        .unwrap();
+        a.reach(devices[1], b.address().unwrap());
+        (a, b)
+    });
+
+    let root = PeerRoot::new(devices[1], ShareId::from_bytes([7; ShareId::BYTE_LEN]));
+    let other = Endpoint::Peer(PeerEndpoint::open(a, &root).unwrap());
+    drop(b);
+
+    let (done, result) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let options = PairOptions::default();
+        let _ = done.send(other.observe_from(
+            options.metadata(),
+            &crate::Filter::none(),
+            &std::collections::BTreeMap::new(),
+            &mut || ScanControl::Continue,
+            &mut |_| {},
+        ));
+    });
+    let result = result
+        .recv_timeout(std::time::Duration::from_secs(45))
+        .expect("a dead peer must answer within the request timeout");
+    assert!(result.is_err());
+}
