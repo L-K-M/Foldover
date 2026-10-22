@@ -407,7 +407,7 @@ fn parameters<T: DeserializeOwned>(request: &Request) -> Result<T, RpcError> {
     .map_err(|_| RpcError::new(INVALID_PARAMS, "Invalid method parameters"))
 }
 
-/// Server browses in flight at once, per server; a timed-out browse
+/// Server browses in flight at once, per root; a timed-out browse
 /// keeps running on the blocking pool, so few enough that a pile of
 /// them cannot crowd other blocking calls out — and scoped by root so
 /// one black-holed server cannot starve browsing the others.
@@ -418,13 +418,7 @@ static BROWSES: LazyLock<Mutex<std::collections::HashMap<Vec<u8>, Arc<tokio::syn
 /// seconds, so it waits off the runtime; it never touches the engine's
 /// state, so other requests go on.
 async fn browse(params: EndpointBrowse) -> Result<Value, RpcError> {
-    let browses = BROWSES
-        .lock()
-        .unwrap()
-        .entry(params.root.clone())
-        .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(4)))
-        .clone();
-    let PairRoot::Sftp(root) = PairRoot::from_bytes(params.root)
+    let PairRoot::Sftp(root) = PairRoot::from_bytes(params.root.clone())
         .map_err(|error| RpcError::new(INVALID_PARAMS, error.to_string()))?
     else {
         return Err(RpcError::new(
@@ -432,6 +426,14 @@ async fn browse(params: EndpointBrowse) -> Result<Value, RpcError> {
             "Only folders on SFTP servers are browsed",
         ));
     };
+    // Only validated roots get a slot: the map never shrinks, so
+    // inserting first would leak one entry per bad root sent.
+    let browses = BROWSES
+        .lock()
+        .unwrap()
+        .entry(params.root)
+        .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(4)))
+        .clone();
     // The engine bounds each phase, but a black-holed server can still
     // outwait a person's patience; bound the wait too. The task itself
     // cannot be cancelled once it is on the blocking pool, so it also
