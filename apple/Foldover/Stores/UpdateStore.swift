@@ -29,13 +29,7 @@ final class UpdateStore {
          present: @escaping @MainActor (UpdateOutcome, String) -> Void = UpdatePrompt.present) {
         self.installed = installed
         self.present = present
-        self.fetch = fetch ?? {
-            let checker = UpdateChecker()
-            if Self.checksPrereleases(installed: installed) {
-                return try await checker.checkIncludingPrereleases()
-            }
-            return try await checker.check()
-        }
+        self.fetch = fetch ?? Self.feedFetcher(forInstalled: installed)
     }
 
     /// The one check made when the app opens.
@@ -80,6 +74,18 @@ final class UpdateStore {
     /// names a stable one.
     nonisolated static func checksPrereleases(installed: String) -> Bool {
         ReleaseVersion(parsing: installed)?.isPrerelease ?? false
+    }
+
+    /// The default feed a build of `installed` reads: pre-releases
+    /// appear only in the release feed, never at `releases/latest`.
+    nonisolated static func feedFetcher(
+        forInstalled installed: String
+    ) -> @Sendable () async throws -> AppRelease {
+        let checker = UpdateChecker()
+        if checksPrereleases(installed: installed) {
+            return { try await checker.checkIncludingPrereleases() }
+        }
+        return { try await checker.check() }
     }
 
     /// Whether `candidate` sorts after `installed`; both must be X.Y.Z
