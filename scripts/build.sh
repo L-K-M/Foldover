@@ -23,7 +23,9 @@
 # the installed code at launch and refuses the changed bundle until it
 # restarts (ADR 0006). The background agent is left to the app, which
 # registers the new agent when it opens; launchd will not start a new
-# ad-hoc-signed agent under the old registration.
+# ad-hoc-signed agent under the old registration. Once the new app is in
+# place the install succeeds; the summary says when Foldover needs
+# opening to start the new agent.
 # FOLDOVER_APPLICATIONS_DIR installs elsewhere, e.g. ~/Applications.
 # core installs nothing: the app embeds its own agent and CLI, and Linux
 # has no installer yet.

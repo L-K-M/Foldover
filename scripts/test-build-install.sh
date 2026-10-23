@@ -2,7 +2,8 @@
 # Check scripts/build.sh --install against a fake macOS toolchain: the
 # app replaces the installed copy, a running app is quit and reopened,
 # a loaded agent is left for the app to register anew, and failures
-# leave the installed app alone. Runs on Linux and macOS; touches nothing outside a temp dir.
+# leave the installed app alone. Runs on Linux and macOS; touches
+# nothing outside a temp dir.
 #
 # The fakes' bodies are single-quoted on purpose: they expand when the
 # fake runs, not here.
@@ -148,11 +149,20 @@ expect_no_call "pkill"
 expect_no_call "kickstart"
 expect_no_call "open $apps/Foldover.app"
 
+# That run loaded no agent, so its output must not mention one.
 if grep -qF "background agent" <<<"$out"; then fail "$name: mentioned an agent that is not loaded"; fi
 
 run "asks to open Foldover for a loaded agent" agent-loaded -- app --install
 expect_status 0
 expect_installed new
+expect_no_call "kickstart"
+expect_no_call "open $apps/Foldover.app"
+expect_out "install app: ok ($apps/Foldover.app); open Foldover to start the new background agent"
+
+run "asks to open Foldover for a running agent" agent-running -- app --install
+expect_status 0
+expect_installed new
+expect_no_call "pkill"
 expect_no_call "kickstart"
 expect_no_call "open $apps/Foldover.app"
 expect_out "install app: ok ($apps/Foldover.app); open Foldover to start the new background agent"

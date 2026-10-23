@@ -106,6 +106,9 @@ private final class StaleLoginItem: AgentRegistering {
     /// starts it; nil when it never does.
     private let startsAfter: Int?
     private(set) var reregistrations = 0
+    private(set) var registrations = 0
+    /// Status requests refused before the agent answers, as while it starts.
+    var startingRefusals = 0
 
     init(_ registration: AgentRegistration = .enabled, startsAfter: Int?) {
         self.registration = registration
@@ -113,6 +116,10 @@ private final class StaleLoginItem: AgentRegistering {
     }
 
     func status() throws -> AgentReport {
+        if startingRefusals > 0 {
+            startingRefusals -= 1
+            throw AgentNotRunning(message: "Connection refused")
+        }
         guard let startsAfter, reregistrations >= startsAfter, registration == .enabled else {
             throw AgentNotRunning(message: "Connection refused")
         }
@@ -120,6 +127,7 @@ private final class StaleLoginItem: AgentRegistering {
     }
 
     func register() throws -> AgentRegistration {
+        registrations += 1
         if registration == .disabled { registration = .enabled }
         return registration
     }
@@ -149,9 +157,10 @@ private func scratchDefaults() -> UserDefaults {
 }
 
 @MainActor
-private func agentStore(for item: StaleLoginItem, defaults: UserDefaults = scratchDefaults()) -> AgentStore {
+private func agentStore(for item: StaleLoginItem, defaults: UserDefaults = scratchDefaults(),
+                        startupTimeout: Duration = .milliseconds(50)) -> AgentStore {
     AgentStore(statusRequest: { try await item.status() }, system: item, defaults: defaults,
-               startupTimeout: .milliseconds(50), startupPoll: .milliseconds(5))
+               startupTimeout: startupTimeout, startupPoll: .milliseconds(5))
 }
 
 /// The login item reads as enabled, but launchd cannot start the agent:
@@ -200,6 +209,62 @@ func registeringAnewCanNeedApproval() async {
     let store = agentStore(for: item)
     await store.enable()
     #expect(store.connection == .approvalRequired)
+}
+
+/// Registering ties the agent to its build; approving it later does not
+/// call for registering it anew at the next launch.
+@MainActor
+@Test
+func aBuildAwaitingApprovalIsNotRegisteredAgain() async {
+    let defaults = scratchDefaults()
+    let item = StaleLoginItem(startsAfter: 1)
+    item.afterReregistering = .requiresApproval
+    let store = agentStore(for: item, defaults: defaults)
+    await store.reregisterIfUpdated()
+    #expect(store.connection == .approvalRequired)
+
+    item.registration = .enabled
+    await agentStore(for: item, defaults: defaults).reregisterIfUpdated()
+    #expect(item.reregistrations == 1)
+}
+
+/// An agent that is still starting, as right after it was turned off and
+/// on in Login Items, is given a moment before it is registered anew.
+@MainActor
+@Test
+func turnOnGivesAStartingAgentAMoment() async {
+    let item = StaleLoginItem(startsAfter: 0)
+    item.startingRefusals = 1
+    // Room for the retry however busy the main actor is.
+    let store = agentStore(for: item, startupTimeout: .seconds(10))
+    await store.enable()
+    #expect(store.connection == .connected(version: "1.0"))
+    #expect(item.reregistrations == 0)
+}
+
+/// Turn On, chosen while the launch registers the agent anew, waits for
+/// that to finish rather than change the login item alongside it.
+@MainActor
+@Test
+func turnOnWaitsForTheRegistrationAtLaunch() async {
+    let item = StaleLoginItem(startsAfter: 1)
+    item.holds = true
+    let store = agentStore(for: item)
+    let launching = Task { await store.reregisterIfUpdated() }
+    for _ in 0..<10_000 where !item.isHeld { await Task.yield() }
+    guard item.isHeld else {
+        Issue.record("The launch never registered the agent anew")
+        launching.cancel()
+        return
+    }
+    let turningOn = Task { await store.enable() }
+    for _ in 0..<1_000 { await Task.yield() }
+    #expect(item.registrations == 0)
+    item.release()
+    await launching.value
+    await turningOn.value
+    #expect(store.connection == .connected(version: "1.0"))
+    #expect(item.reregistrations == 1)
 }
 
 /// Turning on an agent that was off registers it once, with no repair.
@@ -258,7 +323,10 @@ func healthChecksWaitOutTurningOn() async {
     let store = agentStore(for: item)
     let turningOn = Task { await store.enable() }
     for _ in 0..<10_000 where !item.isHeld { await Task.yield() }
-    #expect(item.isHeld)
+    guard item.isHeld else {
+        Issue.record("Turning on never registered the agent anew")
+        return
+    }
     await store.refresh()
     #expect(store.connection == .connecting)
     item.release()

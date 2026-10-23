@@ -53,12 +53,14 @@ final class AgentStore {
     /// Registrations anew before turning on gives up: the first can leave
     /// launchd's old job in place.
     private static let repairAttempts = 2
-    /// The agent build last registered and seen answering.
+    /// The agent build last registered, once seen answering or awaiting
+    /// approval.
     private static let registeredBuildKey = "agent.registeredBuild"
     private var generation = 0
-    /// The request turning the agent on; health checks wait it out rather
-    /// than report the states it passes through.
-    @ObservationIgnored private var startingRequest: Int?
+    /// Turning the agent on in flight. Health checks wait it out rather than
+    /// report the states it passes through, and turning on again waits for
+    /// it, since both change the login item.
+    @ObservationIgnored private var starting: Task<Void, Never>?
     private(set) var connection: AgentConnection = .disconnected {
         didSet {
             if connection != .connecting { lastSettled = connection }
@@ -133,7 +135,7 @@ final class AgentStore {
     }
 
     func refresh() async {
-        guard startingRequest == nil else { return }
+        guard starting == nil else { return }
         generation += 1
         let request = generation
         connection = .connecting
@@ -154,29 +156,28 @@ final class AgentStore {
     }
 
     func enable() async {
-        generation += 1
-        let request = generation
-        startingRequest = request
-        defer { if startingRequest == request { startingRequest = nil } }
-        do {
-            let wasEnabled = system.registration == .enabled
-            let registration = try system.register()
-            if case .requiresApproval = registration {
-                connection = .approvalRequired
-                return
+        await afterStarting { [self] in
+            generation += 1
+            let request = generation
+            do {
+                let before = system.registration
+                let registration = try system.register()
+                // Turning the agent on is not a background check: show that
+                // it is connecting rather than the answer it replaces.
+                lastSettled = nil
+                connection = .connecting
+                // An agent registered before answers within a moment, even
+                // while it starts. One that does not is a job launchd cannot
+                // start, so it is registered anew rather than waited on.
+                // `register` registers only an agent that is off or missing.
+                try await start(registration, request: request,
+                                firstWait: before == .enabled ? startupProbe : startupTimeout,
+                                repairs: Self.repairAttempts,
+                                registered: before == .disabled || before == .unavailable)
+            } catch {
+                guard generation == request else { return }
+                connection = .failed(message: message(for: error))
             }
-            // Turning the agent on is not a background check: show that it
-            // is connecting rather than the answer it replaces.
-            lastSettled = nil
-            connection = .connecting
-            // An agent registered before should already answer. One that does
-            // not is a job launchd cannot start, so it is registered anew at
-            // once rather than after the wait.
-            try await start(registration, request: request, firstWait: wasEnabled ? .zero : startupTimeout,
-                            repairs: Self.repairAttempts, registered: !wasEnabled)
-        } catch {
-            guard generation == request else { return }
-            connection = .failed(message: message(for: error))
         }
     }
 
@@ -185,23 +186,40 @@ final class AgentStore {
     /// registration (see `BackgroundAgent.reregister`). A login item that is
     /// off or awaits approval is left as it is.
     func reregisterIfUpdated() async {
-        guard system.registration == .enabled, let build = system.agentBuild,
-              build != defaults.data(forKey: Self.registeredBuildKey) else { return }
-        generation += 1
-        let request = generation
-        startingRequest = request
-        defer { if startingRequest == request { startingRequest = nil } }
-        connection = .connecting
-        do {
-            let registration = try await system.reregister()
-            guard generation == request else { return }
-            try await start(registration, request: request, firstWait: startupTimeout,
-                            repairs: Self.repairAttempts - 1, registered: true)
-        } catch {
-            guard generation == request else { return }
-            connection = .failed(message: message(for: error))
+        await afterStarting { [self] in
+            guard system.registration == .enabled, let build = system.agentBuild,
+                  build != defaults.data(forKey: Self.registeredBuildKey) else { return }
+            generation += 1
+            let request = generation
+            connection = .connecting
+            do {
+                let registration = try await system.reregister()
+                guard generation == request else { return }
+                try await start(registration, request: request, firstWait: startupTimeout,
+                                repairs: Self.repairAttempts - 1, registered: true)
+            } catch {
+                guard generation == request else { return }
+                connection = .failed(message: message(for: error))
+            }
         }
     }
+
+    /// Run `body` once any turning on in flight has finished: both change
+    /// the login item, so they must not interleave.
+    private func afterStarting(_ body: @escaping @MainActor @Sendable () async -> Void) async {
+        let previous = starting
+        let task = Task {
+            await previous?.value
+            await body()
+        }
+        starting = task
+        await task.value
+        if starting == task { starting = nil }
+    }
+
+    /// How long Turn On gives an agent registered before to answer, as while
+    /// it starts, before registering it anew.
+    private var startupProbe: Duration { startupTimeout / 5 }
 
     /// Wait for the agent behind `registration` to answer, registering it
     /// anew while it does not, up to `repairs` times. `registered` says the
@@ -214,6 +232,9 @@ final class AgentStore {
         var registered = registered
         while true {
             if case .requiresApproval = registration {
+                // Registering tied the agent to this build; approving it
+                // only lets launchd start it.
+                if registered { defaults.set(system.agentBuild, forKey: Self.registeredBuildKey) }
                 connection = .approvalRequired
                 return
             }
