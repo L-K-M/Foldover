@@ -21,7 +21,7 @@ pub struct NearbyServer {
 pub async fn nearby_file_servers() -> Result<Vec<NearbyServer>, AgentError> {
     let servers = foldover_client::network_servers(&SocketLocation::Default)
         .await
-        .map_err(AgentError::from)?;
+        .map_err(AgentError::read)?;
     Ok(servers
         .into_iter()
         .map(|server| NearbyServer {
@@ -55,7 +55,7 @@ pub struct ServerFolderListing {
 pub async fn browse_server(root: Vec<u8>) -> Result<ServerFolderListing, AgentError> {
     let listed = foldover_client::browse_server(&SocketLocation::Default, &root)
         .await
-        .map_err(AgentError::from)?;
+        .map_err(AgentError::read)?;
     Ok(ServerFolderListing {
         root: listed.root,
         parent: listed.parent,

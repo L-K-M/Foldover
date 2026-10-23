@@ -78,6 +78,18 @@ impl AgentError {
             error => Self::from(error),
         }
     }
+
+    /// Reads never write state either, so a timeout is safe to retry and
+    /// must not carry the "may have committed" warning `From` adds for
+    /// mutations.
+    pub(crate) fn read(error: foldover_client::Error) -> Self {
+        match error {
+            foldover_client::Error::Timeout => Self::Connection {
+                message: "The agent did not answer in time; try again".into(),
+            },
+            error => Self::from(error),
+        }
+    }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -438,7 +450,7 @@ pub async fn pair_page(after: Option<String>) -> Result<PairConfigurationPage, A
         .map_err(invalid_configuration)?;
     let page = foldover_client::pairs(&foldover_client::SocketLocation::Default, after)
         .await
-        .map_err(AgentError::from)?;
+        .map_err(AgentError::read)?;
     Ok(PairConfigurationPage {
         pairs: page.pairs.into_iter().map(Into::into).collect(),
         next: page.next.map(|id| id.to_string()),
@@ -540,7 +552,7 @@ pub async fn check_pair(
     let draft = configuration.try_into().map_err(invalid_configuration)?;
     let warnings = foldover_client::check_pair(&foldover_client::SocketLocation::Default, &draft)
         .await
-        .map_err(AgentError::from)?;
+        .map_err(AgentError::read)?;
     Ok(warnings.into_iter().map(Into::into).collect())
 }
 
@@ -566,6 +578,20 @@ uniffi::setup_scaffolding!();
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_timeout_reads_as_retryable_but_writes_as_maybe_committed() {
+        let AgentError::Connection { message } = AgentError::read(foldover_client::Error::Timeout)
+        else {
+            panic!("a read timeout is a connection problem, not a committed save")
+        };
+        assert!(!message.contains("committed"), "{message}");
+        let AgentError::Request { message } = AgentError::from(foldover_client::Error::Timeout)
+        else {
+            panic!("a mutation timeout warns it may have committed")
+        };
+        assert!(message.contains("committed"), "{message}");
+    }
 
     #[test]
     fn swift_configuration_round_trips_modes_and_raw_root_bytes() {
