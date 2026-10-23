@@ -153,8 +153,7 @@ impl Progress {
             .map_or(0, |since| {
                 // Sub-second elapsed counts as a whole second: rounding
                 // up keeps the rate conservative, never overstated.
-                (copied as u128 / since.elapsed().as_secs_f64().ceil().max(1.0) as u128)
-                    as u64
+                (copied as u128 / since.elapsed().as_secs_f64().ceil().max(1.0) as u128) as u64
             });
         SyncProgress {
             listed: read(&self.listed),
