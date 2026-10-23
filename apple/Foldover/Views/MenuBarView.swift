@@ -13,7 +13,7 @@ struct MenuBarView: View {
     /// Rough height of one pair row at default text size, with slack
     /// for a second caption line. Wrapped errors grow rows further, so
     /// the threshold errs toward scrolling early.
-    private static let estimatedRowHeight: CGFloat = 44
+    @ScaledMetric(relativeTo: .body) private var estimatedRowHeight: CGFloat = 44
     /// Pair-list height past which rows scroll instead of pushing the
     /// controls below off screen.
     private static let maxPairListHeight: CGFloat = 280
@@ -39,6 +39,7 @@ struct MenuBarView: View {
                     .foregroundStyle(.red)
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
             }
 
             Divider()
@@ -66,7 +67,7 @@ struct MenuBarView: View {
                 pairRow(row)
             }
         }
-        if CGFloat(rows.count) * Self.estimatedRowHeight > Self.maxPairListHeight {
+        if CGFloat(rows.count) * estimatedRowHeight > Self.maxPairListHeight {
             ScrollView { stack }
                 .frame(maxHeight: Self.maxPairListHeight)
         } else {
@@ -110,6 +111,7 @@ struct MenuBarView: View {
                     .foregroundStyle(.red)
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
                     .padding(.leading, 34)
             }
         }
