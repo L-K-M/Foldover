@@ -184,6 +184,14 @@ struct PairSyncViewModel {
         return 0
     }
 
+    /// When the newest completed sync finished. History is newest first;
+    /// a cancelled, failed or needs-approval run does not count as success.
+    var lastSuccess: Date? {
+        store.history(for: pair.id)
+            .first { $0.end == .completed }
+            .map(\.finished)
+    }
+
     /// What the content area shows instead of an empty table; nil while
     /// a job works or when rows are listed.
     var placeholder: PairPlaceholder? {

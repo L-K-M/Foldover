@@ -101,7 +101,7 @@ private struct SidebarPairRow: View {
                         .lineLimit(1)
                     Text(row.status)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(statusColor)
                         .lineLimit(1)
                 }
             } icon: {
@@ -124,6 +124,26 @@ private struct SidebarPairRow: View {
             }
         }
         .badge(row.conflicts)
+    }
+
+    /// Quiet freshness (PLAN.md §3.2 principle 4): a healthy pair that
+    /// has not synced in a day cools toward secondary; one that has
+    /// never synced stays secondary. Attention and work keep the status
+    /// colors they already use.
+    private var statusColor: Color {
+        switch row.activity {
+        case .attention:
+            return .orange
+        case .working, .waiting:
+            return .secondary
+        case .idle:
+            break
+        }
+        guard let last = row.lastSuccess else { return .secondary }
+        let age = Date().timeIntervalSince(last)
+        if age < 3_600 { return .primary }
+        if age < 86_400 { return .secondary }
+        return .orange.opacity(0.85)
     }
 }
 
