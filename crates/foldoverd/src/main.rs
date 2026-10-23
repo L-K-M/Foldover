@@ -9,10 +9,13 @@ use std::process::ExitCode;
 
 /// How a usage failure exits.
 const USAGE_EXIT: u8 = 2;
+const USAGE: &str = "usage: foldoverd [--socket PATH] | --version | --help";
 
 enum Request {
     /// `--version`: print `foldoverd <version>` and exit 0.
     Version,
+    /// `--help` or `-h`: print usage to stdout and exit 0.
+    Help,
     Run(foldover_ipc::SocketLocation),
     Usage,
 }
@@ -31,8 +34,12 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Request::Help => {
+            println!("{USAGE}");
+            ExitCode::SUCCESS
+        }
         Request::Usage => {
-            eprintln!("usage: foldoverd [--socket PATH] | --version");
+            eprintln!("{USAGE}");
             ExitCode::from(USAGE_EXIT)
         }
     }
@@ -70,6 +77,7 @@ fn request(args: impl Iterator<Item = OsString>) -> Request {
     match args.as_slice() {
         [] => Request::Run(foldover_ipc::SocketLocation::Default),
         [arg] if arg == "--version" => Request::Version,
+        [arg] if arg == "--help" || arg == "-h" => Request::Help,
         [arg, path] if arg == "--socket" => {
             Request::Run(foldover_ipc::SocketLocation::Path(PathBuf::from(path)))
         }
@@ -91,8 +99,14 @@ mod tests {
     }
 
     #[test]
+    fn help_flags_select_help() {
+        assert!(matches!(req(&["--help"]), Request::Help));
+        assert!(matches!(req(&["-h"]), Request::Help));
+    }
+
+    #[test]
     fn anything_else_is_usage() {
-        for args in [&["--help"][..], &["run"], &["--version", "extra"], &["-V"]] {
+        for args in [&["run"][..], &["--version", "extra"], &["-V"]] {
             assert!(matches!(req(args), Request::Usage), "{args:?}");
         }
     }
