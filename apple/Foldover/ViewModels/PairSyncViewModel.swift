@@ -352,15 +352,15 @@ struct PairSyncViewModel {
         // separator would disagree with them and break exact-match tests.
         let locale = Locale(identifier: "en_US_POSIX")
         if bytesPerSecond >= 999_500_000 {
-            return String(format: locale: locale, "%.2f GB/s", bytesPerSecond / 1_000_000_000)
+            return String(format: "%.2f GB/s", locale: locale, bytesPerSecond / 1_000_000_000)
         }
         if bytesPerSecond >= 999_500 {
-            return String(format: locale: locale, "%.1f MB/s", bytesPerSecond / 1_000_000)
+            return String(format: "%.1f MB/s", locale: locale, bytesPerSecond / 1_000_000)
         }
         if bytesPerSecond >= 999.5 {
-            return String(format: locale: locale, "%.0f kB/s", bytesPerSecond / 1_000)
+            return String(format: "%.0f kB/s", locale: locale, bytesPerSecond / 1_000)
         }
-        return String(format: locale: locale, "%.0f B/s", bytesPerSecond)
+        return String(format: "%.0f B/s", locale: locale, bytesPerSecond)
     }
 
     /// Remaining time in minutes and seconds, or hours when longer.
