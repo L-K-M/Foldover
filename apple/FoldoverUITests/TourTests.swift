@@ -33,6 +33,7 @@ final class TourTests: XCTestCase {
         tour.snap("01-preview")
         tour.key("i", .command)
         tour.pause(1)
+        checkPairLayout(tour)
         tour.snap("02-editor")
         tour.key(.escape)
         tour.key("a", [.command, .shift])
@@ -59,6 +60,29 @@ final class TourTests: XCTestCase {
     @MainActor
     private func text(_ app: XCUIApplication, _ label: String) -> XCUIElement {
         app.windows.staticTexts[label].firstMatch
+    }
+
+    /// The folders share a row, with the mode between them and actions visible.
+    @MainActor
+    private func checkPairLayout(_ tour: Tour) {
+        let sheet = tour.app.sheets.firstMatch
+        let left = sheet.descendants(matching: .any)["Choose Folder A"].firstMatch
+        let right = sheet.descendants(matching: .any)["Choose Folder B"].firstMatch
+        let mode = sheet.popUpButtons["pair-mode"].firstMatch
+        for control in [left, mode, right, sheet.buttons["Cancel"], sheet.buttons["Save Pair"]] {
+            guard control.waitForExistence(timeout: 5) else {
+                return XCTFail("Missing pair editor control: \(control)")
+            }
+            XCTAssertTrue(sheet.frame.contains(control.frame), "Pair editor control is clipped: \(control)")
+        }
+        XCTAssertGreaterThan(sheet.frame.width, sheet.frame.height, "The pair editor should be landscape")
+        XCTAssertEqual(left.frame.midY, right.frame.midY, accuracy: 1, "The folders should share a row")
+        XCTAssertLessThan(left.frame.maxX, mode.frame.minX, "Mode should follow Folder A")
+        XCTAssertLessThan(mode.frame.maxX, right.frame.minX, "Mode should precede Folder B")
+        XCTAssertTrue(left.isHittable, "Folder A should be hittable")
+        XCTAssertTrue(mode.isHittable, "Mode picker should be hittable")
+        XCTAssertTrue(right.isHittable, "Folder B should be hittable")
+        XCTAssertEqual(mode.label, "Mode", "The hidden label should remain accessible")
     }
 
     /// Whether the menu-bar menu `menu` offers `item` enabled; the menu
@@ -157,6 +181,7 @@ final class TourTests: XCTestCase {
         let app = tour.app
         tour.key("i", .command)
         tour.pause(1)
+        checkPairLayout(tour)
         tour.snap("13-editor")
         let name = app.sheets.firstMatch.textFields.firstMatch
         if tour.click(name, "Name field") {
@@ -210,6 +235,7 @@ final class TourTests: XCTestCase {
 
         tour.key("n", .command)
         tour.pause(1)
+        checkPairLayout(tour)
         tour.snap("21-new-pair")
         tour.key(.escape)
 
