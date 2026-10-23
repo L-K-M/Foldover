@@ -68,11 +68,23 @@ impl From<foldover_client::Error> for AgentError {
     }
 }
 
+impl AgentError {
+    // Health checks never write state, so a timeout can safely trigger repair.
+    fn status(error: foldover_client::Error) -> Self {
+        match error {
+            foldover_client::Error::Timeout => Self::Connection {
+                message: "The background agent did not answer the status check".into(),
+            },
+            error => Self::from(error),
+        }
+    }
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn agent_status() -> Result<AgentHealth, AgentError> {
     let status = foldover_client::agent_status(&foldover_client::SocketLocation::Default)
         .await
-        .map_err(AgentError::from)?;
+        .map_err(AgentError::status)?;
     Ok(status.into())
 }
 
@@ -644,6 +656,16 @@ mod tests {
         ] {
             assert_eq!(ReadinessWarning::from(warning), expected);
         }
+    }
+
+    #[test]
+    fn health_timeouts_allow_repair_without_changing_save_errors() {
+        let error = AgentError::status(foldover_client::Error::Timeout);
+        assert!(matches!(error, AgentError::Connection { message } if !message.contains("save")));
+        let error = AgentError::from(foldover_client::Error::Timeout);
+        assert!(
+            matches!(error, AgentError::Request { message } if message.contains("may have committed"))
+        );
     }
 
     #[test]
