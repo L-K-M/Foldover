@@ -8,7 +8,8 @@ Archives provide short-term recovery on each endpoint.
 Reviewed 2026-10-23, starting at `8fb2405`. Assumed load: one person,
 several overlapping jobs on disjoint roots, 100k to 1M tracked files,
 and occasional multi-gigabyte files over slow or interrupted links.
-The initial review was written in `Sol.md` before implementation. Source
+The initial review was written in `Sol.md` before implementation; a
+second independent pass by SWE-2 Max was written in `Fusion.md`. Source
 references describe that baseline unless a PR status says otherwise.
 
 ## Start here
@@ -27,7 +28,9 @@ fixing it. Keep visual proposals separate from measured defects.
 | P2 | SOL-24 and SOL-08: complete, bounded archive browsing | Old runs and late items remain reachable without full rescans |
 | P2 | SOL-05 and SOL-06: visible progress and responsive previews | Large transfers advance; search avoids repeated formatting |
 | P2 | SOL-09, SOL-10 and SOL-16: visible, actionable attention | Background failures, restore causes and freshness are explicit |
+| P2 | F-01: `pairs set` partial-update convenience | One option toggles without re-supplying pair identity |
 | P3 | SOL-13–15 and SOL-17–20: product and visual polish | Validate with native light/dark, keyboard and accessibility checks |
+| P3 | F-02–F-07: CLI readability, exports and small notifications | See entries |
 
 ## Implemented in open PRs
 
@@ -41,10 +44,22 @@ follow-up work. No implementation in this table was pushed into main.
 | SOL-22 | `sol/unicode-planning` | [163](https://github.com/L-K-M/Foldover/pull/163) | 50k names: 11.28 s before, 0.094–0.165 s after; 135 engine tests |
 | SOL-02 | `sol/archive-state` | [165](https://github.com/L-K-M/Foldover/pull/165) | Held-reply regression failed first; 12 archive tests pass in a portable source harness |
 | SOL-12 | `sol/menu-bar-controls` | [168](https://github.com/L-K-M/Foldover/pull/168) | Swift syntax, docs and layering; native routing/UI tests await macOS |
+| F-08 | `devin/cli-help-exit` | [157](https://github.com/L-K-M/Foldover/pull/157) | Parser tests both binaries; `--help` anywhere incl. after `--socket` |
+| F-09 | `devin/cli-progress` | [158](https://github.com/L-K-M/Foldover/pull/158) | Trailing-flag parse tests; live Working lines verified against a real agent |
+| F-10 | `devin/cli-changes` | [160](https://github.com/L-K-M/Foldover/pull/160) | Real agent: auto-preview, kind filter, paging, usage errors |
+| F-11 | `devin/cli-sync-all` | [161](https://github.com/L-K-M/Foldover/pull/161) | Real agent, two pairs: finished + needsApproval aggregated to exit 3 |
+| F-12 | `devin/ffi-read-timeouts` | [162](https://github.com/L-K-M/Foldover/pull/162) | Unit test pins read `Connection` vs write `Request` timeout split |
+| F-13 | `devin/sync-throughput` | [164](https://github.com/L-K-M/Foldover/pull/164) | `Progress::wire()` rate test; `check-ffi` bindings match; Swift type-check awaits macOS CI |
+| F-14 | `devin/ipc-slow-timeout` | [166](https://github.com/L-K-M/Foldover/pull/166) | Poisoned-connection regression test; ipc+client tests and clippy |
 
-All four PRs completed two GLM review rounds without confirmed important
-findings. Completed Linux checks passed; some final-revision CI jobs are
-still queued. Check the exact PR head before merging.
+Review status at consolidation: PRs 159, 163, 165 and 168 each completed
+two GLM review rounds without confirmed important findings. PRs 157, 158,
+160, 162, 164 and 166 each completed at least two consecutive rounds
+without important findings on their final revisions; PR 161 completed one
+clean round on its final revision after its findings were addressed (a
+second round never triggered — no further push remained to make). All
+findings called out by reviews were either applied or answered with a
+rejection rationale in the PR threads.
 
 Native app builds, UI tours and rendered layout remain unverified while
 the `xcode-27` CI jobs are queued. Portable archive checks use the actual
@@ -121,6 +136,8 @@ Status: implemented in PR 165; owner merge pending. SOL-03 is separate.
   change that does not exist.
 - **Acceptance:** Find a match beyond row 10,000 without downloading the
   preceding rows; stale review tokens still fail closed.
+- **Related shipped work:** PR 160 (`sync ID --changes`) pages the full
+  preview over the CLI; server-side filtered search remains open.
 
 ### SOL-05: Large-file progress looks frozen
 
@@ -137,6 +154,10 @@ Status: implemented in PR 165; owner merge pending. SOL-03 is separate.
   retries do not double-count, and cancellation remains responsive.
   Add a percentage caption and an explicit accessibility value to the
   existing progress bar as a small interim improvement.
+- **Related shipped work:** PR 164 adds the cumulative copy rate
+  (`SyncProgress.rate`) and an `N MB/s · about T left` status segment,
+  hidden while the job waits on another Mac. In-flight per-file byte
+  progress (the frozen-bar part) remains open.
 
 ### SOL-06: Preview rendering repeatedly builds every loaded row
 
@@ -170,6 +191,9 @@ Status: implemented in PR 165; owner merge pending. SOL-03 is separate.
 - **Acceptance:** Two HDD-backed pairs share the disk's worker count;
   independent disks still run concurrently. Benchmark total completion
   time and foreground latency.
+- **Related shipped work:** PR 161 (`sync --all`) already caps CLI fan-out
+  at four concurrent pair jobs; the per-device worker budgeting it
+  approximates remains engine work.
 
 ### SOL-08: Retained archive runs eventually disappear from browsing
 
@@ -230,6 +254,83 @@ Status: implemented in PR 165; owner merge pending. SOL-03 is separate.
 - **Acceptance:** Record hardware, dataset, build SHA, measurements and
   failures. The owner retains release and hands-on VoiceOver decisions.
 
+### F-01: `pairs update` re-asks for everything to change one option
+
+- **What this is:** Updating a pair requires re-supplying NAME LEFT RIGHT
+  MODE positionally even to toggle `--schedule`.
+- **Problem:** `crates/foldover-cli/src/main.rs` `pairs update` treats
+  roots as required positionals; they print as JSON byte arrays in `pairs
+  show` output, so a one-flag change means copying opaque bytes.
+- **Fix:** Add `pairs set ID REVISION [OPTION VALUE]...` that fetches the
+  pair, applies named option overrides and calls `update_pair`; reuse the
+  existing option parser.
+- **Acceptance:** `pairs set ID R --schedule changes` keeps every other
+  option; a stale revision is still refused.
+
+### F-02: CLI JSON output prints paths as byte arrays
+
+- **What this is:** Every item line prints `"path":[104,101,…]` — exact
+  for any encoding, unreadable for people.
+- **Fix:** A `--text` flag rendering UTF-8 paths as strings (arrays stay
+  for non-UTF-8) across preview items, archive items and history output.
+  Medium surface; cosmetic gain.
+- **Acceptance:** `sync ID --changes --text` prints quoted paths; a
+  non-UTF-8 name still round-trips through the array form.
+
+### F-03: Export or copy the change list
+
+- **What this is:** Preview results cannot leave the app: no Copy for
+  multi-selection, no CSV/JSON export.
+- **Fix:** A "Copy Paths" context command and/or File › Export; small
+  Swift-side add on the same store boundary.
+- **Acceptance:** A filtered selection copies its paths; export writes a
+  parseable file the UI tour can screenshot.
+
+### F-04: Notify when a run recovers leftovers
+
+- **What this is:** `recovered > 0` on a finished run means a previous
+  run was interrupted; alerts currently cover needsApproval/failed only.
+- **Fix:** One coalesced notification for recovered leftovers; opt-in
+  under the existing permission flow.
+- **Acceptance:** An interrupted rerun produces exactly one alert; none
+  when the app already foregrounds the pair.
+
+### F-05: Menu bar shows status but never when
+
+- **What this is:** The extra shows "In sync" style text but not *when* —
+  Time Machine's key glanceable. History is already fetched.
+- **Fix:** "Synced 12 min ago" under the pair name; complements the
+  deeper trust summary in SOL-16.
+- **Acceptance:** Fixture pairs render relative times; no extra polling
+  beyond the existing history refresh.
+
+### F-06: Linux service packaging
+
+- **What this is:** The engine and CLI already run headless on Linux
+  (verified end-to-end: pair add → preview → approve → sync).
+- **Fix:** A `packaging/systemd` user unit for `foldoverd`; GTK4 app
+  remains the planned larger piece.
+- **Acceptance:** `systemctl --user status foldoverd` runs on a clean
+  Linux host; `foldover status` answers over the default socket.
+
+### F-07: NAS pre-flight capability probing
+
+- **What this is:** `pairs check` warns on SFTP roots; the limitations
+  doc leaves "per-volume capability probing" unimplemented.
+- **Fix:** Probe a scratch file — create, statfs, xattr attempt — to
+  predict xattr/permission/records support before the first sync, and
+  surface the result in the pair editor.
+- **Acceptance:** A capability-weak server reports predicted gaps before
+  a sync, not as failures during one.
+
+### F-08 through F-14: shipped this session
+
+`--help`/`-h` exit 0 on both binaries (#157); `sync ID --progress`
+streaming (#158); `sync ID --changes [KIND]` preview paging (#160);
+`sync --all` capped concurrent runs with aggregate exit (#161); read-vs-
+write FFI timeout messages (#162); copy rate + ETA in proto, FFI and app
+(#164); slow-request IPC budget + poisoned-connection hardening (#166).
+
 ## Nice to have: interface and product improvements
 
 ### SOL-12: Keep the menu bar usable with many pairs
@@ -280,6 +381,11 @@ Status: implemented in PR 168; native validation and owner merge pending.
 - **If skipped:** Future additions drift in density, color and emphasis.
 - **Acceptance:** Screenshot light/dark and increased-contrast states at
   minimum widths; status remains understandable without color.
+- **Fusion addendum:** per-pair color/tag (Finder-style) in sidebar and
+  menu bar, a monogram glyph from pair initials, a Reduce-Motion-aware
+  pulse on the status dot while connecting, `.badgeProminence` on the
+  numeric conflict badge, and deletion counts in the approval button or
+  dialog title all fit the same palette work.
 
 ### SOL-15: Make the editor's first three decisions obvious
 
@@ -306,6 +412,11 @@ Status: implemented in PR 168; native validation and owner merge pending.
 - **Acceptance:** Frozen-clock tests cover stale, paused, offline and
   attention states; relative dates update without frequent global redraws.
   A Dock badge can expose pending review while the main window is closed.
+- **Fusion addendum:** the menu-bar variant is F-05; a "time travel"
+  one-liner ("Everything in sync · last checked 10:42 · next ~10:52")
+  and a sync forecast ("≈ 3.2 GB to copy — about 4 min at recent
+  speeds", using the rate plumbing shipped in PR 164) are the same data
+  shown earlier and cheaper.
 
 ### SOL-17: A named safety rehearsal for a first pair
 
@@ -318,6 +429,10 @@ Status: implemented in PR 168; native validation and owner merge pending.
 - **If skipped:** Recovery remains something first learned under stress.
 - **Acceptance:** No real pair configuration is changed; all samples are
   removable and the rehearsal can be skipped permanently.
+- **Fusion addendum:** a `foldover sim` CLI variant — run a pair in a
+  scratch dir — is nearly free with `--socket` +
+  `StateLocation::Directory` (both already work) and demonstrates the
+  product without touching real data.
 
 ### SOL-18: Give versions an expiration receipt
 
@@ -332,6 +447,9 @@ Status: implemented in PR 168; native validation and owner merge pending.
   archived originals, metadata and occupied destination files.
   Add read-only Quick Look and Reveal for local archive items first, so
   users can inspect a version before restoring it.
+- **Fusion addendum:** a symlink or `.fileprovider` view of
+  `.foldover/archive` would give power users Finder-native recovery
+  without opening Foldover.
 
 ### SOL-19: A restrained Foldover signature moment
 
@@ -345,6 +463,8 @@ Status: implemented in PR 168; native validation and owner merge pending.
 - **If skipped:** No functional loss; this is a small identity improvement.
 - **Acceptance:** No animation for unattended runs, partial success or
   conflicts; Reduce Motion gets a static transition; no extra idle timer.
+- **Fusion addendum:** an opt-in completion chime/haptic on syncs with
+  >0 copies is the same moment for the opposite sense.
 
 ### SOL-20: Explain a change and let users test exclusions
 
@@ -359,6 +479,20 @@ Status: implemented in PR 168; native validation and owner merge pending.
   destructive operations.
 - **Acceptance:** Explanations come from typed engine facts, not UI
   guesses; rule testing uses exactly the engine's matcher and writes nothing.
+
+### F-15 to F-18: additional product ideas from the second pass
+
+- **F-15 Quiet hours:** "never sync between 22:00–07:00" — a schedule
+  complement for battery and NAS noise; fits the existing
+  `Schedule`/`Environment` machinery.
+- **F-16 `sync ID --report out.html`:** render a preview/result as a
+  static page for emailing admins — small generator over the existing
+  typed result.
+- **F-17 Change-table width:** let the Item column take max width before
+  Change; the 24 px icon column plus three text columns squeeze paths.
+- **F-18 Hash buffer:** `HASH_BUFFER_BYTES` 64 KiB → 256 KiB–1 MiB to cut
+  syscall count on huge files (`crates/foldover-fs/src/root/content.rs`).
+  Low priority; usually I/O-bound.
 
 ## Additional engine and endpoint findings
 
@@ -465,6 +599,29 @@ indexing costs remain in SOL-23.
 - **Acceptance:** Remove a pair with loaded pages and an outstanding
   request; its state stays forgotten after that request completes.
 
+## Confirmed non-bugs from the second pass
+
+Verified against the source so they are not re-reported:
+
+- **`archive_items` empty-page break (CLI):** both endpoints collect the
+  whole filtered listing before truncating, so `more` can never be true
+  with an empty page; the `after.is_none()` break is dead-code defense.
+- **`leave_safe_mode` maps timeouts via `AgentError::from`:** correct —
+  resuming is a mutation; the committed warning belongs there.
+- **CLI `sync` polls forever:** intentional — syncs legitimately run for
+  hours; `--cancel` is the escape and `--progress` shows liveness.
+- **Cumulative-average copy rate:** `copied / elapsed` lags on bursty
+  runs and after stalls — deliberate honest smoothing, not a bug. An
+  EWMA/instantaneous rate is a refinement if the display ever feels slow.
+- **`deny_unknown_fields` on `SyncProgress`:** mixed-version client/agent
+  pairs reject each other on the new `rate` field; acceptable because
+  app and agent ship versioned together and the `core_version` handshake
+  already enforces it. Revisit only if the proto serves third parties.
+- **Content-filter note:** one engine/filesystem review pass was blocked
+  by a provider content filter and a restart returned only low-severity
+  style notes; the engine's own simulation and property tests remain the
+  authority on that area.
+
 ## Verification and implementation record
 
 - Source review covered the architecture, service/IPC/CLI paths, engine
@@ -500,6 +657,24 @@ indexing costs remain in SOL-23.
   Large-text viewport feedback was addressed. Its remaining multi-display
   sizing suggestion awaits native verification; speculative non-run
   fixture support and a one-use row factory were deferred.
+- Second-pass record (PRs 157, 158, 160, 161, 162, 164, 166): every Rust
+  change was verified locally (unit tests, clippy, fmt; real-agent runs
+  for the CLI features). Two review findings were rejected with reasons
+  in-thread: `--changes` "bypassing the configuration queue" (the pair
+  fetch is itself the queue wait, and dispatch was reordered anyway) and
+  "the apply clock starts at plan time" (`planned()` fires inside
+  `execute()`, after approval, immediately before the copy loop). One
+  macOS-only flake (`a_folder_another_mac_shares_syncs_through_it`,
+  metadata scan raced a file op in the simulated remote) failed once and
+  passed on rerun; a second flake hit `test-agent-registration.py`
+  (`Updated agent did not start` under launchd). Both are worth a
+  stabilization look if they recur; neither touched shipped code.
+- Deferred minor suggestions: `Progress` newtype for `Request::Sync`'s
+  bool, `AgentError::write` alias, JSONL assertion test for `sync --all`
+  (needs a live agent — no unit surface), EWMA rate refinement.
+- Merge-order note: when both #158 and #161 merge, `run_one` (shared by
+  `sync ID` and `sync --all`) should take the progress flag so plain
+  `sync --progress` keeps streaming Working lines.
 - Markdown links/structure and Mermaid checks passed for this document.
   The final revision's native CI and any remaining queued Linux jobs are
   outstanding, not successful or waived.
