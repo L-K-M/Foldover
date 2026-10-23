@@ -96,6 +96,7 @@ func putBackAllRefusesOverlappingRestores() async {
     #expect(!viewModel.canPutBack)
 
     await viewModel.putBackAll()
+    #expect(!viewModel.itemRows.isEmpty)
     if let row = viewModel.itemRows.first {
         await viewModel.putBack(row)
     }
