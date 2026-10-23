@@ -1398,6 +1398,12 @@ mod tests {
             ]),
             Request::Sync(_, _, SyncCommand::Run { .. }, true)
         ));
+        // A --progress that is not the final sync argument stays a usage
+        // error, like any other misplaced flag.
+        assert!(matches!(
+            req(&["sync", id, "--progress", "--preview"]),
+            Request::Usage
+        ));
         // An approval or conflict choice without its preview's token is a
         // usage error: the CLI never looks a token up itself.
         for args in [
