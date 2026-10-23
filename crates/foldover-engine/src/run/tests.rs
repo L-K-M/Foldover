@@ -725,6 +725,23 @@ fn unavailable_socket_paths_keep_the_baselines_unicode_spelling() {
     );
 }
 
+fn composed_baseline(observation: &Observation) -> BTreeMap<SyncPath, BaselineEntry> {
+    observation
+        .entries()
+        .iter()
+        .map(|(name, entry)| {
+            let composed: String = std::str::from_utf8(name.as_bytes())
+                .unwrap()
+                .nfc()
+                .collect();
+            (
+                path(composed.as_bytes()),
+                BaselineEntry::new(entry.version(), entry.version()).unwrap(),
+            )
+        })
+        .collect()
+}
+
 #[test]
 fn ambiguous_unicode_respellings_preserve_every_observed_entry() {
     let memory = foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default());
@@ -746,20 +763,7 @@ fn ambiguous_unicode_respellings_preserve_every_observed_entry() {
             &mut |_| {},
         )
         .unwrap();
-    let base: BTreeMap<_, _> = observation
-        .entries()
-        .iter()
-        .map(|(name, entry)| {
-            let composed: String = std::str::from_utf8(name.as_bytes())
-                .unwrap()
-                .nfc()
-                .collect();
-            (
-                path(composed.as_bytes()),
-                BaselineEntry::new(entry.version(), entry.version()).unwrap(),
-            )
-        })
-        .collect();
+    let base = composed_baseline(&observation);
     let original = observation.versions();
     let names = NameMatching::new(
         foldover_types::CaseMatching::Exact,
@@ -808,20 +812,7 @@ fn unicode_respelling_prepare_budget() {
             &mut |_| {},
         )
         .unwrap();
-    let base: BTreeMap<_, _> = observation
-        .entries()
-        .iter()
-        .map(|(name, entry)| {
-            let composed: String = std::str::from_utf8(name.as_bytes())
-                .unwrap()
-                .nfc()
-                .collect();
-            (
-                path(composed.as_bytes()),
-                BaselineEntry::new(entry.version(), entry.version()).unwrap(),
-            )
-        })
-        .collect();
+    let base = composed_baseline(&observation);
     let names = NameMatching::new(
         foldover_types::CaseMatching::Exact,
         UnicodeMatching::Normalized,

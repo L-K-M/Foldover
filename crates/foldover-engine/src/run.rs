@@ -1449,7 +1449,7 @@ fn align_spellings(
     }
 
     for (from, to) in &respelled {
-        if destinations[to] == 1 {
+        if destinations.get(to) == Some(&1) {
             observation.respell(from, to.clone());
         }
     }
