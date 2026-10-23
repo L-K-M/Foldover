@@ -2005,6 +2005,27 @@ func workingJobHasNoRateUntilBytesMove() async {
     #expect(store.rate(for: pair.id) == nil)
 }
 
+@MainActor
+@Test
+func rateAnchorResetsWhenCopiedReturnsToZero() {
+    let store = SyncStore(client: ScriptedSyncClient([]), pollInterval: .milliseconds(1))
+    let id = "pair-rate-reset"
+
+    // First job moves bytes and starts a clock.
+    store.testTrackRate(id, .working(.run, cancelling: false,
+                                     progress: WorkProgress(bytes: 100, copied: 10)))
+    let first = store.testRateAnchor(id)
+    #expect(first?.copyStarted != nil)
+
+    // A replaced job reports copied == 0: the clock must restart, so a
+    // rate is unavailable again rather than averaged across both jobs.
+    store.testTrackRate(id, .working(.run, cancelling: false,
+                                     progress: WorkProgress(bytes: 100, copied: 0)))
+    let reset = store.testRateAnchor(id)
+    #expect(reset?.copyStarted == nil)
+    #expect(reset?.pausedAt == nil)
+}
+
 @Test
 func quickLookShowsTheFileAChangeWouldCopyOnlyWhereItIsOnThisMac() {
     let local = PairSettings(name: "Docs", left: SelectedFolder(bytes: Data("/Users/a/Docs".utf8)),

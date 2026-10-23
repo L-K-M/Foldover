@@ -450,16 +450,20 @@ final class SyncStore {
     /// cannot touch the successor.
     private var polling: [String: Int] = [:]
     private var pollSequence = 0
-    /// When each pair's current working job started, and when its copy
-    /// phase first moved a byte. Used only for throughput and ETA text.
+    /// When each pair's current working job first moved a byte, and
+    /// where a wait for another Mac paused that clock. Presentation only.
     private struct RateAnchor {
-        var jobStarted: ContinuousClock.Instant
         var copyStarted: ContinuousClock.Instant?
+        var pausedAt: ContinuousClock.Instant?
     }
     private var rateAnchors: [String: RateAnchor] = [:]
     /// Ignore the first moments of a copy phase: a burst of small files
     /// or a cold cache makes an early rate useless as a forecast.
     private static let rateWarmup: Duration = .seconds(2)
+    /// Tripwire for a broken clock, far above any real device: Apple
+    /// SSDs sustain single-digit GB/s; page-cache copies stay well under
+    /// this. A rate above it is discarded rather than shown.
+    private static let maxPlausibleBytesPerSecond = 100_000_000_000.0
     /// Writes a pair has seen. A reply requested before the latest write
     /// is stale and must not overwrite it, even if the state cycles back
     /// to the same value.
@@ -551,23 +555,28 @@ final class SyncStore {
     func listing(for id: String) -> ChangeListing? { listings[id] }
 
     /// Copy throughput for a working job, once it is old enough to
-    /// mean something. Nil while comparing, waiting, or in the warm-up.
+    /// mean something. Nil while comparing, waiting for another Mac,
+    /// or still inside the warm-up. `copyStarted` is stamped when the
+    /// app first observes a byte moved, a moment after the copy began;
+    /// the warm-up absorbs that optimism.
     func rate(for id: String) -> SyncRate? {
         guard case .working(_, _, let progress) = states[id],
               progress.waitingFor == nil,
               progress.bytes > 0,
               progress.copied > 0,
               let anchor = rateAnchors[id],
-              let copyStarted = anchor.copyStarted
+              let copyStarted = anchor.copyStarted,
+              anchor.pausedAt == nil
         else { return nil }
         let elapsed = copyStarted.duration(to: .now)
         guard elapsed >= Self.rateWarmup else { return nil }
-        let seconds = elapsed.seconds
+        let seconds = elapsed / .seconds(1)
         guard seconds > 0 else { return nil }
         let bytesPerSecond = Double(progress.copied) / seconds
-        // Sub-byte/s rates are noise; multi-GB/s rates on this path are
-        // a clock bug. Neither earns a line of status text.
-        guard bytesPerSecond >= 1, bytesPerSecond < 10_000_000_000 else { return nil }
+        // Sub-byte/s rates are noise; absurd rates are a clock bug.
+        // Neither earns a line of status text.
+        guard bytesPerSecond >= 1,
+              bytesPerSecond < Self.maxPlausibleBytesPerSecond else { return nil }
         let remaining: Double? = progress.bytes > progress.copied
             ? Double(progress.bytes - progress.copied) / bytesPerSecond
             : 0
@@ -872,23 +881,46 @@ final class SyncStore {
     }
 
     /// Start or continue the rate anchor for `state`. Leaving working
-    /// drops the anchor; a new job restarts the warm-up clock.
+    /// drops it. Waiting for another Mac pauses the clock; a copied
+    /// counter that returns to zero means a new job took over, so its
+    /// warm-up starts fresh.
     private func trackRate(_ id: String, state: PairSyncState) {
         guard case .working(_, _, let progress) = state else {
             rateAnchors[id] = nil
             return
         }
         let now = ContinuousClock.now
-        if var anchor = rateAnchors[id] {
-            if anchor.copyStarted == nil, progress.copied > 0 {
-                anchor.copyStarted = now
-            }
-            rateAnchors[id] = anchor
-        } else {
-            rateAnchors[id] = RateAnchor(
-                jobStarted: now,
-                copyStarted: progress.copied > 0 ? now : nil
-            )
+        var anchor = rateAnchors[id] ?? RateAnchor(
+            copyStarted: progress.copied > 0 ? now : nil,
+            pausedAt: nil
+        )
+        // Copied bytes only grow within one job; zero after the clock
+        // started means a new job took over.
+        if anchor.copyStarted != nil, progress.copied == 0 {
+            anchor = RateAnchor(copyStarted: nil, pausedAt: nil)
         }
+        if progress.waitingFor != nil {
+            if anchor.copyStarted != nil, anchor.pausedAt == nil {
+                anchor.pausedAt = now
+            }
+        } else if let pausedAt = anchor.pausedAt {
+            // Shift the start so paused time never counts as copying.
+            if let copyStarted = anchor.copyStarted {
+                let waited = pausedAt.duration(to: now)
+                anchor.copyStarted = copyStarted.advanced(by: waited)
+            }
+            anchor.pausedAt = nil
+        }
+        if anchor.copyStarted == nil, progress.copied > 0 {
+            anchor.copyStarted = now
+        }
+        rateAnchors[id] = anchor
+    }
+
+    // Test seams: rate anchors are presentation state the tests assert on.
+    func testTrackRate(_ id: String, _ state: PairSyncState) { trackRate(id, state: state) }
+    func testRateAnchor(_ id: String) -> (copyStarted: ContinuousClock.Instant?,
+                                          pausedAt: ContinuousClock.Instant?)? {
+        rateAnchors[id].map { ($0.copyStarted, $0.pausedAt) }
     }
 }
