@@ -40,11 +40,14 @@ struct ArchiveViewModel {
         }
     }
 
-    /// Absolute for older runs; relative while the day is still useful.
-    static func runTitle(_ started: Date) -> String {
-        let age = Date().timeIntervalSince(started)
+    /// Relative for recent runs, with the clock time so two runs the
+    /// same day stay distinct; absolute once the day is past.
+    static func runTitle(_ started: Date, now: Date = Date()) -> String {
+        let age = now.timeIntervalSince(started)
         if age >= 0, age < 86_400 {
-            return started.formatted(.relative(presentation: .named))
+            let relative = started.formatted(.relative(presentation: .named))
+            let clock = started.formatted(date: .omitted, time: .shortened)
+            return "\(relative), \(clock)"
         }
         return started.formatted(date: .abbreviated, time: .standard)
     }
