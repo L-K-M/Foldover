@@ -993,7 +993,7 @@ fn an_aborted_first_run_keeps_its_review_gate() {
     assert_eq!(report.completion(), Completion::Cancelled);
     assert!(
         !pair.right.path().join("notes").exists(),
-        "a cancelled first run must not have written anything"
+        "a cancelled first run must not have written notes to the right side"
     );
 
     // Nothing completed, so the pair is still on its first run.
