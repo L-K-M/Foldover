@@ -96,13 +96,16 @@ struct ApprovalRequest: Equatable, Sendable, Identifiable {
 }
 
 /// What the change rows were built from: the previewed plan, the pages
-/// loaded for it and the kind filter narrowing them.
+/// loaded for it and the kind filter narrowing them. Every builder that
+/// shares the cache must be distinguishable by these fields — two
+/// builders with an equal source get each other's rows.
 private struct RowsSource: Equatable {
     var pair: String
     var token: String
     var paged: Bool
     var listed: Int
     var filter: ChangeFilter?
+    var failures: Int
 }
 
 /// Change rows are display data built from the store's preview pages:
@@ -452,7 +455,8 @@ struct PairSyncViewModel {
             let listing = store.listing(for: pair.id)
             let source = RowsSource(
                 pair: pair.id, token: preview.reviewToken, paged: listing != nil,
-                listed: (listing?.changes ?? preview.changes).count, filter: listing?.filter)
+                listed: (listing?.changes ?? preview.changes).count, filter: listing?.filter,
+                failures: preview.failures.count)
             return rowCache.rows(from: source) {
                 let review = ReviewContext(token: preview.reviewToken,
                                            pairRevision: preview.pairRevision)

@@ -760,11 +760,13 @@ func changeRowsAreBuiltOncePerPageAndSharedAcrossViewModels() async {
     #expect(second.listedRows.count == 2)
     #expect(cache.builds == 1)
 
-    // Each store change — a page loaded, a filter chosen — rebuilds once.
+    // Each store change — a page loaded, a filter chosen — rebuilds
+    // once. The scripted pages carry copy-kind rows, so the kind filter
+    // narrows them to their first page.
     await second.loadMoreChanges()
     #expect(second.listedRows.map(\.path) == ["p0", "p1", "p2", "p3"])
-    await second.showChanges(.archives)
-    #expect(second.listedRows.isEmpty)
+    await second.showChanges(.copies)
+    #expect(second.listedRows.map(\.path) == ["p0", "p1"])
     #expect(cache.builds == 3)
 }
 
