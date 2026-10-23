@@ -654,7 +654,9 @@ async fn call(
 /// they reach a remote host (SFTP browse or root validation, peer
 /// handshakes, the server scan) or move files inline (put-back,
 /// keep-both). Everything else is local state a healthy agent answers
-/// at once.
+/// at once. Keep in sync with the agent: a method whose handler grows
+/// remote or inline work belongs here, and a slow method that turns
+/// local comes off.
 const SLOW_METHODS: &[&str] = &[
     ENDPOINT_BROWSE,
     NETWORK_SERVERS,
