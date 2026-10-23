@@ -9,8 +9,13 @@ Reviewed 2026-10-23, starting at `8fb2405`. Assumed load: one person,
 several overlapping jobs on disjoint roots, 100k to 1M tracked files,
 and occasional multi-gigabyte files over slow or interrupted links.
 The initial review was written in `Sol.md` before implementation; a
-second independent pass by SWE-2 Max was written in `Fusion.md`. Source
+second independent pass by SWE-2 Max was written in `Fusion.md`; a
+third independent pass is merged below from `Mimo.md` (SWE-2 Max
+scans with the reviewer's own verification, ids `MIMO-`). Source
 references describe that baseline unless a PR status says otherwise.
+Entries whose work ships in an open PR stay until that PR merges
+(see the table below); everything else here is unimplemented and
+shovel-ready.
 
 ## Start here
 
@@ -21,15 +26,18 @@ fixing it. Keep visual proposals separate from measured defects.
 | Priority | Work | Acceptance boundary |
 |---|---|---|
 | P1 | SOL-21: cancel stalled peer streams | Stalled peer, slow healthy peer and idle watch |
+| P1 | MIMO-01–04: correctness the sync depends on | Missed FSEvents changes, stale-plan skips, colliding run names, newline skip rules |
 | P1 | SOL-26: honor the selected SFTP parent | The saved root equals the highlighted folder |
 | P1 | SOL-03: reject stale archive replies | Delayed success, error and cleanup cannot change a newer listing |
 | P1 | SOL-04: search the complete preview | Find late matches without downloading earlier pages |
 | P2 | SOL-23: index protected ancestors | Same safety decisions, bounded work with many failures |
 | P2 | SOL-24 and SOL-08: complete, bounded archive browsing | Old runs and late items remain reachable without full rescans |
 | P2 | SOL-05 and SOL-06: visible progress and responsive previews | Large transfers advance; search avoids repeated formatting |
+| P2 | MIMO-08–11: sync speed and liveness | Batched fsyncs, SFTP scans that skip unchanged content, choices without full re-previews, pushed status |
 | P2 | SOL-09, SOL-10 and SOL-16: visible, actionable attention | Background failures, restore causes and freshness are explicit |
 | P2 | F-01: `pairs set` partial-update convenience | One option toggles without re-supplying pair identity |
 | P3 | SOL-13–15 and SOL-17–20: product and visual polish | Validate with native light/dark, keyboard and accessibility checks |
+| P3 | MIMO-15–27: interface additions and hardening | See entries; MIMO-12/13 are exception-path hardening |
 | P3 | F-02–F-07: CLI readability, exports and small notifications | See entries |
 
 ## Implemented in open PRs
@@ -51,6 +59,25 @@ follow-up work. No implementation in this table was pushed into main.
 | F-12 | `devin/ffi-read-timeouts` | [162](https://github.com/L-K-M/Foldover/pull/162) | Unit test pins read `Connection` vs write `Request` timeout split |
 | F-13 | `devin/sync-throughput` | [164](https://github.com/L-K-M/Foldover/pull/164) | `Progress::wire()` rate test; `check-ffi` bindings match; Swift type-check awaits macOS CI |
 | F-14 | `devin/ipc-slow-timeout` | [166](https://github.com/L-K-M/Foldover/pull/166) | Poisoned-connection regression test; ipc+client tests and clippy |
+| MIMO-01′ first-run review gate after an aborted run | `fix/first-run-gate-after-aborted-run` | [173](https://github.com/L-K-M/Foldover/pull/173) | Regression failed first (identities recorded on abort); engine suite and `cargo xtask ci` green |
+| MIMO-02′ re-subscribe watchers after a pair edit | `fix/watch-roots-after-pair-edit` | [174](https://github.com/L-K-M/Foldover/pull/174) | Notification-level regression failed first; 5/5 local runs; `cargo xtask ci` green |
+| MIMO-03′ bound peer-claimed scan progress | `fix/clamp-peer-scan-progress` | [175](https://github.com/L-K-M/Foldover/pull/175) | End-to-end regression proven sensitive (2,000,010 steps unclamped); endpoint suite green |
+| MIMO-04′ keep pair commands enabled during health probes | `fix/agent-probe-keeps-buttons-enabled` | [176](https://github.com/L-K-M/Foldover/pull/176) | Swift Testing regression; parse-checked here, test run awaits macOS CI |
+| MIMO-05′ one restore at a time in the archive | `fix/archive-put-back-all-guard` | [177](https://github.com/L-K-M/Foldover/pull/177) | Duplicates the reservation half of SOL-02/PR 165; Swift Testing regression, macOS CI pending |
+| SOL-06 rows built once per preview page | `perf/cache-change-rows` | [178](https://github.com/L-K-M/Foldover/pull/178) | Build-count regression plus existing paging/filter tests; macOS profiling acceptance open |
+| SOL-12′ scroll the menu bar pair list | `fix/menu-bar-popover-overflow` | [179](https://github.com/L-K-M/Foldover/pull/179) | Covers only the bounded pair list of SOL-12/PR 168; macOS CI pending |
+
+MIMO-01′ through MIMO-05′ are findings of the third pass that their
+PRs now fix; the primes mark them as implemented, not backlog. Where
+they duplicate a second-pass fix (MIMO-05′ with SOL-02/PR 165,
+SOL-12′ with SOL-12/PR 168, SOL-06 with the cache described there),
+the owner merges one and closes the other — the fixes are small and
+independent. Third-pass review record: PR 173 ran three rounds whose
+findings were all minor and were applied; PRs 174 and 176 reached
+clean rounds after minor findings were applied; PR 175's single round
+was clean and no further push remained to trigger another; PR 177's
+one minor finding was applied; PRs 178 and 179 were still under
+review at this merge.
 
 Review status at consolidation: PRs 159, 163, 165 and 168 each completed
 two GLM review rounds without confirmed important findings. PRs 157, 158,
@@ -88,6 +115,8 @@ Status: implemented in PR 159; owner merge pending.
 ### SOL-02: Put Back All does not reserve the archive UI
 
 Status: implemented in PR 165; owner merge pending. SOL-03 is separate.
+A third-pass duplicate (PR 177) adds the same `isPuttingBack` guard
+with its own overlapping-restore regression; merge one of the two.
 
 - **What this is:** Selected-item restoration already reserves one batch
   with `isPuttingBack`.
@@ -138,6 +167,9 @@ Status: implemented in PR 165; owner merge pending. SOL-03 is separate.
   preceding rows; stale review tokens still fail closed.
 - **Related shipped work:** PR 160 (`sync ID --changes`) pages the full
   preview over the CLI; server-side filtered search remains open.
+- **Mimo addendum:** until search reaches the whole plan, the empty
+  state should not claim "No Matching Changes" while unloaded pages
+  remain; say the search covers the changes loaded so far.
 
 ### SOL-05: Large-file progress looks frozen
 
@@ -161,6 +193,8 @@ Status: implemented in PR 165; owner merge pending. SOL-03 is separate.
 
 ### SOL-06: Preview rendering repeatedly builds every loaded row
 
+Status: implemented in PR 178; owner merge pending.
+
 - **What this is:** `PairSyncViewModel` is a value recreated for rendering.
 - **Problem:** Its `listedRows` at lines 404-442 formats paths, sizes,
   descriptions and Quick Look URLs for every loaded row. `rows`,
@@ -172,6 +206,11 @@ Status: implemented in PR 165; owner merge pending. SOL-03 is separate.
   replacing the native Table with an outline implementation.
 - **If skipped:** Search and selection become increasingly expensive as
   the user reviews more of a large plan.
+- **PR 178 scope:** rows build once per review token, loaded pages and
+  kind filter, in a cache the window's view models share; search
+  filters the cached rows per render rather than caching results
+  separately. The 10k/100k/200k macOS profiling acceptance remains
+  open.
 - **Acceptance:** Profile 10k, 100k and 200k loaded rows on macOS; typing
   and selection must avoid repeated full presentation rebuilds and meet
   PLAN.md's interaction budgets.
@@ -285,6 +324,10 @@ Status: implemented in PR 165; owner merge pending. SOL-03 is separate.
   Swift-side add on the same store boundary.
 - **Acceptance:** A filtered selection copies its paths; export writes a
   parseable file the UI tour can screenshot.
+- **Mimo addendum:** the change table is single-selection today
+  (`Table(rows, selection: ChangeRow.ID?)` in `PairDetailView.swift`);
+  multi-select with bulk actions is MIMO-27 and should land with or
+  before Copy Paths.
 
 ### F-04: Notify when a run recovers leftovers
 
@@ -353,6 +396,9 @@ Status: implemented in PR 168; native validation and owner merge pending.
   review suggested using the smallest attached display or the actual
   popover's display. Verify that behavior before choosing the final
   multi-monitor policy. Scroll-position persistence is optional polish.
+  PR 179 independently implements just the bounded, scrolling pair
+  list (320 pt) with no display probing; if 168 merges first, close
+  179, and vice versa keep 168's Stop-row work.
 
 ### SOL-13: A conflict inspector that compares both versions
 
@@ -386,6 +432,12 @@ Status: implemented in PR 168; native validation and owner merge pending.
   pulse on the status dot while connecting, `.badgeProminence` on the
   numeric conflict badge, and deletion counts in the approval button or
   dialog title all fit the same palette work.
+- **Mimo addendum:** tint the sync modes themselves (two-way, mirror,
+  backup) so a screenshot is readable at a glance; adopt the icon's
+  blue as the default in-app accent (still user-overridable); and keep
+  one status-symbol vocabulary (spinner, warning, waiting, idle) shared
+  by sidebar, detail, menu bar and notifications — today each surface
+  names its own glyphs.
 
 ### SOL-15: Make the editor's first three decisions obvious
 
@@ -493,6 +545,9 @@ Status: implemented in PR 168; native validation and owner merge pending.
 - **F-18 Hash buffer:** `HASH_BUFFER_BYTES` 64 KiB → 256 KiB–1 MiB to cut
   syscall count on huge files (`crates/foldover-fs/src/root/content.rs`).
   Low priority; usually I/O-bound.
+  **Mimo addendum:** `root/write/partial.rs:83` hashes resume prefixes
+  through `io::copy`'s 8 KiB buffer instead of this loop — route it
+  through `HASH_BUFFER_BYTES` too.
 
 ## Additional engine and endpoint findings
 
@@ -596,8 +651,376 @@ indexing costs remain in SOL-23.
 - **Task:** Prune per-pair data against each authoritative catalog refresh.
   Invalidate outstanding read/paging tickets so removed state cannot be
   reintroduced by a delayed response.
+- **Mimo addendum:** the agent leaks the same way: `foldover-service/
+  src/sync.rs:169` keeps `jobs`, `skips` and `mutating` entries after
+  `PAIR_REMOVE`, so `status()` and `items()` keep answering for a
+  deleted id. Prune both sides. `MainViewModel.changeSelections` and
+  the `SyncStore` search/decline maps have the same shape.
 - **Acceptance:** Remove a pair with loaded pages and an outstanding
   request; its state stays forgotten after that request completes.
+
+## Third review additions (Mimo.md)
+
+Unimplemented findings of the third pass. Entries delivered as open PRs
+are in the table above instead. Style and priority rules hold: reproduce
+before fixing, keep the review-token boundaries, and keep visual
+proposals separate from measured defects.
+
+### MIMO-01: The FSEvents history sentinel can swallow a change
+
+- **Evidence:** `crates/foldover-watch/src/history/fsevents.rs:217`.
+  macOS ORs `HistoryDone` onto the last replayed event, which can
+  itself be a real change; the early `Ok(false)` skips `relevant(&path)`
+  for that event and everything queued behind it in the batch.
+- **Impact:** A change riding with the replay sentinel is not noticed
+  until the periodic verification run — the pair looks current while a
+  real edit waits an hour. macOS-only; reported by scan, not reproduced.
+- **Task:** Evaluate `relevant(&path)` before honoring the sentinel, and
+  drain already-queued post-replay events before returning.
+- **Acceptance:** Force a replay whose last event is a user change and
+  observe it reported; a sentinel alone still reports nothing.
+
+### MIMO-02: A skip from a stale plan survives a pair edit
+
+- **Evidence:** `crates/foldover-service/src/sync.rs:292`. `items()`
+  (`:373`) and `keep_both()` (`:263`) check `reviewed.revision` against
+  the pair; `skip()` does not.
+- **Impact:** Skip Once taken from a preview survives `PAIR_UPDATE` and
+  applies if the new folders hold matching versions at that path.
+- **Task:** Validate the revision in `choice()`, or at least in `skip`.
+- **Acceptance:** Skip a row, edit the pair, present the same path with
+  equal versions; the stale skip must be refused.
+
+### MIMO-03: Two runs can share one archive folder
+
+- **Evidence:** Run names are millisecond timestamps
+  (`foldover-engine/src/run.rs:1106`, `foldover-endpoint/src/local/
+  archive.rs:73`, `sftp.rs` same helper).
+- **Impact:** A clock rollback or a restart inside one millisecond
+  merges two runs into one archive folder; undo of the later run can
+  put the earlier run's file back at a colliding path.
+- **Task:** Make run names collision-proof (append the lease holder id
+  or a short unique suffix); keep names sortable by time.
+- **Acceptance:** Force the same name twice; the second run archives
+  beside the first, and undo of either restores only its own entries.
+
+### MIMO-04: A skip rule with a newline silently skips other files
+
+- **Evidence:** `apple/Foldover/Stores/PairStore.swift:467`
+  (`skipRule(for:)`) escapes spaces and glob characters but not control
+  characters; a path containing `\n` yields a two-line gitignore rule.
+- **Impact:** The second line silently excludes unrelated paths from
+  every future sync of the pair.
+- **Task:** Reject control characters like the non-UTF-8 case (an error
+  the Always Skip flow already displays), or escape them.
+- **Acceptance:** Always Skip on a path with a newline either refuses
+  with its message or produces one inert rule.
+
+### MIMO-05: One failed run disables scheduled sync until a manual run
+
+- **Evidence:** `crates/foldover-service/src/sync.rs:563` treats
+  `Failed` like `NeedsApproval`/`Undone` when claiming `Work::Scheduled`.
+- **Impact:** A transient failure (network blip, timeout) stops
+  unattended sync with no recovery except a person syncing by hand;
+  ADR 0022's intent is to stop for *review*, not for retryable errors.
+- **Task:** Retry scheduled work after `Failed`, or clear `Failed` after
+  a cooldown; keep the block for states that genuinely await a person.
+  Decide and document, since the current behavior may be deliberate.
+- **Acceptance:** A scheduled run that fails once runs again on its next
+  cadence; `NeedsApproval` and `Undone` still wait.
+
+### MIMO-06: Undo can panic on edge-case and corrupt entries
+
+- **Evidence:** `crates/foldover-engine/src/run/undo.rs:243,256,271`
+  `expect("a name key is a valid path")` after `name_key`, which
+  lowercases and can grow a path past `SyncPath`'s byte limit (e.g.
+  `İ`), and on malformed stored rows.
+- **Impact:** Undo of a run touching such names panics the job; the
+  `catch_unwind` keeps the agent alive but the undo fails. Undo's
+  reporting also counts a folder restored `Beside` as unrestored
+  (`undo.rs:171`, `205-217`).
+- **Task:** Return the existing soft errors instead of panicking; count
+  `Placed::Beside` restores as refilling their parent.
+- **Acceptance:** Journal entries near the name limit and with bad bytes
+  produce skipped rows in `not_undone`, never a panic.
+
+### MIMO-07: Small app-side correctness edges
+
+Four independent, small fixes in the SwiftUI layer.
+
+- **Counts can trap:** `PairSyncViewModel.swift:483` (`hiddenRowsText`)
+  and two siblings subtract `UInt64` counts the agent reports from
+  counts the listing carries; use `subtractingReportingOverflow` or a
+  zero floor.
+- **A completion card offers Undo that can never enable:**
+  `PairSyncViewModel.swift:456` ignores the `records == .both` rule
+  `undoableResult` applies, so an archive-less Backup target shows a
+  dead button.
+- **Mixed outcomes notify only the conflicts:** `SyncStore.swift:518`
+  alerts conflicts and drops the failure count of the same run.
+- **Sync while an approval is pending just re-prompts:**
+  `PairSyncViewModel.swift:520` runs with zero approvals, bouncing to
+  the dialog; disable the command or present the dialog instead.
+
+### MIMO-08: Per-file fsyncs dominate many-small-file runs
+
+- **Evidence:** `crates/foldover-fs/src/root/write.rs` syncs the file
+  and one or two directories per placement and per removal, at both
+  durability levels (sites listed in the ADR 0019 area).
+- **Impact:** A run over N files in one folder costs ~2N+ fsyncs; on
+  spinning disks and shares this, not copying, is the wall time.
+- **Task:** Batch directory syncs per run or per commit batch under
+  `Durability::Standard`; keep per-op syncs under `Full`. Respect
+  ADR 0019's durability contract and staged-write recovery.
+- **Acceptance:** Equal safety under injected crashes at batch
+  boundaries; benchmark 10k small files before and after.
+
+### MIMO-09: Every SFTP scan re-downloads all file content
+
+- **Evidence:** `crates/foldover-endpoint/src/sftp.rs:480`
+  (`observe_reporting`) ignores its `previous` snapshot and reads and
+  hashes every file on every scan; deliberate, since stat cannot prove
+  unchanged.
+- **Impact:** Periodic verification on a 100 GB SFTP root moves 100 GB;
+  the documented shallow checks stop being shallow.
+- **Task:** A stat-fingerprint fast path (size, mtime second, mode
+  unchanged against the stored snapshot) that skips reads for matching
+  entries, with an explicit weaker-guarantee note and a periodic
+  full-hash pass that keeps the strong guarantee.
+- **Acceptance:** A second scan of an unchanged tree transfers listings
+  only; an edit that preserves size and mtime is still caught by the
+  periodic hash pass.
+
+### MIMO-10: Each review choice re-runs the whole preview
+
+- **Evidence:** `apple/Foldover/Stores/SyncStore.swift` `choose` follows
+  every Skip Once / Keep A / Keep B / Keep Both with `preview(id)`.
+- **Impact:** Ten decisions on a 100k-entry plan cost ten full rescans,
+  each with only "Resolving…" to look at; reviewing a plan feels slow in
+  exactly the moment the product promises responsiveness.
+- **Task:** Either batch choices (multi-select, MIMO-27) and preview
+  once, or refresh incrementally and show the re-scan's counters.
+- **Acceptance:** Resolving several conflicts on a large plan performs
+  at most one preview per batch and shows progress while it runs.
+
+### MIMO-11: Status is polled; the agent's events are unused
+
+- **Evidence:** The agent publishes `scanProgress`, `opDone`,
+  `runFinished` and friends (PLAN.md §4.3), but the UniFFI surface is
+  request/response: `SyncStore` polls working pairs every 500 ms,
+  `MainViewModel.monitor` reads every pair every 15 s, `MacToMacStore`
+  polls two RPCs per second while its tab is open, and jobs the agent
+  starts (scheduled, on-change) update only on the 15 s tick
+  (`SyncStore.swift:598`), so their progress looks frozen between ticks.
+- **Task:** Either carry the event stream through UniFFI (callback
+  interface, batched) or make polling adaptive: fast for app-started
+  jobs, slower for agent-started ones, backoff when idle.
+- **Acceptance:** An agent-started sync updates the app at sub-second
+  cadence while it copies; an idle app polls no pair more than once a
+  minute.
+
+### MIMO-12: IPC exception paths
+
+- **Oversized responses kill the connection:**
+  `foldover-ipc/src/local.rs:185` fails inside `write_value`; the
+  client reads "Agent closed before its response" instead of a JSON-RPC
+  error. Answer with a proper error reply.
+- **One wedged handler can exhaust IPC:** `local.rs:154` holds one of
+  32 connection permits across handler execution with no deadline, and
+  any `accept` error but permission-denied ends `serve` permanently.
+  Bound handler execution and retry transient accept errors.
+- **A transient identity failure is cached forever:**
+  `foldover-net/src/installed.rs:61` pins `None` on the first probe
+  failure, disabling privileged IPC until restart. Cache successes only.
+- **Long work as jobs:** `archive.putBackAll`, `endpoint.browse` and
+  pairing are single RPCs whose deadlines were fixed in PR 166; giving
+  them start/poll job handles (as `run.*` has) would add progress and
+  cancel. Larger than the three fixes above; do it when the archive and
+  browse surfaces are next touched.
+
+### MIMO-13: Platform hardening
+
+- **`pairing=0` is accepted in mDNS sightings:**
+  `foldover-net/src/discovery.rs:267` validates the service port but
+  not the pairing port. Reject zero.
+- **Local-state allowlist omits filesystems:** `foldover-db/src/
+  database.rs:1053` misses ZFS (`0x2fc12fc1`), F2FS (`0xf2f52010`) and
+  bcachefs (`0xca451a4e`), refusing legitimate local state storage.
+- **A permission-corrupted crash record blocks startup:**
+  `foldover-db/src/database/starts.rs:73` hard-fails on wrong uid/mode
+  where malformed content is skipped; treat both as unreadable.
+- **Keep-copy labels are unchecked off the peer path:**
+  `foldover-endpoint/src/local/conflict.rs:33` and `sftp.rs:1251` format
+  the `from` label into a sibling name; only `remote/serve.rs:270`
+  applies `plain_label`. Current callers pass constants — hardening.
+- **Lease writes are uncapped:** `remote/serve.rs:423` writes
+  peer-supplied lease content verbatim while reads cap at 4096 bytes.
+  Cap before touching disk.
+
+### MIMO-14: Input edges in the app
+
+- **`smb://` URLs from unvalidated hosts:**
+  `apple/Foldover/ViewModels/PairEditorViewModel.swift:637` interpolates
+  a network-supplied host into a mount URL; `:` or `@` can inject
+  credentials into the URL Finder opens. Validate the host shape.
+- **`NumberField` ignores its range on typed input**
+  (`PairEditorView.swift:424`): clamp on commit, not only in the stepper.
+- **Blank skip-rule lines persist as empty rules**
+  (`PairEditorViewModel.swift:137` splits without dropping empties).
+- **Update checker edges** (`FoldoverSystem/UpdateChecker.swift:134,167`):
+  force-unwrapped feed URL literals, and an `async let` left unawaited
+  when the feed parse throws.
+
+### MIMO-15: Layout floors that do not fit together
+
+- **Evidence:** `apple/Foldover/Views/MainView.swift:24-34`:
+  `windowMinWidth` 820 is smaller than the sidebar maximum 340 plus the
+  detail minimum 320 plus the inspector 280 = 940. Settings is fixed at
+  520 wide (`SettingsView.swift:97`), the pair editor at `minWidth: 800`
+  (`PairEditorView.swift:33`), the SFTP picker at 500x520.
+- **Impact:** A wide sidebar at minimum window width squeezes the detail
+  under its own floor and clips the inspector; fixed panes crowd scaled
+  text on 1280x800 displays.
+- **Task:** Raise the window minimum or let the sidebar yield first;
+  prefer min/ideal/max over fixed widths (related SOL-15).
+- **Acceptance:** `LayoutStressTests` covers the wide-sidebar case too;
+  every pane stays above its floor at the window minimum.
+
+### MIMO-16: The detail's status card offers no way to run
+
+- **Evidence:** `apple/Foldover/Views/PairDetailView.swift:150` shows
+  action buttons only while working and after completion; a freshly
+  previewed plan's only run buttons are in the toolbar and menus.
+- **Task:** Put the primary action (Sync Now) in the card beside the
+  plan summary; keep the plan sentence's three-line clamp but add an
+  expansion or selection affordance (it truncates with a tooltip only),
+  and auto-load change pages to a stated cap instead of a small
+  "Show More" caption ("and 42 more" is easy to miss).
+- **Acceptance:** Preview, then run without leaving the card; long plan
+  sentences and large plans state their truncation.
+
+### MIMO-17: The app icon predates the platform's icon style
+
+- **Evidence:** `media-sources/icon.png` and `AppIcon.appiconset` ship a
+  full-bleed dark-navy square with no dark or tinted appearances; at
+  16 px the folded dart reads as a blob.
+- **Task:** Regenerate in the layered icon template with light, dark and
+  tinted variants; check legibility at 16 px and on light docks.
+- **Acceptance:** Screenshot the Dock in light, dark and tinted modes at
+  every icon size.
+
+### MIMO-18: Command surface inconsistencies
+
+- **Sync All stays enabled while the pair editor is open**
+  (`App/Commands.swift:160`) although other pair commands withdraw
+  through the focused-scene check.
+- **The Help menu is replaced away** (`App/Commands.swift:29`), which
+  removes the standard menu-item search people use to find commands.
+  Append instead of replacing.
+- **A bare "q" quits the app** from the menu-bar popover
+  (`MenuBarView.swift:44` `keyboardShortcut("q")`); use ⌘Q semantics or
+  drop the shortcut.
+
+### MIMO-19: Destructive dialogs should name the folder
+
+The removal dialog does this well ("Remove settings for X?"). "Archive
+and Sync", "Put Back All?" and the approval message should name the
+pair and its folders, so a reflex tap cannot hit the wrong pair.
+
+### MIMO-20: A Status intent for Shortcuts
+
+`Intents/PairIntents.swift` offers Run, Pause and Preview. An intent
+returning the pair's status line ("In sync", "3 conflicts need you")
+completes the set and makes automations and Siri genuinely useful.
+
+### MIMO-21: Pause one pair
+
+`PauseLength` pauses automatic syncs globally. A per-pair pause (a
+"hold" on one noisy pair without stopping the rest) fits the existing
+`Environment`/pause machinery and the schedule model.
+
+### MIMO-22: Optional notification when a long sync finishes
+
+Notifications cover failures and conflicts only, deliberately
+(PLAN.md §3.8). An opt-in "tell me when a sync that ran longer than N
+minutes finishes" is the one missing alert class in sync tools
+(related F-04 and SOL-09 for the notification plumbing).
+
+### MIMO-23: A run detail sheet
+
+The state keeps `run_item` (ADR 0026) and the inspector shows ten
+one-line summaries; nothing shows what a past run actually changed.
+A read-only change table per run, reusing the preview table's row
+model, closes both this and "Older syncs are not listed." (related
+SOL-08's run cursor and F-03's export).
+
+### MIMO-24: An opt-in diagnostics bundle
+
+PLAN.md §9 promises "an opt-in diagnostics bundle helps support";
+nothing implements it. A "Copy Status" gathering the agent version,
+pair states, last errors and recent history into the pasteboard is the
+small version.
+
+### MIMO-25: Delight and speed ideas
+
+Small, self-contained, each optional.
+
+- **The menu-bar arrow fills as a run progresses** — the animated icon
+  (PR 152) already moves while working; make it carry the byte
+  progress too (related SOL-05).
+- **Completion card thumbnails** — three Quick Look thumbnails of
+  copied images beside "142 items copied", local files only (related
+  SOL-19's signature moment).
+- **Drop a file on the detail to ask "what would this do?"** — a
+  one-path dry run in a popover; a trust builder on the preview promise.
+- **A fuzzy pair switcher (⌘P)** — pairs first, archived runs later,
+  like Xcode's Open Quickly.
+- **A desktop widget** with each pair's one-line status (WidgetKit
+  extension; medium size).
+- **Keyboard-first conflict triage** — J/K to move, 1/2/B to resolve,
+  Space to Quick Look, auto-advance (related SOL-13's comparison cards).
+- **An "in step for 12 days" streak** per pair, from run history
+  (related SOL-16 and F-05's freshness work).
+- **A sync speed sparkline** in the inspector while copying, from the
+  rate samples PR 164 already carries.
+- **Relative times in the history list** ("2 min ago", absolute in the
+  tooltip).
+
+### MIMO-26: Small hot-path notes
+
+Verified shape, small each; batch them when touching the files.
+
+- `MainViewModel.swift:246` sorts `pairs` with `localizedStandardCompare`
+  on every access and is read several times per render; cache the order.
+- `foldover-endpoint/src/link/stream.rs:199,228` memmoves each received
+  frame with `remove(0)` and copies each outbound payload to prepend its
+  tag; slice instead.
+- `foldover-endpoint/src/sftp.rs:1217,1253` probe free sibling names
+  one remote `attributes()` at a time (up to 100 round trips); read the
+  parent once.
+- `apple/Foldover/App/MenuBarScene.swift:28` recomputes `menuBarStatus`
+  (O(pairs)) on every 400 ms animation frame; cache it.
+- `SyncStore.swift:802` fetches history when a job ends and again on
+  the next changed-state tick.
+- `SyncStore.swift:824` writes `states[id]` unconditionally, so equal
+  states still invalidate Observation on every poll tick.
+- `foldover-endpoint/src/remote/serve.rs:463` sleeps 500 ms on a
+  serving thread per change burst; `sftp.rs:491` buffers a whole tree
+  listing before processing any of it.
+
+### MIMO-27: Multi-select and bulk actions in the change table
+
+- **Evidence:** The table selects one row (`PairDetailView.swift`
+  `Table(rows, selection: ChangeRow.ID?)`) while its context-menu
+  closure already takes a set and then acts on `rows.first`; the archive
+  window selects sets happily. F-03's export assumes a multi-selection
+  that does not exist yet.
+- **Task:** Set-valued selection; Skip Once / Always Skip / Keep
+  (conflicts) / Copy Paths over the selection, in one request batch per
+  action (which also halves MIMO-10's re-preview churn).
+- **Acceptance:** Select several rows across kinds and act once; the
+  inspector reports the selection size; each action remains
+  review-token-bound.
 
 ## Confirmed non-bugs from the second pass
 
@@ -672,6 +1095,18 @@ Verified against the source so they are not re-reported:
 - Deferred minor suggestions: `Progress` newtype for `Request::Sync`'s
   bool, `AgentError::write` alias, JSONL assertion test for `sync --all`
   (needs a live agent — no unit surface), EWMA rate refinement.
+- Third-pass record (Mimo.md): each Rust PR reproduced its regression
+  before the fix — PR 173's identity assertion on an aborted first run,
+  PR 174's notification-level watcher test, PR 175's step bound (the
+  unclamped loop reported 2,000,010 steps and failed) — and passed the
+  local `cargo xtask ci`. The Swift PRs (176–179) were parse-checked
+  with a local toolchain; their Swift Testing regressions run in the
+  queued macOS jobs, so native test passage is unverified here.
+- Third-pass scan findings were verified against the source before
+  listing: MIMO-01 is scan-derived and macOS-only, and the fsync and
+  SFTP transfer-volume claims in MIMO-08/09 are read from the source's
+  structure, not measured. SOL-06's macOS profiling acceptance and
+  SOL-12's native checks remain open with their PRs.
 - Merge-order note: when both #158 and #161 merge, `run_one` (shared by
   `sync ID` and `sync --all`) should take the progress flag so plain
   `sync --progress` keeps streaming Working lines.
