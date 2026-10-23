@@ -1467,12 +1467,13 @@ mod tests {
         let root = temporary.path();
         fs::create_dir_all(root.join(".config/op")).unwrap();
         let _socket = UnixListener::bind(root.join(".config/op/op-daemon.sock")).unwrap();
-        rustix::fs::mkfifoat(
-            rustix::fs::CWD,
-            root.join("pipe"),
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        )
-        .unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(root.join("pipe"))
+                .status()
+                .unwrap()
+                .success()
+        );
         fs::write(root.join("notes.txt"), b"keep").unwrap();
         symlink(".config/op/op-daemon.sock", root.join("link")).unwrap();
         let endpoint = LocalEndpoint::open(root).unwrap();
