@@ -8,12 +8,28 @@ private actor ArchiveFixtureClient: ArchiveClient {
     private(set) var sides: [FolderSide] = []
     /// Items put back one by one, in request order.
     private(set) var putBacks: [Data] = []
+    /// Whole-run restores, in request order.
+    private(set) var putBackAlls = 0
+    /// The next whole-run restore to hold until released.
+    private var holdsPutBackAll = false
+    private var heldPutBackAll: CheckedContinuation<Void, Never>?
     /// Requests for later pages, and the next one to hold until released.
     private(set) var pageRequests = 0
     private var holdsNextPage = false
     private var held: CheckedContinuation<Void, Never>?
 
     func holdNextPage() { holdsNextPage = true }
+
+    func holdPutBackAll() { holdsPutBackAll = true }
+
+    func waitForHeldPutBackAll() async {
+        while heldPutBackAll == nil { await Task.yield() }
+    }
+
+    func releasePutBackAll() {
+        heldPutBackAll?.resume()
+        heldPutBackAll = nil
+    }
 
     func waitForHeldPage() async {
         while held == nil { await Task.yield() }
@@ -52,10 +68,42 @@ private actor ArchiveFixtureClient: ArchiveClient {
     }
 
     func putBackAll(_ id: String, side: FolderSide, run: String) async throws -> RunRestore {
+        putBackAlls += 1
+        if holdsPutBackAll {
+            holdsPutBackAll = false
+            await withCheckedContinuation { heldPutBackAll = $0 }
+        }
         let count = UInt64(stored.count)
         stored.removeAll()
         return RunRestore(restored: count - 1, beside: 1, failures: 0)
     }
+}
+
+/// A restore already running is the pair's only one: a second Put Back
+/// All would restore the same run twice, and an item put back mid-run
+/// would race it.
+@MainActor
+@Test
+func putBackAllRefusesOverlappingRestores() async {
+    let client = ArchiveFixtureClient()
+    let store = ArchiveStore(client: client)
+    let viewModel = ArchiveViewModel(pair: docs(), store: store, agentConnected: true)
+    await viewModel.show(.b)
+
+    await client.holdPutBackAll()
+    let first = Task { await viewModel.putBackAll() }
+    await client.waitForHeldPutBackAll()
+    #expect(!viewModel.canPutBack)
+
+    await viewModel.putBackAll()
+    if let row = viewModel.itemRows.first {
+        await viewModel.putBack(row)
+    }
+    await client.releasePutBackAll()
+    await first.value
+
+    #expect(await client.putBackAlls == 1)
+    #expect(await client.putBacks.isEmpty)
 }
 
 private func docs() -> SyncPair {
