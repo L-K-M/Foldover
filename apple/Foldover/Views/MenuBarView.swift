@@ -8,6 +8,8 @@ import SwiftUI
 struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
     @ScaledMetric(relativeTo: .title2) private var headerIconSize: CGFloat = 24
+    @ScaledMetric(relativeTo: .body) private var pairRowHeight: CGFloat = 44
+    private static let visiblePairCount = 8
     let viewModel: MainViewModel
 
     var body: some View {
@@ -17,11 +19,16 @@ struct MenuBarView: View {
 
             if !rows.isEmpty {
                 Divider()
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(rows) { row in
-                        pairRow(row)
+                // Scroll the catalog, keeping Pause, Settings and Quit in reach.
+                ScrollView(.vertical) {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(rows) { row in
+                            pairRow(row).frame(height: pairRowHeight)
+                        }
                     }
                 }
+                .frame(height: pairRowHeight * CGFloat(min(rows.count, Self.visiblePairCount)))
+                .accessibilityIdentifier("menu-pairs")
                 Divider()
                 Button { Task { await viewModel.syncAll() } } label: { rowLabel("Sync All") }
                     .disabled(!viewModel.canSyncAll)
@@ -122,12 +129,21 @@ struct MenuBarView: View {
                     .accessibilityLabel("Working")
             }
 
-            Button("Sync \(row.name)", systemImage: "arrow.triangle.2.circlepath") {
-                Task { await viewModel.syncPair(id: row.id) }
+            if row.activity == .working {
+                Button("Stop \(row.name)", systemImage: "stop.fill") {
+                    Task { await viewModel.stopPair(id: row.id) }
+                }
+                .labelStyle(.iconOnly)
+                .disabled(!row.canCancel)
+                .help("Stop \(row.name)")
+            } else {
+                Button("Sync \(row.name)", systemImage: "arrow.triangle.2.circlepath") {
+                    Task { await viewModel.syncPair(id: row.id) }
+                }
+                .labelStyle(.iconOnly)
+                .disabled(!row.canSync)
+                .help("Sync \(row.name)")
             }
-            .labelStyle(.iconOnly)
-            .disabled(!row.canSync)
-            .help("Sync \(row.name)")
         }
     }
 

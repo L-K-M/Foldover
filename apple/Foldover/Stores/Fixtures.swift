@@ -202,6 +202,8 @@ enum FixtureScenario: String {
     case agentFailed = "agent-failed"
     /// The catalog is empty, so the setup guide shows.
     case noPairs = "no-pairs"
+    /// More pairs than fit in the menu-bar catalog without scrolling.
+    case manyPairs = "many-pairs"
     /// The catalog cannot load.
     case pairsFail = "pairs-fail"
     /// A background sync keeps running after the main window closes.
@@ -221,7 +223,7 @@ enum FixtureScenario: String {
             return AgentReport(version: "0.1.0", safeModeStops: 3)
         case .agentFailed:
             throw FixtureError.agentUnavailable
-        case .noPairs, .pairsFail, .syncing, .syncingReduced:
+        case .noPairs, .manyPairs, .pairsFail, .syncing, .syncingReduced:
             return AgentReport(version: "0.1.0")
         }
     }
@@ -250,6 +252,13 @@ actor FixturePairClient: PairClient {
     init(scenario: FixtureScenario? = nil) {
         self.scenario = scenario
         pairs = scenario == .noPairs ? [] : Fixtures.pairs()
+        if scenario == .manyPairs {
+            pairs += (1...40).map { index in
+                SyncPair(id: "tour-menu-\(index)", revision: 1, settings: PairSettings(
+                    name: "Pair \(index)", left: Fixtures.local("Projects"),
+                    right: Fixtures.local("Backup SSD/Projects"), mode: .backupLeft))
+            }
+        }
     }
 
     func revision(of id: String) -> UInt64 {
@@ -407,6 +416,11 @@ actor FixtureSyncClient: SyncClient {
     }
 
     func cancel(_ id: String) async throws -> PairSyncState {
+        // Launch-time working fixtures have no countdown job to remove.
+        if jobs[id] == nil, case .working(.run, _, _) = states[id] {
+            states[id] = .finished(finish(id, cancelled: true))
+            return states[id] ?? .idle
+        }
         guard let current = jobs[id] else { return states[id] ?? .idle }
         jobs[id] = nil
         states[id] = current.job == .run ? .finished(finish(id, cancelled: true)) : .idle
