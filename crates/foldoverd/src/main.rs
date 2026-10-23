@@ -77,7 +77,7 @@ fn request(args: impl Iterator<Item = OsString>) -> Request {
     match args.as_slice() {
         [] => Request::Run(foldover_ipc::SocketLocation::Default),
         [arg] if arg == "--version" => Request::Version,
-        [arg] if arg == "--help" || arg == "-h" => Request::Help,
+        _ if args.iter().any(|arg| arg == "--help" || arg == "-h") => Request::Help,
         [arg, path] if arg == "--socket" => {
             Request::Run(foldover_ipc::SocketLocation::Path(PathBuf::from(path)))
         }

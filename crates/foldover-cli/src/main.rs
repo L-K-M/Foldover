@@ -1072,6 +1072,10 @@ mod tests {
         assert!(matches!(req(&["--help"]), Request::Help));
         assert!(matches!(req(&["-h"]), Request::Help));
         assert!(matches!(req(&["sync", "--help"]), Request::Help));
+        assert!(matches!(
+            req(&["status", "--socket", "/tmp/foldover.sock", "--help"]),
+            Request::Help
+        ));
     }
 
     #[test]
