@@ -79,8 +79,10 @@ final class PairEditorViewModel: Identifiable {
     var title: String { editing == nil ? String(localized: "New Pair") : String(localized: "Edit Pair") }
     var canSave: Bool { !isSaving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && left != nil && right != nil && durabilityWarning == nil && canaryWarning == nil && dailyWarning == nil && recordsWarning == nil }
 
+    private var backupTarget: FolderSide? { Self.backupTarget(mode) }
+
     /// The folder a Backup copies to; nil for Sync and Mirror.
-    private var backupTarget: FolderSide? {
+    private static func backupTarget(_ mode: PairMode) -> FolderSide? {
         switch mode {
         case .backupLeft: .b
         case .backupRight: .a
@@ -309,17 +311,18 @@ final class PairEditorViewModel: Identifiable {
         return String(localized: "\(list) at \(time)")
     }
 
-    /// What the pair will do, in at most three short sentences that
-    /// rewrite themselves as the settings change (PLAN.md §3.8): the
-    /// direction, what happens to deleted files plus any unusual
-    /// choices, and when syncs run.
-    var planText: String {
-        let details = planDetails
-        var consequence = [Self.deletionClause(mode)]
-        consequence.append(contentsOf: details)
+    /// What the pair will do, rewritten as the settings change.
+    var planText: String { Self.planText(mode: mode, options: options) }
+
+    /// What a pair will do, in at most three short sentences (PLAN.md
+    /// §3.8): the direction, what happens to deleted files plus any
+    /// unusual choices, and when syncs run.
+    static func planText(mode: PairMode, options: PairOptions) -> String {
+        var consequence = [deletionClause(mode)]
+        consequence.append(contentsOf: planDetails(mode: mode, options: options))
         let joined = consequence.joined(separator: "; ")
         let consequenceSentence = "\(joined.prefix(1).uppercased())\(joined.dropFirst())."
-        return [Self.directionSentence(mode), consequenceSentence, scheduleSentence]
+        return [directionSentence(mode), consequenceSentence, scheduleSentence(options.schedule)]
             .joined(separator: " ")
     }
 
@@ -345,16 +348,16 @@ final class PairEditorViewModel: Identifiable {
 
     /// When syncs run, from the schedule's own title; daily titles that
     /// name weekdays keep their capitals.
-    private var scheduleSentence: String {
-        switch options.schedule {
+    private static func scheduleSentence(_ schedule: SyncSchedule) -> String {
+        switch schedule {
         case .manual:
             return String(localized: "Syncs only when you click Sync Now.")
         case .daily(let minutes, let days) where days.isEmpty:
-            return String(localized: "Syncs at \(Self.timeText(Int(minutes))) once you choose weekdays.")
-        case .daily(_, let days) where days.count != SyncDay.allCases.count && days != Self.weekdays:
-            return String(localized: "Syncs \(Self.scheduleTitle(options.schedule)).")
+            return String(localized: "Syncs at \(timeText(Int(minutes))) once you choose weekdays.")
+        case .daily(_, let days) where days.count != SyncDay.allCases.count && days != weekdays:
+            return String(localized: "Syncs \(scheduleTitle(schedule)).")
         default:
-            let title = Self.scheduleTitle(options.schedule)
+            let title = scheduleTitle(schedule)
             return String(localized: "Syncs \(title.prefix(1).lowercased())\(title.dropFirst()).")
         }
     }
@@ -362,7 +365,7 @@ final class PairEditorViewModel: Identifiable {
     /// Metadata choices that differ from the engine's defaults, the skip
     /// rules and limits, and the canary, as clauses in the plan's second
     /// sentence.
-    private var planDetails: [String] {
+    private static func planDetails(mode: PairMode, options: PairOptions) -> [String] {
         let defaults = PairOptions.defaults
         var clauses: [String] = []
         if options.syncPermissions != defaults.syncPermissions {
@@ -380,6 +383,22 @@ final class PairEditorViewModel: Identifiable {
                 ? String(localized: "modification dates sync")
                 : String(localized: "modification dates don't sync"))
         }
+        let skipped = skipClauses(options)
+        if !skipped.isEmpty {
+            clauses.append(String(localized: "skipped: \(skipped.joined(separator: ", "))"))
+        }
+        if let canary = options.canary {
+            clauses.append(String(localized: "the canary file \(String(decoding: canary, as: UTF8.self)) must stay unchanged in both folders"))
+        }
+        if options.records == .sourceOnly, let target = backupTarget(mode) {
+            clauses.append(String(localized: "files replaced in \(PairSyncViewModel.folderName(target)) are deleted, not archived"))
+        }
+        return clauses
+    }
+
+    /// What the skip rules and limits leave out, e.g. "3 rules" and
+    /// "files larger than 1 GB"; empty when nothing is skipped.
+    static func skipClauses(_ options: PairOptions) -> [String] {
         var skipped: [String] = []
         let rules = options.filters.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
         if !rules.isEmpty {
@@ -391,16 +410,7 @@ final class PairEditorViewModel: Identifiable {
         if let ageLimit = options.ageLimit {
             skipped.append(String(localized: "files unchanged for more than \(ageLimit) days"))
         }
-        if !skipped.isEmpty {
-            clauses.append(String(localized: "skipped: \(skipped.joined(separator: ", "))"))
-        }
-        if let canary = options.canary {
-            clauses.append(String(localized: "the canary file \(String(decoding: canary, as: UTF8.self)) must stay unchanged in both folders"))
-        }
-        if options.records == .sourceOnly, let target = backupTarget {
-            clauses.append(String(localized: "files replaced in \(PairSyncViewModel.folderName(target)) are deleted, not archived"))
-        }
-        return clauses
+        return skipped
     }
 
     /// A daily schedule needs at least one weekday; the engine rejects an
@@ -472,6 +482,11 @@ final class PairEditorViewModel: Identifiable {
         return macs?.folderName(for: folder.bytes) ?? Self.pathText(folder)
     }
 
+    /// Where the side's folder is, or an invitation to choose one.
+    func folderSymbol(_ side: PairFolderSide) -> String {
+        (side == .left ? left : right)?.symbolName ?? "folder.badge.plus"
+    }
+
     /// Either side is a folder a paired Mac shares.
     var usesOtherMac: Bool { [left, right].contains { $0?.isPeerFolder == true } }
 
@@ -516,6 +531,14 @@ final class PairEditorViewModel: Identifiable {
         } catch {
             errorMessage = PairStore.message(for: error)
         }
+    }
+
+    /// Use the first dropped folder for `side`; false when none is a folder.
+    @discardableResult
+    func chooseDropped(_ urls: [URL], side: PairFolderSide) -> Bool {
+        guard let folder = MainViewModel.droppedFolders(urls).first else { return false }
+        chooseFolder(.success([folder]), side: side)
+        return true
     }
 
     /// Use a folder on an SFTP server, `sftp://[user@]host[:port]/path`.
@@ -703,9 +726,29 @@ extension SelectedFolder {
     var isServerFolder: Bool {
         bytes.starts(with: Data(sftpScheme.utf8))
     }
+
+    /// Where the folder is, as an SF Symbol name: an SFTP server, another
+    /// Mac, a mounted volume, or this Mac's own disk.
+    var symbolName: String {
+        if isServerFolder { return "server.rack" }
+        if isPeerFolder { return "laptopcomputer" }
+        if bytes.starts(with: Data("/Volumes/".utf8)) { return "externaldrive" }
+        return "folder"
+    }
 }
 
 extension PairMode {
+    /// The direction changes flow, as an SF Symbol name.
+    var symbol: String {
+        switch self {
+        case .sync: "arrow.left.arrow.right"
+        case .mirrorLeft: "arrow.right"
+        case .mirrorRight: "arrow.left"
+        case .backupLeft: "arrow.right.to.line.compact"
+        case .backupRight: "arrow.left.to.line.compact"
+        }
+    }
+
     var title: String {
         switch self {
         case .sync: String(localized: "Sync both ways")

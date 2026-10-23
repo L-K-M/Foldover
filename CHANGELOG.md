@@ -8,6 +8,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The app is laid out like a Mac app: pairs in a sidebar with their
+  status, the selected pair's folders, plan and a table of planned
+  changes in the middle, and an inspector for the selected change, the
+  pair's settings and its recent syncs. Preview, Sync Now and Stop sit in
+  a customizable toolbar and a new Pair menu (⌘R, ⌘S, ⌘.), with every
+  other command in the menus, context menus and the Delete key.
+  [Using the app](docs/guide/using-the-app.md) lists them.
+
+- The archive opens in its own window per pair instead of a sheet, so it
+  can stay open while you work, and puts back several items at once.
+
+- The pair editor, Settings and the menu bar extra are more compact and
+  fit small screens; the pair editor's Save button is always visible.
+
 - Check for Updates… and the check the app makes when it opens now ask
   GitHub for the newest release and link to its download page instead of
   updating in place; the Sparkle updater and its signing keys are gone.
@@ -22,6 +36,15 @@ All notable changes to this project are documented here. The format follows
   from a backup starts without pairs.
 
 ### Added
+
+- Edit › Undo reverses the last Sync Now from the window, named after
+  its pair. Edit › Find filters the list of changes, Edit › Copy copies
+  the selected change's path, and Space shows its file in Quick Look.
+  The window remembers the selected pair and whether the inspector is
+  shown.
+
+- The Pair menu also pauses and resumes automatic syncs and reviews the
+  conflicts a sync left, which only buttons offered before.
 
 - A pair can limit how fast it copies, in megabytes per second, so a
   large sync leaves room on the network for everything else.

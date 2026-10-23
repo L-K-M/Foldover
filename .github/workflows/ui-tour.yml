@@ -1,0 +1,101 @@
+name: ui-tour
+
+# The screenshot tour (apple/FoldoverUITests): launches the Debug app
+# on canned agent answers, walks its windows, menus and sheets with the
+# keyboard and mouse, and uploads a screenshot of every stop in light
+# and dark appearance as the `ui-tour` artifact.
+#
+# Pull requests that touch the app run it; it is not part of the ci
+# gate, since screenshots need a person to look at them.
+on:
+  pull_request:
+    paths:
+      - "apple/**"
+      - ".github/workflows/ui-tour.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tour:
+    runs-on: xcode-27
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Log toolchain and image
+        run: |
+          xcodebuild -version
+          sw_vers
+          system_profiler SPDisplaysDataType | grep -i resolution || true
+          echo "Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+
+      - name: xtask ffi
+        run: cargo xtask ffi
+
+      - name: Install XcodeGen
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/xcodegen.zip" \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
+          echo "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  $RUNNER_TEMP/xcodegen.zip" \
+            | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP"
+
+      - name: Generate the Xcode project
+        run: "$RUNNER_TEMP/xcodegen/bin/xcodegen generate --spec apple/project.yml"
+
+      - name: Run the tour
+        run: |
+          xcodebuild -project apple/Foldover.xcodeproj \
+            -scheme FoldoverUITour \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -resultBundlePath "$RUNNER_TEMP/Tour.xcresult" \
+            CODE_SIGN_IDENTITY=- \
+            test
+
+      # Each stop's screenshot is a result-bundle attachment; export them
+      # under the names the tour gave them.
+      - name: Export the screenshots
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/export" "$RUNNER_TEMP/tour"
+          xcrun xcresulttool export attachments \
+            --path "$RUNNER_TEMP/Tour.xcresult" \
+            --output-path "$RUNNER_TEMP/export"
+          python3 - "$RUNNER_TEMP/export" "$RUNNER_TEMP/tour" <<'PY'
+          import json, re, shutil, sys
+          source, target = sys.argv[1], sys.argv[2]
+          for test in json.load(open(f"{source}/manifest.json")):
+              for item in test["attachments"]:
+                  name = item["suggestedHumanReadableName"]
+                  if re.match(r"(light|dark)-.*\.png$", name):
+                      name = re.sub(r"_\d+_[0-9A-F-]+\.png$", ".png", name)
+                      shutil.copy(f"{source}/{item['exportedFileName']}", f"{target}/{name}")
+          PY
+          ls "$RUNNER_TEMP/tour"
+
+      # A crash in the app under test leaves its report here.
+      - name: Collect crash reports
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/tour/crashes"
+          cp ~/Library/Logs/DiagnosticReports/Foldover* "$RUNNER_TEMP/tour/crashes/" 2>/dev/null || true
+          ls -la "$RUNNER_TEMP/tour/crashes"
+
+      - name: Upload the tour
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ui-tour
+          path: ${{ runner.temp }}/tour

@@ -21,57 +21,53 @@ struct MacToMacView: View {
             } else {
                 Section {
                     if let thisMac = viewModel.thisMac {
-                        Text(thisMac)
+                        Label(thisMac, systemImage: "laptopcomputer")
                     }
-                    Toggle("Allow pairing", isOn: Binding(
-                        get: { viewModel.pairingOpen },
-                        set: { open in Task { await viewModel.setPairing(open ? .open : .closed) } }
-                    ))
-                    Text(viewModel.pairingNote).font(.callout).foregroundStyle(.secondary)
+                    NoteToggle(
+                        title: Text("Allow pairing"),
+                        note: Text(viewModel.pairingNote),
+                        isOn: Binding(
+                            get: { viewModel.pairingOpen },
+                            set: { open in Task { await viewModel.setPairing(open ? .open : .closed) } }
+                        )
+                    )
                 }
                 ForEach(viewModel.codes) { row in
                     Section(row.title) {
                         Text(row.code)
                             .font(.system(.largeTitle, design: .monospaced))
                             .textSelection(.enabled)
+                            .frame(maxWidth: .infinity)
                             .accessibilityLabel(row.spoken)
                         Text(row.note).font(.callout).foregroundStyle(.secondary)
                         HStack {
+                            Spacer()
                             Button("Cancel", role: .cancel) { Task { await viewModel.cancel(row) } }
                             Button("Confirm") { Task { await viewModel.confirm(row) } }
                                 .keyboardShortcut(.defaultAction)
                         }
                     }
                 }
-                Section("Macs on This Network") {
+                Section {
                     ForEach(viewModel.nearby) { row in
-                        HStack {
-                            VStack(alignment: .leading) {
-                                Text(row.name)
-                                Text(row.detail).font(.caption).foregroundStyle(.secondary)
-                            }
-                            .accessibilityElement(children: .combine)
-                            Spacer()
+                        MacRow(symbol: "laptopcomputer", name: row.name, detail: row.detail) {
                             if row.canPair {
                                 Button("Pair") { Task { await viewModel.pair(row) } }
                             }
                         }
                     }
+                } header: {
+                    Text("Macs on This Network")
+                } footer: {
                     if let note = viewModel.nearbyNote {
-                        Text(note).font(.callout).foregroundStyle(.secondary)
+                        Text(note)
                     }
                 }
             }
             if !viewModel.paired.isEmpty {
                 Section {
                     ForEach(viewModel.paired) { row in
-                        HStack {
-                            VStack(alignment: .leading) {
-                                Text(row.name)
-                                Text(row.detail).font(.caption).foregroundStyle(.secondary)
-                            }
-                            .accessibilityElement(children: .combine)
-                            Spacer()
+                        MacRow(symbol: "laptopcomputer", name: row.name, detail: row.detail) {
                             Button("Share a Folder…") {
                                 sharingWith = row
                                 choosingShare = true
@@ -79,27 +75,22 @@ struct MacToMacView: View {
                             Button("Forget…") { forgetting = row }
                         }
                         ForEach(row.shares) { share in
-                            HStack {
-                                VStack(alignment: .leading) {
-                                    Text(share.name)
-                                    Text(share.path).font(.caption).foregroundStyle(.secondary)
-                                        .lineLimit(1).truncationMode(.middle)
-                                }
-                                .accessibilityElement(children: .combine)
-                                Spacer()
+                            MacRow(symbol: "folder", name: share.name, detail: share.path) {
                                 Button("Stop Sharing…") { stopping = (share, row.name) }
                             }
-                            .padding(.leading)
+                            .padding(.leading, 24)
                         }
                     }
                 } header: {
                     Text("Paired Macs")
                 } footer: {
-                    Text(viewModel.sharingNote).font(.callout).foregroundStyle(.secondary)
+                    Text(viewModel.sharingNote)
                 }
             }
             if let error = viewModel.error {
-                Text(error).foregroundStyle(.red).textSelection(.enabled)
+                Section {
+                    ErrorNote(message: error)
+                }
             }
         }
         .formStyle(.grouped)
@@ -128,6 +119,43 @@ struct MacToMacView: View {
             Button("Forget", role: .destructive) { Task { await viewModel.forget(row) } }
         } message: { _ in
             Text("That Mac can no longer connect to this one until you pair them again.")
+        }
+    }
+}
+
+/// A Mac or a shared folder with its detail line, and the controls
+/// that act on it.
+private struct MacRow<Controls: View>: View {
+    let symbol: String
+    let name: String
+    let detail: String
+    let controls: Controls
+
+    init(symbol: String, name: String, detail: String, @ViewBuilder controls: () -> Controls) {
+        self.symbol = symbol
+        self.name = name
+        self.detail = detail
+        self.controls = controls()
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(name)
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            } icon: {
+                Image(systemName: symbol)
+                    .accessibilityHidden(true)
+            }
+            .accessibilityElement(children: .combine)
+            Spacer(minLength: 8)
+            controls
         }
     }
 }

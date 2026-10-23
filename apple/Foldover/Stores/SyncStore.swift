@@ -582,6 +582,26 @@ final class SyncStore {
     /// A conflict choice specifically is on the wire and unanswered.
     func isResolving(_ id: String) -> Bool { pendingOperations[id] == .choice }
 
+    /// Wait until the pair's job ends, whichever poller follows it. A
+    /// refresh takes over the poller of the request that started the
+    /// job, and that request then returns while the job still works.
+    /// When nothing follows the job any more (a poll failed, or the
+    /// caller that took the poller over went away), follow it here; if
+    /// the agent does not answer, stop waiting instead of spinning until
+    /// it is back.
+    func waitWhileWorking(_ id: String) async {
+        while case .working = states[id], !Task.isCancelled {
+            if polling[id] == nil, pendingOperations[id] == nil {
+                await refresh(id)
+                if requestErrors[id] != nil { return }
+                guard case .working = states[id] else { return }
+            }
+            // Every pass that still reads working sleeps, so a refresh
+            // whose reply was dropped cannot make this spin.
+            try? await Task.sleep(for: pollInterval)
+        }
+    }
+
     func refresh(_ id: String) async {
         // A pending command's own reply is fresher; asking again would
         // race it.

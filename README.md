@@ -23,6 +23,8 @@ The macOS app requires macOS 27 and Apple silicon.
 
 ## Guides
 
+- [Using the app](docs/guide/using-the-app.md): the window, menus,
+  keyboard shortcuts, Undo and the archive.
 - [What each folder kind can do](docs/guide/capabilities.md): local
   folders, mounted shares and SFTP folders side by side.
 - [NAS shares and SFTP servers](docs/guide/nas-and-sftp.md): mounting,
