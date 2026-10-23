@@ -43,6 +43,10 @@ pub enum Error {
 pub struct Connection {
     channel: Channel,
     pending: Vec<u8>,
+    /// A call that timed out or failed mid-frame may still have its
+    /// answer in flight; reading it later would hand it to another
+    /// call, so the connection is retired instead.
+    poisoned: bool,
 }
 
 pub struct Server {
@@ -62,6 +66,7 @@ pub async fn connect(location: &SocketLocation) -> Result<Connection, Error> {
     Ok(Connection {
         channel,
         pending: Vec::new(),
+        poisoned: false,
     })
 }
 
@@ -83,6 +88,11 @@ impl Connection {
     }
 
     async fn call_within(&mut self, request: Request, timeout: Duration) -> Result<Value, Error> {
+        if self.poisoned {
+            return Err(Error::Protocol(
+                "The connection is unusable after a call timed out",
+            ));
+        }
         let expected = request
             .id()
             .ok_or(Error::Protocol("A call needs an ID"))?
@@ -91,10 +101,15 @@ impl Connection {
             self.channel.require_installed_peer().await?;
         }
         self.write_value(&request.to_value()).await?;
-        let frame = self
-            .read_frame(timeout)
-            .await?
-            .ok_or(Error::Protocol("Agent closed before its response"))?;
+        let frame = match self.read_frame(timeout).await {
+            // A read failure can leave this call's answer in flight;
+            // a later read would hand it to the wrong call.
+            Err(error) => {
+                self.poisoned = true;
+                return Err(error);
+            }
+            Ok(frame) => frame.ok_or(Error::Protocol("Agent closed before its response"))?,
+        };
         let response = Response::parse(serde_json::from_slice(&frame)?).map_err(Error::Protocol)?;
         if response.id() != &expected {
             return Err(Error::Protocol("Response ID does not match the request"));
@@ -182,6 +197,7 @@ where
             let mut connection = Connection {
                 channel,
                 pending: Vec::new(),
+                poisoned: false,
             };
             let session = AtomicBool::new(false);
             while let Some(frame) = connection.read_frame(REQUEST_TIMEOUT).await? {
@@ -463,6 +479,7 @@ mod tests {
         let mut server = Connection {
             channel: listener.accept().await.unwrap(),
             pending: Vec::new(),
+            poisoned: false,
         };
         client.write_all(b"one\ntwo\npart").await.unwrap();
         assert_eq!(
@@ -487,6 +504,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_timed_out_call_retires_the_connection() {
+        // An agent that answers after the timeout must not let a later
+        // call pick the late response up as its own.
+        let directory = tempfile::tempdir().unwrap();
+        let location = SocketLocation::Path(directory.path().join("runtime/s"));
+        let server = bind(&location).unwrap();
+        let handled = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = std::sync::Arc::clone(&handled);
+        let serving = tokio::spawn(serve(server, move |_request| {
+            let count = std::sync::Arc::clone(&count);
+            async move {
+                count.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                Ok(Value::Null)
+            }
+        }));
+        let mut connection = connect(&location).await.unwrap();
+        let slow = Request::call(1, DAEMON_STATUS, None);
+        assert!(matches!(
+            connection
+                .call_within(slow, Duration::from_millis(50))
+                .await,
+            Err(Error::Timeout)
+        ));
+        // The same connection refuses to risk answering with the late
+        // response; a fresh one is unaffected.
+        let next = Request::call(1, DAEMON_STATUS, None);
+        assert!(matches!(
+            connection
+                .call_within(next, Duration::from_millis(50))
+                .await,
+            Err(Error::Protocol(_))
+        ));
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(handled.load(Ordering::Relaxed), 1);
+        serving.abort();
+    }
+
+    #[tokio::test]
     async fn rejects_oversized_frames_before_json_parsing() {
         let directory = tempfile::tempdir().unwrap();
         let location = SocketLocation::Path(directory.path().join("runtime/s"));
@@ -495,6 +551,7 @@ mod tests {
         let mut server = Connection {
             channel: listener.accept().await.unwrap(),
             pending: vec![b'x'; MAX_FRAME_BYTES + 1],
+            poisoned: false,
         };
         assert!(matches!(
             server.read_frame(REQUEST_TIMEOUT).await,
