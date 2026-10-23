@@ -869,7 +869,9 @@ fn preview(preview: &Preview) -> SyncPreview {
             .iter()
             .take(failure_limit)
             .map(|failure| SyncFailure {
-                path: failure.path().as_bytes().to_vec(),
+                path: failure
+                    .path()
+                    .map_or_else(Vec::new, |path| path.as_bytes().to_vec()),
                 message: failure.message().to_owned(),
             })
             .collect(),
@@ -923,7 +925,9 @@ fn result(report: &RunReport) -> SyncResult {
             .iter()
             .take(SYNC_ITEM_LIMIT)
             .map(|failure| SyncFailure {
-                path: failure.path().as_bytes().to_vec(),
+                path: failure
+                    .path()
+                    .map_or_else(Vec::new, |path| path.as_bytes().to_vec()),
                 message: failure.message().to_owned(),
             })
             .collect(),
@@ -943,7 +947,9 @@ fn undone(report: &UndoReport) -> UndoResult {
             .iter()
             .take(SYNC_ITEM_LIMIT)
             .map(|failure| SyncFailure {
-                path: failure.path().as_bytes().to_vec(),
+                path: failure
+                    .path()
+                    .map_or_else(Vec::new, |path| path.as_bytes().to_vec()),
                 message: failure.message().to_owned(),
             })
             .collect(),

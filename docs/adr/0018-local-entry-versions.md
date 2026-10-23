@@ -19,6 +19,14 @@ observation. Scoped changes and read errors leave explicit unavailable
 subtrees, excluded on both sides of the plan; they never look absent.
 Cancellation and root failures discard the whole observation.
 
+Directory membership changes do not discard readable entries. Their listings
+carry an unstable-directory marker, including at the root: omitted names
+cannot prove deletion or baseline removal until a later stable scan. Creates
+still check destination absence at the write boundary; uncertain renames use
+copies while preserving the original. Directory metadata is refreshed under
+the same held identity before capture. File and link versions retain exact
+freshness checks, and directory substitutions still leave the subtree unread.
+
 **Content** (domain-separated BLAKE3):
 
 | Kind | Content |

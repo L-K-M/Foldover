@@ -200,8 +200,8 @@ impl LocalEntry {
     }
 }
 
-/// Returned only after traversal finishes. Even a completed metadata inventory
-/// needs content/metadata reads, watchers and freshness checks before planning.
+/// Returned only after traversal finishes. Unstable listings cannot establish
+/// absence; even readable entries need content/metadata and freshness checks.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ScanStats {
     entries: usize,
@@ -211,9 +211,15 @@ pub struct ScanStats {
     old: Vec<SyncPath>,
     unavailable: Vec<SyncPath>,
     issues: Vec<ScanIssue>,
+    unstable: Vec<Option<SyncPath>>,
 }
 
 impl ScanStats {
+    /// Directories whose missing entries do not prove absence. `None` is root.
+    pub fn unstable_directories(&self) -> &[Option<SyncPath>] {
+        &self.unstable
+    }
+
     /// These subtrees must be discarded even if the sink already saw rows.
     pub fn unavailable(&self) -> &[SyncPath] {
         &self.unavailable
@@ -417,9 +423,17 @@ pub struct Observation {
     pub(crate) old: Vec<SyncPath>,
     pub(crate) unavailable: Vec<SyncPath>,
     pub(crate) issues: Vec<ScanIssue>,
+    pub(crate) unstable: Vec<Option<SyncPath>>,
 }
 
 impl Observation {
+    /// Listings that changed while traversed. Read entries remain usable,
+    /// but missing paths below these folders do not prove deletion. `None`
+    /// denotes the held root, which has no relative sync path.
+    pub fn unstable_directories(&self) -> &[Option<SyncPath>] {
+        &self.unstable
+    }
+
     pub fn issues(&self) -> &[ScanIssue] {
         &self.issues
     }
@@ -477,6 +491,11 @@ impl Observation {
                 *listed = to.clone();
             }
         }
+        for directory in self.unstable.iter_mut().flatten() {
+            if directory == from {
+                *directory = to.clone();
+            }
+        }
         for issue in &mut self.issues {
             if &issue.path == from {
                 issue.path = to.clone();
@@ -518,6 +537,27 @@ impl Directory {
             before,
             entries,
         })
+    }
+
+    fn next_entry(&mut self, stats: &mut ScanStats) -> Result<Option<DirectoryEntry>, ScanError> {
+        loop {
+            match self.entries.next() {
+                None => return Ok(None),
+                Some(Ok(entry)) => return Ok(Some(entry)),
+                Some(Err(error)) if gone(&error) => {
+                    // The driver can lose a name between readdir and stat.
+                    // Its name is unknown, so preserve unproven absences in
+                    // this directory while continuing with later entries.
+                    stats.unstable.push(self.path.clone());
+                }
+                Some(Err(source)) => {
+                    return Err(ScanError::Io {
+                        path: self.path.clone(),
+                        source,
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -834,7 +874,8 @@ impl LocalEndpoint {
     /// Stream depth-first metadata rows without opening file data or buffering a
     /// whole directory. Enumeration order is filesystem-defined; plans must sort.
     /// Buffer rows and post-filter `ScanStats::unavailable()` subtrees, which
-    /// can fail after rows are emitted. Discard all rows on error. Cancellation
+    /// can fail after rows are emitted. `ScanStats::unstable_directories()`
+    /// listings cannot prove absent names. Discard all rows on error. Cancellation
     /// is checked between rows; it does not interrupt a blocked filesystem call.
     pub fn scan_metadata(
         &self,
@@ -859,19 +900,43 @@ impl LocalEndpoint {
         let mut stats = ScanStats::default();
 
         while let Some(directory) = directories.last_mut() {
-            let Some(entry) = directory.entries.next() else {
+            let next = match directory.next_entry(&mut stats) {
+                Ok(next) => next,
+                Err(error) => {
+                    // An unreadable listing leaves its whole directory
+                    // unknown, including entries already emitted from it.
+                    stats.skip_error(error)?;
+                    directories.pop();
+                    continue;
+                }
+            };
+            let Some(entry) = next else {
                 let finished = directories.pop().expect("the current directory exists");
                 let checked = (|| {
-                    if at_scan(&finished.path, finished.root.root_metadata())? != finished.before {
+                    let current = at_scan(&finished.path, finished.root.root_metadata())?;
+                    if current.identity() != finished.before.identity()
+                        || current.kind() != NodeKind::Directory
+                    {
                         return Err(ScanError::Changed(finished.path.clone()));
                     }
+                    reject_dataless(current.data_residency(), &finished.path)?;
+                    let mut changed = current != finished.before;
                     if let Some(parent) = directories.last() {
                         let path = finished.path.as_ref().expect("a descendant has a path");
                         let name = SyncPath::try_from(path.file_name())?;
-                        if at_scan(&finished.path, parent.root.metadata(&name))? != finished.before
+                        let bound = at_scan(&finished.path, parent.root.metadata(&name))?;
+                        if bound.identity() != finished.before.identity()
+                            || bound.kind() != NodeKind::Directory
                         {
                             return Err(ScanError::Changed(finished.path.clone()));
                         }
+                        reject_dataless(bound.data_residency(), &finished.path)?;
+                        changed |= bound != finished.before;
+                    }
+                    if changed {
+                        // readdir is not a snapshot. Keep verified entries,
+                        // but do not turn an omitted name into a deletion.
+                        stats.unstable.push(finished.path.clone());
                     }
                     Ok(())
                 })();
@@ -879,16 +944,6 @@ impl LocalEndpoint {
                     stats.skip_error(error)?;
                 }
                 continue;
-            };
-            let entry = match at_scan(&directory.path, entry) {
-                Ok(entry) => entry,
-                Err(error) => {
-                    // A listing error has no filename. Its whole directory
-                    // is unknown, including rows already emitted from it.
-                    stats.skip_error(error)?;
-                    directories.pop();
-                    continue;
-                }
             };
             match self.scan_entry(directory, entry, filter, sidecars, &mut stats, sink) {
                 Ok(Some(child))
@@ -905,6 +960,8 @@ impl LocalEndpoint {
                 Err(error) => stats.skip_error(error)?,
             }
         }
+        stats.unstable.sort();
+        stats.unstable.dedup();
         Ok(stats)
     }
 
@@ -925,7 +982,7 @@ impl LocalEndpoint {
             }
             return Ok(None);
         }
-        let metadata = entry.metadata().clone();
+        let mut metadata = entry.metadata().clone();
         if filter.excludes(&path, metadata.kind() == NodeKind::Directory) {
             stats.skipped += 1;
             return Ok(None);
@@ -964,8 +1021,17 @@ impl LocalEndpoint {
         } else {
             None
         };
-        if at_scan(&at_path, directory.root.metadata(&name))? != metadata {
-            return Err(ScanError::Changed(at_path));
+        let current = at_scan(&at_path, directory.root.metadata(&name))?;
+        if current != metadata {
+            if metadata.kind() != NodeKind::Directory
+                || current.kind() != NodeKind::Directory
+                || current.identity() != metadata.identity()
+            {
+                return Err(ScanError::Changed(at_path));
+            }
+            reject_dataless(current.data_residency(), &at_path)?;
+            stats.unstable.push(at_path.clone());
+            metadata = current;
         }
         if sink(LocalEntry {
             path: path.clone(),
@@ -982,8 +1048,11 @@ impl LocalEndpoint {
 
         let child = at_scan(&at_path, directory.root.open_directory(&name))?;
         let child = Directory::open(child, at_path.clone())?;
-        if child.before != metadata {
+        if child.before.identity() != metadata.identity() {
             return Err(ScanError::Changed(at_path));
+        }
+        if child.before != metadata {
+            stats.unstable.push(at_path);
         }
         Ok(Some(child))
     }
@@ -1041,14 +1110,40 @@ impl LocalEndpoint {
             old: stats.old,
             unavailable: stats.unavailable,
             issues: stats.issues,
+            unstable: stats.unstable,
         };
-        for entry in entries {
+        for mut entry in entries {
             if control() == ScanControl::Cancel {
                 return Err(ScanError::Cancelled);
             }
             if observation.is_unavailable(&entry.path) {
                 progress(ObserveStep::Checked);
                 continue;
+            }
+            if entry.metadata.kind() == NodeKind::Directory {
+                // Child changes update directory stats during the walk. Read
+                // its current metadata under the same identity; file and link
+                // versions still require their exact listing observations.
+                let current = at_scan(&Some(entry.path.clone()), self.root.metadata(&entry.path));
+                match current {
+                    Ok(current)
+                        if current.kind() == NodeKind::Directory
+                            && current.identity() == entry.metadata.identity() =>
+                    {
+                        if current != entry.metadata {
+                            observation.unstable.push(Some(entry.path.clone()));
+                        }
+                        entry.metadata = current;
+                    }
+                    current => {
+                        let error = current
+                            .err()
+                            .unwrap_or_else(|| ScanError::Changed(Some(entry.path.clone())));
+                        observation.skip_error(error)?;
+                        progress(ObserveStep::Checked);
+                        continue;
+                    }
+                }
             }
             if let Some(known) = previous.get(&entry.path)
                 && known.fingerprint.proves_unchanged(&entry.metadata)
@@ -1081,6 +1176,8 @@ impl LocalEndpoint {
                 .iter()
                 .any(|root| root == path || root.is_ancestor_of(path))
         });
+        observation.unstable.sort();
+        observation.unstable.dedup();
         Ok(observation)
     }
 
@@ -1305,6 +1402,8 @@ fn at_scan<T>(path: &Option<SyncPath>, result: io::Result<T>) -> Result<T, ScanE
     })
 }
 
+#[cfg(test)]
+mod churn_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1579,7 +1678,11 @@ mod tests {
             symlink(outside.path(), temporary.path().join("directory")).unwrap();
             ScanControl::Continue
         });
-        assert!(matches!(result, Err(ScanError::Changed(_))));
+        let stats = result.unwrap();
+        assert_eq!(
+            stats.unavailable(),
+            &[SyncPath::try_from(b"directory".as_slice()).unwrap()]
+        );
         assert_eq!(
             paths,
             [SyncPath::try_from(b"directory".as_slice()).unwrap()]
@@ -1595,7 +1698,11 @@ mod tests {
             fs::remove_dir(temporary.path().join("directory")).unwrap();
             ScanControl::Continue
         });
-        assert!(matches!(result, Err(ScanError::Changed(_))));
+        let stats = result.unwrap();
+        assert_eq!(
+            stats.unavailable(),
+            &[SyncPath::try_from(b"directory".as_slice()).unwrap()]
+        );
     }
 
     #[test]
@@ -1735,7 +1842,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_directory_changes_even_after_the_last_row() {
+    fn directory_membership_changes_do_not_abort_the_inventory() {
         let temporary = tempfile::tempdir().unwrap();
         fs::write(temporary.path().join("only"), b"one").unwrap();
         let endpoint = LocalEndpoint::open(temporary.path()).unwrap();
@@ -1743,7 +1850,10 @@ mod tests {
             fs::write(temporary.path().join("new"), b"new").unwrap();
             ScanControl::Continue
         });
-        assert!(matches!(result, Err(ScanError::Changed(None))));
+        assert!(
+            result.is_ok(),
+            "directory churn discarded readable entries: {result:?}"
+        );
     }
 
     #[test]

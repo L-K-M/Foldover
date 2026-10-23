@@ -449,8 +449,9 @@ impl Preview {
             hasher.update(&item.bytes.to_le_bytes());
         }
         for failure in &self.failures {
-            hasher.update(&(failure.path.as_bytes().len() as u64).to_le_bytes());
-            hasher.update(failure.path.as_bytes());
+            let path = failure.path.as_ref().map_or(&[][..], SyncPath::as_bytes);
+            hasher.update(&(path.len() as u64).to_le_bytes());
+            hasher.update(path);
             hasher.update(&(failure.message.len() as u64).to_le_bytes());
             hasher.update(failure.message.as_bytes());
         }
@@ -469,13 +470,14 @@ pub enum Completion {
 /// A change that failed; the run went on with independent paths.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Failure {
-    path: SyncPath,
+    path: Option<SyncPath>,
     message: String,
 }
 
 impl Failure {
-    pub fn path(&self) -> &SyncPath {
-        &self.path
+    /// `None` identifies the endpoint root rather than a relative entry.
+    pub fn path(&self) -> Option<&SyncPath> {
+        self.path.as_ref()
     }
 
     pub fn message(&self) -> &str {
@@ -619,6 +621,7 @@ pub struct PairRun {
     left: Observation,
     right: Observation,
     failures: Vec<Failure>,
+    uncertain: Vec<SyncPath>,
     /// Observations the filters excluded, kept for the next run's cache.
     left_cache: BTreeMap<SyncPath, ObservedEntry>,
     right_cache: BTreeMap<SyncPath, ObservedEntry>,
@@ -741,7 +744,7 @@ impl PairRun {
         for (side, observation) in [(Side::Left, &left), (Side::Right, &right)] {
             for issue in observation.issues() {
                 failures.push(Failure {
-                    path: issue.path().clone(),
+                    path: Some(issue.path().clone()),
                     message: format!(
                         "Folder {}: {}. Left unchanged; will retry next sync.",
                         match side {
@@ -752,9 +755,26 @@ impl PairRun {
                     ),
                 });
             }
+            for directory in observation.unstable_directories() {
+                failures.push(Failure {
+                    path: directory.clone(),
+                    message: format!(
+                        "Folder {}: Contents changed while scanning. Readable files will sync; \
+                         entries whose absence could not be verified stay unchanged until the next sync.",
+                        match side {
+                            Side::Left => "A",
+                            Side::Right => "B",
+                        },
+                    ),
+                });
+            }
         }
         failures
             .sort_by(|left, right| (&left.path, &left.message).cmp(&(&right.path, &right.message)));
+        let unavailable: Vec<_> = unavailable(&left, &right, &base, left_names.either(right_names))
+            .cloned()
+            .collect();
+        let uncertain = uncertain_absences(&left, &right, &base, left_names.either(right_names));
         // Size and age differ between folders. A file too large in either
         // folder, or old or absent in both, is skipped in both, and hidden
         // from the base too: its base row stays, so a later edit syncs as
@@ -775,12 +795,7 @@ impl PairRun {
                 .copied()
                 .chain(left.oversized().iter().chain(right.oversized()))
                 .filter(|path| Some(*path) != canary)
-                .chain(unavailable(
-                    &left,
-                    &right,
-                    &base,
-                    left_names.either(right_names),
-                ))
+                .chain(&unavailable)
                 .cloned()
                 .collect()
         };
@@ -822,13 +837,9 @@ impl PairRun {
             PlanError::Cancelled => RunError::Cancelled,
             error => RunError::Plan(error),
         })?;
-        let unavailable: Vec<_> = left
-            .unavailable()
-            .iter()
-            .chain(right.unavailable())
-            .cloned()
-            .collect();
-        plan.protect_unavailable(&unavailable, left_names.either(right_names))?;
+        let protected: Vec<_> = unavailable.iter().chain(&uncertain).cloned().collect();
+        plan.protect_unavailable(&protected, left_names.either(right_names))?;
+        plan.protect_uncertain_absences(&uncertain, left_names.either(right_names))?;
         Ok(Self {
             pair,
             identities,
@@ -836,6 +847,7 @@ impl PairRun {
             left,
             right,
             failures,
+            uncertain,
             left_cache,
             right_cache,
             plan,
@@ -1751,7 +1763,7 @@ impl<'a> Executor<'a> {
 
     fn fail_message(&mut self, path: &SyncPath, message: &str) {
         self.report.failures.push(Failure {
-            path: path.clone(),
+            path: Some(path.clone()),
             message: message.to_owned(),
         });
         self.failed.push(path.clone());
@@ -1827,6 +1839,56 @@ fn unavailable<'a>(
         .chain(right.entries().keys())
         .chain(base.keys())
         .filter(below)
+}
+
+/// Missing names below a listing that changed cannot authorize deletion or
+/// baseline removal. Safe creates still recheck absence at the write boundary.
+fn uncertain_absences(
+    left: &Observation,
+    right: &Observation,
+    base: &BTreeMap<SyncPath, BaselineEntry>,
+    names: NameMatching,
+) -> Vec<SyncPath> {
+    let mut paths = BTreeMap::new();
+    for (seen, other) in [(left, right), (right, left)] {
+        let unstable = seen.unstable_directories();
+        if unstable.is_empty() {
+            continue;
+        }
+        let whole_root = unstable.iter().any(Option::is_none);
+        let directories: BTreeSet<_> = unstable
+            .iter()
+            .flatten()
+            .map(|path| crate::plan::name_key(path.as_bytes(), names))
+            .collect();
+        // Consider only missing counterparts and base rows. A first backup
+        // with an empty target needs no second index of its source tree.
+        let mut missing: BTreeMap<_, _> = other
+            .entries()
+            .keys()
+            .chain(base.keys())
+            .filter(|path| !seen.entries().contains_key(*path))
+            .map(|path| (crate::plan::name_key(path.as_bytes(), names), path))
+            .filter(|(key, _)| {
+                whole_root
+                    || directories.contains(key)
+                    || key
+                        .iter()
+                        .enumerate()
+                        .any(|(index, &byte)| byte == b'/' && directories.contains(&key[..index]))
+            })
+            .collect();
+        if missing.is_empty() {
+            continue;
+        }
+        // Both folders may spell an observed entry differently. A case or
+        // Unicode alias still proves presence and must remain usable.
+        for path in seen.entries().keys() {
+            missing.remove(&crate::plan::name_key(path.as_bytes(), names));
+        }
+        paths.extend(missing);
+    }
+    paths.into_values().cloned().collect()
 }
 
 #[cfg(test)]

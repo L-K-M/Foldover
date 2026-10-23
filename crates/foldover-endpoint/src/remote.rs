@@ -196,6 +196,11 @@ impl PeerEndpoint {
                     observation.unavailable.push(path.clone());
                     observation.issues.push(crate::ScanIssue { path, message });
                 }
+                Incoming::Reply(PeerReply::UnstableDirectory { path }) => {
+                    observation
+                        .unstable
+                        .push(path.map(SyncPath::try_from).transpose()?);
+                }
                 Incoming::End => {}
                 Incoming::Reply(PeerReply::Observed {
                     leftovers,

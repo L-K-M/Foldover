@@ -32,7 +32,7 @@ fn new_folders_with_sidecars_still_copy_readable_children() {
             assert_eq!(report.failures().len(), 1);
             assert_eq!(
                 report.failures()[0].path(),
-                &path(b"folder/nested/._LICENSE")
+                Some(&path(b"folder/nested/._LICENSE"))
             );
             assert_eq!(
                 fs::read(pair.right.path().join("folder/nested/kept")).unwrap(),
@@ -44,6 +44,132 @@ fn new_folders_with_sidecars_still_copy_readable_children() {
             );
             assert!(!pair.right.path().join("folder/nested/._LICENSE").exists());
         }
+    }
+}
+
+/// Change a listing after traversal starts, without depending on readdir order.
+struct ChurnOnList {
+    root: std::path::PathBuf,
+    side: Side,
+    changed: std::cell::Cell<bool>,
+}
+
+impl RunProgress for ChurnOnList {
+    fn observed(&self, side: Side, step: ObserveStep) {
+        if side == self.side && step == ObserveStep::Listed && !self.changed.replace(true) {
+            // Finder state is deliberately excluded from sync, but creating it
+            // still changes the containing directory's membership.
+            fs::write(self.root.join(".DS_Store"), b"churn").unwrap();
+        }
+    }
+    fn planned(&self, _: u64, _: u64) {}
+    fn applied(&self, _: u64) {}
+    fn waiting(&self, _: Option<&str>) {}
+}
+
+#[test]
+fn root_churn_syncs_safe_files_without_deleting_unproven_absences() {
+    for mode in [
+        SyncMode::Sync,
+        SyncMode::Backup { source: Side::Left },
+        SyncMode::Mirror { source: Side::Left },
+    ] {
+        let mut pair = fixture(mode);
+        fs::write(pair.left.path().join("missing"), b"preserve").unwrap();
+        fs::write(pair.left.path().join("unchanged"), b"same").unwrap();
+        pair.sync();
+        let previous = pair.base[&path(b"missing")];
+        fs::remove_file(pair.left.path().join("missing")).unwrap();
+        fs::write(pair.left.path().join("safe"), b"copy now").unwrap();
+        let churn = ChurnOnList {
+            root: pair.left.path().to_path_buf(),
+            side: Side::Left,
+            changed: std::cell::Cell::new(false),
+        };
+        let prepared = PairRun::prepare(pair.inputs(), &mut proceed, &churn).unwrap();
+        assert!(churn.changed.get());
+        let preview = prepared.preview();
+        assert!(
+            preview
+                .failures()
+                .iter()
+                .any(|failure| failure.path().is_none())
+        );
+        let mut store = pair.store();
+        let outcome = prepared
+            .execute(
+                Approval::default(),
+                RunContext::Reviewed,
+                STARTED,
+                &mut |revision, commit| store.apply(revision, commit),
+                &mut proceed,
+                &NoProgress,
+            )
+            .unwrap();
+        let RunOutcome::Ran(report) = outcome else {
+            panic!("run needs approval")
+        };
+        assert_eq!(report.completion(), Completion::Finished);
+        assert!(
+            report
+                .failures()
+                .iter()
+                .any(|failure| failure.path().is_none())
+        );
+        assert_eq!(
+            fs::read(pair.right.path().join("safe")).unwrap(),
+            b"copy now"
+        );
+        assert_eq!(
+            fs::read(pair.right.path().join("missing")).unwrap(),
+            b"preserve"
+        );
+        assert_eq!(pair.base[&path(b"missing")], previous);
+        pair.sync();
+        if matches!(mode, SyncMode::Backup { .. }) {
+            assert!(pair.right.path().join("missing").exists());
+        } else {
+            assert!(!pair.right.path().join("missing").exists());
+        }
+    }
+}
+
+#[test]
+fn target_root_churn_still_permits_guarded_creates() {
+    for mode in [
+        SyncMode::Sync,
+        SyncMode::Backup { source: Side::Left },
+        SyncMode::Mirror { source: Side::Left },
+    ] {
+        let mut pair = fixture(mode);
+        fs::write(pair.left.path().join("safe"), b"copy now").unwrap();
+        fs::write(pair.right.path().join("existing"), b"untouched").unwrap();
+        let churn = ChurnOnList {
+            root: pair.right.path().to_path_buf(),
+            side: Side::Right,
+            changed: std::cell::Cell::new(false),
+        };
+        let prepared = PairRun::prepare(pair.inputs(), &mut proceed, &churn).unwrap();
+        let mut store = pair.store();
+        let outcome = prepared
+            .execute(
+                Approval::default(),
+                RunContext::Reviewed,
+                STARTED,
+                &mut |revision, commit| store.apply(revision, commit),
+                &mut proceed,
+                &NoProgress,
+            )
+            .unwrap();
+        let RunOutcome::Ran(report) = outcome else {
+            panic!("run needs approval")
+        };
+        assert!(churn.changed.get());
+        assert_eq!(report.completion(), Completion::Finished);
+        assert_eq!(
+            fs::read(pair.right.path().join("safe")).unwrap(),
+            b"copy now"
+        );
     }
 }
 
@@ -941,7 +1067,7 @@ fn failed_folders_skip_their_contents_and_later_runs_recover_leftovers() {
         panic!("expected a run");
     };
     assert_eq!(report.failures().len(), 1);
-    assert_eq!(report.failures()[0].path(), &path(b"folder"));
+    assert_eq!(report.failures()[0].path(), Some(&path(b"folder")));
     assert!(base.is_empty());
     assert_eq!(
         fs::read(pair.right.path().join("folder")).unwrap(),
@@ -2282,6 +2408,53 @@ fn undo_reverts_the_newest_run_and_the_next_preview_shows_the_redo() {
 }
 
 #[test]
+fn undo_preserves_unproven_archive_absences_but_removes_known_creates() {
+    let mut pair = fixture(SyncMode::Mirror { source: Side::Left });
+    fs::write(pair.left.path().join("gone"), b"archived").unwrap();
+    fs::write(pair.left.path().join("stable"), b"keep").unwrap();
+    pair.sync();
+    fs::remove_file(pair.left.path().join("gone")).unwrap();
+    fs::write(pair.left.path().join("created"), b"undo me").unwrap();
+    let report = pair.ran(Approval::new(0, 1), at(1));
+    assert_eq!((report.archived(), report.copied()), (1, 1));
+    assert!(!pair.base.contains_key(&path(b"gone")));
+    let journal = pair.journal.clone().unwrap();
+    let churn = ChurnOnList {
+        root: pair.right.path().to_path_buf(),
+        side: Side::Right,
+        changed: std::cell::Cell::new(false),
+    };
+    let prepared = PairRun::prepare(pair.inputs(), &mut proceed, &churn).unwrap();
+    assert!(churn.changed.get());
+    for side in [Side::Left, Side::Right] {
+        assert!(
+            !prepared
+                .observation(side)
+                .entries()
+                .contains_key(&path(b"gone"))
+        );
+    }
+    assert!(!prepared.uncertain.contains(&path(b"gone")));
+    let mut store = pair.store();
+    let report = prepared
+        .undo(
+            journal,
+            at(2),
+            &mut |revision, commit| store.apply(revision, commit),
+            &mut proceed,
+        )
+        .unwrap();
+    assert_eq!(report.restored(), 0);
+    assert_eq!(report.removed(), 1);
+    assert_eq!(report.not_undone().len(), 1);
+    assert_eq!(report.not_undone()[0].path(), Some(&path(b"gone")));
+    assert!(!pair.right.path().join("gone").exists());
+    assert!(!pair.right.path().join("created").exists());
+    assert!(!pair.base.contains_key(&path(b"gone")));
+    assert!(!pair.base.contains_key(&path(b"created")));
+}
+
+#[test]
 fn undo_skips_unreadable_branches_without_changing_their_base() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -2328,7 +2501,7 @@ fn undo_leaves_entries_changed_since_the_run_and_says_why() {
     let undo = pair.undo_at(at(2));
     assert_eq!(undo.removed(), 0);
     assert_eq!(undo.not_undone().len(), 1);
-    assert_eq!(undo.not_undone()[0].path(), &path(b"new.txt"));
+    assert_eq!(undo.not_undone()[0].path(), Some(&path(b"new.txt")));
     assert!(undo.not_undone()[0].message().starts_with("Changed since"));
     assert_eq!(fs::read(right.join("new.txt")).unwrap(), b"edited in B");
     assert!(pair.journal.is_none());

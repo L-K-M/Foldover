@@ -170,6 +170,61 @@ impl CandidatePlan {
                 row.decision = CandidateDecision::Entry(EntryDecision::KeepTarget);
             }
         }
+        self.recount_deletions()
+    }
+
+    /// An incomplete listing cannot prove a deletion, conflict with deletion,
+    /// or rename. Creates remain safe: their write checks require absence and
+    /// report an occupied destination without replacing it.
+    pub(crate) fn protect_uncertain_absences(
+        &mut self,
+        paths: &[SyncPath],
+        names: NameMatching,
+    ) -> Result<(), PlanError> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let paths: BTreeSet<_> = paths
+            .iter()
+            .map(|path| name_key(path.as_bytes(), names))
+            .collect();
+        let uncertain = |path: &SyncPath| paths.contains(&name_key(path.as_bytes(), names));
+        let mut disarmed = BTreeSet::new();
+        self.moves.retain(|to, from| {
+            if uncertain(to) || uncertain(from) {
+                disarmed.insert(to.clone());
+                disarmed.insert(from.clone());
+                false
+            } else {
+                true
+            }
+        });
+        for row in &mut self.rows {
+            let safe_create = matches!(
+                row.decision,
+                CandidateDecision::Entry(EntryDecision::Propagate {
+                    change: ChangeKind::Create,
+                    ..
+                })
+            );
+            if disarmed.contains(&row.path) {
+                row.decision = match row.decision {
+                    CandidateDecision::Entry(EntryDecision::Move { on }) => {
+                        CandidateDecision::Entry(EntryDecision::Propagate {
+                            from: on.other(),
+                            change: ChangeKind::Create,
+                        })
+                    }
+                    _ => CandidateDecision::Entry(EntryDecision::KeepTarget),
+                };
+            } else if uncertain(&row.path) && !safe_create {
+                row.decision = CandidateDecision::Entry(EntryDecision::KeepTarget);
+            }
+        }
+        self.recount_deletions()
+    }
+
+    fn recount_deletions(&mut self) -> Result<(), PlanError> {
         let deletion_counts = |target: Side| -> Result<DeletionCounts, PlanError> {
             let deletions = self
                 .rows
@@ -824,6 +879,144 @@ mod tests {
             .unwrap()
             .decision
             .clone()
+    }
+
+    #[test]
+    fn uncertain_missing_files_preserve_their_base_and_independent_creates() {
+        let base = baseline(&tree(&[(b"missing", file(1)), (b"forgotten", file(2))]));
+        let left = tree(&[(b"healthy", file(3))]);
+        let right = tree(&[(b"missing", file(1))]);
+        let mut candidate = plan(SyncMode::Sync, &base, &left, &right);
+        assert_eq!(
+            decision(&candidate, b"missing"),
+            CandidateDecision::Entry(EntryDecision::Archive { on: Side::Right })
+        );
+        assert_eq!(
+            decision(&candidate, b"forgotten"),
+            CandidateDecision::Entry(EntryDecision::ForgetBase)
+        );
+        candidate
+            .protect_uncertain_absences(
+                &[path(b"missing"), path(b"forgotten")],
+                NameMatching::EXACT,
+            )
+            .unwrap();
+        for name in [b"missing".as_slice(), b"forgotten"] {
+            assert_eq!(
+                decision(&candidate, name),
+                CandidateDecision::Entry(EntryDecision::KeepTarget)
+            );
+        }
+        assert_eq!(
+            decision(&candidate, b"healthy"),
+            CandidateDecision::Entry(EntryDecision::Propagate {
+                from: Side::Left,
+                change: ChangeKind::Create,
+            })
+        );
+        assert_eq!(candidate.deletions(Side::Right).paths(), 1);
+        assert_eq!(candidate.deletions(Side::Right).deletions(), 0);
+    }
+
+    #[test]
+    fn uncertain_target_absence_keeps_mirror_and_backup_creates() {
+        let source = tree(&[(b"missing", file(1))]);
+        let base = baseline(&source);
+        for mode in [
+            SyncMode::Mirror { source: Side::Left },
+            SyncMode::Backup { source: Side::Left },
+        ] {
+            let mut candidate = plan(mode, &base, &source, &BTreeMap::new());
+            candidate
+                .protect_uncertain_absences(&[path(b"missing")], NameMatching::EXACT)
+                .unwrap();
+            assert_eq!(
+                decision(&candidate, b"missing"),
+                CandidateDecision::Entry(EntryDecision::Propagate {
+                    from: Side::Left,
+                    change: ChangeKind::Create,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn uncertain_moves_keep_the_old_file_and_copy_to_the_new_path() {
+        let left = tree(&[(b"new", file(1)), (b"renamed", file(2))]);
+        let right = tree(&[(b"old", file(1)), (b"original", file(2))]);
+        let base = baseline(&right);
+        for uncertain in [b"old".as_slice(), b"new"] {
+            let mut candidate = plan_moving(SyncMode::Sync, &base, &left, &right, Moves::Rename);
+            assert_eq!(candidate.moved_from(&path(b"new")), Some(&path(b"old")));
+            candidate
+                .protect_uncertain_absences(&[path(uncertain)], NameMatching::EXACT)
+                .unwrap();
+            assert_eq!(
+                decision(&candidate, b"old"),
+                CandidateDecision::Entry(EntryDecision::KeepTarget)
+            );
+            assert_eq!(
+                decision(&candidate, b"new"),
+                CandidateDecision::Entry(EntryDecision::Propagate {
+                    from: Side::Left,
+                    change: ChangeKind::Create,
+                })
+            );
+            assert_eq!(candidate.moved_from(&path(b"new")), None);
+            assert_eq!(candidate.moves.len(), 1);
+            assert_eq!(
+                candidate.moved_from(&path(b"renamed")),
+                Some(&path(b"original"))
+            );
+            assert_eq!(
+                decision(&candidate, b"original"),
+                CandidateDecision::Entry(EntryDecision::MovedAway { on: Side::Right })
+            );
+            assert_eq!(
+                decision(&candidate, b"renamed"),
+                CandidateDecision::Entry(EntryDecision::Move { on: Side::Right })
+            );
+            assert_eq!(candidate.deletions(Side::Right).paths(), 2);
+            assert_eq!(candidate.deletions(Side::Right).deletions(), 0);
+        }
+    }
+
+    #[test]
+    fn uncertain_descendants_do_not_reopen_a_protected_ancestor_branch() {
+        let left = tree(&[(b"healthy", file(3))]);
+        let right = tree(&[(b"folder", directory()), (b"folder/kept", file(1))]);
+        let mut base = baseline(&right);
+        base.insert(
+            path(b"folder/missing"),
+            BaselineEntry::new(file(2), file(2)).unwrap(),
+        );
+        let mut candidate = plan(
+            SyncMode::Mirror { source: Side::Left },
+            &base,
+            &left,
+            &right,
+        );
+        let uncertain = [path(b"folder/missing")];
+        candidate
+            .protect_unavailable(&uncertain, NameMatching::EXACT)
+            .unwrap();
+        candidate
+            .protect_uncertain_absences(&uncertain, NameMatching::EXACT)
+            .unwrap();
+        for name in [b"folder".as_slice(), b"folder/kept", b"folder/missing"] {
+            assert_eq!(
+                decision(&candidate, name),
+                CandidateDecision::Entry(EntryDecision::KeepTarget)
+            );
+        }
+        assert_eq!(
+            decision(&candidate, b"healthy"),
+            CandidateDecision::Entry(EntryDecision::Propagate {
+                from: Side::Left,
+                change: ChangeKind::Create,
+            })
+        );
+        assert_eq!(candidate.deletions(Side::Right).deletions(), 0);
     }
 
     #[test]
