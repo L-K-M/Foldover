@@ -9,7 +9,14 @@ struct PairSidebar: View {
     let focus: FocusState<MainPane?>.Binding
     @Environment(\.openWindow) private var openWindow
 
+    // The agent bar below the list wraps its text, so its height depends
+    // on the column's width; the column keeps that out of its limits.
     var body: some View {
+        SplitColumn { list }
+            .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 340)
+    }
+
+    private var list: some View {
         List(selection: $viewModel.selectedPairID) {
             Section("Pairs") {
                 ForEach(viewModel.pairRows) { row in
@@ -20,7 +27,6 @@ struct PairSidebar: View {
             }
         }
         .listStyle(.sidebar)
-        .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 340)
         .overlay {
             if viewModel.pairsLoading && !viewModel.pairsLoaded {
                 ProgressView()

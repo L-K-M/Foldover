@@ -57,7 +57,7 @@ struct ArchiveView: View {
         let items = viewModel.itemRows
         let selected = selectedRows(selection, in: items)
         NavigationSplitView {
-            runList
+            SplitColumn { runList }
                 .navigationSplitViewColumnWidth(min: 170, ideal: 200, max: 280)
         } detail: {
             detail(items)
@@ -110,10 +110,8 @@ struct ArchiveView: View {
 
     // MARK: Items
 
-    /// In a GeometryReader, so the table cannot make the split view's
-    /// column limits change from one layout pass to the next.
     private func detail(_ items: [ArchiveItemRow]) -> some View {
-        GeometryReader { _ in
+        SplitColumn {
             VStack(spacing: 0) {
                 content(items)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

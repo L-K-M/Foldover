@@ -11,14 +11,8 @@ struct PairDetailView: View {
 
     var body: some View {
         let sync = viewModel.sync(for: pair)
-        // The split view sizes the detail, and a GeometryReader takes that
-        // size without reporting a minimum of its own. With the change
-        // table and the fixed-size segments inside, the column's minimum
-        // otherwise changed from one layout pass to the next until AppKit
-        // stopped the loop by throwing.
-        GeometryReader { proxy in
+        SplitColumn(alignment: .topLeading) {
             layout(sync)
-                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
         }
         // The dialog acts on the request captured when it was presented,
         // so a state change cannot redirect the tap to another plan.

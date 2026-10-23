@@ -8,7 +8,7 @@ struct PairInspector: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Group {
+        SplitColumn {
             if let pair = viewModel.selectedPair {
                 form(pair)
             } else {

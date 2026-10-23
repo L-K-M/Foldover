@@ -58,7 +58,9 @@ struct MainView: View {
         NavigationSplitView {
             PairSidebar(viewModel: viewModel, focus: $paneFocus)
         } detail: {
-            detail
+            // Every state of the detail, not just a pair's: the empty
+            // states' wrapping descriptions depend on the width too.
+            SplitColumn { detail }
                 .navigationTitle(viewModel.selectedPair?.settings.name ?? viewModel.title)
                 .navigationSubtitle(viewModel.selectedSync?.shortStatus ?? "")
         }
