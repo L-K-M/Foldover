@@ -139,6 +139,7 @@ struct ArchiveView: View {
         } else {
             ProgressView()
                 .controlSize(.large)
+                .accessibilityLabel("Loading Archive")
         }
     }
 
@@ -178,6 +179,7 @@ struct ArchiveView: View {
             if viewModel.isLoading && !items.isEmpty {
                 ProgressView()
                     .controlSize(.small)
+                    .accessibilityLabel("Loading More Archive Items")
             }
             if viewModel.canLoadMore {
                 Button("Show More") { Task { await viewModel.loadMore() } }

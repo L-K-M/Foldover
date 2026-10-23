@@ -24,6 +24,7 @@ struct PairSidebar: View {
         .overlay {
             if viewModel.pairsLoading && !viewModel.pairsLoaded {
                 ProgressView()
+                    .accessibilityLabel("Loading Pairs")
             }
         }
         // Choosing a pair puts the keys here, as in Mail.
