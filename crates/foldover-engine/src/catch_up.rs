@@ -151,4 +151,29 @@ mod tests {
         std::thread::sleep(SETTLE);
         assert!(changed_while_away(&pair, &cursors, None));
     }
+
+    /// The agent's own writes under its state directory never count as a
+    /// change for a folder that holds it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn writes_to_the_state_directory_do_not_wake_the_folder_holding_it() {
+        const SETTLE: Duration = Duration::from_secs(3);
+        let directory = tempfile::tempdir().unwrap();
+        let pair = pair(directory.path());
+        std::thread::sleep(SETTLE);
+        let event = foldover_endpoint::event_now().unwrap();
+        let saved = quiet_cursors(&pair, event);
+        let cursors = [Some(saved[0].1.clone()), Some(saved[1].1.clone())];
+
+        let state = directory.path().join("left/agent-state");
+        fs::create_dir(&state).unwrap();
+        fs::write(state.join("bookkeeping"), b"agent write").unwrap();
+        std::thread::sleep(SETTLE);
+        assert!(!changed_while_away(&pair, &cursors, Some(&state)));
+
+        // A write anywhere else still counts.
+        fs::write(directory.path().join("left/note.txt"), b"edited").unwrap();
+        std::thread::sleep(SETTLE);
+        assert!(changed_while_away(&pair, &cursors, Some(&state)));
+    }
 }

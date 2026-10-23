@@ -89,18 +89,16 @@ pub fn serve_folder(
     if op == FolderOp::Watch {
         return watch(root, state, answer);
     }
-    // `open_protecting` canonicalizes internally too; resolving here keeps
-    // this consistent with the watch path and any future consumer.
-    let state = state.and_then(|path| path.canonicalize().ok());
-    let endpoint = match LocalEndpoint::open_protecting(
-        Path::new(OsStr::from_bytes(root.as_bytes())),
-        state.as_deref(),
-    )
-    .and_then(|endpoint| endpoint.probe_access().map(|()| endpoint))
-    {
-        Ok(endpoint) => endpoint,
-        Err(error) => return failed(answer, wire::scan_failure(&error)),
-    };
+    // `open_protecting` canonicalizes the state path itself: pass it
+    // through unchanged so a resolution failure surfaces there instead of
+    // silently disabling protection here.
+    let endpoint =
+        match LocalEndpoint::open_protecting(Path::new(OsStr::from_bytes(root.as_bytes())), state)
+            .and_then(|endpoint| endpoint.probe_access().map(|()| endpoint))
+        {
+            Ok(endpoint) => endpoint,
+            Err(error) => return failed(answer, wire::scan_failure(&error)),
+        };
     let reply = match op {
         FolderOp::Probe => Ok(PeerReply::Done),
         FolderOp::Identity => endpoint

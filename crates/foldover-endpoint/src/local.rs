@@ -515,10 +515,11 @@ impl LocalEndpoint {
         // during scan descent instead of re-walking here.
         let mut at_path = Some(path.clone());
         while let Some(dir) = at_path {
-            // Fail-open is fine: touching `path` requires traverse
-            // permission on every ancestor, so an ancestor that fails
-            // `open_directory` (besides the expected NotFound for
-            // not-yet-created leaves) would fail the guarded operation too.
+            // Fail-open is fine: the guarded operation resolves `path`
+            // through this same `Root` (`open_dir_nofollow` per component),
+            // so an ancestor that fails `open_directory` here (besides the
+            // expected NotFound for not-yet-created leaves) fails the
+            // operation's own traversal too.
             if let Ok(held) = self.root.open_directory(&dir) {
                 match at(&Some(dir.clone()), held.relation_to(&state.root))? {
                     RootRelation::Same | RootRelation::Within => {
