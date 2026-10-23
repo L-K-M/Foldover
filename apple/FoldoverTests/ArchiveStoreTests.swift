@@ -12,6 +12,22 @@ private actor ArchiveFixtureClient: ArchiveClient {
     private(set) var pageRequests = 0
     private var holdsNextPage = false
     private var held: CheckedContinuation<Void, Never>?
+    private(set) var restoreRequests = 0
+    private var holdsRestore = false
+    private var heldRestore: CheckedContinuation<Void, Never>?
+    private var refusesRestore = false
+
+    func holdRestore() { holdsRestore = true }
+    func refuseRestore() { refusesRestore = true }
+
+    func waitForHeldRestore() async {
+        while heldRestore == nil { await Task.yield() }
+    }
+
+    func releaseRestore() {
+        heldRestore?.resume()
+        heldRestore = nil
+    }
 
     func holdNextPage() { holdsNextPage = true }
 
@@ -52,9 +68,15 @@ private actor ArchiveFixtureClient: ArchiveClient {
     }
 
     func putBackAll(_ id: String, side: FolderSide, run: String) async throws -> RunRestore {
+        restoreRequests += 1
+        if holdsRestore {
+            holdsRestore = false
+            await withCheckedContinuation { heldRestore = $0 }
+        }
+        if refusesRestore { throw TwoRunFixtureError.refused }
         let count = UInt64(stored.count)
         stored.removeAll()
-        return RunRestore(restored: count - 1, beside: 1, failures: 0)
+        return RunRestore(restored: count > 0 ? count - 1 : 0, beside: count > 0 ? 1 : 0, failures: 0)
     }
 }
 
@@ -111,6 +133,51 @@ func putBackAllEmptiesTheRunAndSummarizes() async {
     #expect(viewModel.itemRows.isEmpty)
     #expect(viewModel.restoreText == "Put back 3 items. 1 went beside newer versions.")
     #expect(!viewModel.canPutBackAll)
+}
+
+@MainActor
+@Test
+func aWholeRunRestoreReservesBothRestoreCommands() async throws {
+    let client = ArchiveFixtureClient()
+    let store = ArchiveStore(client: client)
+    let viewModel = ArchiveViewModel(pair: docs(), store: store, agentConnected: true)
+    await viewModel.show(.b)
+    let row = try #require(viewModel.itemRows.first)
+
+    await client.holdRestore()
+    let restoring = Task { await viewModel.putBackAll() }
+    await client.waitForHeldRestore()
+    #expect(!viewModel.canPutBack)
+    #expect(!viewModel.canPutBackAll)
+    #expect(viewModel.statusText == "Putting items back…")
+
+    await viewModel.putBackAll()
+    await viewModel.putBack(row)
+    #expect(await client.restoreRequests == 1)
+    #expect(await client.putBacks.isEmpty)
+    await client.releaseRestore()
+    await restoring.value
+
+    #expect(!store.isPuttingBack)
+    #expect(viewModel.itemRows.isEmpty)
+    #expect(viewModel.restoreText == "Put back 3 items. 1 went beside newer versions.")
+}
+
+@MainActor
+@Test
+func aFailedWholeRunRestoreReleasesItsReservation() async {
+    let client = ArchiveFixtureClient()
+    let store = ArchiveStore(client: client)
+    let viewModel = ArchiveViewModel(pair: docs(), store: store, agentConnected: true)
+    await viewModel.show(.b)
+    await client.refuseRestore()
+
+    await viewModel.putBackAll()
+    #expect(store.error != nil)
+    #expect(!store.isPuttingBack)
+    #expect(viewModel.canPutBack)
+    #expect(viewModel.canPutBackAll)
+    #expect(viewModel.itemRows.map(\.path) == ["a", "b"])
 }
 
 @MainActor
