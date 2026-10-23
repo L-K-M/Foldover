@@ -120,7 +120,11 @@ impl Engine {
     pub fn open(location: &StateLocation) -> Result<Self, Error> {
         let pairs = PairStore::open(location)?;
         let root = pairs.root()?;
-        let state_path = PathBuf::from(OsStr::from_bytes(root.as_bytes()));
+        // Resolve once: protection checks below compare this path against
+        // canonical paths (watch events, scans, peer requests).
+        let state_path = PathBuf::from(OsStr::from_bytes(root.as_bytes()))
+            .canonicalize()
+            .map_err(|source| ScanError::Io { path: None, source })?;
         let state_root = Endpoint::Local(LocalEndpoint::open(&state_path)?);
         Ok(Self {
             pairs,
@@ -308,7 +312,7 @@ impl Engine {
         if name.is_empty() || name.contains('\0') || name.len() > MAX_PAIR_NAME_BYTES {
             return Err(Error::InvalidShareName);
         }
-        let folder = Endpoint::open(&PairRoot::Local(root.clone()), &Reach::default())?;
+        let folder = Endpoint::open(&PairRoot::Local(root.clone()), &self.reach)?;
         // A folder that holds the agent's state directory is fine: it is
         // protected wherever the folder is read or written. The state
         // directory itself, or somewhere inside it, never is.
@@ -320,13 +324,13 @@ impl Engine {
         }
         // That Mac could otherwise pair two views of the same files.
         for shared in self.pairs.shares_for(device)? {
-            let overlaps =
-                match Endpoint::open(&PairRoot::Local(shared.root.clone()), &Reach::default()) {
-                    Ok(other) => folder.relation_to(&other)? != RootRelation::Disjoint,
-                    // A folder that is away, as on an unplugged disk, is
-                    // judged by its path.
-                    Err(_) => paths_nest(root.as_bytes(), shared.root.as_bytes()),
-                };
+            let overlaps = match Endpoint::open(&PairRoot::Local(shared.root.clone()), &self.reach)
+            {
+                Ok(other) => folder.relation_to(&other)? != RootRelation::Disjoint,
+                // A folder that is away, as on an unplugged disk, is
+                // judged by its path.
+                Err(_) => paths_nest(root.as_bytes(), shared.root.as_bytes()),
+            };
             if overlaps {
                 return Err(Error::ShareOverlap);
             }
@@ -543,7 +547,7 @@ impl Engine {
                     let overlapping = match existing {
                         PairRoot::Local(_) => {
                             let existing =
-                                Endpoint::open(existing, &Reach::default()).map_err(|source| {
+                                Endpoint::open(existing, &self.reach).map_err(|source| {
                                 Error::CatalogUnavailable {
                                     pair: pair.id(),
                                     source: PairRootError::Endpoint(source),

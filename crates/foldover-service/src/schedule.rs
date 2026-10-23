@@ -708,7 +708,7 @@ impl Service {
                 .map(|engine| {
                     (
                         engine.watch_cursors(id).ok().unwrap_or_default(),
-                        engine.state_path().to_path_buf(),
+                        Some(engine.state_path().to_path_buf()),
                     )
                 })
                 .unwrap_or_default();
@@ -725,7 +725,7 @@ impl Service {
             let replay = move || {
                 // A replay that blew up proves nothing: count it as a change.
                 let changed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    check(&pair, &cursors, Some(&state))
+                    check(&pair, &cursors, state.as_deref())
                 }))
                 .unwrap_or(true);
                 if changed {

@@ -509,8 +509,16 @@ impl LocalEndpoint {
         let Some(state) = &self.state else {
             return Ok(());
         };
+        // Runs per guarded call — including every listed directory of a
+        // holding root — opening and fstat'ing each ancestor. If scans of
+        // large home folders regress, cache ancestor identities populated
+        // during scan descent instead of re-walking here.
         let mut at_path = Some(path.clone());
         while let Some(dir) = at_path {
+            // Fail-open is fine: touching `path` requires traverse
+            // permission on every ancestor, so an ancestor that fails
+            // `open_directory` (besides the expected NotFound for
+            // not-yet-created leaves) would fail the guarded operation too.
             if let Ok(held) = self.root.open_directory(&dir) {
                 match at(&Some(dir.clone()), held.relation_to(&state.root))? {
                     RootRelation::Same | RootRelation::Within => {
@@ -1087,7 +1095,9 @@ fn protected_state(
     let Some(state) = state else {
         return Ok(None);
     };
-    // A missing state directory has nothing to protect.
+    // A missing state directory has nothing to protect. Only open roots
+    // after the agent has created the state directory: an endpoint opened
+    // while it is missing will not protect it once it appears.
     let held = match Root::open(state) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         result => at(&None, result)?,
@@ -1106,7 +1116,9 @@ fn protected_state(
         // an aliased root could otherwise leave it reachable.
         let path = SyncPath::try_from(prefix.as_slice())?;
         if at(&Some(path.clone()), root.metadata(&path))?.identity() != identity {
-            return Err(ScanError::ProtectedPath(path));
+            // The root's spelling of the prefix no longer resolves to the
+            // state directory we opened: the root was swapped under us.
+            return Err(ScanError::Changed(Some(path)));
         }
     }
     Ok(Some(ProtectedState {
