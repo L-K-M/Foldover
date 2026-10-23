@@ -22,6 +22,9 @@ All notable changes to this project are documented here. The format follows
 - The pair editor, Settings and the menu bar extra are more compact and
   fit small screens; the pair editor's Save button is always visible.
 
+- The pair editor shows both folders side by side, with the sync mode
+  and direction between them.
+
 - A pair or shared folder may be your home folder — or any folder that
   holds Foldover's state directory. The state directory is left out of
   scans, refused to reads, writes and paired Macs, and protected from

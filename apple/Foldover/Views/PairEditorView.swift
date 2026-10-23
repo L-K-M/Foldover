@@ -30,7 +30,7 @@ struct PairEditorView: View {
             Divider()
             footer
         }
-        .frame(minWidth: 540, idealWidth: 600, minHeight: 380, idealHeight: 540, maxHeight: 820)
+        .frame(minWidth: 800, idealWidth: 920, minHeight: 380, idealHeight: 540, maxHeight: 820)
         .interactiveDismissDisabled(viewModel.isSaving)
         .sheet(item: $enteringServer, onDismiss: { viewModel.resetServerBrowser() }) { side in
             ServerFolderPicker(viewModel: viewModel, side: side)
@@ -68,8 +68,14 @@ struct PairEditorView: View {
 
     private var foldersSection: some View {
         Section {
-            folderRow(.left)
-            folderRow(.right)
+            HStack(spacing: 16) {
+                folderCard(.left)
+                modePicker
+                folderCard(.right)
+            }
+            Text(viewModel.mode.explanation)
+                .font(.callout)
+                .foregroundStyle(.secondary)
             if let warning = viewModel.serverWarning {
                 WarningLabel(text: warning)
             }
@@ -89,13 +95,12 @@ struct PairEditorView: View {
         PairSyncViewModel.folderName(side == .left ? .a : .b)
     }
 
-    /// One side's folder and the menu that changes it; a folder dropped
-    /// on the row becomes the side's folder.
-    private func folderRow(_ side: PairFolderSide) -> some View {
+    /// Each card chooses or accepts a dropped folder for its side.
+    private func folderCard(_ side: PairFolderSide) -> some View {
         let name = folderName(side)
         let path = viewModel.folderText(side)
-        return HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
+        return VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
                 Text(name)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -106,21 +111,21 @@ struct PairEditorView: View {
             }
             .accessibilityElement(children: .combine)
             .help(path)
-            Spacer(minLength: 8)
             chooseMenu(side, folderName: name)
         }
-        .background {
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(.quaternary, in: .rect(cornerRadius: 6))
+        .overlay {
             if dropTarget == side {
                 RoundedRectangle(cornerRadius: 6)
                     .strokeBorder(Color.accentColor, lineWidth: 2)
-                    .background(Color.accentColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
-                    .padding(-6)
             }
         }
         .dropDestination(for: URL.self) { urls, _ in
             viewModel.chooseDropped(urls, side: side)
         } isTargeted: { targeted in
-            // A drag leaving one row must not clear the other's highlight.
+            // A drag leaving one card must not clear the other's highlight.
             if targeted {
                 dropTarget = side
             } else if dropTarget == side {
@@ -150,23 +155,33 @@ struct PairEditorView: View {
             }
         }
         .fixedSize()
-        .help("Choose a folder, or drop one on this row.")
+        .help("Choose a folder, or drop one here.")
         .accessibilityLabel(String(localized: "Choose \(folderName)"))
     }
 
     // MARK: Sync
 
-    private var syncSection: some View {
-        Section {
+    /// Keep direction between the folders, matching the selected mode.
+    private var modePicker: some View {
+        VStack(spacing: 8) {
+            Image(systemName: viewModel.mode.symbol)
+                .font(.title2)
+                .foregroundStyle(.tint)
+                .accessibilityHidden(true)
             Picker("Mode", selection: $viewModel.mode) {
                 ForEach(PairMode.allCases, id: \.self) { mode in
-                    Label(mode.title, systemImage: mode.symbol).tag(mode)
+                    Text(mode.title).tag(mode)
                 }
             }
             .pickerStyle(.menu)
-            Text(viewModel.mode.explanation)
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            .labelsHidden()
+            .accessibilityIdentifier("pair-mode")
+        }
+        .fixedSize()
+    }
+
+    private var syncSection: some View {
+        Section {
             if let warning = viewModel.recordsWarning {
                 WarningLabel(text: warning)
             }
