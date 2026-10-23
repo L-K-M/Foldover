@@ -337,7 +337,7 @@ struct PairSyncViewModel {
     /// once the store's warm-up has passed, so the numbers move slowly
     /// enough to trust.
     static func rateText(_ rate: SyncRate) -> String {
-        var text = String(localized: "\(throughputText(rate.bytesPerSecond))")
+        var text = throughputText(rate.bytesPerSecond)
         if let remaining = rate.remainingSeconds {
             text += " · " + String(localized: "about \(durationText(remaining)) left")
         }
@@ -346,13 +346,15 @@ struct PairSyncViewModel {
 
     /// A copy rate in the largest unit that keeps three significant digits.
     static func throughputText(_ bytesPerSecond: Double) -> String {
-        if bytesPerSecond >= 1_000_000_000 {
+        // Boundaries sit just under the next unit so 999.5 kB/s reads
+        // as 1.0 MB/s instead of 1000 kB/s.
+        if bytesPerSecond >= 999_500_000 {
             return String(format: "%.2f GB/s", bytesPerSecond / 1_000_000_000)
         }
-        if bytesPerSecond >= 1_000_000 {
+        if bytesPerSecond >= 999_500 {
             return String(format: "%.1f MB/s", bytesPerSecond / 1_000_000)
         }
-        if bytesPerSecond >= 1_000 {
+        if bytesPerSecond >= 999.5 {
             return String(format: "%.0f kB/s", bytesPerSecond / 1_000)
         }
         return String(format: "%.0f B/s", bytesPerSecond)
