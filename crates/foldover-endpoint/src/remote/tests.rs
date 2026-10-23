@@ -465,4 +465,32 @@ fn a_shared_folder_never_serves_the_agent_state_directory() {
         SyncPath::try_from(b"Library/Application Support/Foldover/pairs.sqlite".as_slice())
             .unwrap();
     assert!(peer.read(&inside, &entry, &run, 0).is_err());
+
+    // A write inside the state directory is refused there as well.
+    let carried = Carried {
+        metadata: foldover_fs::ForeignMetadata {
+            permissions: 0o644,
+            modified: UNIX_EPOCH,
+        },
+        native: None,
+    };
+    let content = Digest::from_bytes([2; Digest::BYTE_LEN]);
+    assert!(
+        peer.receive(
+            &inside,
+            Expected::Absent,
+            IncomingKind::File {
+                content: content.as_bytes().to_vec(),
+                from: 0,
+            },
+            carried,
+            &run,
+            |sink| sink(b"tampered"),
+        )
+        .is_err()
+    );
+    assert_eq!(
+        std::fs::read(state.join("pairs.sqlite")).unwrap(),
+        b"records"
+    );
 }

@@ -38,6 +38,9 @@ impl<K: Clone + Eq + Send + 'static> RootWatcher<K> {
             let mut affected: Vec<K> = Vec::new();
             for (root, watched) in roots.iter() {
                 let hit = match &change {
+                    // Untargetable overflow: report even for roots that
+                    // hold the state directory — a rare wasted scan beats
+                    // a missed user change.
                     Change::Unknown => true,
                     Change::Paths(paths) => paths
                         .iter()

@@ -153,13 +153,16 @@ impl PeerHost for Host {
                 // Only what is shared with the asking Mac; the engine lock is
                 // released before the folder is touched. The agent's own
                 // state directory stays protected wherever it is shared.
+                let mut lookup_failed = false;
                 let granted = share.parse().ok().and_then(|share| {
                     let engine = self.engine.lock().unwrap_or_else(PoisonError::into_inner);
-                    engine
-                        .shared_folder(device, share)
-                        .ok()
-                        .flatten()
-                        .map(|root| (root, engine.state_path().to_path_buf()))
+                    match engine.shared_folder(device, share) {
+                        Ok(root) => root.map(|root| (root, engine.state_path().to_path_buf())),
+                        Err(_) => {
+                            lookup_failed = true;
+                            None
+                        }
+                    }
                 });
                 match granted {
                     Some((root, state)) => foldover_engine::serve_folder(
@@ -169,6 +172,10 @@ impl PeerHost for Host {
                         answer,
                         Some(&state),
                     ),
+                    None if lookup_failed => {
+                        let _ =
+                            answer.reply(&refused("Could not check shares on this Mac; try again"));
+                    }
                     None => {
                         let _ = answer.reply(&refused("That folder is not shared with this Mac"));
                     }
