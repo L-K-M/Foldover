@@ -177,6 +177,9 @@ struct WorkProgress: Equatable, Sendable {
     var applied: UInt64 = 0
     var bytes: UInt64 = 0
     var copied: UInt64 = 0
+    /// Copy throughput so far, in bytes per second; 0 before the first
+    /// copy lands.
+    var rate: UInt64 = 0
     /// The Mac whose sync of a folder this job waits for, e.g. "Studio".
     var waitingFor: String?
 
@@ -330,7 +333,7 @@ private actor CoreSyncClient: SyncClient {
             .working(self.job(job), cancelling: cancelling, progress: WorkProgress(
                 listed: progress.listed, checked: progress.checked, changes: progress.changes,
                 applied: progress.applied, bytes: progress.bytes, copied: progress.copied,
-                waitingFor: progress.waitingFor
+                rate: progress.rate, waitingFor: progress.waitingFor
             ))
         case .previewed(let preview): .previewed(summary(preview))
         case .needsApproval(let preview): .needsApproval(summary(preview))

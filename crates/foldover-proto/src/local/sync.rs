@@ -288,6 +288,10 @@ pub struct SyncProgress {
     /// Bytes the changes copy, and those copied so far.
     pub bytes: u64,
     pub copied: u64,
+    /// Copy throughput so far, in bytes per second; 0 before the first
+    /// copy lands (PLAN.md §3.2: honest throughput).
+    #[serde(default)]
+    pub rate: u64,
     /// The Mac whose sync of a folder this job waits for, e.g. "Studio".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_for: Option<String>,
