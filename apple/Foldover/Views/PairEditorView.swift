@@ -120,6 +120,7 @@ struct PairEditorView: View {
             if dropTarget == side {
                 RoundedRectangle(cornerRadius: 6)
                     .strokeBorder(Color.accentColor, lineWidth: 2)
+                    .background(Color.accentColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
             }
         }
         .dropDestination(for: URL.self) { urls, _ in

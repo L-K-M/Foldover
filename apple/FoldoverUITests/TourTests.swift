@@ -79,7 +79,10 @@ final class TourTests: XCTestCase {
         XCTAssertEqual(left.frame.midY, right.frame.midY, accuracy: 1, "The folders should share a row")
         XCTAssertLessThan(left.frame.maxX, mode.frame.minX, "Mode should follow Folder A")
         XCTAssertLessThan(mode.frame.maxX, right.frame.minX, "Mode should precede Folder B")
-        XCTAssertTrue(left.isHittable && mode.isHittable && right.isHittable)
+        XCTAssertTrue(left.isHittable, "Folder A should be hittable")
+        XCTAssertTrue(mode.isHittable, "Mode picker should be hittable")
+        XCTAssertTrue(right.isHittable, "Folder B should be hittable")
+        XCTAssertEqual(mode.label, "Mode", "The hidden label should remain accessible")
     }
 
     /// Whether the menu-bar menu `menu` offers `item` enabled; the menu
