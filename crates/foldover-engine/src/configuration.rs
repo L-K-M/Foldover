@@ -122,9 +122,17 @@ impl Engine {
         let root = pairs.root()?;
         // Resolve once: protection checks below compare this path against
         // canonical paths (watch events, scans, peer requests).
-        let state_path = PathBuf::from(OsStr::from_bytes(root.as_bytes()))
-            .canonicalize()
-            .map_err(|source| ScanError::Io { path: None, source })?;
+        let state_path = PathBuf::from(OsStr::from_bytes(root.as_bytes()));
+        let state_path = state_path.canonicalize().map_err(|source| ScanError::Io {
+            path: None,
+            source: std::io::Error::new(
+                source.kind(),
+                format!(
+                    "cannot resolve the agent's state directory {}: {source}",
+                    state_path.display()
+                ),
+            ),
+        })?;
         let state_root = Endpoint::Local(LocalEndpoint::open(&state_path)?);
         Ok(Self {
             pairs,
