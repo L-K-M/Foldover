@@ -1,22 +1,14 @@
-// TEMPORARY, removed before merge: which layout change stops the split
-// view's constraint loop. Each variant turns changes on with
-// -foldover-layout, then runs an unreachable agent, and a selected and
-// previewed pair, through the narrowing sweep from a fresh install.
+// TEMPORARY, removed before merge: how the detail beside the inspector
+// pane should get its minimum. Each variant runs an unreachable agent,
+// and a selected and previewed pair, through the narrowing sweep from a
+// fresh install.
 
 import XCTest
 
 final class LayoutExperimentTests: XCTestCase {
-    @MainActor func testV01Baseline() { run("") }
-    @MainActor func testV02BarLines() { run("barLines") }
-    @MainActor func testV03DetailFrame() { run("detailFrame") }
-    @MainActor func testV04DetailColumn() { run("detailColumn") }
-    @MainActor func testV05EmptyWrap() { run("emptyWrap") }
-    @MainActor func testV06BarLinesEmptyWrap() { run("barLines,emptyWrap") }
-    @MainActor func testV07BarLinesDetailColumn() { run("barLines,detailColumn") }
-    @MainActor func testV08BarLinesEmptyWrapDetailColumn() { run("barLines,emptyWrap,detailColumn") }
-    @MainActor func testV09BarLinesEmptyWrapDetailFrame() { run("barLines,emptyWrap,detailFrame") }
-    @MainActor func testV10DetailFrameWindow800() { run("barLines,emptyWrap,detailFrame,windowMin800") }
-    @MainActor func testV11DetailColumnWindow800() { run("barLines,emptyWrap,detailColumn,windowMin800") }
+    @MainActor func testV01PaneFrame() { run("") }
+    @MainActor func testV02PaneColumnMin() { run("paneColumnMin") }
+    @MainActor func testV03PaneNoMin() { run("paneNoMin") }
 
     @MainActor
     private func run(_ flags: String) {

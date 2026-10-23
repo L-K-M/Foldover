@@ -135,12 +135,6 @@ private struct SidebarAgentBar: View {
     // The button sits below the text: beside it, a narrow sidebar would
     // cut off a reason the agent gives. Long reasons end in an ellipsis,
     // with the full text in the tooltip.
-    //
-    // The bar sits below the list, so its height is part of the column's
-    // minimum, which must not change with the column's width (see
-    // SplitColumn). Each text therefore keeps a fixed number of lines
-    // whatever the width: wrapped text would otherwise gain or lose a
-    // line each time the split view resized the sidebar.
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top, spacing: 8) {
@@ -152,7 +146,6 @@ private struct SidebarAgentBar: View {
                 Text(viewModel.agentSummary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .modifier(ReservedLines(lines: barLines ? summaryLines : nil))
                     .lineLimit(4)
                     .help(viewModel.agentSummary)
                     .accessibilityAddTraits(.updatesFrequently)
@@ -167,8 +160,6 @@ private struct SidebarAgentBar: View {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)
-                    .modifier(ReservedLines(lines: barLines ? 2 : nil))
-                    .help(error)
                     .textSelection(.enabled)
             }
             // The detail explains a catalog that cannot load until a pair
@@ -177,8 +168,6 @@ private struct SidebarAgentBar: View {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)
-                    .modifier(ReservedLines(lines: barLines ? 2 : nil))
-                    .help(error)
                     .textSelection(.enabled)
                 Button("Try Again") { Task { await viewModel.perform(.retry) } }
                     .controlSize(.small)
@@ -187,17 +176,6 @@ private struct SidebarAgentBar: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-    }
-
-    private var barLines: Bool { LayoutExperiment.has("barLines") }
-
-    /// A healthy agent needs a line; a problem gets room for its reason.
-    private var summaryLines: Int {
-        switch viewModel.agentState {
-        case .connected: 1
-        case .connecting: 2
-        case .attention, .off: 3
-        }
     }
 
     private var dotColor: Color {

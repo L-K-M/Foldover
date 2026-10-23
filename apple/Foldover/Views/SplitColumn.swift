@@ -1,20 +1,15 @@
 import SwiftUI
 
-/// A split view column's content, sized to whatever the split view gives
-/// the column and reporting no minimum size of its own.
+/// Content sized to whatever its split view column gives it, reporting
+/// no minimum size of its own.
 ///
-/// AppKit asks every column for its size limits during each constraint
-/// pass. When a column's minimum depends on its own width, as it does
-/// for wrapping text or a table beside fixed-size controls, the limits
-/// change from one pass to the next, and AppKit ends the loop by raising
-/// an exception that quits the app. A GeometryReader takes the size it
-/// is offered and reports none of its content's, so such content sits in
-/// one of these.
-///
-/// A column left with no minimum at all crashed the same way once the
-/// window narrowed and the split view squeezed it, so the column gets a
-/// fixed minimum width outside this view, one that the window's minimum
-/// width leaves room for beside the other columns at theirs.
+/// AppKit asks every split view column for its size limits during each
+/// constraint pass. When a column's minimum depends on its own width, as
+/// it does for wrapping text or a table beside fixed-size controls, the
+/// limits can change from one pass to the next, and AppKit ends the loop
+/// by raising an exception that quits the app. A GeometryReader takes
+/// the size it is offered and reports none of its content's, so content
+/// like that sits in one, with any minimum width set outside it.
 struct SplitColumn<Content: View>: View {
     private let alignment: Alignment
     private let content: Content
@@ -32,9 +27,11 @@ struct SplitColumn<Content: View>: View {
     }
 }
 
-// TEMPORARY, removed before merge: which layout change stops the split
-// view's constraint loop. A Debug build launched with `-foldover-layout
-// a,b` turns on the named changes; without it, the layout is main's.
+// TEMPORARY, removed before merge: how the detail beside the inspector
+// pane should get its minimum. A Debug build launched with
+// `-foldover-layout <flag>` takes `paneColumnMin` (the minimum as a
+// column width instead of a frame) or `paneNoMin` (no minimum, and the
+// old 760 pt window minimum); without one, the frame and 820 pt.
 enum LayoutExperiment {
     private static let flags: Set<String> = {
         #if DEBUG
@@ -48,28 +45,14 @@ enum LayoutExperiment {
     static func has(_ flag: String) -> Bool { flags.contains(flag) }
 }
 
-/// Fixed lines for a text, or its own wrapping when `lines` is nil.
-struct ReservedLines: ViewModifier {
-    let lines: Int?
-
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if let lines {
-            content.lineLimit(lines, reservesSpace: true)
-        } else {
-            content
-        }
-    }
-}
-
-/// The detail column's minimum as a column width, when `enabled`.
+/// The detail column's minimum as a column width, when given one.
 struct DetailColumnWidth: ViewModifier {
-    let enabled: Bool
+    let min: CGFloat?
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        if enabled {
-            content.navigationSplitViewColumnWidth(min: 320, ideal: 520)
+        if let min {
+            content.navigationSplitViewColumnWidth(min: min, ideal: min + 200)
         } else {
             content
         }

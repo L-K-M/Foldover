@@ -16,9 +16,13 @@ struct MainView: View {
     @FocusState private var searchFocused: Bool
     @FocusState private var paneFocus: MainPane?
 
-    /// The detail's fixed minimum width, which its toolbar section of
-    /// title and buttons fits in.
+    /// The selected pair's view keeps this much beside the inspector.
     private static let detailMinWidth: CGFloat = 320
+    private static let inspectorWidth: CGFloat = 280
+    /// The sidebar's minimum, the detail's and the inspector's, with room
+    /// for the dividers: a window narrower than its columns is what sets
+    /// off AppKit's layout loop (see `splitView`).
+    private static let windowMinWidth: CGFloat = 820
 
     var body: some View {
         splitView
@@ -51,28 +55,40 @@ struct MainView: View {
             .onChange(of: viewModel.undoableSync, initial: true) { _, sync in registerUndo(sync) }
             .onChange(of: viewModel.pairsLoaded) { restoreSelection() }
             .onChange(of: viewModel.selectedPairID) { _, pairID in restoredPairID = pairID ?? "" }
-            // Room for every column at its minimum: the sidebar's 200, the
-            // detail's own and the inspector's 240 (see SplitColumn).
-            .frame(minWidth: LayoutExperiment.has("windowMin800") ? 800 : 200 + Self.detailMinWidth + 240,
-                   minHeight: 460)
+            .focusedSceneValue(\.inspectorShown, $showsInspector)
+            .frame(minWidth: LayoutExperiment.has("paneNoMin") ? 760 : Self.windowMinWidth, minHeight: 460)
             .task {
                 await viewModel.refreshAgent()
                 restoreSelection()
             }
     }
 
+    // The inspector is a pane at the detail's trailing edge, not SwiftUI's
+    // `.inspector`. With that third split view column, AppKit's layout
+    // loop quit the app whenever the window got narrower than the
+    // columns together: on a live resize, a sidebar dragged wider, or a
+    // launch into a window saved at a narrow size with a pair selected
+    // (a known SwiftUI defect on macOS 26 and 27). The window's minimum
+    // width keeps every column at its minimum.
     private var splitView: some View {
         NavigationSplitView {
             PairSidebar(viewModel: viewModel, focus: $paneFocus)
         } detail: {
-            detail
-                .frame(minWidth: LayoutExperiment.has("detailFrame") ? Self.detailMinWidth : nil)
-                .modifier(DetailColumnWidth(enabled: LayoutExperiment.has("detailColumn")))
-                .navigationTitle(viewModel.selectedPair?.settings.name ?? viewModel.title)
-                .navigationSubtitle(viewModel.selectedSync?.shortStatus ?? "")
-        }
-        .inspector(isPresented: $showsInspector) {
-            PairInspector(viewModel: viewModel)
+            HStack(spacing: 0) {
+                SplitColumn { detail }
+                    .frame(minWidth: LayoutExperiment.has("paneColumnMin") || LayoutExperiment.has("paneNoMin")
+                           ? nil : Self.detailMinWidth)
+                if showsInspector {
+                    Divider()
+                    PairInspector(viewModel: viewModel)
+                        .frame(width: Self.inspectorWidth)
+                }
+            }
+            .modifier(DetailColumnWidth(
+                min: LayoutExperiment.has("paneColumnMin")
+                    ? Self.detailMinWidth + (showsInspector ? Self.inspectorWidth + 1 : 0) : nil))
+            .navigationTitle(viewModel.selectedPair?.settings.name ?? viewModel.title)
+            .navigationSubtitle(viewModel.selectedSync?.shortStatus ?? "")
         }
         .searchable(text: searchText, placement: .toolbar, prompt: "Filter Changes")
         .searchFocused($searchFocused)
@@ -85,15 +101,7 @@ struct MainView: View {
             PairDetailView(viewModel: viewModel, pair: pair, focus: $paneFocus)
                 .id(pair.id)
         } else {
-            // The empty states' descriptions wrap, so their height
-            // depends on the width (see SplitColumn).
-            Group {
-                if LayoutExperiment.has("emptyWrap") {
-                    SplitColumn { emptyDetail }
-                } else {
-                    emptyDetail
-                }
-            }
+            emptyDetail
                 // Drag one or two folders in to create a pair (PLAN.md §3.8).
                 .dropDestination(for: URL.self) { urls, _ in
                     viewModel.newPair(dropping: urls)
