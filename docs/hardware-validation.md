@@ -20,8 +20,8 @@ mount (`nfs://nas/…`) if the NAS offers both.
 1. Preview a folder of a few hundred items with mixed content.
    - [ ] Scan completes; preview lists creates/copies/deletes correctly.
    - [ ] Names with accents, spaces and emoji preview and copy
-          byte-exact (ambiguous `._*` AppleDouble files are reported and
-          left unchanged while other files sync; see
+         byte-exact (ambiguous `._*` AppleDouble files are reported and
+         left unchanged while other files sync; see
          `docs/guide/nas-and-sftp.md`).
 2. Run the sync.
    - [ ] Run completes; NAS side holds the copies.

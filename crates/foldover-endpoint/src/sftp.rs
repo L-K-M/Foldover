@@ -548,6 +548,7 @@ impl SftpEndpoint {
                 .iter()
                 .any(|root| root == &path || root.is_ancestor_of(&path))
             {
+                progress(ObserveStep::Checked);
                 continue;
             }
             let entry = match self.observe_entry(&path, &attributes, policy, control) {

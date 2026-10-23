@@ -960,26 +960,6 @@ fn completed_runs_name_their_archive_and_prune_expired_runs() {
         fs::create_dir_all(archive.join(&name)).unwrap();
         fs::write(archive.join(name).join("kept"), b"k").unwrap();
     }
-    // A partial run must keep recovery versions, even past retention.
-    fs::write(pair.left.path().join("._unclassified"), b"metadata").unwrap();
-    let RunOutcome::Ran(partial) = pair
-        .prepare()
-        .execute(
-            Approval::default(),
-            RunContext::Reviewed,
-            std::time::UNIX_EPOCH + day * 40,
-            &mut |_, _| Ok(()),
-            &mut proceed,
-            &NoProgress,
-        )
-        .unwrap()
-    else {
-        panic!("expected a run");
-    };
-    assert_eq!(partial.pruned(), 0);
-    assert_eq!(partial.failures().len(), 1);
-    assert_eq!(fs::read_dir(&archive).unwrap().count(), 2);
-    fs::remove_file(pair.left.path().join("._unclassified")).unwrap();
     let prepared = pair.prepare();
     let started = std::time::UNIX_EPOCH + day * 40;
     let RunOutcome::Ran(report) = prepared
@@ -1011,6 +991,35 @@ fn completed_runs_name_their_archive_and_prune_expired_runs() {
             ))
             .exists()
     );
+}
+
+#[test]
+fn persistent_scan_errors_do_not_freeze_archive_retention() {
+    let mut pair = fixture(SyncMode::Mirror { source: Side::Left });
+    let day = Duration::from_secs(SECONDS_PER_DAY);
+    fs::write(pair.left.path().join("file"), b"v1").unwrap();
+    pair.sync();
+    fs::write(pair.left.path().join("._unclassified"), b"metadata").unwrap();
+    let archive = pair.right.path().join(".foldover/archive");
+
+    for days in [40, 80] {
+        let expired = archive.join(foldover_endpoint::archive_name(STARTED + day * (days - 31)));
+        fs::create_dir_all(&expired).unwrap();
+        fs::write(expired.join("old"), b"expired").unwrap();
+        fs::write(pair.left.path().join("file"), days.to_string()).unwrap();
+        let RunOutcome::Ran(report) = pair.run_at(
+            Approval::default(),
+            RunContext::Interactive,
+            STARTED + day * days,
+        ) else {
+            panic!("expected a run");
+        };
+        assert_eq!(report.failures().len(), 1);
+        assert_eq!(report.copied(), 1);
+        assert!(report.pruned() > 0);
+        assert!(!expired.exists());
+        assert!(archive.join(report.archive()).join("file").exists());
+    }
 }
 
 #[test]

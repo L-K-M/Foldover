@@ -216,6 +216,39 @@ fn the_whole_tree_is_listed_before_any_entry_is_checked() {
 }
 
 #[test]
+fn unreadable_directories_still_complete_scan_progress() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    let private = directory.path().join("private");
+    fs::create_dir(&private).unwrap();
+    fs::write(directory.path().join("safe"), b"copy me").unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o0)).unwrap();
+    let mut steps = Vec::new();
+    let result = remote.observe_reporting(
+        PairOptions::default().metadata(),
+        &Filter::none(),
+        &std::collections::BTreeMap::new(),
+        &mut proceed,
+        &mut |step| steps.push(step),
+    );
+    fs::set_permissions(private, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(result.unwrap().issues().len(), 1);
+    let listed = steps
+        .iter()
+        .filter(|&&step| step == ObserveStep::Listed)
+        .count();
+    let checked = steps
+        .iter()
+        .filter(|&&step| step == ObserveStep::Checked)
+        .count();
+    assert_eq!((listed, checked), (2, 2));
+}
+
+#[test]
 fn oversized_sidecars_are_excluded_before_classification() {
     let directory = tempfile::tempdir().unwrap();
     let Some(remote) = sftp(directory.path()) else {

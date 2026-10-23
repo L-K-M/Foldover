@@ -400,6 +400,11 @@ func scanErrorsStayVisibleWhileSafeChangesRemainSyncable() async {
     #expect(viewModel.statusText != "Folders are in sync.")
     #expect(viewModel.placeholder == nil)
     #expect(viewModel.activity == .attention)
+
+    // An inconsistent count cannot underflow while drawing the error list.
+    preview.failureCount = 0
+    await show(.previewed(preview), on: viewModel, via: client)
+    #expect(viewModel.hiddenRowsText == nil)
 }
 
 @MainActor

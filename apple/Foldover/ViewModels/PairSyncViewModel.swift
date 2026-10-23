@@ -468,7 +468,10 @@ struct PairSyncViewModel {
 
     /// Rows not shown because responses carry only the first changes.
     var hiddenRowsText: String? {
-        let hiddenFailures = reviewable.map { $0.failureCount - UInt64($0.failures.count) } ?? 0
+        let hiddenFailures = reviewable.map { preview in
+            let shown = UInt64(preview.failures.count)
+            return preview.failureCount > shown ? preview.failureCount - shown : 0
+        } ?? 0
         let failuresText = hiddenFailures > 0 ? String(localized: "\(hiddenFailures) more scan errors") : nil
         if let listing = store.listing(for: pair.id) {
             let text = [listing.more ? String(localized: "More changes follow") : nil, failuresText]

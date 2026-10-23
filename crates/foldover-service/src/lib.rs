@@ -1252,10 +1252,11 @@ mod tests {
         assert_eq!(previewed["state"], "previewed", "{previewed}");
         let preview = &previewed["preview"];
         assert_eq!(preview["counts"]["copies"], 1);
+        assert_eq!(preview["items"].as_array().unwrap().len(), 1);
         assert_eq!(preview["failure_count"], failures);
         assert_eq!(
             preview["failures"].as_array().unwrap().len(),
-            SYNC_ITEM_LIMIT
+            SYNC_ITEM_LIMIT - 1
         );
         assert!(
             preview["failures"][0]["message"]
@@ -1274,7 +1275,10 @@ mod tests {
         assert_eq!(finished["state"], "finished", "{finished}");
         assert_eq!(finished["result"]["copied"], 1);
         assert_eq!(finished["result"]["failure_count"], failures);
-        assert_eq!(finished["result"]["failures"], preview["failures"]);
+        let shown = preview["failures"].as_array().unwrap();
+        let reported = finished["result"]["failures"].as_array().unwrap();
+        assert_eq!(reported.len(), SYNC_ITEM_LIMIT);
+        assert_eq!(&reported[..shown.len()], shown.as_slice());
         assert_eq!(fs::read(right.join("safe.txt")).unwrap(), b"copy me");
         assert!(!right.join("._sidecar-0").exists());
     }

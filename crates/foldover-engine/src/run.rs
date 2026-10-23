@@ -1212,9 +1212,8 @@ impl PairRun {
             return Err(error.into());
         }
 
-        // Retention deletes data, so it runs only after a complete run.
-        if executor.report.completion == Completion::Finished && executor.report.failures.is_empty()
-        {
+        // Keep retention bounded even when a path fails every run.
+        if executor.report.completion == Completion::Finished {
             for side in [Side::Left, Side::Right] {
                 if unrecorded == Some(side) {
                     continue;

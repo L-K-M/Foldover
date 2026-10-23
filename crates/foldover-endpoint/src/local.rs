@@ -833,8 +833,8 @@ impl LocalEndpoint {
 
     /// Stream depth-first metadata rows without opening file data or buffering a
     /// whole directory. Enumeration order is filesystem-defined; plans must sort.
-    /// The sink must exclude `ScanStats::unavailable` subtrees and discard all
-    /// rows when this returns an error. Cancellation
+    /// Buffer rows and post-filter `ScanStats::unavailable()` subtrees, which
+    /// can fail after rows are emitted. Discard all rows on error. Cancellation
     /// is checked between rows; it does not interrupt a blocked filesystem call.
     pub fn scan_metadata(
         &self,
@@ -1047,6 +1047,7 @@ impl LocalEndpoint {
                 return Err(ScanError::Cancelled);
             }
             if observation.is_unavailable(&entry.path) {
+                progress(ObserveStep::Checked);
                 continue;
             }
             if let Some(known) = previous.get(&entry.path)
@@ -1646,6 +1647,40 @@ mod tests {
             unavailable,
             [path(b".config/op/op-daemon.sock"), path(b"pipe")]
         );
+    }
+
+    #[test]
+    fn root_transport_and_cancellation_errors_never_become_scan_issues() {
+        let path = SyncPath::try_from(b"folder".as_slice()).unwrap();
+        let mut errors = vec![
+            ScanError::Cancelled,
+            ScanError::Changed(None),
+            ScanError::ProtectedPath(path.clone()),
+            ScanError::Io {
+                path: None,
+                source: io::ErrorKind::PermissionDenied.into(),
+            },
+        ];
+        errors.extend(
+            [
+                io::ErrorKind::BrokenPipe,
+                io::ErrorKind::ConnectionAborted,
+                io::ErrorKind::ConnectionReset,
+                io::ErrorKind::NotConnected,
+                io::ErrorKind::UnexpectedEof,
+                io::ErrorKind::TimedOut,
+            ]
+            .map(|kind| ScanError::Io {
+                path: Some(path.clone()),
+                source: kind.into(),
+            }),
+        );
+        for error in errors {
+            let mut observation = Observation::default();
+            assert!(observation.skip_error(error).is_err());
+            assert!(observation.issues().is_empty());
+            assert!(observation.unavailable().is_empty());
+        }
     }
 
     #[test]
