@@ -20,8 +20,13 @@ private actor ArchiveFixtureClient: ArchiveClient {
     func holdRestore() { holdsRestore = true }
     func refuseRestore() { refusesRestore = true }
 
-    func waitForHeldRestore() async {
-        while heldRestore == nil { await Task.yield() }
+    func waitForHeldRestore() async -> Bool {
+        let deadline = ContinuousClock.now + .seconds(3)
+        while heldRestore == nil {
+            if ContinuousClock.now >= deadline { return false }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return true
     }
 
     func releaseRestore() {
@@ -146,7 +151,7 @@ func aWholeRunRestoreReservesBothRestoreCommands() async throws {
 
     await client.holdRestore()
     let restoring = Task { await viewModel.putBackAll() }
-    await client.waitForHeldRestore()
+    try #require(await client.waitForHeldRestore(), "Restore never reached the fixture")
     #expect(!viewModel.canPutBack)
     #expect(!viewModel.canPutBackAll)
     #expect(viewModel.statusText == "Putting items back…")
@@ -274,6 +279,7 @@ private enum TwoRunFixtureError: Error { case refused }
 private actor TwoRunArchiveClient: ArchiveClient {
     /// "run/name" per put-back, in request order.
     private(set) var putBacks: [String] = []
+    private(set) var restoreRequests = 0
     private var refused: Set<String> = []
     private var holdsNext = false
     private var held: CheckedContinuation<Void, Never>?
@@ -313,7 +319,8 @@ private actor TwoRunArchiveClient: ArchiveClient {
     }
 
     func putBackAll(_ id: String, side: FolderSide, run: String) async throws -> RunRestore {
-        RunRestore(restored: 0, beside: 0, failures: 0)
+        restoreRequests += 1
+        return RunRestore(restored: 0, beside: 0, failures: 0)
     }
 }
 
@@ -333,6 +340,9 @@ func aPutBackBatchStaysInTheRunItStartedIn() async {
     await client.waitForHeldPutBack()
     #expect(!viewModel.canPutBack)
     #expect(!viewModel.canPutBackAll)
+
+    await viewModel.putBackAll()
+    #expect(await client.restoreRequests == 0)
 
     await viewModel.select("old")
     await client.releasePutBack()
