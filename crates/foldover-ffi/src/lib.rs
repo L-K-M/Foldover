@@ -586,6 +586,10 @@ mod tests {
             panic!("a read timeout is a connection problem, not a committed save")
         };
         assert!(!message.contains("committed"), "{message}");
+        assert!(
+            message.contains("try again"),
+            "a read timeout invites a retry: {message}"
+        );
         let AgentError::Request { message } = AgentError::from(foldover_client::Error::Timeout)
         else {
             panic!("a mutation timeout warns it may have committed")
