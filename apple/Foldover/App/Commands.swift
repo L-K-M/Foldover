@@ -36,10 +36,17 @@ struct AppCommands: Commands {
 /// of changes the selected pair lists.
 struct ViewCommands: Commands {
     @FocusedValue(\.mainWindow) private var window: MainViewModel?
+    @FocusedValue(\.inspectorShown) private var inspectorShown: Binding<Bool>?
 
     var body: some Commands {
         SidebarCommands()
-        InspectorCommands()
+        CommandGroup(after: .sidebar) {
+            Button(inspectorShown?.wrappedValue == true ? "Hide Inspector" : "Show Inspector") {
+                if let inspectorShown { inspectorShown.wrappedValue.toggle() }
+            }
+            .keyboardShortcut("i", modifiers: [.command, .control])
+            .disabled(inspectorShown == nil)
+        }
         ToolbarCommands()
         CommandGroup(before: .toolbar) {
             ChangeFilterItems(window: window)

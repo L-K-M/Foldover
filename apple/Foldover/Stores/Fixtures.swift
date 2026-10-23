@@ -11,6 +11,11 @@ enum Fixtures {
     static let launchArgument = "-foldover-fixtures"
     /// Shows the app in Dark Mode whatever the system uses.
     static let darkArgument = "-foldover-dark"
+    /// With the launch argument above, starts from no saved preferences,
+    /// as on a fresh install: AppKit keeps the window's size and the
+    /// sidebar's state there, and a tour must not inherit them from an
+    /// earlier run.
+    static let resetArgument = "-foldover-reset-defaults"
 
     static var isEnabled: Bool { ProcessInfo.processInfo.arguments.contains(launchArgument) }
 
@@ -183,27 +188,73 @@ enum Fixtures {
     }
 }
 
+/// A launch state for the layout checks, from `-foldover-scenario
+/// <name>`: states a real agent produces that the tour's instant,
+/// healthy agent does not. Without one, the tour's usual state.
+enum FixtureScenario: String {
+    /// The agent answers after two seconds, as a real one does at launch,
+    /// so the window starts out connecting.
+    case slowAgent = "slow-agent"
+    /// The agent stopped repeatedly and waits in crash-loop safe mode.
+    case safeMode = "safe-mode"
+    /// The agent cannot be reached.
+    case agentFailed = "agent-failed"
+    /// The catalog is empty, so the setup guide shows.
+    case noPairs = "no-pairs"
+    /// The catalog cannot load.
+    case pairsFail = "pairs-fail"
+
+    static var current: FixtureScenario? {
+        UserDefaults.standard.string(forKey: "foldover-scenario").flatMap(FixtureScenario.init)
+    }
+
+    func agentReport() async throws -> AgentReport {
+        switch self {
+        case .slowAgent:
+            try await Task.sleep(for: .seconds(2))
+            return AgentReport(version: "0.1.0")
+        case .safeMode:
+            return AgentReport(version: "0.1.0", safeModeStops: 3)
+        case .agentFailed:
+            throw FixtureError.agentUnavailable
+        case .noPairs, .pairsFail:
+            return AgentReport(version: "0.1.0")
+        }
+    }
+}
+
 private enum FixtureError: LocalizedError {
     case missingPair
     case notAvailable
+    case agentUnavailable
+    case catalogUnavailable
 
     var errorDescription: String? {
         switch self {
         case .missingPair: "The tour has no such pair."
         case .notAvailable: "The tour cannot do that."
+        case .agentUnavailable: "The agent’s socket refused the connection, so its answer about the pairs and their state is not available yet."
+        case .catalogUnavailable: "The agent could not read its pair catalog: the database is locked by another process."
         }
     }
 }
 
 actor FixturePairClient: PairClient {
-    private var pairs = Fixtures.pairs()
+    private let scenario: FixtureScenario?
+    private var pairs: [SyncPair]
+
+    init(scenario: FixtureScenario? = nil) {
+        self.scenario = scenario
+        pairs = scenario == .noPairs ? [] : Fixtures.pairs()
+    }
 
     func revision(of id: String) -> UInt64 {
         pairs.first { $0.id == id }?.revision ?? 0
     }
 
     func page(after: String?) async throws -> PairCatalogPage {
-        PairCatalogPage(pairs: after == nil ? pairs : [], next: nil)
+        if scenario == .pairsFail { throw FixtureError.catalogUnavailable }
+        return PairCatalogPage(pairs: after == nil ? pairs : [], next: nil)
     }
 
     func create(_ settings: PairSettings) async throws -> SyncPair {

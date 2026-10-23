@@ -55,16 +55,22 @@ struct FoldoverApp: App {
     /// Every store wired to the canned clients in Fixtures.swift.
     private static func fixtureStores() -> AppStores {
         Fixtures.prepareFolders()
+        // Before any window reads its saved frame.
+        if ProcessInfo.processInfo.arguments.contains(Fixtures.resetArgument),
+           let domain = Bundle.main.bundleIdentifier {
+            UserDefaults.standard.removePersistentDomain(forName: domain)
+        }
         // A tour's dark pass; the system's own appearance stays as it is.
         if ProcessInfo.processInfo.arguments.contains(Fixtures.darkArgument) {
             NSApplication.shared.appearance = NSAppearance(named: .darkAqua)
         }
-        let pairs = FixturePairClient()
+        let scenario = FixtureScenario.current
+        let pairs = FixturePairClient(scenario: scenario)
         let macToMac = MacToMacStore(client: FixtureMacToMacClient())
         let automation = AutomationStore(client: FixtureAutomationClient())
         let main = MainViewModel(
             appInfo: AppInfoStore(),
-            agent: AgentStore(statusRequest: { AgentReport(version: "0.1.0") },
+            agent: AgentStore(statusRequest: { try await scenario?.agentReport() ?? AgentReport(version: "0.1.0") },
                               leaveSafeModeRequest: { AgentReport(version: "0.1.0") },
                               alert: { _, _ in }),
             pairs: PairStore(client: pairs),

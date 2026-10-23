@@ -16,6 +16,13 @@ struct MainView: View {
     @FocusState private var searchFocused: Bool
     @FocusState private var paneFocus: MainPane?
 
+    /// The selected pair's view keeps this much beside the inspector, and
+    /// the window's minimum leaves room for it, the inspector and the
+    /// sidebar at its minimum.
+    private static let detailMinWidth: CGFloat = 320
+    private static let inspectorWidth: CGFloat = 280
+    private static let windowMinWidth: CGFloat = 820
+
     var body: some View {
         splitView
             // The window's commands withdraw while its editor or removal
@@ -47,23 +54,37 @@ struct MainView: View {
             .onChange(of: viewModel.undoableSync, initial: true) { _, sync in registerUndo(sync) }
             .onChange(of: viewModel.pairsLoaded) { restoreSelection() }
             .onChange(of: viewModel.selectedPairID) { _, pairID in restoredPairID = pairID ?? "" }
-            .frame(minWidth: 760, minHeight: 460)
+            .focusedSceneValue(\.inspectorShown, $showsInspector)
+            .frame(minWidth: Self.windowMinWidth, minHeight: 460)
             .task {
                 await viewModel.refreshAgent()
                 restoreSelection()
             }
     }
 
+    // The inspector is a pane at the detail's trailing edge, not SwiftUI's
+    // `.inspector`. As a third split view column, it set off AppKit's
+    // layout loop, which quits the app, whenever the window got narrower
+    // than the columns together: on a live resize, on dragging the sidebar
+    // wider, and at a launch into a window saved narrow with a pair
+    // selected. Other apps report the same defect on macOS 26 and 27. With
+    // the pane, LayoutStressTests narrows the window to its minimum in
+    // every state without it.
     private var splitView: some View {
         NavigationSplitView {
             PairSidebar(viewModel: viewModel, focus: $paneFocus)
         } detail: {
-            detail
-                .navigationTitle(viewModel.selectedPair?.settings.name ?? viewModel.title)
-                .navigationSubtitle(viewModel.selectedSync?.shortStatus ?? "")
-        }
-        .inspector(isPresented: $showsInspector) {
-            PairInspector(viewModel: viewModel)
+            HStack(spacing: 0) {
+                SplitColumn { detail }
+                    .frame(minWidth: Self.detailMinWidth)
+                if showsInspector {
+                    Divider()
+                    PairInspector(viewModel: viewModel)
+                        .frame(width: Self.inspectorWidth)
+                }
+            }
+            .navigationTitle(viewModel.selectedPair?.settings.name ?? viewModel.title)
+            .navigationSubtitle(viewModel.selectedSync?.shortStatus ?? "")
         }
         .searchable(text: searchText, placement: .toolbar, prompt: "Filter Changes")
         .searchFocused($searchFocused)

@@ -11,24 +11,61 @@ enum TourAppearance: String {
     case dark = "Dark"
 }
 
+/// What a launch brings back from the last one.
+enum TourLaunchState {
+    /// A fresh window: no restored windows or scene storage.
+    case fresh
+    /// The windows, selection and inspector the last run left, as at a
+    /// person's launch.
+    case restored
+}
+
 @MainActor
 struct Tour {
     let app = XCUIApplication()
     let test: XCTestCase
     let appearance: TourAppearance
 
-    init(_ test: XCTestCase, appearance: TourAppearance) {
+    /// `scenario` names a launch state from `FixtureScenario`, such as an
+    /// agent that answers slowly; none is the tour's usual state.
+    init(_ test: XCTestCase, appearance: TourAppearance, scenario: String? = nil,
+         launchState: TourLaunchState = .fresh) {
         self.test = test
         self.appearance = appearance
-        app.launchArguments = ["-foldover-fixtures", "-foldover-skip-update-check",
-                               "-ApplePersistenceIgnoreState", "YES"]
-        if appearance == .dark { app.launchArguments.append("-foldover-dark") }
+        // Every flag takes a value. AppKit reads the arguments as `-key
+        // value` pairs: a bare flag takes the next flag as its value, which
+        // strands the word after it, and AppKit opens a stray word as a
+        // file, so the app opens no window of its own.
+        app.launchArguments = ["-foldover-fixtures", "YES", "-foldover-skip-update-check", "YES"]
+        switch launchState {
+        case .fresh:
+            app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-foldover-reset-defaults", "YES"]
+        case .restored:
+            // Restore after a quit too, not only after a crash or logout.
+            app.launchArguments += ["-NSQuitAlwaysKeepsWindows", "YES"]
+        }
+        if appearance == .dark { app.launchArguments += ["-foldover-dark", "YES"] }
+        if let scenario { app.launchArguments += ["-foldover-scenario", scenario] }
     }
 
     func launch() {
         app.launch()
         XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 30), "No window appeared")
+        showSidebarIfHidden()
         pause(1)
+    }
+
+    /// AppKit remembers a collapsed sidebar from one launch to the next,
+    /// which the tours' saved-state flag does not cover; every tour starts
+    /// with it shown.
+    func showSidebarIfHidden() {
+        // A look can miss a sidebar that is shown but not yet in the
+        // accessibility tree, so each toggle is checked again.
+        for _ in 0..<3 {
+            if app.outlines.firstMatch.waitForExistence(timeout: 2) { return }
+            key("s", [.command, .control])
+        }
+        XCTAssertTrue(app.outlines.firstMatch.waitForExistence(timeout: 2), "The sidebar never appeared")
     }
 
     /// Let animations and polled state settle before a screenshot.

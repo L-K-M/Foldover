@@ -15,7 +15,6 @@ struct PairInspector: View {
                 ContentUnavailableView("No Pair Selected", systemImage: "sidebar.trailing")
             }
         }
-        .inspectorColumnWidth(min: 240, ideal: 280, max: 360)
     }
 
     private func form(_ pair: SyncPair) -> some View {
