@@ -36,8 +36,17 @@ struct ArchiveViewModel {
 
     var runRows: [ArchiveRunRow] {
         store.runs.map {
-            ArchiveRunRow(id: $0.name, title: $0.started.formatted(date: .abbreviated, time: .standard))
+            ArchiveRunRow(id: $0.name, title: Self.runTitle($0.started))
         }
+    }
+
+    /// Absolute for older runs; relative while the day is still useful.
+    static func runTitle(_ started: Date) -> String {
+        let age = Date().timeIntervalSince(started)
+        if age >= 0, age < 86_400 {
+            return started.formatted(.relative(presentation: .named))
+        }
+        return started.formatted(date: .abbreviated, time: .standard)
     }
 
     var itemRows: [ArchiveItemRow] {
