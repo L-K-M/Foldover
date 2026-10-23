@@ -490,6 +490,7 @@ func windowSyncsStayUndoableWhenARefreshTakesOverTheirPoller() async throws {
 
     let syncing = Task { await viewModel.syncInWindow(photos.id) }
     #expect(await eventuallyInWindow { viewModel.sync(for: photos).isWorking })
+    #expect(viewModel.menuBarImage == "MenuBarArrowWorking")
     let refreshing = Task { await viewModel.sync(for: photos).refresh() }
     // Let the refresh take over and the run's poller notice and end.
     try await Task.sleep(for: .milliseconds(250))

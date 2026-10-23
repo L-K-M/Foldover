@@ -42,18 +42,24 @@ private actor AutomationFixtureClient: AutomationClient {
 @Test
 func pausingHoldsAutomaticSyncsUntilResumed() async {
     let client = AutomationFixtureClient()
-    let viewModel = MainViewModel(appInfo: AppInfoStore(), automation: AutomationStore(client: client))
+    let agent = AgentStore(statusRequest: { AgentReport(version: "1.0") })
+    await agent.refresh()
+    let viewModel = MainViewModel(appInfo: AppInfoStore(), agent: agent,
+                                  automation: AutomationStore(client: client))
     #expect(!viewModel.isPaused)
     #expect(viewModel.pauseText == nil)
+    #expect(viewModel.menuBarImage == "MenuBarArrow")
 
     await viewModel.pause(.untilResumed)
     #expect(viewModel.pauseText == "Automatic syncs are paused.")
+    #expect(viewModel.menuBarImage == "MenuBarArrowPaused")
     await viewModel.pause(.oneHour)
     #expect(viewModel.pauseText?.hasPrefix("Automatic syncs are paused until ") == true)
     #expect(await client.requested == [nil, 60])
 
     #expect(await viewModel.resumeForShortcuts() == "Automatic syncs are running.")
     #expect(!viewModel.isPaused)
+    #expect(viewModel.menuBarImage == "MenuBarArrow")
 }
 
 @MainActor

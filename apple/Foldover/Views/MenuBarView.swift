@@ -7,6 +7,7 @@ import SwiftUI
 
 struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
+    @ScaledMetric(relativeTo: .title2) private var headerIconSize: CGFloat = 24
     let viewModel: MainViewModel
 
     var body: some View {
@@ -57,7 +58,7 @@ struct MenuBarView: View {
                     .resizable()
                     .scaledToFit()
                     .foregroundStyle(.tint)
-                    .frame(width: 24, height: 24)
+                    .frame(width: headerIconSize, height: headerIconSize)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(viewModel.statusLine)
