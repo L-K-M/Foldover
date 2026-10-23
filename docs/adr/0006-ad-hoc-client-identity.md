@@ -98,9 +98,47 @@ same-identifier lookalikes, interpreters, changed bundles, restart rotation
 and fake agents receiving no private payload. This transport policy does not
 enable pair APIs or establish their method/root scope.
 
+## Rebuilt agent registration
+
+An ad-hoc helper's designated requirement includes its exact code hash.
+On macOS 27.0.1, Service Management retains the generated launch constraint
+under the helper's launchd label after unregistering and registering it
+again. The API reports the service as enabled, but launchd rejects the
+updated executable with `OS_REASON_CODESIGNING` and a spawn-constraint
+mismatch. Retrying registration under the same label does not reliably
+refresh that constraint.
+
+The installed-app failure was observed in the native logs on 2026-10-23.
+An isolated signed app reproduced it after replacing its entire app bundle
+with a new inode. Changing the helper's launchd label caused the updated
+helper to start immediately. Changing only the bundle version, helper path,
+plist filename, or an explicit additional spawn constraint did not repair
+the retained constraint.
+
+The build now signs the helper first and stamps its code hash into the
+packaged launchd label, `ch.lkmc.foldover.agent.<cdhash>`. The helper's signing
+identifier remains `ch.lkmc.foldover.agent`; private IPC retains the exact
+installed-code checks above. The package check verifies that the label
+matches the signed helper. A Swift-only update can retain its helper's
+label and still restart the agent to enroll the changed app identity.
+
+At launch, loaded previous jobs authorize migration only when launchd
+explicitly reports all of them enabled. Missing, mixed or unknown status
+does not authorize registration, and a disabled or unapproved service is
+left alone. Before registering the new helper, the native boundary stops
+the legacy label and older code-hash labels, then verifies their absence.
+A failure to stop one prevents a new agent from starting.
+
+`scripts/test-agent-registration.py` compiles the production boundary into
+a temporary signed app with a unique service namespace. It checks migration
+from a legacy label, two consecutive helper updates, preservation of a
+disabled previous job even with another stale enabled job, and absence of
+the earlier jobs after each migration. It never registers Foldover's
+production service or opens sync data.
+
 ## Remaining gates
 
-- Full app/agent update lifecycle and authenticated distribution.
+- Shipping-app update lifecycle qualification and authenticated distribution.
 - Shipping-bundle debugging/injection and permission behavior after updates.
 - Different-user rejection and maximum/long UTF-8 socket paths.
 - TCC attribution and guided access for Full Disk Access, removable/network

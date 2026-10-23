@@ -275,7 +275,6 @@ APPLICATIONS_DIR="${FOLDOVER_APPLICATIONS_DIR:-/Applications}"
 # Drop trailing slashes: macOS reports the running app as
 # ~/Applications/Foldover.app, which ~/Applications//Foldover.app misses.
 APPLICATIONS_DIR="${APPLICATIONS_DIR%"${APPLICATIONS_DIR##*[!/]}"}"
-AGENT_LABEL="ch.lkmc.foldover.agent"
 APP_QUIT_SECONDS=10
 
 # Escape $1 for use as a literal inside an extended regular expression.
@@ -298,7 +297,6 @@ install_app() {
   local dest="$APPLICATIONS_DIR/Foldover.app"
   local incoming="$APPLICATIONS_DIR/.Foldover.app.incoming"
   local outgoing="$APPLICATIONS_DIR/.Foldover.app.outgoing"
-  local agent="gui/$UID/$AGENT_LABEL"
   # This user's copy of the installed app only, e.g.
   # ^/Applications/Foldover\.app/Contents/MacOS/Foldover( |$)
   local running
@@ -311,6 +309,23 @@ install_app() {
     record "install app: FAILED (the previous app is stranded at $outgoing)"
     return 1
   fi
+
+  local agent_label="ch.lkmc.foldover.agent"
+  local installed_plist="$dest/Contents/Library/LaunchAgents/ch.lkmc.foldover.agent.plist"
+  if [[ -f "$installed_plist" ]]; then
+    agent_label="$(python3 - "$installed_plist" <<'PY'
+import plistlib
+import re
+import sys
+with open(sys.argv[1], "rb") as stream:
+    label = plistlib.load(stream)["Label"]
+if not re.fullmatch(r"ch\.lkmc\.foldover\.agent(?:\.[0-9a-f]{40})?", label):
+    raise RuntimeError("Installed agent has an invalid launchd label")
+print(label)
+PY
+)" || { record "install app: FAILED (cannot read the installed agent label)"; return 1; }
+  fi
+  local agent="gui/$UID/$agent_label"
 
   echo "-- copying dist/Foldover.app next to $dest"
   if ! rm -rf "$incoming" "$outgoing" || ! ditto "$DIST/Foldover.app" "$incoming"; then

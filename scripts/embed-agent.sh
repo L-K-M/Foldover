@@ -33,3 +33,9 @@ for executable in foldoverd foldover; do
     --identifier "$identifier" "$HELPERS/$executable"
   codesign --verify --strict "$HELPERS/$executable"
 done
+
+# Service Management retains an ad-hoc helper's old exact code constraint
+# across unregister/register. A code-hash label gives this helper a fresh
+# constraint without changing the signing identifier used by private IPC.
+python3 "$ROOT/scripts/agent-plist.py" stamp "$HELPERS/foldoverd" \
+  "$AGENTS/$BUNDLE_ID.agent.plist"

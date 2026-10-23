@@ -136,6 +136,7 @@ func safeModeShowsNotifiesOnceAndResumes() async {
 @MainActor
 final class StaleLoginItem: AgentRegistering {
     var registration: AgentRegistration
+    var previousRegistration: AgentRegistration?
     var appBuild: Data? = Data("new build".utf8)
     /// What registering anew leaves the login item as.
     var afterReregistering: AgentRegistration = .enabled
@@ -167,6 +168,10 @@ final class StaleLoginItem: AgentRegistering {
         registrations += 1
         if registration == .disabled { registration = .enabled }
         return registration
+    }
+
+    func registrationForUpdate() async -> AgentRegistration {
+        previousRegistration ?? registration
     }
 
     /// While set, each registration anew waits for `release()`.
@@ -384,6 +389,28 @@ final class AgentRegistrationTests {
         item.appBuild = Data("newer build".utf8)
         await agentStore(for: item).reregisterIfUpdated()
         #expect(item.reregistrations == 2)
+    }
+
+    /// A changed helper has a fresh launchd label. The old enabled job
+    /// authorizes migration even though the new service is not registered.
+    @Test
+    func anUpdatedHelperMigratesThePreviousEnabledJob() async {
+        let item = StaleLoginItem(.unavailable, startsAfter: 1)
+        item.previousRegistration = .enabled
+        let store = agentStore(for: item)
+        await store.reregisterIfUpdated()
+        #expect(store.connection == .connected(version: "1.0"))
+        #expect(item.reregistrations == 1)
+    }
+
+    @Test
+    func anUpdatedHelperPreservesDisabledAndUnapprovedJobs() async {
+        for previous in [AgentRegistration.disabled, .requiresApproval] {
+            let item = StaleLoginItem(.unavailable, startsAfter: 1)
+            item.previousRegistration = previous
+            await agentStore(for: item).reregisterIfUpdated()
+            #expect(item.reregistrations == 0)
+        }
     }
 
     /// A login item that is off, or a build that cannot be read, is left as
