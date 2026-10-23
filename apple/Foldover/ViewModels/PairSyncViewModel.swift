@@ -99,7 +99,7 @@ struct ApprovalRequest: Equatable, Sendable, Identifiable {
 /// loaded for it and the kind filter narrowing them. Every builder that
 /// shares the cache must be distinguishable by these fields — two
 /// builders with an equal source get each other's rows.
-private struct RowsSource: Equatable {
+fileprivate struct RowsSource: Equatable {
     var pair: String
     var token: String
     var paged: Bool
@@ -121,7 +121,7 @@ final class ChangeRowsCache {
     /// source, however many view models read it.
     private(set) var builds = 0
 
-    func rows(from source: RowsSource, build: () -> [ChangeRow]) -> [ChangeRow] {
+    fileprivate func rows(from source: RowsSource, build: () -> [ChangeRow]) -> [ChangeRow] {
         if let entry = entries[source.pair], entry.source == source {
             return entry.rows
         }
