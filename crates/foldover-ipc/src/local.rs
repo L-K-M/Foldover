@@ -90,7 +90,7 @@ impl Connection {
     async fn call_within(&mut self, request: Request, timeout: Duration) -> Result<Value, Error> {
         if self.poisoned {
             return Err(Error::Protocol(
-                "The connection is unusable after a call timed out",
+                "The connection is unusable after a timed-out or failed call",
             ));
         }
         let expected = request
@@ -100,7 +100,12 @@ impl Connection {
         if privileged(request.method()) {
             self.channel.require_installed_peer().await?;
         }
-        self.write_value(&request.to_value()).await?;
+        if let Err(error) = self.write_value(&request.to_value()).await {
+            // A write failure can leave a truncated frame in flight; a
+            // later call would splice onto the leftover bytes.
+            self.poisoned = true;
+            return Err(error);
+        }
         let frame = match self.read_frame(timeout).await {
             // A read failure can leave this call's answer in flight;
             // a later read would hand it to the wrong call.
@@ -112,6 +117,9 @@ impl Connection {
         };
         let response = Response::parse(serde_json::from_slice(&frame)?).map_err(Error::Protocol)?;
         if response.id() != &expected {
+            // This answer belongs to another call, so the real one is
+            // still in flight and would desync whatever reads next.
+            self.poisoned = true;
             return Err(Error::Protocol("Response ID does not match the request"));
         }
         response.into_result().map_err(|error| Error::Remote {
