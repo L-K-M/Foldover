@@ -32,15 +32,19 @@ struct Tour {
          launchState: TourLaunchState = .fresh) {
         self.test = test
         self.appearance = appearance
-        app.launchArguments = ["-foldover-fixtures", "-foldover-skip-update-check"]
+        // Every flag takes a value. AppKit reads the arguments as `-key
+        // value` pairs: a bare flag takes the next flag as its value, which
+        // strands the word after it, and AppKit opens a stray word as a
+        // file, so the app opens no window of its own.
+        app.launchArguments = ["-foldover-fixtures", "YES", "-foldover-skip-update-check", "YES"]
         switch launchState {
         case .fresh:
-            app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-foldover-reset-defaults"]
+            app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-foldover-reset-defaults", "YES"]
         case .restored:
             // Restore after a quit too, not only after a crash or logout.
             app.launchArguments += ["-NSQuitAlwaysKeepsWindows", "YES"]
         }
-        if appearance == .dark { app.launchArguments.append("-foldover-dark") }
+        if appearance == .dark { app.launchArguments += ["-foldover-dark", "YES"] }
         if let scenario { app.launchArguments += ["-foldover-scenario", scenario] }
     }
 
