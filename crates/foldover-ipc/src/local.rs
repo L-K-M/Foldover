@@ -19,6 +19,11 @@ const MAX_BATCH_REQUESTS: usize = 128;
 const MAX_CONNECTIONS: usize = 32;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Calls that reach a remote host or move files inline get the agent's
+/// own SFTP bounds (60s connect, 60s I/O) plus margin, not the 5s a
+/// local answer needs.
+const SLOW_REQUEST_TIMEOUT: Duration = Duration::from_secs(150);
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("Agent I/O: {0}")]
@@ -67,6 +72,17 @@ impl Connection {
     }
 
     pub async fn call(&mut self, request: Request) -> Result<Value, Error> {
+        self.call_within(request, REQUEST_TIMEOUT).await
+    }
+
+    /// A call the agent answers slowly: reaching a remote host (SFTP
+    /// browsing, pair checks, peer handshakes) or moving files inline
+    /// (put-back, keep-both) outlasts the normal five seconds.
+    pub async fn call_slow(&mut self, request: Request) -> Result<Value, Error> {
+        self.call_within(request, SLOW_REQUEST_TIMEOUT).await
+    }
+
+    async fn call_within(&mut self, request: Request, timeout: Duration) -> Result<Value, Error> {
         let expected = request
             .id()
             .ok_or(Error::Protocol("A call needs an ID"))?
@@ -76,7 +92,7 @@ impl Connection {
         }
         self.write_value(&request.to_value()).await?;
         let frame = self
-            .read_frame()
+            .read_frame(timeout)
             .await?
             .ok_or(Error::Protocol("Agent closed before its response"))?;
         let response = Response::parse(serde_json::from_slice(&frame)?).map_err(Error::Protocol)?;
@@ -89,8 +105,8 @@ impl Connection {
         })
     }
 
-    async fn read_frame(&mut self) -> Result<Option<Vec<u8>>, Error> {
-        tokio::time::timeout(REQUEST_TIMEOUT, self.read_inner())
+    async fn read_frame(&mut self, timeout: Duration) -> Result<Option<Vec<u8>>, Error> {
+        tokio::time::timeout(timeout, self.read_inner())
             .await
             .map_err(|_| Error::Timeout)?
     }
@@ -168,7 +184,7 @@ where
                 pending: Vec::new(),
             };
             let session = AtomicBool::new(false);
-            while let Some(frame) = connection.read_frame().await? {
+            while let Some(frame) = connection.read_frame(REQUEST_TIMEOUT).await? {
                 let output = match serde_json::from_slice(&frame) {
                     Ok(value) => {
                         dispatch(value, &|request| {
@@ -449,14 +465,23 @@ mod tests {
             pending: Vec::new(),
         };
         client.write_all(b"one\ntwo\npart").await.unwrap();
-        assert_eq!(server.read_frame().await.unwrap().unwrap(), b"one");
-        assert_eq!(server.read_frame().await.unwrap().unwrap(), b"two");
+        assert_eq!(
+            server.read_frame(REQUEST_TIMEOUT).await.unwrap().unwrap(),
+            b"one"
+        );
+        assert_eq!(
+            server.read_frame(REQUEST_TIMEOUT).await.unwrap().unwrap(),
+            b"two"
+        );
         client.write_all(b"ial\n").await.unwrap();
-        assert_eq!(server.read_frame().await.unwrap().unwrap(), b"partial");
+        assert_eq!(
+            server.read_frame(REQUEST_TIMEOUT).await.unwrap().unwrap(),
+            b"partial"
+        );
         client.write_all(b"broken").await.unwrap();
         drop(client);
         assert!(matches!(
-            server.read_frame().await,
+            server.read_frame(REQUEST_TIMEOUT).await,
             Err(Error::Protocol("Truncated agent frame"))
         ));
     }
@@ -472,7 +497,7 @@ mod tests {
             pending: vec![b'x'; MAX_FRAME_BYTES + 1],
         };
         assert!(matches!(
-            server.read_frame().await,
+            server.read_frame(REQUEST_TIMEOUT).await,
             Err(Error::FrameTooLarge)
         ));
         client.write_all(b"\n").await.unwrap();
