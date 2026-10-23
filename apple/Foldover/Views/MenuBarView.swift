@@ -10,6 +10,10 @@ struct MenuBarView: View {
     @ScaledMetric(relativeTo: .title2) private var headerIconSize: CGFloat = 24
     let viewModel: MainViewModel
 
+    /// The pair list's height cap: pairs past it scroll, instead of
+    /// pushing Sync All and Quit Foldover below the screen's edge.
+    private static let pairRowsHeight: CGFloat = 320
+
     var body: some View {
         let rows = viewModel.pairRows
         VStack(alignment: .leading, spacing: 8) {
@@ -17,11 +21,14 @@ struct MenuBarView: View {
 
             if !rows.isEmpty {
                 Divider()
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(rows) { row in
-                        pairRow(row)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(rows) { row in
+                            pairRow(row)
+                        }
                     }
                 }
+                .frame(maxHeight: Self.pairRowsHeight)
                 Divider()
                 Button { Task { await viewModel.syncAll() } } label: { rowLabel("Sync All") }
                     .disabled(!viewModel.canSyncAll)
