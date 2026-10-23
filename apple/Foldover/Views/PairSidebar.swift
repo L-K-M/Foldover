@@ -130,10 +130,12 @@ private struct SidebarPairRow: View {
         .badge(row.conflicts)
     }
 
-    /// Quiet freshness (PLAN.md §3.2 principle 4): a healthy pair that
-    /// has not synced in a day cools toward secondary; one that has
-    /// never synced stays secondary. Attention and work keep the status
-    /// colors they already use.
+    /// Quiet freshness (PLAN.md §3.2 principle 4): a completed sync
+    /// within the last hour reads primary, within the last day cools to
+    /// secondary, and beyond a day warms to orange as gently stale.
+    /// Never-synced pairs stay secondary; attention and work keep the
+    /// status colors they already use. The orange here is at 0.85
+    /// opacity so a stale row is softer than the solid attention icon.
     private var statusColor: Color {
         switch row.activity {
         case .attention:
