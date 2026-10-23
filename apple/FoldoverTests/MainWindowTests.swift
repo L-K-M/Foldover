@@ -803,7 +803,7 @@ func aHealthCheckInFlightKeepsShowingTheLastAnswer() async {
     let first = Task { await viewModel.refreshAgent() }
     await health.waitUntilHeld()
     #expect(viewModel.agentState == .connecting)
-    #expect(viewModel.agentAction == nil)
+    #expect(viewModel.agentAction == .turnOn)
     #expect(viewModel.agentStatusText == "Connecting to the background agent…")
     await health.release()
     await first.value
@@ -823,6 +823,54 @@ func aHealthCheckInFlightKeepsShowingTheLastAnswer() async {
     #expect(viewModel.menuBarSymbol == "exclamationmark.arrow.triangle.2.circlepath")
     await health.release()
     await check.value
+}
+
+/// Turn On takes over a connection check immediately; its late result
+/// cannot undo the recovery or prevent the catalog from loading.
+@MainActor
+@Test
+func turnOnIsAvailableBeforeTheFirstHealthCheckAnswers() async {
+    let health = HeldHealthCheck()
+    let item = StaleLoginItem(startsAfter: 0)
+    let suite = "foldover-tests-\(UUID().uuidString)"
+    defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+    let viewModel = MainViewModel(
+        appInfo: AppInfoStore(),
+        agent: AgentStore(statusRequest: { await health.report() }, system: item,
+                          defaults: UserDefaults(suiteName: suite)),
+        pairs: PairStore(client: WindowCatalog([]))
+    )
+    await health.holdNext()
+    let checking = Task { await viewModel.refreshAgent() }
+    await health.waitUntilHeld()
+    let action = viewModel.agentAction
+    #expect(action == .turnOn)
+    if let action { await viewModel.perform(action) }
+    #expect(viewModel.agentState == .connected)
+    #expect(viewModel.pairsLoaded)
+
+    await health.release()
+    await checking.value
+    #expect(viewModel.agentState == .connected)
+}
+
+@MainActor
+@Test
+func cancellingAHealthCheckPreservesTheConnectedState() async {
+    let health = HeldHealthCheck()
+    let viewModel = MainViewModel(
+        appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { await health.report() }),
+        pairs: PairStore(client: WindowCatalog([]))
+    )
+    await viewModel.refreshAgent()
+    await health.holdNext()
+    let checking = Task { await viewModel.refreshAgent() }
+    await health.waitUntilHeld()
+    checking.cancel()
+    await checking.value
+    #expect(viewModel.agentState == .connected)
+    #expect(viewModel.agentAction == nil)
+    await health.release()
 }
 
 #if DEBUG

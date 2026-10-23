@@ -14,6 +14,8 @@ struct AgentReport: Equatable, Sendable {
 enum AgentConnection: Equatable {
     case disconnected
     case connecting
+    case starting
+    case restarting
     case approvalRequired
     case connected(version: String)
     case failed(message: String)
@@ -44,6 +46,10 @@ extension BackgroundAgent: AgentRegistering {}
 @Observable
 @MainActor
 final class AgentStore {
+    private enum StatusError: Error {
+        case timedOut
+    }
+
     private let system: any AgentRegistering
     private let statusRequest: @Sendable () async throws -> AgentReport
     private let leaveSafeModeRequest: @Sendable () async throws -> AgentReport
@@ -67,10 +73,13 @@ final class AgentStore {
     @ObservationIgnored private var starting: Task<Void, Never>?
     private(set) var connection: AgentConnection = .disconnected {
         didSet {
-            if connection != .connecting { lastSettled = connection }
+            switch connection {
+            case .connecting, .starting, .restarting: break
+            default: lastSettled = connection
+            }
         }
     }
-    /// The newest answer that was not `.connecting`; nil until one
+    /// The newest answer that was not progress; nil until one
     /// arrives. A health check in flight can show this instead of
     /// flickering to "connecting" on every check.
     private(set) var lastSettled: AgentConnection?
@@ -139,18 +148,22 @@ final class AgentStore {
     }
 
     func refresh() async {
-        guard starting == nil else { return }
+        guard starting == nil, !Task.isCancelled else { return }
         generation += 1
         let request = generation
         connection = .connecting
         do {
-            let report = try await statusRequest()
+            let report = try await status(within: startupProbe)
             guard generation == request else { return }
             connection = .connected(version: report.version)
             note(report)
         } catch {
             guard generation == request else { return }
-            if error is AgentNotRunning,
+            guard !Task.isCancelled else {
+                connection = lastSettled ?? .disconnected
+                return
+            }
+            if error is AgentNotRunning || error is StatusError,
                case .requiresApproval = system.registration {
                 connection = .approvalRequired
                 return
@@ -169,7 +182,7 @@ final class AgentStore {
                 // Turning the agent on is not a background check: show that
                 // it is connecting rather than the answer it replaces.
                 lastSettled = nil
-                connection = .connecting
+                connection = .starting
                 // An agent registered before answers within a moment, even
                 // while it starts. One that does not is a job launchd cannot
                 // start, so it is registered anew rather than waited on.
@@ -198,7 +211,7 @@ final class AgentStore {
                   build != defaults.data(forKey: Self.registeredBuildKey) else { return }
             generation += 1
             let request = generation
-            connection = .connecting
+            connection = .restarting
             do {
                 let registration = try await system.reregister()
                 guard generation == request else { return }
@@ -224,9 +237,9 @@ final class AgentStore {
         if starting == task { starting = nil }
     }
 
-    /// How long Turn On gives an agent registered before to answer, as while
-    /// it starts, before registering it anew.
-    private var startupProbe: Duration { startupTimeout / 5 }
+    /// Give cold code-identity checks five seconds before repairing an enabled
+    /// agent; the full launch window also covers the agent starting.
+    private var startupProbe: Duration { startupTimeout / 2 }
 
     /// Wait for the agent behind `registration` to answer, registering it
     /// anew while it does not, up to `repairs` times. `registered` says the
@@ -245,6 +258,7 @@ final class AgentStore {
                 connection = .approvalRequired
                 return
             }
+            connection = .starting
             if let report = try await answer(within: wait, request: request) {
                 connection = .connected(version: report.version)
                 note(report)
@@ -257,6 +271,7 @@ final class AgentStore {
                 return
             }
             repairsLeft -= 1
+            connection = .restarting
             registration = try await system.reregister()
             guard generation == request else { return }
             registered = true
@@ -271,13 +286,41 @@ final class AgentStore {
         let deadline = ContinuousClock.now.advanced(by: timeout)
         while true {
             do {
-                let report = try await statusRequest()
+                let report = try await status(within: ContinuousClock.now.duration(to: deadline))
                 return generation == request ? report : nil
-            } catch is AgentNotRunning {
+            } catch is AgentNotRunning, AgentError.Connection, is StatusError {
                 guard ContinuousClock.now < deadline, generation == request else { return nil }
-                try await Task.sleep(for: startupPoll)
+                try await Task.sleep(for: min(startupPoll, ContinuousClock.now.duration(to: deadline)))
             }
         }
+    }
+
+    /// UniFFI status calls ignore Swift cancellation. Race the reply without
+    /// a task group, which would wait for the cancelled call to finish.
+    private func status(within timeout: Duration) async throws -> AgentReport {
+        let request = statusRequest
+        let (replies, reply) = AsyncStream<Result<AgentReport, Error>>.makeStream(
+            bufferingPolicy: .bufferingOldest(1))
+        let checking = Task {
+            do {
+                reply.yield(.success(try await request()))
+            } catch {
+                reply.yield(.failure(error))
+            }
+            reply.finish()
+        }
+        let timer = Task {
+            do { try await Task.sleep(for: timeout) } catch { return }
+            reply.yield(.failure(StatusError.timedOut))
+            reply.finish()
+        }
+        defer {
+            checking.cancel()
+            timer.cancel()
+            reply.finish()
+        }
+        for await result in replies { return try result.get() }
+        throw CancellationError()
     }
 
     func openLoginItems() {
@@ -286,6 +329,8 @@ final class AgentStore {
 
     private func message(for error: Error) -> String {
         switch error {
+        case StatusError.timedOut:
+            String(localized: "The background agent is not responding. Choose Turn On to restart it.")
         case let error as AgentNotRunning: error.message
         case AgentError.Connection(let message), AgentError.NotRunning(let message),
              AgentError.Request(let message): message

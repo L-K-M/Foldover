@@ -262,6 +262,8 @@ final class MainViewModel {
         switch shownConnection {
         case .disconnected: String(localized: "Background agent is off")
         case .connecting: String(localized: "Connecting to the background agent…")
+        case .starting: String(localized: "Starting the background agent…")
+        case .restarting: String(localized: "Restarting the background agent…")
         case .approvalRequired: String(localized: "Approve Foldover in Login Items")
         case .connected(let version): String(localized: "Agent \(version) connected")
         case .failed(let message): String(localized: "Background agent unavailable: \(message)")
@@ -314,7 +316,7 @@ final class MainViewModel {
     var agentState: AgentIndicator {
         switch shownConnection {
         case .connected: agent.safeModeStops == nil ? .connected : .attention
-        case .connecting: .connecting
+        case .connecting, .starting, .restarting: .connecting
         case .approvalRequired: .attention
         case .disconnected, .failed: .off
         }
@@ -324,10 +326,10 @@ final class MainViewModel {
     /// agent needs none.
     var agentAction: AgentAction? {
         switch shownConnection {
-        case .disconnected, .failed: .turnOn
+        case .disconnected, .failed, .connecting: .turnOn
         case .approvalRequired: .openLoginItems
         case .connected: agent.safeModeStops == nil ? nil : .resumeSyncing
-        case .connecting: nil
+        case .starting, .restarting: nil
         }
     }
 
@@ -601,13 +603,18 @@ final class MainViewModel {
 
     var setupSteps: [SetupStep] {
         let connected = if case .connected = agent.connection { true } else { false }
+        let action: SetupAction? = switch agentAction {
+        case .turnOn: .enableAgent
+        case .openLoginItems: .openLoginItems
+        case .resumeSyncing, .retry, nil: nil
+        }
         let agentStep = SetupStep(
             id: 1, title: String(localized: "Turn on the background agent"),
             detail: agentNeedsApproval
                 ? String(localized: "Allow Foldover in System Settings › General › Login Items. Foldover connects once it is allowed.")
                 : String(localized: "It syncs your folders even when this window is closed."),
             progress: connected ? .done : .current,
-            action: connected ? nil : (agentNeedsApproval ? .openLoginItems : .enableAgent)
+            action: action
         )
         let pairStep = SetupStep(
             id: 2, title: String(localized: "Create a pair"),

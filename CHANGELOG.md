@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Agent connection checks time out and keep Turn On available. Starting and
+  restarting show their own status, and Turn On also repairs an agent that
+  rejects an updated app's handshake.
+
 - Sockets, named pipes and device files no longer stop local scans, so a
   home folder containing 1Password's daemon socket can sync. These paths
   are skipped in both folders, preserving existing copies.

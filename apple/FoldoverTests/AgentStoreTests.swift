@@ -1,4 +1,5 @@
 import Foundation
+import FoldoverCore
 import FoldoverSystem
 import Testing
 @testable import Foldover
@@ -48,6 +49,42 @@ func staleAgentRefreshCannotReplaceANewerResult() async {
     await client.finishFirst()
     await older.value
     #expect(store.connection == .connected(version: "new"))
+}
+
+/// A status call may ignore cancellation, as the UniFFI bridge does. Its
+/// deadline must still restore recovery, and a late answer must stay stale.
+@MainActor
+@Test
+func anUnansweredHealthCheckTimesOutAndIgnoresItsLateReply() async throws {
+    let client = DeferredStatus()
+    let store = AgentStore(statusRequest: { AgentReport(version: try await client.status()) },
+                           startupTimeout: .milliseconds(100))
+    let checking = Task { await store.refresh() }
+    await client.waitUntilStarted()
+    try await Task.sleep(for: .milliseconds(150))
+    let timedOut = store.connection
+    if case .failed(let message) = timedOut {
+        #expect(message.contains("not responding"))
+    } else {
+        Issue.record("Expected a timeout, got \(timedOut)")
+    }
+
+    await client.finishFirst()
+    await checking.value
+    #expect(store.connection == timedOut)
+}
+
+@MainActor
+@Test
+func cancellingTheFirstHealthCheckRestoresTheOffState() async {
+    let client = DeferredStatus()
+    let store = AgentStore(statusRequest: { AgentReport(version: try await client.status()) })
+    let checking = Task { await store.refresh() }
+    await client.waitUntilStarted()
+    checking.cancel()
+    await checking.value
+    #expect(store.connection == .disconnected)
+    await client.finishFirst()
 }
 
 private actor SafeModeAgent {
@@ -194,6 +231,33 @@ final class AgentRegistrationTests {
         #expect(item.reregistrations == 2)
     }
 
+    /// An old agent can accept the socket but reject the new app's handshake.
+    @Test
+    func turnOnRepairsAnAgentFromThePreviousBuild() async {
+        let item = StaleLoginItem(startsAfter: 1)
+        let store = AgentStore(statusRequest: {
+            guard await item.reregistrations > 0 else {
+                throw AgentError.Connection(message: "Agent version mismatch; restart the background agent")
+            }
+            return try await item.status()
+        }, system: item, defaults: defaults,
+           startupTimeout: .milliseconds(100), startupPoll: .milliseconds(5))
+        await store.enable()
+        #expect(item.reregistrations == 1)
+        #expect(store.connection == .connected(version: "1.0"))
+    }
+
+    @Test
+    func turnOnPreservesRequestErrorsWithoutRestarting() async {
+        let item = StaleLoginItem(startsAfter: 0)
+        let store = AgentStore(statusRequest: {
+            throw AgentError.Request(message: "Cannot read agent state")
+        }, system: item, defaults: defaults)
+        await store.enable()
+        #expect(item.reregistrations == 0)
+        #expect(store.connection == .failed(message: "Cannot read agent state"))
+    }
+
     @Test
     func turnOnGivesUpAfterTwoTriesAndSaysWhatToDo() async {
         let item = StaleLoginItem(startsAfter: nil)
@@ -243,6 +307,30 @@ final class AgentRegistrationTests {
         await store.enable()
         #expect(store.connection == .connected(version: "1.0"))
         #expect(item.reregistrations == 0)
+    }
+
+    /// The probe's deadline covers the request itself, not just the pauses
+    /// between refused connections. Turn On must reach its repair.
+    @Test
+    func turnOnRepairsWhenTheStatusRequestDoesNotAnswer() async throws {
+        let client = DeferredStatus()
+        let item = StaleLoginItem(startsAfter: 1)
+        let store = AgentStore(statusRequest: { AgentReport(version: try await client.status()) },
+                               system: item, defaults: defaults,
+                               startupTimeout: .milliseconds(100), startupPoll: .milliseconds(5))
+        let turningOn = Task { await store.enable() }
+        await client.waitUntilStarted()
+        let viewModel = MainViewModel(appInfo: AppInfoStore(), agent: store)
+        #expect(viewModel.agentStatusText == "Starting the background agent…")
+        #expect(viewModel.agentAction == nil)
+        #expect(viewModel.setupSteps.first?.action == nil)
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(item.reregistrations == 1)
+        #expect(store.connection == .connected(version: "new"))
+
+        await client.finishFirst()
+        await turningOn.value
+        #expect(store.connection == .connected(version: "new"))
     }
 
     /// Turn On, chosen while the launch registers the agent anew, waits for
@@ -326,7 +414,10 @@ final class AgentRegistrationTests {
             return
         }
         await store.refresh()
-        #expect(store.connection == .connecting)
+        let viewModel = MainViewModel(appInfo: AppInfoStore(), agent: store)
+        #expect(viewModel.agentStatusText == "Restarting the background agent…")
+        #expect(viewModel.agentAction == nil)
+        #expect(viewModel.setupSteps.first?.action == nil)
         item.release()
         await turningOn.value
         #expect(store.connection == .connected(version: "1.0"))
