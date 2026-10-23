@@ -997,6 +997,7 @@ mod tests {
         let second = tempfile::tempdir().unwrap();
         let pair = changing_pair(first.path(), 9);
         let edited = changing_pair(second.path(), 9);
+        assert!(pair.id() == edited.id(), "the edit must keep the pair's id");
         let start = Instant::now();
         let scheduler = Scheduler::new(start);
         let (sender, receiver) = mpsc::channel();
@@ -1015,8 +1016,12 @@ mod tests {
         fs::write(second.path().join("right/new"), b"x").unwrap();
         assert!(receiver.recv_timeout(Duration::from_secs(5)).is_ok());
         // ...and its old one is no longer watched. One write reports
-        // through several events; let its stragglers land first.
-        std::thread::sleep(Duration::from_millis(500));
+        // through several events; wait for a quiet stretch so its
+        // stragglers cannot slip past the drain below.
+        let quiet_by = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < quiet_by && receiver.recv_timeout(Duration::from_millis(250)).is_ok()
+        {
+        }
         while receiver.try_recv().is_ok() {}
         fs::write(first.path().join("right/old"), b"x").unwrap();
         assert!(receiver.recv_timeout(Duration::from_secs(2)).is_err());
