@@ -119,7 +119,7 @@ struct FoldoverApp: App {
         } label: {
             // The menu bar shows only the symbol; the title names the
             // item for VoiceOver.
-            Label("Foldover", systemImage: viewModel.menuBarSymbol)
+            Label("Foldover", image: viewModel.menuBarImage)
         }
         .menuBarExtraStyle(.window)
 

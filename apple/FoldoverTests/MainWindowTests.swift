@@ -230,7 +230,7 @@ func pairRowsSayHowEachPairReadsAtAGlance() async {
     let docs = windowPair(docsWindowID, "Docs")
     let client = WindowSyncClient()
     let viewModel = await windowModel([photos, docs], sync: client)
-    #expect(viewModel.menuBarSymbol == "arrow.triangle.2.circlepath")
+    #expect(viewModel.menuBarImage == "MenuBarArrow")
 
     await client.set(.previewed(conflictPlan()), for: docs.id)
     await viewModel.sync(for: docs).preview()
@@ -248,7 +248,7 @@ func pairRowsSayHowEachPairReadsAtAGlance() async {
     #expect(viewModel.pairsLoaded)
     #expect(viewModel.agentState == .connected)
     #expect(viewModel.agentAction == nil)
-    #expect(viewModel.menuBarSymbol == "exclamationmark.arrow.triangle.2.circlepath")
+    #expect(viewModel.menuBarImage == "MenuBarArrowAttention")
 }
 
 @MainActor
@@ -258,7 +258,7 @@ func theAgentStatusOffersOneFittingAction() async {
                                 agent: AgentStore(statusRequest: { throw WindowFixtureError.unexpected }))
     #expect(offline.agentState == .off)
     #expect(offline.agentAction == .turnOn)
-    #expect(offline.menuBarSymbol == "exclamationmark.arrow.triangle.2.circlepath")
+    #expect(offline.menuBarImage == "MenuBarArrowAttention")
     #expect(!offline.pairsLoaded)
 
     let safeMode = MainViewModel(
@@ -782,7 +782,7 @@ func aFailedHealthCheckReadsAsOffAndOffersTurnOn() async {
     #expect(failing.agentAction == .turnOn)
     #expect(failing.agentStatusText.hasPrefix("Background agent unavailable"))
     #expect(failing.agentSummary == failing.agentStatusText)
-    #expect(failing.menuBarSymbol == "exclamationmark.arrow.triangle.2.circlepath")
+    #expect(failing.menuBarImage == "MenuBarArrowAttention")
 }
 
 // The monitor checks the agent every few seconds, and the agent reads as
@@ -820,7 +820,7 @@ func aHealthCheckInFlightKeepsShowingTheLastAnswer() async {
     #expect(viewModel.agentAction == .resumeSyncing)
     #expect(viewModel.agentStatusText == "Agent 1.0 connected")
     #expect(viewModel.agentSummary == safeMode)
-    #expect(viewModel.menuBarSymbol == "exclamationmark.arrow.triangle.2.circlepath")
+    #expect(viewModel.menuBarImage == "MenuBarArrowAttention")
     await health.release()
     await check.value
 }
