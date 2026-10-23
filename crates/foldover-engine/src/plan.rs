@@ -276,7 +276,7 @@ fn writes_on(decision: &CandidateDecision, side: Side) -> bool {
 /// The bytes two names share when `names` treats them as one: composed
 /// Unicode (NFC) where normalization is ignored, lower case where case is.
 /// Names that are not UTF-8 compare as bytes, ASCII case folded.
-fn name_key(path: &[u8], names: NameMatching) -> Vec<u8> {
+pub(crate) fn name_key(path: &[u8], names: NameMatching) -> Vec<u8> {
     let insensitive = names.case() == CaseMatching::Insensitive;
     let Ok(text) = std::str::from_utf8(path) else {
         return if insensitive {

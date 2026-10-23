@@ -218,6 +218,8 @@ you might expect. Only the last one below blocks saving
 
 ## What never syncs
 
+- Sockets, named pipes and device files in local folders. Their paths and
+  descendants are skipped in both folders, preserving existing copies.
 - Owner and group, creation time, link counts, ctime and inode numbers.
 - Directory and symlink modification times.
 - Lock and append-only flags; storage flags such as compression and

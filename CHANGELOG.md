@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Sockets, named pipes and device files no longer stop local scans, so a
+  home folder containing 1Password's daemon socket can sync. These paths
+  are skipped in both folders, preserving existing copies.
+
 ### Changed
 
 - The app is laid out like a Mac app: pairs in a sidebar with their

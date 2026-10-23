@@ -107,8 +107,8 @@ pub enum RunError {
     )]
     CanaryMissing { side: Side, path: SyncPath },
     #[error(
-        "The canary file “{}” is only in iCloud in the {side:?} folder, so nothing was written. \
-         Download it, or keep it downloaded.",
+        "The canary file “{}” cannot be read in the {side:?} folder, so nothing was written. \
+         Use a regular file and download it first if it is in iCloud.",
         String::from_utf8_lossy(path.as_bytes())
     )]
     CanaryUnavailable { side: Side, path: SyncPath },
@@ -720,16 +720,10 @@ impl PairRun {
         };
         let mut left = observe(Side::Left, control)?;
         let mut right = observe(Side::Right, control)?;
-        align_spellings(
-            &mut left,
-            &base,
-            endpoints.endpoint(Side::Left).name_matching(),
-        );
-        align_spellings(
-            &mut right,
-            &base,
-            endpoints.endpoint(Side::Right).name_matching(),
-        );
+        let left_names = endpoints.endpoint(Side::Left).name_matching();
+        let right_names = endpoints.endpoint(Side::Right).name_matching();
+        align_spellings(&mut left, &base, left_names);
+        align_spellings(&mut right, &base, right_names);
         // Size and age differ between folders. A file too large in either
         // folder, or old or absent in both, is skipped in both, and hidden
         // from the base too: its base row stays, so a later edit syncs as
@@ -750,7 +744,12 @@ impl PairRun {
                 .copied()
                 .chain(left.oversized().iter().chain(right.oversized()))
                 .filter(|path| Some(*path) != canary)
-                .chain(unavailable(&left, &right, &base))
+                .chain(unavailable(
+                    &left,
+                    &right,
+                    &base,
+                    left_names.either(right_names),
+                ))
                 .cloned()
                 .collect()
         };
@@ -775,8 +774,8 @@ impl PairRun {
         let choices = Choices {
             resolutions: &resolutions,
             skips: &skips,
-            left_names: endpoints.endpoint(Side::Left).name_matching(),
-            right_names: endpoints.endpoint(Side::Right).name_matching(),
+            left_names,
+            right_names,
             left_moves: moves(endpoints.endpoint(Side::Left)),
             right_moves: moves(endpoints.endpoint(Side::Right)),
         };
@@ -939,15 +938,14 @@ impl PairRun {
                     .map(ObservedEntry::version)
                     .filter(|version| version.kind() == EntryKind::File);
                 let Some(observed) = observed else {
-                    // Evicted, alone or with a folder above it, it is
-                    // there but cannot prove its content.
-                    let evicted = self
+                    // Special or cloud-only entries cannot prove content.
+                    let unavailable = self
                         .observation(side)
                         .unavailable()
                         .iter()
                         .any(|root| root == canary || root.is_ancestor_of(canary));
                     let path = canary.clone();
-                    return Err(match evicted {
+                    return Err(match unavailable {
                         true => RunError::CanaryUnavailable { side, path },
                         false => RunError::CanaryMissing { side, path },
                     });
@@ -1382,6 +1380,7 @@ fn align_spellings(
     let respelled: Vec<(SyncPath, SyncPath)> = observation
         .entries()
         .keys()
+        .chain(observation.unavailable())
         .filter(|path| !base.contains_key(*path))
         .filter_map(|path| {
             let known = missing.get(&composed(path)?)?.as_ref()?;
@@ -1754,23 +1753,32 @@ fn run_options(options: &PairOptions, endpoints: &EndpointPair) -> Result<PairOp
         .with_metadata(options.metadata().with_quarantine(quarantine)))
 }
 
-/// Entries either folder keeps only in iCloud, with everything below them
-/// on either side or in the base: skipped in both folders rather than
-/// downloaded, and unchanged to the base (PLAN.md §4.10).
+/// Special or cloud-only entries, with everything below them on either
+/// side or in the base: skipped in both folders, unchanged to the base.
 fn unavailable<'a>(
     left: &'a Observation,
     right: &'a Observation,
     base: &'a BTreeMap<SyncPath, BaselineEntry>,
+    names: NameMatching,
 ) -> impl Iterator<Item = &'a SyncPath> {
-    let roots: Vec<&SyncPath> = left
+    // Match as the planner does, so another spelling cannot become a deletion.
+    let roots: Vec<Vec<u8>> = left
         .unavailable()
         .iter()
         .chain(right.unavailable())
+        .map(|root| crate::plan::name_key(root.as_bytes(), names))
         .collect();
     let below = move |path: &&SyncPath| {
-        roots
-            .iter()
-            .any(|root| *root == *path || root.is_ancestor_of(path))
+        if roots.is_empty() {
+            return false;
+        }
+        let key = crate::plan::name_key(path.as_bytes(), names);
+        roots.iter().any(|root| {
+            *root == key
+                || key
+                    .strip_prefix(root.as_slice())
+                    .is_some_and(|rest| rest.starts_with(b"/"))
+        })
     };
     left.unavailable()
         .iter()

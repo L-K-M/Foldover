@@ -316,6 +316,221 @@ fn entries_kept_only_in_icloud_are_skipped_never_deleted() {
     assert_eq!(left.user_files()[b"notes.txt".as_slice()], b"v1");
 }
 
+#[test]
+fn special_entries_protect_both_folders_and_the_base_while_other_files_sync() {
+    use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::net::UnixListener;
+
+    for mode in [
+        SyncMode::Sync,
+        SyncMode::Mirror { source: Side::Left },
+        SyncMode::Mirror {
+            source: Side::Right,
+        },
+    ] {
+        for side in [Side::Left, Side::Right] {
+            let mut pair = fixture(mode);
+            let source = match mode {
+                SyncMode::Mirror {
+                    source: Side::Right,
+                } => pair.right.path(),
+                _ => pair.left.path(),
+            };
+            fs::create_dir(source.join("folder")).unwrap();
+            for name in ["entry", "folder/child", "notes.txt"] {
+                fs::write(source.join(name), b"v1").unwrap();
+            }
+            pair.sync();
+            let base = pair.base.clone();
+            let (special, other) = match side {
+                Side::Left => (pair.left.path(), pair.right.path()),
+                Side::Right => (pair.right.path(), pair.left.path()),
+            };
+
+            // A socket can replace a tracked file or folder; neither is a deletion.
+            fs::remove_file(special.join("entry")).unwrap();
+            fs::remove_dir_all(special.join("folder")).unwrap();
+            let _file_socket = UnixListener::bind(special.join("entry")).unwrap();
+            let _folder_socket = UnixListener::bind(special.join("folder")).unwrap();
+            fs::write(other.join("entry"), b"edited").unwrap();
+            fs::write(other.join("folder/child"), b"edited").unwrap();
+            fs::write(other.join("folder/new"), b"new").unwrap();
+            let source = match mode {
+                SyncMode::Mirror {
+                    source: Side::Right,
+                } => pair.right.path(),
+                _ => pair.left.path(),
+            };
+            fs::write(source.join("notes.txt"), b"v2").unwrap();
+
+            let preview = pair.prepare().preview();
+            assert_eq!(
+                preview
+                    .items()
+                    .iter()
+                    .map(|item| item.path().clone())
+                    .collect::<Vec<_>>(),
+                [path(b"notes.txt")]
+            );
+            let report = pair.sync();
+            assert!(report.failures().is_empty(), "{:?}", report.failures());
+            assert_eq!((report.copied(), report.archived()), (1, 0));
+            for name in [b"entry".as_slice(), b"folder", b"folder/child"] {
+                assert_eq!(pair.base[&path(name)], base[&path(name)]);
+            }
+            assert!(!pair.base.contains_key(&path(b"folder/new")));
+            let (special, other) = match side {
+                Side::Left => (pair.left.path(), pair.right.path()),
+                Side::Right => (pair.right.path(), pair.left.path()),
+            };
+            for name in ["entry", "folder"] {
+                assert!(
+                    fs::symlink_metadata(special.join(name))
+                        .unwrap()
+                        .file_type()
+                        .is_socket()
+                );
+            }
+            assert_eq!(fs::read(other.join("entry")).unwrap(), b"edited");
+            assert_eq!(fs::read(other.join("folder/child")).unwrap(), b"edited");
+            assert_eq!(fs::read(other.join("folder/new")).unwrap(), b"new");
+            assert_eq!(fs::read(other.join("notes.txt")).unwrap(), b"v2");
+
+            // A regular file at the path participates again on the next run.
+            fs::remove_file(special.join("entry")).unwrap();
+            fs::write(special.join("entry"), b"v1").unwrap();
+            assert_eq!(pair.prepare().preview().items()[0].path(), &path(b"entry"));
+        }
+    }
+}
+
+#[test]
+fn unavailable_socket_paths_keep_the_baselines_unicode_spelling() {
+    let mut pair = fixture(SyncMode::Sync);
+    let composed = "caf\u{e9}";
+    let decomposed = "cafe\u{301}";
+    fs::create_dir(pair.left.path().join(composed)).unwrap();
+    fs::write(pair.left.path().join(composed).join("child"), b"keep").unwrap();
+    pair.sync();
+    pair.base = pair
+        .base
+        .into_iter()
+        .map(|(name, entry)| {
+            let composed: String = std::str::from_utf8(name.as_bytes())
+                .unwrap()
+                .nfc()
+                .collect();
+            (path(composed.as_bytes()), entry)
+        })
+        .collect();
+    fs::remove_dir_all(pair.left.path().join(composed)).unwrap();
+    let _socket =
+        std::os::unix::net::UnixListener::bind(pair.left.path().join(decomposed)).unwrap();
+    let observe = |root| {
+        foldover_endpoint::LocalEndpoint::open(root)
+            .unwrap()
+            .observe(foldover_types::MetadataPolicy::default(), &mut proceed)
+            .unwrap()
+    };
+    let mut left = observe(pair.left.path());
+    let right = observe(pair.right.path());
+    let exact: BTreeSet<SyncPath> = unavailable(&left, &right, &pair.base, NameMatching::EXACT)
+        .cloned()
+        .collect();
+    assert_eq!(exact, [path(decomposed.as_bytes())].into_iter().collect());
+    let names = NameMatching::new(
+        foldover_types::CaseMatching::Exact,
+        UnicodeMatching::Normalized,
+    );
+    align_spellings(&mut left, &pair.base, names);
+    assert_eq!(left.unavailable(), &[path(composed.as_bytes())]);
+    let skipped: BTreeSet<SyncPath> = unavailable(&left, &right, &pair.base, names)
+        .cloned()
+        .collect();
+    assert_eq!(
+        skipped,
+        [
+            path(composed.as_bytes()),
+            path(format!("{composed}/child").as_bytes())
+        ]
+        .into_iter()
+        .collect()
+    );
+}
+
+#[test]
+fn unavailable_aliases_are_skipped_before_the_first_sync() {
+    use foldover_types::CaseMatching;
+
+    for (names, unavailable, counterpart) in [
+        (
+            NameMatching::new(CaseMatching::Exact, UnicodeMatching::Normalized),
+            "cafe\u{301}",
+            "caf\u{e9}",
+        ),
+        (
+            NameMatching::new(CaseMatching::Insensitive, UnicodeMatching::Exact),
+            "Socket",
+            "socket",
+        ),
+    ] {
+        let mut pair = fixture(SyncMode::Mirror { source: Side::Left });
+        let folders = [
+            foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks {
+                names,
+                ..foldover_sim::Quirks::default()
+            }),
+            foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default()),
+        ];
+        pair.memory = Some(folders.clone());
+        let [left, right] = &folders;
+        left.put_file(unavailable.as_bytes(), b"unreadable")
+            .unwrap();
+        left.evict(unavailable.as_bytes());
+        right.put_file(counterpart.as_bytes(), b"keep").unwrap();
+        let sibling = format!("{counterpart}-notes");
+        left.put_file(sibling.as_bytes(), b"sync").unwrap();
+
+        let preview = pair.prepare().preview();
+        assert_eq!(preview.items().len(), 1);
+        assert_eq!(preview.items()[0].path(), &path(sibling.as_bytes()));
+        let report = pair.sync();
+        assert!(report.failures().is_empty(), "{:?}", report.failures());
+        assert_eq!((report.copied(), report.archived()), (1, 0));
+        assert_eq!(right.user_files()[counterpart.as_bytes()], b"keep");
+        assert_eq!(right.user_files()[sibling.as_bytes()], b"sync");
+    }
+}
+
+#[test]
+fn a_socket_canary_stops_before_writes_without_claiming_it_is_in_icloud() {
+    let mut pair = fixture(SyncMode::Sync);
+    let _socket = std::os::unix::net::UnixListener::bind(pair.left.path().join("canary")).unwrap();
+    fs::write(pair.left.path().join("notes.txt"), b"keep").unwrap();
+    pair.canary = Some(path(b"canary"));
+    let error = pair
+        .prepare()
+        .execute(
+            Approval::default(),
+            RunContext::Reviewed,
+            STARTED,
+            &mut |_, _| panic!("an unavailable canary must prevent every write"),
+            &mut proceed,
+            &NoProgress,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        RunError::CanaryUnavailable {
+            side: Side::Left,
+            ..
+        }
+    ));
+    assert!(!error.to_string().contains("only in iCloud"));
+    assert!(!pair.right.path().join("notes.txt").exists());
+    assert!(!pair.left.path().join(".foldover").exists());
+}
+
 /// Review of dataless entries: an evicted canary stopped every run as
 /// missing, telling a person to put back a file that was there.
 #[test]
