@@ -825,14 +825,14 @@ async fn sync(
     id: PairId,
     command: SyncCommand,
 ) -> Result<ExitCode, foldover_client::Error> {
-    if let SyncCommand::Changes(kind) = command {
-        return sync_changes(location, id, kind).await;
-    }
     // Cancellation must keep bypassing the configuration queue, even when
     // another request is waiting on a disconnected server.
     if !matches!(&command, SyncCommand::Cancel) {
         let pair = foldover_client::pair(location, id).await?;
         warn_sftp([pair.draft().left(), pair.draft().right()]);
+    }
+    if let SyncCommand::Changes(kind) = command {
+        return sync_changes(location, id, kind).await;
     }
     let mut status = match command {
         SyncCommand::Preview => foldover_client::start_preview(location, id).await?,
@@ -886,21 +886,21 @@ async fn sync_changes(
     id: PairId,
     kind: Option<SyncItemKind>,
 ) -> Result<ExitCode, foldover_client::Error> {
-    let pair = foldover_client::pair(location, id).await?;
-    warn_sftp([pair.draft().left(), pair.draft().right()]);
     let mut status = foldover_client::sync_status(location, id).await?;
-    if !matches!(
-        status,
-        SyncStatus::Working { .. }
-            | SyncStatus::Previewed { .. }
-            | SyncStatus::NeedsApproval { .. }
-    ) {
-        // No preview is held: make one so the command stands alone.
-        status = foldover_client::start_preview(location, id).await?;
-    }
     while matches!(status, SyncStatus::Working { .. }) {
         tokio::time::sleep(POLL_INTERVAL).await;
         status = foldover_client::sync_status(location, id).await?;
+    }
+    if !matches!(
+        status,
+        SyncStatus::Previewed { .. } | SyncStatus::NeedsApproval { .. }
+    ) {
+        // No preview is held: make one so the command stands alone.
+        status = foldover_client::start_preview(location, id).await?;
+        while matches!(status, SyncStatus::Working { .. }) {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            status = foldover_client::sync_status(location, id).await?;
+        }
     }
     let token = match status {
         SyncStatus::Previewed { ref preview } | SyncStatus::NeedsApproval { ref preview } => {
