@@ -15,8 +15,9 @@ struct MacToMacView: View {
         Form {
             if !viewModel.isOn {
                 Section {
-                    Text(viewModel.intro).font(.callout).foregroundStyle(.secondary)
                     Button("Turn On Mac-to-Mac") { Task { await viewModel.turnOn() } }
+                } header: {
+                    InfoLabel(title: Text("Mac-to-Mac"), message: Text(viewModel.intro))
                 }
             } else {
                 Section {
@@ -25,12 +26,15 @@ struct MacToMacView: View {
                     }
                     NoteToggle(
                         title: Text("Allow pairing"),
-                        note: Text(viewModel.pairingNote),
+                        note: Text("\(viewModel.pairingNote)\n\nOpen pairing only while adding a Mac you trust. Compare the code on both screens before confirming. Turning off Allow pairing does not disconnect Macs you already paired."),
                         isOn: Binding(
                             get: { viewModel.pairingOpen },
                             set: { open in Task { await viewModel.setPairing(open ? .open : .closed) } }
                         )
                     )
+                    if viewModel.pairingOpen {
+                        Text(viewModel.pairingNote).font(.callout).foregroundStyle(.secondary)
+                    }
                 }
                 ForEach(viewModel.codes) { row in
                     Section(row.title) {
@@ -82,9 +86,10 @@ struct MacToMacView: View {
                         }
                     }
                 } header: {
-                    Text("Paired Macs")
-                } footer: {
-                    Text(viewModel.sharingNote)
+                    InfoLabel(
+                        title: Text("Paired Macs"),
+                        message: Text("\(viewModel.sharingNote)\n\nShare only folders you want that Mac to read and change through its sync pairs. Sharing makes a folder available; it does not start a sync. Stop Sharing revokes that folder's access, while Forget removes the pairing.")
+                    )
                 }
             }
             if let error = viewModel.error {

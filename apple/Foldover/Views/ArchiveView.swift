@@ -169,13 +169,12 @@ struct ArchiveView: View {
         }
     }
 
-    /// What the last put-back did or what went wrong; otherwise how the
-    /// archive works.
+    /// Put-back status and on-demand guidance stay available together.
     private func statusBar(_ items: [ArchiveItemRow]) -> some View {
         HStack(spacing: 12) {
             statusLine
                 .lineLimit(3)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            Spacer(minLength: 0)
             if viewModel.isLoading && !items.isEmpty {
                 ProgressView()
                     .controlSize(.small)
@@ -184,6 +183,10 @@ struct ArchiveView: View {
                 Button("Show More") { Task { await viewModel.loadMore() } }
                     .controlSize(.small)
             }
+            InfoButton(
+                title: Text("Archive"),
+                message: Text("\(viewModel.explanation)\n\nChoose the folder and sync that held the version you need, then select items and use Put Back. Each archive stays with its folder, so that disk or server must be available. The archive is short-term recovery, not a separate backup against losing the disk.")
+            )
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 8)
@@ -202,10 +205,6 @@ struct ArchiveView: View {
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
                 .accessibilityAddTraits(.updatesFrequently)
-        } else {
-            Text(viewModel.explanation)
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
     }
 

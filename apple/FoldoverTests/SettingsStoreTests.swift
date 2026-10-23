@@ -24,13 +24,15 @@ func openAtLoginFollowsTheSystemAndReportsRefusals() {
     let store = SettingsStore(loginItem: loginItem, showFullDiskAccess: { opened += 1 })
     let viewModel = SettingsViewModel(store: store)
     #expect(!viewModel.opensAtLogin)
+    #expect(viewModel.loginApprovalNote == nil)
 
     viewModel.setLoginLaunch(.open)
     #expect(viewModel.opensAtLogin)
-    #expect(viewModel.loginNote.contains("Login Items"))
+    #expect(viewModel.loginApprovalNote?.contains("Login Items") == true)
 
     loginItem.status = .enabled
     viewModel.refresh()
+    #expect(viewModel.loginApprovalNote == nil)
     viewModel.setLoginLaunch(.stayClosed)
     #expect(!viewModel.opensAtLogin)
 

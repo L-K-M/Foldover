@@ -8,18 +8,18 @@ struct SettingsViewModel {
     var opensAtLogin: Bool { store.loginStatus != .disabled }
 
     var loginNote: String {
-        switch store.loginStatus {
-        case .requiresApproval:
-            String(localized: "Allow Foldover in System Settings › General › Login Items to finish.")
-        case .enabled, .disabled:
-            String(localized: "Syncing runs in the background agent whether or not the app is open. Opening the app at login keeps the menu bar icon and notifications available.")
-        }
+        String(localized: "Syncing runs in the background agent whether or not the app is open. Opening the app at login keeps the menu bar icon and notifications available.\n\nTurn this off if you prefer to open the interface yourself; it does not turn off the background agent or your pairs' schedules.")
+    }
+
+    var loginApprovalNote: String? {
+        guard store.loginStatus == .requiresApproval else { return nil }
+        return String(localized: "Allow Foldover in System Settings › General › Login Items to finish.")
     }
 
     var error: String? { store.error }
 
     var accessNote: String {
-        String(localized: "If a sync says Foldover may not read a folder, for example in Documents, Desktop, iCloud Drive or on an external or network volume, add Foldover to Full Disk Access.")
+        String(localized: "If a sync says Foldover may not read a folder, for example in Documents, Desktop, iCloud Drive or on an external or network volume, add Foldover to Full Disk Access.\n\nThis grants broader access to protected data on this Mac. It does not choose folders to sync: your pairs still determine what Foldover copies. Grant it when a folder's privacy restrictions prevent the access you need.")
     }
 
     func openFullDiskAccess() { store.openFullDiskAccess() }
