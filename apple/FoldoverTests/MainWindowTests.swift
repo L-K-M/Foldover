@@ -272,12 +272,13 @@ func pairRowsSayHowEachPairReadsAtAGlance() async {
     #expect(rows[0].activity == .attention)
     #expect(rows[0].conflicts == 2)
     #expect(rows[0].symbol == "arrow.left.arrow.right")
+    let lastSuccess = viewModel.sync(for: photos).lastSuccess
+    #expect(lastSuccess != nil)
     #expect(rows[1] == PairRow(id: photos.id, name: "Photos", status: "Ready",
                                symbol: "arrow.right.to.line.compact", modeTitle: "Back up A to B",
                                activity: .idle,
                                conflicts: 0, canSync: true,
-                               lastSuccess: viewModel.sync(for: photos).lastSuccess))
-    #expect(viewModel.sync(for: photos).lastSuccess != nil)
+                               lastSuccess: lastSuccess))
     #expect(viewModel.canSyncAll)
     #expect(viewModel.pairsLoaded)
     #expect(viewModel.agentState == .connected)
