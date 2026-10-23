@@ -997,7 +997,7 @@ mod tests {
         let second = tempfile::tempdir().unwrap();
         let pair = changing_pair(first.path(), 9);
         let edited = changing_pair(second.path(), 9);
-        assert!(pair.id() == edited.id(), "the edit must keep the pair's id");
+        assert_eq!(pair.id(), edited.id(), "the edit must keep the pair's id");
         let start = Instant::now();
         let scheduler = Scheduler::new(start);
         let (sender, receiver) = mpsc::channel();
