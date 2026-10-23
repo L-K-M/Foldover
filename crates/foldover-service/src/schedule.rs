@@ -701,17 +701,13 @@ impl Service {
     fn catch_up(&self, pairs: &[PairConfig], away: &[PairId], now: Instant) {
         for pair in pairs.iter().filter(|pair| away.contains(&pair.id())) {
             let id = pair.id();
-            let (cursors, state) = self
-                .engine
-                .lock()
-                .ok()
-                .map(|engine| {
-                    (
-                        engine.watch_cursors(id).ok().unwrap_or_default(),
-                        Some(engine.state_path().to_path_buf()),
-                    )
-                })
-                .unwrap_or_default();
+            let (cursors, state) = {
+                let engine = self.engine.lock().unwrap_or_else(PoisonError::into_inner);
+                (
+                    engine.watch_cursors(id).ok().unwrap_or_default(),
+                    Some(engine.state_path().to_path_buf()),
+                )
+            };
             self.scheduler
                 .catching_up
                 .lock()
