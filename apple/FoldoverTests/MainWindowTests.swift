@@ -437,6 +437,11 @@ func scanErrorsStayVisibleWhileSafeChangesRemainSyncable() async {
     preview.failureCount = 0
     await show(.previewed(preview), on: viewModel, via: client)
     #expect(viewModel.hiddenRowsText == nil)
+
+    preview.failures = [RunFailure(path: Data(), message: "Folder A: Directory listing changed")]
+    preview.failureCount = 1
+    await show(.previewed(preview), on: viewModel, via: client)
+    #expect(viewModel.rows.first?.path == "Folder")
 }
 
 @MainActor

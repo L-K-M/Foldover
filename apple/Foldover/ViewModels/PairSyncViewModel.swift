@@ -801,6 +801,7 @@ struct PairSyncViewModel {
     }
 
     static func pathText(_ path: Data) -> String {
-        String(data: path, encoding: .utf8) ?? String(decoding: path, as: UTF8.self)
+        guard !path.isEmpty else { return String(localized: "Folder") }
+        return String(data: path, encoding: .utf8) ?? String(decoding: path, as: UTF8.self)
     }
 }

@@ -135,7 +135,7 @@ impl PairRun {
                     Ok(step) => step,
                     Err(message) => {
                         report.not_undone.push(Failure {
-                            path: entry.path.clone(),
+                            path: Some(entry.path.clone()),
                             message: message.into(),
                         });
                         continue;
@@ -171,7 +171,7 @@ impl PairRun {
                     Ok(Placed::Beside) => report.beside += 1,
                     Err(message) => {
                         report.not_undone.push(Failure {
-                            path: entry.path.clone(),
+                            path: Some(entry.path.clone()),
                             message,
                         });
                         continue;
@@ -211,7 +211,7 @@ impl PairRun {
                     refilled.extend(restore(folder));
                 } else {
                     report.not_undone.push(Failure {
-                        path: folder.path.clone(),
+                        path: Some(folder.path.clone()),
                         message: EMPTY_FOLDER.into(),
                     });
                 }
@@ -240,17 +240,39 @@ impl PairRun {
             .name_matching()
             .either(self.endpoints.endpoint(Side::Right).name_matching());
         for path in std::iter::once(&entry.path).chain(entry.moved_from.as_ref()) {
-            let path = SyncPath::try_from(crate::plan::name_key(path.as_bytes(), names))
+            let canonical = SyncPath::try_from(crate::plan::name_key(path.as_bytes(), names))
                 .expect("a name key is a valid path");
+            for observation in [&self.left, &self.right] {
+                if observation.entries().contains_key(path) {
+                    continue;
+                }
+                // Archived and moved-away journal names may no longer be in
+                // either observation or the base used to build `uncertain`.
+                // A changed listing still cannot prove these names absent.
+                if observation.unstable_directories().iter().any(|directory| {
+                    directory.as_ref().is_none_or(|directory| {
+                        let directory =
+                            SyncPath::try_from(crate::plan::name_key(directory.as_bytes(), names))
+                                .expect("a name key is a valid path");
+                        directory == canonical || directory.is_ancestor_of(&canonical)
+                    })
+                }) {
+                    return Err(UNREADABLE);
+                }
+            }
             for unread in self
                 .left
                 .unavailable()
                 .iter()
                 .chain(self.right.unavailable())
+                .chain(&self.uncertain)
             {
                 let unread = SyncPath::try_from(crate::plan::name_key(unread.as_bytes(), names))
                     .expect("a name key is a valid path");
-                if path == unread || path.is_ancestor_of(&unread) || unread.is_ancestor_of(&path) {
+                if canonical == unread
+                    || canonical.is_ancestor_of(&unread)
+                    || unread.is_ancestor_of(&canonical)
+                {
                     return Err(UNREADABLE);
                 }
             }

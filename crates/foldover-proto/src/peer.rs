@@ -337,6 +337,12 @@ pub enum PeerReply {
         path: Vec<u8>,
         message: String,
     },
+    /// A directory's listing could not establish absences. Its observed
+    /// entries remain usable; `None` identifies the shared folder's root.
+    /// Older clients reject this reply instead of trusting an incomplete scan.
+    UnstableDirectory {
+        path: Option<Vec<u8>>,
+    },
     /// An observation's entries came as data frames; these are the rest.
     Observed {
         leftovers: Vec<Vec<u8>>,
@@ -411,6 +417,18 @@ pub struct OfferedShare {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unstable_directories_round_trip_for_root_and_descendants() {
+        for path in [
+            serde_json::Value::Null,
+            serde_json::json!([100, 111, 99, 115]),
+        ] {
+            let json = serde_json::json!({ "kind": "unstableDirectory", "path": path });
+            let reply: PeerReply = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(serde_json::to_value(reply).unwrap(), json);
+        }
+    }
 
     /// A scan that lets Gatekeeper's mark travel reads as before, so
     /// both Macs agree on what an observation includes.

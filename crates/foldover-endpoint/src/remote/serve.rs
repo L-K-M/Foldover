@@ -353,6 +353,16 @@ fn observe(
         Err(error) => return failed(answer, wire::scan_failure(&error)),
     };
 
+    for path in observation.unstable_directories() {
+        if answer
+            .reply(&PeerReply::UnstableDirectory {
+                path: path.as_ref().map(|path| path.as_bytes().to_vec()),
+            })
+            .is_err()
+        {
+            return;
+        }
+    }
     for issue in observation.issues() {
         if answer
             .reply(&PeerReply::ScanIssue {

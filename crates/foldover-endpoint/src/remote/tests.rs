@@ -314,6 +314,99 @@ fn observe(endpoint: &Endpoint) -> Result<Observation, ScanError> {
     )
 }
 
+/// Reports a chosen unstable directory before serving an ordinary observation.
+struct UnstableSharing {
+    sharing: Sharing,
+    path: std::sync::Mutex<Option<Vec<u8>>>,
+}
+
+impl PeerHost for UnstableSharing {
+    fn paired(&self, device: DeviceId, name: String) -> Result<(), NotRecorded> {
+        self.sharing.paired(device, name)
+    }
+
+    fn serve(&self, device: DeviceId, call: PeerCall, answer: &mut Answer) {
+        if matches!(&call, PeerCall::Folder { op, .. } if matches!(**op, FolderOp::Observe { .. }))
+        {
+            let path = self.path.lock().unwrap().clone();
+            if answer
+                .reply(&PeerReply::UnstableDirectory { path })
+                .is_err()
+            {
+                return;
+            }
+        }
+        self.sharing.serve(device, call, answer);
+    }
+}
+
+#[test]
+fn unstable_peer_directories_preserve_entries_and_validate_paths() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let shared = tempfile::tempdir().unwrap();
+    std::fs::write(shared.path().join("safe"), b"readable").unwrap();
+    let hosting = Arc::new(UnstableSharing {
+        sharing: Sharing {
+            root: LocalRoot::from_bytes(shared.path().as_os_str().as_encoded_bytes().to_vec())
+                .unwrap(),
+            cache: FolderCache::default(),
+            state: None,
+        },
+        path: std::sync::Mutex::new(None),
+    });
+    let identities = [Identity::generate().unwrap(), Identity::generate().unwrap()];
+    let devices = identities
+        .each_ref()
+        .map(|identity| DeviceId::from_bytes(*identity.id().as_bytes()));
+    let [a_identity, b_identity] = identities;
+    let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let (a, _b) = runtime.block_on(async {
+        let b = PeerLink::start(
+            b_identity,
+            "Studio".into(),
+            loopback,
+            Presence::Unlisted,
+            [devices[0]],
+            hosting.clone(),
+        )
+        .unwrap();
+        let a = PeerLink::start(
+            a_identity,
+            "Laptop".into(),
+            loopback,
+            Presence::Unlisted,
+            [devices[1]],
+            Arc::new(Sharing {
+                root: LocalRoot::from_bytes(b"/".to_vec()).unwrap(),
+                cache: FolderCache::default(),
+                state: None,
+            }),
+        )
+        .unwrap();
+        a.reach(devices[1], b.address().unwrap());
+        (a, b)
+    });
+    let root = PeerRoot::new(devices[1], ShareId::from_bytes([7; ShareId::BYTE_LEN]));
+    let endpoint = Endpoint::Peer(PeerEndpoint::open(a, &root).unwrap());
+    for path in [None, Some(b"docs".to_vec())] {
+        *hosting.path.lock().unwrap() = path.clone();
+        let observed = observe(&endpoint).unwrap();
+        let expected = path.map(|path| SyncPath::try_from(path).unwrap());
+        assert_eq!(observed.unstable_directories(), &[expected]);
+        assert!(observed.unavailable().is_empty());
+        assert!(
+            observed
+                .entries()
+                .contains_key(&SyncPath::try_from(b"safe".as_slice()).unwrap())
+        );
+    }
+    *hosting.path.lock().unwrap() = Some(b"../outside".to_vec());
+    assert!(matches!(observe(&endpoint), Err(ScanError::InvalidPath(_))));
+}
+
 /// A peer that goes away answers errors, never hangs: once its link
 /// closes, remote calls on it fail instead of waiting on a dead Mac.
 #[test]
