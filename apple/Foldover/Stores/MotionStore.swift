@@ -23,6 +23,13 @@ final class MotionStore {
             }
     }
 
+    #if DEBUG
+    /// Canned UI scenarios and unit tests use an explicit motion policy.
+    init(preference: MotionPreference) {
+        self.preference = preference
+    }
+    #endif
+
     private func refresh() {
         preference = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? .reduced : .full
     }

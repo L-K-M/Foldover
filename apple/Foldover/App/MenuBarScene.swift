@@ -7,7 +7,21 @@ struct MenuBarScene: Scene {
 
     init(viewModel: MainViewModel) {
         self.viewModel = viewModel
-        _animation = State(initialValue: MenuBarAnimation(viewModel: viewModel))
+        _animation = State(initialValue: MenuBarAnimation(viewModel: viewModel, motion: Self.motionStore()))
+    }
+
+    private static func motionStore() -> MotionStore {
+        #if DEBUG
+        // Exercise both policies without changing the CI host's accessibility settings.
+        if Fixtures.isEnabled {
+            switch FixtureScenario.current {
+            case .syncing: return MotionStore(preference: .full)
+            case .syncingReduced: return MotionStore(preference: .reduced)
+            default: break
+            }
+        }
+        #endif
+        return MotionStore()
     }
 
     var body: some Scene {

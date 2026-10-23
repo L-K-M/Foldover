@@ -17,9 +17,8 @@ final class MenuBarAnimation {
         self.interval = interval
     }
 
-    convenience init(viewModel: MainViewModel) {
+    convenience init(viewModel: MainViewModel, motion: MotionStore = MotionStore()) {
         self.init()
-        let motion = MotionStore()
         self.motion = motion
         track(viewModel: viewModel, motion: motion)
     }
@@ -27,7 +26,7 @@ final class MenuBarAnimation {
     deinit { task?.cancel() }
 
     private func track(viewModel: MainViewModel, motion: MotionStore) {
-        // MenuBarExtra scene callbacks are not a window-independent clock.
+        // Observe inputs independently of window and popover visibility.
         let (status, preference) = withObservationTracking {
             (viewModel.menuBarStatus, motion.preference)
         } onChange: { [weak self, weak viewModel, weak motion] in

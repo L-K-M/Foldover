@@ -5,13 +5,7 @@ final class MenuBarTests: XCTestCase {
     @MainActor
     func testTheMenuBarPulsesWithEveryWindowClosed() {
         let tour = Tour(self, appearance: .light, scenario: "syncing")
-        tour.launch()
-        print("Menu bar Reduce Motion: \(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)")
-        // MenuBarExtra's Label title is not a status-item query identifier.
-        let item = tour.app.statusItems.firstMatch
-        XCTAssertTrue(item.waitForExistence(timeout: 10))
-        tour.key("w", .command)
-        XCTAssertTrue(tour.app.windows["Foldover"].waitForNonExistence(timeout: 5))
+        let item = backgroundStatusItem(tour)
 
         let first = item.screenshot()
         attach(first, name: "light-menu-bar-pulse-first")
@@ -25,6 +19,18 @@ final class MenuBarTests: XCTestCase {
             break
         }
         XCTAssertTrue(changed, "The native status item should advance frames without an open window")
+        tour.app.terminate()
+    }
+
+    @MainActor
+    func testReducedMotionKeepsTheWorkingIconStill() {
+        let tour = Tour(self, appearance: .light, scenario: "syncing-reduced")
+        let item = backgroundStatusItem(tour)
+        let first = item.screenshot()
+        tour.pause(1.7)
+        let next = item.screenshot()
+        XCTAssertEqual(next.pngRepresentation, first.pngRepresentation)
+        attach(next, name: "light-menu-bar-reduced-motion")
         tour.app.terminate()
     }
 
@@ -51,6 +57,17 @@ final class MenuBarTests: XCTestCase {
             tour.snap("menu-bar-error")
             tour.app.terminate()
         }
+    }
+
+    @MainActor
+    private func backgroundStatusItem(_ tour: Tour) -> XCUIElement {
+        tour.launch()
+        // MenuBarExtra's Label title is not a status-item query identifier.
+        let item = tour.app.statusItems.firstMatch
+        XCTAssertTrue(item.waitForExistence(timeout: 10))
+        tour.key("w", .command)
+        XCTAssertTrue(tour.app.windows["Foldover"].waitForNonExistence(timeout: 5))
+        return item
     }
 
     @MainActor

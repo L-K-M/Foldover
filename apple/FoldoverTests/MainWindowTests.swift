@@ -224,19 +224,24 @@ private func eventuallyInWindow(_ condition: @MainActor () -> Bool,
 }
 
 @MainActor
-@Test
-func theMenuBarPulseObservesWorkWithoutAScene() async throws {
+@Test(arguments: [MotionPreference.full, .reduced])
+func theMenuBarPulseObservesWorkWithoutAScene(_ preference: MotionPreference) async throws {
     let photos = windowPair(photosWindowID, "Photos")
     let client = WindowSyncClient()
     let viewModel = await windowModel([photos], sync: client, pollInterval: .milliseconds(10))
-    let animation = MenuBarAnimation(viewModel: viewModel)
+    let animation = MenuBarAnimation(viewModel: viewModel, motion: MotionStore(preference: preference))
 
     await client.set(.working(.run, cancelling: false), for: photos.id)
     let refresh = Task { await viewModel.sync(for: photos).refresh() }
-    if MotionStore().preference == .full {
+    #expect(await eventuallyInWindow { viewModel.menuBarStatus == .working })
+    switch preference {
+    case .full:
         #expect(await eventuallyInWindow {
             animation.imageName(for: .working) != MenuBarStatus.working.rawValue
         })
+    case .reduced:
+        try await Task.sleep(for: .milliseconds(450))
+        #expect(animation.imageName(for: .working) == MenuBarStatus.working.rawValue)
     }
 
     await client.set(.idle, for: photos.id)
