@@ -109,8 +109,10 @@ impl From<foldover_state::Error> for Error {
 pub struct Engine {
     pairs: PairStore,
     state_root: Endpoint,
-    /// Where the agent's records live; a pair root may hold it, but never
-    /// read, carry or damage it.
+    /// Where the agent's records live, resolved to its canonical path once
+    /// at open; a pair root may hold it, but never read, carry or damage
+    /// it. If the directory is moved or renamed while the agent runs,
+    /// protection follows the path recorded here, not the directory itself.
     state_path: PathBuf,
     /// How folders on paired Macs are reached, once Mac-to-Mac is on.
     reach: Reach,

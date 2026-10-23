@@ -118,7 +118,10 @@ impl Reach {
 
     /// The agent's state directory: a local root that holds it protects
     /// it, so a pair rooted at the home directory never reads, carries or
-    /// damages the agent's own records.
+    /// damages the agent's own records. Every production `Reach` must
+    /// carry this — `Engine` seeds `self.reach` at open and all live
+    /// endpoint opens flow through it; `None` is for tests that have no
+    /// state directory.
     pub fn with_state(mut self, state: PathBuf) -> Self {
         self.state = Some(state);
         self

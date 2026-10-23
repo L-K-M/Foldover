@@ -514,6 +514,11 @@ impl LocalEndpoint {
         // large home folders regress, cache ancestor identities populated
         // during scan descent instead of re-walking here.
         let mut at_path = Some(path.clone());
+        // `Contains` refuses only on the target: `path` itself holding the
+        // state directory is what a subtree mutator must not destroy. An
+        // ancestor of `path` holding it — as the root of `~` does — means
+        // nothing about what mutating `path` reaches.
+        let mut target = true;
         while let Some(dir) = at_path {
             // Fail-open is fine: the guarded operation resolves `path`
             // through this same `Root` (`open_dir_nofollow` per component),
@@ -525,12 +530,13 @@ impl LocalEndpoint {
                     RootRelation::Same | RootRelation::Within => {
                         return Err(ScanError::ProtectedPath(path.clone()));
                     }
-                    RootRelation::Contains if subtree => {
+                    RootRelation::Contains if target && subtree => {
                         return Err(ScanError::ProtectedPath(path.clone()));
                     }
                     _ => {}
                 }
             }
+            target = false;
             at_path = dir.parent();
         }
         Ok(())
@@ -592,9 +598,8 @@ impl LocalEndpoint {
             if protected(entry.name()) {
                 continue;
             }
-            if let Ok(path) = child_path(directory, entry.name())
-                && (self.protects(&path) || self.is_state(entry.metadata()))
-            {
+            let path = child_path(directory, entry.name())?;
+            if self.protects(&path) || self.is_state(entry.metadata()) {
                 continue;
             }
             let metadata = entry.metadata();

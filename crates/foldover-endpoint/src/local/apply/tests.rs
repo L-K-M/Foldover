@@ -300,6 +300,7 @@ fn the_state_directory_and_its_ancestors_are_never_changed() {
     fs::create_dir_all(&state).unwrap();
     fs::write(state.join("pairs.sqlite"), b"records").unwrap();
     fs::write(home.join("mine.txt"), b"mine").unwrap();
+    fs::write(home.join("Library/Application Support/other.txt"), b"other").unwrap();
     let protected = LocalEndpoint::open_protecting(home, Some(&state)).unwrap();
     let observed = observe(&protected);
 
@@ -366,13 +367,20 @@ fn the_state_directory_and_its_ancestors_are_never_changed() {
         Err(ApplyError::Scan(ScanError::ProtectedPath(_)))
     ));
 
-    // Everything outside it still works.
+    // Everything outside it still works — including a file next to the
+    // state directory, whose ancestors hold state without sheltering the
+    // write.
     let mine = path(b"mine.txt");
     let kept = protected.entry_at(&mine).unwrap().unwrap();
     protected
         .remove(&mine, &observed.entries()[&mine], &pair.run, &mut proceed)
         .unwrap();
     assert!(!home.join("mine.txt").exists());
+    let other = path(b"Library/Application Support/other.txt");
+    protected
+        .remove(&other, &observed.entries()[&other], &pair.run, &mut proceed)
+        .unwrap();
+    assert!(!home.join("Library/Application Support/other.txt").exists());
     assert_eq!(fs::read(state.join("pairs.sqlite")).unwrap(), b"records");
     drop(kept);
 }
