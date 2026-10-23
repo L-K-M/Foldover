@@ -468,7 +468,7 @@ struct PairSyncViewModel {
 
     /// Rows not shown because responses carry only the first changes.
     var hiddenRowsText: String? {
-        let hiddenFailures = reviewable.map { preview in
+        let hiddenFailures: UInt64 = reviewable.map { preview in
             let shown = UInt64(preview.failures.count)
             return preview.failureCount > shown ? preview.failureCount - shown : 0
         } ?? 0
