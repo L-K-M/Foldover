@@ -16,7 +16,6 @@ struct MenuBarScene: Scene {
                 Text(status.accessibilityLabel)
             } icon: {
                 Image(animation.imageName(for: status))
-                    .renderingMode(status == .attention ? .original : .template)
             }
         }
         .menuBarExtraStyle(.window)

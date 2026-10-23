@@ -9,7 +9,7 @@ final class MenuBarTests: XCTestCase {
         let item = tour.app.statusItems["Foldover: Syncing"]
         XCTAssertTrue(item.waitForExistence(timeout: 10))
         tour.key("w", .command)
-        XCTAssertFalse(tour.app.windows["Foldover"].exists)
+        XCTAssertTrue(tour.app.windows["Foldover"].waitForNonExistence(timeout: 5))
 
         let first = item.screenshot()
         attach(first, name: "light-menu-bar-pulse-first")
