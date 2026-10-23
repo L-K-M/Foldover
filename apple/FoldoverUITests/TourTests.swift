@@ -290,11 +290,12 @@ final class TourTests: XCTestCase {
         guard login.waitForExistence(timeout: 5) else {
             return XCTFail("Missing labeled login switch: \(app.debugDescription)")
         }
-        let loginValue = login.value as? String
-        XCTAssertNotNil(loginValue, "The login switch should expose its state")
+        let loginValue = login.value.map { String(describing: $0) }
+        XCTAssertNotNil(loginValue, "The login switch should expose its state: \(login.debugDescription)")
         checkInfoPopover(tour, button: app.buttons["About Open Foldover at login"].firstMatch,
                          contains: "background agent", snap: "23-login-help")
-        XCTAssertEqual(login.value as? String, loginValue, "Opening help must not toggle the setting")
+        XCTAssertEqual(login.value.map { String(describing: $0) }, loginValue,
+                       "Opening help must not toggle the setting")
         tour.click(app.toolbars.buttons["Mac-to-Mac"].firstMatch, "Mac-to-Mac settings tab")
         tour.pause(1.5)
         tour.snap("24-settings-mac-to-mac")
