@@ -301,14 +301,14 @@ final class MainViewModel {
 
     /// The menu bar icon. A problem outranks work in progress, which
     /// outranks a pause; connecting between health checks is no problem.
-    var menuBarSymbol: String {
+    var menuBarImage: String {
         let activities = pairRows.map(\.activity)
         if agentState == .off || agentState == .attention || activities.contains(.attention) {
-            return "exclamationmark.arrow.triangle.2.circlepath"
+            return "MenuBarArrowAttention"
         }
-        if activities.contains(.working) { return "arrow.triangle.2.circlepath.circle.fill" }
-        if isPaused { return "pause.circle" }
-        return "arrow.triangle.2.circlepath"
+        if activities.contains(.working) { return "MenuBarArrowWorking" }
+        if isPaused { return "MenuBarArrowPaused" }
+        return "MenuBarArrow"
     }
 
     var agentState: AgentIndicator {
