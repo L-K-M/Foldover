@@ -71,6 +71,8 @@ struct NoteToggle: View {
     var body: some View {
         HStack {
             Toggle(isOn: $isOn) { title }
+                .accessibilityLabel(title)
+                .accessibilityHint(note)
             InfoButton(title: title, message: note)
         }
     }

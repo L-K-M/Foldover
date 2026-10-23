@@ -37,7 +37,6 @@ final class TourTests: XCTestCase {
         tour.snap("02-editor")
         checkInfoPopover(tour, button: app.sheets.buttons["About Folders"].firstMatch,
                          contains: "open a shared folder in Finder", snap: "02-folders-help")
-        XCTAssertTrue(app.sheets.buttons["Cancel"].firstMatch.isHittable, "Help must not close the editor")
         tour.key(.escape)
         tour.key("a", [.command, .shift])
         tour.pause(1.5)
@@ -98,15 +97,19 @@ final class TourTests: XCTestCase {
         guard message.waitForExistence(timeout: 5) else {
             return XCTFail("The info button did not show help")
         }
-        XCTAssertTrue(message.label.contains(fragment), "Help should explain the associated setting")
+        // Selectable macOS text exposes its contents as AXValue.
+        let content = message.value as? String ?? message.label
+        XCTAssertTrue(content.contains(fragment), "Help should explain the associated setting: \(content)")
         let popover = tour.app.popovers.firstMatch
-        XCTAssertTrue(popover.exists, "Help should use a native popover")
+        XCTAssertTrue(popover.waitForExistence(timeout: 5), "Help should use a native popover")
         if popover.exists {
             XCTAssertTrue(popover.frame.contains(message.frame), "Help text should not be clipped")
         }
         tour.snap(name)
         tour.key(.escape)
         XCTAssertTrue(message.waitForNonExistence(timeout: 5), "Escape should dismiss help")
+        XCTAssertTrue(button.waitForExistence(timeout: 5) && button.isHittable,
+                      "Escape should close help, not its parent")
     }
 
     /// Whether the menu-bar menu `menu` offers `item` enabled; the menu
@@ -211,7 +214,6 @@ final class TourTests: XCTestCase {
                          contains: "open a shared folder in Finder", snap: "13-folders-help")
         checkInfoPopover(tour, button: app.sheets.buttons["About Sync Mode"].firstMatch,
                          contains: "Use Mirror for an exact one-way copy", snap: "13-mode-help")
-        XCTAssertTrue(app.sheets.buttons["Save Pair"].firstMatch.isHittable, "Help must not close the editor")
         let name = app.sheets.firstMatch.textFields.firstMatch
         if tour.click(name, "Name field") {
             tour.key(.rightArrow, .command)
@@ -285,7 +287,9 @@ final class TourTests: XCTestCase {
         tour.snap("23-settings-general")
         let checkbox = app.checkBoxes["Open Foldover at login"].firstMatch
         let login = checkbox.exists ? checkbox : app.switches["Open Foldover at login"].firstMatch
-        XCTAssertTrue(login.exists, "The login switch should keep its accessible label")
+        guard login.waitForExistence(timeout: 5) else {
+            return XCTFail("Missing labeled login switch: \(app.debugDescription)")
+        }
         let loginValue = login.value as? String
         XCTAssertNotNil(loginValue, "The login switch should expose its state")
         checkInfoPopover(tour, button: app.buttons["About Open Foldover at login"].firstMatch,

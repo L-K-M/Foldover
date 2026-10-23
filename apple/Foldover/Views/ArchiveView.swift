@@ -174,7 +174,7 @@ struct ArchiveView: View {
         HStack(spacing: 12) {
             statusLine
                 .lineLimit(3)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            Spacer(minLength: 0)
             if viewModel.isLoading && !items.isEmpty {
                 ProgressView()
                     .controlSize(.small)

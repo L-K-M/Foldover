@@ -399,6 +399,7 @@ private struct LimitRow: View {
     var body: some View {
         HStack(spacing: 12) {
             Toggle(title, isOn: $isOn)
+                .accessibilityHint(Text(note))
             InfoButton(title: Text(title), message: Text(note))
             NumberField(title: fieldTitle, value: $value, range: range, unit: unit, isActive: isOn)
         }
