@@ -452,21 +452,30 @@ fn a_shared_folder_never_serves_the_agent_state_directory() {
         unreachable!()
     };
     let run = RunScope::new(UNIX_EPOCH, PairOptions::default());
-    let entry = ObservedEntry::for_tests(
-        foldover_types::EntryVersion::new(
-            foldover_types::EntryContent::File(foldover_types::Digest::from_bytes(
-                [1; Digest::BYTE_LEN],
-            )),
-            foldover_types::Digest::from_bytes([1; Digest::BYTE_LEN]),
-        ),
-        1,
-    );
     let inside =
         SyncPath::try_from(b"Library/Application Support/Foldover/pairs.sqlite".as_slice())
             .unwrap();
-    assert!(peer.read(&inside, &entry, &run, 0).is_err());
 
-    // A write inside the state directory is refused there as well.
+    // The entry a real scan plans for pairs.sqlite, so the read can only
+    // be refused by the state-directory guard, never an entry mismatch.
+    // (The share's own endpoint protects what the *agent's* endpoint
+    // serves, not what sits on disk.)
+    let unprotected = Endpoint::Local(crate::LocalEndpoint::open(shared.path()).unwrap());
+    let planned = observe(&unprotected).unwrap().entries()[&inside].clone();
+    assert!(peer.read(&inside, &planned, &run, 0).is_err());
+
+    // Case-insensitive volumes (default APFS) resolve this spelling to
+    // the same file; the guard compares directory identity, not bytes.
+    let cased = SyncPath::try_from(b"library/Application Support/Foldover/pairs.sqlite".as_slice())
+        .unwrap();
+    assert!(peer.read(&cased, &planned, &run, 0).is_err());
+
+    // A write inside the state directory is refused there as well. The
+    // target does not exist, so `Expected::Absent` is truthful and the
+    // guard is the only possible reason for refusal.
+    let tampered =
+        SyncPath::try_from(b"Library/Application Support/Foldover/tampered.sqlite".as_slice())
+            .unwrap();
     let carried = Carried {
         metadata: foldover_fs::ForeignMetadata {
             permissions: 0o644,
@@ -477,7 +486,7 @@ fn a_shared_folder_never_serves_the_agent_state_directory() {
     let content = Digest::from_bytes([2; Digest::BYTE_LEN]);
     assert!(
         peer.receive(
-            &inside,
+            &tampered,
             Expected::Absent,
             IncomingKind::File {
                 content: content.as_bytes().to_vec(),
@@ -489,6 +498,7 @@ fn a_shared_folder_never_serves_the_agent_state_directory() {
         )
         .is_err()
     );
+    assert!(!state.join("tampered.sqlite").exists());
     assert_eq!(
         std::fs::read(state.join("pairs.sqlite")).unwrap(),
         b"records"
