@@ -450,6 +450,24 @@ final class AgentRegistrationTests {
         #expect(item.reregistrations == 2)
     }
 
+    /// A timed-out status is an answering agent, not a dead one: it is
+    /// reported, never repaired.
+    @Test
+    func aTimedOutCheckDoesNotRepair() async {
+        let item = StaleLoginItem(startsAfter: 1)
+        let store = AgentStore(statusRequest: {
+            try await Task.sleep(for: .seconds(60))
+            return AgentReport(version: "1.0")
+        }, system: item, defaults: defaults,
+           startupTimeout: .milliseconds(20), startupPoll: .milliseconds(5))
+        await store.refresh()
+        #expect(item.reregistrations == 0)
+        guard case .failed = store.connection else {
+            Issue.record("Expected failure, got \(store.connection)")
+            return
+        }
+    }
+
     /// An agent that is simply off is reported, not repaired.
     @Test
     func aCheckDoesNotRepairAnAgentThatIsOff() async {

@@ -191,7 +191,12 @@ final class AgentStore {
     /// start it. Serialized with Turn On, which changes the same item.
     private func repairUnreachable(request: Int) async {
         await afterStarting { [self] in
-            guard generation == request, system.registration == .enabled else { return }
+            guard generation == request, system.registration == .enabled else {
+                // Superseded before the repair ran; the flag must not
+                // claim a repair that never happened.
+                repairedUnreachable = false
+                return
+            }
             connection = .restarting
             do {
                 // The reregister is one repair; `start` may try one more
@@ -214,6 +219,9 @@ final class AgentStore {
     func enable() async {
         await afterStarting { [self] in
             generation += 1
+            // Deliberately turning the agent on is its own repair attempt:
+            // a health check may repair afterwards even if this one fails.
+            repairedUnreachable = false
             let request = generation
             do {
                 let before = system.registration
