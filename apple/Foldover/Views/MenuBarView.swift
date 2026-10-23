@@ -10,6 +10,11 @@ struct MenuBarView: View {
     @ScaledMetric(relativeTo: .title2) private var headerIconSize: CGFloat = 24
     let viewModel: MainViewModel
 
+    /// Most pair rows before the list scrolls. A menu-bar popover that
+    /// grows past the screen loses its Quit item, which is worse than
+    /// scrolling for the pairs below the fold.
+    private static let maxPairRows = 8
+
     var body: some View {
         let rows = viewModel.pairRows
         VStack(alignment: .leading, spacing: 8) {
@@ -17,11 +22,7 @@ struct MenuBarView: View {
 
             if !rows.isEmpty {
                 Divider()
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(rows) { row in
-                        pairRow(row)
-                    }
-                }
+                pairList(rows)
                 Divider()
                 Button { Task { await viewModel.syncAll() } } label: { rowLabel("Sync All") }
                     .disabled(!viewModel.canSyncAll)
@@ -33,6 +34,7 @@ struct MenuBarView: View {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)
+                    .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -47,6 +49,32 @@ struct MenuBarView: View {
         .buttonStyle(.borderless)
         .padding(12)
         .frame(width: 300)
+        // Long agent messages wrap; the window never grows unbounded.
+        .frame(maxHeight: 560)
+    }
+
+    /// Every pair's row, scrolling once there are more than can fit.
+    @ViewBuilder
+    private func pairList(_ rows: [PairRow]) -> some View {
+        if rows.count > Self.maxPairRows {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(rows) { row in
+                        pairRow(row)
+                    }
+                }
+            }
+            .frame(maxHeight: CGFloat(Self.maxPairRows) * 36)
+            Text(String(localized: "\(rows.count) pairs · scroll for more"))
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        } else {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(rows) { row in
+                    pairRow(row)
+                }
+            }
+        }
     }
 
     /// The menu bar symbol, the catalog and the background agent, with
@@ -83,6 +111,7 @@ struct MenuBarView: View {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)
+                    .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.leading, 34)
             }
