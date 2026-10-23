@@ -50,7 +50,7 @@ func reduceMotionStopsThePulseAndAllowsItToResume() async throws {
 @Test
 func anActivePulseDoesNotRetainItsOwner() {
     var animation: MenuBarAnimation? = MenuBarAnimation()
-    weak var owner = animation
+    weak let owner = animation
     animation?.update(status: .working, motion: .full)
     animation = nil
     #expect(owner == nil)

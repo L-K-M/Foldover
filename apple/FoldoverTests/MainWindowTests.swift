@@ -225,6 +225,31 @@ private func eventuallyInWindow(_ condition: @MainActor () -> Bool,
 
 @MainActor
 @Test
+func theMenuBarPulseObservesWorkWithoutAScene() async throws {
+    let photos = windowPair(photosWindowID, "Photos")
+    let client = WindowSyncClient()
+    let viewModel = await windowModel([photos], sync: client, pollInterval: .milliseconds(10))
+    let animation = MenuBarAnimation(viewModel: viewModel)
+
+    await client.set(.working(.run, cancelling: false), for: photos.id)
+    let refresh = Task { await viewModel.sync(for: photos).refresh() }
+    if MotionStore().preference == .full {
+        #expect(await eventuallyInWindow {
+            animation.imageName(for: .working) != MenuBarStatus.working.rawValue
+        })
+    }
+
+    await client.set(.idle, for: photos.id)
+    await refresh.value
+    #expect(await eventuallyInWindow {
+        animation.imageName(for: .working) == MenuBarStatus.working.rawValue
+    })
+    try await Task.sleep(for: .milliseconds(450))
+    #expect(animation.imageName(for: .working) == MenuBarStatus.working.rawValue)
+}
+
+@MainActor
+@Test
 func pairRowsSayHowEachPairReadsAtAGlance() async {
     let photos = windowPair(photosWindowID, "Photos", mode: .backupLeft)
     let docs = windowPair(docsWindowID, "Docs")

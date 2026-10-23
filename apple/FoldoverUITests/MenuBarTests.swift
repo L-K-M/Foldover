@@ -6,6 +6,7 @@ final class MenuBarTests: XCTestCase {
     func testTheMenuBarPulsesWithEveryWindowClosed() {
         let tour = Tour(self, appearance: .light, scenario: "syncing")
         tour.launch()
+        print("Menu bar Reduce Motion: \(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)")
         // MenuBarExtra's Label title is not a status-item query identifier.
         let item = tour.app.statusItems.firstMatch
         XCTAssertTrue(item.waitForExistence(timeout: 10))

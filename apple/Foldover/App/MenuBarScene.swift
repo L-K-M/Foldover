@@ -2,9 +2,13 @@ import SwiftUI
 
 @MainActor
 struct MenuBarScene: Scene {
-    @State private var animation = MenuBarAnimation()
-    @State private var motion = MotionStore()
+    @State private var animation: MenuBarAnimation
     let viewModel: MainViewModel
+
+    init(viewModel: MainViewModel) {
+        self.viewModel = viewModel
+        _animation = State(initialValue: MenuBarAnimation(viewModel: viewModel))
+    }
 
     var body: some Scene {
         let status = viewModel.menuBarStatus
@@ -19,12 +23,5 @@ struct MenuBarScene: Scene {
             }
         }
         .menuBarExtraStyle(.window)
-        // Scene lifetime keeps the pulse running with every window closed.
-        .onChange(of: status, initial: true) { _, status in
-            animation.update(status: status, motion: motion.preference)
-        }
-        .onChange(of: motion.preference) { _, preference in
-            animation.update(status: status, motion: preference)
-        }
     }
 }
