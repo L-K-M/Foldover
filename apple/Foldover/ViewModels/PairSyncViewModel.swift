@@ -95,6 +95,40 @@ struct ApprovalRequest: Equatable, Sendable, Identifiable {
     var id: String { "\(pairID)-\(reviewToken)" }
 }
 
+/// What the change rows were built from: the previewed plan, the pages
+/// loaded for it and the kind filter narrowing them.
+private struct RowsSource: Equatable {
+    var pair: String
+    var token: String
+    var paged: Bool
+    var listed: Int
+    var filter: ChangeFilter?
+}
+
+/// Change rows are display data built from the store's preview pages:
+/// a UTF-8 path decode, a URL, a skip-rule walk and formatted sizes per
+/// row. A big preview rebuilt every row on each read, several reads per
+/// render and one per search keystroke, so the cache builds them once
+/// per source and hands the same rows back until the store changes
+/// (PLAN.md §3.2: fast you can see).
+@MainActor
+final class ChangeRowsCache {
+    private var entries: [String: (source: RowsSource, rows: [ChangeRow])] = [:]
+    /// Builds performed, for tests: a shared cache must build once per
+    /// source, however many view models read it.
+    private(set) var builds = 0
+
+    func rows(from source: RowsSource, build: () -> [ChangeRow]) -> [ChangeRow] {
+        if let entry = entries[source.pair], entry.source == source {
+            return entry.rows
+        }
+        let rows = build()
+        builds += 1
+        entries[source.pair] = (source, rows)
+        return rows
+    }
+}
+
 /// Preview and run controls for the selected pair: strings and actions only.
 @MainActor
 struct PairSyncViewModel {
@@ -102,6 +136,18 @@ struct PairSyncViewModel {
     let store: SyncStore
     let pairs: PairStore
     let agentConnected: Bool
+    /// Rows cached across renders. The main window shares one cache
+    /// across its view models; each render recreates them.
+    let rowCache: ChangeRowsCache
+
+    init(pair: SyncPair, store: SyncStore, pairs: PairStore, agentConnected: Bool,
+         rowCache: ChangeRowsCache = ChangeRowsCache()) {
+        self.pair = pair
+        self.store = store
+        self.pairs = pairs
+        self.agentConnected = agentConnected
+        self.rowCache = rowCache
+    }
 
     private var state: PairSyncState { store.state(for: pair.id) }
 
@@ -403,32 +449,38 @@ struct PairSyncViewModel {
     /// keeps a row selected while a search hides it.
     var listedRows: [ChangeRow] {
         if let preview = reviewable {
-            let review = ReviewContext(token: preview.reviewToken,
-                                       pairRevision: preview.pairRevision)
-            let changes = (store.listing(for: pair.id)?.changes ?? preview.changes)
-                .enumerated().map { index, change in
-                    ChangeRow(id: index, path: Self.pathText(change.path),
-                              description: Self.description(change),
-                              resolvable: Self.resolvable(change.action) ? change.path : nil,
-                              keepsBoth: change.action == .conflict(.bothChanged),
-                              skippable: PairStore.skipRule(for: change.path) == nil ? nil : change.path,
-                              item: Self.choosable(change.action) ? change.path : nil,
-                              otherWay: Self.otherWay(change.action),
-                              otherWayTitle: Self.otherWayTitle(change.action),
-                              review: review,
-                              look: Self.lookURL(change, settings: pair.settings),
-                              symbol: Self.symbol(change.action),
-                              tone: Self.tone(change.action),
-                              actionText: Self.actionText(change),
-                              sizeText: change.bytes > 0 ? Self.byteText(change.bytes) : "")
+            let listing = store.listing(for: pair.id)
+            let source = RowsSource(
+                pair: pair.id, token: preview.reviewToken, paged: listing != nil,
+                listed: (listing?.changes ?? preview.changes).count, filter: listing?.filter)
+            return rowCache.rows(from: source) {
+                let review = ReviewContext(token: preview.reviewToken,
+                                           pairRevision: preview.pairRevision)
+                let changes = (listing?.changes ?? preview.changes)
+                    .enumerated().map { index, change in
+                        ChangeRow(id: index, path: Self.pathText(change.path),
+                                  description: Self.description(change),
+                                  resolvable: Self.resolvable(change.action) ? change.path : nil,
+                                  keepsBoth: change.action == .conflict(.bothChanged),
+                                  skippable: PairStore.skipRule(for: change.path) == nil ? nil : change.path,
+                                  item: Self.choosable(change.action) ? change.path : nil,
+                                  otherWay: Self.otherWay(change.action),
+                                  otherWayTitle: Self.otherWayTitle(change.action),
+                                  review: review,
+                                  look: Self.lookURL(change, settings: pair.settings),
+                                  symbol: Self.symbol(change.action),
+                                  tone: Self.tone(change.action),
+                                  actionText: Self.actionText(change),
+                                  sizeText: change.bytes > 0 ? Self.byteText(change.bytes) : "")
+                    }
+                // Error rows have stable negative IDs, separate from paged changes.
+                let failures = preview.failures.enumerated().map { index, failure in
+                    ChangeRow(id: -(index + 1), path: Self.pathText(failure.path), description: failure.message,
+                              resolvable: nil, symbol: "xmark.octagon.fill", tone: .failure,
+                              actionText: failure.message)
                 }
-            // Error rows have stable negative IDs, separate from paged changes.
-            let failures = preview.failures.enumerated().map { index, failure in
-                ChangeRow(id: -(index + 1), path: Self.pathText(failure.path), description: failure.message,
-                          resolvable: nil, symbol: "xmark.octagon.fill", tone: .failure,
-                          actionText: failure.message)
+                return changes + failures
             }
-            return changes + failures
         }
         let failures: [RunFailure] = switch state {
         case .finished(let result): result.failures

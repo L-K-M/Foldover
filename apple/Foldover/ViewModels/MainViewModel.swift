@@ -144,6 +144,9 @@ final class MainViewModel {
     /// A path, not a row index: a new listing reuses indexes for other
     /// files.
     private var changeSelections: [String: String] = [:]
+    /// Change rows shared by every view model of this window, so each
+    /// render reuses the rows the one before it built.
+    private let changeRows = ChangeRowsCache()
     /// A sync the main window started, with the result it finished with.
     private struct WindowSync {
         let pairID: String
@@ -602,7 +605,8 @@ final class MainViewModel {
     }
 
     func sync(for pair: SyncPair) -> PairSyncViewModel {
-        PairSyncViewModel(pair: pair, store: syncStore, pairs: pairStore, agentConnected: agentConnected)
+        PairSyncViewModel(pair: pair, store: syncStore, pairs: pairStore,
+                          agentConnected: agentConnected, rowCache: changeRows)
     }
 
     /// A store for one archive window, so windows browse independently.
