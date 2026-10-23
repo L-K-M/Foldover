@@ -67,7 +67,8 @@ macOS writes AppleDouble files (`._*`) beside files on volumes that cannot
 store its metadata. Where the volume says it has no extended attributes,
 as exFAT and FAT disks do, Foldover skips them: they hold the attributes
 of the files beside them, which travel with those files. Elsewhere they
-stop a scan; add a `._*` rule to the pair's filters to skip them
+are reported and left unchanged while independent files sync; add a
+`._*` rule to the pair's filters to exclude them explicitly
 ([limitations](limitations.md), [ADR 0024](../adr/0024-filters.md)).
 
 ## An SFTP folder

@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Unreadable or changing files, folders and ambiguous AppleDouble sidecars
+  no longer stop independent, safe copies. Preview and sync results list
+  each error with readable paths; affected branches stay unchanged in both
+  folders and retry next sync. Runs with errors keep their archives.
+
 - Sockets, named pipes and device files no longer stop local scans, so a
   home folder containing 1Password's daemon socket can sync. These paths
   are skipped in both folders, preserving existing copies.

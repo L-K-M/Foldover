@@ -394,6 +394,7 @@ fn a_shared_folder_never_serves_the_agent_state_directory() {
     std::fs::create_dir_all(&state).unwrap();
     std::fs::write(state.join("pairs.sqlite"), b"records").unwrap();
     std::fs::write(shared.path().join("mine.txt"), b"mine").unwrap();
+    std::fs::write(shared.path().join("._unclassified"), b"metadata").unwrap();
     let identities = [Identity::generate().unwrap(), Identity::generate().unwrap()];
     let devices = identities
         .each_ref()
@@ -437,6 +438,11 @@ fn a_shared_folder_never_serves_the_agent_state_directory() {
     let root = PeerRoot::new(devices[1], ShareId::from_bytes([7; ShareId::BYTE_LEN]));
     let other = Endpoint::Peer(PeerEndpoint::open(a, &root).unwrap());
     let seen = observe(&other).unwrap();
+    let sidecar = SyncPath::try_from(b"._unclassified".as_slice()).unwrap();
+    assert_eq!(seen.issues().len(), 1);
+    assert_eq!(seen.issues()[0].path(), &sidecar);
+    assert_eq!(seen.unavailable(), &[sidecar]);
+    assert!(seen.issues()[0].message().contains("AppleDouble"));
     let prefix = b"Library/Application Support/Foldover";
     assert!(!seen.entries().keys().any(|path| {
         let bytes = path.as_bytes();

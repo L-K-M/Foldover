@@ -498,10 +498,13 @@ impl SftpEndpoint {
                 None => self.root.clone(),
                 Some(path) => self.remote(path.as_bytes()),
             };
-            let entries = self
-                .session()
-                .read_dir(&remote)
-                .map_err(|source| at(directory.as_ref(), source))?;
+            let entries = match self.session().read_dir(&remote) {
+                Ok(entries) => entries,
+                Err(source) => {
+                    observation.skip_error(at(directory.as_ref(), source))?;
+                    continue;
+                }
+            };
             for (name, attributes) in entries {
                 let path = child_path(directory.as_ref(), &name)?;
                 if protected(&name) {
@@ -526,7 +529,8 @@ impl SftpEndpoint {
                     }
                 }
                 if name.starts_with(b"._") {
-                    return Err(ScanError::UnclassifiedSidecar(path));
+                    observation.skip_error(ScanError::UnclassifiedSidecar(path))?;
+                    continue;
                 }
                 if kind == FileKind::Directory {
                     pending.push(Some(path.clone()));
@@ -536,10 +540,33 @@ impl SftpEndpoint {
             }
         }
         for (path, attributes) in listed {
-            let entry = self.observe_entry(&path, &attributes, policy, control)?;
+            if control() == ScanControl::Cancel {
+                return Err(ScanError::Cancelled);
+            }
+            if observation
+                .unavailable
+                .iter()
+                .any(|root| root == &path || root.is_ancestor_of(&path))
+            {
+                continue;
+            }
+            let entry = match self.observe_entry(&path, &attributes, policy, control) {
+                Ok(entry) => entry,
+                Err(error) => {
+                    observation.skip_error(error)?;
+                    progress(ObserveStep::Checked);
+                    continue;
+                }
+            };
             observation.entries.insert(path, entry);
             progress(ObserveStep::Checked);
         }
+        let unavailable = &observation.unavailable;
+        observation.entries.retain(|path, _| {
+            !unavailable
+                .iter()
+                .any(|root| root == path || root.is_ancestor_of(path))
+        });
         Ok(observation)
     }
 

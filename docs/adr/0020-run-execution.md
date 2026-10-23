@@ -63,7 +63,7 @@ execute: deletion gate ─▶ archive leftovers
 
 **Retention.** Archives live in `.foldover/archive/<run>/` on each side,
 where `<run>` is the run's UTC start time
-(`2026-10-18T09-30-00.123Z`). After a run completes without cancellation,
+(`2026-10-18T09-30-00.123Z`). After a run completes without cancellation or errors,
 run folders older than 30 days are deleted permanently (owner decision,
 PLAN.md §10). Only canonical run names count, so other folders in the
 archive are kept. Deletion never follows links; a pruning failure is

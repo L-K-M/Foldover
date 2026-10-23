@@ -195,8 +195,8 @@ you might expect. Only the last one below blocks saving
   it as it is ([ADR 0019](../adr/0019-local-write-primitives.md)).
 - AppleDouble sidecar files (`._*`) are skipped on volumes without
   extended attributes, such as exFAT and FAT disks. Elsewhere, including
-  shares that do not say, they stop the scan; add a `._*` rule to skip
-  them instead
+  shares that do not say, they are left unchanged with a reported error;
+  independent files still sync. A `._*` rule excludes them explicitly
   ([ADR 0024](../adr/0024-filters.md),
   `crates/foldover-endpoint/src/local.rs`).
 

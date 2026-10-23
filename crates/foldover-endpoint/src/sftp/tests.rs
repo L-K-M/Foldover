@@ -236,17 +236,19 @@ fn oversized_sidecars_are_excluded_before_classification() {
     assert_eq!(observed.oversized(), &[path(b"._heavy")]);
     assert!(observed.entries().contains_key(&path(b"plain")));
 
-    // A sidecar inside the limits still stops the scan.
+    // An ambiguous sidecar is reported without hiding healthy files.
     fs::write(directory.path().join("._tiny"), b"1234").unwrap();
-    assert!(matches!(
-        remote.observe_from(
+    let observed = remote
+        .observe_from(
             options.metadata(),
             &filter,
             &std::collections::BTreeMap::new(),
             &mut proceed,
-        ),
-        Err(ScanError::UnclassifiedSidecar(sidecar)) if sidecar == path(b"._tiny")
-    ));
+        )
+        .unwrap();
+    assert!(observed.entries().contains_key(&path(b"plain")));
+    assert_eq!(observed.unavailable(), &[path(b"._tiny")]);
+    assert_eq!(observed.issues()[0].path(), &path(b"._tiny"));
 }
 
 #[test]

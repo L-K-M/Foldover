@@ -15,8 +15,9 @@ endpoints, and a metadata digest recorded per side
 
 `LocalEndpoint::observe` scans the root, then derives one version per entry.
 The root itself is excluded. Each read is checked against the entry's scan
-observation, so any change, read error or cancellation fails the whole
-observation instead of returning a partial tree.
+observation. Scoped changes and read errors leave explicit unavailable
+subtrees, excluded on both sides of the plan; they never look absent.
+Cancellation and root failures discard the whole observation.
 
 **Content** (domain-separated BLAKE3):
 
@@ -78,7 +79,7 @@ empty attribute list.
   work: an edit that kept size and modification time is found within a
   week (PLAN.md §4.8). Snapshots are discarded with the base when roots or
   metadata categories change.
-- A single entry changing during observation fails the run; the caller
-  retries. Per-entry retry is pending.
+- An entry changing during observation is reported and left unchanged;
+  independent entries continue. Failed entries are retried next run.
 - Execution must read back the target's version and fail explicitly when
   content differs, for example a dropped resource fork.

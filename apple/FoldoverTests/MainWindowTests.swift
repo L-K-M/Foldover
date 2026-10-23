@@ -371,6 +371,39 @@ func eachStateShowsItsPlaceholderActivityAndConflicts() async throws {
 
 @MainActor
 @Test
+func scanErrorsStayVisibleWhileSafeChangesRemainSyncable() async {
+    let pair = windowPair(photosWindowID, "Photos")
+    let client = WindowSyncClient()
+    let viewModel = PairSyncViewModel(pair: pair, store: SyncStore(client: client),
+                                      pairs: PairStore(client: WindowCatalog([pair])), agentConnected: true)
+    let denied = RunFailure(path: Data("private/notes.txt".utf8), message: "Folder A: Permission denied")
+    var preview = plan([PlannedChange(path: Data("safe.txt".utf8), action: .copy(to: .b))])
+    preview.failures = [denied]
+    preview.failureCount = 3
+    await show(.previewed(preview), on: viewModel, via: client)
+    #expect(viewModel.canSync)
+    #expect(viewModel.activity == .attention)
+    #expect(viewModel.rows.count == 2)
+    #expect(Set(viewModel.rows.map(\.id)).count == 2)
+    #expect(viewModel.rows.last?.path == "private/notes.txt")
+    #expect(viewModel.rows.last?.actionText == denied.message)
+    #expect(viewModel.rows.last?.resolvable == nil)
+    #expect(viewModel.statusText.contains("3 items could not be checked"))
+    #expect(viewModel.hiddenRowsText == "2 more scan errors")
+    #expect(!viewModel.canLoadMoreChanges)
+
+    preview = plan([])
+    preview.failures = [denied]
+    preview.failureCount = 1
+    await show(.previewed(preview), on: viewModel, via: client)
+    #expect(viewModel.shortStatus != "In sync")
+    #expect(viewModel.statusText != "Folders are in sync.")
+    #expect(viewModel.placeholder == nil)
+    #expect(viewModel.activity == .attention)
+}
+
+@MainActor
+@Test
 func changeRowsCarryTheirSymbolToneAndSizeApart() async {
     let pair = windowPair(photosWindowID, "Photos")
     let client = WindowSyncClient()

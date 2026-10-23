@@ -85,7 +85,7 @@ pub enum ScanError {
     DirectoryCycle(SyncPath),
     #[error("Unsupported entry type: {0:?}")]
     UnsupportedEntry(SyncPath),
-    #[error("AppleDouble sidecar needs metadata classification before scanning: {0:?}")]
+    #[error("AppleDouble sidecar cannot be classified safely: {0:?}")]
     UnclassifiedSidecar(SyncPath),
     #[error("Internal endpoint path is protected: {0:?}")]
     ProtectedPath(SyncPath),
@@ -124,6 +124,58 @@ impl ScanError {
     pub fn is_access_denied(&self) -> bool {
         matches!(self, Self::Io { source, .. } if source.kind() == io::ErrorKind::PermissionDenied)
     }
+
+    /// Only a bounded subtree can be skipped. Root failures, cancellation,
+    /// transport loss and protection failures still invalidate the observation.
+    fn into_issue(self) -> Result<ScanIssue, Self> {
+        let path = match &self {
+            Self::Io {
+                path: Some(path),
+                source,
+            } if !matches!(
+                source.kind(),
+                io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::NotConnected
+                    | io::ErrorKind::UnexpectedEof
+                    | io::ErrorKind::TimedOut
+            ) =>
+            {
+                path
+            }
+            Self::Changed(Some(path))
+            | Self::Dataless(Some(path))
+            | Self::Metadata {
+                path: Some(path), ..
+            }
+            | Self::NestedFilesystem(path)
+            | Self::DirectoryCycle(path)
+            | Self::UnsupportedEntry(path)
+            | Self::UnclassifiedSidecar(path) => path,
+            _ => return Err(self),
+        };
+        Ok(ScanIssue {
+            path: path.clone(),
+            message: self.to_string(),
+        })
+    }
+}
+
+/// A path left unread, with its descendants, rather than treated as absent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScanIssue {
+    pub(crate) path: SyncPath,
+    pub(crate) message: String,
+}
+
+impl ScanIssue {
+    pub fn path(&self) -> &SyncPath {
+        &self.path
+    }
+    pub fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 /// Exact path and observed attributes. A link target is data, never a scan root.
@@ -158,9 +210,27 @@ pub struct ScanStats {
     oversized: Vec<SyncPath>,
     old: Vec<SyncPath>,
     unavailable: Vec<SyncPath>,
+    issues: Vec<ScanIssue>,
 }
 
 impl ScanStats {
+    /// These subtrees must be discarded even if the sink already saw rows.
+    pub fn unavailable(&self) -> &[SyncPath] {
+        &self.unavailable
+    }
+
+    pub fn issues(&self) -> &[ScanIssue] {
+        &self.issues
+    }
+
+    fn skip_error(&mut self, error: ScanError) -> Result<(), ScanError> {
+        let issue = error.into_issue()?;
+        self.skipped += 1;
+        self.unavailable.push(issue.path.clone());
+        self.issues.push(issue);
+        Ok(())
+    }
+
     pub fn entries(&self) -> usize {
         self.entries
     }
@@ -180,8 +250,8 @@ impl ScanStats {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Sidecars {
     /// The volume keeps extended attributes itself, so a `._` file is a
-    /// copy of another volume's bookkeeping, and ambiguous: it stops the
-    /// scan (ADR 0010).
+    /// copy of another volume's bookkeeping, and ambiguous: leave it
+    /// unchanged and report it.
     Unclassified,
     /// The volume has none, as exFAT and FAT: macOS keeps each file's
     /// extended attributes in its `._` sidecar and shows them as the
@@ -338,7 +408,7 @@ impl ObservedEntry {
     }
 }
 
-/// A complete tree observation plus leftovers to recover before writing.
+/// Known entries plus explicit unread subtrees and leftovers to recover.
 #[derive(Debug, Default)]
 pub struct Observation {
     pub(crate) entries: BTreeMap<SyncPath, ObservedEntry>,
@@ -346,9 +416,27 @@ pub struct Observation {
     pub(crate) oversized: Vec<SyncPath>,
     pub(crate) old: Vec<SyncPath>,
     pub(crate) unavailable: Vec<SyncPath>,
+    pub(crate) issues: Vec<ScanIssue>,
 }
 
 impl Observation {
+    pub fn issues(&self) -> &[ScanIssue] {
+        &self.issues
+    }
+
+    pub(crate) fn skip_error(&mut self, error: ScanError) -> Result<(), ScanError> {
+        let issue = error.into_issue()?;
+        self.unavailable.push(issue.path.clone());
+        self.issues.push(issue);
+        Ok(())
+    }
+
+    fn is_unavailable(&self, path: &SyncPath) -> bool {
+        self.unavailable
+            .iter()
+            .any(|root| root == path || root.is_ancestor_of(path))
+    }
+
     pub fn entries(&self) -> &BTreeMap<SyncPath, ObservedEntry> {
         &self.entries
     }
@@ -367,7 +455,7 @@ impl Observation {
         &self.old
     }
 
-    /// Special files and cloud-only entries, left unread. Both folders
+    /// Failed reads, special files and cloud-only entries. Both folders
     /// must skip these paths and their descendants, never infer deletion.
     pub fn unavailable(&self) -> &[SyncPath] {
         &self.unavailable
@@ -387,6 +475,11 @@ impl Observation {
         {
             if listed == from {
                 *listed = to.clone();
+            }
+        }
+        for issue in &mut self.issues {
+            if &issue.path == from {
+                issue.path = to.clone();
             }
         }
     }
@@ -740,7 +833,8 @@ impl LocalEndpoint {
 
     /// Stream depth-first metadata rows without opening file data or buffering a
     /// whole directory. Enumeration order is filesystem-defined; plans must sort.
-    /// The sink must discard partial rows when this returns an error. Cancellation
+    /// The sink must exclude `ScanStats::unavailable` subtrees and discard all
+    /// rows when this returns an error. Cancellation
     /// is checked between rows; it does not interrupt a blocked filesystem call.
     pub fn scan_metadata(
         &self,
@@ -766,122 +860,136 @@ impl LocalEndpoint {
 
         while let Some(directory) = directories.last_mut() {
             let Some(entry) = directory.entries.next() else {
-                if at_scan(&directory.path, directory.root.root_metadata())? != directory.before {
-                    return Err(ScanError::Changed(directory.path.clone()));
-                }
                 let finished = directories.pop().expect("the current directory exists");
-                if let Some(parent) = directories.last() {
-                    let path = finished.path.as_ref().expect("a descendant has a path");
-                    let name = SyncPath::try_from(path.file_name())?;
-                    if at_scan(&finished.path, parent.root.metadata(&name))? != finished.before {
-                        return Err(ScanError::Changed(finished.path));
+                let checked = (|| {
+                    if at_scan(&finished.path, finished.root.root_metadata())? != finished.before {
+                        return Err(ScanError::Changed(finished.path.clone()));
                     }
+                    if let Some(parent) = directories.last() {
+                        let path = finished.path.as_ref().expect("a descendant has a path");
+                        let name = SyncPath::try_from(path.file_name())?;
+                        if at_scan(&finished.path, parent.root.metadata(&name))? != finished.before
+                        {
+                            return Err(ScanError::Changed(finished.path.clone()));
+                        }
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = checked {
+                    stats.skip_error(error)?;
                 }
                 continue;
             };
-            let entry = at_scan(&directory.path, entry)?;
-
-            if protected(entry.name()) {
-                stats.skipped += 1;
-                if temporary(entry.name()) {
-                    stats
-                        .leftovers
-                        .push(child_path(directory.path.as_ref(), entry.name())?);
-                }
-                continue;
-            }
-            let path = child_path(directory.path.as_ref(), entry.name())?;
-            if self.protects(&path) || self.is_state(entry.metadata()) {
-                stats.skipped += 1;
-                continue;
-            }
-            if filter.excludes(&path, entry.metadata().kind() == NodeKind::Directory) {
-                stats.skipped += 1;
-                continue;
-            }
-            if entry.metadata().kind() == NodeKind::File
-                && filter.too_large(entry.metadata().size())
-            {
-                stats.skipped += 1;
-                stats.oversized.push(path);
-                continue;
-            }
-            if entry.metadata().kind() == NodeKind::File
-                && filter.is_old(entry.metadata().modified())
-            {
-                stats.old.push(path.clone());
-            }
-            if entry.name().starts_with(b"._") {
-                // Sidecars are files; a folder so named is someone's.
-                let file = entry.metadata().kind() == NodeKind::File;
-                if sidecars == Sidecars::Metadata && file {
-                    stats.skipped += 1;
+            let entry = match at_scan(&directory.path, entry) {
+                Ok(entry) => entry,
+                Err(error) => {
+                    // A listing error has no filename. Its whole directory
+                    // is unknown, including rows already emitted from it.
+                    stats.skip_error(error)?;
+                    directories.pop();
                     continue;
                 }
-                return Err(ScanError::UnclassifiedSidecar(path));
-            }
-            let at_path = Some(path.clone());
-            let name = SyncPath::try_from(entry.name())?;
-            let metadata = entry.metadata().clone();
-            // An entry kept only in iCloud is not absence, and reading it
-            // would download it (PLAN.md §4.10): it is set aside unread,
-            // folders without their contents, for both folders to skip.
-            // run.rs's `unavailable` treats everything below one as
-            // unknown, never as absent.
-            if metadata.data_residency() == DataResidency::Dataless {
-                stats.skipped += 1;
-                stats.unavailable.push(path);
-                continue;
-            }
-            if metadata.identity().device() != self.identity.device() {
-                return Err(ScanError::NestedFilesystem(path));
-            }
-            if metadata.kind() == NodeKind::Other {
-                // Sockets, pipes and devices have no transferable file content.
-                stats.skipped += 1;
-                stats.unavailable.push(path);
-                continue;
-            }
-            let link_target = if metadata.kind() == NodeKind::Symlink {
-                Some(at_scan(&at_path, directory.root.read_link(&name))?)
-            } else {
-                None
             };
-            if at_scan(&at_path, directory.root.metadata(&name))? != metadata {
-                return Err(ScanError::Changed(at_path));
+            match self.scan_entry(directory, entry, filter, sidecars, &mut stats, sink) {
+                Ok(Some(child))
+                    if directories
+                        .iter()
+                        .any(|ancestor| ancestor.before.identity() == child.before.identity()) =>
+                {
+                    stats.skip_error(ScanError::DirectoryCycle(
+                        child.path.expect("a child has a path"),
+                    ))?;
+                }
+                Ok(Some(child)) => directories.push(child),
+                Ok(None) => {}
+                Err(error) => stats.skip_error(error)?,
             }
-            if sink(LocalEntry {
-                path: path.clone(),
-                metadata: metadata.clone(),
-                link_target,
-            }) == ScanControl::Cancel
-            {
-                return Err(ScanError::Cancelled);
-            }
-            stats.entries += 1;
-
-            if metadata.kind() != NodeKind::Directory {
-                continue;
-            }
-            let child = at_scan(&at_path, directory.root.open_directory(&name))?;
-            let child = Directory::open(child, at_path.clone())?;
-            if child.before != metadata {
-                return Err(ScanError::Changed(at_path));
-            }
-            if directories
-                .iter()
-                .any(|ancestor| ancestor.before.identity() == child.before.identity())
-            {
-                return Err(ScanError::DirectoryCycle(path));
-            }
-            directories.push(child);
         }
         Ok(stats)
     }
 
-    /// Versions for every entry below the root, ordered by path. A read
-    /// error, a change since the scan or cancellation fails the whole
-    /// observation; the planner never receives a partial tree.
+    fn scan_entry(
+        &self,
+        directory: &Directory,
+        entry: DirectoryEntry,
+        filter: &Filter,
+        sidecars: Sidecars,
+        stats: &mut ScanStats,
+        sink: &mut impl FnMut(LocalEntry) -> ScanControl,
+    ) -> Result<Option<Directory>, ScanError> {
+        let path = child_path(directory.path.as_ref(), entry.name())?;
+        if protected(entry.name()) || self.protects(&path) || self.is_state(entry.metadata()) {
+            stats.skipped += 1;
+            if temporary(entry.name()) {
+                stats.leftovers.push(path);
+            }
+            return Ok(None);
+        }
+        let metadata = entry.metadata().clone();
+        if filter.excludes(&path, metadata.kind() == NodeKind::Directory) {
+            stats.skipped += 1;
+            return Ok(None);
+        }
+        if metadata.kind() == NodeKind::File && filter.too_large(metadata.size()) {
+            stats.skipped += 1;
+            stats.oversized.push(path);
+            return Ok(None);
+        }
+        if metadata.kind() == NodeKind::File && filter.is_old(metadata.modified()) {
+            stats.old.push(path.clone());
+        }
+        if entry.name().starts_with(b"._") {
+            // Native sidecars travel as metadata. Ambiguous ones stay unread.
+            if sidecars == Sidecars::Metadata && metadata.kind() == NodeKind::File {
+                stats.skipped += 1;
+                return Ok(None);
+            }
+            return Err(ScanError::UnclassifiedSidecar(path));
+        }
+        if metadata.data_residency() == DataResidency::Dataless
+            || metadata.kind() == NodeKind::Other
+        {
+            // Cloud placeholders must not download; sockets and devices have no file data.
+            stats.skipped += 1;
+            stats.unavailable.push(path);
+            return Ok(None);
+        }
+        if metadata.identity().device() != self.identity.device() {
+            return Err(ScanError::NestedFilesystem(path));
+        }
+        let at_path = Some(path.clone());
+        let name = SyncPath::try_from(entry.name())?;
+        let link_target = if metadata.kind() == NodeKind::Symlink {
+            Some(at_scan(&at_path, directory.root.read_link(&name))?)
+        } else {
+            None
+        };
+        if at_scan(&at_path, directory.root.metadata(&name))? != metadata {
+            return Err(ScanError::Changed(at_path));
+        }
+        if sink(LocalEntry {
+            path: path.clone(),
+            metadata: metadata.clone(),
+            link_target,
+        }) == ScanControl::Cancel
+        {
+            return Err(ScanError::Cancelled);
+        }
+        stats.entries += 1;
+        if metadata.kind() != NodeKind::Directory {
+            return Ok(None);
+        }
+
+        let child = at_scan(&at_path, directory.root.open_directory(&name))?;
+        let child = Directory::open(child, at_path.clone())?;
+        if child.before != metadata {
+            return Err(ScanError::Changed(at_path));
+        }
+        Ok(Some(child))
+    }
+
+    /// Versions for readable entries, with failed subtrees explicitly marked
+    /// unavailable. Cancellation and unbounded failures discard all rows.
     pub fn observe(
         &self,
         policy: MetadataPolicy,
@@ -913,12 +1021,18 @@ impl LocalEndpoint {
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<Observation, ScanError> {
+        if control() == ScanControl::Cancel {
+            return Err(ScanError::Cancelled);
+        }
         let mut entries = Vec::new();
         let stats = self.scan_filtered(filter, &mut |entry| {
             entries.push(entry);
             progress(ObserveStep::Listed);
             control()
         })?;
+        if control() == ScanControl::Cancel {
+            return Err(ScanError::Cancelled);
+        }
 
         let mut observation = Observation {
             entries: BTreeMap::new(),
@@ -926,10 +1040,14 @@ impl LocalEndpoint {
             oversized: stats.oversized,
             old: stats.old,
             unavailable: stats.unavailable,
+            issues: stats.issues,
         };
         for entry in entries {
             if control() == ScanControl::Cancel {
                 return Err(ScanError::Cancelled);
+            }
+            if observation.is_unavailable(&entry.path) {
+                continue;
             }
             if let Some(known) = previous.get(&entry.path)
                 && known.fingerprint.proves_unchanged(&entry.metadata)
@@ -939,7 +1057,14 @@ impl LocalEndpoint {
                 continue;
             }
             let observed_at = SystemTime::now();
-            let version = self.entry_version(&entry, policy, control)?;
+            let version = match self.entry_version(&entry, policy, control) {
+                Ok(version) => version,
+                Err(error) => {
+                    observation.skip_error(error)?;
+                    progress(ObserveStep::Checked);
+                    continue;
+                }
+            };
             observation.entries.insert(
                 entry.path,
                 ObservedEntry {
@@ -949,6 +1074,12 @@ impl LocalEndpoint {
             );
             progress(ObserveStep::Checked);
         }
+        let unavailable = &observation.unavailable;
+        observation.entries.retain(|path, _| {
+            !unavailable
+                .iter()
+                .any(|root| root == path || root.is_ancestor_of(path))
+        });
         Ok(observation)
     }
 
@@ -1518,14 +1649,54 @@ mod tests {
     }
 
     #[test]
+    fn a_file_changed_after_listing_does_not_discard_healthy_versions() {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::write(temporary.path().join("changed"), b"before").unwrap();
+        fs::write(temporary.path().join("safe"), b"keep").unwrap();
+        let endpoint = LocalEndpoint::open(temporary.path()).unwrap();
+        let mut listed = 0;
+        let observation = endpoint
+            .observe_reporting(
+                ALL,
+                &Filter::none(),
+                &BTreeMap::new(),
+                &mut || ScanControl::Continue,
+                &mut |step| {
+                    if step == ObserveStep::Listed {
+                        listed += 1;
+                        if listed == 2 {
+                            fs::write(temporary.path().join("changed"), b"after").unwrap();
+                        }
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(observation.entries().len(), 1);
+        assert!(
+            observation
+                .entries()
+                .contains_key(&SyncPath::try_from(b"safe".as_slice()).unwrap())
+        );
+        assert_eq!(
+            observation.unavailable(),
+            &[SyncPath::try_from(b"changed".as_slice()).unwrap()]
+        );
+    }
+
+    #[test]
     fn sidecars_are_not_misclassified_as_ordinary_file_data() {
         let temporary = tempfile::tempdir().unwrap();
         fs::write(temporary.path().join("._file"), b"metadata").unwrap();
         let endpoint = LocalEndpoint::open(temporary.path()).unwrap();
-        assert!(matches!(
-            endpoint.scan_metadata(&mut |_| panic!("sidecar must not be emitted")),
-            Err(ScanError::UnclassifiedSidecar(_)),
-        ));
+        let stats = endpoint
+            .scan_metadata(&mut |_| panic!("sidecar must not be emitted"))
+            .unwrap();
+        assert_eq!(stats.skipped(), 1);
+        assert_eq!(
+            stats.issues()[0].path(),
+            &SyncPath::try_from(b"._file".as_slice()).unwrap()
+        );
+        assert!(stats.issues()[0].message().contains("AppleDouble"));
     }
 
     #[test]
