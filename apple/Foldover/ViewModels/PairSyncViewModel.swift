@@ -341,7 +341,11 @@ struct PairSyncViewModel {
 
     static func timeText(_ seconds: UInt64) -> String {
         if seconds >= 60 * 90 {
-            return String(localized: "\(seconds / 3600) h \((seconds % 3600) / 60) min")
+            let minutes = (seconds % 3600) / 60
+            if minutes == 0 {
+                return String(localized: "\(seconds / 3600) h")
+            }
+            return String(localized: "\(seconds / 3600) h \(minutes) min")
         }
         if seconds >= 90 {
             return String(localized: "\((seconds + 30) / 60) min")
