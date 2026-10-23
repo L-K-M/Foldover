@@ -1967,6 +1967,10 @@ func workingJobsShowLiveCountsWithoutCountingAsNewStates() async {
 func throughputAndDurationTextUseHumanUnits() {
     #expect(PairSyncViewModel.throughputText(2_500_000) == "2.5 MB/s")
     #expect(PairSyncViewModel.throughputText(12_000_000_000) == "12.00 GB/s")
+    #expect(PairSyncViewModel.throughputText(999_400) == "999 kB/s")
+    #expect(PairSyncViewModel.throughputText(999_600) == "1.0 MB/s")
+    #expect(PairSyncViewModel.throughputText(999_400_000) == "999.4 MB/s")
+    #expect(PairSyncViewModel.throughputText(999_600_000) == "1.00 GB/s")
     #expect(PairSyncViewModel.throughputText(850_000) == "850 kB/s")
     #expect(PairSyncViewModel.throughputText(42) == "42 B/s")
     #expect(PairSyncViewModel.durationText(9) == "9 s")

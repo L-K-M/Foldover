@@ -917,10 +917,12 @@ final class SyncStore {
         rateAnchors[id] = anchor
     }
 
+    #if DEBUG
     // Test seams: rate anchors are presentation state the tests assert on.
     func testTrackRate(_ id: String, _ state: PairSyncState) { trackRate(id, state: state) }
     func testRateAnchor(_ id: String) -> (copyStarted: ContinuousClock.Instant?,
                                           pausedAt: ContinuousClock.Instant?)? {
         rateAnchors[id].map { ($0.copyStarted, $0.pausedAt) }
     }
+    #endif
 }
