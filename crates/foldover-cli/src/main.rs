@@ -24,6 +24,9 @@ const USAGE_EXIT: u8 = 2;
 /// A run stopped for deletion approval; nothing was written.
 const APPROVAL_EXIT: u8 = 3;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Pairs `sync --all` runs at once; more would thrash disks and SFTP
+/// servers rather than finish sooner.
+const MAX_CONCURRENT_SYNCS: usize = 4;
 const SFTP_WARNING: &str = concat!(
     "SFTP assumes a trusted server; server-side folder changes can redirect access ",
     "outside the selected root. Extended attributes and ACLs are omitted; files ",
@@ -824,6 +827,13 @@ async fn sync(
     }
     let mut status = match command {
         SyncCommand::Preview => foldover_client::start_preview(location, id).await?,
+        // A plain run goes through `run_one` so `sync ID` and `sync
+        // --all` cannot drift apart in how a run is started.
+        SyncCommand::Run {
+            left: 0,
+            right: 0,
+            review: None,
+        } => run_one(location, id).await?,
         SyncCommand::Run {
             left,
             right,
@@ -904,10 +914,18 @@ async fn sync_all(location: &SocketLocation) -> Result<ExitCode, foldover_client
             .flat_map(|pair| [pair.draft().left(), pair.draft().right()]),
     );
     let mut jobs = tokio::task::JoinSet::new();
+    // Cap fan-out so many pairs cannot hammer the same disks and SFTP
+    // servers at once.
+    let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SYNCS));
     for pair in pairs {
         let location = location.clone();
+        let permit = std::sync::Arc::clone(&permits)
+            .acquire_owned()
+            .await
+            .expect("the semaphore is never closed");
         jobs.spawn(async move {
             let outcome = run_one(&location, pair.id()).await;
+            drop(permit);
             (pair, outcome)
         });
     }
@@ -915,8 +933,10 @@ async fn sync_all(location: &SocketLocation) -> Result<ExitCode, foldover_client
     let mut approvals = false;
     // Each line stands alone, so pairs are reported as they finish.
     while let Some(joined) = jobs.join_next().await {
-        // A task panics only on a bug; keep reporting the rest.
+        // A task panics only on a bug; it still counts as a failure.
         let Ok((pair, outcome)) = joined else {
+            failed = true;
+            eprintln!("foldover: a sync task failed unexpectedly");
             continue;
         };
         let line = match &outcome {
@@ -925,6 +945,17 @@ async fn sync_all(location: &SocketLocation) -> Result<ExitCode, foldover_client
                     code if code == ExitCode::SUCCESS => {}
                     code if code == ExitCode::from(APPROVAL_EXIT) => approvals = true,
                     _ => failed = true,
+                }
+                if let SyncStatus::NeedsApproval { preview } = status {
+                    eprintln!(
+                        "foldover: pair {} ({}) needs review; rerun with sync {} --approve {} {} --review {}",
+                        pair.draft().name(),
+                        pair.id(),
+                        pair.id(),
+                        preview.left.deletions,
+                        preview.right.deletions,
+                        preview.review_token
+                    );
                 }
                 serde_json::json!({
                     "id": pair.id().to_string(),
