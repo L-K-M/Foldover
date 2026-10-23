@@ -16,6 +16,10 @@ struct MainView: View {
     @FocusState private var searchFocused: Bool
     @FocusState private var paneFocus: MainPane?
 
+    /// The detail's fixed minimum width, which its toolbar section of
+    /// title and buttons fits in.
+    private static let detailMinWidth: CGFloat = 320
+
     var body: some View {
         splitView
             // The window's commands withdraw while its editor or removal
@@ -47,7 +51,9 @@ struct MainView: View {
             .onChange(of: viewModel.undoableSync, initial: true) { _, sync in registerUndo(sync) }
             .onChange(of: viewModel.pairsLoaded) { restoreSelection() }
             .onChange(of: viewModel.selectedPairID) { _, pairID in restoredPairID = pairID ?? "" }
-            .frame(minWidth: 760, minHeight: 460)
+            // Room for every column at its minimum: the sidebar's 200, the
+            // detail's own and the inspector's 240 (see SplitColumn).
+            .frame(minWidth: 200 + Self.detailMinWidth + 240, minHeight: 460)
             .task {
                 await viewModel.refreshAgent()
                 restoreSelection()
@@ -58,9 +64,8 @@ struct MainView: View {
         NavigationSplitView {
             PairSidebar(viewModel: viewModel, focus: $paneFocus)
         } detail: {
-            // Every state of the detail, not just a pair's: the empty
-            // states' wrapping descriptions depend on the width too.
-            SplitColumn { detail }
+            detail
+                .frame(minWidth: Self.detailMinWidth)
                 .navigationTitle(viewModel.selectedPair?.settings.name ?? viewModel.title)
                 .navigationSubtitle(viewModel.selectedSync?.shortStatus ?? "")
         }
@@ -78,7 +83,9 @@ struct MainView: View {
             PairDetailView(viewModel: viewModel, pair: pair, focus: $paneFocus)
                 .id(pair.id)
         } else {
-            emptyDetail
+            // The empty states' descriptions wrap, so their height
+            // depends on the width (see SplitColumn).
+            SplitColumn { emptyDetail }
                 // Drag one or two folders in to create a pair (PLAN.md §3.8).
                 .dropDestination(for: URL.self) { urls, _ in
                     viewModel.newPair(dropping: urls)

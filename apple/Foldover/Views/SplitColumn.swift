@@ -5,13 +5,16 @@ import SwiftUI
 ///
 /// AppKit asks every column for its size limits during each constraint
 /// pass. When a column's minimum depends on its own width, as it does
-/// for wrapping text, a status bar in a safe-area inset or a table
-/// beside fixed-size controls, the limits change from one pass to the
-/// next, and AppKit ends the loop by raising an exception that quits
-/// the app. A GeometryReader takes the size it is offered and reports
-/// none of its content's, so a column's limits come only from its
-/// `navigationSplitViewColumnWidth` or `inspectorColumnWidth` and the
-/// window's minimum size. Every column in the app sits in one.
+/// for wrapping text or a table beside fixed-size controls, the limits
+/// change from one pass to the next, and AppKit ends the loop by raising
+/// an exception that quits the app. A GeometryReader takes the size it
+/// is offered and reports none of its content's, so such content sits in
+/// one of these.
+///
+/// A column left with no minimum at all crashed the same way once the
+/// window narrowed and the split view squeezed it, so the column gets a
+/// fixed minimum width outside this view, one that the window's minimum
+/// width leaves room for beside the other columns at theirs.
 struct SplitColumn<Content: View>: View {
     private let alignment: Alignment
     private let content: Content

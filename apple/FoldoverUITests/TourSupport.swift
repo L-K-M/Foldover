@@ -11,6 +11,15 @@ enum TourAppearance: String {
     case dark = "Dark"
 }
 
+/// What a launch brings back from the last one.
+enum TourLaunchState {
+    /// A fresh window: no restored windows or scene storage.
+    case fresh
+    /// The windows, selection and inspector the last run left, as at a
+    /// person's launch.
+    case restored
+}
+
 @MainActor
 struct Tour {
     let app = XCUIApplication()
@@ -19,11 +28,18 @@ struct Tour {
 
     /// `scenario` names a launch state from `FixtureScenario`, such as an
     /// agent that answers slowly; none is the tour's usual state.
-    init(_ test: XCTestCase, appearance: TourAppearance, scenario: String? = nil) {
+    init(_ test: XCTestCase, appearance: TourAppearance, scenario: String? = nil,
+         launchState: TourLaunchState = .fresh) {
         self.test = test
         self.appearance = appearance
-        app.launchArguments = ["-foldover-fixtures", "-foldover-skip-update-check",
-                               "-ApplePersistenceIgnoreState", "YES"]
+        app.launchArguments = ["-foldover-fixtures", "-foldover-skip-update-check"]
+        switch launchState {
+        case .fresh:
+            app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
+        case .restored:
+            // Restore after a quit too, not only after a crash or logout.
+            app.launchArguments += ["-NSQuitAlwaysKeepsWindows", "YES"]
+        }
         if appearance == .dark { app.launchArguments.append("-foldover-dark") }
         if let scenario { app.launchArguments += ["-foldover-scenario", scenario] }
     }
@@ -41,6 +57,11 @@ struct Tour {
     func showSidebarIfHidden() {
         guard !app.outlines.firstMatch.waitForExistence(timeout: 2) else { return }
         key("s", [.command, .control])
+        // The first look can miss a sidebar that was shown but not yet
+        // in the accessibility tree, and the toggle then hid it.
+        if !app.outlines.firstMatch.waitForExistence(timeout: 2) {
+            key("s", [.command, .control])
+        }
     }
 
     /// Let animations and polled state settle before a screenshot.

@@ -14,6 +14,34 @@ final class LayoutStressTests: XCTestCase {
     @MainActor func testNoPairs() { stress("no-pairs") }
     @MainActor func testPairsFail() { stress("pairs-fail") }
 
+    /// The launch the crash on a real Mac came from: the window reopens
+    /// narrow, its pair selected, while the agent is still connecting.
+    @MainActor
+    func testRelaunchNarrowWithAPairSelected() {
+        continueAfterFailure = true
+        let first = Tour(self, appearance: .light, scenario: "slow-agent", launchState: .restored)
+        first.launch()
+        first.pause(3)
+        let photos = first.app.outlines.firstMatch.staticTexts["Photos"].firstMatch
+        guard first.click(photos, "Photos in the sidebar") else { return }
+        let before = Stress(tour: first, scenario: "relaunch")
+        guard before.step("narrowed", { before.narrowToMinimum() }) else { return }
+        // Quit as a person does, so the window keeps its size and pair.
+        first.key("q", .command)
+        XCTAssertTrue(first.app.wait(for: .notRunning, timeout: 15), "relaunch: the app did not quit")
+
+        let second = Tour(self, appearance: .light, scenario: "slow-agent", launchState: .restored)
+        second.app.launch()
+        guard second.app.windows.firstMatch.waitForExistence(timeout: 30) else {
+            return XCTFail("relaunch: no window appeared")
+        }
+        let after = Stress(tour: second, scenario: "relaunch")
+        guard after.step("reopened", { second.pause(4) }) else { return }
+        second.snap("stress-relaunch-1-reopened")
+        guard after.sweep("reopened") else { return }
+        second.app.terminate()
+    }
+
     @MainActor
     private func stress(_ scenario: String) {
         continueAfterFailure = true
@@ -65,7 +93,9 @@ private struct Stress {
         let window = app.windows.firstMatch
         let sidebar = app.outlines.firstMatch
         print("stress \(scenario) \(name): window \(window.frame), sidebar \(sidebar.exists ? sidebar.frame.width : 0)")
-        guard app.state == .runningForeground else {
+        // Only a quit counts: another app or a system dialog can take the
+        // front for a moment without anything having gone wrong.
+        guard app.state == .runningForeground || app.state == .runningBackground else {
             XCTFail("\(scenario): the app quit at “\(name)”")
             return false
         }
@@ -108,6 +138,11 @@ private struct Stress {
         let edge = window.coordinate(withNormalizedOffset: .zero)
             .withOffset(CGVector(dx: sidebar.frame.maxX - window.frame.minX, dy: window.frame.height / 2))
         edge.click(forDuration: 0.3, thenDragTo: edge.withOffset(CGVector(dx: dx, dy: 0)))
+    }
+
+    /// Narrow the window as far as it goes.
+    func narrowToMinimum() {
+        resizeWindow(by: -400)
     }
 
     /// Drag the window's bottom-right corner sideways.

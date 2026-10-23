@@ -12,7 +12,8 @@ struct ArchiveWindow: View {
 
     var body: some View {
         content
-            .frame(minWidth: 600, minHeight: 340)
+            // Room for both columns at their minimums (see SplitColumn).
+            .frame(minWidth: ArchiveView.runsMinWidth + ArchiveView.detailMinWidth, minHeight: 340)
             .onAppear {
                 if store == nil { store = viewModel.makeArchiveStore() }
             }
@@ -53,14 +54,20 @@ struct ArchiveView: View {
     /// does not read as an empty archive.
     @State private var hasStarted = false
 
+    fileprivate static let runsMinWidth: CGFloat = 170
+    /// The detail's fixed minimum width, which its toolbar section of
+    /// title, folder switch and Put Back buttons fits in.
+    fileprivate static let detailMinWidth: CGFloat = 430
+
     var body: some View {
         let items = viewModel.itemRows
         let selected = selectedRows(selection, in: items)
         NavigationSplitView {
-            SplitColumn { runList }
-                .navigationSplitViewColumnWidth(min: 170, ideal: 200, max: 280)
+            runList
+                .navigationSplitViewColumnWidth(min: Self.runsMinWidth, ideal: 200, max: 280)
         } detail: {
             detail(items)
+                .frame(minWidth: Self.detailMinWidth)
                 .navigationTitle(viewModel.pairName)
                 .navigationSubtitle("Archive")
         }
@@ -86,11 +93,14 @@ struct ArchiveView: View {
         List(viewModel.runRows, selection: runSelection) { row in
             Text(row.title).tag(row.id)
         }
+        // One line whatever the column's width (see SplitColumn).
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if let note = viewModel.olderRunsNote {
                 Text(note)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .help(note)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)

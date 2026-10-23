@@ -9,14 +9,7 @@ struct PairSidebar: View {
     let focus: FocusState<MainPane?>.Binding
     @Environment(\.openWindow) private var openWindow
 
-    // The agent bar below the list wraps its text, so its height depends
-    // on the column's width; the column keeps that out of its limits.
     var body: some View {
-        SplitColumn { list }
-            .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 340)
-    }
-
-    private var list: some View {
         List(selection: $viewModel.selectedPairID) {
             Section("Pairs") {
                 ForEach(viewModel.pairRows) { row in
@@ -27,6 +20,7 @@ struct PairSidebar: View {
             }
         }
         .listStyle(.sidebar)
+        .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 340)
         .overlay {
             if viewModel.pairsLoading && !viewModel.pairsLoaded {
                 ProgressView()
@@ -141,6 +135,12 @@ private struct SidebarAgentBar: View {
     // The button sits below the text: beside it, a narrow sidebar would
     // cut off a reason the agent gives. Long reasons end in an ellipsis,
     // with the full text in the tooltip.
+    //
+    // The bar sits below the list, so its height is part of the column's
+    // minimum, which must not change with the column's width (see
+    // SplitColumn). Each text therefore keeps a fixed number of lines
+    // whatever the width: wrapped text would otherwise gain or lose a
+    // line each time the split view resized the sidebar.
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top, spacing: 8) {
@@ -152,7 +152,7 @@ private struct SidebarAgentBar: View {
                 Text(viewModel.agentSummary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(4)
+                    .lineLimit(summaryLines, reservesSpace: true)
                     .help(viewModel.agentSummary)
                     .accessibilityAddTraits(.updatesFrequently)
             }
@@ -166,6 +166,8 @@ private struct SidebarAgentBar: View {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)
+                    .lineLimit(2, reservesSpace: true)
+                    .help(error)
                     .textSelection(.enabled)
             }
             // The detail explains a catalog that cannot load until a pair
@@ -174,6 +176,8 @@ private struct SidebarAgentBar: View {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)
+                    .lineLimit(2, reservesSpace: true)
+                    .help(error)
                     .textSelection(.enabled)
                 Button("Try Again") { Task { await viewModel.perform(.retry) } }
                     .controlSize(.small)
@@ -182,6 +186,15 @@ private struct SidebarAgentBar: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    /// A healthy agent needs a line; a problem gets room for its reason.
+    private var summaryLines: Int {
+        switch viewModel.agentState {
+        case .connected: 1
+        case .connecting: 2
+        case .attention, .off: 3
+        }
     }
 
     private var dotColor: Color {
