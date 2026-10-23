@@ -347,17 +347,20 @@ struct PairSyncViewModel {
     /// A copy rate in the largest unit that keeps three significant digits.
     static func throughputText(_ bytesPerSecond: Double) -> String {
         // Boundaries sit just under the next unit so 999.5 kB/s reads
-        // as 1.0 MB/s instead of 1000 kB/s.
+        // as 1.0 MB/s instead of 1000 kB/s. The decimal point is pinned:
+        // the unit strings are not localized, so a device-localized
+        // separator would disagree with them and break exact-match tests.
+        let locale = Locale(identifier: "en_US_POSIX")
         if bytesPerSecond >= 999_500_000 {
-            return String(format: "%.2f GB/s", bytesPerSecond / 1_000_000_000)
+            return String(format: locale: locale, "%.2f GB/s", bytesPerSecond / 1_000_000_000)
         }
         if bytesPerSecond >= 999_500 {
-            return String(format: "%.1f MB/s", bytesPerSecond / 1_000_000)
+            return String(format: locale: locale, "%.1f MB/s", bytesPerSecond / 1_000_000)
         }
         if bytesPerSecond >= 999.5 {
-            return String(format: "%.0f kB/s", bytesPerSecond / 1_000)
+            return String(format: locale: locale, "%.0f kB/s", bytesPerSecond / 1_000)
         }
-        return String(format: "%.0f B/s", bytesPerSecond)
+        return String(format: locale: locale, "%.0f B/s", bytesPerSecond)
     }
 
     /// Remaining time in minutes and seconds, or hours when longer.
