@@ -25,6 +25,7 @@ final class LayoutStressTests: XCTestCase {
         guard app.windows.firstMatch.waitForExistence(timeout: 30) else {
             return XCTFail("\(scenario): no window appeared")
         }
+        tour.showSidebarIfHidden()
         let stress = Stress(tour: tour, scenario: scenario)
         tour.snap("stress-\(scenario)-1-launch")
 
@@ -62,7 +63,8 @@ private struct Stress {
         action()
         tour.pause(0.8)
         let window = app.windows.firstMatch
-        print("stress \(scenario) \(name): window \(window.frame), dividers \(dividerPositions())")
+        let sidebar = app.outlines.firstMatch
+        print("stress \(scenario) \(name): window \(window.frame), sidebar \(sidebar.exists ? sidebar.frame.width : 0)")
         guard app.state == .runningForeground else {
             XCTFail("\(scenario): the app quit at “\(name)”")
             return false
@@ -70,21 +72,23 @@ private struct Stress {
         return true
     }
 
-    /// Every width change the window offers: both dividers to their
-    /// limits, each side column hidden and shown, and the window
-    /// narrowed and widened.
+    /// The width changes a person makes: the sidebar's edge dragged
+    /// within its limits (past its minimum it would collapse, and AppKit
+    /// would remember that for the next launch), each side column hidden
+    /// and shown, and the window narrowed step by step to its minimum
+    /// and widened again.
     func sweep(_ phase: String) -> Bool {
         let steps: [(String, () -> Void)] = [
-            ("sidebar narrow", { dragDivider(.sidebar, by: -160) }),
-            ("sidebar wide", { dragDivider(.sidebar, by: 320) }),
-            ("sidebar middle", { dragDivider(.sidebar, by: -110) }),
-            ("inspector wide", { dragDivider(.inspector, by: -160) }),
-            ("inspector narrow", { dragDivider(.inspector, by: 320) }),
+            ("sidebar narrower", { dragSidebarEdge(by: -25) }),
+            ("sidebar wider", { dragSidebarEdge(by: 100) }),
+            ("sidebar back", { dragSidebarEdge(by: -75) }),
             ("inspector hidden", { tour.key("i", [.command, .control]) }),
             ("inspector shown", { tour.key("i", [.command, .control]) }),
             ("sidebar hidden", { tour.key("s", [.command, .control]) }),
             ("sidebar shown", { tour.key("s", [.command, .control]) }),
-            ("window narrow", { resizeWindow(by: -400) }),
+            ("window narrower", { resizeWindow(by: -120) }),
+            ("window narrower still", { resizeWindow(by: -120) }),
+            ("window at its minimum", { resizeWindow(by: -160) }),
             ("window wide", { resizeWindow(by: 400) }),
         ]
         for (name, action) in steps {
@@ -93,36 +97,17 @@ private struct Stress {
         return true
     }
 
-    private enum Divider {
-        case sidebar
-        case inspector
-    }
-
-    /// The split view's dividers, left to right: the sidebar's, then the
-    /// inspector's when it shows.
-    private func dividers() -> [XCUIElement] {
-        app.windows.firstMatch.splitters.allElementsBoundByIndex
-            .filter { $0.exists && $0.frame.width < 40 }
-            .sorted { $0.frame.minX < $1.frame.minX }
-    }
-
-    private func dividerPositions() -> [Int] {
-        dividers().map { Int($0.frame.midX) }
-    }
-
-    private func dragDivider(_ divider: Divider, by dx: CGFloat) {
-        let all = dividers()
-        let target: XCUIElement?
-        switch divider {
-        case .sidebar: target = all.count >= 1 ? all.first : nil
-        case .inspector: target = all.count >= 2 ? all.last : nil
-        }
-        guard let target else {
-            print("stress \(scenario): no \(divider) divider among \(all.count)")
+    /// Drag the boundary between the sidebar and the detail sideways.
+    private func dragSidebarEdge(by dx: CGFloat) {
+        let window = app.windows.firstMatch
+        let sidebar = app.outlines.firstMatch
+        guard sidebar.exists else {
+            print("stress \(scenario): no sidebar to drag")
             return
         }
-        let start = target.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-        start.click(forDuration: 0.3, thenDragTo: start.withOffset(CGVector(dx: dx, dy: 0)))
+        let edge = window.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: sidebar.frame.maxX - window.frame.minX, dy: window.frame.height / 2))
+        edge.click(forDuration: 0.3, thenDragTo: edge.withOffset(CGVector(dx: dx, dy: 0)))
     }
 
     /// Drag the window's bottom-right corner sideways.

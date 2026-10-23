@@ -31,7 +31,16 @@ struct Tour {
     func launch() {
         app.launch()
         XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 30), "No window appeared")
+        showSidebarIfHidden()
         pause(1)
+    }
+
+    /// AppKit remembers a collapsed sidebar from one launch to the next,
+    /// which the tours' saved-state flag does not cover; every tour starts
+    /// with it shown.
+    func showSidebarIfHidden() {
+        guard !app.outlines.firstMatch.waitForExistence(timeout: 2) else { return }
+        key("s", [.command, .control])
     }
 
     /// Let animations and polled state settle before a screenshot.
