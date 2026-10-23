@@ -4,20 +4,31 @@ import XCTest
 final class MenuBarTests: XCTestCase {
     @MainActor
     func testManyPairsScrollWithoutHidingTheCommands() {
+        checkManyPairs()
+    }
+
+    @MainActor
+    func testManyPairsKeepTheCommandsAtLargerTextSizes() {
+        checkManyPairs(launchArguments: ["-foldover-large-menu-text", "YES"])
+    }
+
+    @MainActor
+    private func checkManyPairs(launchArguments: [String] = []) {
         let tour = Tour(self, appearance: .light, scenario: "many-pairs")
+        tour.app.launchArguments += launchArguments
         tour.launch()
         tour.click(tour.app.statusItems.firstMatch, "menu bar extra")
         let pairs = tour.app.scrollViews["menu-pairs"]
         XCTAssertTrue(pairs.waitForExistence(timeout: 5))
         let quit = tour.app.buttons["Quit Foldover"]
         XCTAssertTrue(quit.isHittable, "Commands must stay visible above a long catalog")
-        for _ in 0..<5 where !tour.app.staticTexts["Pair 40"].isHittable {
+        for _ in 0..<10 where !pairs.staticTexts["Pair 40"].isHittable {
             pairs.scroll(byDeltaX: 0, deltaY: -400)
             tour.pause(0.2)
         }
-        XCTAssertTrue(tour.app.staticTexts["Pair 40"].isHittable)
+        XCTAssertTrue(pairs.staticTexts["Pair 40"].isHittable)
         XCTAssertTrue(quit.isHittable, "Scrolling pairs must not move the commands")
-        tour.snap("menu-bar-many-pairs")
+        tour.snap(launchArguments.isEmpty ? "menu-bar-many-pairs" : "menu-bar-many-pairs-large-text")
         tour.app.terminate()
     }
 

@@ -9,7 +9,8 @@ struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
     @ScaledMetric(relativeTo: .title2) private var headerIconSize: CGFloat = 24
     @ScaledMetric(relativeTo: .body) private var pairRowHeight: CGFloat = 44
-    private static let visiblePairCount = 8
+    private static let maximumPairListHeight: CGFloat = 352
+    private static let pairListScreenFraction: CGFloat = 1 / 3
     let viewModel: MainViewModel
 
     var body: some View {
@@ -27,7 +28,7 @@ struct MenuBarView: View {
                         }
                     }
                 }
-                .frame(height: pairRowHeight * CGFloat(min(rows.count, Self.visiblePairCount)))
+                .frame(height: pairListHeight(rows.count))
                 .accessibilityIdentifier("menu-pairs")
                 Divider()
                 Button { Task { await viewModel.syncAll() } } label: { rowLabel("Sync All") }
@@ -54,6 +55,13 @@ struct MenuBarView: View {
         .buttonStyle(.borderless)
         .padding(12)
         .frame(width: 300)
+    }
+
+    private func pairListHeight(_ count: Int) -> CGFloat {
+        // Leave most of the display for the header and fixed commands, even at larger text sizes.
+        let screenLimit = NSScreen.main.map { $0.visibleFrame.height * Self.pairListScreenFraction }
+            ?? Self.maximumPairListHeight
+        return min(pairRowHeight * CGFloat(count), Self.maximumPairListHeight, screenLimit)
     }
 
     /// The menu bar symbol, the catalog and the background agent, with
