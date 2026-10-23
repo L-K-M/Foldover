@@ -6,6 +6,47 @@ use foldover_types::{LocalRoot, PairDraft, PairId, SyncMode};
 
 use super::*;
 
+#[test]
+fn new_folders_with_sidecars_still_copy_readable_children() {
+    for right_kind in [RightKind::Local, RightKind::Sftp] {
+        if right_kind == RightKind::Sftp && sftp_server().is_none() {
+            continue;
+        }
+        for mode in [
+            SyncMode::Sync,
+            SyncMode::Backup { source: Side::Left },
+            SyncMode::Mirror { source: Side::Left },
+        ] {
+            let mut pair = fixture(mode);
+            pair.right_kind = right_kind;
+            fs::create_dir_all(pair.left.path().join("folder/nested")).unwrap();
+            fs::write(
+                pair.left.path().join("folder/nested/._LICENSE"),
+                b"metadata",
+            )
+            .unwrap();
+            fs::write(pair.left.path().join("folder/nested/kept"), b"content").unwrap();
+            fs::write(pair.left.path().join("independent"), b"also copied").unwrap();
+            let report = pair.sync();
+            assert_eq!(report.completion(), Completion::Finished);
+            assert_eq!(report.failures().len(), 1);
+            assert_eq!(
+                report.failures()[0].path(),
+                &path(b"folder/nested/._LICENSE")
+            );
+            assert_eq!(
+                fs::read(pair.right.path().join("folder/nested/kept")).unwrap(),
+                b"content"
+            );
+            assert_eq!(
+                fs::read(pair.right.path().join("independent")).unwrap(),
+                b"also copied"
+            );
+            assert!(!pair.right.path().join("folder/nested/._LICENSE").exists());
+        }
+    }
+}
+
 struct Fixture {
     left: tempfile::TempDir,
     right: tempfile::TempDir,
