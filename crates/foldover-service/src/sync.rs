@@ -825,6 +825,13 @@ fn perform(
 fn preview(preview: &Preview) -> SyncPreview {
     let mut counts = SyncCounts::default();
     let mut items = Vec::new();
+    // Reserve up to half the response for changes, even during an error storm.
+    let reserved_changes = preview.items().len().min(SYNC_ITEM_LIMIT / 2);
+    let failure_limit = preview
+        .failures()
+        .len()
+        .min(SYNC_ITEM_LIMIT - reserved_changes);
+    let item_limit = SYNC_ITEM_LIMIT - failure_limit;
     for item in preview.items() {
         let action = action(item.action());
         counts.copy_bytes = counts.copy_bytes.saturating_add(item.bytes());
@@ -837,7 +844,7 @@ fn preview(preview: &Preview) -> SyncPreview {
             SyncAction::Keep => counts.kept += 1,
             SyncAction::Move { .. } => counts.moves += 1,
         }
-        if items.len() < SYNC_ITEM_LIMIT {
+        if items.len() < item_limit {
             items.push(wire_item(item));
         }
     }
@@ -857,6 +864,16 @@ fn preview(preview: &Preview) -> SyncPreview {
         right: deletions(Side::Right),
         review_token: preview.token().to_string(),
         pair_revision: preview.revision(),
+        failures: preview
+            .failures()
+            .iter()
+            .take(failure_limit)
+            .map(|failure| SyncFailure {
+                path: failure.path().as_bytes().to_vec(),
+                message: failure.message().to_owned(),
+            })
+            .collect(),
+        failure_count: preview.failures().len() as u64,
     }
 }
 

@@ -69,6 +69,7 @@ const METADATA_ONLY: &str = "Only its metadata changed, and the earlier metadata
 const NOT_ARCHIVED: &str = "The earlier version is no longer in the archive";
 const EMPTY_FOLDER: &str = "Empty folders are not recreated";
 const OCCUPIED: &str = "Something new holds the path it moved from; left as it is";
+const UNREADABLE: &str = "This path or a related folder could not be read; left unchanged";
 
 impl PairRun {
     /// Undo `journal`, the pair's newest writing run. The run's roots must
@@ -130,6 +131,16 @@ impl PairRun {
             self.check_roots(identities)?;
             let mut steps = Vec::new();
             for entry in batch {
+                let step = match self.plan_undo(entry) {
+                    Ok(step) => step,
+                    Err(message) => {
+                        report.not_undone.push(Failure {
+                            path: entry.path.clone(),
+                            message: message.into(),
+                        });
+                        continue;
+                    }
+                };
                 // A folder the run removed comes back with the first entry
                 // put back inside it; decide once every child is handled.
                 if matches!(entry.action, JournalAction::Archive(version) if version.kind() == EntryKind::Directory)
@@ -137,13 +148,7 @@ impl PairRun {
                     folders.push(entry);
                     continue;
                 }
-                match self.plan_undo(entry) {
-                    Ok(step) => steps.push((*entry, step)),
-                    Err(message) => report.not_undone.push(Failure {
-                        path: entry.path.clone(),
-                        message: message.into(),
-                    }),
-                }
+                steps.push((*entry, step));
             }
             if steps.is_empty() {
                 continue;
@@ -228,6 +233,28 @@ impl PairRun {
     /// What undoing `entry` needs, judged from the fresh observation, or
     /// why it stays as it is.
     fn plan_undo(&self, entry: &JournalEntry) -> Result<Step, &'static str> {
+        // Missing rows from a failed scan cannot authorize a restore or rename.
+        let names = self
+            .endpoints
+            .endpoint(Side::Left)
+            .name_matching()
+            .either(self.endpoints.endpoint(Side::Right).name_matching());
+        for path in std::iter::once(&entry.path).chain(entry.moved_from.as_ref()) {
+            let path = SyncPath::try_from(crate::plan::name_key(path.as_bytes(), names))
+                .expect("a name key is a valid path");
+            for unread in self
+                .left
+                .unavailable()
+                .iter()
+                .chain(self.right.unavailable())
+            {
+                let unread = SyncPath::try_from(crate::plan::name_key(unread.as_bytes(), names))
+                    .expect("a name key is a valid path");
+                if path == unread || path.is_ancestor_of(&unread) || unread.is_ancestor_of(&path) {
+                    return Err(UNREADABLE);
+                }
+            }
+        }
         let current = self.observation(entry.side).entries().get(&entry.path);
         let left_by_run = |version: EntryVersion| current.is_some_and(|c| c.version() == version);
         match entry.action {

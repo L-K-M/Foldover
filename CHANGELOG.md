@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Unreadable or changing files, folders and ambiguous AppleDouble sidecars
+  no longer stop independent, safe copies. Preview and sync results list
+  errors with readable paths; affected branches stay unchanged in both
+  folders and retry next sync. Archive retention still runs after a partial sync.
+
 - Agent connection checks time out and keep Turn On available. Starting and
   restarting show their own status, and Turn On also repairs an agent that
   rejects an updated app's handshake.

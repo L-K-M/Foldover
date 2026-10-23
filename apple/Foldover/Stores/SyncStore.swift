@@ -64,6 +64,8 @@ struct PreviewSummary: Equatable, Sendable {
     /// revision makes the plan obsolete.
     let pairRevision: UInt64
     var moves: UInt64 = 0
+    var failures: [RunFailure] = []
+    var failureCount: UInt64 = 0
 
     var total: UInt64 { copies + updates + archives + conflicts + blocked + kept + moves }
 }
@@ -366,7 +368,9 @@ private actor CoreSyncClient: SyncClient {
             conflicts: preview.conflicts, blocked: preview.blocked, kept: preview.kept,
             a: check(preview.left), b: check(preview.right), copyBytes: preview.copyBytes,
             reviewToken: preview.reviewToken, pairRevision: preview.pairRevision,
-            moves: preview.moves
+            moves: preview.moves,
+            failures: preview.failures.map { RunFailure(path: $0.path, message: $0.message) },
+            failureCount: preview.failureCount
         )
     }
 

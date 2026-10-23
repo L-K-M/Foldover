@@ -334,9 +334,15 @@ pub struct Preview {
     items: Vec<PreviewItem>,
     left_deletions: DeletionCounts,
     right_deletions: DeletionCounts,
+    failures: Vec<Failure>,
 }
 
 impl Preview {
+    /// Entries left unchanged because their scan failed.
+    pub fn failures(&self) -> &[Failure] {
+        &self.failures
+    }
+
     /// The pair this preview was planned for.
     pub fn pair(&self) -> PairId {
         self.pair
@@ -441,6 +447,12 @@ impl Preview {
             version(&mut hasher, item.left);
             version(&mut hasher, item.right);
             hasher.update(&item.bytes.to_le_bytes());
+        }
+        for failure in &self.failures {
+            hasher.update(&(failure.path.as_bytes().len() as u64).to_le_bytes());
+            hasher.update(failure.path.as_bytes());
+            hasher.update(&(failure.message.len() as u64).to_le_bytes());
+            hasher.update(failure.message.as_bytes());
         }
         ReviewToken::from_bytes(*hasher.finalize().as_bytes())
             .expect("a BLAKE3 digest is not all zero")
@@ -606,6 +618,7 @@ pub struct PairRun {
     endpoints: EndpointPair,
     left: Observation,
     right: Observation,
+    failures: Vec<Failure>,
     /// Observations the filters excluded, kept for the next run's cache.
     left_cache: BTreeMap<SyncPath, ObservedEntry>,
     right_cache: BTreeMap<SyncPath, ObservedEntry>,
@@ -724,6 +737,24 @@ impl PairRun {
         let right_names = endpoints.endpoint(Side::Right).name_matching();
         align_spellings(&mut left, &base, left_names);
         align_spellings(&mut right, &base, right_names);
+        let mut failures = Vec::new();
+        for (side, observation) in [(Side::Left, &left), (Side::Right, &right)] {
+            for issue in observation.issues() {
+                failures.push(Failure {
+                    path: issue.path().clone(),
+                    message: format!(
+                        "Folder {}: {}. Left unchanged; will retry next sync.",
+                        match side {
+                            Side::Left => "A",
+                            Side::Right => "B",
+                        },
+                        issue.message()
+                    ),
+                });
+            }
+        }
+        failures
+            .sort_by(|left, right| (&left.path, &left.message).cmp(&(&right.path, &right.message)));
         // Size and age differ between folders. A file too large in either
         // folder, or old or absent in both, is skipped in both, and hidden
         // from the base too: its base row stays, so a later edit syncs as
@@ -797,6 +828,7 @@ impl PairRun {
             endpoints,
             left,
             right,
+            failures,
             left_cache,
             right_cache,
             plan,
@@ -900,6 +932,7 @@ impl PairRun {
             items,
             left_deletions: self.plan.deletions(Side::Left),
             right_deletions: self.plan.deletions(Side::Right),
+            failures: self.failures.clone(),
         }
     }
 
@@ -1077,6 +1110,7 @@ impl PairRun {
             run: &self,
             report: RunReport {
                 archive: name.clone(),
+                failures: self.failures.clone(),
                 ..RunReport::default()
             },
             scopes: &scopes,
@@ -1178,7 +1212,7 @@ impl PairRun {
             return Err(error.into());
         }
 
-        // Retention deletes data, so it runs only after a complete run.
+        // Keep retention bounded even when a path fails every run.
         if executor.report.completion == Completion::Finished {
             for side in [Side::Left, Side::Right] {
                 if unrecorded == Some(side) {
@@ -1753,7 +1787,7 @@ fn run_options(options: &PairOptions, endpoints: &EndpointPair) -> Result<PairOp
         .with_metadata(options.metadata().with_quarantine(quarantine)))
 }
 
-/// Special or cloud-only entries, with everything below them on either
+/// Unread entries, with everything below them on either
 /// side or in the base: skipped in both folders, unchanged to the base.
 fn unavailable<'a>(
     left: &'a Observation,
@@ -1762,23 +1796,52 @@ fn unavailable<'a>(
     names: NameMatching,
 ) -> impl Iterator<Item = &'a SyncPath> {
     // Match as the planner does, so another spelling cannot become a deletion.
-    let roots: Vec<Vec<u8>> = left
+    let directories = |observation: &Observation| -> BTreeSet<Vec<u8>> {
+        if left.unavailable().is_empty() && right.unavailable().is_empty() {
+            return BTreeSet::new();
+        }
+        observation
+            .entries()
+            .iter()
+            .filter(|(_, entry)| entry.version().kind() == EntryKind::Directory)
+            .map(|(path, _)| crate::plan::name_key(path.as_bytes(), names))
+            .collect()
+    };
+    let left_directories = directories(left);
+    let right_directories = directories(right);
+    let roots: BTreeSet<Vec<u8>> = left
         .unavailable()
         .iter()
         .chain(right.unavailable())
-        .map(|root| crate::plan::name_key(root.as_bytes(), names))
+        .map(|root| {
+            let mut protected = crate::plan::name_key(root.as_bytes(), names);
+            let mut parent = root.parent();
+            while let Some(path) = parent {
+                let key = crate::plan::name_key(path.as_bytes(), names);
+                // Removing or replacing this folder could displace unread
+                // children. Protect the branch unless both sides keep it.
+                if !left_directories.contains(&key) || !right_directories.contains(&key) {
+                    protected = key;
+                }
+                parent = path.parent();
+            }
+            protected
+        })
         .collect();
     let below = move |path: &&SyncPath| {
         if roots.is_empty() {
             return false;
         }
-        let key = crate::plan::name_key(path.as_bytes(), names);
-        roots.iter().any(|root| {
-            *root == key
-                || key
-                    .strip_prefix(root.as_slice())
-                    .is_some_and(|rest| rest.starts_with(b"/"))
-        })
+        let mut key = crate::plan::name_key(path.as_bytes(), names);
+        loop {
+            if roots.contains(&key) {
+                return true;
+            }
+            let Some(separator) = key.iter().rposition(|byte| *byte == b'/') else {
+                return false;
+            };
+            key.truncate(separator);
+        }
     };
     left.unavailable()
         .iter()

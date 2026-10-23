@@ -7,8 +7,15 @@ const SEPARATOR: u8 = b'/';
 /// Syntax validation does not prove filesystem containment. Drivers must use
 /// root handles, reject symlink traversal and protect Foldover's internal paths.
 /// NFC/case comparison keys are separate from this lossless representation.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SyncPath(Vec<u8>);
+
+impl fmt::Debug for SyncPath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Errors show a readable filename; the path itself keeps its exact bytes.
+        fmt::Debug::fmt(&String::from_utf8_lossy(&self.0), formatter)
+    }
+}
 
 impl SyncPath {
     pub fn as_bytes(&self) -> &[u8] {
@@ -151,6 +158,18 @@ mod tests {
             path("re\u{301}sume\u{301}".as_bytes())
         );
         assert_ne!(path(b"Name"), path(b"name"));
+    }
+
+    #[test]
+    fn errors_show_readable_paths_instead_of_byte_arrays() {
+        assert_eq!(
+            format!("{:?}", path("jan/._LICENSE-linenoise".as_bytes())),
+            "\"jan/._LICENSE-linenoise\""
+        );
+        assert_eq!(
+            format!("{:?}", path("café/notes\n.txt".as_bytes())),
+            "\"café/notes\\n.txt\""
+        );
     }
 
     #[test]

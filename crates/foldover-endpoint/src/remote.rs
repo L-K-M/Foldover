@@ -191,6 +191,11 @@ impl PeerEndpoint {
                     let entries = wire::entries(&batch).ok_or_else(unexpected)?;
                     observation.entries.extend(entries);
                 }
+                Incoming::Reply(PeerReply::ScanIssue { path, message }) => {
+                    let path = SyncPath::try_from(path)?;
+                    observation.unavailable.push(path.clone());
+                    observation.issues.push(crate::ScanIssue { path, message });
+                }
                 Incoming::End => {}
                 Incoming::Reply(PeerReply::Observed {
                     leftovers,
@@ -201,7 +206,15 @@ impl PeerEndpoint {
                     observation.leftovers = paths(leftovers)?;
                     observation.oversized = paths(oversized)?;
                     observation.old = paths(old)?;
-                    observation.unavailable = paths(unavailable)?;
+                    observation.unavailable.extend(paths(unavailable)?);
+                    observation.unavailable.sort();
+                    observation.unavailable.dedup();
+                    let unavailable = &observation.unavailable;
+                    observation.entries.retain(|path, _| {
+                        !unavailable
+                            .iter()
+                            .any(|root| root == path || root.is_ancestor_of(path))
+                    });
                     return Ok(observation);
                 }
                 Incoming::Reply(PeerReply::Failed { error }) => {

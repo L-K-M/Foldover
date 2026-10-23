@@ -1227,6 +1227,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scan_errors_are_visible_in_previews_and_results_without_blocking_safe_copies() {
+        use foldover_proto::local::SYNC_ITEM_LIMIT;
+
+        let (directory, service) = fixture();
+        let input = input(directory.path(), "Docs");
+        let left = directory.path().join("Docs-left");
+        let right = directory.path().join("Docs-right");
+        fs::write(left.join("safe.txt"), b"copy me").unwrap();
+        let failures = SYNC_ITEM_LIMIT + 1;
+        for index in 0..failures {
+            fs::write(left.join(format!("._sidecar-{index}")), b"metadata").unwrap();
+        }
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        service
+            .handle(Request::call(2, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        let previewed = settled(&service, &key).await;
+        assert_eq!(previewed["state"], "previewed", "{previewed}");
+        let preview = &previewed["preview"];
+        assert_eq!(preview["counts"]["copies"], 1);
+        assert_eq!(preview["items"].as_array().unwrap().len(), 1);
+        assert_eq!(preview["failure_count"], failures);
+        assert_eq!(
+            preview["failures"].as_array().unwrap().len(),
+            SYNC_ITEM_LIMIT - 1
+        );
+        assert!(
+            preview["failures"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Folder A")
+        );
+
+        let run = json!({"id": created["id"], "approved_left_deletions": 0,
+            "approved_right_deletions": 0, "review_token": preview["review_token"]});
+        service
+            .handle(Request::call(3, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        let finished = settled(&service, &key).await;
+        assert_eq!(finished["state"], "finished", "{finished}");
+        assert_eq!(finished["result"]["copied"], 1);
+        assert_eq!(finished["result"]["failure_count"], failures);
+        let shown = preview["failures"].as_array().unwrap();
+        let reported = finished["result"]["failures"].as_array().unwrap();
+        assert_eq!(reported.len(), SYNC_ITEM_LIMIT);
+        assert_eq!(&reported[..shown.len()], shown.as_slice());
+        assert_eq!(fs::read(right.join("safe.txt")).unwrap(), b"copy me");
+        assert!(!right.join("._sidecar-0").exists());
+    }
+
+    #[tokio::test]
     async fn sync_requests_validate_their_parameters() {
         let (_directory, service) = fixture();
         for (method, params) in [
@@ -2922,6 +2979,8 @@ mod tests {
             right: deletions(),
             review_token: "ab".repeat(32),
             pair_revision: 1,
+            failures: Vec::new(),
+            failure_count: 0,
         }
     }
 

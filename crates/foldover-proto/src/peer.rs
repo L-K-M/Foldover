@@ -332,6 +332,11 @@ pub enum PeerReply {
         listed: u64,
         checked: u64,
     },
+    /// A scoped scan failure; separate replies keep large scans within frame limits.
+    ScanIssue {
+        path: Vec<u8>,
+        message: String,
+    },
     /// An observation's entries came as data frames; these are the rest.
     Observed {
         leftovers: Vec<Vec<u8>>,

@@ -67,7 +67,9 @@ where `<run>` is the run's UTC start time
 run folders older than 30 days are deleted permanently (owner decision,
 PLAN.md §10). Only canonical run names count, so other folders in the
 archive are kept. Deletion never follows links; a pruning failure is
-reported, not fatal. This is the only code path that deletes user data.
+reported, not fatal. Per-path failures do not suspend retention: affected
+paths stay unchanged, while older archives still expire. This is the only
+code path that deletes user data.
 
 **Recovery without a journal.** A crash loses at most one uncommitted
 batch of base updates. The next run then sees equal content on both sides

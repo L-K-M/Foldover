@@ -168,7 +168,7 @@ struct PairSyncViewModel {
         case .needsApproval:
             return reviewable == nil ? .idle : .attention
         case .previewed(let preview):
-            return reviewable != nil && preview.conflicts > 0 ? .attention : .idle
+            return reviewable != nil && (preview.conflicts > 0 || preview.failureCount > 0) ? .attention : .idle
         case .finished(let result):
             return result.conflicts > 0 || result.failureCount > 0 ? .attention : .idle
         case .undone(let result):
@@ -197,6 +197,10 @@ struct PairSyncViewModel {
                 return PairPlaceholder(title: String(localized: "Preview Is Out of Date"),
                                        symbol: "clock.arrow.circlepath", message: statusText,
                                        action: .preview)
+            }
+            if preview.failureCount > 0 {
+                return PairPlaceholder(title: String(localized: "Some Items Could Not Be Checked"),
+                                       symbol: "exclamationmark.triangle", message: statusText, action: nil)
             }
             if preview.total == 0 {
                 return PairPlaceholder(title: String(localized: "Folders Are in Sync"),
@@ -244,6 +248,7 @@ struct PairSyncViewModel {
         case .working(.undo, _, _): String(localized: "Undoing…")
         case .previewed(let preview):
             reviewable == nil ? String(localized: "Preview again")
+                : preview.failureCount > 0 ? String(localized: "\(preview.total) changes, \(preview.failureCount) skipped")
                 : preview.total == 0 ? String(localized: "In sync") : String(localized: "\(preview.total) changes")
         case .needsApproval:
             reviewable == nil ? String(localized: "Preview again") : String(localized: "Needs approval")
@@ -278,7 +283,7 @@ struct PairSyncViewModel {
             return String(localized: "Undoing the last sync…")
         case .previewed(let preview):
             guard reviewable != nil else { return Self.outdated }
-            return preview.total == 0
+            return preview.total == 0 && preview.failureCount == 0
                 ? String(localized: "Folders are in sync.")
                 : Self.summary(preview)
         case .needsApproval(let preview):
@@ -354,7 +359,8 @@ struct PairSyncViewModel {
     var changeFilter: ChangeFilter? { store.listing(for: pair.id)?.filter }
     var showsChangeFilter: Bool { reviewable.map { $0.total > 0 } ?? false }
     var canLoadMoreChanges: Bool {
-        store.listing(for: pair.id)?.more ?? (hiddenRowsText != nil && reviewable != nil)
+        store.listing(for: pair.id)?.more
+            ?? (reviewable.map { $0.total > UInt64($0.changes.count) } ?? false)
     }
 
     func showChanges(_ filter: ChangeFilter?) async { await store.showChanges(pair.id, filter: filter) }
@@ -399,7 +405,7 @@ struct PairSyncViewModel {
         if let preview = reviewable {
             let review = ReviewContext(token: preview.reviewToken,
                                        pairRevision: preview.pairRevision)
-            return (store.listing(for: pair.id)?.changes ?? preview.changes)
+            let changes = (store.listing(for: pair.id)?.changes ?? preview.changes)
                 .enumerated().map { index, change in
                     ChangeRow(id: index, path: Self.pathText(change.path),
                               description: Self.description(change),
@@ -416,6 +422,13 @@ struct PairSyncViewModel {
                               actionText: Self.actionText(change),
                               sizeText: change.bytes > 0 ? Self.byteText(change.bytes) : "")
                 }
+            // Error rows have stable negative IDs, separate from paged changes.
+            let failures = preview.failures.enumerated().map { index, failure in
+                ChangeRow(id: -(index + 1), path: Self.pathText(failure.path), description: failure.message,
+                          resolvable: nil, symbol: "xmark.octagon.fill", tone: .failure,
+                          actionText: failure.message)
+            }
+            return changes + failures
         }
         let failures: [RunFailure] = switch state {
         case .finished(let result): result.failures
@@ -455,8 +468,15 @@ struct PairSyncViewModel {
 
     /// Rows not shown because responses carry only the first changes.
     var hiddenRowsText: String? {
+        let hiddenFailures: UInt64 = reviewable.map { preview in
+            let shown = UInt64(preview.failures.count)
+            return preview.failureCount > shown ? preview.failureCount - shown : 0
+        } ?? 0
+        let failuresText = hiddenFailures > 0 ? String(localized: "\(hiddenFailures) more scan errors") : nil
         if let listing = store.listing(for: pair.id) {
-            return listing.more ? String(localized: "More changes follow") : nil
+            let text = [listing.more ? String(localized: "More changes follow") : nil, failuresText]
+                .compactMap { $0 }.joined(separator: "; ")
+            return text.isEmpty ? nil : text
         }
         let hidden: UInt64
         if let preview = reviewable {
@@ -468,7 +488,9 @@ struct PairSyncViewModel {
         } else {
             hidden = 0
         }
-        return hidden == 0 ? nil : String(localized: "and \(hidden) more")
+        let changesText = hidden == 0 ? nil : String(localized: "and \(hidden) more")
+        let text = [changesText, failuresText].compactMap { $0 }.joined(separator: "; ")
+        return text.isEmpty ? nil : text
     }
 
     /// The newest finished runs.
@@ -646,6 +668,9 @@ struct PairSyncViewModel {
         if preview.conflicts > 0 { parts.append(String(localized: "\(preview.conflicts) conflicts")) }
         if preview.blocked > 0 { parts.append(String(localized: "\(preview.blocked) waiting on conflicts")) }
         if preview.kept > 0 { parts.append(String(localized: "\(preview.kept) kept in the backup")) }
+        if preview.failureCount > 0 {
+            parts.append(String(localized: "\(preview.failureCount) items could not be checked and will be left unchanged; safe changes can still sync"))
+        }
         return parts.joined(separator: ", ") + "."
     }
 

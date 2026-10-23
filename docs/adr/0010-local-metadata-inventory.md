@@ -49,8 +49,8 @@ Special files (sockets, named pipes and devices) are counted as skipped and
 listed as unavailable without reading them. The engine skips the same paths
 and their descendants in both folders and the base for that run, preserving
 existing data and baseline rows. Regular files at those paths sync again.
-Entries on a different observed device stop the scan. An ancestor identity
-check also rejects directory cycles. Device/inode values are session
+Entries on a different observed device and directory cycles are reported
+as unavailable branches; independent entries continue. Device/inode values are session
 observations, not volume UUIDs or proof of mount availability.
 
 On Darwin, the same no-follow stat observation includes `SF_DATALESS`.
@@ -66,17 +66,19 @@ On a volume that declares no native extended attributes (exFAT, FAT),
 macOS keeps each file's attributes in its `._` sidecar and presents them
 as the file's own, moving and removing the sidecar with it, so a scan
 skips `._` files there; a folder so named is not a sidecar. Elsewhere, including volumes that do not say,
-`._` names stop the scan with an explicit sidecar-classification error:
+`._` names are left unchanged with an explicit sidecar-classification error:
 they are neither silently omitted nor treated as ordinary content. The need for separate
 filesystem and operation-fidelity probes remains as recorded in
 [ADR 0005](0005-metadata-fidelity.md).
 
 ## Completion and errors
 
-Only a finished traversal returns statistics. Cancellation, I/O failure
-and detected mutations return errors; a caller must
-discard any partial rows. A missing or unreadable directory must never look
-like an empty, successfully scanned subtree.
+Only a finished traversal returns statistics. Scoped I/O failures and
+mutations are reported with unavailable subtrees; callers discard any rows
+already emitted inside them. The engine excludes those branches from both
+folders and the base, protecting ancestors that might displace them.
+Cancellation, root failures and failures without a bounded path discard
+all rows. An unreadable directory never looks empty.
 
 Recheck each emitted entry, every opened directory's identity/attributes and
 its parent's binding when leaving it. Recheck directory attributes after its
@@ -89,7 +91,7 @@ checks. Cancellation occurs between rows, not inside a blocked filesystem call.
 
 Tests exercise nested/empty folders, protected names at multiple depths,
 outside/dangling links, raw names and targets, cancellation, directory-to-link
-replacement, disappearing directories, special items, sidecar rejection,
+replacement, disappearing directories, special items, sidecar isolation,
 last-row mutations and replacement of the root's ambient path. Linux checks
 run locally; macOS coverage runs in CI.
 Root-selection tests cover equal/nested roots, selected symlink aliases,

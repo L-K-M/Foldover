@@ -201,6 +201,7 @@ pub struct SyncDeletions {
 #[serde(deny_unknown_fields)]
 pub struct SyncPreview {
     /// The first items in path order; `counts` covers all of them.
+    /// Items and failures together are bounded by `SYNC_ITEM_LIMIT`.
     pub items: Vec<SyncItem>,
     pub counts: SyncCounts,
     pub left: SyncDeletions,
@@ -213,6 +214,15 @@ pub struct SyncPreview {
     /// preview is obsolete after a configuration change without parsing
     /// the token.
     pub pair_revision: u64,
+    /// The first entries left unchanged after scan errors.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<SyncFailure>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub failure_count: u64,
+}
+
+fn is_zero(count: &u64) -> bool {
+    *count == 0
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -359,9 +369,29 @@ mod tests {
             },
             review_token: "ab".repeat(32),
             pair_revision: 1,
+            failures: Vec::new(),
+            failure_count: 0,
         };
-        let status = SyncStatus::NeedsApproval { preview };
+        let status = SyncStatus::NeedsApproval {
+            preview: preview.clone(),
+        };
         assert!(serde_json::to_vec(&status).unwrap().len() < 1024 * 1024);
+        let mut mixed = preview;
+        mixed.items.truncate(SYNC_ITEM_LIMIT / 2);
+        mixed.failures = vec![
+            SyncFailure {
+                path: path.clone(),
+                message: "x".repeat(1024)
+            };
+            SYNC_ITEM_LIMIT / 2
+        ];
+        mixed.failure_count = u64::MAX;
+        assert!(
+            serde_json::to_vec(&SyncStatus::NeedsApproval { preview: mixed })
+                .unwrap()
+                .len()
+                < 1024 * 1024
+        );
 
         let result = SyncStatus::Finished {
             result: SyncResult {

@@ -505,6 +505,13 @@ rest go to the queue.
    back the stored metadata.
 5. Commit the base.
 
+Scoped scan errors are reported in previews and run results. Their paths
+and descendants are unknown, never absent: both folders and the base leave
+them unchanged while independent changes continue. Ancestors that might
+displace unread children are protected too. Root, identity, lease, canary
+and cancellation failures still stop the run. Completed partial runs keep
+the normal archive-retention policy, so persistent errors cannot fill the disk.
+
 **Preserving an overwritten version**, best option first:
 1. clone (APFS);
 2. hard link;

@@ -405,6 +405,106 @@ fn special_entries_protect_both_folders_and_the_base_while_other_files_sync() {
 }
 
 #[test]
+fn scan_errors_leave_affected_paths_alone_and_copy_independent_files() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for right_kind in [RightKind::Local, RightKind::Sftp] {
+        if right_kind == RightKind::Sftp && sftp_server().is_none() {
+            eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
+            continue;
+        }
+        for side in [Side::Left, Side::Right] {
+            let mut pair = fixture(SyncMode::Mirror { source: Side::Left });
+            pair.right_kind = right_kind;
+            fs::create_dir(pair.left.path().join("private")).unwrap();
+            fs::write(pair.left.path().join("private/keep"), b"original").unwrap();
+            fs::write(pair.left.path().join("unreadable"), b"original").unwrap();
+            pair.sync();
+            let base = pair.base.clone();
+            let affected = match side {
+                Side::Left => pair.left.path(),
+                Side::Right => pair.right.path(),
+            };
+            fs::write(affected.join("._metadata"), b"sidecar").unwrap();
+            fs::set_permissions(affected.join("private"), fs::Permissions::from_mode(0o0)).unwrap();
+            fs::set_permissions(affected.join("unreadable"), fs::Permissions::from_mode(0o0))
+                .unwrap();
+            fs::write(pair.left.path().join("safe"), b"copy me").unwrap();
+
+            let preview = pair.prepare().preview();
+            assert_eq!(preview.items().len(), 1, "{preview:?}");
+            assert_eq!(preview.items()[0].path(), &path(b"safe"));
+            assert_eq!(preview.failures().len(), 3);
+            assert!(
+                preview
+                    .failures()
+                    .iter()
+                    .all(|failure| !failure.message().contains("SyncPath(["))
+            );
+            let report = pair.sync();
+            assert_eq!(report.copied(), 1);
+            assert_eq!(report.archived(), 0);
+            assert_eq!(report.failures().len(), 3, "{:?}", report.failures());
+            for name in [b"private".as_slice(), b"private/keep", b"unreadable"] {
+                assert_eq!(pair.base[&path(name)], base[&path(name)]);
+            }
+            assert_eq!(
+                fs::read(pair.right.path().join("safe")).unwrap(),
+                b"copy me"
+            );
+
+            let affected = match side {
+                Side::Left => pair.left.path(),
+                Side::Right => pair.right.path(),
+            };
+            fs::set_permissions(affected.join("private"), fs::Permissions::from_mode(0o700))
+                .unwrap();
+            fs::set_permissions(
+                affected.join("unreadable"),
+                fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+            assert_eq!(fs::read(affected.join("._metadata")).unwrap(), b"sidecar");
+            fs::remove_file(affected.join("._metadata")).unwrap();
+            assert!(pair.sync().failures().is_empty());
+        }
+    }
+}
+
+#[test]
+fn an_unreadable_descendant_prevents_archiving_its_parent() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut pair = fixture(SyncMode::Mirror { source: Side::Left });
+    fs::create_dir(pair.left.path().join("folder")).unwrap();
+    fs::write(pair.left.path().join("folder/keep"), b"original").unwrap();
+    pair.sync();
+    let base = pair.base.clone();
+    fs::remove_dir_all(pair.left.path().join("folder")).unwrap();
+    fs::set_permissions(
+        pair.right.path().join("folder/keep"),
+        fs::Permissions::from_mode(0o0),
+    )
+    .unwrap();
+    fs::write(pair.left.path().join("safe"), b"copy me").unwrap();
+
+    let report = pair.sync();
+    assert_eq!((report.copied(), report.archived()), (1, 0));
+    for name in [b"folder".as_slice(), b"folder/keep"] {
+        assert_eq!(pair.base[&path(name)], base[&path(name)]);
+    }
+    fs::set_permissions(
+        pair.right.path().join("folder/keep"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(pair.right.path().join("folder/keep")).unwrap(),
+        b"original"
+    );
+}
+
+#[test]
 fn unavailable_socket_paths_keep_the_baselines_unicode_spelling() {
     let mut pair = fixture(SyncMode::Sync);
     let composed = "caf\u{e9}";
@@ -891,6 +991,35 @@ fn completed_runs_name_their_archive_and_prune_expired_runs() {
             ))
             .exists()
     );
+}
+
+#[test]
+fn persistent_scan_errors_do_not_freeze_archive_retention() {
+    let mut pair = fixture(SyncMode::Mirror { source: Side::Left });
+    let day = Duration::from_secs(SECONDS_PER_DAY);
+    fs::write(pair.left.path().join("file"), b"v1").unwrap();
+    pair.sync();
+    fs::write(pair.left.path().join("._unclassified"), b"metadata").unwrap();
+    let archive = pair.right.path().join(".foldover/archive");
+
+    for days in [40, 80] {
+        let expired = archive.join(foldover_endpoint::archive_name(STARTED + day * (days - 31)));
+        fs::create_dir_all(&expired).unwrap();
+        fs::write(expired.join("old"), b"expired").unwrap();
+        fs::write(pair.left.path().join("file"), days.to_string()).unwrap();
+        let RunOutcome::Ran(report) = pair.run_at(
+            Approval::default(),
+            RunContext::Interactive,
+            STARTED + day * days,
+        ) else {
+            panic!("expected a run");
+        };
+        assert_eq!(report.failures().len(), 1);
+        assert_eq!(report.copied(), 1);
+        assert!(report.pruned() > 0);
+        assert!(!expired.exists());
+        assert!(archive.join(report.archive()).join("file").exists());
+    }
 }
 
 #[test]
@@ -2109,6 +2238,40 @@ fn undo_reverts_the_newest_run_and_the_next_preview_shows_the_redo() {
     assert!(pair.journal.is_none());
     // Syncing again would redo exactly what was undone.
     assert_eq!(pair.prepare().preview().items().len(), 5);
+}
+
+#[test]
+fn undo_skips_unreadable_branches_without_changing_their_base() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut pair = fixture(SyncMode::Sync);
+    fs::create_dir(pair.left.path().join("private")).unwrap();
+    fs::write(pair.left.path().join("private/keep"), b"original").unwrap();
+    fs::write(pair.left.path().join("safe"), b"copy me").unwrap();
+    pair.sync();
+    let base = pair.base.clone();
+    fs::set_permissions(
+        pair.right.path().join("private"),
+        fs::Permissions::from_mode(0o0),
+    )
+    .unwrap();
+
+    let report = pair.undo_at(at(1));
+    assert_eq!(report.removed(), 1);
+    assert_eq!(report.not_undone().len(), 2);
+    for name in [b"private".as_slice(), b"private/keep"] {
+        assert_eq!(pair.base[&path(name)], base[&path(name)]);
+    }
+    assert!(!pair.right.path().join("safe").exists());
+    fs::set_permissions(
+        pair.right.path().join("private"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(pair.right.path().join("private/keep")).unwrap(),
+        b"original"
+    );
 }
 
 #[test]

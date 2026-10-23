@@ -353,6 +353,17 @@ fn observe(
         Err(error) => return failed(answer, wire::scan_failure(&error)),
     };
 
+    for issue in observation.issues() {
+        if answer
+            .reply(&PeerReply::ScanIssue {
+                path: issue.path().as_bytes().to_vec(),
+                message: issue.message().to_owned(),
+            })
+            .is_err()
+        {
+            return;
+        }
+    }
     let mut batch = Vec::new();
     for (path, entry) in observation.entries() {
         wire::put_entry(&mut batch, path, entry);

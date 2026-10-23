@@ -2401,6 +2401,8 @@ public struct SyncPreviewSummary: Equatable, Hashable {
      * revision means the preview is obsolete.
      */
     public var pairRevision: UInt64
+    public var failures: [SyncFailureItem]
+    public var failureCount: UInt64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -2419,7 +2421,7 @@ public struct SyncPreviewSummary: Equatable, Hashable {
         /**
          * The pair revision this preview was planned for; a higher stored
          * revision means the preview is obsolete.
-         */pairRevision: UInt64) {
+         */pairRevision: UInt64, failures: [SyncFailureItem], failureCount: UInt64) {
         self.changes = changes
         self.copyBytes = copyBytes
         self.copies = copies
@@ -2433,6 +2435,8 @@ public struct SyncPreviewSummary: Equatable, Hashable {
         self.right = right
         self.reviewToken = reviewToken
         self.pairRevision = pairRevision
+        self.failures = failures
+        self.failureCount = failureCount
     }
 
     
@@ -2463,7 +2467,9 @@ public struct FfiConverterTypeSyncPreviewSummary: FfiConverterRustBuffer {
                 left: FfiConverterTypeSyncSideDeletions.read(from: &buf), 
                 right: FfiConverterTypeSyncSideDeletions.read(from: &buf), 
                 reviewToken: FfiConverterString.read(from: &buf), 
-                pairRevision: FfiConverterUInt64.read(from: &buf)
+                pairRevision: FfiConverterUInt64.read(from: &buf), 
+                failures: FfiConverterSequenceTypeSyncFailureItem.read(from: &buf), 
+                failureCount: FfiConverterUInt64.read(from: &buf)
         )
     }
 
@@ -2481,6 +2487,8 @@ public struct FfiConverterTypeSyncPreviewSummary: FfiConverterRustBuffer {
         FfiConverterTypeSyncSideDeletions.write(value.right, into: &buf)
         FfiConverterString.write(value.reviewToken, into: &buf)
         FfiConverterUInt64.write(value.pairRevision, into: &buf)
+        FfiConverterSequenceTypeSyncFailureItem.write(value.failures, into: &buf)
+        FfiConverterUInt64.write(value.failureCount, into: &buf)
     }
 }
 

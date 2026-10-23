@@ -91,6 +91,8 @@ pub struct SyncPreviewSummary {
     /// The pair revision this preview was planned for; a higher stored
     /// revision means the preview is obsolete.
     pub pair_revision: u64,
+    pub failures: Vec<SyncFailureItem>,
+    pub failure_count: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
@@ -422,6 +424,15 @@ impl From<SyncPreview> for SyncPreviewSummary {
             right: preview.right.into(),
             review_token: preview.review_token,
             pair_revision: preview.pair_revision,
+            failures: preview
+                .failures
+                .into_iter()
+                .map(|failure| SyncFailureItem {
+                    path: failure.path,
+                    message: failure.message,
+                })
+                .collect(),
+            failure_count: preview.failure_count,
         }
     }
 }
@@ -566,6 +577,11 @@ mod tests {
             },
             review_token: "ab".repeat(32),
             pair_revision: 7,
+            failures: vec![SyncFailure {
+                path: b"unreadable".to_vec(),
+                message: "Permission denied".into(),
+            }],
+            failure_count: 3,
         };
         let SyncJobState::NeedsApproval { preview } = SyncStatus::NeedsApproval { preview }.into()
         else {
@@ -591,6 +607,8 @@ mod tests {
             ]
         );
         assert_eq!(preview.moves, 8);
+        assert_eq!(preview.failure_count, 3);
+        assert_eq!(preview.failures[0].path, b"unreadable");
         assert_eq!(preview.copy_bytes, 7);
         assert_eq!(
             (
