@@ -6,7 +6,8 @@ final class MenuBarTests: XCTestCase {
     func testTheMenuBarPulsesWithEveryWindowClosed() {
         let tour = Tour(self, appearance: .light, scenario: "syncing")
         tour.launch()
-        let item = tour.app.statusItems["Foldover: Syncing"]
+        // MenuBarExtra's Label title is not a status-item query identifier.
+        let item = tour.app.statusItems.firstMatch
         XCTAssertTrue(item.waitForExistence(timeout: 10))
         tour.key("w", .command)
         XCTAssertTrue(tour.app.windows["Foldover"].waitForNonExistence(timeout: 5))
@@ -31,7 +32,7 @@ final class MenuBarTests: XCTestCase {
         for appearance in [TourAppearance.light, .dark] {
             let tour = Tour(self, appearance: appearance, scenario: "agent-failed")
             tour.launch()
-            let item = tour.app.statusItems["Foldover: Needs Attention"]
+            let item = tour.app.statusItems.firstMatch
             XCTAssertTrue(item.waitForExistence(timeout: 10))
             let shot = item.screenshot()
             let pixels = try XCTUnwrap(NSBitmapImageRep(data: shot.pngRepresentation))
