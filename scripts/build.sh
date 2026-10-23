@@ -19,9 +19,14 @@
 #   scripts/build.sh --install      # also install what this run built
 #
 # --install replaces /Applications/Foldover.app with the app this run
-# built. A running Foldover is quit first and reopened afterwards, and a
-# running background agent is restarted: both pin the installed code at
-# launch and refuse the changed bundle until they restart (ADR 0006).
+# built. A running Foldover is quit first and reopened afterwards. Both
+# it and a running background agent pin the installed code at launch and
+# refuse the changed bundle until they restart (ADR 0006). Foldover
+# restarts the agent itself: opened as a changed build, it registers the
+# agent anew, since launchd will not start a rebuilt ad-hoc-signed agent
+# under its old registration. Once the new app is in place the install
+# succeeds; the summary says when Foldover needs opening to restart the
+# agent.
 # FOLDOVER_APPLICATIONS_DIR installs elsewhere, e.g. ~/Applications.
 # core installs nothing: the app embeds its own agent and CLI, and Linux
 # has no installer yet.
@@ -345,41 +350,35 @@ install_app() {
   rm -rf "$outgoing"
   echo "-- installed $dest"
 
-  # A running agent keeps the old code until it restarts. One that is not
-  # running (never enabled, disabled, awaiting approval) starts from the
-  # new bundle whenever it next launches, so it is left alone. The state
-  # is captured first: grep -q would cut launchctl off mid-write and fail
-  # the pipeline under pipefail.
-  local agent_state agent_restarted=true
-  agent_state="$(launchctl print "$agent" 2>/dev/null)"
-  if [[ "$agent_state" == *"state = running"* ]]; then
-    echo "-- restarting the background agent"
-    if ! launchctl kickstart -k "$agent"; then
-      echo "!! install app: the background agent did not restart" >&2
-      agent_restarted=false
-    fi
-  else
-    echo "-- background agent not running; nothing to restart"
-  fi
+  # The agent is left to Foldover, which restarts it by registering it
+  # anew when it opens as a changed build. launchd ties a registered
+  # agent to the code hash it had at registration, and a rebuilt
+  # ad-hoc-signed agent has a new one, so restarting it here would stop
+  # the old agent and leave launchd unable to start the new one. Until
+  # Foldover opens, a running agent keeps the old code.
+  local agent_loaded=false
+  if launchctl print "$agent" >/dev/null 2>&1; then agent_loaded=true; fi
 
-  # Reopen even when the agent failed: the install itself succeeded, and
-  # the app was only quit to make room for it.
-  local reopened=true
+  local reopened=false
   if $reopen; then
     echo "-- reopening Foldover"
-    if ! open "$dest"; then
+    if open "$dest"; then
+      reopened=true
+    else
       echo "!! install app: Foldover did not reopen" >&2
-      reopened=false
     fi
   fi
 
-  local not_reopened=""
-  $reopened || not_reopened=", but Foldover did not reopen"
-  if ! $agent_restarted; then
-    record "install app: FAILED (installed $dest, but the agent did not restart; choose Enable Background Agent in Foldover)$not_reopened"
-    return 1
+  local note=""
+  if $reopen && ! $reopened; then note=", but Foldover did not reopen"; fi
+  if $agent_loaded; then
+    if $reopened; then
+      echo "-- Foldover restarts the background agent as it opens"
+    else
+      note="$note; open Foldover to restart the background agent"
+    fi
   fi
-  record "install app: ok ($dest)$not_reopened"
+  record "install app: ok ($dest)$note"
 }
 
 install_core() {

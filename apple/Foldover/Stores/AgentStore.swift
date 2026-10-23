@@ -19,16 +19,52 @@ enum AgentConnection: Equatable {
     case failed(message: String)
 }
 
+/// The agent did not answer because it is not running: its socket is
+/// missing or refuses connections.
+struct AgentNotRunning: Error, Equatable {
+    let message: String
+}
+
+/// The agent's login item: the system's (`BackgroundAgent`), or a stand-in
+/// in tests and UI tours.
+@MainActor
+protocol AgentRegistering {
+    var registration: AgentRegistration { get }
+    /// What identifies this build of the app and the agent it embeds; nil
+    /// when it cannot be read.
+    var appBuild: Data? { get }
+    func register() throws -> AgentRegistration
+    /// Register the agent anew, for a job launchd keeps but cannot start.
+    func reregister() async throws -> AgentRegistration
+    func openLoginItems()
+}
+
+extension BackgroundAgent: AgentRegistering {}
+
 @Observable
 @MainActor
 final class AgentStore {
-    private let system = BackgroundAgent()
+    private let system: any AgentRegistering
     private let statusRequest: @Sendable () async throws -> AgentReport
     private let leaveSafeModeRequest: @Sendable () async throws -> AgentReport
     private let alert: @MainActor (String, String) async -> Void
-    private let startupTimeout: Duration = .seconds(10)
-    private let startupPoll: Duration = .milliseconds(250)
+    private let defaults: UserDefaults
+    private let startupTimeout: Duration
+    private let startupPoll: Duration
+    /// Registrations anew before turning on gives up: the first can leave
+    /// launchd's old job in place.
+    private static let repairAttempts = 2
+    /// The app build the agent was last registered from, once seen
+    /// answering or awaiting approval.
+    private static let registeredBuildKey = "agent.registeredBuild"
+    /// Where that is kept: apart from the app's own domain, which a UI tour
+    /// resets, so a tour does not make the next launch restart the agent.
+    private static let registrationSuite = "ch.lkmc.foldover.login-item"
     private var generation = 0
+    /// Turning the agent on in flight. Health checks wait it out rather than
+    /// report the states it passes through, and turning on again waits for
+    /// it, since both change the login item.
+    @ObservationIgnored private var starting: Task<Void, Never>?
     private(set) var connection: AgentConnection = .disconnected {
         didSet {
             if connection != .connecting { lastSettled = connection }
@@ -44,13 +80,23 @@ final class AgentStore {
     private(set) var safeModeError: String?
 
     init(statusRequest: @escaping @Sendable () async throws -> AgentReport = {
-        AgentStore.report(try await FoldoverCore.agentStatus())
+        do {
+            return AgentStore.report(try await FoldoverCore.agentStatus())
+        } catch AgentError.NotRunning(let message) {
+            throw AgentNotRunning(message: message)
+        }
     }, leaveSafeModeRequest: @escaping @Sendable () async throws -> AgentReport = {
         AgentStore.report(try await FoldoverCore.leaveSafeMode())
-    }, alert: @escaping @MainActor (String, String) async -> Void = AgentStore.postAlert) {
+    }, alert: @escaping @MainActor (String, String) async -> Void = AgentStore.postAlert,
+         system: (any AgentRegistering)? = nil, defaults: UserDefaults? = nil,
+         startupTimeout: Duration = .seconds(10), startupPoll: Duration = .milliseconds(250)) {
         self.statusRequest = statusRequest
         self.leaveSafeModeRequest = leaveSafeModeRequest
         self.alert = alert
+        self.system = system ?? BackgroundAgent()
+        self.defaults = defaults ?? UserDefaults(suiteName: Self.registrationSuite) ?? .standard
+        self.startupTimeout = startupTimeout
+        self.startupPoll = startupPoll
     }
 
     nonisolated private static func report(_ health: AgentHealth) -> AgentReport {
@@ -93,6 +139,7 @@ final class AgentStore {
     }
 
     func refresh() async {
+        guard starting == nil else { return }
         generation += 1
         let request = generation
         connection = .connecting
@@ -103,7 +150,7 @@ final class AgentStore {
             note(report)
         } catch {
             guard generation == request else { return }
-            if case AgentError.NotRunning = error,
+            if error is AgentNotRunning,
                case .requiresApproval = system.registration {
                 connection = .approvalRequired
                 return
@@ -113,36 +160,123 @@ final class AgentStore {
     }
 
     func enable() async {
-        generation += 1
-        let request = generation
-        do {
-            let registration = try system.register()
+        await afterStarting { [self] in
+            generation += 1
+            let request = generation
+            do {
+                let before = system.registration
+                let registration = try system.register()
+                // Turning the agent on is not a background check: show that
+                // it is connecting rather than the answer it replaces.
+                lastSettled = nil
+                connection = .connecting
+                // An agent registered before answers within a moment, even
+                // while it starts. One that does not is a job launchd cannot
+                // start, so it is registered anew rather than waited on.
+                // `register` registers only an agent that is off or missing.
+                try await start(registration, request: request,
+                                firstWait: before == .enabled ? startupProbe : startupTimeout,
+                                repairs: Self.repairAttempts,
+                                registered: before == .disabled || before == .unavailable)
+            } catch {
+                guard generation == request else { return }
+                connection = .failed(message: message(for: error))
+            }
+        }
+    }
+
+    /// Register the agent anew, which restarts it, once the app is a build
+    /// the agent was not registered from: a running agent refuses a changed
+    /// app until it restarts (ADR 0006), and launchd cannot start a changed
+    /// ad-hoc-signed agent under the old registration (see
+    /// `BackgroundAgent.reregister`). A login item that is off or awaits
+    /// approval is left as it is. Only a real launch calls this; a test host
+    /// must leave the developer's login item alone.
+    func reregisterIfUpdated() async {
+        await afterStarting { [self] in
+            guard system.registration == .enabled, let build = system.appBuild,
+                  build != defaults.data(forKey: Self.registeredBuildKey) else { return }
+            generation += 1
+            let request = generation
+            connection = .connecting
+            do {
+                let registration = try await system.reregister()
+                guard generation == request else { return }
+                try await start(registration, request: request, firstWait: startupTimeout,
+                                repairs: Self.repairAttempts - 1, registered: true)
+            } catch {
+                guard generation == request else { return }
+                connection = .failed(message: message(for: error))
+            }
+        }
+    }
+
+    /// Run `body` once any turning on in flight has finished: both change
+    /// the login item, so they must not interleave.
+    private func afterStarting(_ body: @escaping @MainActor @Sendable () async -> Void) async {
+        let previous = starting
+        let task = Task {
+            await previous?.value
+            await body()
+        }
+        starting = task
+        await task.value
+        if starting == task { starting = nil }
+    }
+
+    /// How long Turn On gives an agent registered before to answer, as while
+    /// it starts, before registering it anew.
+    private var startupProbe: Duration { startupTimeout / 5 }
+
+    /// Wait for the agent behind `registration` to answer, registering it
+    /// anew while it does not, up to `repairs` times. `registered` says the
+    /// registration is this request's own, so an answer confirms the build.
+    private func start(_ registration: AgentRegistration, request: Int, firstWait: Duration,
+                       repairs: Int, registered: Bool) async throws {
+        var registration = registration
+        var wait = firstWait
+        var repairsLeft = repairs
+        var registered = registered
+        while true {
             if case .requiresApproval = registration {
+                // Registering tied the agent to this build; approving it
+                // only lets launchd start it.
+                if registered { defaults.set(system.appBuild, forKey: Self.registeredBuildKey) }
                 connection = .approvalRequired
                 return
             }
-            // Turning the agent on is not a background check: show that it
-            // is connecting rather than the answer it replaces.
-            lastSettled = nil
-            connection = .connecting
-            let deadline = ContinuousClock.now.advanced(by: startupTimeout)
-            while ContinuousClock.now < deadline {
-                do {
-                    let report = try await statusRequest()
-                    guard generation == request else { return }
-                    connection = .connected(version: report.version)
-                    note(report)
-                    return
-                } catch AgentError.NotRunning {
-                    // Registration returns before launchd has bound the socket.
-                    try await Task.sleep(for: startupPoll)
-                    guard generation == request else { return }
-                }
+            if let report = try await answer(within: wait, request: request) {
+                connection = .connected(version: report.version)
+                note(report)
+                if registered { defaults.set(system.appBuild, forKey: Self.registeredBuildKey) }
+                return
             }
-            connection = .failed(message: String(localized: "The registered agent did not start. Check Login Items, then turn it on again."))
-        } catch {
             guard generation == request else { return }
-            connection = .failed(message: message(for: error))
+            guard repairsLeft > 0 else {
+                connection = .failed(message: String(localized: "The background agent did not start. In System Settings › General › Login Items, turn Foldover off and on, then choose Turn On again."))
+                return
+            }
+            repairsLeft -= 1
+            registration = try await system.reregister()
+            guard generation == request else { return }
+            registered = true
+            wait = startupTimeout
+        }
+    }
+
+    /// The agent's report once it answers within `timeout`, after at least
+    /// one try; nil when it does not, or when a newer request took over.
+    /// Registration returns before launchd has started the agent.
+    private func answer(within timeout: Duration, request: Int) async throws -> AgentReport? {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while true {
+            do {
+                let report = try await statusRequest()
+                return generation == request ? report : nil
+            } catch is AgentNotRunning {
+                guard ContinuousClock.now < deadline, generation == request else { return nil }
+                try await Task.sleep(for: startupPoll)
+            }
         }
     }
 
@@ -152,6 +286,7 @@ final class AgentStore {
 
     private func message(for error: Error) -> String {
         switch error {
+        case let error as AgentNotRunning: error.message
         case AgentError.Connection(let message), AgentError.NotRunning(let message),
              AgentError.Request(let message): message
         default: error.localizedDescription

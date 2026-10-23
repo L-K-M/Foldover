@@ -278,9 +278,13 @@ func monitorRefreshesTheAgentAndCatalogAfterTheFirstLoad() async {
     let agent = AgentProbe()
     let catalog = CatalogProbe([first])
     let sync = SyncProbe()
+    // An updated app's login item: monitor() also runs in test hosts, so it
+    // must leave it alone; only a real launch registers the agent anew.
+    let loginItem = StaleLoginItem(startsAfter: 0)
     let viewModel = MainViewModel(
         appInfo: AppInfoStore(),
-        agent: AgentStore(statusRequest: { AgentReport(version: try await agent.status()) }),
+        agent: AgentStore(statusRequest: { AgentReport(version: try await agent.status()) },
+                          system: loginItem, defaults: UserDefaults(suiteName: "foldover-tests-\(UUID().uuidString)")),
         pairs: PairStore(client: catalog),
         sync: SyncStore(client: sync, pollInterval: .milliseconds(1)),
         automation: AutomationStore(client: AutomationProbe())
@@ -308,6 +312,8 @@ func monitorRefreshesTheAgentAndCatalogAfterTheFirstLoad() async {
     await agent.recover("1.0.0")
     #expect(await eventually { viewModel.agentStatusText.contains("1.0.0 connected") })
     #expect(await sync.waitForCalls(stalled + 1))
+    #expect(loginItem.registrations == 0)
+    #expect(loginItem.reregistrations == 0)
 
     monitor.cancel()
     await monitor.value

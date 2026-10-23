@@ -5,6 +5,7 @@
 // previews, runs and archives with no agent running. Release builds
 // never compile this file's contents.
 
+import FoldoverSystem
 import Foundation
 
 enum Fixtures {
@@ -578,6 +579,18 @@ actor FixtureMacToMacClient: MacToMacClient {
         guard device == "studio" else { throw FixtureError.notAvailable }
         return [OfferedShare(id: "share-1", name: "Documents"), OfferedShare(id: "share-2", name: "Design")]
     }
+}
+
+/// The agent's login item in a tour: on, and never registered anew, so a
+/// tour leaves the system's login items alone.
+@MainActor
+final class FixtureAgentLoginItem: AgentRegistering {
+    var registration: AgentRegistration { .enabled }
+    var appBuild: Data? { nil }
+
+    func register() throws -> AgentRegistration { .enabled }
+    func reregister() async throws -> AgentRegistration { .enabled }
+    func openLoginItems() {}
 }
 
 /// Login-item state kept in memory.

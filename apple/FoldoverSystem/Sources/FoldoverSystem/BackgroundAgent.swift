@@ -1,3 +1,5 @@
+import Foundation
+import Security
 import ServiceManagement
 
 public enum AgentRegistration: Sendable {
@@ -9,6 +11,14 @@ public enum AgentRegistration: Sendable {
 
 @MainActor
 public final class BackgroundAgent {
+    private static let label = "ch.lkmc.foldover.agent"
+    /// How long launchd may take to drop the job after it is unregistered.
+    private static let forgetTimeout: Duration = .seconds(10)
+    private static let forgetPoll: Duration = .milliseconds(250)
+    /// Pauses before registering again when registering straight after
+    /// unregistering fails: the system can refuse it ("Operation not
+    /// permitted") until it has finished unregistering.
+    private static let registerRetries: [Duration] = [.milliseconds(500), .seconds(1), .seconds(2)]
     private let service = SMAppService.agent(plistName: "ch.lkmc.foldover.agent.plist")
 
     public init() {}
@@ -23,6 +33,22 @@ public final class BackgroundAgent {
         }
     }
 
+    /// The app's code directory hash; nil when the code signature cannot be
+    /// read. The app's signature seals the embedded agent and CLI, so it
+    /// changes whenever any of them does. A running agent refuses a changed
+    /// app until it restarts (ADR 0006), and launchd refuses a changed
+    /// agent under its old registration.
+    public var appBuild: Data? {
+        let url = Bundle.main.bundleURL
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess, let code else { return nil }
+        var information: CFDictionary?
+        let flags = SecCSFlags(rawValue: kSecCSSigningInformation)
+        guard SecCodeCopySigningInformation(code, flags, &information) == errSecSuccess,
+              let information = information as? [String: Any] else { return nil }
+        return information[kSecCodeInfoUnique as String] as? Data
+    }
+
     public func register() throws -> AgentRegistration {
         switch registration {
         case .enabled, .requiresApproval:
@@ -33,7 +59,63 @@ public final class BackgroundAgent {
         }
     }
 
+    /// Register the agent anew, which also restarts it from this app.
+    /// Registering pins the job's launch constraint to the agent's code
+    /// hash, which an ad-hoc-signed agent changes whenever it is rebuilt, so
+    /// once the app is replaced launchd refuses the new agent ("spawn
+    /// failed", exit 78, "needs LWCR update") while the login item still
+    /// reads as enabled. Registering again while launchd still holds the old
+    /// job keeps its constraint, so the job is unregistered and stopped, and
+    /// launchd given time to drop it, first.
+    public func reregister() async throws -> AgentRegistration {
+        await unregister()
+        _ = await Self.launchctl("bootout", Self.target)
+        let deadline = ContinuousClock.now.advanced(by: Self.forgetTimeout)
+        while await Self.launchctl("print", Self.target) == 0, ContinuousClock.now < deadline {
+            try await Task.sleep(for: Self.forgetPoll)
+        }
+        for pause in Self.registerRetries {
+            do {
+                try service.register()
+                return registration
+            } catch {
+                try await Task.sleep(for: pause)
+            }
+        }
+        try service.register()
+        return registration
+    }
+
     public func openLoginItems() {
         SMAppService.openSystemSettingsLoginItems()
+    }
+
+    /// Unregister without holding up the main actor. It fails for a job
+    /// launchd has already dropped, which is as good: whether the agent
+    /// answers once registered again is what callers check.
+    private func unregister() async {
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            service.unregister { @Sendable _ in done.resume() }
+        }
+    }
+
+    /// The agent's job in this user's launchd domain.
+    private static var target: String { "gui/\(getuid())/\(label)" }
+
+    /// Run launchctl quietly; its exit status, or nil when it cannot run.
+    private nonisolated static func launchctl(_ arguments: String...) async -> Int32? {
+        await withCheckedContinuation { continuation in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            process.arguments = arguments
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            process.terminationHandler = { continuation.resume(returning: $0.terminationStatus) }
+            do {
+                try process.run()
+            } catch {
+                continuation.resume(returning: nil)
+            }
+        }
     }
 }

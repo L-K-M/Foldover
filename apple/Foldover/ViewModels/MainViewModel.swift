@@ -550,6 +550,13 @@ final class MainViewModel {
         }
     }
 
+    /// At launch, before `monitor`: restart the agent from this app when
+    /// the app changed since the agent was registered (see
+    /// `AgentStore.reregisterIfUpdated`).
+    func restartAgentIfUpdated() async {
+        await agent.reregisterIfUpdated()
+    }
+
     /// Keep the agent, the catalog and every pair's status current while
     /// the app runs, so automatic syncs, restarts and outside changes
     /// show up and their problems become notifications.

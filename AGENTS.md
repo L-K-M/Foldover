@@ -43,7 +43,7 @@ The roadmap is PLAN.md §7.
 | Generate the Xcode project | `xcodegen generate --spec apple/project.yml` |
 | UI tour: drive the Debug app on canned data, screenshot every stop (macOS; the `ui-tour` workflow uploads them) | `xcodebuild test -project apple/Foldover.xcodeproj -scheme FoldoverUITour` |
 | Build everything this host can → `dist/` | `scripts/build.sh [core] [app] [--debug] [--clean] [--check]` |
-| Build, then install the app into `/Applications` (restarts a running agent) | `scripts/build.sh app --install` |
+| Build, then install the app into `/Applications` (the app restarts its agent when it opens) | `scripts/build.sh app --install` |
 | Test `--install` against a fake macOS toolchain | `bash scripts/test-build-install.sh` |
 | Release (macOS, X.Y.Z only; the pushed tag publishes the app zip) | `scripts/release.sh X.Y.Z [--push]` |
 | Package the ad-hoc-signed app zip (macOS) | `bash scripts/package-app.sh OUT.zip DERIVED_DATA` |
@@ -130,6 +130,17 @@ never breaks the build.
   with AppKit's layout-loop exception once the window gets narrower
   than its columns (macOS 26 and 27). The main window's inspector is a
   pane in the detail instead; `LayoutStressTests` checks it.
+- launchd ties a registered login-item agent to the code hash it had
+  at registration, and a rebuilt ad-hoc-signed agent has a new one.
+  After such an install launchd refuses the new agent ("spawn failed",
+  exit 78, "needs LWCR update") while `SMAppService` still reports it
+  enabled; a running agent also refuses a changed app (ADR 0006). The
+  fix is to unregister, `launchctl bootout` the job, wait for launchd
+  to drop it and register again (`BackgroundAgent.reregister`). The
+  app does that when it opens as a changed build, and Turn On does
+  when the agent does not answer (`AgentStore`); a first attempt can
+  fail, so both try twice. Never `launchctl kickstart` the agent after
+  an install.
 
 <!-- shared-rules:start -->
 

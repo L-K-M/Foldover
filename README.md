@@ -65,8 +65,9 @@ Toolchain details and every other command: [`AGENTS.md`](AGENTS.md).
 
 ## Background agent
 
-The app embeds the Rust agent and CLI. Choose **Enable Background Agent**;
-if macOS requests approval, open Login Items and allow Foldover, then refresh.
+The app embeds the Rust agent and CLI. Choose **Turn On** to start the
+background agent; if macOS requests approval, open Login Items and allow
+Foldover, then refresh.
 The agent configures and syncs pairs, and keeps syncing with the window closed.
 Choose **New Pair**, select both folders and a mode, then save. Select the pair
 and choose **Preview** to see every change, then **Sync Now**. Saving never
