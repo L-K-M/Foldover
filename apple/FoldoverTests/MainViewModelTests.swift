@@ -180,7 +180,7 @@ private actor AgentProbe {
 private actor SlowProbe {
     private let probe = CallProbe()
     private var calls = 0
-    private var held: CheckedContinuation<Void, Never>?
+    private var held: [CheckedContinuation<Void, Never>] = []
     private var released = false
 
     func status() async throws -> String {
@@ -188,7 +188,7 @@ private actor SlowProbe {
         await probe.hit()
         if calls > 1 && !released {
             await withCheckedContinuation { continuation in
-                if released { continuation.resume() } else { held = continuation }
+                if released { continuation.resume() } else { held.append(continuation) }
             }
         }
         return "1.0.0"
@@ -199,8 +199,8 @@ private actor SlowProbe {
 
     func release() {
         released = true
-        held?.resume()
-        held = nil
+        for continuation in held { continuation.resume() }
+        held = []
     }
 }
 
