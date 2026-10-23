@@ -10,10 +10,13 @@ struct MenuBarView: View {
     @ScaledMetric(relativeTo: .title2) private var headerIconSize: CGFloat = 24
     let viewModel: MainViewModel
 
-    /// Most pair rows before the list scrolls. A menu-bar popover that
-    /// grows past the screen loses its Quit item, which is worse than
-    /// scrolling for the pairs below the fold.
-    private static let maxPairRows = 8
+    /// Rough height of one pair row at default text size, with slack
+    /// for a second caption line. Wrapped errors grow rows further, so
+    /// the threshold errs toward scrolling early.
+    private static let estimatedRowHeight: CGFloat = 44
+    /// Pair-list height past which rows scroll instead of pushing the
+    /// controls below off screen.
+    private static let maxPairListHeight: CGFloat = 280
 
     var body: some View {
         let rows = viewModel.pairRows
@@ -53,27 +56,21 @@ struct MenuBarView: View {
         .frame(maxHeight: 560)
     }
 
-    /// Every pair's row, scrolling once there are more than can fit.
+    /// Every pair's row. Scrolls when the estimated height outruns the
+    /// bound; the estimate is deliberately generous so tall rows (wrapped
+    /// errors, large text) start scrolling before they can clip Quit.
     @ViewBuilder
     private func pairList(_ rows: [PairRow]) -> some View {
-        if rows.count > Self.maxPairRows {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(rows) { row in
-                        pairRow(row)
-                    }
-                }
+        let stack = VStack(alignment: .leading, spacing: 2) {
+            ForEach(rows) { row in
+                pairRow(row)
             }
-            .frame(maxHeight: CGFloat(Self.maxPairRows) * 36)
-            Text(String(localized: "\(rows.count) pairs · scroll for more"))
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+        }
+        if CGFloat(rows.count) * Self.estimatedRowHeight > Self.maxPairListHeight {
+            ScrollView { stack }
+                .frame(maxHeight: Self.maxPairListHeight)
         } else {
-            VStack(alignment: .leading, spacing: 2) {
-                ForEach(rows) { row in
-                    pairRow(row)
-                }
-            }
+            stack
         }
     }
 
