@@ -23,6 +23,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- CLI syncs with unresolved conflicts and no failures now exit with
+  status 4 instead of 0. Partial `--put-back-all` restores exit with
+  status 1 instead of 0 and still print the restore report as JSON.
+  Failed items stay archived; sync failures take precedence over conflicts.
+
 - The app is laid out like a Mac app: pairs in a sidebar with their
   status, the selected pair's folders, plan and a table of planned
   changes in the middle, and an inspector for the selected change, the

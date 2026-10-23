@@ -179,6 +179,8 @@ def restoration(cli, endpoint, directory):
         raise RuntimeError(f"Restore pair creation failed: {created}")
     pair = json.loads(created.stdout)["id"]
     preview = invoke(cli, endpoint, ("sync", pair, "--preview"))
+    if preview.returncode != 0:
+        raise RuntimeError(f"Restore preview failed: {preview}")
     token = json.loads(preview.stdout)["preview"]["review_token"]
     initial = invoke(cli, endpoint, ("sync", pair, "--approve", "0", "0", "--review", token))
     if initial.returncode != 0:
