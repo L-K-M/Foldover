@@ -65,6 +65,11 @@ final class MenuBarTests: XCTestCase {
         // MenuBarExtra's Label title is not a status-item query identifier.
         let item = tour.app.statusItems.firstMatch
         XCTAssertTrue(item.waitForExistence(timeout: 10))
+        tour.click(item, "working menu bar extra")
+        let working = tour.app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", "Syncing…")).firstMatch
+        XCTAssertTrue(working.waitForExistence(timeout: 5), "The fixture should have a running sync")
+        tour.key(.escape)
         tour.key("w", .command)
         XCTAssertTrue(tour.app.windows["Foldover"].waitForNonExistence(timeout: 5))
         return item

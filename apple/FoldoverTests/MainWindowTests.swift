@@ -223,6 +223,7 @@ private func eventuallyInWindow(_ condition: @MainActor () -> Bool,
     return true
 }
 
+#if DEBUG
 @MainActor
 @Test(arguments: [MotionPreference.full, .reduced])
 func theMenuBarPulseObservesWorkWithoutAScene(_ preference: MotionPreference) async throws {
@@ -252,6 +253,7 @@ func theMenuBarPulseObservesWorkWithoutAScene(_ preference: MotionPreference) as
     try await Task.sleep(for: .milliseconds(450))
     #expect(animation.imageName(for: .working) == MenuBarStatus.working.rawValue)
 }
+#endif
 
 @MainActor
 @Test
