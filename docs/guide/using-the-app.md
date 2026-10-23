@@ -7,6 +7,10 @@ the menu bar, and the menus own the keyboard shortcuts. The window's
 commands act on the selected pair and turn off while the pair editor or a
 dialog is open.
 
+Click an **ⓘ** button beside a setting for instructions and tradeoffs.
+Press Escape or click outside to close the popover. Warnings and the live
+sync plan stay visible without opening help.
+
 ## The main window
 
 - **Sidebar.** Every pair with its direction, name and status. A spinner

@@ -26,6 +26,11 @@ struct SettingsView: View {
                         set: { opens in viewModel.setLoginLaunch(opens ? .open : .stayClosed) }
                     )
                 )
+                if let note = viewModel.loginApprovalNote {
+                    Label(note, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                }
                 if let error = viewModel.error {
                     ErrorNote(message: error)
                 }
@@ -33,7 +38,7 @@ struct SettingsView: View {
             Section("Automatic Syncs") {
                 NoteToggle(
                     title: Text("Sync automatically in Low Power Mode"),
-                    note: Text("When off, automatic syncs wait until Low Power Mode ends. Syncs over the network always wait while the network is expensive or Low Data Mode is on."),
+                    note: Text("When off, automatic syncs wait until Low Power Mode ends to conserve battery. Turn this on if keeping folders current matters more than saving power.\n\nSyncs over the network always wait while the network is expensive or Low Data Mode is on. This setting controls automatic runs; you can still start a sync yourself."),
                     isOn: Binding(
                         get: { automation.lowPower == .run },
                         set: { run in Task { await automation.setLowPower(run ? .run : .pause) } }
@@ -46,9 +51,7 @@ struct SettingsView: View {
             Section {
                 Button("Open Full Disk Access Settings…") { viewModel.openFullDiskAccess() }
             } header: {
-                Text("Folder Access")
-            } footer: {
-                Text(viewModel.accessNote)
+                InfoLabel(title: Text("Folder Access"), message: Text(viewModel.accessNote))
             }
         }
         .formStyle(.grouped)
@@ -59,21 +62,16 @@ struct SettingsView: View {
     }
 }
 
-/// A switch with its explanation under the title, as System Settings
-/// lays one out.
+/// A switch with optional guidance beside its title.
 struct NoteToggle: View {
     let title: Text
     let note: Text
     @Binding var isOn: Bool
 
     var body: some View {
-        Toggle(isOn: $isOn) {
-            VStack(alignment: .leading, spacing: 2) {
-                title
-                note
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
+        HStack {
+            Toggle(isOn: $isOn) { title }
+            InfoButton(title: title, message: note)
         }
     }
 }

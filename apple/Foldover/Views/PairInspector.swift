@@ -39,12 +39,11 @@ struct PairInspector: View {
             }
 
             Section("Pair") {
-                VStack(alignment: .leading, spacing: 2) {
-                    LabeledContent("Mode", value: pair.settings.mode.title)
-                    Text(pair.settings.mode.explanation)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                LabeledContent("Mode") {
+                    HStack(spacing: 6) {
+                        Text(pair.settings.mode.title)
+                        InfoButton(title: Text("Sync Mode"), message: Text(pair.settings.mode.explanation))
+                    }
                 }
                 folderRow("Folder A", folder: pair.settings.left, side: .a)
                 folderRow("Folder B", folder: pair.settings.right, side: .b)

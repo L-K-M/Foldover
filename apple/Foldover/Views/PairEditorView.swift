@@ -44,13 +44,14 @@ struct PairEditorView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        HStack(spacing: 8) {
             Text(viewModel.title)
                 .font(.title2)
                 .accessibilityAddTraits(.isHeader)
-            Text("Saving configures the pair. Nothing is copied until you preview and sync.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            InfoButton(
+                title: Text("Saving a Pair"),
+                message: Text("Saving configures the pair. Nothing is copied until you preview and sync.\n\nChoose the folders and direction, then review the live plan at the bottom. Run the first sync yourself before automatic syncs can start.")
+            )
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 20)
@@ -73,9 +74,6 @@ struct PairEditorView: View {
                 modePicker
                 folderCard(.right)
             }
-            Text(viewModel.mode.explanation)
-                .font(.callout)
-                .foregroundStyle(.secondary)
             if let warning = viewModel.serverWarning {
                 WarningLabel(text: warning)
             }
@@ -83,11 +81,10 @@ struct PairEditorView: View {
                 WarningLabel(text: warning)
             }
         } header: {
-            Text("Folders")
-        } footer: {
-            if !viewModel.nearbyServers.isEmpty {
-                Text("Connect to a nearby server from the Choose menu, open a shared folder in Finder, then pick it here.")
-            }
+            InfoLabel(
+                title: Text("Folders"),
+                message: Text("Choose a folder for each side, or drop a folder onto its card. Local disks, mounted shares and remote folders can be paired.\n\nFor a nearby server, connect from the Choose menu, open a shared folder in Finder, then pick it with Folder on This Mac. If the server is not listed, connect in Finder first. The share must be available when the pair syncs.\n\nUse Folder on an SFTP Server for a direct SSH connection without mounting a share. Pair another Mac in Settings to use folders it shares with you.")
+            )
         }
     }
 
@@ -169,14 +166,20 @@ struct PairEditorView: View {
                 .font(.title2)
                 .foregroundStyle(.tint)
                 .accessibilityHidden(true)
-            Picker("Mode", selection: $viewModel.mode) {
-                ForEach(PairMode.allCases, id: \.self) { mode in
-                    Text(mode.title).tag(mode)
+            HStack(spacing: 6) {
+                Picker("Mode", selection: $viewModel.mode) {
+                    ForEach(PairMode.allCases, id: \.self) { mode in
+                        Text(mode.title).tag(mode)
+                    }
                 }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .accessibilityIdentifier("pair-mode")
+                InfoButton(
+                    title: Text("Sync Mode"),
+                    message: Text("\(viewModel.mode.explanation)\n\nUse Sync when you work in both folders. Use Mirror for an exact one-way copy, or Backup to keep target files after removing them from the source. Check the arrow and live plan before saving: they show which folder can change.")
+                )
             }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .accessibilityIdentifier("pair-mode")
         }
         .fixedSize()
     }
@@ -187,22 +190,29 @@ struct PairEditorView: View {
                 WarningLabel(text: warning)
             }
             if viewModel.offersKeepingNothing {
-                Toggle(isOn: $viewModel.keepsNothingInTarget) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(viewModel.keepingNothingTitle)
-                        Text(viewModel.keepingNothingExplanation)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Toggle(viewModel.keepingNothingTitle, isOn: $viewModel.keepsNothingInTarget)
+                    InfoButton(
+                        title: Text(viewModel.keepingNothingTitle),
+                        message: Text("\(viewModel.keepingNothingExplanation)\n\nUse this only when the backup target cannot store Foldover's records. Keep recoverable copies elsewhere and avoid syncing another Mac to that target at the same time.")
+                    )
+                }
+                if viewModel.keepsNothingInTarget {
+                    WarningLabel(text: viewModel.keepingNothingExplanation)
+                }
+            }
+            HStack {
+                Picker("Sync Automatically", selection: $viewModel.options.schedule) {
+                    ForEach(viewModel.scheduleChoices, id: \.self) { schedule in
+                        Text(PairEditorViewModel.scheduleTitle(schedule)).tag(schedule)
                     }
                 }
+                .pickerStyle(.menu)
+                InfoButton(
+                    title: Text("Sync Automatically"),
+                    message: Text("Automatic syncs start after the first sync you run yourself. Choose a schedule to keep the folders in step while the app is closed; the background agent must be running and both folders must be available.\n\nAutomatic syncs stop for review instead of asking when they would archive many items. Power and network restrictions can also postpone a run.\(viewModel.scheduleNote.map { "\n\n\($0)" } ?? "")")
+                )
             }
-            Picker("Sync Automatically", selection: $viewModel.options.schedule) {
-                ForEach(viewModel.scheduleChoices, id: \.self) { schedule in
-                    Text(PairEditorViewModel.scheduleTitle(schedule)).tag(schedule)
-                }
-            }
-            .pickerStyle(.menu)
             if viewModel.showsDailySettings {
                 DatePicker("At", selection: $viewModel.dailyTime, displayedComponents: .hourAndMinute)
                 LabeledContent("On") { dayToggles }
@@ -212,13 +222,6 @@ struct PairEditorView: View {
             }
         } header: {
             Text("Sync")
-        } footer: {
-            VStack(alignment: .leading, spacing: 4) {
-                if let note = viewModel.scheduleNote {
-                    Text(note)
-                }
-                Text("Automatic syncs start after the first sync you run yourself. They stop instead of asking when they would archive many items.")
-            }
         }
     }
 
@@ -242,19 +245,13 @@ struct PairEditorView: View {
 
     private var skipSection: some View {
         Section {
-            VStack(alignment: .leading, spacing: 6) {
-                TextEditor(text: $viewModel.filterText)
-                    .font(.body.monospaced())
-                    .frame(minHeight: 72)
-                    .accessibilityLabel("Rules for files to skip")
-                Text("One rule per line, like .gitignore: *.tmp skips temporary files, build/ skips folders named build. Rules apply to both folders; a .foldoverignore file in either folder adds more.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            TextEditor(text: $viewModel.filterText)
+                .font(.body.monospaced())
+                .frame(minHeight: 72)
+                .accessibilityLabel("Rules for files to skip")
             LimitRow(
                 title: "Skip files larger than",
-                note: "A file this large in either folder is skipped in both, so it is never copied or deleted.",
+                note: "Leave large files out to reduce transfer time and disk use. A file this large in either folder is skipped in both, so it is never copied or deleted.\n\nExisting copies stay where they are. If the file later falls below the limit, it can sync again.",
                 isOn: $viewModel.limitsSize,
                 value: $viewModel.sizeLimitMegabytes,
                 range: 1...1_000_000_000,
@@ -263,7 +260,7 @@ struct PairEditorView: View {
             )
             LimitRow(
                 title: "Skip files unchanged for more than",
-                note: "Skipped only while unchanged in both folders; editing one makes it sync again.",
+                note: "Leave older, inactive files out of sync. A file is skipped only while unchanged in both folders; editing one makes it sync again.\n\nExisting copies stay where they are. This limits what sync considers; it does not clean up old files.",
                 isOn: $viewModel.limitsAge,
                 value: $viewModel.ageLimitDays,
                 // The view model clamps to 36,500 days (100 years).
@@ -271,14 +268,21 @@ struct PairEditorView: View {
                 fieldTitle: "Unchanged for more than (days)",
                 unit: "days"
             )
-            TextField("Canary file", text: $viewModel.canary)
+            HStack {
+                TextField("Canary file", text: $viewModel.canary)
+                InfoButton(
+                    title: Text("Canary file"),
+                    message: Text("A file that must stay in both folders unchanged. If it goes missing or changes, syncs stop before writing anything.\n\nUse a small, dedicated file as an extra check against an unexpectedly empty or damaged folder. Enter its path relative to each folder, such as checks/canary.txt, and put matching copies in both folders before syncing. Leave this blank to use the normal safety checks alone.")
+                )
+            }
             if let warning = viewModel.canaryWarning {
                 WarningLabel(text: warning)
             }
         } header: {
-            Text("Skip")
-        } footer: {
-            Text("A file that must stay in both folders unchanged. If it goes missing or changes, syncs stop before writing anything.")
+            InfoLabel(
+                title: Text("Skip"),
+                message: Text("Leave out temporary files, caches or other content you do not want to sync. Enter one rule per line, like .gitignore: *.tmp skips temporary files, and build/ skips folders named build.\n\nRules apply to both folders; a .foldoverignore file in either folder adds more. Skipped files are left alone, including copies already present in the other folder. Removing a rule brings those files back into the next comparison.")
+            )
         }
     }
 
@@ -294,9 +298,10 @@ struct PairEditorView: View {
                 WarningLabel(text: String(localized: "Changing metadata settings resets this pair's sync history. The next preview compares both folders from scratch."))
             }
         } header: {
-            Text("Metadata")
-        } footer: {
-            Text(viewModel.metadataNote)
+            InfoLabel(
+                title: Text("Metadata"),
+                message: Text("Choose which file details travel with the contents. Modification dates preserve timestamps; extended attributes include tags and Finder information. Permissions and access lists affect who can use the copied files.\n\nTurn off details you do not want to carry between different users or file systems. Foldover warns when a destination cannot preserve a requested detail.\n\n\(viewModel.metadataNote)")
+            )
         }
     }
 
@@ -304,26 +309,29 @@ struct PairEditorView: View {
         Section("Advanced") {
             LimitRow(
                 title: "Limit bandwidth",
-                note: "All of this pair's copies together stay under this rate.",
+                note: "Leave network capacity for other apps or people during a large sync. All of this pair's copies together stay under this rate, in megabytes per second.\n\nA lower limit makes transfers take longer. Other pairs have their own limits.",
                 isOn: $viewModel.limitsBandwidth,
                 value: $viewModel.bandwidthLimitMegabytesPerSecond,
                 range: 1...1_000_000,
                 fieldTitle: "At most (MB/s)",
                 unit: "MB/s"
             )
-            Picker("Write Safety", selection: $viewModel.options.durability) {
-                ForEach(viewModel.durabilityChoices, id: \.self) { durability in
-                    Text(durability.title).tag(durability)
-                        .disabled(viewModel.usesServerFolder && durability == .full)
+            HStack {
+                Picker("Write Safety", selection: $viewModel.options.durability) {
+                    ForEach(viewModel.durabilityChoices, id: \.self) { durability in
+                        Text(durability.title).tag(durability)
+                            .disabled(viewModel.usesServerFolder && durability == .full)
+                    }
                 }
+                .pickerStyle(.menu)
+                InfoButton(
+                    title: Text("Write Safety"),
+                    message: Text("\(viewModel.durabilityExplanation)\n\nStandard suits everyday syncing. Survive power loss requests stronger disk flushing before a change is committed, which can slow a sync. SFTP follows the server's durability policy and cannot promise that its drive cache has been flushed.")
+                )
             }
-            .pickerStyle(.menu)
             if let warning = viewModel.durabilityWarning {
                 WarningLabel(text: warning)
             }
-            Text(viewModel.durabilityExplanation)
-                .font(.callout)
-                .foregroundStyle(.secondary)
         }
     }
 
@@ -376,7 +384,7 @@ private struct WarningLabel: View {
     }
 }
 
-/// A switch for an optional limit with its note beneath, and the limit's
+/// A switch for an optional limit with on-demand help, and the limit's
 /// number beside it, which stays in place but disabled while the limit
 /// is off.
 private struct LimitRow: View {
@@ -390,15 +398,8 @@ private struct LimitRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Toggle(isOn: $isOn) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                    Text(note)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
+            Toggle(title, isOn: $isOn)
+            InfoButton(title: Text(title), message: Text(note))
             NumberField(title: fieldTitle, value: $value, range: range, unit: unit, isActive: isOn)
         }
     }
@@ -449,8 +450,14 @@ private struct OtherMacFolderPicker: View {
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Choose a Folder on Another Mac").font(.headline)
-                Text(viewModel.otherMacsNote).font(.callout).foregroundStyle(.secondary)
+                InfoLabel(
+                    title: Text("Choose a Folder on Another Mac"),
+                    message: Text("\(viewModel.otherMacsNote)\n\nPair the Macs in Settings › Mac-to-Mac, then share the folder from the Mac that holds it. Only explicitly shared folders are available here. Both Macs must be reachable on the same network when syncing; the connection is encrypted.")
+                )
+                .font(.headline)
+                if viewModel.pairedMacs.isEmpty {
+                    Text(viewModel.otherMacsNote).font(.callout).foregroundStyle(.secondary)
+                }
                 if !viewModel.pairedMacs.isEmpty {
                     Picker("Mac", selection: $mac) {
                         Text("Choose a Mac").tag(PairedDevice?.none)
@@ -529,7 +536,11 @@ private struct ServerFolderPicker: View {
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Folder on an SFTP Server").font(.headline)
+                InfoLabel(
+                    title: Text("Folder on an SFTP Server"),
+                    message: Text("Connect directly to an SSH server without mounting a share in Finder. Foldover uses your SSH keys, agent and ~/.ssh/config, like the ssh command; it cannot ask for a password. Set up key-based access first.\n\nEnter sftp://user@host/path, then Browse to choose a folder. Use ~ for the home folder, for example sftp://nas.local/~/Photos. Network speed and the server's metadata support affect what the pair can preserve.")
+                )
+                .font(.headline)
                 HStack {
                     TextField("sftp://user@host/path", text: $viewModel.serverLocator)
                         .onSubmit { Task { await viewModel.browseServer() } }
@@ -564,9 +575,7 @@ private struct ServerFolderPicker: View {
                 if let error = viewModel.serverBrowseError {
                     Text(error).foregroundStyle(.red).textSelection(.enabled)
                 }
-                Text("Foldover connects with your SSH keys, agent and ~/.ssh/config, like the ssh command; it cannot ask for a password. Use ~ for the home folder, for example sftp://nas.local/~/Photos. Use only trusted servers: changes on the server can redirect Foldover's access outside the folder you choose.")
-                    .font(.callout).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                WarningLabel(text: String(localized: "Use only trusted servers: changes on the server can redirect Foldover's access outside the folder you choose."))
             }
             .padding(16)
             Divider()

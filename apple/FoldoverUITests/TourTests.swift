@@ -35,6 +35,9 @@ final class TourTests: XCTestCase {
         tour.pause(1)
         checkPairLayout(tour)
         tour.snap("02-editor")
+        checkInfoPopover(tour, button: app.sheets.buttons["About Folders"].firstMatch,
+                         contains: "open a shared folder in Finder", snap: "02-folders-help")
+        XCTAssertTrue(app.sheets.buttons["Cancel"].firstMatch.isHittable, "Help must not close the editor")
         tour.key(.escape)
         tour.key("a", [.command, .shift])
         tour.pause(1.5)
@@ -83,6 +86,27 @@ final class TourTests: XCTestCase {
         XCTAssertTrue(mode.isHittable, "Mode picker should be hittable")
         XCTAssertTrue(right.isHittable, "Folder B should be hittable")
         XCTAssertEqual(mode.label, "Mode", "The hidden label should remain accessible")
+    }
+
+    /// Guidance appears only on request; Escape closes help, not its parent.
+    @MainActor
+    private func checkInfoPopover(_ tour: Tour, button: XCUIElement,
+                                  contains fragment: String, snap name: String) {
+        let message = tour.app.staticTexts["info-message"].firstMatch
+        XCTAssertFalse(message.exists, "Help should stay out of the form until requested")
+        guard tour.click(button, "info button") else { return }
+        guard message.waitForExistence(timeout: 5) else {
+            return XCTFail("The info button did not show help")
+        }
+        XCTAssertTrue(message.label.contains(fragment), "Help should explain the associated setting")
+        let popover = tour.app.popovers.firstMatch
+        XCTAssertTrue(popover.exists, "Help should use a native popover")
+        if popover.exists {
+            XCTAssertTrue(popover.frame.contains(message.frame), "Help text should not be clipped")
+        }
+        tour.snap(name)
+        tour.key(.escape)
+        XCTAssertTrue(message.waitForNonExistence(timeout: 5), "Escape should dismiss help")
     }
 
     /// Whether the menu-bar menu `menu` offers `item` enabled; the menu
@@ -183,6 +207,11 @@ final class TourTests: XCTestCase {
         tour.pause(1)
         checkPairLayout(tour)
         tour.snap("13-editor")
+        checkInfoPopover(tour, button: app.sheets.buttons["About Folders"].firstMatch,
+                         contains: "open a shared folder in Finder", snap: "13-folders-help")
+        checkInfoPopover(tour, button: app.sheets.buttons["About Sync Mode"].firstMatch,
+                         contains: "Use Mirror for an exact one-way copy", snap: "13-mode-help")
+        XCTAssertTrue(app.sheets.buttons["Save Pair"].firstMatch.isHittable, "Help must not close the editor")
         let name = app.sheets.firstMatch.textFields.firstMatch
         if tour.click(name, "Name field") {
             tour.key(.rightArrow, .command)
@@ -197,6 +226,8 @@ final class TourTests: XCTestCase {
         tour.key("a", [.command, .shift])
         tour.pause(1.5)
         tour.snap("15-archive")
+        checkInfoPopover(tour, button: app.buttons["About Archive"].firstMatch,
+                         contains: "not a separate backup", snap: "15-archive-help")
         let folderB = app.toolbars.buttons["Folder B"].firstMatch
         if folderB.waitForExistence(timeout: 3) {
             folderB.click()
@@ -252,6 +283,14 @@ final class TourTests: XCTestCase {
         tour.key(",", .command)
         tour.pause(1.5)
         tour.snap("23-settings-general")
+        let checkbox = app.checkBoxes["Open Foldover at login"].firstMatch
+        let login = checkbox.exists ? checkbox : app.switches["Open Foldover at login"].firstMatch
+        XCTAssertTrue(login.exists, "The login switch should keep its accessible label")
+        let loginValue = login.value as? String
+        XCTAssertNotNil(loginValue, "The login switch should expose its state")
+        checkInfoPopover(tour, button: app.buttons["About Open Foldover at login"].firstMatch,
+                         contains: "background agent", snap: "23-login-help")
+        XCTAssertEqual(login.value as? String, loginValue, "Opening help must not toggle the setting")
         tour.click(app.toolbars.buttons["Mac-to-Mac"].firstMatch, "Mac-to-Mac settings tab")
         tour.pause(1.5)
         tour.snap("24-settings-mac-to-mac")
