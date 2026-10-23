@@ -52,7 +52,7 @@ final class MenuBarTests: XCTestCase {
     }
 
     @MainActor
-    private func attach(_ shot: XCTScreenshot, name: String) {
+    private func attach(_ shot: XCUIScreenshot, name: String) {
         let attachment = XCTAttachment(screenshot: shot)
         attachment.name = name
         attachment.lifetime = .keepAlways
