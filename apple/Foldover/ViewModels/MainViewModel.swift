@@ -259,16 +259,18 @@ final class MainViewModel {
     var pairsLoading: Bool { pairStore.isLoading }
     var pairError: String? { pairStore.loadError }
     var canConfigurePairs: Bool {
-        guard case .connected = agent.connection else { return false }
+        // The settled answer, not the probe in flight: a health check
+        // every 15 s must not blink the pair commands off.
+        guard case .connected = shownConnection else { return false }
         return pairStore.hasLoaded && pairStore.loadError == nil && !pairStore.isLoading && !pairStore.isSaving
     }
 
     var coreVersionText: String { "Core \(appInfo.coreVersion)" }
 
-    /// The connection the status surfaces show. A health check in flight
-    /// keeps showing the last settled answer, so the status bar does not
-    /// flicker on every `monitor` tick; with no answer yet, connecting
-    /// shows as connecting.
+    /// The connection the status surfaces show, and the commands follow:
+    /// a health check in flight keeps showing the last settled answer, so
+    /// neither the status bar nor the buttons flicker on every `monitor`
+    /// tick; with no answer yet, connecting shows as connecting.
     private var shownConnection: AgentConnection {
         if agent.connection == .connecting, let settled = agent.lastSettled { return settled }
         return agent.connection
@@ -597,7 +599,7 @@ final class MainViewModel {
     }
 
     private var agentConnected: Bool {
-        if case .connected = agent.connection { return true }
+        if case .connected = shownConnection { return true }
         return false
     }
 
