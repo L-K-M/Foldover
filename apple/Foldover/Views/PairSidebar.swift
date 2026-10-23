@@ -99,10 +99,14 @@ private struct SidebarPairRow: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(row.name)
                         .lineLimit(1)
-                    Text(row.status)
-                        .font(.caption)
-                        .foregroundStyle(statusColor)
-                        .lineLimit(1)
+                    // Freshness tiers depend on wall-clock age; re-read
+                    // every few minutes so a pair cannot look fresh all day.
+                    TimelineView(.periodic(from: .now, by: 300)) { _ in
+                        Text(row.status)
+                            .font(.caption)
+                            .foregroundStyle(statusColor)
+                            .lineLimit(1)
+                    }
                 }
             } icon: {
                 Image(systemName: row.symbol)
