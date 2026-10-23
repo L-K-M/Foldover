@@ -1964,6 +1964,48 @@ func workingJobsShowLiveCountsWithoutCountingAsNewStates() async {
 }
 
 @Test
+func throughputAndDurationTextUseHumanUnits() {
+    #expect(PairSyncViewModel.throughputText(2_500_000) == "2.5 MB/s")
+    #expect(PairSyncViewModel.throughputText(12_000_000_000) == "12.00 GB/s")
+    #expect(PairSyncViewModel.throughputText(850_000) == "850 kB/s")
+    #expect(PairSyncViewModel.throughputText(42) == "42 B/s")
+    #expect(PairSyncViewModel.durationText(9) == "9 s")
+    #expect(PairSyncViewModel.durationText(65) == "1 min 5 s")
+    #expect(PairSyncViewModel.durationText(120) == "2 min")
+    #expect(PairSyncViewModel.durationText(125) == "2 min 5 s")
+    #expect(PairSyncViewModel.durationText(600) == "10 min")
+    #expect(PairSyncViewModel.durationText(3_700) == "1 hr 1 min")
+    #expect(PairSyncViewModel.applying(
+        WorkProgress(changes: 4, applied: 1, bytes: 4_000_000, copied: 1_000_000),
+        rate: SyncRate(bytesPerSecond: 2_500_000, remainingSeconds: 120)
+    ).hasSuffix(" · 2.5 MB/s · about 2 min left"))
+    #expect(PairSyncViewModel.applying(
+        WorkProgress(changes: 4, applied: 1, bytes: 0, copied: 0)
+    ) == "Syncing… 1 of 4 changes")
+}
+
+@MainActor
+@Test
+func workingJobHasNoRateUntilBytesMove() async {
+    let comparing = WorkProgress(listed: 200, checked: 50)
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.working(.preview, cancelling: false, progress: comparing))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+
+    let preview = Task { await store.preview(pair.id) }
+    await client.waitForStatusCalls(1)
+    // Comparing has no bytes: the rate stays nil even after a poll.
+    await client.reply(.working(.preview, cancelling: false, progress: comparing))
+    await client.waitForStatusCalls(2)
+    #expect(store.rate(for: pair.id) == nil)
+
+    await client.finishPolling(.idle)
+    await preview.value
+    #expect(store.rate(for: pair.id) == nil)
+}
+
+@Test
 func quickLookShowsTheFileAChangeWouldCopyOnlyWhereItIsOnThisMac() {
     let local = PairSettings(name: "Docs", left: SelectedFolder(bytes: Data("/Users/a/Docs".utf8)),
                              right: SelectedFolder(bytes: Data("sftp://nas/docs".utf8)),

@@ -276,7 +276,7 @@ struct PairSyncViewModel {
         case .working(.preview, _, let progress):
             return Self.comparing(progress)
         case .working(.run, _, let progress) where progress.changes > 0:
-            return Self.applying(progress)
+            return Self.applying(progress, rate: store.rate(for: pair.id))
         case .working(.run, _, let progress):
             return Self.comparing(progress)
         case .working(.undo, _, _):
@@ -322,12 +322,63 @@ struct PairSyncViewModel {
         return String(localized: "Comparing folders… \(progress.checked) of \(progress.listed) items checked")
     }
 
-    static func applying(_ progress: WorkProgress) -> String {
+    static func applying(_ progress: WorkProgress, rate: SyncRate? = nil) -> String {
         var text = String(localized: "Syncing… \(progress.applied) of \(progress.changes) changes")
         if progress.bytes > 0 {
             text += " · " + String(localized: "\(byteText(progress.copied)) of \(byteText(progress.bytes))")
         }
+        if let rate {
+            text += " · " + rateText(rate)
+        }
         return text
+    }
+
+    /// Throughput and remaining time, as PLAN.md §3.2 asks. Only shown
+    /// once the store's warm-up has passed, so the numbers move slowly
+    /// enough to trust.
+    static func rateText(_ rate: SyncRate) -> String {
+        var text = String(localized: "\(throughputText(rate.bytesPerSecond))")
+        if let remaining = rate.remainingSeconds {
+            text += " · " + String(localized: "about \(durationText(remaining)) left")
+        }
+        return text
+    }
+
+    /// A copy rate in the largest unit that keeps three significant digits.
+    static func throughputText(_ bytesPerSecond: Double) -> String {
+        if bytesPerSecond >= 1_000_000_000 {
+            return String(format: "%.2f GB/s", bytesPerSecond / 1_000_000_000)
+        }
+        if bytesPerSecond >= 1_000_000 {
+            return String(format: "%.1f MB/s", bytesPerSecond / 1_000_000)
+        }
+        if bytesPerSecond >= 1_000 {
+            return String(format: "%.0f kB/s", bytesPerSecond / 1_000)
+        }
+        return String(format: "%.0f B/s", bytesPerSecond)
+    }
+
+    /// Remaining time in minutes and seconds, or hours when longer.
+    static func durationText(_ seconds: Double) -> String {
+        let total = Int(seconds.rounded())
+        if total >= 3600 {
+            let hours = total / 3600
+            let minutes = (total % 3600) / 60
+            return minutes > 0
+                ? String(localized: "\(hours) hr \(minutes) min")
+                : String(localized: "\(hours) hr")
+        }
+        if total >= 600 {
+            return String(localized: "\(total / 60) min")
+        }
+        if total >= 60 {
+            let minutes = total / 60
+            let rest = total % 60
+            return rest == 0
+                ? String(localized: "\(minutes) min")
+                : String(localized: "\(minutes) min \(rest) s")
+        }
+        return String(localized: "\(max(total, 1)) s")
     }
 
     /// A plan made for another pair revision is shown as information,

@@ -185,6 +185,18 @@ struct WorkProgress: Equatable, Sendable {
     static func == (_: WorkProgress, _: WorkProgress) -> Bool { true }
 }
 
+/// Copy throughput measured over the current job's copy phase, shown
+/// beside the progress bar (PLAN.md §3.2: honest throughput and ETA).
+/// Measured only after the plan is ready and some bytes have moved, so
+/// a long compare never pretends to be a stalled copy.
+struct SyncRate: Equatable, Sendable {
+    /// Bytes of file data copied per second, averaged since copying began.
+    let bytesPerSecond: Double
+    /// Seconds left at the current rate; nil while the rate is too young
+    /// to trust for a remaining-time claim.
+    let remainingSeconds: Double?
+}
+
 enum PairSyncState: Equatable, Sendable {
     case idle
     case working(SyncJob, cancelling: Bool, progress: WorkProgress = .none)
@@ -438,6 +450,16 @@ final class SyncStore {
     /// cannot touch the successor.
     private var polling: [String: Int] = [:]
     private var pollSequence = 0
+    /// When each pair's current working job started, and when its copy
+    /// phase first moved a byte. Used only for throughput and ETA text.
+    private struct RateAnchor {
+        var jobStarted: ContinuousClock.Instant
+        var copyStarted: ContinuousClock.Instant?
+    }
+    private var rateAnchors: [String: RateAnchor] = [:]
+    /// Ignore the first moments of a copy phase: a burst of small files
+    /// or a cold cache makes an early rate useless as a forecast.
+    private static let rateWarmup: Duration = .seconds(2)
     /// Writes a pair has seen. A reply requested before the latest write
     /// is stale and must not overwrite it, even if the state cycles back
     /// to the same value.
@@ -527,6 +549,30 @@ final class SyncStore {
 
     func state(for id: String) -> PairSyncState { states[id] ?? .idle }
     func listing(for id: String) -> ChangeListing? { listings[id] }
+
+    /// Copy throughput for a working job, once it is old enough to
+    /// mean something. Nil while comparing, waiting, or in the warm-up.
+    func rate(for id: String) -> SyncRate? {
+        guard case .working(_, _, let progress) = states[id],
+              progress.waitingFor == nil,
+              progress.bytes > 0,
+              progress.copied > 0,
+              let anchor = rateAnchors[id],
+              let copyStarted = anchor.copyStarted
+        else { return nil }
+        let elapsed = copyStarted.duration(to: .now)
+        guard elapsed >= Self.rateWarmup else { return nil }
+        let seconds = elapsed.seconds
+        guard seconds > 0 else { return nil }
+        let bytesPerSecond = Double(progress.copied) / seconds
+        // Sub-byte/s rates are noise; multi-GB/s rates on this path are
+        // a clock bug. Neither earns a line of status text.
+        guard bytesPerSecond >= 1, bytesPerSecond < 10_000_000_000 else { return nil }
+        let remaining: Double? = progress.bytes > progress.copied
+            ? Double(progress.bytes - progress.copied) / bytesPerSecond
+            : 0
+        return SyncRate(bytesPerSecond: bytesPerSecond, remainingSeconds: remaining)
+    }
 
     /// The pair's change-list text filter; it narrows the fetched rows
     /// and never refetches (PLAN.md §3.8).
@@ -822,5 +868,27 @@ final class SyncStore {
             listingRequests[id] = nil
         }
         states[id] = state
+        trackRate(id, state: state)
+    }
+
+    /// Start or continue the rate anchor for `state`. Leaving working
+    /// drops the anchor; a new job restarts the warm-up clock.
+    private func trackRate(_ id: String, state: PairSyncState) {
+        guard case .working(_, _, let progress) = state else {
+            rateAnchors[id] = nil
+            return
+        }
+        let now = ContinuousClock.now
+        if var anchor = rateAnchors[id] {
+            if anchor.copyStarted == nil, progress.copied > 0 {
+                anchor.copyStarted = now
+            }
+            rateAnchors[id] = anchor
+        } else {
+            rateAnchors[id] = RateAnchor(
+                jobStarted: now,
+                copyStarted: progress.copied > 0 ? now : nil
+            )
+        }
     }
 }
