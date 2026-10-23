@@ -62,6 +62,22 @@ enum PairActivity: Equatable, Sendable {
     case waiting
 }
 
+enum MenuBarStatus: String, CaseIterable, Sendable {
+    case idle = "MenuBarArrow"
+    case working = "MenuBarArrowWorking"
+    case paused = "MenuBarArrowPaused"
+    case attention = "MenuBarArrowAttention"
+
+    var accessibilityLabel: String {
+        switch self {
+        case .idle: String(localized: "Foldover: Ready")
+        case .working: String(localized: "Foldover: Syncing")
+        case .paused: String(localized: "Foldover: Paused")
+        case .attention: String(localized: "Foldover: Needs Attention")
+        }
+    }
+}
+
 /// One pair in the sidebar and the menu bar.
 struct PairRow: Identifiable, Equatable {
     let id: String
@@ -303,14 +319,15 @@ final class MainViewModel {
 
     /// The menu bar icon. A problem outranks work in progress, which
     /// outranks a pause; connecting between health checks is no problem.
-    var menuBarImage: String {
-        let activities = pairRows.map(\.activity)
-        if agentState == .off || agentState == .attention || activities.contains(.attention) {
-            return "MenuBarArrowAttention"
+    var menuBarStatus: MenuBarStatus {
+        let syncs = pairs.map { sync(for: $0) }
+        if agentState == .off || agentState == .attention || operationError != nil || pairError != nil
+            || syncs.contains(where: { $0.activity == .attention || $0.requestError != nil }) {
+            return .attention
         }
-        if activities.contains(.working) { return "MenuBarArrowWorking" }
-        if isPaused { return "MenuBarArrowPaused" }
-        return "MenuBarArrow"
+        if syncs.contains(where: { $0.activity == .working }) { return .working }
+        if isPaused { return .paused }
+        return .idle
     }
 
     var agentState: AgentIndicator {

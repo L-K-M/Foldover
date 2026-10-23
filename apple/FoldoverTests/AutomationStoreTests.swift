@@ -48,18 +48,18 @@ func pausingHoldsAutomaticSyncsUntilResumed() async {
                                   automation: AutomationStore(client: client))
     #expect(!viewModel.isPaused)
     #expect(viewModel.pauseText == nil)
-    #expect(viewModel.menuBarImage == "MenuBarArrow")
+    #expect(viewModel.menuBarStatus == .idle)
 
     await viewModel.pause(.untilResumed)
     #expect(viewModel.pauseText == "Automatic syncs are paused.")
-    #expect(viewModel.menuBarImage == "MenuBarArrowPaused")
+    #expect(viewModel.menuBarStatus == .paused)
     await viewModel.pause(.oneHour)
     #expect(viewModel.pauseText?.hasPrefix("Automatic syncs are paused until ") == true)
     #expect(await client.requested == [nil, 60])
 
     #expect(await viewModel.resumeForShortcuts() == "Automatic syncs are running.")
     #expect(!viewModel.isPaused)
-    #expect(viewModel.menuBarImage == "MenuBarArrow")
+    #expect(viewModel.menuBarStatus == .idle)
 }
 
 @MainActor

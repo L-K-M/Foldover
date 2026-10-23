@@ -204,6 +204,9 @@ enum FixtureScenario: String {
     case noPairs = "no-pairs"
     /// The catalog cannot load.
     case pairsFail = "pairs-fail"
+    /// A background sync keeps running after the main window closes.
+    case syncing
+    case syncingReduced = "syncing-reduced"
 
     static var current: FixtureScenario? {
         UserDefaults.standard.string(forKey: "foldover-scenario").flatMap(FixtureScenario.init)
@@ -218,7 +221,7 @@ enum FixtureScenario: String {
             return AgentReport(version: "0.1.0", safeModeStops: 3)
         case .agentFailed:
             throw FixtureError.agentUnavailable
-        case .noPairs, .pairsFail:
+        case .noPairs, .pairsFail, .syncing, .syncingReduced:
             return AgentReport(version: "0.1.0")
         }
     }
@@ -318,8 +321,11 @@ actor FixtureSyncClient: SyncClient {
     private var runs = 0
     private static let polls = 6
 
-    init(pairs: FixturePairClient) {
+    init(pairs: FixturePairClient, scenario: FixtureScenario? = nil) {
         self.pairs = pairs
+        if scenario == .syncing || scenario == .syncingReduced {
+            states[Fixtures.photosID] = .working(.run, cancelling: false)
+        }
     }
 
     private func plan(for id: String) async -> PreviewSummary {

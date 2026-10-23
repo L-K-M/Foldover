@@ -54,7 +54,7 @@ struct MenuBarView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top, spacing: 10) {
-                Image(viewModel.menuBarImage)
+                Image(viewModel.menuBarStatus.rawValue)
                     .resizable()
                     .scaledToFit()
                     .foregroundStyle(.tint)
