@@ -79,7 +79,7 @@ final class LayoutStressTests: XCTestCase {
 /// Steps that change the main window's column widths, each followed by
 /// a check that the app survived it.
 @MainActor
-private struct Stress {
+struct Stress {
     let tour: Tour
     let scenario: String
 

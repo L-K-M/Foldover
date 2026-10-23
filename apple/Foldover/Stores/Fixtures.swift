@@ -11,6 +11,10 @@ enum Fixtures {
     static let launchArgument = "-foldover-fixtures"
     /// Shows the app in Dark Mode whatever the system uses.
     static let darkArgument = "-foldover-dark"
+    /// Starts from no saved preferences, as on a fresh install: AppKit
+    /// keeps the window's size and the sidebar's state there, and a tour
+    /// must not inherit them from an earlier run.
+    static let resetArgument = "-foldover-reset-defaults"
 
     static var isEnabled: Bool { ProcessInfo.processInfo.arguments.contains(launchArgument) }
 

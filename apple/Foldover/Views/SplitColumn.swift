@@ -31,3 +31,47 @@ struct SplitColumn<Content: View>: View {
         }
     }
 }
+
+// TEMPORARY, removed before merge: which layout change stops the split
+// view's constraint loop. A Debug build launched with `-foldover-layout
+// a,b` turns on the named changes; without it, the layout is main's.
+enum LayoutExperiment {
+    private static let flags: Set<String> = {
+        #if DEBUG
+        let value = UserDefaults.standard.string(forKey: "foldover-layout") ?? ""
+        return Set(value.split(separator: ",").map(String.init))
+        #else
+        return []
+        #endif
+    }()
+
+    static func has(_ flag: String) -> Bool { flags.contains(flag) }
+}
+
+/// Fixed lines for a text, or its own wrapping when `lines` is nil.
+struct ReservedLines: ViewModifier {
+    let lines: Int?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let lines {
+            content.lineLimit(lines, reservesSpace: true)
+        } else {
+            content
+        }
+    }
+}
+
+/// The detail column's minimum as a column width, when `enabled`.
+struct DetailColumnWidth: ViewModifier {
+    let enabled: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            content.navigationSplitViewColumnWidth(min: 320, ideal: 520)
+        } else {
+            content
+        }
+    }
+}

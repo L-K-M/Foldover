@@ -35,7 +35,7 @@ struct Tour {
         app.launchArguments = ["-foldover-fixtures", "-foldover-skip-update-check"]
         switch launchState {
         case .fresh:
-            app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
+            app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-foldover-reset-defaults"]
         case .restored:
             // Restore after a quit too, not only after a crash or logout.
             app.launchArguments += ["-NSQuitAlwaysKeepsWindows", "YES"]

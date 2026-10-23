@@ -53,7 +53,8 @@ struct MainView: View {
             .onChange(of: viewModel.selectedPairID) { _, pairID in restoredPairID = pairID ?? "" }
             // Room for every column at its minimum: the sidebar's 200, the
             // detail's own and the inspector's 240 (see SplitColumn).
-            .frame(minWidth: 200 + Self.detailMinWidth + 240, minHeight: 460)
+            .frame(minWidth: LayoutExperiment.has("windowMin800") ? 800 : 200 + Self.detailMinWidth + 240,
+                   minHeight: 460)
             .task {
                 await viewModel.refreshAgent()
                 restoreSelection()
@@ -65,7 +66,8 @@ struct MainView: View {
             PairSidebar(viewModel: viewModel, focus: $paneFocus)
         } detail: {
             detail
-                .frame(minWidth: Self.detailMinWidth)
+                .frame(minWidth: LayoutExperiment.has("detailFrame") ? Self.detailMinWidth : nil)
+                .modifier(DetailColumnWidth(enabled: LayoutExperiment.has("detailColumn")))
                 .navigationTitle(viewModel.selectedPair?.settings.name ?? viewModel.title)
                 .navigationSubtitle(viewModel.selectedSync?.shortStatus ?? "")
         }
@@ -85,7 +87,13 @@ struct MainView: View {
         } else {
             // The empty states' descriptions wrap, so their height
             // depends on the width (see SplitColumn).
-            SplitColumn { emptyDetail }
+            Group {
+                if LayoutExperiment.has("emptyWrap") {
+                    SplitColumn { emptyDetail }
+                } else {
+                    emptyDetail
+                }
+            }
                 // Drag one or two folders in to create a pair (PLAN.md §3.8).
                 .dropDestination(for: URL.self) { urls, _ in
                     viewModel.newPair(dropping: urls)

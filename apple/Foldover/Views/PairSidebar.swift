@@ -152,7 +152,8 @@ private struct SidebarAgentBar: View {
                 Text(viewModel.agentSummary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(summaryLines, reservesSpace: true)
+                    .modifier(ReservedLines(lines: barLines ? summaryLines : nil))
+                    .lineLimit(4)
                     .help(viewModel.agentSummary)
                     .accessibilityAddTraits(.updatesFrequently)
             }
@@ -166,7 +167,7 @@ private struct SidebarAgentBar: View {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)
-                    .lineLimit(2, reservesSpace: true)
+                    .modifier(ReservedLines(lines: barLines ? 2 : nil))
                     .help(error)
                     .textSelection(.enabled)
             }
@@ -176,7 +177,7 @@ private struct SidebarAgentBar: View {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)
-                    .lineLimit(2, reservesSpace: true)
+                    .modifier(ReservedLines(lines: barLines ? 2 : nil))
                     .help(error)
                     .textSelection(.enabled)
                 Button("Try Again") { Task { await viewModel.perform(.retry) } }
@@ -187,6 +188,8 @@ private struct SidebarAgentBar: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
     }
+
+    private var barLines: Bool { LayoutExperiment.has("barLines") }
 
     /// A healthy agent needs a line; a problem gets room for its reason.
     private var summaryLines: Int {
