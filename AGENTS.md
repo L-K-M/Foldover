@@ -130,17 +130,17 @@ never breaks the build.
   with AppKit's layout-loop exception once the window gets narrower
   than its columns (macOS 26 and 27). The main window's inspector is a
   pane in the detail instead; `LayoutStressTests` checks it.
-- launchd ties a registered login-item agent to the code hash it had
-  at registration, and a rebuilt ad-hoc-signed agent has a new one.
-  After such an install launchd refuses the new agent ("spawn failed",
-  exit 78, "needs LWCR update") while `SMAppService` still reports it
-  enabled; a running agent also refuses a changed app (ADR 0006). The
-  fix is to unregister, `launchctl bootout` the job, wait for launchd
-  to drop it and register again (`BackgroundAgent.reregister`). The
-  app does that when it opens as a changed build, and Turn On does
-  when the agent does not answer (`AgentStore`); a first attempt can
-  fail, so both try twice. Never `launchctl kickstart` the agent after
-  an install.
+- Service Management retains an ad-hoc agent's exact code constraint
+  by launchd label, even across unregister/register. `embed-agent.sh`
+  stamps the signed helper's code hash into its launchd label, while
+  its signing identifier stays `ch.lkmc.foldover.agent` for private
+  IPC. `BackgroundAgent` migrates previous enabled jobs, stops all
+  previous labels and verifies their absence before starting the new
+  one. It preserves a disabled or unapproved Login Items choice. A
+  running agent also refuses a changed app until restarted (ADR 0006).
+  `scripts/test-agent-registration.py` checks consecutive real signed
+  updates under an isolated namespace. Never `launchctl kickstart`
+  the agent after an install.
 
 <!-- shared-rules:start -->
 

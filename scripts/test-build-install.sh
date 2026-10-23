@@ -101,6 +101,11 @@ run() {
   echo old > "$installed"
   while [[ "$1" != "--" ]]; do touch "$state/$1"; shift; done
   shift
+  if [[ -e "$state/hashed-agent" ]]; then
+    local plist="$apps/Foldover.app/Contents/Library/LaunchAgents/ch.lkmc.foldover.agent.plist"
+    mkdir -p "$(dirname "$plist")"
+    printf '%s\n' '<plist version="1.0"><dict><key>Label</key><string>ch.lkmc.foldover.agent.0123456789abcdef0123456789abcdef01234567</string></dict></plist>' > "$plist"
+  fi
   if [[ -e "$state/app-running" ]]; then
     echo "$installed" > "$state/app-running"
   fi
@@ -166,6 +171,16 @@ expect_no_call "pkill"
 expect_no_call "kickstart"
 expect_no_call "open $apps/Foldover.app"
 expect_out "install app: ok ($apps/Foldover.app); open Foldover to restart the background agent"
+
+run "finds the installed build agent before replacing it" hashed-agent agent-running -- app --install
+expect_status 0
+expect_call "launchctl print gui/$(id -u)/ch.lkmc.foldover.agent.0123456789abcdef0123456789abcdef01234567"
+expect_out "open Foldover to restart the background agent"
+
+run "finds the hashed agent after recovering an interrupted swap" hashed-agent interrupted-swap agent-running -- app --install
+expect_status 0
+expect_call "launchctl print gui/$(id -u)/ch.lkmc.foldover.agent.0123456789abcdef0123456789abcdef01234567"
+expect_out "open Foldover to restart the background agent"
 
 run "does not quit another app with a similar name" helper-running -- app --install
 expect_status 0

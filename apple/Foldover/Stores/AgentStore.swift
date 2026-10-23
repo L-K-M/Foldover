@@ -35,10 +35,17 @@ protocol AgentRegistering {
     /// What identifies this build of the app and the agent it embeds; nil
     /// when it cannot be read.
     var appBuild: Data? { get }
-    func register() throws -> AgentRegistration
+    func register() async throws -> AgentRegistration
+    /// The installed service, or a still-enabled service from the build
+    /// this app replaced.
+    func registrationForUpdate() async -> AgentRegistration
     /// Register the agent anew, for a job launchd keeps but cannot start.
     func reregister() async throws -> AgentRegistration
     func openLoginItems()
+}
+
+extension AgentRegistering {
+    func registrationForUpdate() async -> AgentRegistration { registration }
 }
 
 extension BackgroundAgent: AgentRegistering {}
@@ -178,7 +185,7 @@ final class AgentStore {
             let request = generation
             do {
                 let before = system.registration
-                let registration = try system.register()
+                let registration = try await system.register()
                 // Turning the agent on is not a background check: show that
                 // it is connecting rather than the answer it replaces.
                 lastSettled = nil
@@ -207,7 +214,7 @@ final class AgentStore {
     /// must leave the developer's login item alone.
     func reregisterIfUpdated() async {
         await afterStarting { [self] in
-            guard system.registration == .enabled, let build = system.appBuild,
+            guard await system.registrationForUpdate() == .enabled, let build = system.appBuild,
                   build != defaults.data(forKey: Self.registeredBuildKey) else { return }
             generation += 1
             let request = generation

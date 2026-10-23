@@ -51,6 +51,9 @@ for executable in foldoverd foldover; do
   codesign -d --verbose=4 "$helper" 2>&1 | grep -E 'flags=.*runtime'
 done
 plutil -lint "$app/Contents/Library/LaunchAgents/ch.lkmc.foldover.agent.plist"
+python3 "$ROOT/scripts/agent-plist.py" check \
+  "$app/Contents/Library/LaunchServices/foldoverd" \
+  "$app/Contents/Library/LaunchAgents/ch.lkmc.foldover.agent.plist"
 
 # The packaged helpers must pass the same process smoke as the build.
 python3 "$ROOT/scripts/test-agent.py" \

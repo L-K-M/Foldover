@@ -84,6 +84,9 @@ jobs:
       - name: build.sh --install against a fake macOS toolchain
         run: bash scripts/test-build-install.sh
 
+      - name: Signed agent launch labels
+        run: python3 scripts/test-agent-plist.py
+
   # Links, anchors, fences and tables in every tracked Markdown file, plus
   # every Mermaid diagram (tools/doccheck).
   docs:
@@ -141,6 +144,9 @@ jobs:
 
       - name: Launchd materialization policy
         run: python3 scripts/test-materialization-policy.py
+
+      - name: Agent registration across rebuilt apps
+        run: python3 scripts/test-agent-registration.py
 
       # /bin/bash is 3.2 here, the oldest bash build.sh supports; the
       # shellcheck job runs the same test on Linux's bash 5.
