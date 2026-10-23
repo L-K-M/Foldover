@@ -230,7 +230,7 @@ func pairRowsSayHowEachPairReadsAtAGlance() async {
     let docs = windowPair(docsWindowID, "Docs")
     let client = WindowSyncClient()
     let viewModel = await windowModel([photos, docs], sync: client)
-    #expect(viewModel.menuBarImage == "MenuBarArrow")
+    #expect(viewModel.menuBarStatus == .idle)
 
     await client.set(.previewed(conflictPlan()), for: docs.id)
     await viewModel.sync(for: docs).preview()
@@ -248,7 +248,7 @@ func pairRowsSayHowEachPairReadsAtAGlance() async {
     #expect(viewModel.pairsLoaded)
     #expect(viewModel.agentState == .connected)
     #expect(viewModel.agentAction == nil)
-    #expect(viewModel.menuBarImage == "MenuBarArrowAttention")
+    #expect(viewModel.menuBarStatus == .attention)
 }
 
 @MainActor
@@ -258,7 +258,7 @@ func theAgentStatusOffersOneFittingAction() async {
                                 agent: AgentStore(statusRequest: { throw WindowFixtureError.unexpected }))
     #expect(offline.agentState == .off)
     #expect(offline.agentAction == .turnOn)
-    #expect(offline.menuBarImage == "MenuBarArrowAttention")
+    #expect(offline.menuBarStatus == .attention)
     #expect(!offline.pairsLoaded)
 
     let safeMode = MainViewModel(
@@ -490,7 +490,7 @@ func windowSyncsStayUndoableWhenARefreshTakesOverTheirPoller() async throws {
 
     let syncing = Task { await viewModel.syncInWindow(photos.id) }
     #expect(await eventuallyInWindow { viewModel.sync(for: photos).isWorking })
-    #expect(viewModel.menuBarImage == "MenuBarArrowWorking")
+    #expect(viewModel.menuBarStatus == .working)
     let refreshing = Task { await viewModel.sync(for: photos).refresh() }
     // Let the refresh take over and the run's poller notice and end.
     try await Task.sleep(for: .milliseconds(250))
@@ -515,6 +515,7 @@ func failedWindowSyncsDoNotAdoptAnEarlierRun() async {
     await client.setRunReply(.fail)
     await viewModel.syncInWindow(photos.id)
     #expect(viewModel.sync(for: photos).requestError != nil)
+    #expect(viewModel.menuBarStatus == .attention)
     #expect(viewModel.undoableSync == nil)
 }
 
@@ -783,7 +784,7 @@ func aFailedHealthCheckReadsAsOffAndOffersTurnOn() async {
     #expect(failing.agentAction == .turnOn)
     #expect(failing.agentStatusText.hasPrefix("Background agent unavailable"))
     #expect(failing.agentSummary == failing.agentStatusText)
-    #expect(failing.menuBarImage == "MenuBarArrowAttention")
+    #expect(failing.menuBarStatus == .attention)
 }
 
 // The monitor checks the agent every few seconds, and the agent reads as
@@ -821,7 +822,7 @@ func aHealthCheckInFlightKeepsShowingTheLastAnswer() async {
     #expect(viewModel.agentAction == .resumeSyncing)
     #expect(viewModel.agentStatusText == "Agent 1.0 connected")
     #expect(viewModel.agentSummary == safeMode)
-    #expect(viewModel.menuBarImage == "MenuBarArrowAttention")
+    #expect(viewModel.menuBarStatus == .attention)
     await health.release()
     await check.value
 }

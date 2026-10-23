@@ -79,7 +79,7 @@ struct FoldoverApp: App {
                               leaveSafeModeRequest: { AgentReport(version: "0.1.0") },
                               alert: { _, _ in }, system: FixtureAgentLoginItem()),
             pairs: PairStore(client: pairs),
-            sync: SyncStore(client: FixtureSyncClient(pairs: pairs), alert: { _ in }),
+            sync: SyncStore(client: FixtureSyncClient(pairs: pairs, scenario: scenario), alert: { _ in }),
             archive: ArchiveStore(client: FixtureArchiveClient()),
             automation: automation, macToMac: macToMac)
         return AppStores(main: main,
@@ -111,17 +111,7 @@ struct FoldoverApp: App {
         }
         .defaultSize(width: 760, height: 500)
 
-        // .window style hosts a regular SwiftUI view instead of the
-        // default menu rendering, which is what the status surfaces in
-        // PLAN.md §3.8 need. The symbol shows work, problems and pauses.
-        MenuBarExtra {
-            MenuBarView(viewModel: viewModel)
-        } label: {
-            // The menu bar shows only the symbol; the title names the
-            // item for VoiceOver.
-            Label("Foldover", image: viewModel.menuBarImage)
-        }
-        .menuBarExtraStyle(.window)
+        MenuBarScene(viewModel: viewModel)
 
         Settings {
             SettingsView(viewModel: SettingsViewModel(store: settings),
