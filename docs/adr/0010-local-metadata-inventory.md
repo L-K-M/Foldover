@@ -45,9 +45,13 @@ because the other endpoint may be case-insensitive. These internal paths
 cannot become user data on another endpoint. A skipped directory's children
 are never visited. Future writers must use this temporary-file namespace.
 
-Special file types and entries on a different observed device stop the scan.
-An ancestor identity check also rejects directory cycles. Device/inode values
-are session observations, not volume UUIDs or proof of mount availability.
+Special files (sockets, named pipes and devices) are counted as skipped and
+listed as unavailable without reading them. The engine skips the same paths
+and their descendants in both folders and the base for that run, preserving
+existing data and baseline rows. Regular files at those paths sync again.
+Entries on a different observed device stop the scan. An ancestor identity
+check also rejects directory cycles. Device/inode values are session
+observations, not volume UUIDs or proof of mount availability.
 
 On Darwin, the same no-follow stat observation includes `SF_DATALESS`.
 A dataless root stops the inventory. A dataless entry below it, a file or a
@@ -69,8 +73,8 @@ filesystem and operation-fidelity probes remains as recorded in
 
 ## Completion and errors
 
-Only a finished traversal returns statistics. Cancellation, I/O failure,
-unsupported entries and detected mutations return errors; a caller must
+Only a finished traversal returns statistics. Cancellation, I/O failure
+and detected mutations return errors; a caller must
 discard any partial rows. A missing or unreadable directory must never look
 like an empty, successfully scanned subtree.
 

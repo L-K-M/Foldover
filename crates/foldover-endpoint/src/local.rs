@@ -367,8 +367,8 @@ impl Observation {
         &self.old
     }
 
-    /// Entries macOS keeps only in iCloud (dataless), left unread with
-    /// everything below them: reading would download them.
+    /// Special files and cloud-only entries, left unread. Both folders
+    /// must skip these paths and their descendants, never infer deletion.
     pub fn unavailable(&self) -> &[SyncPath] {
         &self.unavailable
     }
@@ -832,7 +832,10 @@ impl LocalEndpoint {
                 return Err(ScanError::NestedFilesystem(path));
             }
             if metadata.kind() == NodeKind::Other {
-                return Err(ScanError::UnsupportedEntry(path));
+                // Sockets, pipes and devices have no transferable file content.
+                stats.skipped += 1;
+                stats.unavailable.push(path);
+                continue;
             }
             let link_target = if metadata.kind() == NodeKind::Symlink {
                 Some(at_scan(&at_path, directory.root.read_link(&name))?)
@@ -1447,7 +1450,7 @@ mod tests {
     }
 
     #[test]
-    fn disappearing_entries_and_special_items_are_errors_not_empty_trees() {
+    fn disappearing_entries_are_errors_not_empty_trees() {
         let temporary = tempfile::tempdir().unwrap();
         fs::create_dir(temporary.path().join("directory")).unwrap();
         let endpoint = LocalEndpoint::open(temporary.path()).unwrap();
@@ -1456,12 +1459,56 @@ mod tests {
             ScanControl::Continue
         });
         assert!(matches!(result, Err(ScanError::Changed(_))));
+    }
 
-        let _socket = UnixListener::bind(temporary.path().join("socket")).unwrap();
-        assert!(matches!(
-            endpoint.scan_metadata(&mut |_| ScanControl::Continue),
-            Err(ScanError::UnsupportedEntry(_)),
-        ));
+    #[test]
+    fn home_folder_scans_skip_sockets_and_fifos_without_reading_them() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        fs::create_dir_all(root.join(".config/op")).unwrap();
+        let _socket = UnixListener::bind(root.join(".config/op/op-daemon.sock")).unwrap();
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            root.join("pipe"),
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .unwrap();
+        fs::write(root.join("notes.txt"), b"keep").unwrap();
+        symlink(".config/op/op-daemon.sock", root.join("link")).unwrap();
+        let endpoint = LocalEndpoint::open(root).unwrap();
+        let path = |bytes: &[u8]| SyncPath::try_from(bytes).unwrap();
+        let mut paths = Vec::new();
+        let stats = endpoint
+            .scan_metadata(&mut |entry| {
+                paths.push(entry.path);
+                ScanControl::Continue
+            })
+            .unwrap();
+        paths.sort();
+        assert_eq!(
+            paths,
+            [
+                path(b".config"),
+                path(b".config/op"),
+                path(b"link"),
+                path(b"notes.txt")
+            ]
+        );
+        assert_eq!((stats.entries(), stats.skipped()), (4, 2));
+
+        let observed = endpoint
+            .observe(ALL, &mut || ScanControl::Continue)
+            .unwrap();
+        assert_eq!(
+            observed.entries().keys().cloned().collect::<Vec<_>>(),
+            paths
+        );
+        let mut unavailable = observed.unavailable().to_vec();
+        unavailable.sort();
+        assert_eq!(
+            unavailable,
+            [path(b".config/op/op-daemon.sock"), path(b"pipe")]
+        );
     }
 
     #[test]
