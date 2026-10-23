@@ -90,8 +90,9 @@ pub fn serve_folder(
         return watch(root, state, answer);
     }
     // `open_protecting` canonicalizes the state path itself: pass it
-    // through unchanged so a resolution failure surfaces there instead of
-    // silently disabling protection here.
+    // through unchanged so resolution failures surface there instead of
+    // silently disabling protection here. (A state path that is simply
+    // gone is still "nothing to protect", matching every other caller.)
     let endpoint =
         match LocalEndpoint::open_protecting(Path::new(OsStr::from_bytes(root.as_bytes())), state)
             .and_then(|endpoint| endpoint.probe_access().map(|()| endpoint))
