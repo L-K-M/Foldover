@@ -157,6 +157,10 @@ foldover archive ID left RUN --put-back-all
 ```
 
 Each command waits for its job and prints the final status as JSON. A run
+that finishes with unresolved conflicts exits with status 4; failures exit
+with status 1, and invalid command usage with status 2. A partial
+`--put-back-all` also exits with status 1 and prints its full restore report;
+failed items remain archived. Clean runs exit with status 0. A run
 stops before writing, exiting with status 3, when it is the pair's first
 run, when it would delete more than the automatic limits allow, or when
 one folder is suddenly empty; rerun with `--approve` and the preview's
