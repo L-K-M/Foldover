@@ -1237,6 +1237,9 @@ impl PairRun {
         // stopped or failed keeps them unrecorded, so its next run is
         // reviewed again and scheduled runs keep waiting (§3.6).
         if first_sync && executor.report.completion == Completion::Finished {
+            // A crash between the batch above and this commit leaves the
+            // sync done but the gate closed: the next run re-reviews what
+            // is now an empty plan. Harmless, just redundant (PLAN.md §3.6).
             commit(
                 revision,
                 Commit::Identities {

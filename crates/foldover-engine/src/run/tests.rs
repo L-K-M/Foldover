@@ -991,6 +991,10 @@ fn an_aborted_first_run_keeps_its_review_gate() {
         panic!("a stopped run reports itself, not an approval request")
     };
     assert_eq!(report.completion(), Completion::Cancelled);
+    assert!(
+        !pair.right.path().join("notes").exists(),
+        "a cancelled first run must not have written anything"
+    );
 
     // Nothing completed, so the pair is still on its first run.
     assert!(pair.identities.side(Side::Left).is_none());
