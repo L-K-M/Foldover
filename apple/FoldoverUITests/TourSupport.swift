@@ -59,13 +59,13 @@ struct Tour {
     /// which the tours' saved-state flag does not cover; every tour starts
     /// with it shown.
     func showSidebarIfHidden() {
-        guard !app.outlines.firstMatch.waitForExistence(timeout: 2) else { return }
-        key("s", [.command, .control])
-        // The first look can miss a sidebar that was shown but not yet
-        // in the accessibility tree, and the toggle then hid it.
-        if !app.outlines.firstMatch.waitForExistence(timeout: 2) {
+        // A look can miss a sidebar that is shown but not yet in the
+        // accessibility tree, so each toggle is checked again.
+        for _ in 0..<3 {
+            if app.outlines.firstMatch.waitForExistence(timeout: 2) { return }
             key("s", [.command, .control])
         }
+        XCTAssertTrue(app.outlines.firstMatch.waitForExistence(timeout: 2), "The sidebar never appeared")
     }
 
     /// Let animations and polled state settle before a screenshot.

@@ -126,6 +126,10 @@ never breaks the build.
 - `scripts/release.sh` reads the version through the generated Xcode
   project, which needs the XCFramework; the stub builds both when
   missing.
+- SwiftUI's `.inspector` beside a `NavigationSplitView` quits the app
+  with AppKit's layout-loop exception once the window gets narrower
+  than its columns (macOS 26 and 27). The main window's inspector is a
+  pane in the detail instead; `LayoutStressTests` checks it.
 
 <!-- shared-rules:start -->
 

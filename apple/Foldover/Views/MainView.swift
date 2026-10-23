@@ -16,12 +16,11 @@ struct MainView: View {
     @FocusState private var searchFocused: Bool
     @FocusState private var paneFocus: MainPane?
 
-    /// The selected pair's view keeps this much beside the inspector.
+    /// The selected pair's view keeps this much beside the inspector, and
+    /// the window's minimum leaves room for it, the inspector and the
+    /// sidebar at its minimum.
     private static let detailMinWidth: CGFloat = 320
     private static let inspectorWidth: CGFloat = 280
-    /// The sidebar's minimum, the detail's and the inspector's, with room
-    /// for the dividers: a window narrower than its columns is what sets
-    /// off AppKit's layout loop (see `splitView`).
     private static let windowMinWidth: CGFloat = 820
 
     var body: some View {
@@ -56,7 +55,7 @@ struct MainView: View {
             .onChange(of: viewModel.pairsLoaded) { restoreSelection() }
             .onChange(of: viewModel.selectedPairID) { _, pairID in restoredPairID = pairID ?? "" }
             .focusedSceneValue(\.inspectorShown, $showsInspector)
-            .frame(minWidth: LayoutExperiment.has("paneNoMin") ? 760 : Self.windowMinWidth, minHeight: 460)
+            .frame(minWidth: Self.windowMinWidth, minHeight: 460)
             .task {
                 await viewModel.refreshAgent()
                 restoreSelection()
@@ -64,29 +63,26 @@ struct MainView: View {
     }
 
     // The inspector is a pane at the detail's trailing edge, not SwiftUI's
-    // `.inspector`. With that third split view column, AppKit's layout
-    // loop quit the app whenever the window got narrower than the
-    // columns together: on a live resize, a sidebar dragged wider, or a
-    // launch into a window saved at a narrow size with a pair selected
-    // (a known SwiftUI defect on macOS 26 and 27). The window's minimum
-    // width keeps every column at its minimum.
+    // `.inspector`. As a third split view column, it set off AppKit's
+    // layout loop, which quits the app, whenever the window got narrower
+    // than the columns together: on a live resize, on dragging the sidebar
+    // wider, and at a launch into a window saved narrow with a pair
+    // selected. Other apps report the same defect on macOS 26 and 27. With
+    // the pane, LayoutStressTests narrows the window to its minimum in
+    // every state without it.
     private var splitView: some View {
         NavigationSplitView {
             PairSidebar(viewModel: viewModel, focus: $paneFocus)
         } detail: {
             HStack(spacing: 0) {
                 SplitColumn { detail }
-                    .frame(minWidth: LayoutExperiment.has("paneColumnMin") || LayoutExperiment.has("paneNoMin")
-                           ? nil : Self.detailMinWidth)
+                    .frame(minWidth: Self.detailMinWidth)
                 if showsInspector {
                     Divider()
                     PairInspector(viewModel: viewModel)
                         .frame(width: Self.inspectorWidth)
                 }
             }
-            .modifier(DetailColumnWidth(
-                min: LayoutExperiment.has("paneColumnMin")
-                    ? Self.detailMinWidth + (showsInspector ? Self.inspectorWidth + 1 : 0) : nil))
             .navigationTitle(viewModel.selectedPair?.settings.name ?? viewModel.title)
             .navigationSubtitle(viewModel.selectedSync?.shortStatus ?? "")
         }

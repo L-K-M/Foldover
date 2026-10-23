@@ -26,35 +26,3 @@ struct SplitColumn<Content: View>: View {
         }
     }
 }
-
-// TEMPORARY, removed before merge: how the detail beside the inspector
-// pane should get its minimum. A Debug build launched with
-// `-foldover-layout <flag>` takes `paneColumnMin` (the minimum as a
-// column width instead of a frame) or `paneNoMin` (no minimum, and the
-// old 760 pt window minimum); without one, the frame and 820 pt.
-enum LayoutExperiment {
-    private static let flags: Set<String> = {
-        #if DEBUG
-        let value = UserDefaults.standard.string(forKey: "foldover-layout") ?? ""
-        return Set(value.split(separator: ",").map(String.init))
-        #else
-        return []
-        #endif
-    }()
-
-    static func has(_ flag: String) -> Bool { flags.contains(flag) }
-}
-
-/// The detail column's minimum as a column width, when given one.
-struct DetailColumnWidth: ViewModifier {
-    let min: CGFloat?
-
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if let min {
-            content.navigationSplitViewColumnWidth(min: min, ideal: min + 200)
-        } else {
-            content
-        }
-    }
-}

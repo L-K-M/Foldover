@@ -28,7 +28,9 @@ final class LayoutStressTests: XCTestCase {
         guard before.step("narrowed", { before.narrowToMinimum() }) else { return }
         // Quit as a person does, so the window keeps its size and pair.
         first.key("q", .command)
-        XCTAssertTrue(first.app.wait(for: .notRunning, timeout: 15), "relaunch: the app did not quit")
+        guard first.app.wait(for: .notRunning, timeout: 15) else {
+            return XCTFail("relaunch: the app did not quit")
+        }
 
         let second = Tour(self, appearance: .light, scenario: "slow-agent", launchState: .restored)
         second.app.launch()
