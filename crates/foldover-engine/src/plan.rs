@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use unicode_normalization::UnicodeNormalization;
 
@@ -104,6 +104,93 @@ impl CandidatePlan {
             Side::Left => self.left_deletions,
             Side::Right => self.right_deletions,
         }
+    }
+
+    /// Unavailable paths were removed from both observations and the planning
+    /// base. Their surviving ancestors must not remove them indirectly. Keep
+    /// destructive ancestor branches untouched, including their baseline rows,
+    /// while safe creates and metadata writes on other ancestors can proceed.
+    /// File/folder replacements are already type conflicts; directory versions
+    /// have no payload to replace, so only archives can displace a subtree.
+    pub(crate) fn protect_unavailable(
+        &mut self,
+        roots: &[SyncPath],
+        names: NameMatching,
+    ) -> Result<(), PlanError> {
+        if roots.is_empty() {
+            return Ok(());
+        }
+        let mut ancestors = BTreeSet::new();
+        for root in roots {
+            let key = name_key(root.as_bytes(), names);
+            for (index, &byte) in key.iter().enumerate() {
+                if byte == b'/' {
+                    ancestors.insert(key[..index].to_vec());
+                }
+            }
+            ancestors.insert(key);
+        }
+        let blocked: BTreeSet<_> = self
+            .rows
+            .iter()
+            .filter(|row| {
+                matches!(
+                    row.decision,
+                    CandidateDecision::Entry(EntryDecision::Archive { .. })
+                )
+            })
+            .map(|row| name_key(row.path.as_bytes(), names))
+            .filter(|key| ancestors.contains(key))
+            .collect();
+        if blocked.is_empty() {
+            return Ok(());
+        }
+        let inside = |path: &SyncPath| {
+            let key = name_key(path.as_bytes(), names);
+            blocked.contains(&key)
+                || key
+                    .iter()
+                    .enumerate()
+                    .any(|(index, &byte)| byte == b'/' && blocked.contains(&key[..index]))
+        };
+        // A move's source row carries no operation; its destination commits
+        // both baseline changes. Disarm both ends when either is protected.
+        let mut disarmed = BTreeSet::new();
+        self.moves.retain(|to, from| {
+            if inside(to) || inside(from) {
+                disarmed.insert(to.clone());
+                disarmed.insert(from.clone());
+                false
+            } else {
+                true
+            }
+        });
+        for row in &mut self.rows {
+            if inside(&row.path) || disarmed.contains(&row.path) {
+                row.decision = CandidateDecision::Entry(EntryDecision::KeepTarget);
+            }
+        }
+        let deletion_counts = |target: Side| -> Result<DeletionCounts, PlanError> {
+            let deletions = self
+                .rows
+                .iter()
+                .filter(|row| {
+                    matches!(
+                        row.decision,
+                        CandidateDecision::Entry(EntryDecision::Archive { on }) if on == target
+                    )
+                })
+                .count();
+            Ok(DeletionCounts::new(
+                self.deletions(target).paths(),
+                count_paths(deletions)?,
+            )?)
+        };
+        let left_deletions = deletion_counts(Side::Left)?;
+        let right_deletions = deletion_counts(Side::Right)?;
+        self.left_deletions = left_deletions;
+        self.right_deletions = right_deletions;
+        Ok(())
     }
 }
 
@@ -737,6 +824,171 @@ mod tests {
             .unwrap()
             .decision
             .clone()
+    }
+
+    #[test]
+    fn unavailable_child_protects_archived_branch_and_preserves_independent_work() {
+        let left = tree(&[(b"sibling", file(1))]);
+        let right = tree(&[
+            (b"folder", directory()),
+            (b"folder/readable", file(2)),
+            (b"unrelated", file(3)),
+        ]);
+        let mut base = baseline(&right);
+        base.insert(
+            path(b"folder/removed"),
+            BaselineEntry::new(file(4), file(4)).unwrap(),
+        );
+        let mut candidate = plan(
+            SyncMode::Mirror { source: Side::Left },
+            &base,
+            &left,
+            &right,
+        );
+        candidate
+            .protect_unavailable(&[path(b"folder/unreadable")], NameMatching::EXACT)
+            .unwrap();
+        for name in [b"folder".as_slice(), b"folder/readable", b"folder/removed"] {
+            assert_eq!(
+                decision(&candidate, name),
+                CandidateDecision::Entry(EntryDecision::KeepTarget)
+            );
+        }
+        assert_eq!(
+            decision(&candidate, b"sibling"),
+            CandidateDecision::Entry(EntryDecision::Propagate {
+                from: Side::Left,
+                change: ChangeKind::Create,
+            })
+        );
+        assert_eq!(
+            decision(&candidate, b"unrelated"),
+            CandidateDecision::Entry(EntryDecision::Archive { on: Side::Right })
+        );
+        assert_eq!(candidate.deletions(Side::Right).paths(), 3);
+        assert_eq!(candidate.deletions(Side::Right).deletions(), 1);
+    }
+
+    #[test]
+    fn unavailable_children_preserve_existing_type_conflicts() {
+        let left = tree(&[(b"folder", file(1))]);
+        let right = tree(&[(b"folder", directory())]);
+        let mut candidate = plan(
+            SyncMode::Mirror { source: Side::Left },
+            &BTreeMap::new(),
+            &left,
+            &right,
+        );
+        candidate
+            .protect_unavailable(&[path(b"folder/unreadable")], NameMatching::EXACT)
+            .unwrap();
+        assert_eq!(
+            decision(&candidate, b"folder"),
+            CandidateDecision::Entry(EntryDecision::Conflict(ConflictKind::TypeMismatch))
+        );
+    }
+
+    #[test]
+    fn unavailable_child_preserves_safe_ancestor_creates_and_metadata_changes() {
+        let left = tree(&[(b"folder", directory()), (b"folder/readable", file(2))]);
+        for right in [
+            BTreeMap::new(),
+            tree(&[(
+                b"folder",
+                EntryVersion::new(
+                    EntryContent::Directory,
+                    Digest::from_bytes([1; Digest::BYTE_LEN]),
+                ),
+            )]),
+        ] {
+            let mut candidate = plan(
+                SyncMode::Mirror { source: Side::Left },
+                &BTreeMap::new(),
+                &left,
+                &right,
+            );
+            let expected = candidate.rows.clone();
+            candidate
+                .protect_unavailable(&[path(b"folder/unreadable")], NameMatching::EXACT)
+                .unwrap();
+            assert_eq!(candidate.rows, expected);
+        }
+    }
+
+    #[test]
+    fn unavailable_ancestry_uses_case_and_unicode_rules_and_component_boundaries() {
+        let right = tree(&[
+            (b"CAF\xc3\x89", directory()),
+            (b"CAF\xc3\x89/readable", file(1)),
+            (b"CAF\xc3\x89-extra", directory()),
+            (b"CAF\xc3\x89-extra/readable", file(2)),
+        ]);
+        let mut candidate = plan(
+            SyncMode::Mirror { source: Side::Left },
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &right,
+        );
+        candidate
+            .protect_unavailable(
+                &[path(b"cafe\xcc\x81/unreadable")],
+                NameMatching::new(CaseMatching::Insensitive, UnicodeMatching::Normalized),
+            )
+            .unwrap();
+        for name in [b"CAF\xc3\x89".as_slice(), b"CAF\xc3\x89/readable"] {
+            assert_eq!(
+                decision(&candidate, name),
+                CandidateDecision::Entry(EntryDecision::KeepTarget)
+            );
+        }
+        for name in [
+            b"CAF\xc3\x89-extra".as_slice(),
+            b"CAF\xc3\x89-extra/readable",
+        ] {
+            assert_eq!(
+                decision(&candidate, name),
+                CandidateDecision::Entry(EntryDecision::Archive { on: Side::Right })
+            );
+        }
+    }
+
+    #[test]
+    fn unavailable_branch_disarms_both_ends_of_crossing_moves() {
+        let left = tree(&[(b"outside", file(1)), (b"renamed", file(2))]);
+        let right = tree(&[
+            (b"folder", directory()),
+            (b"folder/moved", file(1)),
+            (b"original", file(2)),
+        ]);
+        let mut candidate = plan_moving(
+            SyncMode::Mirror { source: Side::Left },
+            &baseline(&right),
+            &left,
+            &right,
+            Moves::Rename,
+        );
+        assert_eq!(candidate.moves.len(), 2);
+        candidate
+            .protect_unavailable(&[path(b"folder/unreadable")], NameMatching::EXACT)
+            .unwrap();
+        assert_eq!(candidate.moves.len(), 1);
+        for name in [b"folder/moved".as_slice(), b"outside"] {
+            assert_eq!(
+                decision(&candidate, name),
+                CandidateDecision::Entry(EntryDecision::KeepTarget)
+            );
+        }
+        assert_eq!(candidate.moved_from(&path(b"outside")), None);
+        assert_eq!(
+            candidate.moved_from(&path(b"renamed")),
+            Some(&path(b"original"))
+        );
+        assert_eq!(
+            decision(&candidate, b"renamed"),
+            CandidateDecision::Entry(EntryDecision::Move { on: Side::Right })
+        );
+        assert_eq!(candidate.deletions(Side::Right).paths(), 3);
+        assert_eq!(candidate.deletions(Side::Right).deletions(), 0);
     }
 
     #[test]

@@ -810,7 +810,7 @@ impl PairRun {
             left_moves: moves(endpoints.endpoint(Side::Left)),
             right_moves: moves(endpoints.endpoint(Side::Right)),
         };
-        let plan = plan_resolved(
+        let mut plan = plan_resolved(
             draft.mode(),
             &base,
             &left.versions(),
@@ -822,6 +822,13 @@ impl PairRun {
             PlanError::Cancelled => RunError::Cancelled,
             error => RunError::Plan(error),
         })?;
+        let unavailable: Vec<_> = left
+            .unavailable()
+            .iter()
+            .chain(right.unavailable())
+            .cloned()
+            .collect();
+        plan.protect_unavailable(&unavailable, left_names.either(right_names))?;
         Ok(Self {
             pair,
             identities,
@@ -1796,52 +1803,22 @@ fn unavailable<'a>(
     names: NameMatching,
 ) -> impl Iterator<Item = &'a SyncPath> {
     // Match as the planner does, so another spelling cannot become a deletion.
-    let directories = |observation: &Observation| -> BTreeSet<Vec<u8>> {
-        if left.unavailable().is_empty() && right.unavailable().is_empty() {
-            return BTreeSet::new();
-        }
-        observation
-            .entries()
-            .iter()
-            .filter(|(_, entry)| entry.version().kind() == EntryKind::Directory)
-            .map(|(path, _)| crate::plan::name_key(path.as_bytes(), names))
-            .collect()
-    };
-    let left_directories = directories(left);
-    let right_directories = directories(right);
     let roots: BTreeSet<Vec<u8>> = left
         .unavailable()
         .iter()
         .chain(right.unavailable())
-        .map(|root| {
-            let mut protected = crate::plan::name_key(root.as_bytes(), names);
-            let mut parent = root.parent();
-            while let Some(path) = parent {
-                let key = crate::plan::name_key(path.as_bytes(), names);
-                // Removing or replacing this folder could displace unread
-                // children. Protect the branch unless both sides keep it.
-                if !left_directories.contains(&key) || !right_directories.contains(&key) {
-                    protected = key;
-                }
-                parent = path.parent();
-            }
-            protected
-        })
+        .map(|root| crate::plan::name_key(root.as_bytes(), names))
         .collect();
     let below = move |path: &&SyncPath| {
         if roots.is_empty() {
             return false;
         }
-        let mut key = crate::plan::name_key(path.as_bytes(), names);
-        loop {
-            if roots.contains(&key) {
-                return true;
-            }
-            let Some(separator) = key.iter().rposition(|byte| *byte == b'/') else {
-                return false;
-            };
-            key.truncate(separator);
-        }
+        let key = crate::plan::name_key(path.as_bytes(), names);
+        roots.contains(&key)
+            || key
+                .iter()
+                .enumerate()
+                .any(|(index, &byte)| byte == b'/' && roots.contains(&key[..index]))
     };
     left.unavailable()
         .iter()
