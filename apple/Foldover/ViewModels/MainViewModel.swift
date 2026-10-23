@@ -550,13 +550,17 @@ final class MainViewModel {
         }
     }
 
+    /// At launch, before `monitor`: restart the agent from this app when
+    /// the app changed since the agent was registered (see
+    /// `AgentStore.reregisterIfUpdated`).
+    func restartAgentIfUpdated() async {
+        await agent.reregisterIfUpdated()
+    }
+
     /// Keep the agent, the catalog and every pair's status current while
     /// the app runs, so automatic syncs, restarts and outside changes
     /// show up and their problems become notifications.
     func monitor(every interval: Duration = .seconds(15)) async {
-        // An updated app's agent needs registering anew before launchd
-        // starts it, so that comes before the first check.
-        await agent.reregisterIfUpdated()
         while !Task.isCancelled {
             // Inline instead of refreshAgent: a tick must not clear a
             // user-facing operationError, and PairStore.refresh skips the

@@ -586,7 +586,7 @@ actor FixtureMacToMacClient: MacToMacClient {
 @MainActor
 final class FixtureAgentLoginItem: AgentRegistering {
     var registration: AgentRegistration { .enabled }
-    var agentBuild: Data? { nil }
+    var appBuild: Data? { nil }
 
     func register() throws -> AgentRegistration { .enabled }
     func reregister() async throws -> AgentRegistration { .enabled }

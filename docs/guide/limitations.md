@@ -271,8 +271,9 @@ deletion ([ADR 0010](../adr/0010-local-metadata-inventory.md)).
   with a link to its download page
   ([ADR 0045](../adr/0045-github-update-check.md)).
 - Updating is manual: download the release, replace the app and run the
-  documented `xattr` activation again. The embedded agent restarts from
-  the new bundle ([ADR 0045](../adr/0045-github-update-check.md)).
+  documented `xattr` activation again, then open Foldover: it restarts
+  the embedded agent from the new bundle, which macOS does not do on its
+  own ([ADR 0045](../adr/0045-github-update-check.md)).
 - Nothing in the app verifies the download; the release page over HTTPS
   is the only authenticity check, so download only from the official
   repository's releases page.

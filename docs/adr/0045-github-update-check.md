@@ -61,8 +61,8 @@ app ─ github.com/releases/latest ─ 302 ─▶ /releases/tag/vX.Y.Z
 - No update keys to create, guard or lose; no third-party updater code
   runs in the app.
 - Every update is a deliberate manual step: download, replace, re-run
-  the documented `xattr` activation. The embedded agent restarts from
-  the new bundle.
+  the documented `xattr` activation, then open Foldover. The app
+  restarts the embedded agent from the new bundle; macOS does not.
 - The download page is reached over HTTPS to github.com, the same trust
   the first install already placed in the release page; nothing about
   the check is signed, so the check itself proves only what GitHub says.

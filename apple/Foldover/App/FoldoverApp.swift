@@ -26,13 +26,18 @@ struct FoldoverApp: App {
         _viewModel = State(initialValue: viewModel)
         // Shortcuts actions run in the app and share its state.
         AppDependencyManager.shared.add(dependency: viewModel)
-        // Runs for the app's lifetime, with or without an open window.
-        Task { await viewModel.monitor() }
-        // A test host is not a launch: a modal prompt there would stall
-        // the suite. UI-test launches carry no test environment and opt
-        // out with a launch argument instead.
-        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil,
-           !CommandLine.arguments.contains("-foldover-skip-update-check") {
+        // A test host is not a launch: it must leave the developer's login
+        // item alone, and a modal prompt there would stall the suite.
+        // UI-test launches carry no test environment; they run on fixtures
+        // and opt out of the update check with a launch argument instead.
+        let isTestHost = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        // Runs for the app's lifetime, with or without an open window. An
+        // updated app restarts its agent before the first check.
+        Task {
+            if !isTestHost { await viewModel.restartAgentIfUpdated() }
+            await viewModel.monitor()
+        }
+        if !isTestHost, !CommandLine.arguments.contains("-foldover-skip-update-check") {
             Task { await updates.checkAtLaunch() }
         }
     }

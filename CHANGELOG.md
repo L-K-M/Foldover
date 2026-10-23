@@ -76,8 +76,8 @@ All notable changes to this project are documented here. The format follows
   not archived. The pair editor says when a folder refuses it.
 
 - `scripts/build.sh --install` installs the app it built into
-  `/Applications`, quitting and reopening a running Foldover and
-  restarting a running background agent so both use the new build.
+  `/Applications`, quitting and reopening a running Foldover, which
+  restarts the background agent so both use the new build.
 
 - "When files change" catches up on changes made while the agent was
   not running, syncs after 5 minutes of nonstop changes, and checks
@@ -312,6 +312,12 @@ All notable changes to this project are documented here. The format follows
   scripts, CI.
 
 ### Fixed
+
+- The background agent starts again after the app is replaced: Foldover
+  registers it anew when it opens as a changed build, and Turn On does
+  when the agent does not answer. macOS kept the agent registered to the
+  previous build and would not start the new one, so Turn On did nothing
+  and the agent stayed unavailable ("Connection refused").
 
 - Files synced to a network share no longer get macOS's quarantine
   mark (Gatekeeper's note that a file was downloaded) written there,

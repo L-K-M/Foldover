@@ -19,13 +19,14 @@
 #   scripts/build.sh --install      # also install what this run built
 #
 # --install replaces /Applications/Foldover.app with the app this run
-# built. A running Foldover is quit first and reopened afterwards: it pins
-# the installed code at launch and refuses the changed bundle until it
-# restarts (ADR 0006). The background agent is left to the app, which
-# registers the new agent when it opens; launchd will not start a new
-# ad-hoc-signed agent under the old registration. Once the new app is in
-# place the install succeeds; the summary says when Foldover needs
-# opening to start the new agent.
+# built. A running Foldover is quit first and reopened afterwards. Both
+# it and a running background agent pin the installed code at launch and
+# refuse the changed bundle until they restart (ADR 0006). Foldover
+# restarts the agent itself: opened as a changed build, it registers the
+# agent anew, since launchd will not start a rebuilt ad-hoc-signed agent
+# under its old registration. Once the new app is in place the install
+# succeeds; the summary says when Foldover needs opening to restart the
+# agent.
 # FOLDOVER_APPLICATIONS_DIR installs elsewhere, e.g. ~/Applications.
 # core installs nothing: the app embeds its own agent and CLI, and Linux
 # has no installer yet.
@@ -349,11 +350,12 @@ install_app() {
   rm -rf "$outgoing"
   echo "-- installed $dest"
 
-  # launchd ties a registered agent to the code hash it had when it was
-  # registered, and every build of the ad-hoc-signed agent has a new one.
-  # Restarting the agent here would stop the old one and leave launchd
-  # unable to start the new one, so Foldover registers the new agent
-  # when it opens instead; until then a running agent keeps the old code.
+  # The agent is left to Foldover, which restarts it by registering it
+  # anew when it opens as a changed build. launchd ties a registered
+  # agent to the code hash it had at registration, and a rebuilt
+  # ad-hoc-signed agent has a new one, so restarting it here would stop
+  # the old agent and leave launchd unable to start the new one. Until
+  # Foldover opens, a running agent keeps the old code.
   local agent_loaded=false
   if launchctl print "$agent" >/dev/null 2>&1; then agent_loaded=true; fi
 
@@ -371,9 +373,9 @@ install_app() {
   if $reopen && ! $reopened; then note=", but Foldover did not reopen"; fi
   if $agent_loaded; then
     if $reopened; then
-      echo "-- Foldover registers the new background agent as it opens"
+      echo "-- Foldover restarts the background agent as it opens"
     else
-      note="$note; open Foldover to start the new background agent"
+      note="$note; open Foldover to restart the background agent"
     fi
   fi
   record "install app: ok ($dest)$note"

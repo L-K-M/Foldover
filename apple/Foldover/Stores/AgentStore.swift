@@ -30,8 +30,9 @@ struct AgentNotRunning: Error, Equatable {
 @MainActor
 protocol AgentRegistering {
     var registration: AgentRegistration { get }
-    /// What identifies the agent's build; nil when it cannot be read.
-    var agentBuild: Data? { get }
+    /// What identifies this build of the app and the agent it embeds; nil
+    /// when it cannot be read.
+    var appBuild: Data? { get }
     func register() throws -> AgentRegistration
     /// Register the agent anew, for a job launchd keeps but cannot start.
     func reregister() async throws -> AgentRegistration
@@ -53,9 +54,12 @@ final class AgentStore {
     /// Registrations anew before turning on gives up: the first can leave
     /// launchd's old job in place.
     private static let repairAttempts = 2
-    /// The agent build last registered, once seen answering or awaiting
-    /// approval.
+    /// The app build the agent was last registered from, once seen
+    /// answering or awaiting approval.
     private static let registeredBuildKey = "agent.registeredBuild"
+    /// Where that is kept: apart from the app's own domain, which a UI tour
+    /// resets, so a tour does not make the next launch restart the agent.
+    private static let registrationSuite = "ch.lkmc.foldover.login-item"
     private var generation = 0
     /// Turning the agent on in flight. Health checks wait it out rather than
     /// report the states it passes through, and turning on again waits for
@@ -84,13 +88,13 @@ final class AgentStore {
     }, leaveSafeModeRequest: @escaping @Sendable () async throws -> AgentReport = {
         AgentStore.report(try await FoldoverCore.leaveSafeMode())
     }, alert: @escaping @MainActor (String, String) async -> Void = AgentStore.postAlert,
-         system: (any AgentRegistering)? = nil, defaults: UserDefaults = .standard,
+         system: (any AgentRegistering)? = nil, defaults: UserDefaults? = nil,
          startupTimeout: Duration = .seconds(10), startupPoll: Duration = .milliseconds(250)) {
         self.statusRequest = statusRequest
         self.leaveSafeModeRequest = leaveSafeModeRequest
         self.alert = alert
         self.system = system ?? BackgroundAgent()
-        self.defaults = defaults
+        self.defaults = defaults ?? UserDefaults(suiteName: Self.registrationSuite) ?? .standard
         self.startupTimeout = startupTimeout
         self.startupPoll = startupPoll
     }
@@ -181,13 +185,16 @@ final class AgentStore {
         }
     }
 
-    /// Register the agent anew once the app holds a build it has not run:
-    /// launchd cannot start a new ad-hoc-signed build under the old
-    /// registration (see `BackgroundAgent.reregister`). A login item that is
-    /// off or awaits approval is left as it is.
+    /// Register the agent anew, which restarts it, once the app is a build
+    /// the agent was not registered from: a running agent refuses a changed
+    /// app until it restarts (ADR 0006), and launchd cannot start a changed
+    /// ad-hoc-signed agent under the old registration (see
+    /// `BackgroundAgent.reregister`). A login item that is off or awaits
+    /// approval is left as it is. Only a real launch calls this; a test host
+    /// must leave the developer's login item alone.
     func reregisterIfUpdated() async {
         await afterStarting { [self] in
-            guard system.registration == .enabled, let build = system.agentBuild,
+            guard system.registration == .enabled, let build = system.appBuild,
                   build != defaults.data(forKey: Self.registeredBuildKey) else { return }
             generation += 1
             let request = generation
@@ -234,14 +241,14 @@ final class AgentStore {
             if case .requiresApproval = registration {
                 // Registering tied the agent to this build; approving it
                 // only lets launchd start it.
-                if registered { defaults.set(system.agentBuild, forKey: Self.registeredBuildKey) }
+                if registered { defaults.set(system.appBuild, forKey: Self.registeredBuildKey) }
                 connection = .approvalRequired
                 return
             }
             if let report = try await answer(within: wait, request: request) {
                 connection = .connected(version: report.version)
                 note(report)
-                if registered { defaults.set(system.agentBuild, forKey: Self.registeredBuildKey) }
+                if registered { defaults.set(system.appBuild, forKey: Self.registeredBuildKey) }
                 return
             }
             guard generation == request else { return }

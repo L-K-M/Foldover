@@ -20,7 +20,7 @@ Foldover is signed ad hoc, not notarized. macOS 27 on Apple silicon.
    xattr -dr com.apple.quarantine /Applications/Foldover.app
    ```
 
-4. Open Foldover and click **Enable Background Agent**.
+4. Open Foldover and choose **Turn On** to start the background agent.
 
 Preview a new pair before its first sync. Replaced and removed files are kept
 in each folder's `.foldover/archive` for 30 days.

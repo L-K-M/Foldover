@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Check scripts/build.sh --install against a fake macOS toolchain: the
 # app replaces the installed copy, a running app is quit and reopened,
-# a loaded agent is left for the app to register anew, and failures
-# leave the installed app alone. Runs on Linux and macOS; touches
+# a loaded agent is left for the app to restart, and failures leave
+# the installed app alone. Runs on Linux and macOS; touches
 # nothing outside a temp dir.
 #
 # The fakes' bodies are single-quoted on purpose: they expand when the
@@ -127,8 +127,8 @@ expect_installed() {
 
 agent="gui/$(id -u)/ch.lkmc.foldover.agent"
 
-# launchd cannot start a new ad-hoc-signed agent under its old
-# registration: the reopened app registers it anew, so nothing restarts it.
+# launchd cannot start a rebuilt ad-hoc-signed agent under its old
+# registration: the reopened app restarts it by registering it anew.
 run "replaces a running app and leaves its agent to the app" app-running agent-running -- app --install
 expect_status 0
 expect_installed new
@@ -137,7 +137,7 @@ expect_call "pkill -TERM -U $(id -u) -f"
 [[ ! -e "$state/app-running" ]] || fail "$name: the running app was not quit"
 expect_call "launchctl print $agent"
 expect_no_call "kickstart"
-expect_out "Foldover registers the new background agent as it opens"
+expect_out "Foldover restarts the background agent as it opens"
 expect_call "open $apps/Foldover.app"
 [[ ! -e "$apps/.Foldover.app.incoming" && ! -e "$apps/.Foldover.app.outgoing" ]] \
   || fail "$name: staging copies left behind"
@@ -157,7 +157,7 @@ expect_status 0
 expect_installed new
 expect_no_call "kickstart"
 expect_no_call "open $apps/Foldover.app"
-expect_out "install app: ok ($apps/Foldover.app); open Foldover to start the new background agent"
+expect_out "install app: ok ($apps/Foldover.app); open Foldover to restart the background agent"
 
 run "asks to open Foldover for a running agent" agent-running -- app --install
 expect_status 0
@@ -165,7 +165,7 @@ expect_installed new
 expect_no_call "pkill"
 expect_no_call "kickstart"
 expect_no_call "open $apps/Foldover.app"
-expect_out "install app: ok ($apps/Foldover.app); open Foldover to start the new background agent"
+expect_out "install app: ok ($apps/Foldover.app); open Foldover to restart the background agent"
 
 run "does not quit another app with a similar name" helper-running -- app --install
 expect_status 0
@@ -212,7 +212,7 @@ expect_out "install app: ok ($apps/Foldover.app), but Foldover did not reopen"
 run "asks to open an app that does not reopen for its agent" app-running agent-running open-fails -- app --install
 expect_status 0
 expect_installed new
-expect_out "install app: ok ($apps/Foldover.app), but Foldover did not reopen; open Foldover to start the new background agent"
+expect_out "install app: ok ($apps/Foldover.app), but Foldover did not reopen; open Foldover to restart the background agent"
 
 applications_dir="$apps/" run "quits the app under a trailing-slash directory" app-running -- app --install
 expect_status 0
