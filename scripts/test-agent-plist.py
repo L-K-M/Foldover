@@ -118,8 +118,10 @@ class TestCLIMain(unittest.TestCase):
                 _agent_plist.main()
         with mock.patch.object(subprocess, "run", return_value=check_result):
             with mock.patch.object(sys, "argv", ["agent-plist", "check", "/fake/helper", str(plist_path)]):
-                with self.assertRaises(RuntimeError):
+                with self.assertRaises(RuntimeError) as error:
                     _agent_plist.main()
+        self.assertIn("ch.lkmc.foldover.agent." + "a" * 40, str(error.exception))
+        self.assertIn("ch.lkmc.foldover.agent." + "b" * 40, str(error.exception))
 
     def test_repeated_stamp_idempotent(self):
         plist_path = self._make_plist()

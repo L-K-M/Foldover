@@ -87,6 +87,9 @@ jobs:
       - name: Signed agent launch labels
         run: python3 scripts/test-agent-plist.py
 
+      - name: Agent registration fixture cleanup
+        run: python3 scripts/test-agent-registration-cleanup.py
+
   # Links, anchors, fences and tables in every tracked Markdown file, plus
   # every Mermaid diagram (tools/doccheck).
   docs:

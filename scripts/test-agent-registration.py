@@ -28,6 +28,30 @@ def sign(path, identifier=None):
     command(arguments + [str(path)])
 
 
+def cleanup(app, prefix, plist_name, labels):
+    domain = f"gui/{os.getuid()}"
+    actions = []
+    if app.exists():
+        actions.append([str(app / "Contents/MacOS/Registration"), prefix, plist_name, "stop"])
+    for label in labels:
+        actions += [["/bin/launchctl", "bootout", f"{domain}/{label}"],
+                    ["/bin/launchctl", "enable", f"{domain}/{label}"]]
+    for arguments in actions:
+        try:
+            command(arguments, check=False)
+        except (OSError, subprocess.SubprocessError) as error:
+            # Cleanup must preserve the test failure and still attempt every
+            # label when unregistering or an earlier launchctl call fails.
+            print(f"Registration fixture cleanup failed: {error}", file=sys.stderr)
+
+
+def fixture_code_hash(signing):
+    match = re.search(r"^CDHash=([0-9a-f]{40})$", signing, re.MULTILINE)
+    if match is None:
+        raise RuntimeError("Signed registration fixture helper has no valid CDHash")
+    return match[1]
+
+
 def run():
     if sys.platform != "darwin":
         raise RuntimeError("The registration lifecycle check requires macOS")
@@ -87,7 +111,7 @@ import ServiceManagement
             command(["clang", str(helper_source), "-o", str(helper)])
             sign(helper, prefix + ".helper")
             signing = command(["codesign", "--display", "--verbose=4", str(helper)]).stderr
-            code_hash = re.search(r"^CDHash=([0-9a-f]{40})$", signing, re.MULTILINE)[1]
+            code_hash = fixture_code_hash(signing)
             label = prefix if legacy else prefix + "." + code_hash
             labels.append(label)
             info = {"CFBundleIdentifier": prefix, "CFBundleExecutable": "Registration",
@@ -148,11 +172,7 @@ import ServiceManagement
             print(json.dumps({"legacy_migration": "passed", "second_update": "passed",
                               "disabled_job_preserved": "passed", "old_jobs_removed": "passed"}))
         finally:
-            if app.exists():
-                invoke("stop")
-            for label in labels:
-                command(["/bin/launchctl", "bootout", f"{domain}/{label}"], check=False)
-                command(["/bin/launchctl", "enable", f"{domain}/{label}"], check=False)
+            cleanup(app, prefix, plist_name, labels)
 
 
 if __name__ == "__main__":

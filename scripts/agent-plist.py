@@ -32,7 +32,10 @@ def main():
     contents = plistlib.loads(args.plist.read_bytes())
     if args.mode == "check":
         if contents.get("Label") != label:
-            raise RuntimeError("Agent launchd label does not match its signed code hash")
+            raise RuntimeError(
+                f"Agent launchd label {contents.get('Label')!r} does not match"
+                f" its signed code hash {label!r}"
+            )
         return
     contents["Label"] = label
     args.plist.write_bytes(plistlib.dumps(contents))
