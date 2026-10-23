@@ -37,6 +37,8 @@ enum Request {
     Status(foldover_client::SocketLocation),
     Pairs(SocketLocation, PairCommand),
     Sync(SocketLocation, PairId, SyncCommand),
+    /// `sync --all`: run every pair, reporting each one's result.
+    SyncAll(SocketLocation),
     Archive(SocketLocation, PairId, Side, ArchiveCommand),
     History(SocketLocation, PairId),
     /// Pause automatic syncs for minutes, or until resumed.
@@ -244,6 +246,13 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Request::SyncAll(location) => match sync_all(&location).await {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("foldover: {error}");
+                ExitCode::FAILURE
+            }
+        },
         Request::Archive(location, id, side, command) => {
             match archive(&location, id, side, command).await {
                 Ok(()) => ExitCode::SUCCESS,
@@ -304,7 +313,7 @@ async fn main() -> ExitCode {
         },
         Request::Usage => {
             eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs check NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover safe-mode off [--socket PATH]\n       foldover automation [low-power pause|run] [--socket PATH]\n       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]\n       foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]\n       foldover servers [browse sftp://[user@]host[:port]/path] [--socket PATH]\nLEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --records (both | source: a backup-* target that cannot hold .foldover keeps nothing, archives nothing); --schedule (manual | changes | MINUTES | daily@HH:MM[:DAYS]); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --bandwidth-limit (MEGABYTES per second | none); --canary (PATH | none)\nUpdates keep options that are not named."
+                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs check NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover sync --all [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover safe-mode off [--socket PATH]\n       foldover automation [low-power pause|run] [--socket PATH]\n       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]\n       foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]\n       foldover servers [browse sftp://[user@]host[:port]/path] [--socket PATH]\nLEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --records (both | source: a backup-* target that cannot hold .foldover keeps nothing, archives nothing); --schedule (manual | changes | MINUTES | daily@HH:MM[:DAYS]); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --bandwidth-limit (MEGABYTES per second | none); --canary (PATH | none)\nUpdates keep options that are not named."
             );
             ExitCode::from(USAGE_EXIT)
         }
@@ -343,6 +352,7 @@ fn request(args: impl Iterator<Item = OsString>) -> Request {
             Some(command) => Request::Pairs(location, command),
             None => Request::Usage,
         },
+        [command, flag] if command == "sync" && flag == "--all" => Request::SyncAll(location),
         [command, id, rest @ ..] if command == "sync" => {
             match (
                 id.to_str().and_then(|id| id.parse().ok()),
@@ -836,7 +846,19 @@ async fn sync(
         status = foldover_client::sync_status(location, id).await?;
     }
     println!("{}", serde_json::to_string(&status)?);
-    Ok(match &status {
+    if let SyncStatus::NeedsApproval { preview } = &status {
+        eprintln!(
+            "foldover: review these changes; rerun with --approve {} {} --review {}",
+            preview.left.deletions, preview.right.deletions, preview.review_token
+        );
+    }
+    Ok(status_code(&status))
+}
+
+/// The exit code for a settled status: success, approval needed, or
+/// failure.
+fn status_code(status: &SyncStatus) -> ExitCode {
+    match status {
         SyncStatus::Idle | SyncStatus::Previewed { .. } => ExitCode::SUCCESS,
         SyncStatus::Finished { result } if result.failure_count == 0 && !result.cancelled => {
             ExitCode::SUCCESS
@@ -845,14 +867,88 @@ async fn sync(
         SyncStatus::Undone { result } if result.not_undone_count == 0 && !result.cancelled => {
             ExitCode::SUCCESS
         }
-        SyncStatus::NeedsApproval { preview } => {
-            eprintln!(
-                "foldover: review these changes; rerun with --approve {} {} --review {}",
-                preview.left.deletions, preview.right.deletions, preview.review_token
-            );
-            ExitCode::from(APPROVAL_EXIT)
-        }
+        SyncStatus::NeedsApproval { .. } => ExitCode::from(APPROVAL_EXIT),
         _ => ExitCode::FAILURE,
+    }
+}
+
+/// Start a plain run on the pair and wait for its final status.
+async fn run_one(
+    location: &SocketLocation,
+    id: PairId,
+) -> Result<SyncStatus, foldover_client::Error> {
+    let mut status = foldover_client::start_run(location, id, 0, 0, None).await?;
+    while matches!(status, SyncStatus::Working { .. }) {
+        tokio::time::sleep(POLL_INTERVAL).await;
+        status = foldover_client::sync_status(location, id).await?;
+    }
+    Ok(status)
+}
+
+/// Run every pair concurrently, printing each pair's outcome as one JSON
+/// line; the exit code is the worst outcome across pairs.
+async fn sync_all(location: &SocketLocation) -> Result<ExitCode, foldover_client::Error> {
+    let mut pairs = Vec::new();
+    let mut after = None;
+    loop {
+        let page = foldover_client::pairs(location, after).await?;
+        pairs.extend(page.pairs);
+        let Some(next) = page.next else {
+            break;
+        };
+        after = Some(next);
+    }
+    warn_sftp(
+        pairs
+            .iter()
+            .flat_map(|pair| [pair.draft().left(), pair.draft().right()]),
+    );
+    let mut jobs = tokio::task::JoinSet::new();
+    for pair in pairs {
+        let location = location.clone();
+        jobs.spawn(async move {
+            let outcome = run_one(&location, pair.id()).await;
+            (pair, outcome)
+        });
+    }
+    let mut failed = false;
+    let mut approvals = false;
+    // Each line stands alone, so pairs are reported as they finish.
+    while let Some(joined) = jobs.join_next().await {
+        // A task panics only on a bug; keep reporting the rest.
+        let Ok((pair, outcome)) = joined else {
+            continue;
+        };
+        let line = match &outcome {
+            Ok(status) => {
+                match status_code(status) {
+                    code if code == ExitCode::SUCCESS => {}
+                    code if code == ExitCode::from(APPROVAL_EXIT) => approvals = true,
+                    _ => failed = true,
+                }
+                serde_json::json!({
+                    "id": pair.id().to_string(),
+                    "name": pair.draft().name(),
+                    "status": status,
+                })
+            }
+            Err(error) => {
+                failed = true;
+                serde_json::json!({
+                    "id": pair.id().to_string(),
+                    "name": pair.draft().name(),
+                    "error": error.to_string(),
+                })
+            }
+        };
+        println!("{line}");
+    }
+    Ok(if failed {
+        ExitCode::FAILURE
+    } else if approvals {
+        ExitCode::from(APPROVAL_EXIT)
+    } else {
+        ExitCode::SUCCESS
     })
 }
 
@@ -1304,6 +1400,16 @@ mod tests {
         ] {
             assert!(matches!(req(&args), Request::Usage), "{args:?}");
         }
+    }
+
+    #[test]
+    fn sync_all_selects_every_pair() {
+        assert!(matches!(req(&["sync", "--all"]), Request::SyncAll(_)));
+        assert!(matches!(
+            req(&["sync", "--all", "--socket", "/tmp/s"]),
+            Request::SyncAll(_)
+        ));
+        assert!(matches!(req(&["sync", "--all", "extra"]), Request::Usage));
     }
 
     #[test]
