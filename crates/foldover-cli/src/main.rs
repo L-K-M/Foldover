@@ -881,6 +881,8 @@ async fn sync(
 
 /// Print every item in the pair's latest preview as JSON lines, paged
 /// through the agent. A pair without a held preview is previewed first.
+/// Caller contract: `sync` has already fetched the pair (the
+/// configuration-queue wait) and emitted the SFTP warning.
 async fn sync_changes(
     location: &SocketLocation,
     id: PairId,
