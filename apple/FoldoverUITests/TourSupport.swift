@@ -17,12 +17,15 @@ struct Tour {
     let test: XCTestCase
     let appearance: TourAppearance
 
-    init(_ test: XCTestCase, appearance: TourAppearance) {
+    /// `scenario` names a launch state from `FixtureScenario`, such as an
+    /// agent that answers slowly; none is the tour's usual state.
+    init(_ test: XCTestCase, appearance: TourAppearance, scenario: String? = nil) {
         self.test = test
         self.appearance = appearance
         app.launchArguments = ["-foldover-fixtures", "-foldover-skip-update-check",
                                "-ApplePersistenceIgnoreState", "YES"]
         if appearance == .dark { app.launchArguments.append("-foldover-dark") }
+        if let scenario { app.launchArguments += ["-foldover-scenario", scenario] }
     }
 
     func launch() {

@@ -59,12 +59,13 @@ struct FoldoverApp: App {
         if ProcessInfo.processInfo.arguments.contains(Fixtures.darkArgument) {
             NSApplication.shared.appearance = NSAppearance(named: .darkAqua)
         }
-        let pairs = FixturePairClient()
+        let scenario = FixtureScenario.current
+        let pairs = FixturePairClient(scenario: scenario)
         let macToMac = MacToMacStore(client: FixtureMacToMacClient())
         let automation = AutomationStore(client: FixtureAutomationClient())
         let main = MainViewModel(
             appInfo: AppInfoStore(),
-            agent: AgentStore(statusRequest: { AgentReport(version: "0.1.0") },
+            agent: AgentStore(statusRequest: { try await scenario?.agentReport() ?? AgentReport(version: "0.1.0") },
                               leaveSafeModeRequest: { AgentReport(version: "0.1.0") },
                               alert: { _, _ in }),
             pairs: PairStore(client: pairs),
