@@ -554,6 +554,9 @@ final class MainViewModel {
     /// the app runs, so automatic syncs, restarts and outside changes
     /// show up and their problems become notifications.
     func monitor(every interval: Duration = .seconds(15)) async {
+        // An updated app's agent needs registering anew before launchd
+        // starts it, so that comes before the first check.
+        await agent.reregisterIfUpdated()
         while !Task.isCancelled {
             // Inline instead of refreshAgent: a tick must not clear a
             // user-facing operationError, and PairStore.refresh skips the

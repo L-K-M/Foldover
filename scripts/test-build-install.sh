@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Check scripts/build.sh --install against a fake macOS toolchain: the
 # app replaces the installed copy, a running app is quit and reopened,
-# a loaded agent is restarted, and failures leave the installed app
-# alone. Runs on Linux and macOS; touches nothing outside a temp dir.
+# a loaded agent is left for the app to register anew, and failures
+# leave the installed app alone. Runs on Linux and macOS; touches nothing outside a temp dir.
 #
 # The fakes' bodies are single-quoted on purpose: they expand when the
 # fake runs, not here.
@@ -32,7 +32,7 @@ printf '[workspace.package]\nversion = "9.9.9"\n' > "$repo/Cargo.toml"
 #   interrupted-swap the old app sits in .Foldover.app.outgoing, as a run
 #                    killed mid-swap leaves it
 #   mv-into-fails    moving the new copy into place fails
-#   ditto-fails, kickstart-fails, open-fails, xcodebuild-fails,
+#   ditto-fails, open-fails, xcodebuild-fails,
 #   app-ignores-term
 fakes="$work/bin"
 log="$work/calls.log"
@@ -83,7 +83,6 @@ case "$1" in
     if [[ -e "$state/agent-running" ]]; then echo "	state = running"
     elif [[ -e "$state/agent-loaded" ]]; then echo "	state = not running"
     else exit 113; fi ;;
-  kickstart) [[ ! -e "$state/kickstart-fails" ]] ;;
 esac'
 fake open 'echo "open $*" >> "$log"; [[ ! -e "$state/open-fails" ]]'
 
@@ -127,13 +126,17 @@ expect_installed() {
 
 agent="gui/$(id -u)/ch.lkmc.foldover.agent"
 
-run "replaces a running app and restarts its agent" app-running agent-running -- app --install
+# launchd cannot start a new ad-hoc-signed agent under its old
+# registration: the reopened app registers it anew, so nothing restarts it.
+run "replaces a running app and leaves its agent to the app" app-running agent-running -- app --install
 expect_status 0
 expect_installed new
 expect_out "install app: ok ($apps/Foldover.app)"
 expect_call "pkill -TERM -U $(id -u) -f"
 [[ ! -e "$state/app-running" ]] || fail "$name: the running app was not quit"
-expect_call "launchctl kickstart -k $agent"
+expect_call "launchctl print $agent"
+expect_no_call "kickstart"
+expect_out "Foldover registers the new background agent as it opens"
 expect_call "open $apps/Foldover.app"
 [[ ! -e "$apps/.Foldover.app.incoming" && ! -e "$apps/.Foldover.app.outgoing" ]] \
   || fail "$name: staging copies left behind"
@@ -145,11 +148,14 @@ expect_no_call "pkill"
 expect_no_call "kickstart"
 expect_no_call "open $apps/Foldover.app"
 
-run "leaves a loaded but stopped agent alone" agent-loaded -- app --install
+if grep -qF "background agent" <<<"$out"; then fail "$name: mentioned an agent that is not loaded"; fi
+
+run "asks to open Foldover for a loaded agent" agent-loaded -- app --install
 expect_status 0
 expect_installed new
 expect_no_call "kickstart"
-expect_out "background agent not running; nothing to restart"
+expect_no_call "open $apps/Foldover.app"
+expect_out "install app: ok ($apps/Foldover.app); open Foldover to start the new background agent"
 
 run "does not quit another app with a similar name" helper-running -- app --install
 expect_status 0
@@ -193,16 +199,10 @@ expect_status 0
 expect_installed new
 expect_out "install app: ok ($apps/Foldover.app), but Foldover did not reopen"
 
-run "reports an agent that does not restart" agent-running kickstart-fails -- app --install
-expect_status 1
+run "asks to open an app that does not reopen for its agent" app-running agent-running open-fails -- app --install
+expect_status 0
 expect_installed new
-expect_out "the agent did not restart"
-
-run "reopens the app when the agent does not restart" app-running agent-running kickstart-fails -- app --install
-expect_status 1
-expect_installed new
-expect_out "the agent did not restart"
-expect_call "open $apps/Foldover.app"
+expect_out "install app: ok ($apps/Foldover.app), but Foldover did not reopen; open Foldover to start the new background agent"
 
 applications_dir="$apps/" run "quits the app under a trailing-slash directory" app-running -- app --install
 expect_status 0

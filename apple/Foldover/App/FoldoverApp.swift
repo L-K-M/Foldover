@@ -72,7 +72,7 @@ struct FoldoverApp: App {
             appInfo: AppInfoStore(),
             agent: AgentStore(statusRequest: { try await scenario?.agentReport() ?? AgentReport(version: "0.1.0") },
                               leaveSafeModeRequest: { AgentReport(version: "0.1.0") },
-                              alert: { _, _ in }),
+                              alert: { _, _ in }, system: FixtureAgentLoginItem()),
             pairs: PairStore(client: pairs),
             sync: SyncStore(client: FixtureSyncClient(pairs: pairs), alert: { _ in }),
             archive: ArchiveStore(client: FixtureArchiveClient()),
