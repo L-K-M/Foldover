@@ -328,7 +328,9 @@ struct PairSyncViewModel {
             text += " · " + String(localized: "\(byteText(progress.copied)) of \(byteText(progress.bytes))")
         }
         // The agent reports 0 until the first copy lands; no invented speed.
-        if progress.rate > 0 {
+        // A wait on another Mac freezes `copied`, so the cumulative rate
+        // would decay and its ETA balloon — hide both during the stall.
+        if progress.rate > 0, progress.waitingFor == nil {
             text += " · " + String(localized: "\(byteText(progress.rate))/s")
             if progress.bytes > progress.copied {
                 text += " · " + String(localized: "about \(timeText((progress.bytes - progress.copied) / progress.rate)) left")
@@ -338,6 +340,9 @@ struct PairSyncViewModel {
     }
 
     static func timeText(_ seconds: UInt64) -> String {
+        if seconds >= 60 * 90 {
+            return String(localized: "\(seconds / 3600) h \((seconds % 3600) / 60) min")
+        }
         if seconds >= 90 {
             return String(localized: "\((seconds + 30) / 60) min")
         }

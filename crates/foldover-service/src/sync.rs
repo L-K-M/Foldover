@@ -151,7 +151,10 @@ impl Progress {
             .unwrap_or_else(PoisonError::into_inner)
             .filter(|_| copied > 0)
             .map_or(0, |since| {
-                (copied as u128 / since.elapsed().as_secs().max(1) as u128) as u64
+                // Sub-second elapsed counts as a whole second: rounding
+                // up keeps the rate conservative, never overstated.
+                (copied as u128 / since.elapsed().as_secs_f64().ceil().max(1.0) as u128)
+                    as u64
             });
         SyncProgress {
             listed: read(&self.listed),
@@ -1026,9 +1029,9 @@ mod tests {
         progress.planned(3, 100);
         assert_eq!(progress.wire().rate, 0);
         progress.applied(100);
-        // The apply clock rounds up to a second, so the first landed
-        // copy reports its own size as the rate.
-        assert_eq!(progress.wire().rate, 100);
+        // The rate is nonzero but never exceeds copied per whole second.
+        let rate = progress.wire().rate;
+        assert!(rate > 0 && rate <= 100, "unexpected rate {rate}");
     }
 
     async fn settled(jobs: &Jobs, id: PairId) -> SyncStatus {
