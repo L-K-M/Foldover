@@ -465,10 +465,16 @@ fn a_shared_folder_never_serves_the_agent_state_directory() {
     assert!(peer.read(&inside, &planned, &run, 0).is_err());
 
     // Case-insensitive volumes (default APFS) resolve this spelling to
-    // the same file; the guard compares directory identity, not bytes.
-    let cased = SyncPath::try_from(b"library/Application Support/Foldover/pairs.sqlite".as_slice())
-        .unwrap();
-    assert!(peer.read(&cased, &planned, &run, 0).is_err());
+    // the same file; the guard compares directory identity, not bytes. On
+    // case-sensitive volumes the alias does not exist, so the read would
+    // fail as missing rather than as guarded — probe only where it can
+    // resolve.
+    if shared.path().join("library").exists() {
+        let cased =
+            SyncPath::try_from(b"library/Application Support/Foldover/pairs.sqlite".as_slice())
+                .unwrap();
+        assert!(peer.read(&cased, &planned, &run, 0).is_err());
+    }
 
     // A write inside the state directory is refused there as well. The
     // target does not exist, so `Expected::Absent` is truthful and the

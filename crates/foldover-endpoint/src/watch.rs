@@ -71,7 +71,10 @@ impl<K: Clone + Eq + Send + 'static> RootWatcher<K> {
         wanted: &[(LocalRoot, K)],
         state: Option<&Path>,
     ) -> Vec<(LocalRoot, io::Error)> {
-        let state = state.and_then(|path| path.canonicalize().ok());
+        // The caller passes the path the engine resolved at open; keep it
+        // if it cannot be re-resolved, so protection never silently
+        // switches off.
+        let state = state.map(|path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf()));
         let mut failures = Vec::new();
         let mut next: BTreeMap<PathBuf, Watched<K>> = BTreeMap::new();
         for (root, key) in wanted {
@@ -144,7 +147,9 @@ pub fn changed_since_event(
 ) -> io::Result<bool> {
     // Events carry resolved paths, e.g. /private/var for /var.
     let path = Path::new(OsStr::from_bytes(root.as_bytes())).canonicalize()?;
-    let state = state.and_then(|state| state.canonicalize().ok());
+    // Keep the caller's (already resolved) path if re-resolution fails:
+    // momentary trouble must not count the agent's writes as changes.
+    let state = state.map(|state| state.canonicalize().unwrap_or_else(|_| state.to_path_buf()));
     foldover_watch::changed_since(&path, since, timeout, |changed| {
         relevant(&path, changed)
             && state
