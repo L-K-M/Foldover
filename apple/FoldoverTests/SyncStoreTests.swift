@@ -739,6 +739,44 @@ func previewsListMoreChangesByKindAndResetOnTheNextPreview() async {
     #expect(store.listing(for: pair().id) == nil)
 }
 
+/// Rows are display data built once per preview page and shared by
+/// every view model the window recreates; a store change rebuilds them.
+@MainActor
+@Test
+func changeRowsAreBuiltOncePerPageAndSharedAcrossViewModels() async {
+    let summary = preview(archivesInA: 3, needsApproval: false)
+    let client = ScriptedSyncClient([.previewed(summary), .previewed(summary)])
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let cache = ChangeRowsCache()
+    let first = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(),
+                                  agentConnected: true, rowCache: cache)
+    await first.preview()
+
+    // Reads of the same page, here or in another view model, build once.
+    #expect(first.listedRows.count == 2)
+    #expect(first.rows.count == 2)
+    let second = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(),
+                                   agentConnected: true, rowCache: cache)
+    #expect(second.listedRows.count == 2)
+    #expect(cache.builds == 1)
+
+    // Each store change — a page loaded, a filter chosen — rebuilds
+    // once. The scripted pages carry copy-kind rows, so the kind filter
+    // narrows them to their first page.
+    await second.loadMoreChanges()
+    #expect(second.listedRows.map(\.path) == ["p0", "p1", "p2", "p3"])
+    await second.showChanges(.copies)
+    #expect(second.listedRows.map(\.path) == ["p0", "p1"])
+    #expect(cache.builds == 3)
+
+    // A view model the window recreates after the page load and kind
+    // switch still reads the cached rows instead of building again.
+    let third = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(),
+                                  agentConnected: true, rowCache: cache)
+    #expect(third.listedRows.map(\.path) == ["p0", "p1"])
+    #expect(cache.builds == 3)
+}
+
 // Regression for PR57: declineApproval only flipped the local state, so
 // the next scheduled checkAll read the same needsApproval from the
 // agent, resurrected the dialog and reposted the notification.
