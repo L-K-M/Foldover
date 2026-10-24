@@ -11,11 +11,13 @@ and occasional multi-gigabyte files over slow or interrupted links.
 The initial review was written in `Sol.md` before implementation; a
 second independent pass by SWE-2 Max was written in `Fusion.md`; a
 third independent pass is merged below from `Mimo.md` (SWE-2 Max
-scans with the reviewer's own verification, ids `MIMO-`). Source
-references describe that baseline unless a PR status says otherwise.
-Entries whose work ships in an open PR stay until that PR merges
-(see the table below); everything else here is unimplemented and
-shovel-ready.
+scans with the reviewer's own verification, ids `MIMO-`). A fourth
+pass (`Muse.md`, ids `MUSE-`) added engine/UI findings and five
+small UI PRs; its unique material is merged in place below (ids
+`MUSE-`). Source references describe that baseline unless a PR status
+says otherwise. Entries whose work ships in an open PR stay until that
+PR merges (see the table below); everything else here is unimplemented
+and shovel-ready.
 
 ## Start here
 
@@ -27,16 +29,19 @@ fixing it. Keep visual proposals separate from measured defects.
 |---|---|---|
 | P1 | SOL-21: cancel stalled peer streams | Stalled peer, slow healthy peer and idle watch |
 | P1 | MIMO-01–04: correctness the sync depends on | Missed FSEvents changes, stale-plan skips, colliding run names, newline skip rules |
+| P1 | MUSE-01: atomic lease renewal | Two processes: renewer loses cleanly after a takeover |
 | P1 | SOL-26: honor the selected SFTP parent | The saved root equals the highlighted folder |
 | P1 | SOL-03: reject stale archive replies | Delayed success, error and cleanup cannot change a newer listing |
 | P1 | SOL-04: search the complete preview | Find late matches without downloading earlier pages |
 | P2 | SOL-23: index protected ancestors | Same safety decisions, bounded work with many failures |
 | P2 | SOL-24 and SOL-08: complete, bounded archive browsing | Old runs and late items remain reachable without full rescans |
 | P2 | SOL-05 and SOL-06: visible progress and responsive previews | Large transfers advance; search avoids repeated formatting |
+| P2 | MUSE-02–04: progress equality, CLI default verb, archive prune kinds | Tautological Equatable is explicit; bare `sync` is safe by default; only directories prune |
 | P2 | MIMO-08–11: sync speed and liveness | Batched fsyncs, SFTP scans that skip unchanged content, choices without full re-previews, pushed status |
 | P2 | SOL-09, SOL-10 and SOL-16: visible, actionable attention | Background failures, restore causes and freshness are explicit |
 | P2 | F-01: `pairs set` partial-update convenience | One option toggles without re-supplying pair identity |
 | P3 | SOL-13–15 and SOL-17–20: product and visual polish | Validate with native light/dark, keyboard and accessibility checks |
+| P3 | MUSE-05: small UI edges (inspector width, empty states, CLI `--help`) | Each edge fixed where it sits; no layout regressions in LayoutStressTests |
 | P3 | MIMO-15–27: interface additions and hardening | See entries; MIMO-12/13 are exception-path hardening |
 | P3 | F-02–F-07: CLI readability, exports and small notifications | See entries |
 
@@ -66,6 +71,11 @@ follow-up work. No implementation in this table was pushed into main.
 | MIMO-05′ one restore at a time in the archive | `fix/archive-put-back-all-guard` | [177](https://github.com/L-K-M/Foldover/pull/177) | Duplicates the reservation half of SOL-02/PR 165; Swift Testing regression, macOS CI pending |
 | SOL-06 rows built once per preview page | `perf/cache-change-rows` | [178](https://github.com/L-K-M/Foldover/pull/178) | Build-count regression plus existing paging/filter tests; macOS profiling acceptance open |
 | SOL-12′ scroll the menu bar pair list | `fix/menu-bar-popover-overflow` | [179](https://github.com/L-K-M/Foldover/pull/179) | Covers only the bounded pair list of SOL-12/PR 168; macOS CI pending |
+| MUSE-a11y progress labels | `muse/a11y-progress-labels` | [167](https://github.com/L-K-M/Foldover/pull/167) | Script checked every ProgressView has a label; macOS/tour green after GLM round 2 |
+| MUSE-ETA client-side rate line | `muse/progress-eta` | [169](https://github.com/L-K-M/Foldover/pull/169) | Format/boundary/reset unit tests; **overlaps PR 164** (wire-level rate) — owner merges one |
+| MUSE-menubar height bound | `muse/menubar-overflow` | [170](https://github.com/L-K-M/Foldover/pull/170) | Height-estimate scroll threshold; **overlaps PR 179 and PR 168** — owner merges one |
+| MUSE-sidebar freshness tint | `muse/sidebar-freshness` | [171](https://github.com/L-K-M/Foldover/pull/171) | TimelineView re-tick; pair-row equality test updated; tour green |
+| MUSE-archive relative dates | `muse/archive-relative-dates` | [172](https://github.com/L-K-M/Foldover/pull/172) | `runTitle(now:)` boundary tests; nonisolated for the test target; tour green |
 
 MIMO-01′ through MIMO-05′ are findings of the third pass that their
 PRs now fix; the primes mark them as implemented, not backlog. Where
@@ -87,6 +97,20 @@ clean round on its final revision after its findings were addressed (a
 second round never triggered — no further push remained to make). All
 findings called out by reviews were either applied or answered with a
 rejection rationale in the PR threads.
+
+Fourth-pass (Muse) review record: PR 167 completed two rounds; the one
+minor (spinner wording) was applied. PR 169 completed three rounds; the
+tour compile break, job-switch clock, wait pause, unit boundaries,
+locale pinning and test seams were all applied, with one locale-API
+compile error fixed in a follow-up. PR 170's major height-vs-count
+finding and both Dynamic Type minors were applied (an intermediate
+always-scroll attempt was corrected to a height estimate). PR 171's
+major freshness-reactivity finding, the `context.date` follow-up and
+the doc-comment/test minors were applied. PR 172's relative+clock-time
+finding and the `nonisolated` test compile fix were applied. All five
+PRs' latest GLM reviews reported zero actionable suggestions. PRs 169
+and 170 duplicate wire-level and third-party work already open as PRs
+164 and 179/168; the owner should merge one of each pair.
 
 Native app builds, UI tours and rendered layout remain unverified while
 the `xcode-27` CI jobs are queued. Portable archive checks use the actual
@@ -189,7 +213,9 @@ with its own overlapping-restore regression; merge one of the two.
 - **Related shipped work:** PR 164 adds the cumulative copy rate
   (`SyncProgress.rate`) and an `N MB/s · about T left` status segment,
   hidden while the job waits on another Mac. In-flight per-file byte
-  progress (the frozen-bar part) remains open.
+  progress (the frozen-bar part) remains open. PR 169 is a client-only
+  sibling of the same status line (no proto bump); if 164 merges first,
+  close 169, and vice versa keep 164's wire field.
 
 ### SOL-06: Preview rendering repeatedly builds every loaded row
 
@@ -659,6 +685,123 @@ indexing costs remain in SOL-23.
 - **Acceptance:** Remove a pair with loaded pages and an outstanding
   request; its state stays forgotten after that request completes.
 
+## Fourth review additions (Muse.md)
+
+Unique findings of the fourth pass. Material that only restates SOL-,
+MIMO- or F- entries, or that ships in the table above, is not repeated.
+PRIORITY table rows: MUSE-01 (P1), MUSE-02 and MUSE-03 (P2).
+
+### MUSE-01: Lease renewal is a non-atomic read-then-replace
+
+- **Evidence:** `crates/foldover-endpoint/src/lease.rs:287-301`
+  (`HeldLease::renew`) reads `.foldover/lock`, checks the holder, then
+  `replace_lock_file` without an exclusive claim. Takeover uses the
+  exclusive-create protocol (ADR 0032); the steady-state beat does not.
+- **Impact:** A reclaimer that wins between the check and the write can
+  be overwritten by the old holder for up to one beat, briefly allowing
+  two writers. The window is small but the lease is the only mutual
+  exclusion on a shared folder.
+- **Task:** Renew through the same exclusive-create claim path as
+  takeover, or re-read after write and surface `LeaseError::Lost` on
+  mismatch. Record the decision in ADR 0032 (amendment or "accepted
+  risk with bound").
+- **Acceptance:** Two processes: one holds and renews while the other
+  reclaims; the loser observes `Lost` and never writes after takeover.
+
+### MUSE-02: WorkProgress equality is a tautology
+
+- **Evidence:** `apple/Foldover/Stores/SyncStore.swift` `WorkProgress.==
+  always returns true`, with a comment that equal-looking working states
+  must not look like new results.
+- **Impact:** Harmless under `@Observable` rendering today, but any
+  future `onChange(of:)` on a state embedding progress will never fire.
+  The comment documents intent; the type still lies.
+- **Task:** Prefer explicit progress events or a dedicated equality
+  that ignores counters but compares `waitingFor`/job identity; document
+  whichever contract stays.
+- **Acceptance:** A regression test shows a job-level transition (idle →
+  working, waiting → copying) is observable and a pure counter tick is
+  not.
+
+### MUSE-03: `foldover sync ID` applies immediately by default
+
+- **Evidence:** `crates/foldover-cli/src/main.rs` `sync_command` with
+  no flags builds `SyncCommand::Run { left: 0, right: 0, … }`. The
+  README's app story is preview-first; the CLI's bare verb is a full run.
+- **Impact:** A user following "sync ID" muscle memory can write without
+  seeing the plan. First-run gates still stop new pairs; existing pairs
+  do not.
+- **Task:** Either make no flags mean preview + exit 3 with a rerun hint,
+  or require an explicit `--run`/`--apply` for execution. Align README
+  and usage text either way.
+- **Acceptance:** Documented behavior matches the binary; a regression
+  test pins the chosen default.
+
+### MUSE-04: Archive pruning accepts timestamp-named files
+
+- **Evidence:** `crates/foldover-endpoint/src/local/archive.rs:272-305`
+  collects any top-level entry whose name parses as a run timestamp and
+  `remove_tree`s it; `archived_runs` filters to directories.
+- **Impact:** A stray file named like a run folder would be deleted by
+  retention. Low likelihood (Foldover only creates directories), real
+  consequence (pruning is the only path that deletes data, per
+  limitations).
+- **Task:** Require `NodeKind::Directory` before scheduling removal.
+- **Acceptance:** A file whose name matches the run format survives
+  pruning; timestamp directories still expire.
+
+### MUSE-05: Small UI edges from the fourth pass
+
+- **Fixed inspector width:** `MainView.swift` pins the inspector pane at
+  280 pt with a decorative divider; long paths and conflict details
+  cannot widen it. Let the pane drag or grow to an ideal width without
+  reintroducing the `.inspector` column crash (see `SplitColumn` notes).
+- **Empty detail while loading is `Color.clear`** (`MainView.swift`
+  emptyDetail): a blank pane beside a sidebar spinner; a lightweight
+  `ProgressView` would say what is happening.
+- **Inspector empty icon is `sidebar.trailing`** (the toggle glyph);
+  prefer `info.circle` or `slider.horizontal.3`.
+- **Change-table symbol column header is `""`:** per-row action labels
+  exist; a column-level accessibility name would help explorers.
+- **SetupView current-step badge** hardcodes white text on accent;
+  check Increase Contrast.
+- **Status bar and placeholder can both offer actions** after a finished
+  sync when the table is empty (`PairDetailView` `placeholderSpeaks`);
+  pick one primary surface.
+- **Archive run list has no item counts.** `ArchiveRun` only carries
+  name + `started_ms`; counts need a wire field or a selected-run
+  summary line (the selected run's loaded page can state its size now).
+- **CLI help is one giant USAGE string** (`main.rs` const `USAGE`):
+  no `foldover sync --help`, no per-subcommand epilogues. A small
+  parser (or generated sections) would help scripting users.
+- **Menu-bar "q" shortcut** is already MIMO-18; noted again because
+  the fourth pass hit it while bounding the popover.
+
+### MUSE-06: Delight ideas not already listed elsewhere
+
+Consolidated; cross-references show where a named SOL/MIMO/F entry
+already owns the work. Shovel-ready small ideas:
+
+- Sidebar freshness tint — ships in PR 171 (also feeds SOL-16).
+- Archive recent runs as "3 hours ago, 2:15 PM" — ships in PR 172.
+- Completion breath: one Reduce-Motion-aware pulse of the pair status
+  icon on a clean interactive completion — part of SOL-19's signature
+  moment; do not add a second animation system.
+- Undo toast after a window sync ("Synced · Undo", auto-dismiss):
+  teaches the existing Edit › Undo; pure Swift on the window model.
+- Menu-bar progress ring replacing the spinner — only after SOL-05's
+  in-flight bytes exist; otherwise it repeats PR 164's numbers.
+- Conflict compare: two-pane local Quick Look for both-changed pairs —
+  belongs with SOL-13's version cards.
+- First-sync receipt: "First sync done — N files now protected" on the
+  completion card; pairs with SOL-17's rehearsal.
+- `foldover watch ID`: re-preview on a timer, one-line diff counts;
+  fits the CLI after PR 158's `--progress`.
+- Pair templates ("Photos → NAS" preset of mode/schedule/filters) in
+  the editor's Choose menu.
+- Pair health filter: clicking "N need attention" in the sidebar
+  narrows the list to attention rows.
+
 ## Third review additions (Mimo.md)
 
 Unimplemented findings of the third pass. Entries delivered as open PRs
@@ -1110,6 +1253,18 @@ Verified against the source so they are not re-reported:
 - Merge-order note: when both #158 and #161 merge, `run_one` (shared by
   `sync ID` and `sync --all`) should take the progress flag so plain
   `sync --progress` keeps streaming Working lines.
+- Fourth-pass (Muse) record: five Swift-only PRs (167, 169–172) were
+  developed on Linux with helper-model review passes; every important
+  GLM finding on their latest revisions was applied, and the last review
+  of each reported zero actionable suggestions. Tour/macos jobs were
+  green or still queued at the time of this merge, except where a PR's
+  own table row says otherwise. Engine claims MUSE-01 and MUSE-04 were
+  read from source and not reproduced under two-process tests yet;
+  MUSE-03's default-verb behavior was read from `sync_command`, not
+  executed against a live agent in this pass. Native layout, VoiceOver
+  and Increase Contrast were not exercised here. PRs 169 and 170
+  duplicate PR 164 and PR 179/168 respectively and are left open for
+  the owner to choose; do not merge both of a pair.
 - Markdown links/structure and Mermaid checks passed for this document.
   The final revision's native CI and any remaining queued Linux jobs are
   outstanding, not successful or waived.
