@@ -49,3 +49,11 @@ func theWorkingFramesPulseWithoutDisappearing() throws {
     #expect(soft.alphaComponent > dim.alphaComponent)
     #expect(dim.alphaComponent > 0.7)
 }
+
+@MainActor
+@Test(arguments: ["MenuBarArrowWorking", "MenuBarArrowWorkingSoft", "MenuBarArrowWorkingDim"])
+func theWorkingFramesDoNotDrawAStaticSpinner(_ name: String) throws {
+    // A frozen arc looks stalled; the arrow's pulse already indicates work.
+    let formerSpinner = try arrowPixel(name, x: 19, y: 14)
+    #expect(formerSpinner.alphaComponent == 0)
+}
