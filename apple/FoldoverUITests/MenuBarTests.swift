@@ -24,16 +24,21 @@ final class MenuBarTests: XCTestCase {
         XCTAssertTrue(pairs.waitForExistence(timeout: 5))
         // SwiftUI exposes the combined name/status label as a button.
         let lastPair = pairs.buttons["menu-pair-tour-menu-40"]
+        // Hittable alone can include a row outside SwiftUI's clipped viewport.
+        let lastPairIsVisible = {
+            lastPair.exists && lastPair.isHittable && pairs.frame.contains(lastPair.frame)
+        }
         let quit = tour.app.buttons["Quit Foldover"]
         XCTAssertTrue(quit.isHittable, "Commands must stay visible above a long catalog")
         // A step larger than the viewport can jump past the target row.
         let scrollStep = pairs.frame.height / 2
         let maximumScrolls = 40
-        for _ in 0..<maximumScrolls where !lastPair.isHittable {
+        for _ in 0..<maximumScrolls where !lastPairIsVisible() {
             pairs.scroll(byDeltaX: 0, deltaY: -scrollStep)
             tour.pause(0.2)
         }
-        XCTAssertTrue(lastPair.isHittable)
+        XCTAssertTrue(lastPairIsVisible(), "\(lastPair.debugDescription), viewport: \(pairs.frame)")
+        XCTAssertTrue(lastPair.label.contains("Pair 40"), lastPair.debugDescription)
         XCTAssertTrue(quit.isHittable, "Scrolling pairs must not move the commands")
         tour.snap(launchArguments.isEmpty ? "menu-bar-many-pairs" : "menu-bar-many-pairs-large-text")
         tour.app.terminate()
