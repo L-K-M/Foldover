@@ -254,6 +254,22 @@ func aWholeRunPutBackOutranksTheLastItemInTheStatusLine() async {
     #expect(viewModel.statusText != nil)
 }
 
+@Test
+func recentRunTitlesKeepTheClockTime() {
+    let now = Date(timeIntervalSince1970: 1_761_300_000)
+    // Three hours old: relative phrase plus the start time, so two runs
+    // the same day stay distinguishable.
+    let recent = now.addingTimeInterval(-3 * 3600)
+    let recentTitle = ArchiveViewModel.runTitle(recent, now: now)
+    #expect(recentTitle.contains(recent.formatted(date: .omitted, time: .shortened)))
+    #expect(recentTitle != recent.formatted(date: .abbreviated, time: .standard))
+
+    // Past a day: absolute date and time only.
+    let old = now.addingTimeInterval(-50 * 3600)
+    #expect(ArchiveViewModel.runTitle(old, now: now)
+        == old.formatted(date: .abbreviated, time: .standard))
+}
+
 @MainActor
 @Test
 func siblingStoresShareTheClientButNotTheState() async {
