@@ -95,25 +95,22 @@ struct ApprovalRequest: Equatable, Sendable, Identifiable {
     var id: String { "\(pairID)-\(reviewToken)" }
 }
 
-/// What the change rows were built from: the previewed plan, the pages
-/// loaded for it and the kind filter narrowing them. Every builder that
-/// shares the cache must be distinguishable by these fields — two
-/// builders with an equal source get each other's rows.
+/// What the change rows were built from: the pair's store revision,
+/// which bumps whenever a new state or another page of changes can
+/// change them. Every builder that shares the cache must be
+/// distinguishable by these fields — two builders with an equal source
+/// get each other's rows.
 fileprivate struct RowsSource: Equatable {
     var pair: String
-    var token: String
-    var paged: Bool
-    var listed: Int
-    var filter: ChangeFilter?
-    var failures: Int
+    var revision: Int
 }
 
 /// Change rows are display data built from the store's preview pages:
 /// a UTF-8 path decode, a URL, a skip-rule walk and formatted sizes per
 /// row. A big preview rebuilt every row on each read, several reads per
 /// render and one per search keystroke, so the cache builds them once
-/// per source and hands the same rows back until the store changes
-/// (PLAN.md §3.2: fast you can see).
+/// per store revision and hands the same rows back until the store
+/// changes (PLAN.md §3.2: fast you can see).
 @MainActor
 final class ChangeRowsCache {
     private var entries: [String: (source: RowsSource, rows: [ChangeRow])] = [:]
@@ -453,10 +450,7 @@ struct PairSyncViewModel {
     var listedRows: [ChangeRow] {
         if let preview = reviewable {
             let listing = store.listing(for: pair.id)
-            let source = RowsSource(
-                pair: pair.id, token: preview.reviewToken, paged: listing != nil,
-                listed: (listing?.changes ?? preview.changes).count, filter: listing?.filter,
-                failures: preview.failures.count)
+            let source = RowsSource(pair: pair.id, revision: store.rowsRevision(for: pair.id))
             return rowCache.rows(from: source) {
                 let review = ReviewContext(token: preview.reviewToken,
                                            pairRevision: preview.pairRevision)
