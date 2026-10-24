@@ -1132,7 +1132,8 @@ fn batched_first_runs_reopen_safely_before_the_identity_commit() {
     let right = directory.path().join("right");
     fs::create_dir(&left).unwrap();
     fs::create_dir(&right).unwrap();
-    let count = COMMIT_BATCH + 1;
+    // Leave work beyond the first batch and the copies still in flight.
+    let count = 2 * COMMIT_BATCH;
     for index in 0..count {
         fs::write(left.join(format!("file-{index}")), b"content").unwrap();
     }
@@ -1174,7 +1175,11 @@ fn batched_first_runs_reopen_safely_before_the_identity_commit() {
         result,
         Err(RunError::Commit(crate::Error::StaleRevision))
     ));
-    assert!(refused_identities && batches >= 2);
+    assert!(refused_identities);
+    assert!(
+        batches >= 2,
+        "expected multiple durable batches, got {batches}"
+    );
     drop(engine);
 
     let mut engine = crate::Engine::open(&location).unwrap();
