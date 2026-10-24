@@ -88,9 +88,9 @@ latest round on each PR was clean. PR 178's row cache additionally
 failed a macOS regression (`scanErrorsStayVisibleWhileSafeChanges-
 RemainSyncable`) that review did not catch — the review token
 fingerprints the plan, not its failure list — and was re-keyed on a
-per-pair store revision before the suite passed. All checks pass on
-PRs 173-177 and 179; PR 178's final revision was re-running the macOS
-jobs at this update.
+per-pair store revision before the suite passed. All checks — Linux
+CI, macOS suite and UI tour — pass on PRs 173-179 as they await the
+owner's merge.
 
 Review status at consolidation: PRs 159, 163, 165 and 168 each completed
 two GLM review rounds without confirmed important findings. PRs 157, 158,
