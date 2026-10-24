@@ -152,12 +152,14 @@ fn wire(entry: &HistoryEntry) -> HistoryRecord {
 fn readable_message(message: &str) -> String {
     let mut readable = String::with_capacity(message.len());
     let mut remaining = message;
-    let mut quoted = false;
+    let mut closing_quote = None;
 
     // Old history stored Debug byte arrays. Decode on read, preserving the record
     // and quoted filenames that happen to contain text such as SyncPath([97]).
     while let Some(character) = remaining.chars().next() {
-        if !quoted && let Some((path, suffix)) = legacy_path(remaining) {
+        if closing_quote.is_none()
+            && let Some((path, suffix)) = legacy_path(remaining)
+        {
             readable.push_str(&format!("{path:?}"));
             remaining = suffix;
             continue;
@@ -165,10 +167,13 @@ fn readable_message(message: &str) -> String {
 
         readable.push(character);
         remaining = &remaining[character.len_utf8()..];
-        if character == '"' {
-            quoted = !quoted;
-        }
-        if quoted
+        closing_quote = match closing_quote {
+            Some(quote) if character == quote => None,
+            None if character == '"' => Some('"'),
+            None if character == '“' => Some('”'),
+            quote => quote,
+        };
+        if closing_quote == Some('"')
             && character == '\\'
             && let Some(escaped) = remaining.chars().next()
         {
@@ -218,6 +223,8 @@ mod tests {
             "Reading \"jan/._LICENSE-linenoise\" failed",
             r#"Reading "quote\"SyncPath([97])" failed"#,
             r#"Reading "backslash\\" and "SyncPath([97])" failed"#,
+            "The canary file “SyncPath([97])” is missing from the Left folder, so nothing \
+             was written. Put it back, or change the pair's canary.",
             "SyncPath([])",
             "SyncPath([256])",
             "SyncPath([-1])",
@@ -233,6 +240,10 @@ mod tests {
         assert_eq!(
             readable_message(r#"Reading "SyncPath([97])" and SyncPath([98]) failed"#),
             r#"Reading "SyncPath([97])" and "b" failed"#
+        );
+        assert_eq!(
+            readable_message("Reading “quote\"SyncPath([97])” and SyncPath([98]) failed"),
+            "Reading “quote\"SyncPath([97])” and \"b\" failed"
         );
     }
 }
