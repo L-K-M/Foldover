@@ -26,6 +26,9 @@ const APPROVAL_EXIT: u8 = 3;
 /// A run finished but left versions that need a person's choice.
 const CONFLICT_EXIT: u8 = 4;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Pairs `sync --all` runs at once; more would thrash disks and SFTP
+/// servers rather than finish sooner.
+const MAX_CONCURRENT_SYNCS: usize = 4;
 const SFTP_WARNING: &str = concat!(
     "SFTP assumes a trusted server; server-side folder changes can redirect access ",
     "outside the selected root. Extended attributes and ACLs are omitted; files ",
@@ -361,6 +364,7 @@ fn request(args: impl Iterator<Item = OsString>) -> Request {
             Some(command) => Request::Pairs(location, command),
             None => Request::Usage,
         },
+        [command, flag] if command == "sync" && flag == "--all" => Request::SyncAll(location),
         [command, id, rest @ ..] if command == "sync" => {
             // A trailing --progress streams Working statuses while waiting.
             let (rest, progress) = match rest {
@@ -858,6 +862,13 @@ async fn sync(
     }
     let mut status = match command {
         SyncCommand::Preview => foldover_client::start_preview(location, id).await?,
+        // A plain run goes through `run_one` so `sync ID` and `sync
+        // --all` cannot drift apart in how a run is started.
+        SyncCommand::Run {
+            left: 0,
+            right: 0,
+            review: None,
+        } => run_one(location, id).await?,
         SyncCommand::Run {
             left,
             right,
@@ -887,7 +898,19 @@ async fn sync(
         status = foldover_client::sync_status(location, id).await?;
     }
     println!("{}", serde_json::to_string(&status)?);
-    Ok(match &status {
+    if let SyncStatus::NeedsApproval { preview } = &status {
+        eprintln!(
+            "foldover: review these changes; rerun with --approve {} {} --review {}",
+            preview.left.deletions, preview.right.deletions, preview.review_token
+        );
+    }
+    Ok(status_code(&status))
+}
+
+/// The exit code for a settled status: success, approval needed, or
+/// failure.
+fn status_code(status: &SyncStatus) -> ExitCode {
+    match status {
         SyncStatus::Idle | SyncStatus::Previewed { .. } => ExitCode::SUCCESS,
         SyncStatus::Finished { result }
             if result.failure_count == 0 && !result.cancelled && result.conflicts > 0 =>
@@ -901,14 +924,109 @@ async fn sync(
         SyncStatus::Undone { result } if result.not_undone_count == 0 && !result.cancelled => {
             ExitCode::SUCCESS
         }
-        SyncStatus::NeedsApproval { preview } => {
-            eprintln!(
-                "foldover: review these changes; rerun with --approve {} {} --review {}",
-                preview.left.deletions, preview.right.deletions, preview.review_token
-            );
-            ExitCode::from(APPROVAL_EXIT)
-        }
+        SyncStatus::NeedsApproval { .. } => ExitCode::from(APPROVAL_EXIT),
         _ => ExitCode::FAILURE,
+    }
+}
+
+/// Start a plain run on the pair and wait for its final status.
+async fn run_one(
+    location: &SocketLocation,
+    id: PairId,
+) -> Result<SyncStatus, foldover_client::Error> {
+    let mut status = foldover_client::start_run(location, id, 0, 0, None).await?;
+    while matches!(status, SyncStatus::Working { .. }) {
+        tokio::time::sleep(POLL_INTERVAL).await;
+        status = foldover_client::sync_status(location, id).await?;
+    }
+    Ok(status)
+}
+
+/// Run every pair concurrently, printing each pair's outcome as one JSON
+/// line; the exit code is the worst outcome across pairs.
+async fn sync_all(location: &SocketLocation) -> Result<ExitCode, foldover_client::Error> {
+    let mut pairs = Vec::new();
+    let mut after = None;
+    loop {
+        let page = foldover_client::pairs(location, after).await?;
+        pairs.extend(page.pairs);
+        let Some(next) = page.next else {
+            break;
+        };
+        after = Some(next);
+    }
+    warn_sftp(
+        pairs
+            .iter()
+            .flat_map(|pair| [pair.draft().left(), pair.draft().right()]),
+    );
+    let mut jobs = tokio::task::JoinSet::new();
+    // Cap fan-out so many pairs cannot hammer the same disks and SFTP
+    // servers at once.
+    let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SYNCS));
+    for pair in pairs {
+        let location = location.clone();
+        let permit = std::sync::Arc::clone(&permits)
+            .acquire_owned()
+            .await
+            .expect("the semaphore is never closed");
+        jobs.spawn(async move {
+            let outcome = run_one(&location, pair.id()).await;
+            drop(permit);
+            (pair, outcome)
+        });
+    }
+    let mut failed = false;
+    let mut approvals = false;
+    // Each line stands alone, so pairs are reported as they finish.
+    while let Some(joined) = jobs.join_next().await {
+        // A task panics only on a bug; it still counts as a failure.
+        let Ok((pair, outcome)) = joined else {
+            failed = true;
+            eprintln!("foldover: a sync task failed unexpectedly");
+            continue;
+        };
+        let line = match &outcome {
+            Ok(status) => {
+                match status_code(status) {
+                    code if code == ExitCode::SUCCESS => {}
+                    code if code == ExitCode::from(APPROVAL_EXIT) => approvals = true,
+                    _ => failed = true,
+                }
+                if let SyncStatus::NeedsApproval { preview } = status {
+                    eprintln!(
+                        "foldover: pair {} ({}) needs review; rerun with sync {} --approve {} {} --review {}",
+                        pair.draft().name(),
+                        pair.id(),
+                        pair.id(),
+                        preview.left.deletions,
+                        preview.right.deletions,
+                        preview.review_token
+                    );
+                }
+                serde_json::json!({
+                    "id": pair.id().to_string(),
+                    "name": pair.draft().name(),
+                    "status": status,
+                })
+            }
+            Err(error) => {
+                failed = true;
+                serde_json::json!({
+                    "id": pair.id().to_string(),
+                    "name": pair.draft().name(),
+                    "error": error.to_string(),
+                })
+            }
+        };
+        println!("{line}");
+    }
+    Ok(if failed {
+        ExitCode::FAILURE
+    } else if approvals {
+        ExitCode::from(APPROVAL_EXIT)
+    } else {
+        ExitCode::SUCCESS
     })
 }
 
@@ -1425,6 +1543,16 @@ mod tests {
         ] {
             assert!(matches!(req(&args), Request::Usage), "{args:?}");
         }
+    }
+
+    #[test]
+    fn sync_all_selects_every_pair() {
+        assert!(matches!(req(&["sync", "--all"]), Request::SyncAll(_)));
+        assert!(matches!(
+            req(&["sync", "--all", "--socket", "/tmp/s"]),
+            Request::SyncAll(_)
+        ));
+        assert!(matches!(req(&["sync", "--all", "extra"]), Request::Usage));
     }
 
     #[test]
