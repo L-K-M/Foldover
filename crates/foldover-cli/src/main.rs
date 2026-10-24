@@ -1368,7 +1368,7 @@ mod tests {
         ));
         assert!(matches!(
             req(&["status", "--socket", "-h"]),
-            Request::Status(SocketLocation::Path(path)) if path == PathBuf::from("-h")
+            Request::Status(SocketLocation::Path(path)) if path.as_os_str() == "-h"
         ));
     }
 

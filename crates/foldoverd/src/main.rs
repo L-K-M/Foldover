@@ -108,7 +108,7 @@ mod tests {
     fn a_help_looking_socket_path_is_still_a_value() {
         assert!(matches!(
             req(&["--socket", "-h"]),
-            Request::Run(foldover_ipc::SocketLocation::Path(path)) if path == PathBuf::from("-h")
+            Request::Run(foldover_ipc::SocketLocation::Path(path)) if path.as_os_str() == "-h"
         ));
     }
 
