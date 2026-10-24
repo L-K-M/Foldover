@@ -725,6 +725,110 @@ fn unavailable_socket_paths_keep_the_baselines_unicode_spelling() {
     );
 }
 
+fn composed_baseline(observation: &Observation) -> BTreeMap<SyncPath, BaselineEntry> {
+    observation
+        .entries()
+        .iter()
+        .map(|(name, entry)| {
+            let composed: String = std::str::from_utf8(name.as_bytes())
+                .unwrap()
+                .nfc()
+                .collect();
+            (
+                path(composed.as_bytes()),
+                BaselineEntry::new(entry.version(), entry.version()).unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn ambiguous_unicode_respellings_preserve_every_observed_entry() {
+    let memory = foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default());
+    for name in [
+        "s\u{323}\u{307}",
+        "\u{1e63}\u{307}",
+        "cafe\u{301}",
+        "Report",
+    ] {
+        memory.put_file(name.as_bytes(), name.as_bytes()).unwrap();
+    }
+    let endpoint = Endpoint::Memory(memory);
+    let mut observation = endpoint
+        .observe_from(
+            foldover_types::MetadataPolicy::default(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+            &mut |_| {},
+        )
+        .unwrap();
+    let base = composed_baseline(&observation);
+    let original = observation.versions();
+    let names = NameMatching::new(
+        foldover_types::CaseMatching::Exact,
+        UnicodeMatching::Normalized,
+    );
+    align_spellings(&mut observation, &base, names);
+
+    // Ambiguous aliases keep both versions; a unique alias still aligns.
+    assert_eq!(observation.entries().len(), original.len());
+    for name in ["s\u{323}\u{307}", "\u{1e63}\u{307}", "Report"] {
+        assert_eq!(
+            observation.entries()[&path(name.as_bytes())].version(),
+            original[&path(name.as_bytes())]
+        );
+    }
+    assert!(
+        !observation
+            .entries()
+            .contains_key(&path("\u{1e69}".as_bytes()))
+    );
+    assert_eq!(
+        observation.entries()[&path("café".as_bytes())].version(),
+        original[&path("cafe\u{301}".as_bytes())]
+    );
+}
+
+/// PLAN.md §5.3 allows five seconds for planning 500k paths after a scan.
+/// This narrower phase must fit that budget even for 50k respelled names.
+#[test]
+#[ignore = "performance budget; run explicitly in release mode on an idle host"]
+fn unicode_respelling_prepare_budget() {
+    const ENTRIES: usize = 50_000;
+    const BUDGET: Duration = Duration::from_secs(5);
+    let memory = foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default());
+    for index in 0..ENTRIES {
+        memory
+            .put_file(format!("cafe\u{301}-{index:05}").as_bytes(), b"data")
+            .unwrap();
+    }
+    let mut observation = Endpoint::Memory(memory)
+        .observe_from(
+            foldover_types::MetadataPolicy::default(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+            &mut |_| {},
+        )
+        .unwrap();
+    let base = composed_baseline(&observation);
+    let names = NameMatching::new(
+        foldover_types::CaseMatching::Exact,
+        UnicodeMatching::Normalized,
+    );
+
+    let started = std::time::Instant::now();
+    align_spellings(&mut observation, &base, names);
+    let elapsed = started.elapsed();
+    eprintln!("Aligned {ENTRIES} Unicode names in {elapsed:?}");
+    assert!(
+        elapsed < BUDGET,
+        "Unicode alignment exceeded {BUDGET:?}: {elapsed:?}"
+    );
+    assert!(observation.entries().keys().eq(base.keys()));
+}
+
 #[test]
 fn unavailable_aliases_are_skipped_before_the_first_sync() {
     use foldover_types::CaseMatching;

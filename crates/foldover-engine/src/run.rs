@@ -1442,8 +1442,14 @@ fn align_spellings(
         .collect();
     // Such a folder holds one spelling of a name; should two map to one
     // base spelling anyway, neither is mapped rather than one lost.
+    // Count once: a restored tree can respell tens of thousands of names.
+    let mut destinations: BTreeMap<&SyncPath, usize> = BTreeMap::new();
+    for (_, to) in &respelled {
+        *destinations.entry(to).or_default() += 1;
+    }
+
     for (from, to) in &respelled {
-        if respelled.iter().filter(|(_, other)| other == to).count() == 1 {
+        if destinations.get(to) == Some(&1) {
             observation.respell(from, to.clone());
         }
     }
