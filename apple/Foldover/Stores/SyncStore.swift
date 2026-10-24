@@ -822,11 +822,17 @@ final class SyncStore {
     private func set(_ id: String, _ state: PairSyncState) {
         generations[id, default: 0] += 1
         if states[id] != state {
-            listings[id] = nil
-            listingRequests[id] = nil
-            rowsRevisions[id, default: 0] += 1
+            dropListing(for: id)
         }
         states[id] = state
+    }
+
+    /// The single place a pair's listing is dropped, so the row revision
+    /// can't drift from the listing it tracks.
+    private func dropListing(for id: String) {
+        listings[id] = nil
+        listingRequests[id] = nil
+        rowsRevisions[id, default: 0] += 1
     }
 
     /// When the pair's listed rows last changed; rows cached against an
