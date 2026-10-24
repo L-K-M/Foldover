@@ -23,6 +23,8 @@ const BYTES_PER_MEGABYTE: u64 = 1_000_000;
 const USAGE_EXIT: u8 = 2;
 /// A run stopped for deletion approval; nothing was written.
 const APPROVAL_EXIT: u8 = 3;
+/// A run finished but left versions that need a person's choice.
+const CONFLICT_EXIT: u8 = 4;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const SFTP_WARNING: &str = concat!(
     "SFTP assumes a trusted server; server-side folder changes can redirect access ",
@@ -246,7 +248,7 @@ async fn main() -> ExitCode {
         },
         Request::Archive(location, id, side, command) => {
             match archive(&location, id, side, command).await {
-                Ok(()) => ExitCode::SUCCESS,
+                Ok(code) => code,
                 Err(error) => {
                     eprintln!("foldover: {error}");
                     ExitCode::FAILURE
@@ -838,6 +840,11 @@ async fn sync(
     println!("{}", serde_json::to_string(&status)?);
     Ok(match &status {
         SyncStatus::Idle | SyncStatus::Previewed { .. } => ExitCode::SUCCESS,
+        SyncStatus::Finished { result }
+            if result.failure_count == 0 && !result.cancelled && result.conflicts > 0 =>
+        {
+            ExitCode::from(CONFLICT_EXIT)
+        }
         SyncStatus::Finished { result } if result.failure_count == 0 && !result.cancelled => {
             ExitCode::SUCCESS
         }
@@ -888,7 +895,7 @@ async fn archive(
     id: PairId,
     side: Side,
     command: ArchiveCommand,
-) -> Result<(), foldover_client::Error> {
+) -> Result<ExitCode, foldover_client::Error> {
     if matches!(
         &command,
         ArchiveCommand::PutBack { .. } | ArchiveCommand::PutBackAll(_)
@@ -932,9 +939,16 @@ async fn archive(
         ArchiveCommand::PutBackAll(run) => {
             let restored = foldover_client::put_back_all(location, id, side, &run).await?;
             println!("{}", serde_json::to_string(&restored)?);
+            if restored.failure_count > 0 {
+                eprintln!(
+                    "foldover: {} items could not be put back and remain archived",
+                    restored.failure_count
+                );
+                return Ok(ExitCode::FAILURE);
+            }
         }
     }
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 async fn peers(
