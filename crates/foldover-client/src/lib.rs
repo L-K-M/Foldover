@@ -642,8 +642,35 @@ async fn call(
             "Agent version mismatch; restart the background agent",
         ));
     }
-    connection.call(Request::call(2, method, params)).await
+    let request = Request::call(2, method, params);
+    if SLOW_METHODS.contains(&method) {
+        connection.call_slow(request).await
+    } else {
+        connection.call(request).await
+    }
 }
+
+/// Calls whose answer can legitimately outlast the normal five seconds:
+/// they reach a remote host (SFTP browse or root validation, peer
+/// handshakes, the server scan) or move files inline (put-back,
+/// keep-both). Everything else is local state a healthy agent answers
+/// at once. Keep in sync with the agent: a method whose handler grows
+/// remote or inline work belongs here, and a slow method that turns
+/// local comes off.
+const SLOW_METHODS: &[&str] = &[
+    ENDPOINT_BROWSE,
+    NETWORK_SERVERS,
+    PAIR_CHECK,
+    PAIR_CREATE,
+    PAIR_UPDATE,
+    ARCHIVE_PUT_BACK,
+    ARCHIVE_PUT_BACK_ALL,
+    SYNC_RESOLVE,
+    PEER_PAIR,
+    PEER_CONFIRM,
+    PEER_REVOKE,
+    PEER_SHARES,
+];
 
 #[cfg(test)]
 mod tests {

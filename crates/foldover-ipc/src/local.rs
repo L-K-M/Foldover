@@ -19,6 +19,11 @@ const MAX_BATCH_REQUESTS: usize = 128;
 const MAX_CONNECTIONS: usize = 32;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Calls that reach a remote host or move files inline get the agent's
+/// own SFTP bounds (60s connect, 60s I/O) plus margin, not the 5s a
+/// local answer needs.
+const SLOW_REQUEST_TIMEOUT: Duration = Duration::from_secs(150);
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("Agent I/O: {0}")]
@@ -38,6 +43,10 @@ pub enum Error {
 pub struct Connection {
     channel: Channel,
     pending: Vec<u8>,
+    /// A call that timed out or failed mid-frame may still have its
+    /// answer in flight; reading it later would hand it to another
+    /// call, so the connection is retired instead.
+    poisoned: bool,
 }
 
 pub struct Server {
@@ -57,6 +66,7 @@ pub async fn connect(location: &SocketLocation) -> Result<Connection, Error> {
     Ok(Connection {
         channel,
         pending: Vec::new(),
+        poisoned: false,
     })
 }
 
@@ -67,6 +77,22 @@ impl Connection {
     }
 
     pub async fn call(&mut self, request: Request) -> Result<Value, Error> {
+        self.call_within(request, REQUEST_TIMEOUT).await
+    }
+
+    /// A call the agent answers slowly: reaching a remote host (SFTP
+    /// browsing, pair checks, peer handshakes) or moving files inline
+    /// (put-back, keep-both) outlasts the normal five seconds.
+    pub async fn call_slow(&mut self, request: Request) -> Result<Value, Error> {
+        self.call_within(request, SLOW_REQUEST_TIMEOUT).await
+    }
+
+    async fn call_within(&mut self, request: Request, timeout: Duration) -> Result<Value, Error> {
+        if self.poisoned {
+            return Err(Error::Protocol(
+                "The connection is unusable after a timed-out or failed call",
+            ));
+        }
         let expected = request
             .id()
             .ok_or(Error::Protocol("A call needs an ID"))?
@@ -74,13 +100,26 @@ impl Connection {
         if privileged(request.method()) {
             self.channel.require_installed_peer().await?;
         }
-        self.write_value(&request.to_value()).await?;
-        let frame = self
-            .read_frame()
-            .await?
-            .ok_or(Error::Protocol("Agent closed before its response"))?;
+        if let Err(error) = self.write_value(&request.to_value()).await {
+            // A write failure can leave a truncated frame in flight; a
+            // later call would splice onto the leftover bytes.
+            self.poisoned = true;
+            return Err(error);
+        }
+        let frame = match self.read_frame(timeout).await {
+            // A read failure can leave this call's answer in flight;
+            // a later read would hand it to the wrong call.
+            Err(error) => {
+                self.poisoned = true;
+                return Err(error);
+            }
+            Ok(frame) => frame.ok_or(Error::Protocol("Agent closed before its response"))?,
+        };
         let response = Response::parse(serde_json::from_slice(&frame)?).map_err(Error::Protocol)?;
         if response.id() != &expected {
+            // This answer belongs to another call, so the real one is
+            // still in flight and would desync whatever reads next.
+            self.poisoned = true;
             return Err(Error::Protocol("Response ID does not match the request"));
         }
         response.into_result().map_err(|error| Error::Remote {
@@ -89,8 +128,8 @@ impl Connection {
         })
     }
 
-    async fn read_frame(&mut self) -> Result<Option<Vec<u8>>, Error> {
-        tokio::time::timeout(REQUEST_TIMEOUT, self.read_inner())
+    async fn read_frame(&mut self, timeout: Duration) -> Result<Option<Vec<u8>>, Error> {
+        tokio::time::timeout(timeout, self.read_inner())
             .await
             .map_err(|_| Error::Timeout)?
     }
@@ -166,9 +205,10 @@ where
             let mut connection = Connection {
                 channel,
                 pending: Vec::new(),
+                poisoned: false,
             };
             let session = AtomicBool::new(false);
-            while let Some(frame) = connection.read_frame().await? {
+            while let Some(frame) = connection.read_frame(REQUEST_TIMEOUT).await? {
                 let output = match serde_json::from_slice(&frame) {
                     Ok(value) => {
                         dispatch(value, &|request| {
@@ -447,18 +487,67 @@ mod tests {
         let mut server = Connection {
             channel: listener.accept().await.unwrap(),
             pending: Vec::new(),
+            poisoned: false,
         };
         client.write_all(b"one\ntwo\npart").await.unwrap();
-        assert_eq!(server.read_frame().await.unwrap().unwrap(), b"one");
-        assert_eq!(server.read_frame().await.unwrap().unwrap(), b"two");
+        assert_eq!(
+            server.read_frame(REQUEST_TIMEOUT).await.unwrap().unwrap(),
+            b"one"
+        );
+        assert_eq!(
+            server.read_frame(REQUEST_TIMEOUT).await.unwrap().unwrap(),
+            b"two"
+        );
         client.write_all(b"ial\n").await.unwrap();
-        assert_eq!(server.read_frame().await.unwrap().unwrap(), b"partial");
+        assert_eq!(
+            server.read_frame(REQUEST_TIMEOUT).await.unwrap().unwrap(),
+            b"partial"
+        );
         client.write_all(b"broken").await.unwrap();
         drop(client);
         assert!(matches!(
-            server.read_frame().await,
+            server.read_frame(REQUEST_TIMEOUT).await,
             Err(Error::Protocol("Truncated agent frame"))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_call_retires_the_connection() {
+        // An agent that answers after the timeout must not let a later
+        // call pick the late response up as its own.
+        let directory = tempfile::tempdir().unwrap();
+        let location = SocketLocation::Path(directory.path().join("runtime/s"));
+        let server = bind(&location).unwrap();
+        let handled = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = std::sync::Arc::clone(&handled);
+        let serving = tokio::spawn(serve(server, move |_request| {
+            let count = std::sync::Arc::clone(&count);
+            async move {
+                count.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                Ok(Value::Null)
+            }
+        }));
+        let mut connection = connect(&location).await.unwrap();
+        let slow = Request::call(1, DAEMON_STATUS, None);
+        assert!(matches!(
+            connection
+                .call_within(slow, Duration::from_millis(50))
+                .await,
+            Err(Error::Timeout)
+        ));
+        // The same connection refuses to risk answering with the late
+        // response; a fresh one is unaffected.
+        let next = Request::call(1, DAEMON_STATUS, None);
+        assert!(matches!(
+            connection
+                .call_within(next, Duration::from_millis(50))
+                .await,
+            Err(Error::Protocol(_))
+        ));
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(handled.load(Ordering::Relaxed), 1);
+        serving.abort();
     }
 
     #[tokio::test]
@@ -470,9 +559,10 @@ mod tests {
         let mut server = Connection {
             channel: listener.accept().await.unwrap(),
             pending: vec![b'x'; MAX_FRAME_BYTES + 1],
+            poisoned: false,
         };
         assert!(matches!(
-            server.read_frame().await,
+            server.read_frame(REQUEST_TIMEOUT).await,
             Err(Error::FrameTooLarge)
         ));
         client.write_all(b"\n").await.unwrap();
