@@ -119,7 +119,7 @@ struct MenuBarView: View {
             if row.activity == .working {
                 ProgressView()
                     .controlSize(.small)
-                    .accessibilityLabel("Working")
+                    .accessibilityLabel("Syncing \(row.name)")
             }
 
             Button("Sync \(row.name)", systemImage: "arrow.triangle.2.circlepath") {
