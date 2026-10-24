@@ -41,7 +41,9 @@ struct MenuBarView: View {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)
+                    .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
             }
 
             Divider()
@@ -59,7 +61,7 @@ struct MenuBarView: View {
 
     private func pairListHeight(_ count: Int) -> CGFloat {
         // Leave most of the display for the header and fixed commands, even at larger text sizes.
-        let screenLimit = NSScreen.main.map { $0.visibleFrame.height * Self.pairListScreenFraction }
+        let screenLimit = NSScreen.screens.map { $0.visibleFrame.height * Self.pairListScreenFraction }.min()
             ?? Self.maximumPairListHeight
         return min(pairRowHeight * CGFloat(count), Self.maximumPairListHeight, screenLimit)
     }
@@ -98,7 +100,9 @@ struct MenuBarView: View {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)
+                    .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
                     .padding(.leading, 34)
             }
         }

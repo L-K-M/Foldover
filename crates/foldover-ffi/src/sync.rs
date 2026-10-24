@@ -565,6 +565,19 @@ mod tests {
 
     #[test]
     fn statuses_keep_every_count_path_byte_and_side() {
+        let SyncJobState::Working { progress, .. } = SyncStatus::Working {
+            job: SyncJob::Run,
+            cancelling: false,
+            progress: SyncProgress {
+                rate: 17,
+                ..SyncProgress::default()
+            },
+        }
+        .into() else {
+            panic!("unexpected state");
+        };
+        assert_eq!(progress.rate, 17);
+
         let preview = SyncPreview {
             items: vec![
                 SyncItem {

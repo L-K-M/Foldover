@@ -163,7 +163,7 @@ fn agent_instance() -> &'static str {
 /// Durable progress a run hands to the state store, in order.
 #[derive(Clone, Copy, Debug)]
 pub enum Commit<'a> {
-    /// First run only, before any other write.
+    /// Record the first run's identities only after it completes.
     Identities { left: EndpointId, right: EndpointId },
     /// Base updates, with the journal entries of `run`'s writes behind
     /// them (ADR 0029), so the run can be undone.

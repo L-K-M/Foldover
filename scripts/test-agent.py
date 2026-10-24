@@ -29,6 +29,8 @@ ROOT_OVERLAP = -32006
 STALE_REVISION = -32004
 PAIR_NOT_FOUND = -32003
 CONFLICT_EXIT = 4
+# More than the protocol's first 100 preview items.
+PAGED_CHANGES = 125
 FORBIDDEN_ENTITLEMENTS = (
     "com.apple.security.get-task-allow",
     "com.apple.security.cs.debugger",
@@ -217,6 +219,42 @@ def restoration(cli, endpoint, directory):
         raise RuntimeError("Successful restore did not return the contents")
 
 
+def preview_paging(cli, endpoint, directory):
+    left, right = directory / "paging-left", directory / "paging-right"
+    left.mkdir()
+    right.mkdir()
+    names = {f"item-{index:03}.txt" for index in range(PAGED_CHANGES)}
+    for name in names:
+        (left / name).write_bytes(b"preview only")
+    created = invoke(cli, endpoint, ("pairs", "add", "Paging", str(left), str(right), "sync"))
+    if created.returncode != 0:
+        raise RuntimeError(f"Paging pair creation failed: {created}")
+    pair = json.loads(created.stdout)["id"]
+
+    for suffix in [(), ("copies",)]:
+        listed = invoke(cli, endpoint, ("sync", pair, "--changes", *suffix))
+        items = [json.loads(line) for line in listed.stdout.splitlines()]
+        paths = [bytes(item["path"]).decode() for item in items]
+        if listed.returncode != 0 or len(paths) != len(names) or set(paths) != names:
+            raise RuntimeError(f"CLI lost or duplicated preview pages: {listed}")
+    empty = invoke(cli, endpoint, ("sync", pair, "--changes", "archives"))
+    if empty.returncode != 0 or empty.stdout.strip():
+        raise RuntimeError(f"CLI ignored the preview kind filter: {empty}")
+    if any((right / name).exists() for name in names):
+        raise RuntimeError("Listing changes wrote to an endpoint")
+
+
+def sync_all_results(cli, endpoint):
+    catalog = invoke(cli, endpoint, ("pairs",))
+    expected = {json.loads(line)["id"] for line in catalog.stdout.splitlines()}
+    synced = invoke(cli, endpoint, ("sync", "--all"))
+    results = [json.loads(line) for line in synced.stdout.splitlines()]
+    ids = [result["id"] for result in results]
+    # Docs is conflicted; the first-run pairs need approval. Conflicts win.
+    if synced.returncode != CONFLICT_EXIT or len(ids) != len(expected) or set(ids) != expected:
+        raise RuntimeError(f"Sync All exit {synced.returncode}, pair IDs {ids}; expected exit {CONFLICT_EXIT}, {expected}")
+
+
 def verify_release_entitlements(agent, cli):
     bundle = agent.parents[3]
     if bundle.suffix != ".app" or cli.parents[3] != bundle:
@@ -297,6 +335,8 @@ def main():
             if pair is not None:
                 synchronization(cli, endpoint, home)
                 restoration(cli, endpoint, home)
+                preview_paging(cli, endpoint, home)
+                sync_all_results(cli, endpoint)
             # Clients can close before the agent reads their kernel credentials.
             for _ in range(DISCONNECTED_CLIENTS):
                 with socket.socket(socket.AF_UNIX) as connection:

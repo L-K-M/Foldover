@@ -35,7 +35,30 @@ const SFTP_WARNING: &str = concat!(
     "with resource forks cannot be copied. Power-loss-safe mode is unavailable; ",
     "Standard follows server durability."
 );
-const USAGE: &str = "usage: foldover --version\n       foldover --help\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs check NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover safe-mode off [--socket PATH]\n       foldover automation [low-power pause|run] [--socket PATH]\n       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]\n       foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]\n       foldover servers [browse sftp://[user@]host[:port]/path] [--socket PATH]\nLEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --records (both | source: a backup-* target that cannot hold .foldover keeps nothing, archives nothing); --schedule (manual | changes | MINUTES | daily@HH:MM[:DAYS]); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --bandwidth-limit (MEGABYTES per second | none); --canary (PATH | none)\nUpdates keep options that are not named.";
+const USAGE: &str = "usage: foldover --version
+       foldover --help
+       foldover status [--socket PATH]
+       foldover pairs [--socket PATH]
+       foldover pairs show ID [--socket PATH]
+       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]
+       foldover pairs check NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]
+       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]
+       foldover pairs remove ID REVISION [--socket PATH]
+       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN | --changes [copies | updates | archives | conflicts | blocked | kept | moves]] [--progress] [--socket PATH]
+       foldover sync --all [--socket PATH]
+       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]
+       foldover history ID [--socket PATH]
+       foldover pause [MINUTES] [--socket PATH]
+       foldover resume [--socket PATH]
+       foldover safe-mode off [--socket PATH]
+       foldover automation [low-power pause|run] [--socket PATH]
+       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]
+       foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]
+       foldover servers [browse sftp://[user@]host[:port]/path] [--socket PATH]
+LEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)
+MODE: sync | mirror-left | mirror-right | backup-left | backup-right
+OPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --records (both | source: a backup-* target that cannot hold .foldover keeps nothing, archives nothing); --schedule (manual | changes | MINUTES | daily@HH:MM[:DAYS]); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --bandwidth-limit (MEGABYTES per second | none); --canary (PATH | none)
+Updates keep options that are not named.";
 
 enum Request {
     /// `--version`: print `foldover <version>` and exit 0.
@@ -44,8 +67,9 @@ enum Request {
     Help,
     Status(foldover_client::SocketLocation),
     Pairs(SocketLocation, PairCommand),
-    /// `progress` prints each distinct Working status while the job runs.
-    Sync(SocketLocation, PairId, SyncCommand, bool),
+    Sync(SocketLocation, PairId, SyncCommand, ProgressOutput),
+    /// `sync --all`: run every pair, reporting each one's result.
+    SyncAll(SocketLocation),
     Archive(SocketLocation, PairId, Side, ArchiveCommand),
     History(SocketLocation, PairId),
     /// Pause automatic syncs for minutes, or until resumed.
@@ -62,6 +86,12 @@ enum Request {
     /// The folders in a folder on an SFTP server (PLAN.md §4.3).
     Browse(SocketLocation, Vec<u8>),
     Usage,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ProgressOutput {
+    Final,
+    Stream,
 }
 
 /// Folders this Mac shares with paired Macs.
@@ -258,6 +288,13 @@ async fn main() -> ExitCode {
                 }
             }
         }
+        Request::SyncAll(location) => match sync_all(&location).await {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("foldover: {error}");
+                ExitCode::FAILURE
+            }
+        },
         Request::Archive(location, id, side, command) => {
             match archive(&location, id, side, command).await {
                 Ok(code) => code,
@@ -342,13 +379,16 @@ fn status_line(status: &foldover_client::DaemonStatus) -> String {
 
 fn request(args: impl Iterator<Item = OsString>) -> Request {
     let args: Vec<OsString> = args.collect();
-    if matches!(args.as_slice(), [arg] if arg == "--version") {
-        return Request::Version;
+    match parse_request(&args) {
+        // Valid names and path/option values may literally be `--help`.
+        Request::Usage if args.iter().any(|arg| arg == "--help" || arg == "-h") => Request::Help,
+        request => request,
     }
-    // `--help` or `-h` anywhere asks for usage rather than running a
-    // command: no option takes either as a value.
-    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        return Request::Help;
+}
+
+fn parse_request(args: &[OsString]) -> Request {
+    if matches!(args, [arg] if arg == "--version") {
+        return Request::Version;
     }
     let (args, location) = if args.len() >= 2 && args[args.len() - 2] == "--socket" {
         (
@@ -356,7 +396,7 @@ fn request(args: impl Iterator<Item = OsString>) -> Request {
             SocketLocation::Path(PathBuf::from(&args[args.len() - 1])),
         )
     } else {
-        (args.as_slice(), SocketLocation::Default)
+        (args, SocketLocation::Default)
     };
     match args {
         [arg] if arg == "status" => Request::Status(location),
@@ -368,8 +408,8 @@ fn request(args: impl Iterator<Item = OsString>) -> Request {
         [command, id, rest @ ..] if command == "sync" => {
             // A trailing --progress streams Working statuses while waiting.
             let (rest, progress) = match rest {
-                [rest @ .., flag] if flag == "--progress" => (rest, true),
-                _ => (rest, false),
+                [rest @ .., flag] if flag == "--progress" => (rest, ProgressOutput::Stream),
+                _ => (rest, ProgressOutput::Final),
             };
             match (
                 id.to_str().and_then(|id| id.parse().ok()),
@@ -849,7 +889,7 @@ async fn sync(
     location: &SocketLocation,
     id: PairId,
     command: SyncCommand,
-    progress: bool,
+    progress: ProgressOutput,
 ) -> Result<ExitCode, foldover_client::Error> {
     // Cancellation must keep bypassing the configuration queue, even when
     // another request is waiting on a disconnected server.
@@ -858,9 +898,9 @@ async fn sync(
         warn_sftp([pair.draft().left(), pair.draft().right()]);
     }
     if let SyncCommand::Changes(kind) = command {
-        return sync_changes(location, id, kind).await;
+        return sync_changes(location, id, kind, progress).await;
     }
-    let mut status = match command {
+    let status = match command {
         SyncCommand::Preview => foldover_client::start_preview(location, id).await?,
         // A plain run goes through `run_one` so `sync ID` and `sync
         // --all` cannot drift apart in how a run is started.
@@ -868,7 +908,7 @@ async fn sync(
             left: 0,
             right: 0,
             review: None,
-        } => run_one(location, id).await?,
+        } => run_one(location, id, progress).await?,
         SyncCommand::Run {
             left,
             right,
@@ -887,16 +927,7 @@ async fn sync(
         }
         SyncCommand::Changes(_) => unreachable!("listed before the job dispatch"),
     };
-    let mut printed: Option<SyncStatus> = None;
-    while matches!(status, SyncStatus::Working { .. }) {
-        // Counters repeat between polls; only new values are worth a line.
-        if progress && printed.as_ref() != Some(&status) {
-            println!("{}", serde_json::to_string(&status)?);
-            printed = Some(status.clone());
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
-        status = foldover_client::sync_status(location, id).await?;
-    }
+    let status = settled(location, id, status, progress).await?;
     println!("{}", serde_json::to_string(&status)?);
     if let SyncStatus::NeedsApproval { preview } = &status {
         eprintln!(
@@ -907,8 +938,7 @@ async fn sync(
     Ok(status_code(&status))
 }
 
-/// The exit code for a settled status: success, approval needed, or
-/// failure.
+/// Errors take precedence over conflicts, then approval, then success.
 fn status_code(status: &SyncStatus) -> ExitCode {
     match status {
         SyncStatus::Idle | SyncStatus::Previewed { .. } => ExitCode::SUCCESS,
@@ -933,9 +963,25 @@ fn status_code(status: &SyncStatus) -> ExitCode {
 async fn run_one(
     location: &SocketLocation,
     id: PairId,
+    progress: ProgressOutput,
 ) -> Result<SyncStatus, foldover_client::Error> {
-    let mut status = foldover_client::start_run(location, id, 0, 0, None).await?;
+    let status = foldover_client::start_run(location, id, 0, 0, None).await?;
+    settled(location, id, status, progress).await
+}
+
+/// All job entry points share polling and distinct progress output.
+async fn settled(
+    location: &SocketLocation,
+    id: PairId,
+    mut status: SyncStatus,
+    progress: ProgressOutput,
+) -> Result<SyncStatus, foldover_client::Error> {
+    let mut printed = None;
     while matches!(status, SyncStatus::Working { .. }) {
+        if progress == ProgressOutput::Stream && printed.as_ref() != Some(&status) {
+            println!("{}", serde_json::to_string(&status)?);
+            printed = Some(status.clone());
+        }
         tokio::time::sleep(POLL_INTERVAL).await;
         status = foldover_client::sync_status(location, id).await?;
     }
@@ -966,17 +1012,19 @@ async fn sync_all(location: &SocketLocation) -> Result<ExitCode, foldover_client
     let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SYNCS));
     for pair in pairs {
         let location = location.clone();
-        let permit = std::sync::Arc::clone(&permits)
-            .acquire_owned()
-            .await
-            .expect("the semaphore is never closed");
+        let permits = std::sync::Arc::clone(&permits);
         jobs.spawn(async move {
-            let outcome = run_one(&location, pair.id()).await;
-            drop(permit);
+            // Waiting for a slot must not delay collecting finished jobs.
+            let _permit = permits
+                .acquire_owned()
+                .await
+                .expect("the semaphore is never closed");
+            let outcome = run_one(&location, pair.id(), ProgressOutput::Final).await;
             (pair, outcome)
         });
     }
     let mut failed = false;
+    let mut conflicted = false;
     let mut approvals = false;
     // Each line stands alone, so pairs are reported as they finish.
     while let Some(joined) = jobs.join_next().await {
@@ -990,6 +1038,7 @@ async fn sync_all(location: &SocketLocation) -> Result<ExitCode, foldover_client
             Ok(status) => {
                 match status_code(status) {
                     code if code == ExitCode::SUCCESS => {}
+                    code if code == ExitCode::from(CONFLICT_EXIT) => conflicted = true,
                     code if code == ExitCode::from(APPROVAL_EXIT) => approvals = true,
                     _ => failed = true,
                 }
@@ -1023,6 +1072,8 @@ async fn sync_all(location: &SocketLocation) -> Result<ExitCode, foldover_client
     }
     Ok(if failed {
         ExitCode::FAILURE
+    } else if conflicted {
+        ExitCode::from(CONFLICT_EXIT)
     } else if approvals {
         ExitCode::from(APPROVAL_EXIT)
     } else {
@@ -1038,22 +1089,17 @@ async fn sync_changes(
     location: &SocketLocation,
     id: PairId,
     kind: Option<SyncItemKind>,
+    progress: ProgressOutput,
 ) -> Result<ExitCode, foldover_client::Error> {
-    let mut status = foldover_client::sync_status(location, id).await?;
-    while matches!(status, SyncStatus::Working { .. }) {
-        tokio::time::sleep(POLL_INTERVAL).await;
-        status = foldover_client::sync_status(location, id).await?;
-    }
+    let status = foldover_client::sync_status(location, id).await?;
+    let mut status = settled(location, id, status, progress).await?;
     if !matches!(
         status,
         SyncStatus::Previewed { .. } | SyncStatus::NeedsApproval { .. }
     ) {
         // No preview is held: make one so the command stands alone.
         status = foldover_client::start_preview(location, id).await?;
-        while matches!(status, SyncStatus::Working { .. }) {
-            tokio::time::sleep(POLL_INTERVAL).await;
-            status = foldover_client::sync_status(location, id).await?;
-        }
+        status = settled(location, id, status, progress).await?;
     }
     let token = match status {
         SyncStatus::Previewed { ref preview } | SyncStatus::NeedsApproval { ref preview } => {
@@ -1294,6 +1340,35 @@ mod tests {
         assert!(matches!(
             req(&["status", "--socket", "/tmp/foldover.sock", "--help"]),
             Request::Help
+        ));
+    }
+
+    #[test]
+    fn help_flags_do_not_replace_names_paths_or_option_values() {
+        let Request::Pairs(_, PairCommand::Add(draft)) = req(&[
+            "pairs",
+            "add",
+            "-h",
+            "/a",
+            "/b",
+            "sync",
+            "--exclude",
+            "--help",
+        ]) else {
+            panic!("help-looking values must remain literal");
+        };
+        assert_eq!(draft.name(), "-h");
+        assert_eq!(draft.options().filters().rules(), ["--help"]);
+
+        let id = "01010101010101010101010101010101";
+        let token = "ab".repeat(32);
+        assert!(matches!(
+            req(&["sync", id, "--keep-both", "--help", "--review", &token]),
+            Request::Sync(_, _, SyncCommand::KeepBoth { ref path, .. }, ProgressOutput::Final) if path == b"--help"
+        ));
+        assert!(matches!(
+            req(&["status", "--socket", "-h"]),
+            Request::Status(SocketLocation::Path(path)) if path == PathBuf::from("-h")
         ));
     }
 
@@ -1568,33 +1643,33 @@ mod tests {
                     right: 0,
                     review: None
                 },
-                false
+                ProgressOutput::Final
             )
         ));
         assert!(matches!(
             req(&["sync", id, "--preview", "--socket", "/tmp/s"]),
-            Request::Sync(_, _, SyncCommand::Preview, false)
+            Request::Sync(_, _, SyncCommand::Preview, ProgressOutput::Final)
         ));
         assert!(matches!(
             req(&["sync", id, "--cancel"]),
-            Request::Sync(_, _, SyncCommand::Cancel, false)
+            Request::Sync(_, _, SyncCommand::Cancel, ProgressOutput::Final)
         ));
         assert!(matches!(
             req(&["sync", id, "--undo"]),
-            Request::Sync(_, _, SyncCommand::Undo, false)
+            Request::Sync(_, _, SyncCommand::Undo, ProgressOutput::Final)
         ));
         let token = "ab".repeat(32);
         assert!(matches!(
             req(&["sync", id, "--keep-right", "docs/a.txt", "--review", &token]),
-            Request::Sync(_, _, SyncCommand::Keep { side: Side::Right, ref path, .. }, false) if path == b"docs/a.txt"
+            Request::Sync(_, _, SyncCommand::Keep { side: Side::Right, ref path, .. }, ProgressOutput::Final) if path == b"docs/a.txt"
         ));
         assert!(matches!(
             req(&["sync", id, "--keep-both", "a.txt", "--review", &token]),
-            Request::Sync(_, _, SyncCommand::KeepBoth { ref path, .. }, false) if path == b"a.txt"
+            Request::Sync(_, _, SyncCommand::KeepBoth { ref path, .. }, ProgressOutput::Final) if path == b"a.txt"
         ));
         assert!(matches!(
             req(&["sync", id, "--skip", "a.txt", "--review", &token]),
-            Request::Sync(_, _, SyncCommand::Skip { ref path, .. }, false) if path == b"a.txt"
+            Request::Sync(_, _, SyncCommand::Skip { ref path, .. }, ProgressOutput::Final) if path == b"a.txt"
         ));
         assert!(matches!(
             req(&["sync", id, "--approve", "60", "0", "--review", &token]),
@@ -1606,16 +1681,46 @@ mod tests {
                     right: 0,
                     review: Some(_)
                 },
-                false
+                ProgressOutput::Final
             )
         ));
         assert!(matches!(
             req(&["sync", id, "--changes"]),
-            Request::Sync(_, _, SyncCommand::Changes(None))
+            Request::Sync(_, _, SyncCommand::Changes(None), ProgressOutput::Final)
         ));
         assert!(matches!(
             req(&["sync", id, "--changes", "conflicts"]),
-            Request::Sync(_, _, SyncCommand::Changes(Some(SyncItemKind::Conflict)))
+            Request::Sync(
+                _,
+                _,
+                SyncCommand::Changes(Some(SyncItemKind::Conflict)),
+                ProgressOutput::Final
+            )
+        ));
+        assert!(matches!(
+            req(&["sync", id, "--progress"]),
+            Request::Sync(_, _, SyncCommand::Run { .. }, ProgressOutput::Stream)
+        ));
+        assert!(matches!(
+            req(&["sync", id, "--preview", "--progress"]),
+            Request::Sync(_, _, SyncCommand::Preview, ProgressOutput::Stream)
+        ));
+        assert!(matches!(
+            req(&[
+                "sync",
+                id,
+                "--approve",
+                "60",
+                "0",
+                "--review",
+                &token,
+                "--progress"
+            ]),
+            Request::Sync(_, _, SyncCommand::Run { .. }, ProgressOutput::Stream)
+        ));
+        assert!(matches!(
+            req(&["sync", id, "--progress", "--preview"]),
+            Request::Usage
         ));
         // An approval or conflict choice without its preview's token is a
         // usage error: the CLI never looks a token up itself.

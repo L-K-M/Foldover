@@ -140,7 +140,12 @@ client does not cancel a committing configuration change.
 ### Sync
 
 ```sh
+foldover --help                   # usage; exits successfully
 foldover sync ID --preview       # list changes; writes nothing
+foldover sync ID --changes       # every preview item, across all pages
+foldover sync ID --changes conflicts  # only conflicts in the held preview
+foldover sync ID --progress      # distinct working statuses, then the result
+foldover sync --all              # every pair, at most four at once
 foldover sync ID                 # run; a pair's first run needs review
 foldover sync ID --approve 60 0 --review TOKEN  # approve the reviewed deletions
 foldover sync ID --keep-right PATH --review TOKEN  # keep B's reviewed version
@@ -156,8 +161,14 @@ foldover archive ID left RUN --put-back PATH
 foldover archive ID left RUN --put-back-all
 ```
 
-Each command waits for its job and prints the final status as JSON. A run
-that finishes with unresolved conflicts and no failed items exits with
+Each command waits for its job and prints the final status as JSON.
+`--progress` prints working statuses as JSON lines too. `--changes` reuses
+the held preview, or previews first; its optional kind is `copies`, `updates`,
+`archives`, `conflicts`, `blocked`, `kept` or `moves`. Sync All prints one
+JSON line per pair as it finishes. Its exit code gives errors precedence
+over conflicts, then approval, then success.
+
+A run that finishes with unresolved conflicts and no failed items exits with
 status 4; failures exit with status 1 even when conflicts also remain,
 and invalid command usage with status 2. A partial
 `--put-back-all` also exits with status 1 and prints its full restore report;

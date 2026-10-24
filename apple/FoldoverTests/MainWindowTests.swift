@@ -80,6 +80,7 @@ private actor WindowSyncClient: SyncClient {
     }
 
     private var states: [String: PairSyncState] = [:]
+    private var histories: [String: [RunRecord]] = [:]
     private var runs = 0
     private var runReply = RunReply.finish
     /// Status requests fail, as while the agent does not answer.
@@ -88,6 +89,7 @@ private actor WindowSyncClient: SyncClient {
     private(set) var cancelledIDs: [String] = []
 
     func set(_ state: PairSyncState, for id: String) { states[id] = state }
+    func setHistory(_ history: [RunRecord], for id: String) { histories[id] = history }
     func setRunReply(_ reply: RunReply) { runReply = reply }
     func setStatusFails(_ fails: Bool) { statusFails = fails }
     func setUndoFails(_ fails: Bool) { undoFails = fails }
@@ -130,7 +132,7 @@ private actor WindowSyncClient: SyncClient {
     func skipOnce(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState {
         states[id] ?? .idle
     }
-    func history(_ id: String) async throws -> [RunRecord] { [] }
+    func history(_ id: String) async throws -> [RunRecord] { histories[id] ?? [] }
     func changes(_ id: String, after: Data?, filter: ChangeFilter?,
                  reviewToken: String) async throws -> ChangePage {
         ChangePage(changes: [], more: false)
@@ -266,8 +268,15 @@ func pairRowsSayHowEachPairReadsAtAGlance() async {
     let photos = windowPair(photosWindowID, "Photos", mode: .backupLeft)
     let docs = windowPair(docsWindowID, "Docs")
     let client = WindowSyncClient()
+    let lastSuccess = Date(timeIntervalSince1970: 100)
+    await client.setHistory([
+        RunRecord(started: lastSuccess.addingTimeInterval(-60), finished: lastSuccess,
+                  trigger: .manual, end: .completed, copied: 1, updated: 0, archived: 0,
+                  recovered: 0, conflicts: 0, failures: 0, message: nil)
+    ], for: photos.id)
     let viewModel = await windowModel([photos, docs], sync: client)
     #expect(viewModel.menuBarStatus == .idle)
+    await viewModel.sync(for: photos).refresh()
 
     await client.set(.previewed(conflictPlan()), for: docs.id)
     await viewModel.sync(for: docs).preview()
@@ -277,8 +286,7 @@ func pairRowsSayHowEachPairReadsAtAGlance() async {
     #expect(rows[0].activity == .attention)
     #expect(rows[0].conflicts == 2)
     #expect(rows[0].symbol == "arrow.left.arrow.right")
-    let lastSuccess = viewModel.sync(for: photos).lastSuccess
-    #expect(lastSuccess != nil)
+    #expect(viewModel.sync(for: photos).lastSuccess == lastSuccess)
     #expect(rows[1] == PairRow(id: photos.id, name: "Photos", status: "Ready",
                                symbol: "arrow.right.to.line.compact", modeTitle: "Back up A to B",
                                activity: .idle,

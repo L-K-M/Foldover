@@ -18,4 +18,4 @@ path = "src/main.rs"
 foldover-client = { path = "../foldover-client" }
 foldover-proto = { path = "../foldover-proto" }
 serde_json = "1"
-tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "sync", "time"] }

@@ -100,6 +100,7 @@ struct ApprovalRequest: Equatable, Sendable, Identifiable {
 /// change them. Every builder that shares the cache must be
 /// distinguishable by these fields — two builders with an equal source
 /// get each other's rows.
+/// Settings changes invalidate `reviewable` through the pair revision.
 fileprivate struct RowsSource: Equatable {
     var pair: String
     var revision: Int
@@ -385,7 +386,7 @@ struct PairSyncViewModel {
         // A wait on another Mac freezes `copied`, so the cumulative rate
         // would decay and its ETA balloon — hide both during the stall.
         if progress.rate > 0, progress.waitingFor == nil {
-            text += " · " + String(localized: "\(byteText(progress.rate))/s")
+            text += " · " + throughputText(progress.rate)
             if progress.bytes > progress.copied {
                 text += " · " + String(localized: "about \(timeText((progress.bytes - progress.copied) / progress.rate)) left")
             }
@@ -393,16 +394,44 @@ struct PairSyncViewModel {
         return text
     }
 
-    static func timeText(_ seconds: UInt64) -> String {
-        if seconds >= 60 * 90 {
-            let minutes = (seconds % 3600) / 60
-            if minutes == 0 {
-                return String(localized: "\(seconds / 3600) h")
-            }
-            return String(localized: "\(seconds / 3600) h \(minutes) min")
+    /// Promote rounded unit boundaries instead of showing "1000 kB/s".
+    static func throughputText(_ bytesPerSecond: UInt64) -> String {
+        let kilobyte = 1_000.0
+        let megabyte = kilobyte * kilobyte
+        let gigabyte = megabyte * kilobyte
+        let promotionThreshold = 0.9995
+        let rate = Double(bytesPerSecond)
+        let locale = Locale(identifier: "en_US_POSIX")
+        if rate >= gigabyte * promotionThreshold {
+            return String(format: "%.2f GB/s", locale: locale, rate / gigabyte)
         }
-        if seconds >= 90 {
-            return String(localized: "\((seconds + 30) / 60) min")
+        if rate >= megabyte * promotionThreshold {
+            return String(format: "%.1f MB/s", locale: locale, rate / megabyte)
+        }
+        if rate >= kilobyte * promotionThreshold {
+            return String(format: "%.0f kB/s", locale: locale, rate / kilobyte)
+        }
+        return String(format: "%.0f B/s", locale: locale, rate)
+    }
+
+    static func timeText(_ seconds: UInt64) -> String {
+        let secondsPerMinute: UInt64 = 60
+        let secondsPerHour = 60 * secondsPerMinute
+        if seconds >= secondsPerHour {
+            let minutes = (seconds % secondsPerHour) / secondsPerMinute
+            if minutes == 0 {
+                return String(localized: "\(seconds / secondsPerHour) h")
+            }
+            return String(localized: "\(seconds / secondsPerHour) h \(minutes) min")
+        }
+        if seconds >= 10 * secondsPerMinute {
+            return String(localized: "\(seconds / secondsPerMinute) min")
+        }
+        if seconds >= secondsPerMinute {
+            let minutes = seconds / secondsPerMinute
+            let rest = seconds % secondsPerMinute
+            if rest == 0 { return String(localized: "\(minutes) min") }
+            return String(localized: "\(minutes) min \(rest) s")
         }
         return String(localized: "\(seconds) s")
     }

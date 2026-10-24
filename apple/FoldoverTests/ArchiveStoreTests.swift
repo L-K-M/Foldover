@@ -155,6 +155,7 @@ func aWholeRunRestoreReservesBothRestoreCommands() async throws {
     #expect(!viewModel.canPutBack)
     #expect(!viewModel.canPutBackAll)
     #expect(viewModel.statusText == "Putting items back…")
+    #expect(!viewModel.itemRows.isEmpty)
 
     await viewModel.putBackAll()
     await viewModel.putBack(row)

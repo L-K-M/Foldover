@@ -77,10 +77,10 @@ fn request(args: impl Iterator<Item = OsString>) -> Request {
     match args.as_slice() {
         [] => Request::Run(foldover_ipc::SocketLocation::Default),
         [arg] if arg == "--version" => Request::Version,
-        _ if args.iter().any(|arg| arg == "--help" || arg == "-h") => Request::Help,
         [arg, path] if arg == "--socket" => {
             Request::Run(foldover_ipc::SocketLocation::Path(PathBuf::from(path)))
         }
+        _ if args.iter().any(|arg| arg == "--help" || arg == "-h") => Request::Help,
         _ => Request::Usage,
     }
 }
@@ -102,6 +102,14 @@ mod tests {
     fn help_flags_select_help() {
         assert!(matches!(req(&["--help"]), Request::Help));
         assert!(matches!(req(&["-h"]), Request::Help));
+    }
+
+    #[test]
+    fn a_help_looking_socket_path_is_still_a_value() {
+        assert!(matches!(
+            req(&["--socket", "-h"]),
+            Request::Run(foldover_ipc::SocketLocation::Path(path)) if path == PathBuf::from("-h")
+        ));
     }
 
     #[test]

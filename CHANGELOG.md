@@ -8,6 +8,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- An aborted first sync still requires review on retry. Editing a pair's
+  folders re-subscribes its change watchers. Peer scan counters cannot
+  claim unbounded work in one progress report.
+- Put Back All reserves the archive through its reload and shows recovery
+  activity. Periodic health probes keep pair commands enabled.
+- Unicode spelling preparation counts aliases once, and preview rows are
+  cached across renders and searches.
+- Remote requests, including archive listings, get longer client timeouts.
+  Read timeouts invite retry; saves retain the uncertain-commit warning.
+- The menu-bar pair list scrolls while commands remain reachable. Its
+  error captions are bounded and selectable, and busy pairs offer Stop.
+
 - Unreadable or changing files, folders and ambiguous AppleDouble sidecars
   no longer stop independent, safe copies. Preview and sync results list
   errors with readable paths; affected branches stay unchanged in both
@@ -69,6 +81,11 @@ All notable changes to this project are documented here. The format follows
   from a backup starts without pairs.
 
 ### Added
+
+- CLI help, live `sync ID --progress`, complete filtered preview listings
+  with `--changes [KIND]`, and bounded concurrent `sync --all`.
+- Agent-measured copy throughput and ETA, labeled progress indicators,
+  sidebar freshness tints and relative archive dates.
 
 - Edit › Undo reverses the last Sync Now from the window, named after
   its pair. Edit › Find filters the list of changes, Edit › Copy copies
