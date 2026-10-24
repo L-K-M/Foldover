@@ -91,6 +91,7 @@ struct ArchiveViewModel {
     /// What the last put-back did, for the window's status line: a
     /// whole run, several items, or where one item went.
     var statusText: String? {
+        if store.isPuttingBack { return String(localized: "Putting items back…") }
         if let restoreText { return restoreText }
         guard store.placedCount > 1 else { return placedText }
         return String(localized: "Put back \(store.placedCount) items. The next sync copies them to the other folder.")
