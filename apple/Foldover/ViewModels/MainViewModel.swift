@@ -93,6 +93,8 @@ struct PairRow: Identifiable, Equatable {
     let conflicts: Int
     let canSync: Bool
     let canCancel: Bool
+    /// When the newest completed sync finished; nil before any success.
+    let lastSuccess: Date?
 }
 
 /// The background agent's health as the status bar's dot shows it.
@@ -317,7 +319,8 @@ final class MainViewModel {
             return PairRow(id: pair.id, name: pair.settings.name, status: pairSync.shortStatus,
                            symbol: pair.settings.mode.symbol, modeTitle: pair.settings.mode.title,
                            activity: pairSync.activity, conflicts: pairSync.conflictCount,
-                           canSync: pairSync.canSync, canCancel: pairSync.canCancel)
+                           canSync: pairSync.canSync, canCancel: pairSync.canCancel,
+                           lastSuccess: pairSync.lastSuccess)
         }
     }
 

@@ -100,10 +100,14 @@ private struct SidebarPairRow: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(row.name)
                         .lineLimit(1)
-                    Text(row.status)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    // Freshness tiers depend on wall-clock age; re-read
+                    // every few minutes so a pair cannot look fresh all day.
+                    TimelineView(.periodic(from: .now, by: 300)) { context in
+                        Text(row.status)
+                            .font(.caption)
+                            .foregroundStyle(statusColor(at: context.date))
+                            .lineLimit(1)
+                    }
                 }
             } icon: {
                 Image(systemName: row.symbol)
@@ -125,6 +129,28 @@ private struct SidebarPairRow: View {
             }
         }
         .badge(row.conflicts)
+    }
+
+    /// Quiet freshness (PLAN.md §3.2 principle 4): a completed sync
+    /// within the last hour reads primary, within the last day cools to
+    /// secondary, and beyond a day warms to orange as gently stale.
+    /// Never-synced pairs stay secondary; attention and work keep the
+    /// status colors they already use. The orange here is at 0.85
+    /// opacity so a stale row is softer than the solid attention icon.
+    private func statusColor(at now: Date) -> Color {
+        switch row.activity {
+        case .attention:
+            return .orange
+        case .working, .waiting:
+            return .secondary
+        case .idle:
+            break
+        }
+        guard let last = row.lastSuccess else { return .secondary }
+        let age = now.timeIntervalSince(last)
+        if age < 3_600 { return .primary }
+        if age < 86_400 { return .secondary }
+        return .orange.opacity(0.85)
     }
 }
 
