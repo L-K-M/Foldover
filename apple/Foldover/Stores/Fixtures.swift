@@ -344,7 +344,8 @@ actor FixtureSyncClient: SyncClient {
         case .run:
             let total = UInt64(Fixtures.changes(for: id).count)
             return WorkProgress(listed: 48_211, checked: 48_211, changes: total, applied: total * done / steps,
-                                bytes: 120_600_000, copied: 120_600_000 * done / steps)
+                                bytes: 120_600_000, copied: 120_600_000 * done / steps,
+                                rate: done == 0 ? 0 : 26_000_000)
         }
     }
 

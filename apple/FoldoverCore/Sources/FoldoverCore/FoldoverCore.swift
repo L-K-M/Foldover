@@ -2764,6 +2764,11 @@ public struct SyncWorkProgress: Equatable, Hashable {
     public var bytes: UInt64
     public var copied: UInt64
     /**
+     * Copy throughput so far, in bytes per second; 0 before the first
+     * copy lands.
+     */
+    public var rate: UInt64
+    /**
      * The Mac whose sync of a folder this job waits for.
      */
     public var waitingFor: String?
@@ -2771,6 +2776,10 @@ public struct SyncWorkProgress: Equatable, Hashable {
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(listed: UInt64, checked: UInt64, changes: UInt64, applied: UInt64, bytes: UInt64, copied: UInt64, 
+        /**
+         * Copy throughput so far, in bytes per second; 0 before the first
+         * copy lands.
+         */rate: UInt64, 
         /**
          * The Mac whose sync of a folder this job waits for.
          */waitingFor: String?) {
@@ -2780,6 +2789,7 @@ public struct SyncWorkProgress: Equatable, Hashable {
         self.applied = applied
         self.bytes = bytes
         self.copied = copied
+        self.rate = rate
         self.waitingFor = waitingFor
     }
 
@@ -2805,6 +2815,7 @@ public struct FfiConverterTypeSyncWorkProgress: FfiConverterRustBuffer {
                 applied: FfiConverterUInt64.read(from: &buf), 
                 bytes: FfiConverterUInt64.read(from: &buf), 
                 copied: FfiConverterUInt64.read(from: &buf), 
+                rate: FfiConverterUInt64.read(from: &buf), 
                 waitingFor: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -2816,6 +2827,7 @@ public struct FfiConverterTypeSyncWorkProgress: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.applied, into: &buf)
         FfiConverterUInt64.write(value.bytes, into: &buf)
         FfiConverterUInt64.write(value.copied, into: &buf)
+        FfiConverterUInt64.write(value.rate, into: &buf)
         FfiConverterOptionString.write(value.waitingFor, into: &buf)
     }
 }

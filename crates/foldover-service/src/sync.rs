@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use foldover_engine::{
     Action, Approval, Commit, Completion, DeletionReview, Engine, KeepBothError, ObserveStep,
@@ -103,6 +103,8 @@ pub(crate) struct Progress {
     applied: AtomicU64,
     bytes: AtomicU64,
     copied: AtomicU64,
+    /// When the apply phase started, for the copy rate a status reports.
+    applying_since: Mutex<Option<Instant>>,
     waiting_for: Mutex<Option<String>>,
 }
 
@@ -118,6 +120,10 @@ impl RunProgress for Progress {
     fn planned(&self, changes: u64, bytes: u64) {
         self.changes.store(changes, Ordering::Relaxed);
         self.bytes.store(bytes, Ordering::Relaxed);
+        *self
+            .applying_since
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
     }
 
     fn applied(&self, bytes: u64) {
@@ -136,13 +142,27 @@ impl RunProgress for Progress {
 impl Progress {
     fn wire(&self) -> SyncProgress {
         let read = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+        let copied = read(&self.copied);
+        // The apply clock starts when the plan lands; a job that has not
+        // copied yet reports no rate rather than a misleading one.
+        let rate = self
+            .applying_since
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .filter(|_| copied > 0)
+            .map_or(0, |since| {
+                // Sub-second elapsed counts as a whole second: rounding
+                // up keeps the rate conservative, never overstated.
+                (copied as u128 / since.elapsed().as_secs_f64().ceil().max(1.0) as u128) as u64
+            });
         SyncProgress {
             listed: read(&self.listed),
             checked: read(&self.checked),
             changes: read(&self.changes),
             applied: read(&self.applied),
             bytes: read(&self.bytes),
-            copied: read(&self.copied),
+            copied,
+            rate,
             waiting_for: self
                 .waiting_for
                 .lock()
@@ -999,6 +1019,18 @@ mod tests {
                 progress: SyncProgress::default(),
             }
         );
+    }
+
+    #[test]
+    fn progress_reports_no_rate_until_a_copy_lands() {
+        let progress = Progress::default();
+        assert_eq!(progress.wire().rate, 0);
+        progress.planned(3, 100);
+        assert_eq!(progress.wire().rate, 0);
+        progress.applied(100);
+        // The rate is nonzero but never exceeds copied per whole second.
+        let rate = progress.wire().rate;
+        assert!(rate > 0 && rate <= 100, "unexpected rate {rate}");
     }
 
     async fn settled(jobs: &Jobs, id: PairId) -> SyncStatus {

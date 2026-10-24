@@ -147,6 +147,9 @@ pub struct SyncWorkProgress {
     pub applied: u64,
     pub bytes: u64,
     pub copied: u64,
+    /// Copy throughput so far, in bytes per second; 0 before the first
+    /// copy lands.
+    pub rate: u64,
     /// The Mac whose sync of a folder this job waits for.
     pub waiting_for: Option<String>,
 }
@@ -160,6 +163,7 @@ impl From<SyncProgress> for SyncWorkProgress {
             applied: progress.applied,
             bytes: progress.bytes,
             copied: progress.copied,
+            rate: progress.rate,
             waiting_for: progress.waiting_for,
         }
     }
