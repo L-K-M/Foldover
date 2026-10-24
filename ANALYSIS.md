@@ -67,7 +67,7 @@ The original four passes above remain the source of the unresolved backlog.
 | [165](https://github.com/L-K-M/Foldover/pull/165) | Combine | Restore reservation through reload, busy feedback and failure recovery tests |
 | [166](https://github.com/L-K-M/Foldover/pull/166) | Fix and merge | Slow budgets and poisoned connections; include remote archive reads |
 | [167](https://github.com/L-K-M/Foldover/pull/167) | Merge | Named progress indicators retained through menu-bar integration |
-| [168](https://github.com/L-K-M/Foldover/pull/168) | Fix and combine | Stop routing, bounded rows and large-text tests; smaller scroll steps and conservative display cap |
+| [168](https://github.com/L-K-M/Foldover/pull/168) | Fix and combine | Stop routing, bounded rows and larger-font tests; stable button targets and conservative display cap |
 | [169](https://github.com/L-K-M/Foldover/pull/169) | Supersede with 164 | Keep unit promotion, duration formatting and tests; replace client clock with agent clock |
 | [170](https://github.com/L-K-M/Foldover/pull/170) | Supersede with 168 | Keep bounded selectable errors; 168 supplies scaled rows and display-aware scrolling |
 | [171](https://github.com/L-K-M/Foldover/pull/171) | Fix and merge | Freshness updates over time; supply real history in its failing test fixture |
@@ -82,7 +82,9 @@ The original four passes above remain the source of the unresolved backlog.
 
 The review found three red native checks: 168's scroll test, 169's
 actor-isolated formatting calls, and 171's empty history fixture. The
-consolidation corrects those paths. CLI regressions reproduced delayed
+scroll screenshots showed the target row on screen: its combined label
+is a button, while the test queried a static text. The consolidation
+corrects those paths. CLI regressions reproduced delayed
 Sync All output, swallowed progress and incorrect aggregate conflict
 exits before their fixes. Help-value and archive-budget tests also failed
 before their fixes.

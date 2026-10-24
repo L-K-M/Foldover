@@ -43,7 +43,8 @@ struct MenuBarScene: Scene {
     private var menuContent: some View {
         #if DEBUG
         if Fixtures.isEnabled && UserDefaults.standard.bool(forKey: "foldover-large-menu-text") {
-            MenuBarView(viewModel: viewModel).dynamicTypeSize(.accessibility3)
+            // Explicitly enlarge the inherited font for the macOS text-size tour.
+            MenuBarView(viewModel: viewModel).font(.title2).dynamicTypeSize(.accessibility3)
         } else {
             MenuBarView(viewModel: viewModel)
         }

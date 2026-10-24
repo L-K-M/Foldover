@@ -133,6 +133,7 @@ struct MenuBarView: View {
             }
             // Plain keeps the name in the primary color, like a menu item.
             .buttonStyle(.plain)
+            .accessibilityIdentifier("menu-pair-\(row.id)")
             .help("Show \(row.name) in Foldover")
 
             if row.activity == .working {
