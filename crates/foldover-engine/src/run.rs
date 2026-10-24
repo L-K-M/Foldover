@@ -1017,8 +1017,8 @@ impl PairRun {
 
         // PLAN.md §3.2, §3.6: the first run of every pair is previewed,
         // which also covers a non-empty target's confirmation. Only the
-        // exact plan a person saw (`RunContext::Reviewed`) records the
-        // identities and writes; anything else returns the plan for review.
+        // exact plan a person saw (`RunContext::Reviewed`) writes; anything
+        // else returns the plan for review.
         let first_run = self.identities.side(Side::Left).is_none()
             || self.identities.side(Side::Right).is_none();
         if first_run && context != RunContext::Reviewed {
@@ -1061,7 +1061,10 @@ impl PairRun {
         // PLAN.md §3.6: a Backup target without records gets an identity
         // only this agent knows, and nothing of it is read or written there.
         let unrecorded = self.pair.draft().unrecorded();
-        let identities = match (
+        // The identities record a completed first sync: committing them
+        // earlier let a run stopped or crashed before its first write leave
+        // the pair past this run's gates with nothing recorded but them.
+        let (identities, first_sync) = match (
             self.identities.side(Side::Left),
             self.identities.side(Side::Right),
         ) {
@@ -1070,7 +1073,7 @@ impl PairRun {
             (Some(left), Some(right)) => {
                 let identities = [left, right];
                 self.check_roots(identities)?;
-                identities
+                (identities, false)
             }
             _ => {
                 // A side whose identity is recorded must still hold it,
@@ -1098,8 +1101,7 @@ impl PairRun {
                     Ok(recorded)
                 };
                 let (left, right) = (ensure(Side::Left)?, ensure(Side::Right)?);
-                commit(revision, Commit::Identities { left, right }).map_err(RunError::Commit)?;
-                [left, right]
+                ([left, right], true)
             }
         };
 
@@ -1138,7 +1140,7 @@ impl PairRun {
             written: 0,
             failed: Vec::new(),
         };
-        let mut commit = |executor: &mut Executor<'_>| {
+        let mut commit_batch = |executor: &mut Executor<'_>| {
             let updates = Commit::Base {
                 run: &name,
                 updates: &executor.pending,
@@ -1191,7 +1193,7 @@ impl PairRun {
                     && let Err(error) = self.check_roots(identities)
                 {
                     copies.finish(&mut executor, control, progress);
-                    commit(&mut executor)?;
+                    commit_batch(&mut executor)?;
                     return Err(error);
                 }
                 // Archives go children first, once every copy has landed.
@@ -1208,14 +1210,14 @@ impl PairRun {
                 }
                 copies.collect(&mut executor, progress);
                 if executor.pending.len().max(executor.journal.len()) >= COMMIT_BATCH
-                    && let Err(error) = commit(&mut executor)
+                    && let Err(error) = commit_batch(&mut executor)
                 {
                     // Landed copies must be journaled before this run
                     // can fail, as the root check above does. The
                     // retry is best-effort: the run fails either way,
                     // so the first failure is what to report.
                     copies.finish(&mut executor, control, progress);
-                    let _ = commit(&mut executor);
+                    let _ = commit_batch(&mut executor);
                     return Err(error);
                 }
             }
@@ -1226,9 +1228,26 @@ impl PairRun {
         if stopped {
             executor.report.completion = Completion::Cancelled;
         }
-        commit(&mut executor)?;
+        commit_batch(&mut executor)?;
         if let Some(error) = leases.failure() {
             return Err(error.into());
+        }
+        // PLAN.md §3.6: the identities record a completed first sync, and
+        // with it the pair's way out of the first-run gates. A run that
+        // stopped or failed keeps them unrecorded, so its next run is
+        // reviewed again and scheduled runs keep waiting (§3.6).
+        if first_sync && executor.report.completion == Completion::Finished {
+            // A crash between the batch above and this commit leaves the
+            // sync done but the gate closed: the next run re-reviews what
+            // is now an empty plan. Harmless, just redundant (PLAN.md §3.6).
+            commit(
+                revision,
+                Commit::Identities {
+                    left: identities[0],
+                    right: identities[1],
+                },
+            )
+            .map_err(RunError::Commit)?;
         }
 
         // Keep retention bounded even when a path fails every run.

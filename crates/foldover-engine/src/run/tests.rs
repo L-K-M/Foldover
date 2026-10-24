@@ -1047,6 +1047,84 @@ fn conflicts_are_reported_and_both_versions_stay_untouched() {
     assert_eq!(fs::read(pair.right.path().join("file")).unwrap(), b"right");
 }
 
+/// Cancels as soon as the plan is announced, so the copy loop stops
+/// before its first write: an abort with nothing committed.
+struct CancelAfterPlan {
+    planned: std::cell::Cell<bool>,
+}
+
+impl RunProgress for CancelAfterPlan {
+    fn observed(&self, _: Side, _: ObserveStep) {}
+    fn planned(&self, _: u64, _: u64) {
+        self.planned.set(true);
+    }
+    fn applied(&self, _: u64) {}
+    fn waiting(&self, _: Option<&str>) {}
+}
+
+/// PLAN.md §3.6: a pair is past its first run only once a run
+/// completes. A run stopped before its first write used to record the
+/// identities all the same, so every later run — scheduled ones
+/// included — skipped the first-run review gate.
+#[test]
+fn an_aborted_first_run_keeps_its_review_gate() {
+    let mut pair = fixture(SyncMode::Sync);
+    fs::write(pair.left.path().join("notes"), b"content").unwrap();
+    let cancel = CancelAfterPlan {
+        planned: std::cell::Cell::new(false),
+    };
+    let prepared = pair.prepare();
+    let mut store = pair.store();
+    let outcome = prepared
+        .execute(
+            Approval::default(),
+            RunContext::Reviewed,
+            STARTED,
+            &mut |revision, commit| store.apply(revision, commit),
+            &mut || {
+                if cancel.planned.get() {
+                    ScanControl::Cancel
+                } else {
+                    ScanControl::Continue
+                }
+            },
+            &cancel,
+        )
+        .unwrap();
+    let RunOutcome::Ran(report) = outcome else {
+        panic!("a stopped run reports itself, not an approval request")
+    };
+    assert_eq!(report.completion(), Completion::Cancelled);
+    assert!(
+        !pair.right.path().join("notes").exists(),
+        "a cancelled first run must not have written notes to the right side"
+    );
+
+    // Nothing completed, so the pair is still on its first run.
+    assert!(pair.identities.side(Side::Left).is_none());
+    assert!(pair.identities.side(Side::Right).is_none());
+    assert!(matches!(
+        pair.run(Approval::default(), RunContext::Unattended),
+        RunOutcome::NeedsApproval(_)
+    ));
+}
+
+/// The other half of the gate: a first run that completes records the
+/// identities, so unattended runs may start (PLAN.md §3.6).
+#[test]
+fn a_completed_first_run_records_its_identities() {
+    let mut pair = fixture(SyncMode::Sync);
+    fs::write(pair.left.path().join("notes"), b"content").unwrap();
+    pair.sync();
+
+    assert!(pair.identities.side(Side::Left).is_some());
+    assert!(pair.identities.side(Side::Right).is_some());
+    let RunOutcome::Ran(report) = pair.run(Approval::default(), RunContext::Unattended) else {
+        panic!("a synced pair runs unattended without a fresh review")
+    };
+    assert_eq!(report.completion(), Completion::Finished);
+}
+
 #[test]
 fn mass_deletions_need_approval_and_unattended_runs_stop() {
     let mut pair = fixture(SyncMode::Sync);
