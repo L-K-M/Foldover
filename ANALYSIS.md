@@ -82,12 +82,15 @@ PRs now fix; the primes mark them as implemented, not backlog. Where
 they duplicate a second-pass fix (MIMO-05′ with SOL-02/PR 165,
 SOL-12′ with SOL-12/PR 168, SOL-06 with the cache described there),
 the owner merges one and closes the other — the fixes are small and
-independent. Third-pass review record: PR 173 ran three rounds whose
-findings were all minor and were applied; PRs 174 and 176 reached
-clean rounds after minor findings were applied; PR 175's single round
-was clean and no further push remained to trigger another; PR 177's
-one minor finding was applied; PRs 178 and 179 were still under
-review at this merge.
+independent. Third-pass review record: every review round across PRs
+173-179 raised only minor findings, all applied in-thread, and the
+latest round on each PR was clean. PR 178's row cache additionally
+failed a macOS regression (`scanErrorsStayVisibleWhileSafeChanges-
+RemainSyncable`) that review did not catch — the review token
+fingerprints the plan, not its failure list — and was re-keyed on a
+per-pair store revision before the suite passed. All checks pass on
+PRs 173-177 and 179; PR 178's final revision was re-running the macOS
+jobs at this update.
 
 Review status at consolidation: PRs 159, 163, 165 and 168 each completed
 two GLM review rounds without confirmed important findings. PRs 157, 158,
