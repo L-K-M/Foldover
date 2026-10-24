@@ -609,3 +609,140 @@ fn a_shared_folder_never_serves_the_agent_state_directory() {
         b"records"
     );
 }
+
+/// A counter grows by its own steps, however the other Mac counts; one
+/// that stands still or goes back reports nothing new.
+#[test]
+fn progress_reports_only_a_peers_counters_growth() {
+    let mut adopted = 0;
+    let mut steps = 0;
+    report_steps(&mut adopted, 3, ObserveStep::Listed, &mut |_| steps += 1);
+    assert_eq!(steps, 3);
+    report_steps(&mut adopted, 2, ObserveStep::Listed, &mut |_| steps += 1);
+    report_steps(&mut adopted, 3, ObserveStep::Listed, &mut |_| steps += 1);
+    assert_eq!(steps, 3);
+    assert_eq!(adopted, 3);
+}
+
+/// Whatever the other Mac claims its counter reached, the asking side
+/// works a bounded number of steps for it (PLAN.md §4.3).
+#[test]
+fn a_peers_counter_cannot_make_the_asking_side_iterate() {
+    let mut adopted = 0;
+    let mut steps = 0;
+    report_steps(&mut adopted, u64::MAX, ObserveStep::Checked, &mut |_| {
+        steps += 1
+    });
+    assert_eq!(steps, MAX_STEPS_PER_REPORT);
+    report_steps(&mut adopted, u64::MAX, ObserveStep::Checked, &mut |_| {
+        steps += 1
+    });
+    assert_eq!(steps, MAX_STEPS_PER_REPORT);
+    assert_eq!(adopted, u64::MAX);
+}
+
+/// A scan counter far past the folder's size, as a buggy or hostile
+/// Mac might claim: more than one report's cap of steps.
+const HUGE_COUNT: u64 = MAX_STEPS_PER_REPORT + 5;
+
+/// Claims a scan counter far past the folder's size before answering
+/// the observation it shares, as a buggy or hostile Mac might.
+struct InflatingSharing {
+    sharing: Sharing,
+}
+
+impl PeerHost for InflatingSharing {
+    fn paired(&self, device: DeviceId, name: String) -> Result<(), NotRecorded> {
+        self.sharing.paired(device, name)
+    }
+
+    fn serve(&self, device: DeviceId, call: PeerCall, answer: &mut Answer) {
+        if matches!(&call, PeerCall::Folder { op, .. } if matches!(**op, FolderOp::Observe { .. }))
+            && answer
+                .reply(&PeerReply::Progress {
+                    listed: HUGE_COUNT,
+                    checked: HUGE_COUNT,
+                })
+                .is_err()
+        {
+            return;
+        }
+        self.sharing.serve(device, call, answer);
+    }
+}
+
+/// The other Mac's scan counters stay display data end to end: the
+/// asking Mac's progress loop stays bounded by one report's cap.
+#[test]
+fn inflated_scan_counters_report_a_bounded_number_of_steps() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let shared = tempfile::tempdir().unwrap();
+    std::fs::write(shared.path().join("safe"), b"readable").unwrap();
+    let hosting = Arc::new(InflatingSharing {
+        sharing: Sharing {
+            root: LocalRoot::from_bytes(shared.path().as_os_str().as_encoded_bytes().to_vec())
+                .unwrap(),
+            cache: FolderCache::default(),
+            state: None,
+        },
+    });
+    let identities = [Identity::generate().unwrap(), Identity::generate().unwrap()];
+    let devices = identities
+        .each_ref()
+        .map(|identity| DeviceId::from_bytes(*identity.id().as_bytes()));
+    let [a_identity, b_identity] = identities;
+    let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let (a, _b) = runtime.block_on(async {
+        let b = PeerLink::start(
+            b_identity,
+            "Studio".into(),
+            loopback,
+            Presence::Unlisted,
+            [devices[0]],
+            hosting,
+        )
+        .unwrap();
+        let a = PeerLink::start(
+            a_identity,
+            "Laptop".into(),
+            loopback,
+            Presence::Unlisted,
+            [devices[1]],
+            Arc::new(Sharing {
+                root: LocalRoot::from_bytes(b"/".to_vec()).unwrap(),
+                cache: FolderCache::default(),
+                state: None,
+            }),
+        )
+        .unwrap();
+        a.reach(devices[1], b.address().unwrap());
+        (a, b)
+    });
+    let root = PeerRoot::new(devices[1], ShareId::from_bytes([7; ShareId::BYTE_LEN]));
+    let endpoint = Endpoint::Peer(PeerEndpoint::open(a, &root).unwrap());
+
+    let options = PairOptions::default();
+    let mut steps = 0u64;
+    let observed = endpoint
+        .observe_from(
+            options.metadata(),
+            &crate::Filter::none(),
+            &std::collections::BTreeMap::new(),
+            &mut || ScanControl::Continue,
+            &mut |_| steps += 1,
+        )
+        .unwrap();
+    // Each of the report's two counters stands for at most one cap.
+    assert!(
+        steps <= 2 * MAX_STEPS_PER_REPORT,
+        "one report's counters made the scan report {steps} steps"
+    );
+    assert!(
+        observed
+            .entries()
+            .contains_key(&SyncPath::try_from(b"safe".as_slice()).unwrap())
+    );
+}
