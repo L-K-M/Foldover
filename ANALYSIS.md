@@ -40,7 +40,7 @@ fixing it. Keep visual proposals separate from measured defects.
 | P2 | SOL-09, SOL-10 and SOL-16: visible, actionable attention | Background failures, restore causes and freshness are explicit |
 | P2 | F-01: `pairs set` partial-update convenience | One option toggles without re-supplying pair identity |
 | P3 | SOL-13–15 and SOL-17–20: product and visual polish | Validate with native light/dark, keyboard and accessibility checks |
-| P3 | MUSE-05: small UI edges (inspector width, empty states, command-specific help) | Each edge fixed where it sits; no layout regressions in LayoutStressTests |
+| P3 | MUSE-05: small UI edges (inspector width, empty states, focused subcommand usage still open) | Each edge fixed where it sits; no layout regressions in LayoutStressTests |
 | P3 | MIMO-15–27: interface additions and hardening | See entries; MIMO-12/13 are exception-path hardening |
 | P3 | F-02–F-07: CLI readability, exports and small notifications | See entries |
 
@@ -49,11 +49,15 @@ fixing it. Keep visual proposals separate from measured defects.
 Reviewed all 26 open PRs against `9b9eeab`, including connected code,
 tests, CI failures and review threads. The consolidation branch is
 `review/consolidate-open-prs`; its combined checks qualify the result.
+Qualification covers Linux `cargo xtask ci`, dependency and shell checks,
+tracked Markdown/Mermaid checks, the native Xcode 27 build/test and UI tour.
+Revision-specific results are recorded on
+[PR 181](https://github.com/L-K-M/Foldover/pull/181).
 The original four passes above remain the source of the unresolved backlog.
 
 | PR | Decision | Retained work and corrections |
 |---|---|---|
-| [140](https://github.com/L-K-M/Foldover/pull/140) | Close as shipped | All seven patches already exist in main under different commit IDs |
+| [140](https://github.com/L-K-M/Foldover/pull/140) | Close as shipped | `git cherry` verifies all seven patches already exist in main under different commit IDs |
 | [146](https://github.com/L-K-M/Foldover/pull/146) | Merge | Action release SHA independently verified; six immutable pins |
 | [147](https://github.com/L-K-M/Foldover/pull/147) | Merge | libc patch release and registry checksum verified |
 | [157](https://github.com/L-K-M/Foldover/pull/157) | Combine and fix | Help exits 0; literal help-looking names, paths and values remain valid |

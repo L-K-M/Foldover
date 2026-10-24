@@ -167,6 +167,8 @@ the held preview, or previews first; its optional kind is `copies`, `updates`,
 `archives`, `conflicts`, `blocked`, `kept` or `moves`. Sync All prints one
 JSON line per pair as it finishes. Its exit code gives errors precedence
 over conflicts, then approval, then success.
+Place `--progress` after the sync options and before `--socket PATH`;
+path and option values remain literal.
 
 A run that finishes with unresolved conflicts and no failed items exits with
 status 4; failures exit with status 1 even when conflicts also remain,

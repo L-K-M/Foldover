@@ -91,6 +91,7 @@ enum Request {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ProgressOutput {
     Final,
+    /// Only the trailing flag selects streaming; path and option values stay literal.
     Stream,
 }
 
@@ -1029,10 +1030,13 @@ async fn sync_all(location: &SocketLocation) -> Result<ExitCode, foldover_client
     // Each line stands alone, so pairs are reported as they finish.
     while let Some(joined) = jobs.join_next().await {
         // A task panics only on a bug; it still counts as a failure.
-        let Ok((pair, outcome)) = joined else {
-            failed = true;
-            eprintln!("foldover: a sync task failed unexpectedly");
-            continue;
+        let (pair, outcome) = match joined {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                failed = true;
+                eprintln!("foldover: a sync task failed unexpectedly: {error}");
+                continue;
+            }
         };
         let line = match &outcome {
             Ok(status) => {
@@ -1365,6 +1369,10 @@ mod tests {
         assert!(matches!(
             req(&["sync", id, "--keep-both", "--help", "--review", &token]),
             Request::Sync(_, _, SyncCommand::KeepBoth { ref path, .. }, ProgressOutput::Final) if path == b"--help"
+        ));
+        assert!(matches!(
+            req(&["sync", id, "--keep-both", "--progress", "--review", &token]),
+            Request::Sync(_, _, SyncCommand::KeepBoth { ref path, .. }, ProgressOutput::Final) if path == b"--progress"
         ));
         assert!(matches!(
             req(&["status", "--socket", "-h"]),

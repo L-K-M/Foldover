@@ -29,6 +29,7 @@ final class MenuBarTests: XCTestCase {
             lastPair.exists && lastPair.isHittable && pairs.frame.contains(lastPair.frame)
         }
         let quit = tour.app.buttons["Quit Foldover"]
+        XCTAssertTrue(quit.waitForExistence(timeout: 5))
         XCTAssertTrue(quit.isHittable, "Commands must stay visible above a long catalog")
         // A step larger than the viewport can jump past the target row.
         let scrollStep = pairs.frame.height / 2

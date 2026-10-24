@@ -25,6 +25,7 @@ import time
 # repeated Working answers, never by a silent socket.
 EARLY_LINE_SECONDS = 10
 DRAIN_SECONDS = 15
+# Acceptance bound shared with the CLI's MAX_CONCURRENT_SYNCS.
 MAX_CONCURRENT = 4
 PAIR_NOT_FOUND = -32003
 METHOD_NOT_FOUND = -32601
@@ -283,7 +284,7 @@ def sync_all_streams(cli, fixture, endpoint):
         if reap(child) != 0:
             raise RuntimeError(
                 f"sync --all failed: {child.stderr.read().strip()}")
-        if output.line(deadline) is not None:
+        if output.line(time.monotonic() + 1) is not None:
             raise RuntimeError("sync --all repeated a pair's result")
         if seen != set(PAIR_IDS):
             raise RuntimeError(f"sync --all missed pairs {sorted(set(PAIR_IDS) - seen)}")

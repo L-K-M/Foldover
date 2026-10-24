@@ -785,7 +785,7 @@ fn ambiguous_unicode_respellings_preserve_every_observed_entry() {
             .contains_key(&path("\u{1e69}".as_bytes()))
     );
     assert_eq!(
-        observation.entries()[&path("café".as_bytes())].version(),
+        observation.entries()[&path("caf\u{e9}".as_bytes())].version(),
         original[&path("cafe\u{301}".as_bytes())]
     );
 }
@@ -1123,6 +1123,108 @@ fn a_completed_first_run_records_its_identities() {
         panic!("a synced pair runs unattended without a fresh review")
     };
     assert_eq!(report.completion(), Completion::Finished);
+}
+
+#[test]
+fn batched_first_runs_reopen_safely_before_the_identity_commit() {
+    let directory = tempfile::tempdir().unwrap();
+    let left = directory.path().join("left");
+    let right = directory.path().join("right");
+    fs::create_dir(&left).unwrap();
+    fs::create_dir(&right).unwrap();
+    let count = COMMIT_BATCH + 1;
+    for index in 0..count {
+        fs::write(left.join(format!("file-{index}")), b"content").unwrap();
+    }
+    let location = foldover_state::StateLocation::Directory(directory.path().join("state"));
+    let mut engine = crate::Engine::open(&location).unwrap();
+    let pair = engine
+        .create_pair(
+            &PairDraft::new("Batched".into(), root(&left), root(&right), SyncMode::Sync).unwrap(),
+        )
+        .unwrap();
+    let prepared = PairRun::prepare(
+        engine.run_inputs(pair.id()).unwrap(),
+        &mut proceed,
+        &NoProgress,
+    )
+    .unwrap();
+    let mut batches = 0;
+    let mut refused_identities = false;
+    // Model a stop after durable batches, before the first-run marker lands.
+    let result = prepared.execute(
+        Approval::default(),
+        RunContext::Reviewed,
+        STARTED,
+        &mut |revision, commit| {
+            if matches!(commit, Commit::Identities { .. }) {
+                refused_identities = true;
+                return Err(crate::Error::StaleRevision);
+            }
+            engine.commit_run(pair.id(), revision, commit)?;
+            if matches!(commit, Commit::Base { .. }) {
+                batches += 1;
+            }
+            Ok(())
+        },
+        &mut proceed,
+        &NoProgress,
+    );
+    assert!(matches!(
+        result,
+        Err(RunError::Commit(crate::Error::StaleRevision))
+    ));
+    assert!(refused_identities && batches >= 2);
+    drop(engine);
+
+    let mut engine = crate::Engine::open(&location).unwrap();
+    assert_eq!(engine.pair(pair.id()).unwrap().revision(), pair.revision());
+    assert_eq!(engine.run_inputs(pair.id()).unwrap().base.len(), count);
+    assert!(!engine.first_synced(pair.id()).unwrap());
+    let prepared = PairRun::prepare(
+        engine.run_inputs(pair.id()).unwrap(),
+        &mut proceed,
+        &NoProgress,
+    )
+    .unwrap();
+    assert!(matches!(
+        prepared
+            .execute(
+                Approval::default(),
+                RunContext::Unattended,
+                STARTED,
+                &mut |revision, commit| engine.commit_run(pair.id(), revision, commit),
+                &mut proceed,
+                &NoProgress,
+            )
+            .unwrap(),
+        RunOutcome::NeedsApproval(_)
+    ));
+
+    // The same stored revision accepts the identities; later runs need no review.
+    for context in [RunContext::Reviewed, RunContext::Unattended] {
+        let prepared = PairRun::prepare(
+            engine.run_inputs(pair.id()).unwrap(),
+            &mut proceed,
+            &NoProgress,
+        )
+        .unwrap();
+        let RunOutcome::Ran(report) = prepared
+            .execute(
+                Approval::default(),
+                context,
+                STARTED,
+                &mut |revision, commit| engine.commit_run(pair.id(), revision, commit),
+                &mut proceed,
+                &NoProgress,
+            )
+            .unwrap()
+        else {
+            panic!("reviewed completion must unlock unattended runs")
+        };
+        assert_eq!(report.completion(), Completion::Finished);
+        assert!(engine.first_synced(pair.id()).unwrap());
+    }
 }
 
 #[test]

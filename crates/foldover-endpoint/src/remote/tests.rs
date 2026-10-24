@@ -736,9 +736,10 @@ fn inflated_scan_counters_report_a_bounded_number_of_steps() {
         )
         .unwrap();
     // Each of the report's two counters stands for at most one cap.
-    assert!(
-        steps <= 2 * MAX_STEPS_PER_REPORT,
-        "one report's counters made the scan report {steps} steps"
+    assert_eq!(
+        steps,
+        2 * MAX_STEPS_PER_REPORT,
+        "both inflated counters must reach the cap"
     );
     assert!(
         observed

@@ -681,7 +681,12 @@ mod tests {
     #[test]
     fn remote_archive_reads_get_the_remote_request_budget() {
         // Both reads open SFTP/peer endpoints, just like a restore does.
-        for method in [ARCHIVE_RUNS, ARCHIVE_ITEMS, ARCHIVE_PUT_BACK_ALL] {
+        for method in [
+            ARCHIVE_RUNS,
+            ARCHIVE_ITEMS,
+            ARCHIVE_PUT_BACK,
+            ARCHIVE_PUT_BACK_ALL,
+        ] {
             assert!(
                 SLOW_METHODS.contains(&method),
                 "{method} needs the remote budget"

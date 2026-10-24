@@ -777,6 +777,25 @@ func changeRowsAreBuiltOncePerPageAndSharedAcrossViewModels() async {
     #expect(cache.builds == 3)
 }
 
+@MainActor
+@Test
+func cachedRowsAdoptANewTokenEvenWhenChangesAreIdentical() async {
+    let first = preview(archivesInA: 3, needsApproval: false)
+    let next = preview(archivesInA: 3, needsApproval: false, reviewToken: reviewTokenB)
+    let store = SyncStore(client: ScriptedSyncClient([.previewed(first), .previewed(next)]))
+    let cache = ChangeRowsCache()
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(),
+                                     agentConnected: true, rowCache: cache)
+    // A different client can replace the held preview between status polls.
+    await viewModel.refresh()
+    #expect(viewModel.listedRows.allSatisfy { $0.review?.token == reviewTokenA })
+
+    await viewModel.refresh()
+    #expect(!viewModel.listedRows.isEmpty)
+    #expect(viewModel.listedRows.allSatisfy { $0.review?.token == reviewTokenB })
+    #expect(cache.builds == 2)
+}
+
 // Regression for PR57: declineApproval only flipped the local state, so
 // the next scheduled checkAll read the same needsApproval from the
 // agent, resurrected the dialog and reposted the notification.

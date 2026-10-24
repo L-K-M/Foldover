@@ -520,11 +520,15 @@ mod tests {
         let server = bind(&location).unwrap();
         let handled = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = std::sync::Arc::clone(&handled);
+        let answered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let reply_ready = std::sync::Arc::clone(&answered);
         let serving = tokio::spawn(serve(server, move |_request| {
             let count = std::sync::Arc::clone(&count);
+            let reply_ready = std::sync::Arc::clone(&reply_ready);
             async move {
                 count.fetch_add(1, Ordering::Relaxed);
                 tokio::time::sleep(Duration::from_millis(300)).await;
+                reply_ready.notify_one();
                 Ok(Value::Null)
             }
         }));
@@ -545,7 +549,14 @@ mod tests {
                 .await,
             Err(Error::Protocol(_))
         ));
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        // Wait for the late handler, not a fixed delay on a loaded runner.
+        tokio::time::timeout(REQUEST_TIMEOUT, answered.notified())
+            .await
+            .unwrap();
+        assert!(matches!(
+            connection.call(Request::call(1, DAEMON_STATUS, None)).await,
+            Err(Error::Protocol(_))
+        ));
         assert_eq!(handled.load(Ordering::Relaxed), 1);
         serving.abort();
     }
