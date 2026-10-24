@@ -768,6 +768,13 @@ func changeRowsAreBuiltOncePerPageAndSharedAcrossViewModels() async {
     await second.showChanges(.copies)
     #expect(second.listedRows.map(\.path) == ["p0", "p1"])
     #expect(cache.builds == 3)
+
+    // A view model the window recreates after the page load and kind
+    // switch still reads the cached rows instead of building again.
+    let third = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(),
+                                  agentConnected: true, rowCache: cache)
+    #expect(third.listedRows.map(\.path) == ["p0", "p1"])
+    #expect(cache.builds == 3)
 }
 
 // Regression for PR57: declineApproval only flipped the local state, so
