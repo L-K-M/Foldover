@@ -6,7 +6,7 @@ use foldover_client::{
     PairId, PairOptions, PairRoot, Propagation, ReviewToken, Schedule, ScheduleInterval, Side,
     SocketLocation, SyncMode, SyncPath, TimeOfDay, Weekday, Weekdays,
 };
-use foldover_client::{DeviceId, PeerStatus, ShareId, SyncStatus};
+use foldover_client::{DeviceId, PeerStatus, ShareId, SyncItemKind, SyncStatus};
 use foldover_proto::local::PairRecord;
 use std::env;
 use std::ffi::OsString;
@@ -107,6 +107,9 @@ enum ArchiveCommand {
 
 enum SyncCommand {
     Preview,
+    /// List every item in the pair's latest preview, optionally of one
+    /// kind; a pair without a held preview is previewed first.
+    Changes(Option<SyncItemKind>),
     /// Deletions approved per side beyond the automatic limits; `review`
     /// names the preview being approved.
     Run {
@@ -497,6 +500,8 @@ fn sync_command(args: &[OsString]) -> Option<SyncCommand> {
             review: None,
         }),
         [flag] if flag == "--preview" => Some(SyncCommand::Preview),
+        [flag] if flag == "--changes" => Some(SyncCommand::Changes(None)),
+        [flag, kind] if flag == "--changes" => Some(SyncCommand::Changes(Some(item_kind(kind)?))),
         [flag] if flag == "--cancel" => Some(SyncCommand::Cancel),
         [flag] if flag == "--undo" => Some(SyncCommand::Undo),
         [flag, path, rest @ ..] if flag == "--keep-left" || flag == "--keep-right" => {
@@ -688,6 +693,20 @@ fn day_list(list: &str) -> Option<Weekdays> {
     Weekdays::of(&days).ok()
 }
 
+/// The `--changes` kind names, plural as the summary counts are.
+fn item_kind(name: &OsString) -> Option<SyncItemKind> {
+    Some(match name.to_str()? {
+        "copies" => SyncItemKind::Copy,
+        "updates" => SyncItemKind::Update,
+        "archives" => SyncItemKind::Archive,
+        "conflicts" => SyncItemKind::Conflict,
+        "blocked" => SyncItemKind::Blocked,
+        "kept" => SyncItemKind::Keep,
+        "moves" => SyncItemKind::Move,
+        _ => return None,
+    })
+}
+
 fn weekday(name: &str) -> Option<Weekday> {
     Some(match name {
         "mon" | "monday" => Weekday::Monday,
@@ -824,6 +843,9 @@ async fn sync(
         let pair = foldover_client::pair(location, id).await?;
         warn_sftp([pair.draft().left(), pair.draft().right()]);
     }
+    if let SyncCommand::Changes(kind) = command {
+        return sync_changes(location, id, kind).await;
+    }
     let mut status = match command {
         SyncCommand::Preview => foldover_client::start_preview(location, id).await?,
         SyncCommand::Run {
@@ -842,6 +864,7 @@ async fn sync(
         SyncCommand::Skip { path, review } => {
             foldover_client::skip_once(location, id, &path, review).await?
         }
+        SyncCommand::Changes(_) => unreachable!("listed before the job dispatch"),
     };
     while matches!(status, SyncStatus::Working { .. }) {
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -871,6 +894,54 @@ async fn sync(
         }
         _ => ExitCode::FAILURE,
     })
+}
+
+/// Print every item in the pair's latest preview as JSON lines, paged
+/// through the agent. A pair without a held preview is previewed first.
+/// Caller contract: `sync` has already fetched the pair (the
+/// configuration-queue wait) and emitted the SFTP warning.
+async fn sync_changes(
+    location: &SocketLocation,
+    id: PairId,
+    kind: Option<SyncItemKind>,
+) -> Result<ExitCode, foldover_client::Error> {
+    let mut status = foldover_client::sync_status(location, id).await?;
+    while matches!(status, SyncStatus::Working { .. }) {
+        tokio::time::sleep(POLL_INTERVAL).await;
+        status = foldover_client::sync_status(location, id).await?;
+    }
+    if !matches!(
+        status,
+        SyncStatus::Previewed { .. } | SyncStatus::NeedsApproval { .. }
+    ) {
+        // No preview is held: make one so the command stands alone.
+        status = foldover_client::start_preview(location, id).await?;
+        while matches!(status, SyncStatus::Working { .. }) {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            status = foldover_client::sync_status(location, id).await?;
+        }
+    }
+    let token = match status {
+        SyncStatus::Previewed { ref preview } | SyncStatus::NeedsApproval { ref preview } => {
+            preview.review_token.parse().ok()
+        }
+        _ => None,
+    };
+    let Some(token) = token else {
+        println!("{}", serde_json::to_string(&status)?);
+        return Ok(ExitCode::FAILURE);
+    };
+    let mut after = None;
+    loop {
+        let page = foldover_client::sync_items(location, id, token, after.as_deref(), kind).await?;
+        for item in &page.items {
+            println!("{}", serde_json::to_string(item)?);
+        }
+        match page.items.last() {
+            Some(item) if page.more => after = Some(item.path.clone()),
+            _ => return Ok(ExitCode::SUCCESS),
+        }
+    }
 }
 
 /// Print an automation status as one JSON line.
@@ -1392,6 +1463,14 @@ mod tests {
                 }
             )
         ));
+        assert!(matches!(
+            req(&["sync", id, "--changes"]),
+            Request::Sync(_, _, SyncCommand::Changes(None))
+        ));
+        assert!(matches!(
+            req(&["sync", id, "--changes", "conflicts"]),
+            Request::Sync(_, _, SyncCommand::Changes(Some(SyncItemKind::Conflict)))
+        ));
         // An approval or conflict choice without its preview's token is a
         // usage error: the CLI never looks a token up itself.
         for args in [
@@ -1404,6 +1483,8 @@ mod tests {
             vec!["sync", id, "--keep-both", "a.txt"],
             vec!["sync", id, "--keep-left", "a.txt", "--review"],
             vec!["sync", id, "--preview", "--cancel"],
+            vec!["sync", id, "--changes", "copy"],
+            vec!["sync", id, "--changes", "copies", "extra"],
         ] {
             assert!(matches!(req(&args), Request::Usage), "{args:?}");
         }
