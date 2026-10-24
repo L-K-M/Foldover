@@ -136,6 +136,35 @@ disabled previous job even with another stale enabled job, and absence of
 the earlier jobs after each migration. It never registers Foldover's
 production service or opens sync data.
 
+## Full Disk Access recovery after updates
+
+The app reminds the user to review Full Disk Access on the first launch of
+each signed build. Its code hash distinguishes builds even when the version
+number stays the same. Acknowledging the reminder records only that review,
+not a verified permission grant. Unsigned or unidentifiable builds do not
+infer permission status.
+
+Apple provides [no supported Full Disk Access status API](https://developer.apple.com/forums/thread/835851).
+The app does not probe the privacy database, silently revoke access, or
+change its signing requirements to preserve a grant. Startup displays
+guidance only. Settings retains the same recovery actions after dismissal.
+
+The explicit Reset and Open Settings action invokes Apple's
+[app-scoped reset command](https://developer.apple.com/documentation/xcode/resetting-access-to-protected-resources-in-macos),
+`tccutil reset SystemPolicyAllFiles ch.lkmc.foldover`, with a bounded runtime.
+Only a successful reset opens Settings. The user must remove stale Foldover
+entries if necessary, add the current app from Applications, and grant access
+again. The app cannot confirm that this happened or guarantee that macOS
+removes every stale visual entry. The action is disabled during known active
+work across the configured pairs, and until their statuses are known; the
+guidance also asks the user to finish
+or stop any sync before resetting. It never restarts the agent.
+
+Store tests cover build acknowledgements, explicit recovery, errors and
+concurrent requests with mocked permission actions. Native command tests
+use harmless executables, and the UI fixture has inert reset/settings
+actions. These tests never reset the developer's real privacy permissions.
+
 ## Remaining gates
 
 - Shipping-app update lifecycle qualification and authenticated distribution.

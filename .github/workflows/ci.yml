@@ -180,6 +180,9 @@ jobs:
       - name: Generate the Xcode project
         run: "$RUNNER_TEMP/xcodegen/bin/xcodegen generate --spec apple/project.yml"
 
+      - name: Native system boundary tests
+        run: swift test --package-path apple/FoldoverSystem
+
       - name: xcodebuild build test
         run: |
           xcodebuild -project apple/Foldover.xcodeproj \

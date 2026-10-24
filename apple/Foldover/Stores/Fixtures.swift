@@ -17,6 +17,7 @@ enum Fixtures {
     /// sidebar's state there, and a tour must not inherit them from an
     /// earlier run.
     static let resetArgument = "-foldover-reset-defaults"
+    static let accessReminderArgument = "-foldover-access-reminder"
 
     static var isEnabled: Bool { ProcessInfo.processInfo.arguments.contains(launchArgument) }
 

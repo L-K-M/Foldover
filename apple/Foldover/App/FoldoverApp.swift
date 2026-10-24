@@ -31,6 +31,7 @@ struct FoldoverApp: App {
         // UI-test launches carry no test environment; they run on fixtures
         // and opt out of the update check with a launch argument instead.
         let isTestHost = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        if !isTestHost { stores.settings.reviewFullDiskAccessAtLaunch() }
         // Runs for the app's lifetime, with or without an open window. An
         // updated app restarts its agent before the first check.
         Task {
@@ -51,9 +52,11 @@ struct FoldoverApp: App {
         #endif
         let macToMac = MacToMacStore()
         let automation = AutomationStore()
+        let main = MainViewModel(appInfo: AppInfoStore(), automation: automation, macToMac: macToMac)
         return AppStores(
-            main: MainViewModel(appInfo: AppInfoStore(), automation: automation, macToMac: macToMac),
-            settings: SettingsStore(), macToMac: macToMac, automation: automation)
+            main: main,
+            settings: SettingsStore(canResetFullDiskAccess: { main.canResetFullDiskAccess }),
+            macToMac: macToMac, automation: automation)
     }
 
     #if DEBUG
@@ -82,8 +85,14 @@ struct FoldoverApp: App {
             sync: SyncStore(client: FixtureSyncClient(pairs: pairs, scenario: scenario), alert: { _ in }),
             archive: ArchiveStore(client: FixtureArchiveClient()),
             automation: automation, macToMac: macToMac)
+        let showAccessReminder = CommandLine.arguments.contains(Fixtures.accessReminderArgument)
+        let accessDefaults = UserDefaults(suiteName: "ch.lkmc.foldover.fixture-access")!
+        accessDefaults.removePersistentDomain(forName: "ch.lkmc.foldover.fixture-access")
         return AppStores(main: main,
-                         settings: SettingsStore(loginItem: FixtureLoginItem(), showFullDiskAccess: {}),
+                         settings: SettingsStore(loginItem: FixtureLoginItem(), showFullDiskAccess: {},
+                                                 resetFullDiskAccess: {},
+                                                 appBuild: showAccessReminder ? Data([1]) : nil,
+                                                 defaults: accessDefaults),
                          macToMac: macToMac, automation: automation)
     }
     #endif
@@ -92,7 +101,12 @@ struct FoldoverApp: App {
         // The one main window (PLAN.md §7.1): everything is reachable
         // from it, and the menu bar extra shares its selection and editor.
         Window("Foldover", id: "main") {
-            MainView(viewModel: viewModel)
+            VStack(spacing: 0) {
+                if settings.fullDiskAccessReminderNeeded {
+                    FullDiskAccessReminder(viewModel: SettingsViewModel(store: settings))
+                }
+                MainView(viewModel: viewModel)
+            }
         }
         .defaultSize(width: 1000, height: 640)
         .windowToolbarStyle(.unified)

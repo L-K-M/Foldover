@@ -301,6 +301,39 @@ func pairRowsSayHowEachPairReadsAtAGlance() async {
 
 @MainActor
 @Test
+func accessResetWaitsForWorkOnAnUnselectedPair() async {
+    let photos = windowPair(photosWindowID, "Photos")
+    let docs = windowPair(docsWindowID, "Docs")
+    let client = WindowSyncClient()
+    let sync = SyncStore(client: client, alert: { _ in })
+    let viewModel = MainViewModel(
+        appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { AgentReport(version: "1.0") }),
+        pairs: PairStore(client: WindowCatalog([photos, docs])), sync: sync)
+    #expect(!viewModel.canResetFullDiskAccess)
+    await viewModel.refreshAgent()
+    viewModel.selectedPairID = photos.id
+    #expect(!viewModel.canResetFullDiskAccess)
+    await sync.checkAll(viewModel.pairs)
+    #expect(viewModel.canResetFullDiskAccess)
+
+    await client.set(.working(.run, cancelling: false), for: docs.id)
+    await sync.checkAll(viewModel.pairs)
+    #expect(!viewModel.canResetFullDiskAccess)
+    await client.set(.idle, for: docs.id)
+    await sync.checkAll(viewModel.pairs)
+    #expect(viewModel.canResetFullDiskAccess)
+    await client.setRunReply(.fail)
+    await sync.run(docs.id)
+    #expect(!viewModel.canResetFullDiskAccess)
+    await sync.checkAll(viewModel.pairs)
+    #expect(viewModel.canResetFullDiskAccess)
+    await client.setStatusFails(true)
+    await sync.checkAll(viewModel.pairs)
+    #expect(!viewModel.canResetFullDiskAccess)
+}
+
+@MainActor
+@Test
 func stoppingAPairFromTheMenuDoesNotStopTheSelectedPair() async {
     let photos = windowPair(photosWindowID, "Photos")
     let docs = windowPair(docsWindowID, "Docs")

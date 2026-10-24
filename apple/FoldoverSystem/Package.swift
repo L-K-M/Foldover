@@ -10,5 +10,10 @@ let package = Package(
             name: "FoldoverSystem",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
+        .testTarget(
+            name: "FoldoverSystemTests",
+            dependencies: ["FoldoverSystem"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
     ]
 )
