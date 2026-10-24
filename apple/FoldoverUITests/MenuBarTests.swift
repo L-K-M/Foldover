@@ -3,6 +3,49 @@ import XCTest
 
 final class MenuBarTests: XCTestCase {
     @MainActor
+    func testManyPairsScrollWithoutHidingTheCommands() {
+        checkManyPairs()
+    }
+
+    @MainActor
+    func testManyPairsKeepTheCommandsAtLargerTextSizes() {
+        checkManyPairs(launchArguments: ["-foldover-large-menu-text", "YES"])
+    }
+
+    @MainActor
+    private func checkManyPairs(launchArguments: [String] = []) {
+        let tour = Tour(self, appearance: .light, scenario: "many-pairs")
+        tour.app.launchArguments += launchArguments
+        tour.launch()
+        tour.click(tour.app.statusItems.firstMatch, "menu bar extra")
+        let pairs = tour.app.scrollViews["menu-pairs"]
+        XCTAssertTrue(pairs.waitForExistence(timeout: 5))
+        let quit = tour.app.buttons["Quit Foldover"]
+        XCTAssertTrue(quit.isHittable, "Commands must stay visible above a long catalog")
+        for _ in 0..<10 where !pairs.staticTexts["Pair 40"].isHittable {
+            pairs.scroll(byDeltaX: 0, deltaY: -400)
+            tour.pause(0.2)
+        }
+        XCTAssertTrue(pairs.staticTexts["Pair 40"].isHittable)
+        XCTAssertTrue(quit.isHittable, "Scrolling pairs must not move the commands")
+        tour.snap(launchArguments.isEmpty ? "menu-bar-many-pairs" : "menu-bar-many-pairs-large-text")
+        tour.app.terminate()
+    }
+
+    @MainActor
+    func testAWorkingPairCanBeStoppedFromTheMenuBar() {
+        let tour = Tour(self, appearance: .light, scenario: "syncing")
+        tour.launch()
+        tour.click(tour.app.statusItems.firstMatch, "menu bar extra")
+        let stop = tour.app.buttons["Stop Photos"]
+        XCTAssertTrue(stop.waitForExistence(timeout: 5))
+        tour.click(stop, "stop Photos")
+        XCTAssertTrue(tour.app.buttons["Sync Photos"].waitForExistence(timeout: 5))
+        tour.snap("menu-bar-stopped")
+        tour.app.terminate()
+    }
+
+    @MainActor
     func testTheMenuBarPulsesWithEveryWindowClosed() {
         let tour = Tour(self, appearance: .light, scenario: "syncing")
         let item = backgroundStatusItem(tour)

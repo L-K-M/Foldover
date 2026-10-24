@@ -92,6 +92,7 @@ struct PairRow: Identifiable, Equatable {
     /// Conflicts waiting for a decision; 0 hides the badge.
     let conflicts: Int
     let canSync: Bool
+    let canCancel: Bool
 }
 
 /// The background agent's health as the status bar's dot shows it.
@@ -316,7 +317,7 @@ final class MainViewModel {
             return PairRow(id: pair.id, name: pair.settings.name, status: pairSync.shortStatus,
                            symbol: pair.settings.mode.symbol, modeTitle: pair.settings.mode.title,
                            activity: pairSync.activity, conflicts: pairSync.conflictCount,
-                           canSync: pairSync.canSync)
+                           canSync: pairSync.canSync, canCancel: pairSync.canCancel)
         }
     }
 
@@ -535,6 +536,14 @@ final class MainViewModel {
     func syncPair(id: String) async {
         guard let pair = pairs.first(where: { $0.id == id }) else { return }
         await sync(for: pair).sync()
+    }
+
+    /// Menu-bar commands target their own row without changing selection.
+    func stopPair(id: String) async {
+        guard let pair = pairs.first(where: { $0.id == id }) else { return }
+        let sync = sync(for: pair)
+        guard sync.canCancel else { return }
+        await sync.cancel()
     }
 
     /// Pairs for Shortcuts; loads them first when the app just started.

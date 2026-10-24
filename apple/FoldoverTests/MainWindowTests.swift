@@ -85,6 +85,7 @@ private actor WindowSyncClient: SyncClient {
     /// Status requests fail, as while the agent does not answer.
     private var statusFails = false
     private var undoFails = false
+    private(set) var cancelledIDs: [String] = []
 
     func set(_ state: PairSyncState, for id: String) { states[id] = state }
     func setRunReply(_ reply: RunReply) { runReply = reply }
@@ -116,7 +117,11 @@ private actor WindowSyncClient: SyncClient {
         states[id] = state
         return state
     }
-    func cancel(_ id: String) async throws -> PairSyncState { states[id] ?? .idle }
+    func cancel(_ id: String) async throws -> PairSyncState {
+        cancelledIDs.append(id)
+        states[id] = .idle
+        return .idle
+    }
     func resolve(_ id: String, path: Data, keep: FolderSide,
                  reviewToken: String) async throws -> PairSyncState { states[id] ?? .idle }
     func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState {
@@ -275,12 +280,36 @@ func pairRowsSayHowEachPairReadsAtAGlance() async {
     #expect(rows[1] == PairRow(id: photos.id, name: "Photos", status: "Ready",
                                symbol: "arrow.right.to.line.compact", modeTitle: "Back up A to B",
                                activity: .idle,
-                               conflicts: 0, canSync: true))
+                                conflicts: 0, canSync: true, canCancel: false))
     #expect(viewModel.canSyncAll)
     #expect(viewModel.pairsLoaded)
     #expect(viewModel.agentState == .connected)
     #expect(viewModel.agentAction == nil)
     #expect(viewModel.menuBarStatus == .attention)
+}
+
+@MainActor
+@Test
+func stoppingAPairFromTheMenuDoesNotStopTheSelectedPair() async {
+    let photos = windowPair(photosWindowID, "Photos")
+    let docs = windowPair(docsWindowID, "Docs")
+    let client = WindowSyncClient()
+    let viewModel = await windowModel([photos, docs], sync: client)
+    viewModel.selectedPairID = photos.id
+
+    await client.set(.working(.run, cancelling: false), for: docs.id)
+    let refreshing = Task { await viewModel.sync(for: docs).refresh() }
+    #expect(await eventuallyInWindow { viewModel.pairRows.first { $0.id == docs.id }?.canCancel == true })
+    await viewModel.stopPair(id: docs.id)
+    await refreshing.value
+    #expect(await client.cancelledIDs == [docs.id])
+    #expect(viewModel.selectedPairID == photos.id)
+    #expect(viewModel.pairRows.allSatisfy { !$0.canCancel })
+
+    // Idle and unknown IDs never send cancellation requests.
+    await viewModel.stopPair(id: photos.id)
+    await viewModel.stopPair(id: "removed")
+    #expect(await client.cancelledIDs == [docs.id])
 }
 
 @MainActor
