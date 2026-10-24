@@ -32,10 +32,13 @@ const SFTP_WARNING: &str = concat!(
     "with resource forks cannot be copied. Power-loss-safe mode is unavailable; ",
     "Standard follows server durability."
 );
+const USAGE: &str = "usage: foldover --version\n       foldover --help\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs check NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover safe-mode off [--socket PATH]\n       foldover automation [low-power pause|run] [--socket PATH]\n       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]\n       foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]\n       foldover servers [browse sftp://[user@]host[:port]/path] [--socket PATH]\nLEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --records (both | source: a backup-* target that cannot hold .foldover keeps nothing, archives nothing); --schedule (manual | changes | MINUTES | daily@HH:MM[:DAYS]); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --bandwidth-limit (MEGABYTES per second | none); --canary (PATH | none)\nUpdates keep options that are not named.";
 
 enum Request {
     /// `--version`: print `foldover <version>` and exit 0.
     Version,
+    /// `--help` or `-h`: print usage to stdout and exit 0.
+    Help,
     Status(foldover_client::SocketLocation),
     Pairs(SocketLocation, PairCommand),
     Sync(SocketLocation, PairId, SyncCommand),
@@ -304,10 +307,12 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Request::Help => {
+            println!("{USAGE}");
+            ExitCode::SUCCESS
+        }
         Request::Usage => {
-            eprintln!(
-                "usage: foldover --version\n       foldover status [--socket PATH]\n       foldover pairs [--socket PATH]\n       foldover pairs show ID [--socket PATH]\n       foldover pairs add NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs check NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]\n       foldover pairs remove ID REVISION [--socket PATH]\n       foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN] [--socket PATH]\n       foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]\n       foldover history ID [--socket PATH]\n       foldover pause [MINUTES] [--socket PATH]\n       foldover resume [--socket PATH]\n       foldover safe-mode off [--socket PATH]\n       foldover automation [low-power pause|run] [--socket PATH]\n       foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]\n       foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]\n       foldover servers [browse sftp://[user@]host[:port]/path] [--socket PATH]\nLEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)\nMODE: sync | mirror-left | mirror-right | backup-left | backup-right\nOPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --records (both | source: a backup-* target that cannot hold .foldover keeps nothing, archives nothing); --schedule (manual | changes | MINUTES | daily@HH:MM[:DAYS]); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --bandwidth-limit (MEGABYTES per second | none); --canary (PATH | none)\nUpdates keep options that are not named."
-            );
+            eprintln!("{USAGE}");
             ExitCode::from(USAGE_EXIT)
         }
     }
@@ -330,6 +335,11 @@ fn request(args: impl Iterator<Item = OsString>) -> Request {
     let args: Vec<OsString> = args.collect();
     if matches!(args.as_slice(), [arg] if arg == "--version") {
         return Request::Version;
+    }
+    // `--help` or `-h` anywhere asks for usage rather than running a
+    // command: no option takes either as a value.
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        return Request::Help;
     }
     let (args, location) = if args.len() >= 2 && args[args.len() - 2] == "--socket" {
         (
@@ -1072,6 +1082,17 @@ mod tests {
     }
 
     #[test]
+    fn help_flag_anywhere_selects_help() {
+        assert!(matches!(req(&["--help"]), Request::Help));
+        assert!(matches!(req(&["-h"]), Request::Help));
+        assert!(matches!(req(&["sync", "--help"]), Request::Help));
+        assert!(matches!(
+            req(&["status", "--socket", "/tmp/foldover.sock", "--help"]),
+            Request::Help
+        ));
+    }
+
+    #[test]
     fn share_commands_name_a_device_folder_and_name() {
         let device = "ab".repeat(32);
         let share = "cd".repeat(16);
@@ -1179,7 +1200,6 @@ mod tests {
     fn anything_else_is_usage() {
         for args in [
             &[][..],
-            &["--help"],
             &["status", "extra"],
             &["--version", "extra"],
             &["-V"],
