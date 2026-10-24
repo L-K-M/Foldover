@@ -50,6 +50,9 @@ struct SettingsView: View {
             }
             Section {
                 Button("Open Full Disk Access Settings…") { viewModel.openFullDiskAccess() }
+                Text(viewModel.accessRecoveryNote).font(.callout).foregroundStyle(.secondary)
+                FullDiskAccessResetButton(viewModel: viewModel)
+                if let error = viewModel.accessError { ErrorNote(message: error) }
             } header: {
                 InfoLabel(title: Text("Folder Access"), message: Text(viewModel.accessNote))
             }

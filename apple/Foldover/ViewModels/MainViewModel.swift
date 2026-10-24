@@ -263,6 +263,13 @@ final class MainViewModel {
         return pairs.isEmpty ? emptyState : String(localized: "Select a pair")
     }
     var pairsLoading: Bool { pairStore.isLoading }
+    var canResetFullDiskAccess: Bool {
+        guard agentConnected, pairStore.hasLoaded, !pairStore.isLoading,
+              pairStore.loadError == nil else { return false }
+        return pairs.allSatisfy {
+            syncStore.hasKnownState(for: $0.id) && !sync(for: $0).isWorking && !syncStore.isBusy($0.id)
+        }
+    }
     var pairError: String? { pairStore.loadError }
     var canConfigurePairs: Bool {
         // The settled answer, not the probe in flight: a health check

@@ -467,6 +467,8 @@ final class SyncStore {
     private var listingRequests: [String: Int] = [:]
     private var listingSequence = 0
     private(set) var states: [String: PairSyncState] = [:]
+    /// Unknown or failed observations must not authorize permission resets.
+    private var knownStates: Set<String> = []
     /// Bumped whenever a pair's listed rows can change: a new state, or
     /// another page of changes. Display bookkeeping for row caching.
     private(set) var rowsRevisions: [String: Int] = [:]
@@ -497,10 +499,17 @@ final class SyncStore {
         for pair in pairs where polling[pair.id] == nil && pendingOperations[pair.id] == nil {
             let previous = states[pair.id]
             let generation = generations[pair.id] ?? 0
-            guard var state = try? await client.status(pair.id) else { continue }
+            let reply: PairSyncState
+            do {
+                reply = try await client.status(pair.id)
+            } catch {
+                if (generations[pair.id] ?? 0) == generation { knownStates.remove(pair.id) }
+                continue
+            }
             // A local write while the request was in flight is newer.
             guard (generations[pair.id] ?? 0) == generation else { continue }
-            state = normalized(pair.id, state)
+            let state = normalized(pair.id, reply)
+            knownStates.insert(pair.id)
             set(pair.id, state)
             if previous != state { await refreshHistory(pair.id) }
             guard let previous, previous != state, let alert = Self.alert(for: pair, state: state) else {
@@ -532,6 +541,7 @@ final class SyncStore {
     }
 
     func state(for id: String) -> PairSyncState { states[id] ?? .idle }
+    func hasKnownState(for id: String) -> Bool { knownStates.contains(id) }
     func listing(for id: String) -> ChangeListing? { listings[id] }
 
     /// The pair's change-list text filter; it narrows the fetched rows
@@ -696,6 +706,7 @@ final class SyncStore {
         } catch {
             pendingOperations[id] = nil
             guard !Task.isCancelled, (generations[id] ?? 0) == generation else { return }
+            knownStates.remove(id)
             requestErrors[id] = PairStore.message(for: error)
             return
         }
@@ -742,6 +753,7 @@ final class SyncStore {
         guard pendingOperations[id] == nil else { return false }
         if operation == .choice, polling[id] != nil { return false }
         pendingOperations[id] = operation
+        knownStates.remove(id)
         generations[id, default: 0] += 1
         polling[id] = nil
         return true
@@ -753,6 +765,7 @@ final class SyncStore {
     private func perform(_ id: String, _ kind: RequestKind,
                          _ request: @Sendable () async throws -> PairSyncState) async {
         requestErrors[id] = nil
+        knownStates.remove(id)
         let generation = generations[id] ?? 0
         let reply: PairSyncState
         do {
@@ -767,6 +780,7 @@ final class SyncStore {
         guard !Task.isCancelled, (generations[id] ?? 0) == generation else { return }
         // An explicit job that ran re-arms approval requests for the pair.
         if kind == .start { declined[id] = nil }
+        knownStates.insert(id)
         set(id, normalized(id, reply))
         await pollWhileWorking(id)
     }
@@ -798,11 +812,13 @@ final class SyncStore {
             } catch {
                 guard polling[id] == owner, !Task.isCancelled,
                       (generations[id] ?? 0) == generation else { return }
+                knownStates.remove(id)
                 requestErrors[id] = PairStore.message(for: error)
                 return
             }
             guard polling[id] == owner,
                   (generations[id] ?? 0) == generation else { return }
+            knownStates.insert(id)
             set(id, normalized(id, reply))
         }
         if polling[id] == owner { polling[id] = nil }
