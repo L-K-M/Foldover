@@ -94,6 +94,9 @@ final class AgentStore {
     /// syncs.
     private(set) var safeModeStops: UInt32?
     private(set) var safeModeError: String?
+    /// A refused check already registered the agent anew: until an answer
+    /// arrives, more registrations only repeat a failure.
+    private var repairedUnreachable = false
 
     init(statusRequest: @escaping @Sendable () async throws -> AgentReport = {
         do {
@@ -146,6 +149,7 @@ final class AgentStore {
     /// Take the agent's report; entering safe mode is worth a
     /// notification, since nothing syncs until a person resumes.
     private func note(_ report: AgentReport) {
+        repairedUnreachable = false
         let entering = safeModeStops == nil && report.safeModeStops != nil
         safeModeStops = report.safeModeStops
         guard entering, let stops = report.safeModeStops else { return }
@@ -175,13 +179,56 @@ final class AgentStore {
                 connection = .approvalRequired
                 return
             }
+            // A login item that reads enabled while the agent refuses
+            // connections is a job launchd cannot start, as after a
+            // rebuild: register it anew rather than wait for Turn On. A
+            // timed-out status is an answering agent, not a dead one.
+            if error is AgentNotRunning,
+               system.registration == .enabled, !repairedUnreachable {
+                repairedUnreachable = true
+                await repairUnreachable(request: request)
+                return
+            }
             connection = .failed(message: message(for: error))
+        }
+    }
+
+    /// Register the agent anew after a health check found it unreachable
+    /// while its login item reads enabled: launchd keeps the job but cannot
+    /// start it. Serialized with Turn On, which changes the same item.
+    private func repairUnreachable(request: Int) async {
+        await afterStarting { [self] in
+            guard generation == request, system.registration == .enabled else {
+                // Superseded before the repair ran; the flag must not
+                // claim a repair that never happened.
+                repairedUnreachable = false
+                return
+            }
+            connection = .restarting
+            do {
+                // The reregister is one repair; `start` may try one more
+                // before it gives up.
+                let registration = try await system.reregister()
+                guard generation == request else { return }
+                try await start(registration, request: request, firstWait: startupTimeout,
+                                repairs: Self.repairAttempts - 1, registered: true)
+            } catch {
+                guard generation == request else { return }
+                guard !Task.isCancelled else {
+                    connection = lastSettled ?? .disconnected
+                    return
+                }
+                connection = .failed(message: message(for: error))
+            }
         }
     }
 
     func enable() async {
         await afterStarting { [self] in
             generation += 1
+            // Deliberately turning the agent on is its own repair attempt:
+            // a health check may repair afterwards even if this one fails.
+            repairedUnreachable = false
             let request = generation
             do {
                 let before = system.registration

@@ -449,4 +449,62 @@ final class AgentRegistrationTests {
         await turningOn.value
         #expect(store.connection == .connected(version: "1.0"))
     }
+
+    /// A health check that cannot reach an agent its login item says is on
+    /// registers it anew; it does not wait for Turn On.
+    @Test
+    func aRefusedCheckRegistersTheAgentAnew() async {
+        let item = StaleLoginItem(startsAfter: 1)
+        let store = agentStore(for: item)
+        await store.refresh()
+        #expect(store.connection == .connected(version: "1.0"))
+        #expect(item.reregistrations == 1)
+    }
+
+    /// The repair tries the registration anew and one more, then stops:
+    /// until an answer arrives, more checks do not register again.
+    @Test
+    func aRefusedCheckRepairsOnceUntilAnAnswer() async {
+        let item = StaleLoginItem(startsAfter: nil)
+        let store = agentStore(for: item)
+        await store.refresh()
+        #expect(item.reregistrations == 2)
+        guard case .failed = store.connection else {
+            Issue.record("Expected failure, got \(store.connection)")
+            return
+        }
+        await store.refresh()
+        #expect(item.reregistrations == 2)
+    }
+
+    /// A timed-out status is an answering agent, not a dead one: it is
+    /// reported, never repaired.
+    @Test
+    func aTimedOutCheckDoesNotRepair() async {
+        let item = StaleLoginItem(startsAfter: 1)
+        let store = AgentStore(statusRequest: {
+            try await Task.sleep(for: .seconds(60))
+            return AgentReport(version: "1.0")
+        }, system: item, defaults: defaults,
+           startupTimeout: .milliseconds(20), startupPoll: .milliseconds(5))
+        await store.refresh()
+        #expect(item.reregistrations == 0)
+        guard case .failed = store.connection else {
+            Issue.record("Expected failure, got \(store.connection)")
+            return
+        }
+    }
+
+    /// An agent that is simply off is reported, not repaired.
+    @Test
+    func aCheckDoesNotRepairAnAgentThatIsOff() async {
+        let item = StaleLoginItem(.disabled, startsAfter: nil)
+        let store = agentStore(for: item)
+        await store.refresh()
+        #expect(item.reregistrations == 0)
+        guard case .failed = store.connection else {
+            Issue.record("Expected failure, got \(store.connection)")
+            return
+        }
+    }
 }

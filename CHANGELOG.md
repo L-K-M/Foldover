@@ -342,10 +342,11 @@ All notable changes to this project are documented here. The format follows
 ### Fixed
 
 - The background agent starts again after the app is replaced: Foldover
-  registers it anew when it opens as a changed build, and Turn On does
-  when the agent does not answer. macOS kept the agent registered to the
-  previous build and would not start the new one, so Turn On did nothing
-  and the agent stayed unavailable ("Connection refused").
+  registers it anew when it opens as a changed build, when a status check
+  finds it unreachable while turned on, and Turn On does when the agent
+  does not answer. macOS kept the agent registered to the previous build
+  and would not start the new one, so it stayed unavailable ("Connection
+  refused").
 
 - Files synced to a network share no longer get macOS's quarantine
   mark (Gatekeeper's note that a file was downloaded) written there,
