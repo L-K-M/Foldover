@@ -31,18 +31,27 @@ pub struct AutomationState {
 
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn automation_state() -> Result<AutomationState, AgentError> {
-    state(foldover_client::automation_status(&SocketLocation::Default).await)
+    state(
+        foldover_client::automation_status(&SocketLocation::Default).await,
+        AgentError::read,
+    )
 }
 
 /// Pause automatic syncs for `minutes`, or until resumed when absent.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn pause_automation(minutes: Option<u32>) -> Result<AutomationState, AgentError> {
-    state(foldover_client::pause_automation(&SocketLocation::Default, minutes).await)
+    state(
+        foldover_client::pause_automation(&SocketLocation::Default, minutes).await,
+        AgentError::from,
+    )
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn resume_automation() -> Result<AutomationState, AgentError> {
-    state(foldover_client::resume_automation(&SocketLocation::Default).await)
+    state(
+        foldover_client::resume_automation(&SocketLocation::Default).await,
+        AgentError::from,
+    )
 }
 
 /// Set the person's choice for automatic syncs in Low Power Mode.
@@ -57,13 +66,15 @@ pub async fn set_low_power_syncs(syncs: LowPowerSyncs) -> Result<AutomationState
             },
         )
         .await,
+        AgentError::from,
     )
 }
 
 fn state(
     status: Result<AutomationStatus, foldover_client::Error>,
+    error: impl FnOnce(foldover_client::Error) -> AgentError,
 ) -> Result<AutomationState, AgentError> {
-    let status = status.map_err(AgentError::from)?;
+    let status = status.map_err(error)?;
     Ok(AutomationState {
         paused: status.paused,
         until_ms: status.until_ms,

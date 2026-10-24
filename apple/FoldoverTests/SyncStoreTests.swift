@@ -739,6 +739,63 @@ func previewsListMoreChangesByKindAndResetOnTheNextPreview() async {
     #expect(store.listing(for: pair().id) == nil)
 }
 
+/// Rows are display data built once per preview page and shared by
+/// every view model the window recreates; a store change rebuilds them.
+@MainActor
+@Test
+func changeRowsAreBuiltOncePerPageAndSharedAcrossViewModels() async {
+    let summary = preview(archivesInA: 3, needsApproval: false)
+    let client = ScriptedSyncClient([.previewed(summary), .previewed(summary)])
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let cache = ChangeRowsCache()
+    let first = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(),
+                                  agentConnected: true, rowCache: cache)
+    await first.preview()
+
+    // Reads of the same page, here or in another view model, build once.
+    #expect(first.listedRows.count == 2)
+    #expect(first.rows.count == 2)
+    let second = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(),
+                                   agentConnected: true, rowCache: cache)
+    #expect(second.listedRows.count == 2)
+    #expect(cache.builds == 1)
+
+    // Each store change — a page loaded, a filter chosen — rebuilds
+    // once. The scripted pages carry copy-kind rows, so the kind filter
+    // narrows them to their first page.
+    await second.loadMoreChanges()
+    #expect(second.listedRows.map(\.path) == ["p0", "p1", "p2", "p3"])
+    await second.showChanges(.copies)
+    #expect(second.listedRows.map(\.path) == ["p0", "p1"])
+    #expect(cache.builds == 3)
+
+    // A view model the window recreates after the page load and kind
+    // switch still reads the cached rows instead of building again.
+    let third = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(),
+                                  agentConnected: true, rowCache: cache)
+    #expect(third.listedRows.map(\.path) == ["p0", "p1"])
+    #expect(cache.builds == 3)
+}
+
+@MainActor
+@Test
+func cachedRowsAdoptANewTokenEvenWhenChangesAreIdentical() async {
+    let first = preview(archivesInA: 3, needsApproval: false)
+    let next = preview(archivesInA: 3, needsApproval: false, reviewToken: reviewTokenB)
+    let store = SyncStore(client: ScriptedSyncClient([.previewed(first), .previewed(next)]))
+    let cache = ChangeRowsCache()
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(),
+                                     agentConnected: true, rowCache: cache)
+    // A different client can replace the held preview between status polls.
+    await viewModel.refresh()
+    #expect(viewModel.listedRows.allSatisfy { $0.review?.token == reviewTokenA })
+
+    await viewModel.refresh()
+    #expect(!viewModel.listedRows.isEmpty)
+    #expect(viewModel.listedRows.allSatisfy { $0.review?.token == reviewTokenB })
+    #expect(cache.builds == 2)
+}
+
 // Regression for PR57: declineApproval only flipped the local state, so
 // the next scheduled checkAll read the same needsApproval from the
 // agent, resurrected the dialog and reposted the notification.
@@ -1961,6 +2018,30 @@ func workingJobsShowLiveCountsWithoutCountingAsNewStates() async {
     await client.reply(.idle)
     await refresh.value
     #expect(viewModel.progressFraction == nil)
+}
+
+@MainActor
+@Test
+func throughputAndDurationTextUseHumanUnits() {
+    for (bytes, expected) in [(UInt64(42), "42 B/s"), (850_000, "850 kB/s"),
+                              (999_400, "999 kB/s"), (999_600, "1.0 MB/s"),
+                              (999_400_000, "999.4 MB/s"), (999_600_000, "1.00 GB/s"),
+                              (2_500_000, "2.5 MB/s"), (12_000_000_000, "12.00 GB/s")] {
+        #expect(PairSyncViewModel.throughputText(bytes) == expected)
+    }
+    for (seconds, expected) in [(UInt64(9), "9 s"), (65, "1 min 5 s"), (120, "2 min"),
+                                (125, "2 min 5 s"), (600, "10 min"), (3_700, "1 h 1 min")] {
+        #expect(PairSyncViewModel.timeText(seconds) == expected)
+    }
+    #expect(PairSyncViewModel.applying(
+        WorkProgress(changes: 4, applied: 1, bytes: 301_000_000, copied: 1_000_000, rate: 2_500_000)
+    ).hasSuffix(" · 2.5 MB/s · about 2 min left"))
+    #expect(PairSyncViewModel.applying(WorkProgress(changes: 4, applied: 1)) == "Syncing… 1 of 4 changes")
+
+    let copied = WorkProgress(changes: 1, applied: 1, bytes: 42, copied: 42, rate: 42)
+    #expect(!PairSyncViewModel.applying(copied).contains("left"))
+    let waiting = WorkProgress(changes: 1, bytes: 42, rate: 42, waitingFor: "Studio")
+    #expect(!PairSyncViewModel.applying(waiting).contains("/s"))
 }
 
 @Test

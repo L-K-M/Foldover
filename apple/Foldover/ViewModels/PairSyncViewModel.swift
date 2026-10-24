@@ -95,6 +95,41 @@ struct ApprovalRequest: Equatable, Sendable, Identifiable {
     var id: String { "\(pairID)-\(reviewToken)" }
 }
 
+/// What the change rows were built from: the pair's store revision,
+/// which bumps whenever a new state or another page of changes can
+/// change them. Every builder that shares the cache must be
+/// distinguishable by these fields — two builders with an equal source
+/// get each other's rows.
+/// Settings changes invalidate `reviewable` through the pair revision.
+fileprivate struct RowsSource: Equatable {
+    var pair: String
+    var revision: Int
+}
+
+/// Change rows are display data built from the store's preview pages:
+/// a UTF-8 path decode, a URL, a skip-rule walk and formatted sizes per
+/// row. A big preview rebuilt every row on each read, several reads per
+/// render and one per search keystroke, so the cache builds them once
+/// per store revision and hands the same rows back until the store
+/// changes (PLAN.md §3.2: fast you can see).
+@MainActor
+final class ChangeRowsCache {
+    private var entries: [String: (source: RowsSource, rows: [ChangeRow])] = [:]
+    /// Builds performed, for tests: a shared cache must build once per
+    /// source, however many view models read it.
+    private(set) var builds = 0
+
+    fileprivate func rows(from source: RowsSource, build: () -> [ChangeRow]) -> [ChangeRow] {
+        if let entry = entries[source.pair], entry.source == source {
+            return entry.rows
+        }
+        let rows = build()
+        builds += 1
+        entries[source.pair] = (source, rows)
+        return rows
+    }
+}
+
 /// Preview and run controls for the selected pair: strings and actions only.
 @MainActor
 struct PairSyncViewModel {
@@ -102,6 +137,18 @@ struct PairSyncViewModel {
     let store: SyncStore
     let pairs: PairStore
     let agentConnected: Bool
+    /// Rows cached across renders. The main window shares one cache
+    /// across its view models; each render recreates them.
+    let rowCache: ChangeRowsCache
+
+    init(pair: SyncPair, store: SyncStore, pairs: PairStore, agentConnected: Bool,
+         rowCache: ChangeRowsCache = ChangeRowsCache()) {
+        self.pair = pair
+        self.store = store
+        self.pairs = pairs
+        self.agentConnected = agentConnected
+        self.rowCache = rowCache
+    }
 
     private var state: PairSyncState { store.state(for: pair.id) }
 
@@ -182,6 +229,14 @@ struct PairSyncViewModel {
         if let preview = reviewable { return Int(clamping: preview.conflicts) }
         if case .finished(let result) = state { return Int(clamping: result.conflicts) }
         return 0
+    }
+
+    /// When the newest completed sync finished. History is newest first;
+    /// a cancelled, failed or needs-approval run does not count as success.
+    var lastSuccess: Date? {
+        store.history(for: pair.id)
+            .first { $0.end == .completed }
+            .map(\.finished)
     }
 
     /// What the content area shows instead of an empty table; nil while
@@ -327,7 +382,58 @@ struct PairSyncViewModel {
         if progress.bytes > 0 {
             text += " · " + String(localized: "\(byteText(progress.copied)) of \(byteText(progress.bytes))")
         }
+        // The agent reports 0 until the first copy lands; no invented speed.
+        // A wait on another Mac freezes `copied`, so the cumulative rate
+        // would decay and its ETA balloon — hide both during the stall.
+        if progress.rate > 0, progress.waitingFor == nil {
+            text += " · " + throughputText(progress.rate)
+            if progress.bytes > progress.copied {
+                text += " · " + String(localized: "about \(timeText((progress.bytes - progress.copied) / progress.rate)) left")
+            }
+        }
         return text
+    }
+
+    /// Promote rounded unit boundaries instead of showing "1000 kB/s".
+    static func throughputText(_ bytesPerSecond: UInt64) -> String {
+        let kilobyte = 1_000.0
+        let megabyte = kilobyte * kilobyte
+        let gigabyte = megabyte * kilobyte
+        let promotionThreshold = 0.9995
+        let rate = Double(bytesPerSecond)
+        let locale = Locale(identifier: "en_US_POSIX")
+        if rate >= gigabyte * promotionThreshold {
+            return String(format: "%.2f GB/s", locale: locale, rate / gigabyte)
+        }
+        if rate >= megabyte * promotionThreshold {
+            return String(format: "%.1f MB/s", locale: locale, rate / megabyte)
+        }
+        if rate >= kilobyte * promotionThreshold {
+            return String(format: "%.0f kB/s", locale: locale, rate / kilobyte)
+        }
+        return String(format: "%.0f B/s", locale: locale, rate)
+    }
+
+    static func timeText(_ seconds: UInt64) -> String {
+        let secondsPerMinute: UInt64 = 60
+        let secondsPerHour = 60 * secondsPerMinute
+        if seconds >= secondsPerHour {
+            let minutes = (seconds % secondsPerHour) / secondsPerMinute
+            if minutes == 0 {
+                return String(localized: "\(seconds / secondsPerHour) h")
+            }
+            return String(localized: "\(seconds / secondsPerHour) h \(minutes) min")
+        }
+        if seconds >= 10 * secondsPerMinute {
+            return String(localized: "\(seconds / secondsPerMinute) min")
+        }
+        if seconds >= secondsPerMinute {
+            let minutes = seconds / secondsPerMinute
+            let rest = seconds % secondsPerMinute
+            if rest == 0 { return String(localized: "\(minutes) min") }
+            return String(localized: "\(minutes) min \(rest) s")
+        }
+        return String(localized: "\(seconds) s")
     }
 
     /// A plan made for another pair revision is shown as information,
@@ -403,32 +509,36 @@ struct PairSyncViewModel {
     /// keeps a row selected while a search hides it.
     var listedRows: [ChangeRow] {
         if let preview = reviewable {
-            let review = ReviewContext(token: preview.reviewToken,
-                                       pairRevision: preview.pairRevision)
-            let changes = (store.listing(for: pair.id)?.changes ?? preview.changes)
-                .enumerated().map { index, change in
-                    ChangeRow(id: index, path: Self.pathText(change.path),
-                              description: Self.description(change),
-                              resolvable: Self.resolvable(change.action) ? change.path : nil,
-                              keepsBoth: change.action == .conflict(.bothChanged),
-                              skippable: PairStore.skipRule(for: change.path) == nil ? nil : change.path,
-                              item: Self.choosable(change.action) ? change.path : nil,
-                              otherWay: Self.otherWay(change.action),
-                              otherWayTitle: Self.otherWayTitle(change.action),
-                              review: review,
-                              look: Self.lookURL(change, settings: pair.settings),
-                              symbol: Self.symbol(change.action),
-                              tone: Self.tone(change.action),
-                              actionText: Self.actionText(change),
-                              sizeText: change.bytes > 0 ? Self.byteText(change.bytes) : "")
+            let listing = store.listing(for: pair.id)
+            let source = RowsSource(pair: pair.id, revision: store.rowsRevision(for: pair.id))
+            return rowCache.rows(from: source) {
+                let review = ReviewContext(token: preview.reviewToken,
+                                           pairRevision: preview.pairRevision)
+                let changes = (listing?.changes ?? preview.changes)
+                    .enumerated().map { index, change in
+                        ChangeRow(id: index, path: Self.pathText(change.path),
+                                  description: Self.description(change),
+                                  resolvable: Self.resolvable(change.action) ? change.path : nil,
+                                  keepsBoth: change.action == .conflict(.bothChanged),
+                                  skippable: PairStore.skipRule(for: change.path) == nil ? nil : change.path,
+                                  item: Self.choosable(change.action) ? change.path : nil,
+                                  otherWay: Self.otherWay(change.action),
+                                  otherWayTitle: Self.otherWayTitle(change.action),
+                                  review: review,
+                                  look: Self.lookURL(change, settings: pair.settings),
+                                  symbol: Self.symbol(change.action),
+                                  tone: Self.tone(change.action),
+                                  actionText: Self.actionText(change),
+                                  sizeText: change.bytes > 0 ? Self.byteText(change.bytes) : "")
+                    }
+                // Error rows have stable negative IDs, separate from paged changes.
+                let failures = preview.failures.enumerated().map { index, failure in
+                    ChangeRow(id: -(index + 1), path: Self.pathText(failure.path), description: failure.message,
+                              resolvable: nil, symbol: "xmark.octagon.fill", tone: .failure,
+                              actionText: failure.message)
                 }
-            // Error rows have stable negative IDs, separate from paged changes.
-            let failures = preview.failures.enumerated().map { index, failure in
-                ChangeRow(id: -(index + 1), path: Self.pathText(failure.path), description: failure.message,
-                          resolvable: nil, symbol: "xmark.octagon.fill", tone: .failure,
-                          actionText: failure.message)
+                return changes + failures
             }
-            return changes + failures
         }
         let failures: [RunFailure] = switch state {
         case .finished(let result): result.failures

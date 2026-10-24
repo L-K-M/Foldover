@@ -177,6 +177,9 @@ struct WorkProgress: Equatable, Sendable {
     var applied: UInt64 = 0
     var bytes: UInt64 = 0
     var copied: UInt64 = 0
+    /// Copy throughput so far, in bytes per second; 0 before the first
+    /// copy lands.
+    var rate: UInt64 = 0
     /// The Mac whose sync of a folder this job waits for, e.g. "Studio".
     var waitingFor: String?
 
@@ -330,7 +333,7 @@ private actor CoreSyncClient: SyncClient {
             .working(self.job(job), cancelling: cancelling, progress: WorkProgress(
                 listed: progress.listed, checked: progress.checked, changes: progress.changes,
                 applied: progress.applied, bytes: progress.bytes, copied: progress.copied,
-                waitingFor: progress.waitingFor
+                rate: progress.rate, waitingFor: progress.waitingFor
             ))
         case .previewed(let preview): .previewed(summary(preview))
         case .needsApproval(let preview): .needsApproval(summary(preview))
@@ -464,6 +467,9 @@ final class SyncStore {
     private var listingRequests: [String: Int] = [:]
     private var listingSequence = 0
     private(set) var states: [String: PairSyncState] = [:]
+    /// Bumped whenever a pair's listed rows can change: a new state, or
+    /// another page of changes. Display bookkeeping for row caching.
+    private(set) var rowsRevisions: [String: Int] = [:]
     private(set) var requestErrors: [String: String] = [:]
     private(set) var histories: [String: [RunRecord]] = [:]
     private(set) var listings: [String: ChangeListing] = [:]
@@ -564,6 +570,7 @@ final class SyncStore {
             listing?.changes += page.changes
             listing?.more = page.more
             listings[id] = listing
+            rowsRevisions[id, default: 0] += 1
         } catch {
             guard listingRequests[id] == ticket, !Task.isCancelled else { return }
             requestErrors[id] = PairStore.message(for: error)
@@ -818,9 +825,20 @@ final class SyncStore {
     private func set(_ id: String, _ state: PairSyncState) {
         generations[id, default: 0] += 1
         if states[id] != state {
-            listings[id] = nil
-            listingRequests[id] = nil
+            dropListing(for: id)
         }
         states[id] = state
     }
+
+    /// The single place a pair's listing is dropped, so the row revision
+    /// can't drift from the listing it tracks.
+    private func dropListing(for id: String) {
+        listings[id] = nil
+        listingRequests[id] = nil
+        rowsRevisions[id, default: 0] += 1
+    }
+
+    /// When the pair's listed rows last changed; rows cached against an
+    /// older revision are stale.
+    func rowsRevision(for id: String) -> Int { rowsRevisions[id] ?? 0 }
 }

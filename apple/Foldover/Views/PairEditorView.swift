@@ -479,6 +479,7 @@ private struct OtherMacFolderPicker: View {
                     .overlay {
                         if loading {
                             ProgressView()
+                                .accessibilityLabel("Loading Shared Folders")
                         } else if mac != nil && folders.isEmpty {
                             Text("That Mac shares no folders with this one.").foregroundStyle(.secondary)
                         }
@@ -569,6 +570,7 @@ private struct ServerFolderPicker: View {
                 .overlay {
                     if viewModel.isBrowsingServer {
                         ProgressView()
+                            .accessibilityLabel("Browsing Server Folders")
                     } else if viewModel.serverListing?.folders.isEmpty == true {
                         Text("No folders inside this one.").foregroundStyle(.secondary)
                     }

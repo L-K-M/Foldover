@@ -15,9 +15,8 @@ scans with the reviewer's own verification, ids `MIMO-`). A fourth
 pass (`Muse.md`, ids `MUSE-`) added engine/UI findings and five
 small UI PRs; its unique material is merged in place below (ids
 `MUSE-`). Source references describe that baseline unless a PR status
-says otherwise. Entries whose work ships in an open PR stay until that
-PR merges (see the table below); everything else here is unimplemented
-and shovel-ready.
+says otherwise. The consolidation table records retained and superseded
+work; the remaining entries describe unresolved work and qualification.
 
 ## Start here
 
@@ -41,123 +40,66 @@ fixing it. Keep visual proposals separate from measured defects.
 | P2 | SOL-09, SOL-10 and SOL-16: visible, actionable attention | Background failures, restore causes and freshness are explicit |
 | P2 | F-01: `pairs set` partial-update convenience | One option toggles without re-supplying pair identity |
 | P3 | SOL-13–15 and SOL-17–20: product and visual polish | Validate with native light/dark, keyboard and accessibility checks |
-| P3 | MUSE-05: small UI edges (inspector width, empty states, CLI `--help`) | Each edge fixed where it sits; no layout regressions in LayoutStressTests |
+| P3 | MUSE-05: small UI edges (inspector width, empty states, focused subcommand usage still open) | Each edge fixed where it sits; no layout regressions in LayoutStressTests |
 | P3 | MIMO-15–27: interface additions and hardening | See entries; MIMO-12/13 are exception-path hardening |
 | P3 | F-02–F-07: CLI readability, exports and small notifications | See entries |
 
-## Implemented in open PRs
+## PR consolidation decisions (24 October)
 
-These remain unmerged for the owner's review. Do not implement duplicate
-patches. Remove their detailed entries once merged, retaining any stated
-follow-up work. No implementation in this table was pushed into main.
+Reviewed all 26 open PRs against `9b9eeab`, including connected code,
+tests, CI failures and review threads. The consolidation branch is
+`review/consolidate-open-prs`; its combined checks qualify the result.
+Qualification covers Linux `cargo xtask ci`, dependency and shell checks,
+tracked Markdown/Mermaid checks, the native Xcode 27 build/test and UI tour.
+Revision-specific results are recorded on
+[PR 181](https://github.com/L-K-M/Foldover/pull/181).
+The original four passes above remain the source of the unresolved backlog.
 
-| Finding | Branch | PR | Verification |
-|---|---|---|---|
-| SOL-01 | `sol/cli-results` | [159](https://github.com/L-K-M/Foldover/pull/159) | Real-agent red/green regressions; CLI tests and clippy |
-| SOL-22 | `sol/unicode-planning` | [163](https://github.com/L-K-M/Foldover/pull/163) | 50k names: 11.28 s before, 0.094–0.165 s after; 135 engine tests |
-| SOL-02 | `sol/archive-state` | [165](https://github.com/L-K-M/Foldover/pull/165) | Held-reply regression failed first; 12 archive tests pass in a portable source harness |
-| SOL-12 | `sol/menu-bar-controls` | [168](https://github.com/L-K-M/Foldover/pull/168) | Swift syntax, docs and layering; native routing/UI tests await macOS |
-| F-08 | `devin/cli-help-exit` | [157](https://github.com/L-K-M/Foldover/pull/157) | Parser tests both binaries; `--help` anywhere incl. after `--socket` |
-| F-09 | `devin/cli-progress` | [158](https://github.com/L-K-M/Foldover/pull/158) | Trailing-flag parse tests; live Working lines verified against a real agent |
-| F-10 | `devin/cli-changes` | [160](https://github.com/L-K-M/Foldover/pull/160) | Real agent: auto-preview, kind filter, paging, usage errors |
-| F-11 | `devin/cli-sync-all` | [161](https://github.com/L-K-M/Foldover/pull/161) | Real agent, two pairs: finished + needsApproval aggregated to exit 3 |
-| F-12 | `devin/ffi-read-timeouts` | [162](https://github.com/L-K-M/Foldover/pull/162) | Unit test pins read `Connection` vs write `Request` timeout split |
-| F-13 | `devin/sync-throughput` | [164](https://github.com/L-K-M/Foldover/pull/164) | `Progress::wire()` rate test; `check-ffi` bindings match; Swift type-check awaits macOS CI |
-| F-14 | `devin/ipc-slow-timeout` | [166](https://github.com/L-K-M/Foldover/pull/166) | Poisoned-connection regression test; ipc+client tests and clippy |
-| MIMO-01′ first-run review gate after an aborted run | `fix/first-run-gate-after-aborted-run` | [173](https://github.com/L-K-M/Foldover/pull/173) | Regression failed first (identities recorded on abort); engine suite and `cargo xtask ci` green |
-| MIMO-02′ re-subscribe watchers after a pair edit | `fix/watch-roots-after-pair-edit` | [174](https://github.com/L-K-M/Foldover/pull/174) | Notification-level regression failed first; 5/5 local runs; `cargo xtask ci` green |
-| MIMO-03′ bound peer-claimed scan progress | `fix/clamp-peer-scan-progress` | [175](https://github.com/L-K-M/Foldover/pull/175) | End-to-end regression proven sensitive (2,000,010 steps unclamped); endpoint suite green |
-| MIMO-04′ keep pair commands enabled during health probes | `fix/agent-probe-keeps-buttons-enabled` | [176](https://github.com/L-K-M/Foldover/pull/176) | Swift Testing regression; parse-checked here, test run awaits macOS CI |
-| MIMO-05′ one restore at a time in the archive | `fix/archive-put-back-all-guard` | [177](https://github.com/L-K-M/Foldover/pull/177) | Duplicates the reservation half of SOL-02/PR 165; Swift Testing regression, macOS CI pending |
-| SOL-06 rows built once per preview page | `perf/cache-change-rows` | [178](https://github.com/L-K-M/Foldover/pull/178) | Build-count regression plus existing paging/filter tests; macOS profiling acceptance open |
-| SOL-12′ scroll the menu bar pair list | `fix/menu-bar-popover-overflow` | [179](https://github.com/L-K-M/Foldover/pull/179) | Covers only the bounded pair list of SOL-12/PR 168; macOS CI pending |
-| MUSE-a11y progress labels | `muse/a11y-progress-labels` | [167](https://github.com/L-K-M/Foldover/pull/167) | Script checked every ProgressView has a label; macOS/tour green after GLM round 2 |
-| MUSE-ETA client-side rate line | `muse/progress-eta` | [169](https://github.com/L-K-M/Foldover/pull/169) | Format/boundary/reset unit tests; **overlaps PR 164** (wire-level rate) — owner merges one |
-| MUSE-menubar height bound | `muse/menubar-overflow` | [170](https://github.com/L-K-M/Foldover/pull/170) | Height-estimate scroll threshold; **overlaps PR 179 and PR 168** — owner merges one |
-| MUSE-sidebar freshness tint | `muse/sidebar-freshness` | [171](https://github.com/L-K-M/Foldover/pull/171) | TimelineView re-tick; pair-row equality test updated; tour green |
-| MUSE-archive relative dates | `muse/archive-relative-dates` | [172](https://github.com/L-K-M/Foldover/pull/172) | `runTitle(now:)` boundary tests; nonisolated for the test target; tour green |
+| PR | Decision | Retained work and corrections |
+|---|---|---|
+| [140](https://github.com/L-K-M/Foldover/pull/140) | Close as shipped | `git cherry` verifies all seven patches already exist in main under different commit IDs |
+| [146](https://github.com/L-K-M/Foldover/pull/146) | Merge | Action release SHA independently verified; six immutable pins |
+| [147](https://github.com/L-K-M/Foldover/pull/147) | Merge | libc patch release and registry checksum verified |
+| [157](https://github.com/L-K-M/Foldover/pull/157) | Combine and fix | Help exits 0; literal help-looking names, paths and values remain valid |
+| [158](https://github.com/L-K-M/Foldover/pull/158) | Combine and fix | Shared polling preserves progress through plain runs and preview listings |
+| [159](https://github.com/L-K-M/Foldover/pull/159) | Combine | Conflict exit 4, partial restore exit 1, real-agent regressions |
+| [160](https://github.com/L-K-M/Foldover/pull/160) | Combine | Complete token-bound paging and kind filters; 125-item process test |
+| [161](https://github.com/L-K-M/Foldover/pull/161) | Combine and fix | Four running pairs; slot waits inside tasks; early results and aggregate exits tested |
+| [162](https://github.com/L-K-M/Foldover/pull/162) | Merge | Retryable reads preserve uncertain-commit warnings for mutations |
+| [163](https://github.com/L-K-M/Foldover/pull/163) | Merge | Count Unicode destinations once; preserve ambiguity and preparation budget |
+| [164](https://github.com/L-K-M/Foldover/pull/164) | Combine | Agent owns the copy clock; rate survives proto, FFI and app boundaries |
+| [165](https://github.com/L-K-M/Foldover/pull/165) | Combine | Restore reservation through reload, busy feedback and failure recovery tests |
+| [166](https://github.com/L-K-M/Foldover/pull/166) | Fix and merge | Slow budgets and poisoned connections; include remote archive reads |
+| [167](https://github.com/L-K-M/Foldover/pull/167) | Merge | Named progress indicators retained through menu-bar integration |
+| [168](https://github.com/L-K-M/Foldover/pull/168) | Fix and combine | Stop routing, bounded rows and larger-font tests; stable button targets and conservative display cap |
+| [169](https://github.com/L-K-M/Foldover/pull/169) | Supersede with 164 | Keep unit promotion, duration formatting and tests; replace client clock with agent clock |
+| [170](https://github.com/L-K-M/Foldover/pull/170) | Supersede with 168 | Keep bounded selectable errors; 168 supplies scaled rows and display-aware scrolling |
+| [171](https://github.com/L-K-M/Foldover/pull/171) | Fix and merge | Freshness updates over time; supply real history in its failing test fixture |
+| [172](https://github.com/L-K-M/Foldover/pull/172) | Merge | Relative archive dates retain clock times and boundary tests |
+| [173](https://github.com/L-K-M/Foldover/pull/173) | Merge | Keep aborted first runs gated; correct the identity-commit contract |
+| [174](https://github.com/L-K-M/Foldover/pull/174) | Merge | Re-subscribe changed roots; retain real notification regression |
+| [175](https://github.com/L-K-M/Foldover/pull/175) | Merge | Bound each peer counter report; retain unit and link-level regressions |
+| [176](https://github.com/L-K-M/Foldover/pull/176) | Merge | Pair commands follow the settled health answer during probes |
+| [177](https://github.com/L-K-M/Foldover/pull/177) | Supersede with 165 | Keep reservation rationale and the held-list assertion in 165's stronger tests |
+| [178](https://github.com/L-K-M/Foldover/pull/178) | Merge | Share rows across renders; state/page revisions invalidate the cache |
+| [179](https://github.com/L-K-M/Foldover/pull/179) | Supersede with 168 | Its bounded list is covered by 168, including compact short catalogs |
 
-MIMO-01′ through MIMO-05′ are findings of the third pass that their
-PRs now fix; the primes mark them as implemented, not backlog. Where
-they duplicate a second-pass fix (MIMO-05′ with SOL-02/PR 165,
-SOL-12′ with SOL-12/PR 168, SOL-06 with the cache described there),
-the owner merges one and closes the other — the fixes are small and
-independent. Third-pass review record: every review round across PRs
-173-179 raised only minor findings, all applied in-thread, and the
-latest round on each PR was clean. PR 178's row cache additionally
-failed a macOS regression (`scanErrorsStayVisibleWhileSafeChanges-
-RemainSyncable`) that review did not catch — the review token
-fingerprints the plan, not its failure list — and was re-keyed on a
-per-pair store revision before the suite passed. All checks — Linux
-CI, macOS suite and UI tour — pass on PRs 173-179 as they await the
-owner's merge.
+The review found three red native checks: 168's scroll test, 169's
+actor-isolated formatting calls, and 171's empty history fixture. The
+scroll screenshots showed the target row on screen: its combined label
+is a button, while the test queried a static text. The consolidation
+corrects those paths. CLI regressions reproduced delayed
+Sync All output, swallowed progress and incorrect aggregate conflict
+exits before their fixes. Help-value and archive-budget tests also failed
+before their fixes.
 
-Review status at consolidation: PRs 159, 163, 165 and 168 each completed
-two GLM review rounds without confirmed important findings. PRs 157, 158,
-160, 162, 164 and 166 each completed at least two consecutive rounds
-without important findings on their final revisions; PR 161 completed one
-clean round on its final revision after its findings were addressed (a
-second round never triggered — no further push remained to make). All
-findings called out by reviews were either applied or answered with a
-rejection rationale in the PR threads.
-
-Fourth-pass (Muse) review record: PR 167 completed two rounds; the one
-minor (spinner wording) was applied. PR 169 completed three rounds; the
-tour compile break, job-switch clock, wait pause, unit boundaries,
-locale pinning and test seams were all applied, with one locale-API
-compile error fixed in a follow-up. PR 170's major height-vs-count
-finding and both Dynamic Type minors were applied (an intermediate
-always-scroll attempt was corrected to a height estimate). PR 171's
-major freshness-reactivity finding, the `context.date` follow-up and
-the doc-comment/test minors were applied. PR 172's relative+clock-time
-finding and the `nonisolated` test compile fix were applied. All five
-PRs' latest GLM reviews reported zero actionable suggestions. PRs 169
-and 170 duplicate wire-level and third-party work already open as PRs
-164 and 179/168; the owner should merge one of each pair.
-
-Native app builds, UI tours and rendered layout remain unverified while
-the `xcode-27` CI jobs are queued. Portable archive checks use the actual
-store and view-model sources with unused FFI and formatting shims; they
-do not establish native integration or visual correctness.
+Remaining qualification: large-preview profiling, physical mixed-display
+layout and hands-on VoiceOver. Peer progress is bounded per report;
+counted callbacks or a per-observation budget would also bound CPU
+amplification across a hostile stream. Per-file bytes in flight and stale
+archive replies remain separate work below.
 
 ## Must fix
-
-### SOL-01: CLI success can mean an incomplete operation
-
-Status: implemented in PR 159; owner merge pending.
-
-- **What this is:** Scripts rely on exit status to decide whether a sync
-  or recovery finished successfully.
-- **Problem:** `crates/foldover-cli/src/main.rs:839-855` returns success
-  for a finished run with conflicts. Its archive command at lines 932-937
-  returns success even when `failure_count` reports failed restores.
-- **Fix:** Keep the JSON report, return failure for partial restores,
-  and give unresolved sync conflicts a documented nonzero exit status.
-- **If skipped:** Scheduled scripts can announce a successful backup or
-  recovery while files still need attention.
-- **Acceptance:** Exercise the real CLI and agent with divergent edits,
-  successful restoration, and a restore blocked by a file occupying its
-  parent directory. Check both exit codes and retained file contents.
-
-### SOL-02: Put Back All does not reserve the archive UI
-
-Status: implemented in PR 165; owner merge pending. SOL-03 is separate.
-A third-pass duplicate (PR 177) adds the same `isPuttingBack` guard
-with its own overlapping-restore regression; merge one of the two.
-
-- **What this is:** Selected-item restoration already reserves one batch
-  with `isPuttingBack`.
-- **Problem:** `apple/Foldover/Stores/ArchiveStore.swift:161-174` neither
-  checks nor sets that flag. A second whole-run restore, or a selected
-  restore, can overlap it. The agent rejects competing mutations, leaving
-  avoidable errors in the recovery interface.
-- **Fix:** Share the existing reservation across both restore commands,
-  hold it through the post-restore reload, and show that recovery is busy.
-- **If skipped:** Repeated clicks produce inconsistent feedback during
-  the operation where users most need certainty.
-- **Acceptance:** Hold a fake client's whole-run restore; both restore
-  buttons must disable and duplicate calls must send no second request.
-  Test failure and recovery of the reservation too.
 
 ### SOL-03: Old archive requests can change the current browser
 
@@ -216,30 +158,13 @@ with its own overlapping-restore regression; merge one of the two.
 - **Related shipped work:** PR 164 adds the cumulative copy rate
   (`SyncProgress.rate`) and an `N MB/s · about T left` status segment,
   hidden while the job waits on another Mac. In-flight per-file byte
-  progress (the frozen-bar part) remains open. PR 169 is a client-only
-  sibling of the same status line (no proto bump); if 164 merges first,
-  close 169, and vice versa keep 164's wire field.
+  progress remains open. The consolidation retains 169's unit promotion,
+  duration formatting and tests over 164's agent-owned clock.
 
-### SOL-06: Preview rendering repeatedly builds every loaded row
+### SOL-06: Profile cached preview rendering at scale
 
-Status: implemented in PR 178; owner merge pending.
-
-- **What this is:** `PairSyncViewModel` is a value recreated for rendering.
-- **Problem:** Its `listedRows` at lines 404-442 formats paths, sizes,
-  descriptions and Quick Look URLs for every loaded row. `rows`,
-  `placeholder`, `showsSearch` and selection consumers request this work
-  independently. Paging many rows moves increasing work onto the main
-  actor. This is a source-level hotspot, not a measured frame-rate claim.
-- **Fix:** Cache presentation rows by pair revision, review token and
-  listing generation; cache search results independently. Profile before
-  replacing the native Table with an outline implementation.
-- **If skipped:** Search and selection become increasingly expensive as
-  the user reviews more of a large plan.
-- **PR 178 scope:** rows build once per review token, loaded pages and
-  kind filter, in a cache the window's view models share; search
-  filters the cached rows per render rather than caching results
-  separately. The 10k/100k/200k macOS profiling acceptance remains
-  open.
+- **Implemented:** PR 178 caches rows across renders by store revision,
+  including state, pages and kind filters. Search filters cached rows.
 - **Acceptance:** Profile 10k, 100k and 200k loaded rows on macOS; typing
   and selection must avoid repeated full presentation rebuilds and meet
   PLAN.md's interaction budgets.
@@ -405,29 +330,14 @@ write FFI timeout messages (#162); copy rate + ETA in proto, FFI and app
 
 ## Nice to have: interface and product improvements
 
-### SOL-12: Keep the menu bar usable with many pairs
+### SOL-12: Qualify the menu bar on physical displays
 
-Status: implemented in PR 168; native validation and owner merge pending.
-
-- **What this is:** `MenuBarView.swift:18-28` puts every pair in an
-  unbounded vertical stack above the controls.
-- **Problem:** A larger catalog can push Pause, Settings and Quit beyond
-  the available display height. Busy rows offer a disabled sync button
-  instead of an immediate Stop action.
-- **Fix:** Bound and scroll only the pair list, keeping the header and
-  commands visible. Replace Sync with Stop while a cancellable job runs.
-- **If skipped:** The quick-control surface requires opening the main
-  window precisely when the user wants to stop activity quickly.
-- **Acceptance:** A 40-pair fixture fits a small display; footer controls
-  remain reachable by keyboard and Stop targets only its own pair.
-- **Native follow-up:** Check large text on mixed-height displays. The
-  implementation uses `NSScreen.main` and a 352-point list ceiling; a
-  review suggested using the smallest attached display or the actual
-  popover's display. Verify that behavior before choosing the final
-  multi-monitor policy. Scroll-position persistence is optional polish.
-  PR 179 independently implements just the bounded, scrolling pair
-  list (320 pt) with no display probing; if 168 merges first, close
-  179, and vice versa keep 168's Stop-row work.
+- **Implemented:** The consolidation retains 168's Stop routing and
+  scaled, scrolling rows, 170's bounded selectable errors, and a list
+  budget based on the smallest attached display. Default and large-text
+  UI tests exercise a 44-pair fixture.
+- **Acceptance:** Verify short and mixed-height displays, keyboard
+  access and VoiceOver with the popover on each display.
 
 ### SOL-13: A conflict inspector that compares both versions
 
@@ -598,21 +508,6 @@ against the connected source. They take priority over decorative work.
   must release the caller on cancel and on the stall deadline. Slow
   healthy transfers and idle watches must remain valid.
 
-### SOL-22: Unicode respelling performs quadratic duplicate checks
-
-Status: implemented in PR 163; owner merge pending. Other protected-path
-indexing costs remain in SOL-23.
-
-- **Evidence:** `crates/foldover-engine/src/run.rs:1433-1448` scans all
-  respelled paths again for every candidate destination.
-- **Impact:** 50k normalized spelling changes require roughly 2.5 billion
-  comparisons before a plan can be shown.
-- **Task:** Count destination multiplicity once, then apply only unique
-  mappings. Preserve ambiguity protection for both readable and
-  unavailable entries. Do not change case-only rename behavior.
-- **Acceptance:** Existing normalization safety cases pass; add a large
-  respelling benchmark and ambiguous-destination regression coverage.
-
 ### SOL-23: Many failed or unavailable paths multiply per-row work
 
 - **Evidence:** `run.rs:1574-1576` linearly searches failed ancestors per
@@ -775,8 +670,8 @@ PRIORITY table rows: MUSE-01 (P1), MUSE-02 and MUSE-03 (P2).
   name + `started_ms`; counts need a wire field or a selected-run
   summary line (the selected run's loaded page can state its size now).
 - **CLI help is one giant USAGE string** (`main.rs` const `USAGE`):
-  no `foldover sync --help`, no per-subcommand epilogues. A small
-  parser (or generated sections) would help scripting users.
+  `foldover sync --help` now works, but shows every command. Focused
+  subcommand usage and epilogues remain optional work.
 - **Menu-bar "q" shortcut** is already MIMO-18; noted again because
   the fourth pass hit it while bounding the popover.
 
@@ -785,8 +680,6 @@ PRIORITY table rows: MUSE-01 (P1), MUSE-02 and MUSE-03 (P2).
 Consolidated; cross-references show where a named SOL/MIMO/F entry
 already owns the work. Shovel-ready small ideas:
 
-- Sidebar freshness tint — ships in PR 171 (also feeds SOL-16).
-- Archive recent runs as "3 hours ago, 2:15 PM" — ships in PR 172.
 - Completion breath: one Reduce-Motion-aware pulse of the pair status
   icon on a clean interactive completion — part of SOL-19's signature
   moment; do not add a second animation system.
@@ -1191,7 +1084,7 @@ Verified against the source so they are not re-reported:
   style notes; the engine's own simulation and property tests remain the
   authority on that area.
 
-## Verification and implementation record
+## Original verification record (23 October)
 
 - Source review covered the architecture, service/IPC/CLI paths, engine
   and storage safety paths, endpoints, Swift stores and views, tests,
@@ -1238,9 +1131,9 @@ Verified against the source so they are not re-reported:
   passed on rerun; a second flake hit `test-agent-registration.py`
   (`Updated agent did not start` under launchd). Both are worth a
   stabilization look if they recur; neither touched shipped code.
-- Deferred minor suggestions: `Progress` newtype for `Request::Sync`'s
-  bool, `AgentError::write` alias, JSONL assertion test for `sync --all`
-  (needs a live agent — no unit surface), EWMA rate refinement.
+- Deferred minor suggestions: `AgentError::write` alias and EWMA rate
+  refinement. The consolidation adds a typed progress mode and CLI process
+  regressions for streaming, paging and aggregate exits.
 - Third-pass record (Mimo.md): each Rust PR reproduced its regression
   before the fix — PR 173's identity assertion on an aborted first run,
   PR 174's notification-level watcher test, PR 175's step bound (the
@@ -1253,9 +1146,8 @@ Verified against the source so they are not re-reported:
   SFTP transfer-volume claims in MIMO-08/09 are read from the source's
   structure, not measured. SOL-06's macOS profiling acceptance and
   SOL-12's native checks remain open with their PRs.
-- Merge-order note: when both #158 and #161 merge, `run_one` (shared by
-  `sync ID` and `sync --all`) should take the progress flag so plain
-  `sync --progress` keeps streaming Working lines.
+- The consolidation resolves the #158/#161 merge-order dependency through
+  shared polling, retaining plain-run progress output.
 - Fourth-pass (Muse) record: five Swift-only PRs (167, 169–172) were
   developed on Linux with helper-model review passes; every important
   GLM finding on their latest revisions was applied, and the last review
@@ -1266,8 +1158,8 @@ Verified against the source so they are not re-reported:
   MUSE-03's default-verb behavior was read from `sync_command`, not
   executed against a live agent in this pass. Native layout, VoiceOver
   and Increase Contrast were not exercised here. PRs 169 and 170
-  duplicate PR 164 and PR 179/168 respectively and are left open for
-  the owner to choose; do not merge both of a pair.
+  duplicated PR 164 and PR 179/168 respectively; their final disposition
+  is recorded in the consolidation table above.
 - Markdown links/structure and Mermaid checks passed for this document.
   The final revision's native CI and any remaining queued Linux jobs are
   outstanding, not successful or waived.

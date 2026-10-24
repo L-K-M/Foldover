@@ -159,9 +159,12 @@ final class ArchiveStore {
     }
 
     /// Put back everything the selected run archived, then list what is left.
+    /// Share the item-restore reservation so a run cannot be restored twice.
     func putBackAll() async {
-        guard let pairID, let run else { return }
+        guard !isPuttingBack, let pairID, let run else { return }
         let side = side
+        isPuttingBack = true
+        defer { isPuttingBack = false }
         error = nil
         do {
             let restore = try await client.putBackAll(pairID, side: side, run: run)

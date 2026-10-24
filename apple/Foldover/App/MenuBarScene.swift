@@ -27,7 +27,7 @@ struct MenuBarScene: Scene {
     var body: some Scene {
         let status = viewModel.menuBarStatus
         MenuBarExtra {
-            MenuBarView(viewModel: viewModel)
+            menuContent
         } label: {
             // Status items snapshot images; view animations do not reach them.
             Label {
@@ -37,5 +37,19 @@ struct MenuBarScene: Scene {
             }
         }
         .menuBarExtraStyle(.window)
+    }
+
+    @ViewBuilder
+    private var menuContent: some View {
+        #if DEBUG
+        if Fixtures.isEnabled && UserDefaults.standard.bool(forKey: "foldover-large-menu-text") {
+            // Explicitly enlarge the inherited font for the macOS text-size tour.
+            MenuBarView(viewModel: viewModel).font(.title2).dynamicTypeSize(.accessibility3)
+        } else {
+            MenuBarView(viewModel: viewModel)
+        }
+        #else
+        MenuBarView(viewModel: viewModel)
+        #endif
     }
 }

@@ -725,6 +725,110 @@ fn unavailable_socket_paths_keep_the_baselines_unicode_spelling() {
     );
 }
 
+fn composed_baseline(observation: &Observation) -> BTreeMap<SyncPath, BaselineEntry> {
+    observation
+        .entries()
+        .iter()
+        .map(|(name, entry)| {
+            let composed: String = std::str::from_utf8(name.as_bytes())
+                .unwrap()
+                .nfc()
+                .collect();
+            (
+                path(composed.as_bytes()),
+                BaselineEntry::new(entry.version(), entry.version()).unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn ambiguous_unicode_respellings_preserve_every_observed_entry() {
+    let memory = foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default());
+    for name in [
+        "s\u{323}\u{307}",
+        "\u{1e63}\u{307}",
+        "cafe\u{301}",
+        "Report",
+    ] {
+        memory.put_file(name.as_bytes(), name.as_bytes()).unwrap();
+    }
+    let endpoint = Endpoint::Memory(memory);
+    let mut observation = endpoint
+        .observe_from(
+            foldover_types::MetadataPolicy::default(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+            &mut |_| {},
+        )
+        .unwrap();
+    let base = composed_baseline(&observation);
+    let original = observation.versions();
+    let names = NameMatching::new(
+        foldover_types::CaseMatching::Exact,
+        UnicodeMatching::Normalized,
+    );
+    align_spellings(&mut observation, &base, names);
+
+    // Ambiguous aliases keep both versions; a unique alias still aligns.
+    assert_eq!(observation.entries().len(), original.len());
+    for name in ["s\u{323}\u{307}", "\u{1e63}\u{307}", "Report"] {
+        assert_eq!(
+            observation.entries()[&path(name.as_bytes())].version(),
+            original[&path(name.as_bytes())]
+        );
+    }
+    assert!(
+        !observation
+            .entries()
+            .contains_key(&path("\u{1e69}".as_bytes()))
+    );
+    assert_eq!(
+        observation.entries()[&path("caf\u{e9}".as_bytes())].version(),
+        original[&path("cafe\u{301}".as_bytes())]
+    );
+}
+
+/// PLAN.md §5.3 allows five seconds for planning 500k paths after a scan.
+/// This narrower phase must fit that budget even for 50k respelled names.
+#[test]
+#[ignore = "performance budget; run explicitly in release mode on an idle host"]
+fn unicode_respelling_prepare_budget() {
+    const ENTRIES: usize = 50_000;
+    const BUDGET: Duration = Duration::from_secs(5);
+    let memory = foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default());
+    for index in 0..ENTRIES {
+        memory
+            .put_file(format!("cafe\u{301}-{index:05}").as_bytes(), b"data")
+            .unwrap();
+    }
+    let mut observation = Endpoint::Memory(memory)
+        .observe_from(
+            foldover_types::MetadataPolicy::default(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+            &mut |_| {},
+        )
+        .unwrap();
+    let base = composed_baseline(&observation);
+    let names = NameMatching::new(
+        foldover_types::CaseMatching::Exact,
+        UnicodeMatching::Normalized,
+    );
+
+    let started = std::time::Instant::now();
+    align_spellings(&mut observation, &base, names);
+    let elapsed = started.elapsed();
+    eprintln!("Aligned {ENTRIES} Unicode names in {elapsed:?}");
+    assert!(
+        elapsed < BUDGET,
+        "Unicode alignment exceeded {BUDGET:?}: {elapsed:?}"
+    );
+    assert!(observation.entries().keys().eq(base.keys()));
+}
+
 #[test]
 fn unavailable_aliases_are_skipped_before_the_first_sync() {
     use foldover_types::CaseMatching;
@@ -941,6 +1045,191 @@ fn conflicts_are_reported_and_both_versions_stay_untouched() {
     );
     assert_eq!(fs::read(pair.left.path().join("file")).unwrap(), b"left");
     assert_eq!(fs::read(pair.right.path().join("file")).unwrap(), b"right");
+}
+
+/// Cancels as soon as the plan is announced, so the copy loop stops
+/// before its first write: an abort with nothing committed.
+struct CancelAfterPlan {
+    planned: std::cell::Cell<bool>,
+}
+
+impl RunProgress for CancelAfterPlan {
+    fn observed(&self, _: Side, _: ObserveStep) {}
+    fn planned(&self, _: u64, _: u64) {
+        self.planned.set(true);
+    }
+    fn applied(&self, _: u64) {}
+    fn waiting(&self, _: Option<&str>) {}
+}
+
+/// PLAN.md §3.6: a pair is past its first run only once a run
+/// completes. A run stopped before its first write used to record the
+/// identities all the same, so every later run — scheduled ones
+/// included — skipped the first-run review gate.
+#[test]
+fn an_aborted_first_run_keeps_its_review_gate() {
+    let mut pair = fixture(SyncMode::Sync);
+    fs::write(pair.left.path().join("notes"), b"content").unwrap();
+    let cancel = CancelAfterPlan {
+        planned: std::cell::Cell::new(false),
+    };
+    let prepared = pair.prepare();
+    let mut store = pair.store();
+    let outcome = prepared
+        .execute(
+            Approval::default(),
+            RunContext::Reviewed,
+            STARTED,
+            &mut |revision, commit| store.apply(revision, commit),
+            &mut || {
+                if cancel.planned.get() {
+                    ScanControl::Cancel
+                } else {
+                    ScanControl::Continue
+                }
+            },
+            &cancel,
+        )
+        .unwrap();
+    let RunOutcome::Ran(report) = outcome else {
+        panic!("a stopped run reports itself, not an approval request")
+    };
+    assert_eq!(report.completion(), Completion::Cancelled);
+    assert!(
+        !pair.right.path().join("notes").exists(),
+        "a cancelled first run must not have written notes to the right side"
+    );
+
+    // Nothing completed, so the pair is still on its first run.
+    assert!(pair.identities.side(Side::Left).is_none());
+    assert!(pair.identities.side(Side::Right).is_none());
+    assert!(matches!(
+        pair.run(Approval::default(), RunContext::Unattended),
+        RunOutcome::NeedsApproval(_)
+    ));
+}
+
+/// The other half of the gate: a first run that completes records the
+/// identities, so unattended runs may start (PLAN.md §3.6).
+#[test]
+fn a_completed_first_run_records_its_identities() {
+    let mut pair = fixture(SyncMode::Sync);
+    fs::write(pair.left.path().join("notes"), b"content").unwrap();
+    pair.sync();
+
+    assert!(pair.identities.side(Side::Left).is_some());
+    assert!(pair.identities.side(Side::Right).is_some());
+    let RunOutcome::Ran(report) = pair.run(Approval::default(), RunContext::Unattended) else {
+        panic!("a synced pair runs unattended without a fresh review")
+    };
+    assert_eq!(report.completion(), Completion::Finished);
+}
+
+#[test]
+fn batched_first_runs_reopen_safely_before_the_identity_commit() {
+    let directory = tempfile::tempdir().unwrap();
+    let left = directory.path().join("left");
+    let right = directory.path().join("right");
+    fs::create_dir(&left).unwrap();
+    fs::create_dir(&right).unwrap();
+    // Leave work beyond the first batch and the copies still in flight.
+    let count = 2 * COMMIT_BATCH;
+    for index in 0..count {
+        fs::write(left.join(format!("file-{index}")), b"content").unwrap();
+    }
+    let location = foldover_state::StateLocation::Directory(directory.path().join("state"));
+    let mut engine = crate::Engine::open(&location).unwrap();
+    let pair = engine
+        .create_pair(
+            &PairDraft::new("Batched".into(), root(&left), root(&right), SyncMode::Sync).unwrap(),
+        )
+        .unwrap();
+    let prepared = PairRun::prepare(
+        engine.run_inputs(pair.id()).unwrap(),
+        &mut proceed,
+        &NoProgress,
+    )
+    .unwrap();
+    let mut batches = 0;
+    let mut refused_identities = false;
+    // Model a stop after durable batches, before the first-run marker lands.
+    let result = prepared.execute(
+        Approval::default(),
+        RunContext::Reviewed,
+        STARTED,
+        &mut |revision, commit| {
+            if matches!(commit, Commit::Identities { .. }) {
+                refused_identities = true;
+                return Err(crate::Error::StaleRevision);
+            }
+            engine.commit_run(pair.id(), revision, commit)?;
+            if matches!(commit, Commit::Base { .. }) {
+                batches += 1;
+            }
+            Ok(())
+        },
+        &mut proceed,
+        &NoProgress,
+    );
+    assert!(matches!(
+        result,
+        Err(RunError::Commit(crate::Error::StaleRevision))
+    ));
+    assert!(refused_identities);
+    assert!(
+        batches >= 2,
+        "expected multiple durable batches, got {batches}"
+    );
+    drop(engine);
+
+    let mut engine = crate::Engine::open(&location).unwrap();
+    assert_eq!(engine.pair(pair.id()).unwrap().revision(), pair.revision());
+    assert_eq!(engine.run_inputs(pair.id()).unwrap().base.len(), count);
+    assert!(!engine.first_synced(pair.id()).unwrap());
+    let prepared = PairRun::prepare(
+        engine.run_inputs(pair.id()).unwrap(),
+        &mut proceed,
+        &NoProgress,
+    )
+    .unwrap();
+    assert!(matches!(
+        prepared
+            .execute(
+                Approval::default(),
+                RunContext::Unattended,
+                STARTED,
+                &mut |revision, commit| engine.commit_run(pair.id(), revision, commit),
+                &mut proceed,
+                &NoProgress,
+            )
+            .unwrap(),
+        RunOutcome::NeedsApproval(_)
+    ));
+
+    // The same stored revision accepts the identities; later runs need no review.
+    for context in [RunContext::Reviewed, RunContext::Unattended] {
+        let prepared = PairRun::prepare(
+            engine.run_inputs(pair.id()).unwrap(),
+            &mut proceed,
+            &NoProgress,
+        )
+        .unwrap();
+        let RunOutcome::Ran(report) = prepared
+            .execute(
+                Approval::default(),
+                context,
+                STARTED,
+                &mut |revision, commit| engine.commit_run(pair.id(), revision, commit),
+                &mut proceed,
+                &NoProgress,
+            )
+            .unwrap()
+        else {
+            panic!("reviewed completion must unlock unattended runs")
+        };
+        assert_eq!(report.completion(), Completion::Finished);
+        assert!(engine.first_synced(pair.id()).unwrap());
+    }
 }
 
 #[test]

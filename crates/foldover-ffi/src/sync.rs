@@ -147,6 +147,9 @@ pub struct SyncWorkProgress {
     pub applied: u64,
     pub bytes: u64,
     pub copied: u64,
+    /// Copy throughput so far, in bytes per second; 0 before the first
+    /// copy lands.
+    pub rate: u64,
     /// The Mac whose sync of a folder this job waits for.
     pub waiting_for: Option<String>,
 }
@@ -160,6 +163,7 @@ impl From<SyncProgress> for SyncWorkProgress {
             applied: progress.applied,
             bytes: progress.bytes,
             copied: progress.copied,
+            rate: progress.rate,
             waiting_for: progress.waiting_for,
         }
     }
@@ -199,7 +203,10 @@ pub enum SyncJobState {
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn sync_preview(id: String) -> Result<SyncJobState, AgentError> {
     let id = id.parse().map_err(invalid_configuration)?;
-    state(foldover_client::start_preview(&SocketLocation::Default, id).await)
+    state(
+        foldover_client::start_preview(&SocketLocation::Default, id).await,
+        AgentError::from,
+    )
 }
 
 /// `review_token` is the `SyncPreviewSummary.review_token` captured with
@@ -225,13 +232,17 @@ pub async fn sync_run(
             token,
         )
         .await,
+        AgentError::from,
     )
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn sync_status(id: String) -> Result<SyncJobState, AgentError> {
     let id = id.parse().map_err(invalid_configuration)?;
-    state(foldover_client::sync_status(&SocketLocation::Default, id).await)
+    state(
+        foldover_client::sync_status(&SocketLocation::Default, id).await,
+        AgentError::read,
+    )
 }
 
 /// Keep one side's version of a conflict from the pair's latest preview.
@@ -249,6 +260,7 @@ pub async fn sync_resolve(
     state(
         foldover_client::resolve_conflict(&SocketLocation::Default, id, &path, keep.into(), token)
             .await,
+        AgentError::from,
     )
 }
 
@@ -295,7 +307,7 @@ pub async fn sync_changes(
     let page =
         foldover_client::sync_items(&SocketLocation::Default, id, token, after.as_deref(), kind)
             .await
-            .map_err(AgentError::from)?;
+            .map_err(AgentError::read)?;
     Ok(page.into())
 }
 
@@ -328,7 +340,10 @@ pub async fn sync_keep_both(
 ) -> Result<SyncJobState, AgentError> {
     let id = id.parse().map_err(invalid_configuration)?;
     let token = parse_review_token(&review_token)?;
-    state(foldover_client::keep_both(&SocketLocation::Default, id, &path, token).await)
+    state(
+        foldover_client::keep_both(&SocketLocation::Default, id, &path, token).await,
+        AgentError::from,
+    )
 }
 
 /// Leave a previewed change, and everything inside it, alone in the next
@@ -341,13 +356,19 @@ pub async fn sync_skip_once(
 ) -> Result<SyncJobState, AgentError> {
     let id = id.parse().map_err(invalid_configuration)?;
     let token = parse_review_token(&review_token)?;
-    state(foldover_client::skip_once(&SocketLocation::Default, id, &path, token).await)
+    state(
+        foldover_client::skip_once(&SocketLocation::Default, id, &path, token).await,
+        AgentError::from,
+    )
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn sync_cancel(id: String) -> Result<SyncJobState, AgentError> {
     let id = id.parse().map_err(invalid_configuration)?;
-    state(foldover_client::cancel_sync(&SocketLocation::Default, id).await)
+    state(
+        foldover_client::cancel_sync(&SocketLocation::Default, id).await,
+        AgentError::from,
+    )
 }
 
 /// Start undoing the pair's newest sync that changed anything; poll
@@ -355,11 +376,17 @@ pub async fn sync_cancel(id: String) -> Result<SyncJobState, AgentError> {
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn sync_undo(id: String) -> Result<SyncJobState, AgentError> {
     let id = id.parse().map_err(invalid_configuration)?;
-    state(foldover_client::undo_sync(&SocketLocation::Default, id).await)
+    state(
+        foldover_client::undo_sync(&SocketLocation::Default, id).await,
+        AgentError::from,
+    )
 }
 
-fn state(status: Result<SyncStatus, foldover_client::Error>) -> Result<SyncJobState, AgentError> {
-    Ok(status.map_err(AgentError::from)?.into())
+fn state(
+    status: Result<SyncStatus, foldover_client::Error>,
+    error: impl FnOnce(foldover_client::Error) -> AgentError,
+) -> Result<SyncJobState, AgentError> {
+    Ok(status.map_err(error)?.into())
 }
 
 impl From<SyncStatus> for SyncJobState {
@@ -538,6 +565,19 @@ mod tests {
 
     #[test]
     fn statuses_keep_every_count_path_byte_and_side() {
+        let SyncJobState::Working { progress, .. } = SyncStatus::Working {
+            job: SyncJob::Run,
+            cancelling: false,
+            progress: SyncProgress {
+                rate: 17,
+                ..SyncProgress::default()
+            },
+        }
+        .into() else {
+            panic!("unexpected state");
+        };
+        assert_eq!(progress.rate, 17);
+
         let preview = SyncPreview {
             items: vec![
                 SyncItem {

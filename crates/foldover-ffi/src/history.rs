@@ -47,7 +47,7 @@ pub async fn pair_history(id: String) -> Result<Vec<RunHistoryEntry>, AgentError
     let id = id.parse().map_err(invalid_configuration)?;
     let history = foldover_client::history(&SocketLocation::Default, id)
         .await
-        .map_err(AgentError::from)?;
+        .map_err(AgentError::read)?;
     Ok(entries(history))
 }
 

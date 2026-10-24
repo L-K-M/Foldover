@@ -131,6 +131,7 @@ struct PairDetailView: View {
         case .working:
             ProgressView()
                 .controlSize(.small)
+                .accessibilityLabel("Syncing \(pair.settings.name)")
         case .attention:
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)

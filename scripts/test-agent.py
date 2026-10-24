@@ -28,6 +28,9 @@ VERSION_MISMATCH = -32001
 ROOT_OVERLAP = -32006
 STALE_REVISION = -32004
 PAIR_NOT_FOUND = -32003
+CONFLICT_EXIT = 4
+# More than the protocol's first 100 preview items.
+PAGED_CHANGES = 125
 FORBIDDEN_ENTITLEMENTS = (
     "com.apple.security.get-task-allow",
     "com.apple.security.cs.debugger",
@@ -156,6 +159,101 @@ def synchronization(cli, endpoint, directory):
     if (right / "note.txt").read_bytes() != b"synced":
         raise RuntimeError("Sync did not copy the file")
 
+    # A completed job with unresolved conflicts is not a successful sync.
+    (left / "note.txt").write_bytes(b"left edit")
+    (right / "note.txt").write_bytes(b"right edit")
+    conflicted = invoke(cli, endpoint, ("sync", pair))
+    status = json.loads(conflicted.stdout)
+    if conflicted.returncode != CONFLICT_EXIT or status["result"]["conflicts"] != 1:
+        raise RuntimeError(f"Conflicted sync reported the wrong outcome: {conflicted}")
+    if (left / "note.txt").read_bytes() != b"left edit" or (right / "note.txt").read_bytes() != b"right edit":
+        raise RuntimeError("Conflicted sync changed a version")
+
+
+def restoration(cli, endpoint, directory):
+    left, right = directory / "restore-left", directory / "restore-right"
+    (left / "nested").mkdir(parents=True)
+    right.mkdir()
+    (left / "nested/note.txt").write_bytes(b"nested original")
+    (left / "note.txt").write_bytes(b"original")
+    created = invoke(cli, endpoint, ("pairs", "add", "Restore", str(left), str(right), "sync"))
+    if created.returncode != 0:
+        raise RuntimeError(f"Restore pair creation failed: {created}")
+    pair = json.loads(created.stdout)["id"]
+    preview = invoke(cli, endpoint, ("sync", pair, "--preview"))
+    if preview.returncode != 0:
+        raise RuntimeError(f"Restore preview failed: {preview}")
+    token = json.loads(preview.stdout)["preview"]["review_token"]
+    initial = invoke(cli, endpoint, ("sync", pair, "--approve", "0", "0", "--review", token))
+    if initial.returncode != 0:
+        raise RuntimeError(f"Restore fixture sync failed: {initial}")
+
+    # Archive a replaced file and a deleted subtree through the real engine.
+    (left / "note.txt").write_bytes(b"newer")
+    (left / "nested/note.txt").unlink()
+    (left / "nested").rmdir()
+    synced = invoke(cli, endpoint, ("sync", pair))
+    if synced.returncode != 0:
+        raise RuntimeError(f"Archive fixture sync failed: {synced}")
+    run = json.loads(synced.stdout)["result"]["archive"]
+    (right / "nested").write_bytes(b"blocker")
+
+    arguments = ("archive", pair, "right", run, "--put-back-all")
+    partial = invoke(cli, endpoint, arguments)
+    report = json.loads(partial.stdout)
+    if partial.returncode != 1 or report["failure_count"] != 1 or report["beside"] != 1:
+        raise RuntimeError(f"Partial restore reported the wrong outcome: {partial}")
+    if (right / "nested").read_bytes() != b"blocker" or (right / "note.txt").read_bytes() != b"newer":
+        raise RuntimeError("Restore overwrote newer contents")
+    kept = right / ".foldover/archive" / run / "nested/note.txt"
+    if kept.read_bytes() != b"nested original":
+        raise RuntimeError("Failed restore lost the archived version")
+
+    # A retry succeeds after the obstruction is removed.
+    (right / "nested").unlink()
+    restored = invoke(cli, endpoint, arguments)
+    report = json.loads(restored.stdout)
+    if restored.returncode != 0 or report["failure_count"] != 0 or report["restored"] != 1:
+        raise RuntimeError(f"Successful restore reported the wrong outcome: {restored}")
+    if (right / "nested/note.txt").read_bytes() != b"nested original":
+        raise RuntimeError("Successful restore did not return the contents")
+
+
+def preview_paging(cli, endpoint, directory):
+    left, right = directory / "paging-left", directory / "paging-right"
+    left.mkdir()
+    right.mkdir()
+    names = {f"item-{index:03}.txt" for index in range(PAGED_CHANGES)}
+    for name in names:
+        (left / name).write_bytes(b"preview only")
+    created = invoke(cli, endpoint, ("pairs", "add", "Paging", str(left), str(right), "sync"))
+    if created.returncode != 0:
+        raise RuntimeError(f"Paging pair creation failed: {created}")
+    pair = json.loads(created.stdout)["id"]
+
+    for suffix in [(), ("copies",)]:
+        listed = invoke(cli, endpoint, ("sync", pair, "--changes", *suffix))
+        items = [json.loads(line) for line in listed.stdout.splitlines()]
+        paths = [bytes(item["path"]).decode() for item in items]
+        if listed.returncode != 0 or len(paths) != len(names) or set(paths) != names:
+            raise RuntimeError(f"CLI lost or duplicated preview pages: {listed}")
+    empty = invoke(cli, endpoint, ("sync", pair, "--changes", "archives"))
+    if empty.returncode != 0 or empty.stdout.strip():
+        raise RuntimeError(f"CLI ignored the preview kind filter: {empty}")
+    if any((right / name).exists() for name in names):
+        raise RuntimeError("Listing changes wrote to an endpoint")
+
+
+def sync_all_results(cli, endpoint):
+    catalog = invoke(cli, endpoint, ("pairs",))
+    expected = {json.loads(line)["id"] for line in catalog.stdout.splitlines()}
+    synced = invoke(cli, endpoint, ("sync", "--all"))
+    results = [json.loads(line) for line in synced.stdout.splitlines()]
+    ids = [result["id"] for result in results]
+    # Docs is conflicted; the first-run pairs need approval. Conflicts win.
+    if synced.returncode != CONFLICT_EXIT or len(ids) != len(expected) or set(ids) != expected:
+        raise RuntimeError(f"Sync All exit {synced.returncode}, pair IDs {ids}; expected exit {CONFLICT_EXIT}, {expected}")
+
 
 def verify_release_entitlements(agent, cli):
     bundle = agent.parents[3]
@@ -236,6 +334,9 @@ def main():
             pair = configuration(cli, endpoint, home, arguments.configuration)
             if pair is not None:
                 synchronization(cli, endpoint, home)
+                restoration(cli, endpoint, home)
+                preview_paging(cli, endpoint, home)
+                sync_all_results(cli, endpoint)
             # Clients can close before the agent reads their kernel credentials.
             for _ in range(DISCONNECTED_CLIENTS):
                 with socket.socket(socket.AF_UNIX) as connection:

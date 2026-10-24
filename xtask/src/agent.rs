@@ -50,7 +50,7 @@ fn check() -> Result<String, ToolError> {
     let agent =
         agent.ok_or_else(|| ToolError("Cargo reported no foldoverd executable".to_owned()))?;
     let cli = cli.ok_or_else(|| ToolError("Cargo reported no foldover executable".to_owned()))?;
-    run(
+    let output = run(
         "python3",
         &[
             "scripts/test-agent.py",
@@ -65,5 +65,16 @@ fn check() -> Result<String, ToolError> {
         ],
         &root,
         None,
-    )
+    )?;
+    // Linux admits a same-user fixture; macOS authenticates signed helpers.
+    if cfg!(target_os = "linux") {
+        let streamed = run(
+            "python3",
+            &["scripts/test-cli-streaming.py", &cli],
+            &root,
+            None,
+        )?;
+        return Ok(format!("{output}{streamed}"));
+    }
+    Ok(output)
 }

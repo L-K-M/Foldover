@@ -12,6 +12,27 @@ private actor ArchiveFixtureClient: ArchiveClient {
     private(set) var pageRequests = 0
     private var holdsNextPage = false
     private var held: CheckedContinuation<Void, Never>?
+    private(set) var restoreRequests = 0
+    private var holdsRestore = false
+    private var heldRestore: CheckedContinuation<Void, Never>?
+    private var refusesRestore = false
+
+    func holdRestore() { holdsRestore = true }
+    func refuseRestore() { refusesRestore = true }
+
+    func waitForHeldRestore() async -> Bool {
+        let deadline = ContinuousClock.now + .seconds(3)
+        while heldRestore == nil {
+            if ContinuousClock.now >= deadline { return false }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return true
+    }
+
+    func releaseRestore() {
+        heldRestore?.resume()
+        heldRestore = nil
+    }
 
     func holdNextPage() { holdsNextPage = true }
 
@@ -52,9 +73,15 @@ private actor ArchiveFixtureClient: ArchiveClient {
     }
 
     func putBackAll(_ id: String, side: FolderSide, run: String) async throws -> RunRestore {
+        restoreRequests += 1
+        if holdsRestore {
+            holdsRestore = false
+            await withCheckedContinuation { heldRestore = $0 }
+        }
+        if refusesRestore { throw TwoRunFixtureError.refused }
         let count = UInt64(stored.count)
         stored.removeAll()
-        return RunRestore(restored: count - 1, beside: 1, failures: 0)
+        return RunRestore(restored: count > 0 ? count - 1 : 0, beside: count > 0 ? 1 : 0, failures: 0)
     }
 }
 
@@ -111,6 +138,52 @@ func putBackAllEmptiesTheRunAndSummarizes() async {
     #expect(viewModel.itemRows.isEmpty)
     #expect(viewModel.restoreText == "Put back 3 items. 1 went beside newer versions.")
     #expect(!viewModel.canPutBackAll)
+}
+
+@MainActor
+@Test
+func aWholeRunRestoreReservesBothRestoreCommands() async throws {
+    let client = ArchiveFixtureClient()
+    let store = ArchiveStore(client: client)
+    let viewModel = ArchiveViewModel(pair: docs(), store: store, agentConnected: true)
+    await viewModel.show(.b)
+    let row = try #require(viewModel.itemRows.first)
+
+    await client.holdRestore()
+    let restoring = Task { await viewModel.putBackAll() }
+    try #require(await client.waitForHeldRestore(), "Restore never reached the fixture")
+    #expect(!viewModel.canPutBack)
+    #expect(!viewModel.canPutBackAll)
+    #expect(viewModel.statusText == "Putting items back…")
+    #expect(!viewModel.itemRows.isEmpty)
+
+    await viewModel.putBackAll()
+    await viewModel.putBack(row)
+    #expect(await client.restoreRequests == 1)
+    #expect(await client.putBacks.isEmpty)
+    await client.releaseRestore()
+    await restoring.value
+
+    #expect(!store.isPuttingBack)
+    #expect(viewModel.itemRows.isEmpty)
+    #expect(viewModel.restoreText == "Put back 3 items. 1 went beside newer versions.")
+}
+
+@MainActor
+@Test
+func aFailedWholeRunRestoreReleasesItsReservation() async {
+    let client = ArchiveFixtureClient()
+    let store = ArchiveStore(client: client)
+    let viewModel = ArchiveViewModel(pair: docs(), store: store, agentConnected: true)
+    await viewModel.show(.b)
+    await client.refuseRestore()
+
+    await viewModel.putBackAll()
+    #expect(store.error != nil)
+    #expect(!store.isPuttingBack)
+    #expect(viewModel.canPutBack)
+    #expect(viewModel.canPutBackAll)
+    #expect(viewModel.itemRows.map(\.path) == ["a", "b"])
 }
 
 @MainActor
@@ -182,6 +255,22 @@ func aWholeRunPutBackOutranksTheLastItemInTheStatusLine() async {
     #expect(viewModel.statusText != nil)
 }
 
+@Test
+func recentRunTitlesKeepTheClockTime() {
+    let now = Date(timeIntervalSince1970: 1_761_300_000)
+    // Three hours old: relative phrase plus the start time, so two runs
+    // the same day stay distinguishable.
+    let recent = now.addingTimeInterval(-3 * 3600)
+    let recentTitle = ArchiveViewModel.runTitle(recent, now: now)
+    #expect(recentTitle.contains(recent.formatted(date: .omitted, time: .shortened)))
+    #expect(recentTitle != recent.formatted(date: .abbreviated, time: .standard))
+
+    // Past a day: absolute date and time only.
+    let old = now.addingTimeInterval(-50 * 3600)
+    #expect(ArchiveViewModel.runTitle(old, now: now)
+        == old.formatted(date: .abbreviated, time: .standard))
+}
+
 @MainActor
 @Test
 func siblingStoresShareTheClientButNotTheState() async {
@@ -207,6 +296,7 @@ private enum TwoRunFixtureError: Error { case refused }
 private actor TwoRunArchiveClient: ArchiveClient {
     /// "run/name" per put-back, in request order.
     private(set) var putBacks: [String] = []
+    private(set) var restoreRequests = 0
     private var refused: Set<String> = []
     private var holdsNext = false
     private var held: CheckedContinuation<Void, Never>?
@@ -246,7 +336,8 @@ private actor TwoRunArchiveClient: ArchiveClient {
     }
 
     func putBackAll(_ id: String, side: FolderSide, run: String) async throws -> RunRestore {
-        RunRestore(restored: 0, beside: 0, failures: 0)
+        restoreRequests += 1
+        return RunRestore(restored: 0, beside: 0, failures: 0)
     }
 }
 
@@ -266,6 +357,9 @@ func aPutBackBatchStaysInTheRunItStartedIn() async {
     await client.waitForHeldPutBack()
     #expect(!viewModel.canPutBack)
     #expect(!viewModel.canPutBackAll)
+
+    await viewModel.putBackAll()
+    #expect(await client.restoreRequests == 0)
 
     await viewModel.select("old")
     await client.releasePutBack()

@@ -20,7 +20,7 @@ use foldover_engine::{
     ChangePoll, Environment, PairWatcher, PollMode, Polled, Reach, WatchCursor, local_time,
 };
 use foldover_proto::local::SyncStatus;
-use foldover_types::{LocalDateTime, PairConfig, PairId, Schedule, Side};
+use foldover_types::{LocalDateTime, PairConfig, PairId, PairRoot, Schedule, Side};
 
 use crate::Service;
 use crate::sync::Work;
@@ -122,8 +122,10 @@ pub(crate) struct Scheduler {
     /// When each pair's folders first changed since its last run.
     churning: Mutex<HashMap<PairId, Instant>>,
     watcher: Mutex<Option<PairWatcher>>,
-    /// `None` until the first tick watches anything.
-    watched: Mutex<Option<Vec<PairId>>>,
+    /// `None` until the first tick watches anything. What is watched
+    /// follows the pairs' folders, so an edit that moves a pair onto new
+    /// folders re-subscribes although its id stayed (PLAN.md §4.8).
+    watched: Mutex<Option<Vec<(PairId, PairRoot, PairRoot)>>>,
     /// Pairs with a folder that could not be watched, retried every tick.
     unwatchable: Mutex<HashSet<PairId>>,
     reconnected: Mutex<HashMap<PairId, Instant>>,
@@ -421,16 +423,23 @@ impl Scheduler {
     /// started, so their histories need replaying.
     fn watch(&self, pairs: &[PairConfig], reach: &Reach, now: Instant) -> Vec<PairId> {
         let ids: Vec<_> = pairs.iter().map(PairConfig::id).collect();
+        let folders: Vec<_> = pairs
+            .iter()
+            .map(|pair| {
+                let draft = pair.draft();
+                (pair.id(), draft.left().clone(), draft.right().clone())
+            })
+            .collect();
         let mut watched = self.watched.lock().unwrap_or_else(PoisonError::into_inner);
         let mut unwatchable = self
             .unwatchable
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if watched.as_ref() == Some(&ids) && unwatchable.is_empty() {
+        if watched.as_ref() == Some(&folders) && unwatchable.is_empty() {
             return Vec::new();
         }
         let first = watched.is_none();
-        *watched = Some(ids.clone());
+        *watched = Some(folders);
         let mut watcher = self.watcher.lock().unwrap_or_else(PoisonError::into_inner);
         let failed: HashSet<_> = match watcher.as_mut() {
             Some(watcher) => watcher
@@ -974,6 +983,48 @@ mod tests {
             draft,
         )
         .unwrap()
+    }
+
+    /// A pair edited onto other folders re-subscribes its watcher
+    /// (PLAN.md §4.8): what is watched follows the pair's folders, not
+    /// only its id. A stale subscription misses the new folders' changes
+    /// and reports the old ones as the pair's.
+    #[test]
+    fn an_edit_to_a_pairs_folders_resubscribes_its_watcher() {
+        use std::sync::mpsc;
+
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let pair = changing_pair(first.path(), 9);
+        let edited = changing_pair(second.path(), 9);
+        assert_eq!(pair.id(), edited.id(), "the edit must keep the pair's id");
+        let start = Instant::now();
+        let scheduler = Scheduler::new(start);
+        let (sender, receiver) = mpsc::channel();
+        *scheduler.watcher.lock().unwrap() = Some(
+            PairWatcher::new(move |_| {
+                let _ = sender.send(());
+            })
+            .unwrap(),
+        );
+        let at = |seconds| start + Duration::from_secs(seconds);
+
+        scheduler.watch(std::slice::from_ref(&pair), &Reach::default(), at(1));
+        scheduler.watch(std::slice::from_ref(&edited), &Reach::default(), at(2));
+
+        // The pair's new folder reports changes...
+        fs::write(second.path().join("right/new"), b"x").unwrap();
+        assert!(receiver.recv_timeout(Duration::from_secs(5)).is_ok());
+        // ...and its old one is no longer watched. One write reports
+        // through several events; wait for a quiet stretch so its
+        // stragglers cannot slip past the drain below.
+        let quiet_by = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < quiet_by && receiver.recv_timeout(Duration::from_millis(250)).is_ok()
+        {
+        }
+        while receiver.try_recv().is_ok() {}
+        fs::write(first.path().join("right/old"), b"x").unwrap();
+        assert!(receiver.recv_timeout(Duration::from_secs(2)).is_err());
     }
 
     #[test]

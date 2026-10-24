@@ -92,6 +92,9 @@ struct PairRow: Identifiable, Equatable {
     /// Conflicts waiting for a decision; 0 hides the badge.
     let conflicts: Int
     let canSync: Bool
+    let canCancel: Bool
+    /// When the newest completed sync finished; nil before any success.
+    let lastSuccess: Date?
 }
 
 /// The background agent's health as the status bar's dot shows it.
@@ -144,6 +147,9 @@ final class MainViewModel {
     /// A path, not a row index: a new listing reuses indexes for other
     /// files.
     private var changeSelections: [String: String] = [:]
+    /// Change rows shared by every view model of this window, so each
+    /// render reuses the rows the one before it built.
+    private let changeRows = ChangeRowsCache()
     /// A sync the main window started, with the result it finished with.
     private struct WindowSync {
         let pairID: String
@@ -259,16 +265,18 @@ final class MainViewModel {
     var pairsLoading: Bool { pairStore.isLoading }
     var pairError: String? { pairStore.loadError }
     var canConfigurePairs: Bool {
-        guard case .connected = agent.connection else { return false }
+        // The settled answer, not the probe in flight: a health check
+        // every 15 s must not blink the pair commands off.
+        guard case .connected = shownConnection else { return false }
         return pairStore.hasLoaded && pairStore.loadError == nil && !pairStore.isLoading && !pairStore.isSaving
     }
 
     var coreVersionText: String { "Core \(appInfo.coreVersion)" }
 
-    /// The connection the status surfaces show. A health check in flight
-    /// keeps showing the last settled answer, so the status bar does not
-    /// flicker on every `monitor` tick; with no answer yet, connecting
-    /// shows as connecting.
+    /// The connection the status surfaces show, and the commands follow:
+    /// a health check in flight keeps showing the last settled answer, so
+    /// neither the status bar nor the buttons flicker on every `monitor`
+    /// tick; with no answer yet, connecting shows as connecting.
     private var shownConnection: AgentConnection {
         if agent.connection == .connecting, let settled = agent.lastSettled { return settled }
         return agent.connection
@@ -311,7 +319,8 @@ final class MainViewModel {
             return PairRow(id: pair.id, name: pair.settings.name, status: pairSync.shortStatus,
                            symbol: pair.settings.mode.symbol, modeTitle: pair.settings.mode.title,
                            activity: pairSync.activity, conflicts: pairSync.conflictCount,
-                           canSync: pairSync.canSync)
+                           canSync: pairSync.canSync, canCancel: pairSync.canCancel,
+                           lastSuccess: pairSync.lastSuccess)
         }
     }
 
@@ -532,6 +541,14 @@ final class MainViewModel {
         await sync(for: pair).sync()
     }
 
+    /// Menu-bar commands target their own row without changing selection.
+    func stopPair(id: String) async {
+        guard let pair = pairs.first(where: { $0.id == id }) else { return }
+        let sync = sync(for: pair)
+        guard sync.canCancel else { return }
+        await sync.cancel()
+    }
+
     /// Pairs for Shortcuts; loads them first when the app just started.
     func intentPairs() async -> [IntentPair] {
         if !pairStore.hasLoaded { await refreshAgent() }
@@ -597,12 +614,13 @@ final class MainViewModel {
     }
 
     private var agentConnected: Bool {
-        if case .connected = agent.connection { return true }
+        if case .connected = shownConnection { return true }
         return false
     }
 
     func sync(for pair: SyncPair) -> PairSyncViewModel {
-        PairSyncViewModel(pair: pair, store: syncStore, pairs: pairStore, agentConnected: agentConnected)
+        PairSyncViewModel(pair: pair, store: syncStore, pairs: pairStore,
+                          agentConnected: agentConnected, rowCache: changeRows)
     }
 
     /// A store for one archive window, so windows browse independently.

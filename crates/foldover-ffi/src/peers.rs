@@ -50,24 +50,36 @@ pub struct NearbyMac {
 /// Never turns Mac-to-Mac on, so it never shows the Local Network prompt.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn mac_to_mac_status() -> Result<MacToMac, AgentError> {
-    state(foldover_client::peer_status(&SocketLocation::Default).await)
+    state(
+        foldover_client::peer_status(&SocketLocation::Default).await,
+        AgentError::read,
+    )
 }
 
 /// Turn Mac-to-Mac on: listen, and look for Macs on the network.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn start_mac_to_mac() -> Result<MacToMac, AgentError> {
-    state(foldover_client::start_peers(&SocketLocation::Default).await)
+    state(
+        foldover_client::start_peers(&SocketLocation::Default).await,
+        AgentError::from,
+    )
 }
 
 /// Let other Macs pair with this one for `minutes` (10 when absent).
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn open_mac_pairing(minutes: Option<u32>) -> Result<MacToMac, AgentError> {
-    state(foldover_client::open_pairing(&SocketLocation::Default, minutes).await)
+    state(
+        foldover_client::open_pairing(&SocketLocation::Default, minutes).await,
+        AgentError::from,
+    )
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn close_mac_pairing() -> Result<MacToMac, AgentError> {
-    state(foldover_client::close_pairing(&SocketLocation::Default).await)
+    state(
+        foldover_client::close_pairing(&SocketLocation::Default).await,
+        AgentError::from,
+    )
 }
 
 /// Start pairing with a nearby Mac that is open for pairing.
@@ -82,18 +94,27 @@ pub async fn pair_with_mac(device: String) -> Result<PairingCode, AgentError> {
 /// The person saw the same code on both Macs.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn confirm_mac_pairing(device: String) -> Result<MacToMac, AgentError> {
-    state(foldover_client::confirm_pairing(&SocketLocation::Default, parse(&device)?).await)
+    state(
+        foldover_client::confirm_pairing(&SocketLocation::Default, parse(&device)?).await,
+        AgentError::from,
+    )
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn cancel_mac_pairing(device: String) -> Result<MacToMac, AgentError> {
-    state(foldover_client::cancel_pairing(&SocketLocation::Default, parse(&device)?).await)
+    state(
+        foldover_client::cancel_pairing(&SocketLocation::Default, parse(&device)?).await,
+        AgentError::from,
+    )
 }
 
 /// Forget a paired Mac and close its connections.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn forget_mac(device: String) -> Result<MacToMac, AgentError> {
-    state(foldover_client::revoke_device(&SocketLocation::Default, parse(&device)?).await)
+    state(
+        foldover_client::revoke_device(&SocketLocation::Default, parse(&device)?).await,
+        AgentError::from,
+    )
 }
 
 fn parse(device: &str) -> Result<DeviceId, AgentError> {
@@ -110,8 +131,11 @@ fn code(pending: PeerPendingRecord) -> PairingCode {
     }
 }
 
-fn state(status: Result<PeerStatus, foldover_client::Error>) -> Result<MacToMac, AgentError> {
-    let status = status.map_err(AgentError::from)?;
+fn state(
+    status: Result<PeerStatus, foldover_client::Error>,
+    error: impl FnOnce(foldover_client::Error) -> AgentError,
+) -> Result<MacToMac, AgentError> {
+    let status = status.map_err(error)?;
     Ok(MacToMac {
         device: status.device,
         name: status.name,
@@ -163,7 +187,7 @@ pub struct OfferedFolder {
 pub async fn shared_folders() -> Result<Vec<SharedFolder>, AgentError> {
     let listed = foldover_client::shares(&SocketLocation::Default)
         .await
-        .map_err(AgentError::from)?;
+        .map_err(AgentError::read)?;
     Ok(listed.shares.into_iter().map(shared).collect())
 }
 
@@ -197,7 +221,7 @@ pub async fn stop_sharing(id: String) -> Result<Vec<SharedFolder>, AgentError> {
 pub async fn offered_folders(device: String) -> Result<Vec<OfferedFolder>, AgentError> {
     let offered = foldover_client::peer_shares(&SocketLocation::Default, parse(&device)?)
         .await
-        .map_err(AgentError::from)?;
+        .map_err(AgentError::read)?;
     Ok(offered
         .shares
         .into_iter()

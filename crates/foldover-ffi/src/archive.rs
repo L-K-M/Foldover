@@ -38,7 +38,7 @@ pub async fn archive_runs(id: String, side: SyncSide) -> Result<ArchivedRunList,
     let id = id.parse().map_err(invalid_configuration)?;
     let runs = foldover_client::archive_runs(&SocketLocation::Default, id, side.into())
         .await
-        .map_err(AgentError::from)?;
+        .map_err(AgentError::read)?;
     Ok(runs.into())
 }
 
@@ -59,7 +59,7 @@ pub async fn archive_items(
         after.as_deref(),
     )
     .await
-    .map_err(AgentError::from)?;
+    .map_err(AgentError::read)?;
     Ok(items.into())
 }
 

@@ -22,6 +22,18 @@ ids are the bench function names; estimates land in
 Fixtures are built in temp directories on every run; nothing outside
 `target/` and the system temp directory is touched.
 
+Unicode normalization has a separate preparation regression budget. Run
+it explicitly on an idle host in release mode:
+
+```sh
+cargo test --release -p foldover-engine unicode_respelling_prepare_budget -- --ignored --nocapture
+```
+
+It aligns 50,000 respelled names within five seconds, the entire planning
+budget for 500,000 paths in PLAN.md section 5.3. Setup is not timed. It is
+excluded from ordinary unit tests to avoid wall-clock assertions on busy
+runners; the normal suite checks ambiguous aliases and unreadable paths.
+
 ## How budgets were set
 
 Each budget is a maximum median in milliseconds, set at roughly 3x

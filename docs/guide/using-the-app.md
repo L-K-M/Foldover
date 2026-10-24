@@ -74,8 +74,10 @@ its name.
 
 ## The menu bar
 
-The menu bar extra lists every pair with its status; click one to show it
-in the window, or click its button to sync it. It also has Sync All,
+The menu bar extra lists every pair with its status; scroll the list to
+reach more pairs. Click a pair to show it in the window, or click its
+button to sync it. While it works, that button stops its job instead.
+Commands stay visible below the list. The extra also has Sync All,
 Pause Automatic Syncs (for an hour, four hours or until you resume),
 Open Foldover, Settings… and Quit Foldover. The Pair menu offers the same
 Sync All and Pause Automatic Syncs.

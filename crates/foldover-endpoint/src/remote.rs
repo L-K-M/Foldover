@@ -41,6 +41,28 @@ mod wire;
 
 pub use serve::{FolderCache, serve_folder};
 
+/// The most scan steps one progress report's counter can stand for. The
+/// counters come from the other Mac and drive display only (PLAN.md
+/// §4.3), so a buggy or hostile peer must not make the asking side
+/// iterate over its numbers. No real scan lists this many entries
+/// between two reports.
+const MAX_STEPS_PER_REPORT: u64 = 1_000_000;
+
+/// Report the steps a peer's cumulative counter grew, at most
+/// `MAX_STEPS_PER_REPORT` of them, then adopt the counter as it stands.
+/// Progress is what "Comparing… N items" counts; it decides nothing.
+fn report_steps(
+    adopted: &mut u64,
+    now: u64,
+    step: ObserveStep,
+    progress: &mut impl FnMut(ObserveStep),
+) {
+    for _ in 0..now.saturating_sub(*adopted).min(MAX_STEPS_PER_REPORT) {
+        progress(step);
+    }
+    *adopted = (*adopted).max(now);
+}
+
 /// Report changes in a folder a paired Mac shares until the handle drops.
 /// Changes while the request was broken are unknown, so the first report
 /// after a break counts as a change.
@@ -179,13 +201,8 @@ impl PeerEndpoint {
                     listed: now_listed,
                     checked: now_checked,
                 }) => {
-                    for _ in listed..now_listed {
-                        progress(ObserveStep::Listed);
-                    }
-                    for _ in checked..now_checked {
-                        progress(ObserveStep::Checked);
-                    }
-                    (listed, checked) = (now_listed.max(listed), now_checked.max(checked));
+                    report_steps(&mut listed, now_listed, ObserveStep::Listed, progress);
+                    report_steps(&mut checked, now_checked, ObserveStep::Checked, progress);
                 }
                 Incoming::Data(batch) => {
                     let entries = wire::entries(&batch).ok_or_else(unexpected)?;
