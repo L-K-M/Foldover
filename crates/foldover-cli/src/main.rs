@@ -41,7 +41,8 @@ enum Request {
     Help,
     Status(foldover_client::SocketLocation),
     Pairs(SocketLocation, PairCommand),
-    Sync(SocketLocation, PairId, SyncCommand),
+    /// `progress` prints each distinct Working status while the job runs.
+    Sync(SocketLocation, PairId, SyncCommand, bool),
     Archive(SocketLocation, PairId, Side, ArchiveCommand),
     History(SocketLocation, PairId),
     /// Pause automatic syncs for minutes, or until resumed.
@@ -245,13 +246,15 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        Request::Sync(location, id, command) => match sync(&location, id, command).await {
-            Ok(code) => code,
-            Err(error) => {
-                eprintln!("foldover: {error}");
-                ExitCode::FAILURE
+        Request::Sync(location, id, command, progress) => {
+            match sync(&location, id, command, progress).await {
+                Ok(code) => code,
+                Err(error) => {
+                    eprintln!("foldover: {error}");
+                    ExitCode::FAILURE
+                }
             }
-        },
+        }
         Request::Archive(location, id, side, command) => {
             match archive(&location, id, side, command).await {
                 Ok(code) => code,
@@ -359,11 +362,16 @@ fn request(args: impl Iterator<Item = OsString>) -> Request {
             None => Request::Usage,
         },
         [command, id, rest @ ..] if command == "sync" => {
+            // A trailing --progress streams Working statuses while waiting.
+            let (rest, progress) = match rest {
+                [rest @ .., flag] if flag == "--progress" => (rest, true),
+                _ => (rest, false),
+            };
             match (
                 id.to_str().and_then(|id| id.parse().ok()),
                 sync_command(rest),
             ) {
-                (Some(id), Some(command)) => Request::Sync(location, id, command),
+                (Some(id), Some(command)) => Request::Sync(location, id, command, progress),
                 _ => Request::Usage,
             }
         }
@@ -832,10 +840,12 @@ async fn pairs(
 }
 
 /// Start the job, wait for it and print its final status as one JSON line.
+/// `progress` also prints each distinct Working status while the job runs.
 async fn sync(
     location: &SocketLocation,
     id: PairId,
     command: SyncCommand,
+    progress: bool,
 ) -> Result<ExitCode, foldover_client::Error> {
     // Cancellation must keep bypassing the configuration queue, even when
     // another request is waiting on a disconnected server.
@@ -866,7 +876,13 @@ async fn sync(
         }
         SyncCommand::Changes(_) => unreachable!("listed before the job dispatch"),
     };
+    let mut printed: Option<SyncStatus> = None;
     while matches!(status, SyncStatus::Working { .. }) {
+        // Counters repeat between polls; only new values are worth a line.
+        if progress && printed.as_ref() != Some(&status) {
+            println!("{}", serde_json::to_string(&status)?);
+            printed = Some(status.clone());
+        }
         tokio::time::sleep(POLL_INTERVAL).await;
         status = foldover_client::sync_status(location, id).await?;
     }
@@ -1423,33 +1439,34 @@ mod tests {
                     left: 0,
                     right: 0,
                     review: None
-                }
+                },
+                false
             )
         ));
         assert!(matches!(
             req(&["sync", id, "--preview", "--socket", "/tmp/s"]),
-            Request::Sync(_, _, SyncCommand::Preview)
+            Request::Sync(_, _, SyncCommand::Preview, false)
         ));
         assert!(matches!(
             req(&["sync", id, "--cancel"]),
-            Request::Sync(_, _, SyncCommand::Cancel)
+            Request::Sync(_, _, SyncCommand::Cancel, false)
         ));
         assert!(matches!(
             req(&["sync", id, "--undo"]),
-            Request::Sync(_, _, SyncCommand::Undo)
+            Request::Sync(_, _, SyncCommand::Undo, false)
         ));
         let token = "ab".repeat(32);
         assert!(matches!(
             req(&["sync", id, "--keep-right", "docs/a.txt", "--review", &token]),
-            Request::Sync(_, _, SyncCommand::Keep { side: Side::Right, ref path, .. }) if path == b"docs/a.txt"
+            Request::Sync(_, _, SyncCommand::Keep { side: Side::Right, ref path, .. }, false) if path == b"docs/a.txt"
         ));
         assert!(matches!(
             req(&["sync", id, "--keep-both", "a.txt", "--review", &token]),
-            Request::Sync(_, _, SyncCommand::KeepBoth { ref path, .. }) if path == b"a.txt"
+            Request::Sync(_, _, SyncCommand::KeepBoth { ref path, .. }, false) if path == b"a.txt"
         ));
         assert!(matches!(
             req(&["sync", id, "--skip", "a.txt", "--review", &token]),
-            Request::Sync(_, _, SyncCommand::Skip { ref path, .. }) if path == b"a.txt"
+            Request::Sync(_, _, SyncCommand::Skip { ref path, .. }, false) if path == b"a.txt"
         ));
         assert!(matches!(
             req(&["sync", id, "--approve", "60", "0", "--review", &token]),
@@ -1460,7 +1477,8 @@ mod tests {
                     left: 60,
                     right: 0,
                     review: Some(_)
-                }
+                },
+                false
             )
         ));
         assert!(matches!(
