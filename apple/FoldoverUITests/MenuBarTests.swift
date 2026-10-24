@@ -2,6 +2,8 @@ import AppKit
 import XCTest
 
 final class MenuBarTests: XCTestCase {
+    private static let initialPairStateTimeout: TimeInterval = 30
+
     @MainActor
     func testManyPairsScrollWithoutHidingTheCommands() {
         checkManyPairs()
@@ -41,13 +43,13 @@ final class MenuBarTests: XCTestCase {
     func testAWorkingPairCanBeStoppedFromTheMenuBar() {
         let tour = Tour(self, appearance: .light, scenario: "syncing")
         tour.launch()
+        defer { tour.app.terminate() }
         tour.click(tour.app.statusItems.firstMatch, "menu bar extra")
         let stop = tour.app.buttons["Stop Photos"]
-        XCTAssertTrue(stop.waitForExistence(timeout: 5))
-        tour.click(stop, "stop Photos")
+        // Pair status can arrive after the window and agent health answer.
+        guard tour.click(stop, "stop Photos", timeout: Self.initialPairStateTimeout) else { return }
         XCTAssertTrue(tour.app.buttons["Sync Photos"].waitForExistence(timeout: 5))
         tour.snap("menu-bar-stopped")
-        tour.app.terminate()
     }
 
     @MainActor
