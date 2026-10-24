@@ -21,8 +21,8 @@ import tempfile
 import threading
 import time
 
-# The CLI waits at most five seconds per call, so a gated job is held by
-# repeated Working answers, never by a silent socket.
+# Gated jobs use repeated Working replies. The timeout scenario instead
+# withholds one status reply beyond the client's five-second call deadline.
 EARLY_LINE_SECONDS = 10
 DRAIN_SECONDS = 15
 # Acceptance bound shared with the CLI's MAX_CONCURRENT_SYNCS.
@@ -37,6 +37,8 @@ INSTANT = PAIR_IDS[0]
 # A seventh pair, reachable through pair.get but not listed, drives the
 # `sync ID --progress` scenario without touching `sync --all`.
 PROGRESS_ID = f"{7:032x}"
+# An eighth unlisted pair exercises a transient status timeout.
+TIMEOUT_ID = f"{8:032x}"
 
 WORKING = {
     "state": "working", "job": "run", "cancelling": False,
@@ -88,6 +90,7 @@ def pair_record(pair_id, name):
 PAIRS = [pair_record(pair_id, f"Pair {index}") for index, pair_id in enumerate(PAIR_IDS, 1)]
 RECORDS = {record["id"]: record for record in PAIRS}
 RECORDS[PROGRESS_ID] = pair_record(PROGRESS_ID, "Progress")
+RECORDS[TIMEOUT_ID] = pair_record(TIMEOUT_ID, "Timeout")
 
 
 class Fixture:
@@ -105,6 +108,8 @@ class Fixture:
         self.polls = {}
         self.handlers = []
         self.closed = False
+        self.timeout_status_polls = 0
+        self.timeout_run_count = 0
         self.listener = socket.socket(socket.AF_UNIX)
         self.listener.bind(str(endpoint))
         self.listener.listen(16)
@@ -174,6 +179,8 @@ class Fixture:
             if pair not in RECORDS:
                 return self.reply(request, error=(PAIR_NOT_FOUND, "Pair not found"))
             result = self.job_status(pair, poll=True)
+            if result is None:
+                return None
         else:
             return self.reply(request, error=(METHOD_NOT_FOUND, "Method not found"))
         return self.reply(request, result=result)
@@ -197,6 +204,17 @@ class Fixture:
                 status = PROGRESS_STAGES[min(index, len(PROGRESS_STAGES) - 1)]
             else:
                 status = PROGRESS_STAGES[0]
+        elif pair == TIMEOUT_ID:
+            with self.lock:
+                if poll:
+                    self.timeout_status_polls += 1
+                else:
+                    self.timeout_run_count += 1
+                count = self.timeout_status_polls
+            if poll and count == 1:
+                # Keep this connection silent; the listener accepts retries.
+                return None
+            status = FINISHED if poll and count >= 3 else WORKING
         elif pair == INSTANT or self.release.is_set():
             status = FINISHED
         else:
@@ -327,6 +345,40 @@ def progress_streams(cli, fixture, endpoint):
         child.stderr.close()
 
 
+def timeout_retry_streams(cli, fixture, endpoint):
+    """Retry a silent status call without starting the sync again."""
+    started = time.monotonic()
+    child = spawn(cli, endpoint, ("sync", TIMEOUT_ID, "--progress"))
+    output = Pipe(child)
+    deadline = started + DRAIN_SECONDS
+    lines = []
+    try:
+        while True:
+            line = output.line(deadline)
+            if line is None:
+                break
+            lines.append(json.loads(line))
+        if reap(child) != 0:
+            raise RuntimeError(f"timeout retry failed: {child.stderr.read().strip()}")
+        elapsed = time.monotonic() - started
+        if elapsed < 5:
+            raise RuntimeError(f"Finished before the five-second timeout: {elapsed:.1f}s")
+        if fixture.timeout_status_polls != 3:
+            raise RuntimeError(
+                f"Expected exactly three status polls, got {fixture.timeout_status_polls}")
+        if fixture.timeout_run_count != 1:
+            raise RuntimeError(
+                f"Expected exactly one sync.run, got {fixture.timeout_run_count}")
+        finals = [line for line in lines if line.get("state") != "working"]
+        if len(finals) != 1 or finals[0].get("state") != "finished" or lines[-1:] != finals:
+            raise RuntimeError(f"Expected exactly one final finished status, got {lines}")
+    finally:
+        reap(child)
+        output.selector.close()
+        child.stdout.close()
+        child.stderr.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("cli", type=Path)
@@ -342,7 +394,7 @@ def main():
         fixture = Fixture(endpoint, version)
         failures = []
         try:
-            for check in (sync_all_streams, progress_streams):
+            for check in (sync_all_streams, progress_streams, timeout_retry_streams):
                 try:
                     check(cli, fixture, endpoint)
                 except Exception as error:
@@ -352,7 +404,7 @@ def main():
             fixture.close()
     if failures:
         raise RuntimeError("; ".join(failures))
-    print("sync --all early results and sync --progress distinct lines passed")
+    print("sync --all, sync --progress, and timeout-retry scenarios passed")
 
 
 if __name__ == "__main__":

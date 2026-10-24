@@ -26,6 +26,8 @@ const APPROVAL_EXIT: u8 = 3;
 /// A run finished but left versions that need a person's choice.
 const CONFLICT_EXIT: u8 = 4;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Bound consecutive failed reads without abandoning a job after one delay.
+const MAX_CONSECUTIVE_POLL_TIMEOUTS: u8 = 3;
 /// Pairs `sync --all` runs at once; more would thrash disks and SFTP
 /// servers rather than finish sooner.
 const MAX_CONCURRENT_SYNCS: usize = 4;
@@ -974,17 +976,51 @@ async fn run_one(
 async fn settled(
     location: &SocketLocation,
     id: PairId,
-    mut status: SyncStatus,
+    status: SyncStatus,
     progress: ProgressOutput,
 ) -> Result<SyncStatus, foldover_client::Error> {
+    settled_with(status, progress, || {
+        foldover_client::sync_status(location, id)
+    })
+    .await
+}
+
+async fn settled_with<Poll, Reply>(
+    mut status: SyncStatus,
+    progress: ProgressOutput,
+    mut poll: Poll,
+) -> Result<SyncStatus, foldover_client::Error>
+where
+    Poll: FnMut() -> Reply,
+    Reply: std::future::Future<Output = Result<SyncStatus, foldover_client::Error>>,
+{
     let mut printed = None;
+    let mut timeouts = 0;
     while matches!(status, SyncStatus::Working { .. }) {
         if progress == ProgressOutput::Stream && printed.as_ref() != Some(&status) {
             println!("{}", serde_json::to_string(&status)?);
             printed = Some(status.clone());
         }
         tokio::time::sleep(POLL_INTERVAL).await;
-        status = foldover_client::sync_status(location, id).await?;
+        match poll().await {
+            Ok(next) => {
+                timeouts = 0;
+                status = next;
+            }
+            Err(foldover_client::Error::Timeout) => {
+                timeouts += 1;
+                if timeouts == MAX_CONSECUTIVE_POLL_TIMEOUTS {
+                    eprintln!(
+                        "Agent status could not be read. The existing job may still be running; \
+                         check it before starting another."
+                    );
+                    return Err(foldover_client::Error::Timeout);
+                }
+                // Only status reads are replayed. A lost response to a start,
+                // cancel or other mutation must never start that action again.
+            }
+            Err(error) => return Err(error),
+        }
     }
     Ok(status)
 }
@@ -1326,6 +1362,94 @@ fn warn_sftp<'a>(roots: impl IntoIterator<Item = &'a PairRoot>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn working_status() -> SyncStatus {
+        SyncStatus::Working {
+            job: foldover_client::SyncJob::Run,
+            cancelling: false,
+            progress: foldover_client::SyncProgress::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn polling_recovers_after_a_transient_timeout() {
+        let mut replies = [Err(foldover_client::Error::Timeout), Ok(SyncStatus::Idle)].into_iter();
+        let result = settled_with(working_status(), ProgressOutput::Final, || {
+            std::future::ready(replies.next().expect("unexpected extra poll"))
+        })
+        .await;
+        assert!(matches!(result, Ok(SyncStatus::Idle)));
+        assert_eq!(replies.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn successful_poll_resets_the_consecutive_timeout_limit() {
+        let mut replies = [
+            Err(foldover_client::Error::Timeout),
+            Err(foldover_client::Error::Timeout),
+            Ok(working_status()),
+            Err(foldover_client::Error::Timeout),
+            Err(foldover_client::Error::Timeout),
+            Ok(SyncStatus::Idle),
+        ]
+        .into_iter();
+        let result = settled_with(working_status(), ProgressOutput::Final, || {
+            std::future::ready(replies.next().expect("unexpected extra poll"))
+        })
+        .await;
+        assert!(matches!(result, Ok(SyncStatus::Idle)));
+        assert_eq!(replies.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn repeated_poll_timeouts_return_after_three_failures() {
+        let mut replies = [
+            Err(foldover_client::Error::Timeout),
+            Err(foldover_client::Error::Timeout),
+            Err(foldover_client::Error::Timeout),
+            Ok(SyncStatus::Idle),
+        ]
+        .into_iter();
+        let result = settled_with(working_status(), ProgressOutput::Final, || {
+            std::future::ready(replies.next().expect("unexpected extra poll"))
+        })
+        .await;
+        assert!(matches!(result, Err(foldover_client::Error::Timeout)));
+        assert_eq!(replies.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn polling_preserves_non_timeout_errors_without_retrying() {
+        let mut replies = [
+            Err(foldover_client::Error::Remote {
+                code: -32003,
+                message: "Pair not found".into(),
+            }),
+            Ok(SyncStatus::Idle),
+        ]
+        .into_iter();
+        let result = settled_with(working_status(), ProgressOutput::Final, || {
+            std::future::ready(replies.next().expect("unexpected extra poll"))
+        })
+        .await;
+        assert!(matches!(
+            result,
+            Err(foldover_client::Error::Remote { code: -32003, .. })
+        ));
+        assert_eq!(replies.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn terminal_status_does_not_poll() {
+        let mut polls = 0;
+        let result = settled_with(SyncStatus::Idle, ProgressOutput::Final, || {
+            polls += 1;
+            std::future::ready(Ok(SyncStatus::Idle))
+        })
+        .await;
+        assert!(matches!(result, Ok(SyncStatus::Idle)));
+        assert_eq!(polls, 0);
+    }
 
     fn req(args: &[&str]) -> Request {
         request(args.iter().map(|argument| OsString::from(*argument)))
