@@ -9,11 +9,14 @@ use foldover_proto::local::{
     History, HistoryRecord, HistoryTrigger, INTERNAL_ERROR, INVALID_PARAMS, Request, RpcError,
     SyncKey, SyncStatus,
 };
-use foldover_types::PairId;
+use foldover_types::{PairId, SyncPath};
 use serde_json::Value;
 
 use crate::sync::Work;
 use crate::{encode, parameters};
+
+const LEGACY_PATH_PREFIX: &str = "SyncPath(";
+const LEGACY_PATH_END: char = ')';
 
 pub(crate) async fn handle(
     engine: &Arc<Mutex<Engine>>,
@@ -142,6 +145,94 @@ fn wire(entry: &HistoryEntry) -> HistoryRecord {
         conflicts: entry.conflicts,
         failures: entry.failures,
         archive: entry.archive.clone(),
-        message: entry.message.clone(),
+        message: entry.message.as_deref().map(readable_message),
+    }
+}
+
+fn readable_message(message: &str) -> String {
+    let mut readable = String::with_capacity(message.len());
+    let mut remaining = message;
+    let mut quoted = false;
+
+    // Old history stored Debug byte arrays. Decode on read, preserving the record
+    // and quoted filenames that happen to contain text such as SyncPath([97]).
+    while let Some(character) = remaining.chars().next() {
+        if !quoted && let Some((path, suffix)) = legacy_path(remaining) {
+            readable.push_str(&format!("{path:?}"));
+            remaining = suffix;
+            continue;
+        }
+
+        readable.push(character);
+        remaining = &remaining[character.len_utf8()..];
+        if character == '"' {
+            quoted = !quoted;
+        }
+        if quoted
+            && character == '\\'
+            && let Some(escaped) = remaining.chars().next()
+        {
+            readable.push(escaped);
+            remaining = &remaining[escaped.len_utf8()..];
+        }
+    }
+
+    readable
+}
+
+fn legacy_path(message: &str) -> Option<(SyncPath, &str)> {
+    let encoded = message.strip_prefix(LEGACY_PATH_PREFIX)?;
+    let (bytes, suffix) = encoded.split_once(LEGACY_PATH_END)?;
+    let bytes: Vec<u8> = serde_json::from_str(bytes).ok()?;
+    let path = SyncPath::try_from(bytes).ok()?;
+    Some((path, suffix))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_paths_are_readable_and_escaped() {
+        for (bytes, expected) in [
+            ("café/notes\n.txt".as_bytes(), "\"café/notes\\n.txt\""),
+            (b"raw/\xff.txt".as_slice(), "\"raw/\u{fffd}.txt\""),
+            (b"quote\"\\name", "\"quote\\\"\\\\name\""),
+            (b"SyncPath([97])", "\"SyncPath([97])\""),
+        ] {
+            let message = format!("Reading SyncPath({bytes:?}) failed");
+            let expected = format!("Reading {expected} failed");
+            assert_eq!(readable_message(&message), expected);
+            assert_eq!(readable_message(&expected), expected);
+        }
+        assert_eq!(
+            readable_message("Moving SyncPath([97]) to SyncPath([98]) failed"),
+            "Moving \"a\" to \"b\" failed"
+        );
+    }
+
+    #[test]
+    fn quoted_paths_and_malformed_legacy_paths_are_preserved() {
+        for message in [
+            "Disk full",
+            "Reading \"jan/._LICENSE-linenoise\" failed",
+            r#"Reading "quote\"SyncPath([97])" failed"#,
+            r#"Reading "backslash\\" and "SyncPath([97])" failed"#,
+            "SyncPath([])",
+            "SyncPath([256])",
+            "SyncPath([-1])",
+            "SyncPath([abc])",
+            "SyncPath([97,])",
+            "SyncPath([97",
+            "SyncPath([0])",
+            "SyncPath([46, 46])",
+            "SyncPath([47, 97])",
+        ] {
+            assert_eq!(readable_message(message), message);
+        }
+        assert_eq!(
+            readable_message(r#"Reading "SyncPath([97])" and SyncPath([98]) failed"#),
+            r#"Reading "SyncPath([97])" and "b" failed"#
+        );
     }
 }

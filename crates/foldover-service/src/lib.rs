@@ -1709,6 +1709,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn saved_history_shows_readable_paths_without_rewriting_messages() {
+        let (directory, service) = fixture();
+        let created = service
+            .handle(Request::call(
+                1,
+                PAIR_CREATE,
+                Some(input(directory.path(), "Docs")),
+            ))
+            .await
+            .unwrap();
+        let id = created["id"].as_str().unwrap().parse().unwrap();
+        let message = format!(
+            "Reading the Left folder failed: AppleDouble sidecar needs metadata \
+             classification before scanning: SyncPath({:?})",
+            b"jan/._LICENSE-linenoise"
+        );
+        history::record(
+            &service.engine,
+            id,
+            Work::Scheduled,
+            SystemTime::now(),
+            &SyncStatus::Failed {
+                message: message.clone(),
+            },
+        );
+
+        let history = service
+            .handle(Request::call(
+                2,
+                HISTORY_LIST,
+                Some(json!({"id": created["id"]})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            history["runs"][0]["message"],
+            "Reading the Left folder failed: AppleDouble sidecar needs metadata \
+             classification before scanning: \"jan/._LICENSE-linenoise\""
+        );
+        let stored = service.engine.lock().unwrap().history(id, 1).unwrap();
+        assert_eq!(stored[0].message.as_deref(), Some(message.as_str()));
+    }
+
+    #[tokio::test]
     async fn undo_reverts_the_newest_sync_and_holds_automatic_runs() {
         let (directory, service) = fixture();
         let mut input = input(directory.path(), "Docs");
