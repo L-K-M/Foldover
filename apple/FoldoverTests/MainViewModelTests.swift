@@ -175,6 +175,60 @@ private actor AgentProbe {
     func calls() async -> Int { await probe.count }
 }
 
+/// Agent health whose second call hangs until `release()`, like a probe
+/// against an agent that is slow to answer.
+private actor SlowProbe {
+    private let probe = CallProbe()
+    private var calls = 0
+    private var held: [CheckedContinuation<Void, Never>] = []
+    private var released = false
+
+    func status() async throws -> String {
+        calls += 1
+        await probe.hit()
+        if calls > 1 && !released {
+            await withCheckedContinuation { continuation in
+                if released { continuation.resume() } else { held.append(continuation) }
+            }
+        }
+        return "1.0.0"
+    }
+
+    @discardableResult
+    func waitForSecondCall() async -> Bool { await probe.wait(for: .calls(2)) }
+
+    func release() {
+        released = true
+        for continuation in held { continuation.resume() }
+        held = []
+    }
+}
+
+/// PLAN.md §3.2: a health probe in flight keeps the last settled answer,
+/// and the pair commands follow it, rather than blinking off on every
+/// monitor tick while a slow check runs.
+@MainActor
+@Test
+func aHealthProbeInFlightKeepsPairCommandsEnabled() async {
+    let agent = SlowProbe()
+    let viewModel = MainViewModel(
+        appInfo: AppInfoStore(),
+        agent: AgentStore(statusRequest: { AgentReport(version: try await agent.status()) }),
+        pairs: PairStore(client: OnePairClient()),
+        sync: SyncStore(client: FinishingSyncClient())
+    )
+    await viewModel.refreshAgent()
+    #expect(viewModel.canConfigurePairs)
+
+    let probing = Task { await viewModel.refreshAgent() }
+    #expect(await agent.waitForSecondCall())
+    #expect(viewModel.canConfigurePairs)
+
+    await agent.release()
+    await probing.value
+    #expect(viewModel.canConfigurePairs)
+}
+
 /// A pair catalog the test can rewrite behind the store's back.
 private actor CatalogProbe: PairClient {
     private let probe = CallProbe()
