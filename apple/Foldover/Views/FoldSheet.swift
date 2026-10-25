@@ -62,15 +62,21 @@ struct FoldSheet: View {
     @State private var leafDown = false
     /// The leaf has landed and pressed: the run's progress shows on it.
     @State private var landed = false
+    /// The leaf is still swinging back open: its swing is already 0,
+    /// its drawing not yet.
+    @State private var opening = false
     /// Bumped by every fall and opening, so a superseded animation's
     /// completion does nothing.
     @State private var motion = 0
     @State private var voice = FoldVoice.silent
     @State private var drag: LeafDrag?
     @GestureState private var pointerDown = false
-    /// The plan the sheet last showed, for the leaf to carry and for the
-    /// re-preview after a choice to keep on screen.
+    /// The plan the sheet last showed: its token binds a fold, and its
+    /// lines pick the half that folds on its own.
     @State private var plan: FoldPlan?
+    /// The lines the plan last showed, search applied: a re-check after a
+    /// choice and a run keep them on screen, and the leaf carries them.
+    @State private var shown: [FoldLine] = []
     @State private var paperSize: CGSize = .zero
     @State private var scrollOffset: CGFloat = 0
     @State private var staged: StagedTurn?
@@ -161,6 +167,9 @@ struct FoldSheet: View {
             staged = nil
             if let request = approval, request.reviewToken != token { cancelApproval() }
         }
+        .onChange(of: rows, initial: true) { _, new in
+            if scene == .plan { shown = new.map(FoldLine.init) }
+        }
         .onChange(of: viewModel.selectedChangeID) { _, id in
             if let turn = staged, turn.lineID != id { staged = nil }
         }
@@ -213,7 +222,7 @@ struct FoldSheet: View {
     private func lines(for scene: FoldScene) -> [FoldLine] {
         switch scene {
         case .plan, .imprint: rows.map(FoldLine.init)
-        case .comparing, .pressing: plan?.lines ?? []
+        case .comparing, .pressing: shown
         case .lifting, .message: []
         }
     }
@@ -265,8 +274,9 @@ struct FoldSheet: View {
             halves(progress)
                 .compositingGroup()
                 .shadow(color: .black.opacity(0.16), radius: 5, x: 0, y: 2)
+                // In the paper, under the ink printed across it.
+                .overlay { Crease(depth: progress) }
         }
-        .overlay { Crease(depth: progress) }
         .overlay(alignment: .topLeading) {
             if progress > 0, paperSize.width > 0 {
                 FoldLeafView(side: leafSide, progress: progress, lines: lines, pageSize: paperSize,
@@ -334,6 +344,7 @@ struct FoldSheet: View {
     private func content(scene: FoldScene, lines: [FoldLine], progress: Double) -> some View {
         Group {
             if scene == .imprint {
+                // Stamped mid-page, or above the failures it lists.
                 VStack(spacing: 0) {
                     if let imprint = sync.imprint {
                         FoldImprintView(imprint: imprint, ink: imprintInk)
@@ -344,8 +355,8 @@ struct FoldSheet: View {
                             .id(imprint.title)
                     }
                     if !lines.isEmpty { lineList(lines, interactive: false, progress: progress) }
-                    Spacer(minLength: 0)
                 }
+                .frame(maxHeight: .infinity, alignment: lines.isEmpty ? .center : .top)
             } else if scene == .lifting {
                 VStack(spacing: 10) {
                     ProgressView().controlSize(.small)
@@ -443,7 +454,9 @@ struct FoldSheet: View {
         }
         // A new plan re-inks the lines that changed in place.
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.25 * timeScale), value: lines)
-        .scrollDisabled(swing > 0)
+        // Held still while the leaf is up, so the lines it carries stay
+        // where they were.
+        .scrollDisabled(progress > 0)
         .scrollContentBackground(.hidden)
         .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, offset in
             scrollOffset = max(0, offset)
@@ -699,7 +712,8 @@ struct FoldSheet: View {
             .updating($pointerDown) { _, down, _ in down = true }
             .onChanged { value in
                 if drag == nil {
-                    guard scene == .plan, !leafDown, approval == nil else { return }
+                    // The other half waits until this one is back down.
+                    guard scene == .plan, !leafDown, approval == nil, !opening || side == leafSide else { return }
                     drag = LeafDrag(side: side, token: plan?.token)
                     leafSide = side
                     focus.wrappedValue = .changes
@@ -783,6 +797,7 @@ struct FoldSheet: View {
     private func fall() {
         motion += 1
         let generation = motion
+        opening = false
         leafDown = true
         landed = false
         let animation: Animation = reduceMotion
@@ -815,12 +830,16 @@ struct FoldSheet: View {
     /// Back open, short of a fold or after a run.
     private func open() {
         motion += 1
+        let generation = motion
+        opening = opening || swing > 0
         leafDown = false
         landed = false
         bump = false
         voice = .silent
         withAnimation(reduceMotion ? .easeInOut(duration: 0.2 * timeScale) : .spring(duration: 0.5 * timeScale)) {
             swing = 0
+        } completion: {
+            if motion == generation { opening = false }
         }
     }
 
@@ -845,7 +864,10 @@ struct FoldSheet: View {
         }
         if new == .pressing {
             if !leafDown {
-                leafSide = FoldLeaf.automatic(pair.settings.mode, lines: plan?.lines ?? [])
+                // A leaf already up keeps its side rather than jump the crease.
+                if swing == 0, !opening {
+                    leafSide = FoldLeaf.automatic(pair.settings.mode, lines: plan?.lines ?? [])
+                }
                 voice = .silent
                 fall()
             }
@@ -853,7 +875,11 @@ struct FoldSheet: View {
             settle()
         }
         // The pressed plan is spent; a later comparison must not show it.
-        if old == .pressing, new != .pressing { plan = sync.foldPlan }
+        if old == .pressing, new != .pressing {
+            plan = sync.foldPlan
+            shown = []
+        }
+        if new == .plan { shown = rows.map(FoldLine.init) }
         announce(new)
     }
 

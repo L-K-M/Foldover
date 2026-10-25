@@ -43,20 +43,30 @@ struct FoldLeafView<Label: View>: View {
     /// The folder label printed at the top of the half.
     @ViewBuilder let label: Label
 
-    /// Which way a positive angle turns, so the free edge rises toward
-    /// the viewer.
-    private static var turnSign: Double { -1 }
-    private static var perspective: CGFloat { 0.32 }
+    /// A positive turn about the vertical axis brings the left edge
+    /// forward: A's leaf turns positive, B's negative, so each free edge
+    /// rises toward the viewer rather than sinking behind the page.
+    private static var turnSign: Double { 1 }
+    /// Upright, the free edge stands nearest and looks about a fifth
+    /// taller than the page: depth without spilling far past it.
+    private static var perspective: CGFloat { 0.24 }
 
     private var half: CGFloat { pageSize.width / 2 }
 
     var body: some View {
         if reduceMotion {
-            // No swing: the back of the leaf fades in over the other half.
-            Paper(tone: FoldPalette.paperBack)
-                .frame(width: half, height: pageSize.height)
-                .opacity(progress)
-                .offset(x: side == .a ? half : 0)
+            // No swing: the half fades from where it lay as its back fades
+            // in over the other half.
+            ZStack(alignment: .topLeading) {
+                front
+                    .frame(width: half, height: pageSize.height)
+                    .opacity(1 - progress)
+                    .offset(x: side == .a ? 0 : half)
+                Paper(tone: FoldPalette.paperBack)
+                    .frame(width: half, height: pageSize.height)
+                    .opacity(progress)
+                    .offset(x: side == .a ? half : 0)
+            }
         } else {
             faces
                 .frame(width: half, height: pageSize.height)
