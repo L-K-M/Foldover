@@ -96,12 +96,32 @@ struct FoldSheet: View {
     @State private var printing: String?
 
     private static let headerHeight: CGFloat = 50
+    private static let earSpring = Animation.spring(duration: 0.22, bounce: 0.3)
+    /// The desk's words beside its buttons get at least this much room.
+    private static let deskTextRoom: CGFloat = 200
     private static let listInset: CGFloat = 6
     /// The printed lines' stagger, and how many lines it reaches.
     private static let printStagger = 0.018
     private static let printedLines = 30
     /// Keys held with these are someone else's shortcut.
     private static let shortcutModifiers: EventModifiers = [.command, .option, .control, .shift]
+
+    /// How the leaf comes back open.
+    private enum Opening {
+        /// Let go short of a fold, or no fold after all.
+        case fallBack
+        /// After a run, lifted off the pressed half.
+        case peel
+    }
+
+    /// The fold's timings, in seconds at full speed: a full fall from
+    /// upright, a fall back from upright, the shortest drop, and the
+    /// peel's rise and drop.
+    private static let fallTime = 0.28
+    private static let fallBackTime = 0.26
+    private static let shortestDrop = 0.12
+    private static let peelLift = 0.2
+    private static let peelDrop = 0.22
 
     /// A drag on a dog-ear, bound to the plan it began on: a new plan
     /// arriving mid-drag cancels it.
@@ -128,14 +148,17 @@ struct FoldSheet: View {
     var body: some View {
         let scene = self.scene
         let lines = lines(for: scene)
+        // Grouped once per change, not on every frame of the swing.
+        let entries = FoldEntry.entries(lines)
         // The keys live on the whole sheet, not the list, so Escape can
         // cancel a fold begun with nothing listed, and a re-check keeps them.
         ScrollViewReader { proxy in
             VStack(spacing: 10) {
                 SwingProgress(swing) { progress in
-                    paper(scene: scene, lines: lines, progress: progress)
+                    paper(scene: scene, entries: entries, progress: progress)
                 }
-                .scaleEffect(bump ? 0.985 : 1)
+                // Pressed, the paper settles a hair into the field.
+                .offset(y: bump ? 1 : 0)
                 desk(scene: scene)
             }
             .padding(.horizontal, 14)
@@ -144,7 +167,7 @@ struct FoldSheet: View {
             .focused(focus, equals: .changes)
             .focusEffectDisabled()
             .onKeyPress(keys: [.upArrow, .downArrow], phases: [.down, .repeat]) { press in
-                move(press, in: lines, proxy: proxy)
+                move(press, in: entries, proxy: proxy)
             }
             .onKeyPress(keys: [.leftArrow, .rightArrow], phases: .down) { press in stage(press) }
             .onKeyPress(.return, phases: .down) { press in plain(press) ? runStaged() : .ignored }
@@ -277,25 +300,32 @@ struct FoldSheet: View {
 
     // MARK: Paper
 
-    private func paper(scene: FoldScene, lines: [FoldLine], progress: Double) -> some View {
+    private func paper(scene: FoldScene, entries: [FoldEntry], progress: Double) -> some View {
         VStack(spacing: 0) {
             header(progress)
-            content(scene: scene, lines: lines, progress: progress)
+            content(scene: scene, entries: entries, progress: progress)
         }
         // The page's shadow falls on the navy from the paper alone, not
         // from every line of text on it: a tight contact shadow and the
-        // icon's soft, deep cast.
+        // icon's deep cast, down and to the right, away from the light.
+        // Pressed, the paper flattens onto the field and both tighten.
         .background {
-            halves(progress)
+            let dark = colorScheme == .dark
+            halves(scene: scene, progress: progress)
                 .compositingGroup()
-                .shadow(color: .black.opacity(0.22), radius: 1.5, x: 0, y: 1)
-                .shadow(color: FoldPalette.deskShade.opacity(0.6), radius: 18, x: 0, y: 10)
-                // In the paper, under the ink printed across it.
-                .overlay { Crease(depth: progress) }
+                .shadow(color: FoldPalette.castShadow.opacity((dark ? 0.7 : 0.5) + (bump ? 0.12 : 0)),
+                        radius: 1.5, x: 0, y: 1)
+                .shadow(color: FoldPalette.castShadow.opacity(dark ? 0.65 : 0.45),
+                        radius: bump ? 10 : 20, x: 3, y: bump ? 4 : 9)
+                // In the paper, under the ink printed across it; there is
+                // no fold where a half is missing.
+                .overlay {
+                    if sync.missingSide == nil { Crease(depth: progress) }
+                }
         }
         .overlay(alignment: .topLeading) {
             if progress > 0, paperSize.width > 0 {
-                FoldLeafView(side: leafSide, progress: progress, lines: lines, pageSize: paperSize,
+                FoldLeafView(side: leafSide, progress: progress, entries: entries, pageSize: paperSize,
                              scrollOffset: scrollMark.offset, headerHeight: Self.headerHeight,
                              listInset: Self.listInset, compact: compact, reduceMotion: reduceMotion) {
                     FoldFolderLabel(viewModel: viewModel, folder: folder(leafSide), side: leafSide)
@@ -317,15 +347,16 @@ struct FoldSheet: View {
 
     /// The two halves of the page: paper, the desk where the leaf lifted
     /// off, or a dashed outline where a folder is not connected.
-    private func halves(_ progress: Double) -> some View {
+    private func halves(scene: FoldScene, progress: Double) -> some View {
         HStack(spacing: 0) {
-            half(.a, progress)
-            half(.b, progress)
+            half(.a, scene: scene, progress: progress)
+            half(.b, scene: scene, progress: progress)
         }
+        .animation(reduceMotion ? nil : Self.earSpring, value: hoveredEar)
     }
 
     @ViewBuilder
-    private func half(_ side: FolderSide, _ progress: Double) -> some View {
+    private func half(_ side: FolderSide, scene: FoldScene, progress: Double) -> some View {
         if sync.missingSide == side {
             RoundedRectangle(cornerRadius: 4)
                 .strokeBorder(.white.opacity(0.45), style: StrokeStyle(lineWidth: 1, dash: [6, 4]))
@@ -333,8 +364,16 @@ struct FoldSheet: View {
         } else if lifted(side, progress) {
             Color.clear
         } else {
-            Paper()
+            // A dog-ear's corner is folded back: the navy shows where it was.
+            let earShown = scene == .plan && progress == 0 && FoldLeaf.sides(pair.settings.mode).contains(side)
+            Paper(facet: PaperFacet(side))
+                .clipShape(CornerCut(side: side, size: earShown ? earSize(side) : 0))
         }
+    }
+
+    /// A dog-ear's size: larger under the pointer when it can fold.
+    private func earSize(_ side: FolderSide) -> CGFloat {
+        hoveredEar == side && canFold ? 26 : 16
     }
 
     private func header(_ progress: Double) -> some View {
@@ -344,7 +383,7 @@ struct FoldSheet: View {
                 .environment(\.colorScheme, ground(.a))
             Image(systemName: pair.settings.mode.symbol)
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(FoldPalette.slate)
+                .foregroundStyle(FoldPalette.umber)
                 .frame(width: FoldMetrics.creaseWidth)
                 .opacity(acrossInk(progress))
                 .help(pair.settings.mode.title)
@@ -366,7 +405,7 @@ struct FoldSheet: View {
     /// shown, re-checked after a choice, or pressed, so its scroll
     /// position stays put.
     @ViewBuilder
-    private func content(scene: FoldScene, lines: [FoldLine], progress: Double) -> some View {
+    private func content(scene: FoldScene, entries: [FoldEntry], progress: Double) -> some View {
         Group {
             if scene == .imprint {
                 // Stamped mid-page, or above the failures it lists, once
@@ -379,7 +418,7 @@ struct FoldSheet: View {
                             if let note = sync.archiveNote {
                                 Text(note)
                                     .font(.caption)
-                                    .foregroundStyle(FoldPalette.slate)
+                                    .foregroundStyle(FoldPalette.umber)
                                     .multilineTextAlignment(.center)
                                     .textSelection(.enabled)
                             }
@@ -387,24 +426,25 @@ struct FoldSheet: View {
                         .padding(.top, 18)
                         .padding(.bottom, 10)
                         .padding(.horizontal, 24)
-                        .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 1.06)),
+                        .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 1.1)),
                                                 removal: .opacity.combined(with: .offset(y: -10))))
                         .id(imprint.title)
                     }
-                    if !lines.isEmpty { lineList(lines, interactive: false, progress: progress) }
+                    if !entries.isEmpty { lineList(entries, interactive: false, progress: progress) }
                 }
-                .frame(maxHeight: .infinity, alignment: lines.isEmpty ? .center : .top)
-                .animation(reduceMotion ? nil : .spring(duration: 0.4 * timeScale, bounce: 0.3), value: progress == 0)
+                .frame(maxHeight: .infinity, alignment: entries.isEmpty ? .center : .top)
+                // A stamp lands once and stays: no bounce.
+                .animation(reduceMotion ? nil : .spring(duration: 0.22 * timeScale, bounce: 0), value: progress == 0)
             } else if scene == .lifting {
                 VStack(spacing: 10) {
                     ProgressView().controlSize(.small)
                     Text(sync.statusText)
                         .font(.callout)
-                        .foregroundStyle(FoldPalette.slate)
+                        .foregroundStyle(FoldPalette.umber)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if !lines.isEmpty {
-                lineList(lines, interactive: scene == .plan, progress: progress)
+            } else if !entries.isEmpty {
+                lineList(entries, interactive: scene == .plan, progress: progress)
                     .opacity(scene == .comparing ? 0.42 : 1)
                     .overlay {
                         if scene == .comparing { ComparingSweep(paused: reduceMotion, timeScale: timeScale) }
@@ -413,12 +453,12 @@ struct FoldSheet: View {
                 VStack(spacing: 10) {
                     Text(sync.statusText)
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(FoldPalette.slate)
+                        .foregroundStyle(FoldPalette.umber)
                         .multilineTextAlignment(.center)
                         .accessibilityAddTraits(.updatesFrequently)
                     if let fraction = sync.progressFraction {
                         ProgressView(value: fraction)
-                            .tint(FoldPalette.slate)
+                            .tint(FoldPalette.umber)
                             .frame(width: 180)
                             .accessibilityLabel("Progress")
                     }
@@ -444,12 +484,12 @@ struct FoldSheet: View {
             VStack(spacing: 10) {
                 Image(systemName: placeholder.symbol)
                     .font(.system(size: 26, weight: .light))
-                    .foregroundStyle(FoldPalette.slate)
+                    .foregroundStyle(FoldPalette.umber)
                 Text(placeholder.title)
                     .font(.system(size: 17, weight: .semibold))
                 Text(placeholder.message)
                     .font(.callout)
-                    .foregroundStyle(FoldPalette.slate)
+                    .foregroundStyle(FoldPalette.umber)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 380)
                     .textSelection(.enabled)
@@ -470,8 +510,7 @@ struct FoldSheet: View {
 
     // MARK: Lines
 
-    private func lineList(_ lines: [FoldLine], interactive: Bool, progress: Double) -> some View {
-        let entries = FoldEntry.entries(lines)
+    private func lineList(_ entries: [FoldEntry], interactive: Bool, progress: Double) -> some View {
         let lookup = interactive ? rowsByID : [:]
         let selectedID = interactive ? viewModel.selectedChangeID : nil
         return ScrollView {
@@ -487,7 +526,7 @@ struct FoldSheet: View {
             .padding(.vertical, Self.listInset)
         }
         // A new plan re-inks the lines that changed in place.
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25 * timeScale), value: lines)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25 * timeScale), value: entries)
         // Held still while the leaf is up, so the lines it carries stay
         // where they were.
         .scrollDisabled(progress > 0)
@@ -507,9 +546,9 @@ struct FoldSheet: View {
                     .opacity(lifted(.a, progress) ? 0 : 1)
                 Image(systemName: "folder")
                     .font(.system(size: 8))
-                    .foregroundStyle(FoldPalette.slate.opacity(0.7))
+                    .foregroundStyle(FoldPalette.umber.opacity(0.7))
                     .frame(width: FoldMetrics.creaseWidth)
-                    .padding(.top, 6)
+                    .padding(.top, 4)
                     .opacity(acrossInk(progress))
                 FoldHeadingHalf(path: path, count: count, side: .b)
                     .opacity(lifted(.b, progress) ? 0 : 1)
@@ -617,9 +656,9 @@ struct FoldSheet: View {
 
     /// ↑ and ↓ walk the lines in the order the sheet shows them: grouped
     /// by folder, not in raw path order.
-    private func move(_ press: KeyPress, in lines: [FoldLine], proxy: ScrollViewProxy) -> KeyPress.Result {
+    private func move(_ press: KeyPress, in entries: [FoldEntry], proxy: ScrollViewProxy) -> KeyPress.Result {
         guard plain(press), scene == .plan, drag == nil else { return .ignored }
-        let shown = FoldEntry.entries(lines).compactMap(\.line)
+        let shown = entries.compactMap(\.line)
         guard !shown.isEmpty else { return .ignored }
         let step = press.key == .upArrow ? -1 : 1
         let current = shown.firstIndex { $0.id == viewModel.selectedChangeID }
@@ -731,22 +770,21 @@ struct FoldSheet: View {
     }
 
     private func ear(_ side: FolderSide) -> some View {
-        let size: CGFloat = hoveredEar == side && canFold ? 26 : 16
+        let size = earSize(side)
         return ZStack(alignment: side == .a ? .topLeading : .topTrailing) {
             Color.clear.frame(width: 46, height: 46)
-            ZStack {
-                DogEar(side: side, part: .cut).fill(FoldPalette.desk)
-                DogEar(side: side, part: .flap)
-                    .fill(FoldPalette.kami)
-                    .shadow(color: .black.opacity(0.28), radius: 1.5, x: side == .a ? 1 : -1, y: 1)
-            }
-            .frame(width: size, height: size)
+            // The flap shows the paper's cerulean back; the paper under
+            // the corner it came from is cut away.
+            DogEar(side: side)
+                .fill(FoldPalette.kamiLit)
+                .shadow(color: FoldPalette.foldShadow.opacity(0.3), radius: 1.5, x: side == .a ? 1 : -1, y: 1)
+                .frame(width: size, height: size)
         }
         .contentShape(Rectangle())
         .opacity(canFold ? 1 : 0.4)
         .onHover { inside in hoveredEar = inside ? side : nil }
         .pointerStyle(!canFold ? nil : drag == nil ? PointerStyle.grabIdle : PointerStyle.grabActive)
-        .animation(reduceMotion ? nil : .spring(duration: 0.22, bounce: 0.3), value: hoveredEar)
+        .animation(reduceMotion ? nil : Self.earSpring, value: hoveredEar)
         .gesture(foldDrag(side))
         .help(foldHint)
         .accessibilityElement()
@@ -860,7 +898,7 @@ struct FoldSheet: View {
         landed = false
         let animation: Animation = reduceMotion
             ? .easeInOut(duration: 0.2 * timeScale)
-            : .spring(duration: 0.42 * timeScale, bounce: 0.05)
+            : drop(over: 1 - swing, base: Self.fallTime)
         withAnimation(animation) {
             swing = 1
         } completion: {
@@ -884,12 +922,21 @@ struct FoldSheet: View {
             bump = true
         } completion: {
             guard motion == generation else { return }
-            withAnimation(.spring(duration: 0.3 * timeScale, bounce: 0.45)) { bump = false }
+            withAnimation(.spring(duration: 0.28 * timeScale, bounce: 0)) { bump = false }
         }
     }
 
-    /// Back open, short of a fold or after a run.
-    private func open() {
+    /// The leaf falling under its own weight: it gathers speed and is
+    /// still moving when it meets the page, so contact and thump land
+    /// together. A longer drop takes longer, as a falling sheet does.
+    private func drop(over travel: Double, base: Double) -> Animation {
+        let duration = max(Self.shortestDrop, base * (travel / FoldMotion.tippingPoint).squareRoot())
+        return .timingCurve(0.6, 0, 0.85, 0.75, duration: duration * timeScale)
+    }
+
+    /// Back open: dropped back short of a fold, or peeled off the
+    /// pressed half after a run, rising to upright and dropping open.
+    private func open(_ way: Opening = .fallBack) {
         motion += 1
         let generation = motion
         opening = opening || swing > 0
@@ -897,10 +944,25 @@ struct FoldSheet: View {
         landed = false
         bump = false
         voice = .silent
-        withAnimation(reduceMotion ? .easeInOut(duration: 0.2 * timeScale) : .spring(duration: 0.5 * timeScale)) {
-            swing = 0
+        if reduceMotion {
+            withAnimation(.easeInOut(duration: 0.2 * timeScale)) { swing = 0 } completion: {
+                if motion == generation { opening = false }
+            }
+            return
+        }
+        guard way == .peel, swing > FoldMotion.tippingPoint else {
+            withAnimation(drop(over: swing, base: Self.fallBackTime)) { swing = 0 } completion: {
+                if motion == generation { opening = false }
+            }
+            return
+        }
+        withAnimation(.timingCurve(0.4, 0, 0.6, 1, duration: Self.peelLift * timeScale)) {
+            swing = FoldMotion.tippingPoint
         } completion: {
-            if motion == generation { opening = false }
+            guard motion == generation else { return }
+            withAnimation(drop(over: FoldMotion.tippingPoint, base: Self.peelDrop)) { swing = 0 } completion: {
+                if motion == generation { opening = false }
+            }
         }
     }
 
@@ -910,7 +972,7 @@ struct FoldSheet: View {
         guard scene != .pressing, approval == nil, drag == nil || drag?.cancelled == true,
               swing > 0 else { return }
         if voice == .audible { viewModel.play(.peel) }
-        open()
+        open(.peel)
     }
 
     private func sceneChanged(from old: FoldScene, to new: FoldScene) {
@@ -975,10 +1037,10 @@ struct FoldSheet: View {
     private var pressReadout: some View {
         VStack(spacing: 10) {
             Text(pair.settings.mode.title)
-                .font(FoldType.eyebrow)
+                .font(FoldType.backEyebrow)
                 .textCase(.uppercase)
                 .tracking(FoldType.eyebrowTracking * 1.5)
-                .foregroundStyle(.white.opacity(0.85))
+                .foregroundStyle(.white)
             Text(sync.progressFraction.map { $0.formatted(.percent.precision(.fractionLength(0))) }
                  ?? String(localized: "Pressing"))
                 .font(FoldType.figure)
@@ -996,7 +1058,7 @@ struct FoldSheet: View {
             .accessibilityLabel("Progress")
             Text(sync.statusText)
                 .font(.callout)
-                .foregroundStyle(.white.opacity(0.85))
+                .foregroundStyle(.white)
                 .multilineTextAlignment(.center)
                 .lineLimit(3)
                 .accessibilityAddTraits(.updatesFrequently)
@@ -1005,7 +1067,7 @@ struct FoldSheet: View {
         }
         // Controls drawn for a dark ground, legible on the cerulean.
         .environment(\.colorScheme, .dark)
-        .padding(24)
+        .padding(16)
         .frame(width: halfWidth)
         .frame(maxHeight: .infinity)
         .offset(x: leafSide == .a ? halfWidth : 0)
@@ -1017,12 +1079,22 @@ struct FoldSheet: View {
     /// can follow it. It lies on the navy, so it is drawn for a dark
     /// ground in either appearance.
     private func desk(scene: FoldScene) -> some View {
-        HStack(alignment: .center, spacing: 12) {
-            deskText(scene: scene)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            // Buttons keep their titles; the words beside them wrap.
-            deskButtons(scene: scene)
-                .fixedSize()
+        // Buttons keep their titles. The words sit beside them while they
+        // have room to say something, and above them when they do not.
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: 12) {
+                deskText(scene: scene)
+                    .frame(minWidth: Self.deskTextRoom, idealWidth: Self.deskTextRoom, maxWidth: .infinity,
+                           alignment: .leading)
+                deskButtons(scene: scene)
+                    .fixedSize()
+            }
+            VStack(alignment: .trailing, spacing: 6) {
+                deskText(scene: scene)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                deskButtons(scene: scene)
+                    .fixedSize()
+            }
         }
         .frame(minHeight: 28)
         .environment(\.colorScheme, .dark)
@@ -1032,9 +1104,14 @@ struct FoldSheet: View {
     private func deskText(scene: FoldScene) -> some View {
         if let turn = staged {
             Label {
-                Text("\(turn.title): \(turn.name)")
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                // The turn's name stays whole; only the file's name shortens.
+                HStack(spacing: 4) {
+                    Text("\(turn.title):")
+                        .fixedSize()
+                    Text(turn.name)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
             } icon: {
                 Image(systemName: turn.flow == .toA ? "arrow.left" : "arrow.right")
             }
@@ -1049,7 +1126,7 @@ struct FoldSheet: View {
         } else if scene == .plan || scene == .imprint {
             Text(sync.statusText)
                 .font(.callout)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(FoldPalette.deskInk)
                 .lineLimit(2)
                 .help(sync.statusText)
                 .textSelection(.enabled)

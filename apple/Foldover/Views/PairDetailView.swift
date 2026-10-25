@@ -52,7 +52,7 @@ struct PairDetailView: View {
             // change on every layout pass, which AppKit ends with a crash.
             Text(viewModel.planText(for: pair))
                 .font(.callout)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(FoldPalette.deskInk)
                 .lineLimit(2)
                 .help(viewModel.planText(for: pair))
                 .frame(maxWidth: .infinity, alignment: .leading)

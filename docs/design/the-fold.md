@@ -31,8 +31,8 @@ falls, presses, and the sync starts. Like origami paper, the sheet is
 colored on its back: past upright the leaf turns cerulean, and its back
 shows the run's progress in white.
 
-**After.** The leaf peels open on a cerulean card: the run's own counts
-in large white figures. Undo lifts it.
+**After.** The leaf peels open, then a cerulean card stamps onto the
+paper: the run's own counts in large white figures. Undo lifts it.
 
 **You have to see this:** the names filling with ink under the
 approaching leaf, the blue back turning over, then the thump. Folded,

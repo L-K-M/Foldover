@@ -19,7 +19,7 @@ struct FoldFolderLabel: View {
                 .font(FoldType.eyebrow)
                 .textCase(.uppercase)
                 .tracking(FoldType.eyebrowTracking)
-                .foregroundStyle(FoldPalette.slate)
+                .foregroundStyle(FoldPalette.umber)
             Label(text, systemImage: viewModel.folderSymbol(folder))
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(FoldPalette.ink(side))
@@ -52,7 +52,8 @@ struct FoldFolderLabel: View {
 struct FoldImprintView: View {
     let imprint: FoldImprint
 
-    private static let corner: CGFloat = 14
+    /// Crisp, as a folded paper's corner is.
+    private static let corner: CGFloat = 3
 
     var body: some View {
         VStack(spacing: 12) {
@@ -60,7 +61,7 @@ struct FoldImprintView: View {
             ForEach(imprint.notes, id: \.self) { note in
                 Text(note)
                     .font(.callout)
-                    .foregroundStyle(FoldPalette.slate)
+                    .foregroundStyle(FoldPalette.umber)
                     .multilineTextAlignment(.center)
             }
         }
@@ -70,30 +71,28 @@ struct FoldImprintView: View {
     private var card: some View {
         VStack(spacing: 10) {
             Text(imprint.title)
-                .font(FoldType.eyebrow)
+                .font(FoldType.backEyebrow)
                 .textCase(.uppercase)
                 .tracking(FoldType.eyebrowTracking * 1.5)
-                .foregroundStyle(.white.opacity(0.85))
             HStack(alignment: .firstTextBaseline, spacing: 26) {
                 ForEach(imprint.figures, id: \.label) { figure in
                     VStack(spacing: 2) {
                         Text(figure.value)
                             .font(FoldType.figure)
                         Text(figure.label)
-                            .font(FoldType.eyebrow)
+                            .font(FoldType.backEyebrow)
                             .textCase(.uppercase)
                             .tracking(FoldType.eyebrowTracking)
-                            .opacity(0.85)
                     }
                 }
             }
-            .foregroundStyle(.white)
         }
+        .foregroundStyle(.white)
         .padding(.vertical, 18)
         .padding(.horizontal, 30)
         .background(Kami().clipShape(RoundedRectangle(cornerRadius: Self.corner, style: .continuous)))
-        // Cast onto the paper, as the icon's folds cast onto the navy.
-        .shadow(color: FoldPalette.deskShade.opacity(0.35), radius: 14, x: 0, y: 8)
+        // Cast onto the paper down and to the right, away from the light.
+        .shadow(color: FoldPalette.foldShadow.opacity(0.28), radius: 12, x: 3, y: 8)
     }
 }
 
@@ -107,7 +106,8 @@ struct ComparingSweep: View {
 
     var body: some View {
         if !paused {
-            TimelineView(.animation) { context in
+            // A soft band reads as smooth at a modest rate.
+            TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
                 let period = Self.period * timeScale
                 let phase = context.date.timeIntervalSinceReferenceDate
                     .truncatingRemainder(dividingBy: period) / period

@@ -14,7 +14,7 @@ import SwiftUI
 enum FoldMetrics {
     /// Every entry is one line tall, so the leaf can find the visible
     /// lines from the scroll offset alone.
-    static let rowHeight: CGFloat = 30
+    static let rowHeight: CGFloat = 26
     /// The crease column the pips sit in.
     static let creaseWidth: CGFloat = 30
     /// A half narrower than this shows impressions as short stubs.
@@ -30,6 +30,7 @@ struct FoldHalf: View {
     /// incoming ink as it approaches.
     var peek: Double = 0
     @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         HStack(spacing: 8) {
@@ -60,7 +61,7 @@ struct FoldHalf: View {
                 Color.clear.frame(width: 0, height: 0)
             }
             .font(FoldType.meta)
-            .foregroundStyle(line.flow == .failed ? FoldPalette.failure : FoldPalette.slate)
+            .foregroundStyle(line.flow == .failed ? FoldPalette.failure : FoldPalette.umber)
             .lineLimit(1)
             .layoutPriority(-1)
         }
@@ -89,7 +90,7 @@ struct FoldHalf: View {
                     .foregroundStyle(FoldPalette.ink(side == .a ? .b : .a))
             }
         case .faint:
-            name.foregroundStyle(FoldPalette.slate.opacity(0.6))
+            name.foregroundStyle(FoldPalette.umber.opacity(0.6))
         case .blank:
             absence
         }
@@ -103,12 +104,12 @@ struct FoldHalf: View {
     }
 
     /// Where the other folder's version lands: its name in that folder's
-    /// ink, faint until the leaf comes over and fills it. Increase
-    /// Contrast prints it darker from the start.
+    /// ink, lighter and thinner until the leaf comes over and fills it.
     @ViewBuilder
     private var impression: some View {
-        let incoming = FoldPalette.ink(side == .a ? .b : .a)
-        let faint = contrast == .increased ? Self.arrivingContrast : Self.arriving
+        let from: FolderSide = side == .a ? .b : .a
+        let incoming = FoldPalette.ink(from)
+        let faint = arriving(from)
         let ink = faint + (1 - faint) * peek
         if compact {
             Capsule()
@@ -120,13 +121,17 @@ struct FoldHalf: View {
                     Text(Self.lastComponent(from))
                         .font(.system(size: 11))
                         .strikethrough()
-                        .foregroundStyle(FoldPalette.slate.opacity(0.7))
+                        .foregroundStyle(FoldPalette.umber.opacity(0.7))
                         .lineLimit(1)
                     Image(systemName: "arrow.right")
                         .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(FoldPalette.slate)
+                        .foregroundStyle(FoldPalette.umber)
                 }
-                name.foregroundStyle(incoming.opacity(ink))
+                Text(line.name)
+                    .font(FoldType.arrivingName)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(incoming.opacity(ink))
             }
         }
     }
@@ -138,11 +143,11 @@ struct FoldHalf: View {
         if line.mark(side == .a ? .b : .a) == .lift {
             Text("no copy")
                 .font(FoldType.meta)
-                .foregroundStyle(FoldPalette.slate.opacity(0.8))
+                .foregroundStyle(FoldPalette.umber.opacity(0.8))
                 .padding(.horizontal, 6)
                 .padding(.vertical, 1)
                 .overlay(RoundedRectangle(cornerRadius: 3)
-                    .strokeBorder(FoldPalette.slate.opacity(0.45), style: StrokeStyle(lineWidth: 0.75, dash: [2, 2])))
+                    .strokeBorder(FoldPalette.umber.opacity(0.45), style: StrokeStyle(lineWidth: 0.75, dash: [2, 2])))
         } else if line.flow == .failed, side == .a {
             HStack(spacing: 4) {
                 Image(systemName: "xmark.octagon.fill")
@@ -153,9 +158,18 @@ struct FoldHalf: View {
         }
     }
 
-    /// How much ink an arriving copy shows before the leaf comes over.
-    private static let arriving = 0.38
-    private static let arrivingContrast = 0.7
+    /// How much ink an arriving copy shows before the leaf comes over:
+    /// at least 3:1 on either half, below the folder's own version and
+    /// above a line that waits. Increase Contrast prints it near full.
+    private func arriving(_ from: FolderSide) -> Double {
+        if contrast == .increased { return 0.85 }
+        switch (from, scheme) {
+        case (.a, .dark): return 0.55
+        case (.b, .dark): return 0.6
+        case (.a, _): return 0.6
+        case (.b, _): return 0.75
+        }
+    }
 
     /// The half whose edge names the change: where it arrives, or the
     /// right-hand half when nothing moves.
@@ -188,11 +202,11 @@ struct FoldHeadingHalf: View {
                 Spacer(minLength: 4)
             }
         }
-        .foregroundStyle(FoldPalette.slate)
+        .foregroundStyle(FoldPalette.umber)
         .padding(.leading, side == .a ? 14 : 6)
         .padding(.trailing, side == .a ? 6 : 14)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(.top, 6)
+        .padding(.top, 4)
     }
 }
 
@@ -213,11 +227,11 @@ struct FoldPip: View {
             case .waiting:
                 Image(systemName: "hourglass")
                     .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(FoldPalette.slate)
+                    .foregroundStyle(FoldPalette.umber)
             case .still:
                 Image(systemName: "equal")
                     .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(FoldPalette.slate)
+                    .foregroundStyle(FoldPalette.umber)
             case .failed:
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .bold))
