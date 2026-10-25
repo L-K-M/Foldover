@@ -487,7 +487,7 @@ struct PairSyncViewModel {
     /// The previewed plan's lines, while the plan can still be reviewed.
     var foldPlan: FoldPlan? {
         guard let preview = reviewable else { return nil }
-        return FoldPlan(token: preview.reviewToken, lines: listedRows.map(FoldLine.init))
+        return FoldPlan(token: preview.reviewToken, lines: listedRows.map(FoldLine.init), changes: preview.total)
     }
 
     /// What the last run or undo reports it did, for the opened sheet.

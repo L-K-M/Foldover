@@ -75,12 +75,17 @@ enum FoldType {
 }
 
 /// A fine, fixed grain: the same fibres at every size, so a resize
-/// never makes the paper shimmer.
+/// never makes the paper shimmer. It has no inputs, so a swinging leaf
+/// does not redraw it; only a new size does.
 private struct Grain: View {
+    /// Past this many fibres a large window gains no texture, only
+    /// drawing time.
+    private static let maxFibres = 12_000
+
     var body: some View {
         Canvas { context, size in
             var random = SplitMix(seed: 0xF01D)
-            let fibres = Int(size.width * size.height / 160)
+            let fibres = min(Int(size.width * size.height / 160), Self.maxFibres)
             for _ in 0..<fibres {
                 let x = random.unit() * size.width
                 let y = random.unit() * size.height

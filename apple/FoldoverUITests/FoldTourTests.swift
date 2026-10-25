@@ -15,6 +15,7 @@ final class FoldTourTests: XCTestCase {
         let tour = Tour(self, appearance: .light, slowFold: Self.slowMotion)
         let app = tour.app
         tour.launch()
+        defer { app.terminate() }
         tour.click(app.outlines.firstMatch.staticTexts["Photos"].firstMatch, "Photos in the sidebar")
         tour.key("r", .command)
         tour.pause(5)
@@ -35,7 +36,7 @@ final class FoldTourTests: XCTestCase {
         let ear = app.windows.descendants(matching: .any)["Fold Folder A’s Half to Sync"].firstMatch
         guard ear.waitForExistence(timeout: 5) else { return XCTFail("Missing: Folder A’s dog-ear") }
         let half = tour.line("2026/Trip/notes.md").frame.width / 2
-        XCTAssertGreaterThan(half, 100, "The sheet should be wide enough to fold")
+        guard half > 100 else { return XCTFail("The sheet should be wide enough to fold, half is \(half)") }
         let corner = ear.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.25))
 
         // Short of upright: the leaf falls back and nothing syncs.
@@ -57,6 +58,5 @@ final class FoldTourTests: XCTestCase {
         tour.key("z", .command)
         tour.pause(3)
         tour.snap("fold-10-lifted")
-        app.terminate()
     }
 }

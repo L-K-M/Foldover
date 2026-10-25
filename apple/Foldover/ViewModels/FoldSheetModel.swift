@@ -209,7 +209,11 @@ enum FoldEntry: Identifiable, Equatable {
 /// the run did.
 struct FoldPlan: Equatable {
     let token: String
+    /// The lines the kind filter lists.
     let lines: [FoldLine]
+    /// Every change in the plan, listed or not: a filter can hide them
+    /// all, and the run still carries them.
+    let changes: UInt64
 }
 
 /// What the leaf leaves on the sheet when it opens: the run's own
@@ -235,13 +239,19 @@ struct FoldImprint: Equatable {
             (result.moved, String(localized: "renamed")),
         ], none: String(localized: "changes"))
         var notes: [String] = []
-        if result.conflicts > 0 {
+        if result.conflicts == 1 {
+            notes.append(String(localized: "1 conflict left as it was"))
+        } else if result.conflicts > 1 {
             notes.append(String(localized: "\(result.conflicts) conflicts left as they were"))
         }
-        if result.failureCount > 0 {
+        if result.failureCount == 1 {
+            notes.append(String(localized: "1 item failed; the next sync retries it"))
+        } else if result.failureCount > 1 {
             notes.append(String(localized: "\(result.failureCount) items failed; the next sync retries them"))
         }
-        if result.recovered > 0 {
+        if result.recovered == 1 {
+            notes.append(String(localized: "1 item recovered from an interrupted sync"))
+        } else if result.recovered > 1 {
             notes.append(String(localized: "\(result.recovered) items recovered from an interrupted sync"))
         }
         self.notes = notes
@@ -255,7 +265,9 @@ struct FoldImprint: Equatable {
             (undo.beside, String(localized: "beside newer")),
         ], none: String(localized: "changes"))
         var notes: [String] = []
-        if undo.notUndoneCount > 0 {
+        if undo.notUndoneCount == 1 {
+            notes.append(String(localized: "1 item left as it is"))
+        } else if undo.notUndoneCount > 1 {
             notes.append(String(localized: "\(undo.notUndoneCount) items left as they are"))
         }
         notes.append(String(localized: "Automatic syncs wait until you sync again"))

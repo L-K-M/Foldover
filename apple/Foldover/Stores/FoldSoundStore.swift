@@ -39,7 +39,10 @@ final class FoldSoundStore {
     func play(_ sound: FoldSound) {
         let systemAllows = (defaults.object(forKey: Self.systemKey) as? NSNumber)?.boolValue ?? true
         guard isEnabled, systemAllows else { return }
-        guard let player = sounds[sound] ?? NSSound(named: NSSound.Name(sound.rawValue)) else { return }
+        guard let player = sounds[sound] ?? NSSound(named: NSSound.Name(sound.rawValue)) else {
+            assertionFailure("No bundled sound \(sound.rawValue); see tools/sounds/make_fold_sounds.py")
+            return
+        }
         sounds[sound] = player
         player.stop()
         player.play()

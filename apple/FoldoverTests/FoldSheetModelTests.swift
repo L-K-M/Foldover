@@ -82,7 +82,8 @@ struct FoldSheetModelTests {
     }
 
     @Test func linesGroupUnderTheirFolder() {
-        // Path order, with a subfolder between its parent's files.
+        // In path order a subfolder falls between its parent's files; each
+        // folder's lines still gather under one heading, first seen first.
         let lines = [
             FoldLine(row: row("Budget.txt", .update(to: .b), id: 0)),
             FoldLine(row: row("Website/index.html", .copy(to: .b), id: 1)),
@@ -118,7 +119,7 @@ struct FoldSheetModelTests {
         #expect(imprint.title == "Folded")
         #expect(imprint.figures == [.init(value: "5", label: "copied"), .init(value: "2", label: "archived"),
                                     .init(value: "1", label: "renamed")])
-        #expect(imprint.notes == ["3 conflicts left as they were", "1 items failed; the next sync retries them"])
+        #expect(imprint.notes == ["3 conflicts left as they were", "1 item failed; the next sync retries it"])
 
         let nothing = RunSummary(cancelled: true, copied: 0, updated: 0, archived: 0, recovered: 0, conflicts: 0,
                                  failures: [], failureCount: 0, archive: "run")

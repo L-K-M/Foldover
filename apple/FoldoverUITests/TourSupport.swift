@@ -121,6 +121,7 @@ struct Tour {
     /// Keep `count` screenshots `interval` seconds apart, named
     /// "<name>-1", "<name>-2", …: frames of something in motion.
     func frames(_ name: String, count: Int, every interval: TimeInterval) {
+        guard count > 0 else { return }
         for index in 1...count {
             snap("\(name)-\(index)")
             pause(interval)

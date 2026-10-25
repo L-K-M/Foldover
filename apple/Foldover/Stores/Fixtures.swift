@@ -345,7 +345,7 @@ actor FixtureSyncClient: SyncClient {
 
     /// Polls a job takes; a slow-motion tour stretches runs with the fold.
     private static func polls(_ job: Job) -> Int {
-        job == .run ? polls * Int(Fixtures.foldTimeScale) : polls
+        job == .run ? Int((Double(polls) * Fixtures.foldTimeScale).rounded()) : polls
     }
 
     init(pairs: FixturePairClient, scenario: FixtureScenario? = nil) {
@@ -373,7 +373,7 @@ actor FixtureSyncClient: SyncClient {
 
     /// What the engine's next preview plans after keeping `keep`'s
     /// version: that version, or its absence, carries over to the other
-    /// folder.
+    /// folder. Moves, blocked and kept items offer no turn.
     private static func choice(_ action: ChangeAction, keep: FolderSide) -> ChangeAction? {
         let other: FolderSide = keep == .a ? .b : .a
         switch action {

@@ -68,13 +68,15 @@ final class SettingsStore {
          appBuild: Data? = BackgroundAgent().appBuild,
          defaults: UserDefaults = .standard,
          canResetFullDiskAccess: @escaping @MainActor () -> Bool = { true },
-         sounds: FoldSoundStore = FoldSoundStore()) {
+         sounds: FoldSoundStore? = nil) {
         self.loginItem = loginItem
         self.showFullDiskAccess = showFullDiskAccess
         self.resetFullDiskAccess = resetFullDiskAccess
         self.appBuild = appBuild
         self.defaults = defaults
         self.canResetFullDiskAccess = canResetFullDiskAccess
+        // The sounds' preference lives with the other settings' defaults.
+        let sounds = sounds ?? FoldSoundStore(defaults: defaults)
         self.sounds = sounds
         loginStatus = loginItem.status
         paperSounds = sounds.isEnabled
