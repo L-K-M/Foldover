@@ -61,7 +61,7 @@ impl From<foldover_client::Error> for AgentError {
                 if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => Self::NotRunning { message },
             foldover_client::Error::Remote { .. } => Self::Request { message },
             foldover_client::Error::Timeout => Self::Request {
-                message: "Agent request timed out. Refresh pairs before retrying a save; it may have committed.".into(),
+                message: "Agent request timed out. The operation may still be running or may have completed. Refresh to check its outcome before retrying.".into(),
             },
             _ => Self::Connection { message },
         }
@@ -580,7 +580,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_timeout_reads_as_retryable_but_writes_as_maybe_committed() {
+    fn a_timeout_reads_as_retryable_but_writes_as_uncertain() {
         let AgentError::Connection { message } = AgentError::read(foldover_client::Error::Timeout)
         else {
             panic!("a read timeout is a connection problem, not a committed save")
@@ -594,7 +594,19 @@ mod tests {
         else {
             panic!("a mutation timeout warns it may have committed")
         };
-        assert!(message.contains("committed"), "{message}");
+        assert!(message.contains("may have completed"), "{message}");
+    }
+
+    #[test]
+    fn mutation_timeouts_do_not_assume_the_request_was_a_pair_save() {
+        let AgentError::Request { message } = AgentError::from(foldover_client::Error::Timeout)
+        else {
+            panic!("a mutation timeout leaves its outcome uncertain")
+        };
+        assert!(!message.contains("save"), "{message}");
+        assert!(!message.contains("pairs"), "{message}");
+        assert!(message.contains("operation"), "{message}");
+        assert!(message.contains("before retrying"), "{message}");
     }
 
     #[test]
@@ -689,12 +701,12 @@ mod tests {
     }
 
     #[test]
-    fn health_timeouts_allow_repair_without_changing_save_errors() {
+    fn health_timeouts_allow_repair_without_changing_mutation_warnings() {
         let error = AgentError::status(foldover_client::Error::Timeout);
         assert!(matches!(error, AgentError::Connection { message } if !message.contains("save")));
         let error = AgentError::from(foldover_client::Error::Timeout);
         assert!(
-            matches!(error, AgentError::Request { message } if message.contains("may have committed"))
+            matches!(error, AgentError::Request { message } if message.contains("may have completed"))
         );
     }
 

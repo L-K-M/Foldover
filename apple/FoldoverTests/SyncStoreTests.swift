@@ -316,6 +316,11 @@ private actor DeferredSyncClient: SyncClient {
         pending.removeFirst().resume(throwing: error)
     }
 
+    /// Fails the newest unanswered status request.
+    func replyLatestError(_ error: any Error) {
+        pending.removeLast().resume(throwing: error)
+    }
+
     /// Resumes the oldest parked preview/run request.
     func replyStart(_ state: PairSyncState) {
         pendingStarts.removeFirst().resume(returning: state)
@@ -2236,4 +2241,174 @@ func movesNameTheirSourceAndCount() {
     let result = RunSummary(cancelled: false, copied: 0, updated: 0, archived: 0, recovered: 0,
                             conflicts: 0, failures: [], failureCount: 0, archive: "run", moved: 1)
     #expect(PairSyncViewModel.summary(result).contains("Moved 1 as the other folder did."))
+}
+
+/// Returns scripted status and preview replies, failing chosen calls.
+private actor FailingOnIndexClient: SyncClient {
+    private let failStatusOn: [Int]
+    private let failPreviewOn: [Int]
+    private let failChangesOn: [Int]
+    private(set) var statusCount = 0
+    private(set) var previewCount = 0
+    private(set) var runCount = 0
+    private var changesCount = 0
+    private var statusReply: PairSyncState = .idle
+    private var previewReply: PairSyncState = .idle
+
+    init(failStatusOn: [Int] = [], failPreviewOn: [Int] = [], failChangesOn: [Int] = []) {
+        self.failStatusOn = failStatusOn
+        self.failPreviewOn = failPreviewOn
+        self.failChangesOn = failChangesOn
+    }
+
+    func setStatusReply(_ reply: PairSyncState) { statusReply = reply }
+    func setPreviewReply(_ reply: PairSyncState) { previewReply = reply }
+    func preview(_ id: String) async throws -> PairSyncState {
+        previewCount += 1
+        if failPreviewOn.contains(previewCount) { throw SyncFixtureError.unreachable }
+        return previewReply
+    }
+    func status(_ id: String) async throws -> PairSyncState {
+        statusCount += 1
+        if failStatusOn.contains(statusCount) { throw SyncFixtureError.unreachable }
+        return statusReply
+    }
+    func run(_ id: String, approvedA: UInt64, approvedB: UInt64,
+             reviewToken: String?) async throws -> PairSyncState {
+        runCount += 1
+        return .idle
+    }
+    func cancel(_ id: String) async throws -> PairSyncState { .idle }
+    func undo(_ id: String) async throws -> PairSyncState { .idle }
+    func resolve(_ id: String, path: Data, keep: FolderSide,
+                 reviewToken: String) async throws -> PairSyncState { .idle }
+    func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
+    func skipOnce(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
+    func history(_ id: String) async throws -> [RunRecord] { [] }
+    func changes(_ id: String, after: Data?, filter: ChangeFilter?,
+                 reviewToken: String) async throws -> ChangePage {
+        changesCount += 1
+        if failChangesOn.contains(changesCount) { throw SyncFixtureError.unreachable }
+        return ChangePage(changes: [], more: false)
+    }
+}
+
+@MainActor
+@Test
+func checkAllSuccessClearsForegroundRefreshError() async {
+    let client = FailingOnIndexClient(failStatusOn: [1])
+    let store = SyncStore(client: client)
+    let pair = pair()
+    await store.refresh(pair.id)
+    #expect(store.requestError(for: pair.id) != nil)
+
+    await store.checkAll([pair])
+    #expect(store.requestError(for: pair.id) == nil)
+    #expect(store.state(for: pair.id) == .idle)
+    #expect(await client.previewCount == 0)
+    #expect(await client.runCount == 0)
+}
+
+@MainActor
+@Test
+func checkAllSuccessClearsPollErrorAndPreservesAgentState() async {
+    let client = DeferredSyncClient()
+    await client.setPreviewReply(.working(.preview, cancelling: false))
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let pair = pair()
+    let previewTask = Task { await store.preview(pair.id) }
+    #expect(await client.waitForStatusCalls(1, timeout: .seconds(3)))
+    await client.replyError(SyncFixtureError.unreachable)
+    await previewTask.value
+    #expect(store.requestError(for: pair.id) != nil)
+    #expect(store.state(for: pair.id) == .working(.preview, cancelling: false))
+
+    let completed = preview(archivesInA: 0, needsApproval: false)
+    await client.finishPolling(.previewed(completed))
+    await store.checkAll([pair])
+    #expect(store.requestError(for: pair.id) == nil)
+    #expect(store.state(for: pair.id) == .previewed(completed))
+    #expect(await client.previewCalls == 1)
+    #expect(await client.runCalls == 0)
+}
+
+@MainActor
+@Test
+func mutationErrorRemainsAfterStatusObservations() async throws {
+    let client = FailingOnIndexClient(failStatusOn: [2], failPreviewOn: [1])
+    let store = SyncStore(client: client)
+    let pair = pair()
+    await store.preview(pair.id)
+    let failure = try #require(store.requestError(for: pair.id))
+
+    await store.checkAll([pair])
+    #expect(store.requestError(for: pair.id) == failure)
+    await store.refresh(pair.id)
+    #expect(store.requestError(for: pair.id) == failure)
+    await store.checkAll([pair])
+    #expect(store.requestError(for: pair.id) == failure)
+    #expect(await client.previewCount == 1)
+    #expect(await client.runCount == 0)
+}
+
+@MainActor
+@Test
+func changesListErrorRemainsAfterStatusObservations() async throws {
+    let summary = preview(archivesInA: 0, needsApproval: false)
+    let client = FailingOnIndexClient(failChangesOn: [1])
+    await client.setStatusReply(.previewed(summary))
+    let store = SyncStore(client: client)
+    let pair = pair()
+    await store.checkAll([pair])
+    await store.showChanges(pair.id, filter: nil)
+    let failure = try #require(store.requestError(for: pair.id))
+
+    await store.checkAll([pair])
+    #expect(store.requestError(for: pair.id) == failure)
+    await store.refresh(pair.id)
+    #expect(store.requestError(for: pair.id) == failure)
+}
+
+@MainActor
+@Test
+func newerStatusErrorSurvivesOlderCheckAllSuccess() async throws {
+    let client = DeferredSyncClient()
+    let store = SyncStore(client: client)
+    let pair = pair()
+    let initial = Task { await store.refresh(pair.id) }
+    #expect(await client.waitForStatusCalls(1, timeout: .seconds(3)))
+    await client.replyError(SyncFixtureError.unreachable)
+    await initial.value
+
+    // Both later requests observe the same state generation. The old
+    // success may clear only the failure it saw before it suspended.
+    let checking = Task { await store.checkAll([pair]) }
+    #expect(await client.waitForStatusCalls(2, timeout: .seconds(3)))
+    let refreshing = Task { await store.refresh(pair.id) }
+    #expect(await client.waitForStatusCalls(3, timeout: .seconds(3)))
+    await client.replyLatestError(SyncFixtureError.timedOut)
+    await refreshing.value
+    let newerFailure = try #require(store.requestError(for: pair.id))
+    await client.reply(.idle)
+    await checking.value
+    #expect(store.requestError(for: pair.id) == newerFailure)
+    await client.finishPolling(.idle)
+}
+
+@Test @MainActor
+func successfulRefreshKeepsErrorReportedWhileReadingStatus() async {
+    let client = DeferredSyncClient()
+    let store = SyncStore(client: client)
+    let initial = Task { await store.refresh("p") }
+    #expect(await client.waitForStatusCalls(1, timeout: .seconds(3)))
+    await client.replyError(SyncFixtureError.unreachable)
+    await initial.value
+
+    let refreshing = Task { await store.refresh("p") }
+    #expect(await client.waitForStatusCalls(2, timeout: .seconds(3)))
+    store.report("A later command may have completed", for: "p")
+    await client.reply(.idle)
+    await refreshing.value
+
+    #expect(store.requestError(for: "p") == "A later command may have completed")
 }
