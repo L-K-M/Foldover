@@ -86,17 +86,21 @@ struct Paper: View {
 }
 
 /// The fold line down the middle of the sheet: a valley, darker while
-/// the sheet is folded.
+/// the sheet is folded. Its lit side is faint on dark paper, where a
+/// bright edge would glow.
 struct Crease: View {
     /// 0 flat … 1 folded.
     var depth: Double = 0
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
+        let shade = scheme == .dark ? 0.25 : 0.05
+        let lit = scheme == .dark ? 0.05 : 0.35
         HStack(spacing: 0) {
-            LinearGradient(colors: [.clear, .black.opacity(0.05 + 0.08 * depth)],
+            LinearGradient(colors: [.clear, .black.opacity(shade + 0.08 * depth)],
                            startPoint: .leading, endPoint: .trailing)
             Rectangle().fill(.black.opacity(0.10 + 0.10 * depth)).frame(width: 1)
-            LinearGradient(colors: [.white.opacity(0.35), .clear], startPoint: .leading, endPoint: .trailing)
+            LinearGradient(colors: [.white.opacity(lit), .clear], startPoint: .leading, endPoint: .trailing)
         }
         .frame(width: 22)
         .allowsHitTesting(false)
@@ -114,16 +118,34 @@ extension View {
 
 private struct Impression: ViewModifier {
     let contrast: ColorSchemeContrast
+    @Environment(\.colorScheme) private var scheme
 
     func body(content: Content) -> some View {
         if contrast == .increased {
             content.foregroundStyle(FoldPalette.pencil)
         } else {
+            // Light catches the lower lip of a pressed letter and shades
+            // its upper edge; on dark paper the catch light is faint.
             content
                 .foregroundStyle(FoldPalette.impression)
-                .shadow(color: .white.opacity(0.75), radius: 0, x: 0, y: 1)
-                .shadow(color: .black.opacity(0.22), radius: 0, x: 0, y: -0.5)
+                .shadow(color: .white.opacity(scheme == .dark ? 0.07 : 0.75), radius: 0, x: 0, y: 1)
+                .shadow(color: .black.opacity(scheme == .dark ? 0.55 : 0.22), radius: 0, x: 0, y: -0.5)
         }
+    }
+}
+
+extension View {
+    /// Letterpress: set a hair below the paper, lit from above.
+    func letterpress() -> some View {
+        modifier(Letterpress())
+    }
+}
+
+private struct Letterpress: ViewModifier {
+    @Environment(\.colorScheme) private var scheme
+
+    func body(content: Content) -> some View {
+        content.shadow(color: scheme == .dark ? .black.opacity(0.5) : .white.opacity(0.6), radius: 0, x: 0, y: 1)
     }
 }
 

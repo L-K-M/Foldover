@@ -52,12 +52,15 @@ struct FoldHalf: View {
     @ViewBuilder
     private var meta: some View {
         if side == Self.arrivalSide(line.flow) {
-            let text = line.sizeText.isEmpty ? line.verb : "\(line.verb) · \(line.sizeText)"
-            Text(text)
-                .font(FoldType.meta)
-                .foregroundStyle(line.flow == .failed ? FoldPalette.failure : FoldPalette.pencil)
-                .lineLimit(1)
-                .layoutPriority(-1)
+            // The last choice truncates when even the verb does not fit.
+            ViewThatFits(in: .horizontal) {
+                if !line.sizeText.isEmpty { Text("\(line.verb) · \(line.sizeText)") }
+                Text(line.verb)
+            }
+            .font(FoldType.meta)
+            .foregroundStyle(line.flow == .failed ? FoldPalette.failure : FoldPalette.pencil)
+            .lineLimit(1)
+            .layoutPriority(-1)
         }
     }
 
@@ -130,8 +133,7 @@ struct FoldHalf: View {
     /// hole that reads as "nothing happens here".
     @ViewBuilder
     private var absence: some View {
-        let other = line.mark(side == .a ? .b : .a)
-        if other == .lift || line.flow == .still {
+        if line.mark(side == .a ? .b : .a) == .lift {
             Text("no copy")
                 .font(FoldType.meta)
                 .foregroundStyle(FoldPalette.pencil.opacity(0.8))

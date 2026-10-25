@@ -6,6 +6,7 @@ import Foundation
 import Testing
 @testable import Foldover
 
+@MainActor
 private func row(_ path: String, _ action: ChangeAction?, id: Int = 0, resolvable: Bool = false,
                  otherWay: FolderSide? = nil, movedFrom: String? = nil) -> ChangeRow {
     var row = ChangeRow(id: id, path: path, description: "", resolvable: resolvable ? Data(path.utf8) : nil)

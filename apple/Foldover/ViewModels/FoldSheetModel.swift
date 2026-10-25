@@ -133,7 +133,8 @@ struct FoldLine: Identifiable, Equatable {
         case .move(on: .a): (.impression, .ink, .toA)
         case .conflict: (.ink, .ink, .held)
         case .blocked: (.faint, .faint, .waiting)
-        case .keep: (.blank, .faint, .still)
+        // Which folder holds a kept item is not said; claim neither.
+        case .keep: (.faint, .faint, .still)
         }
     }
 
