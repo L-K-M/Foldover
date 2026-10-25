@@ -18,6 +18,9 @@ use tokio::sync::{OnceCell, Semaphore};
 
 use crate::code_identity::CodeIdentity;
 
+mod cache;
+use cache::VerifiedCache;
+
 const APP_IDENTIFIER: &str = "ch.lkmc.foldover";
 const CLI_IDENTIFIER: &str = "ch.lkmc.foldover.cli";
 const AGENT_IDENTIFIER: &str = "ch.lkmc.foldover.agent";
@@ -28,6 +31,7 @@ const CODESIGN: &str = "/usr/bin/codesign";
 const MAX_SIGNING_OUTPUT: u64 = 64 * 1024;
 const IDENTITY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_NATIVE_CHECKS: usize = 4;
+const IDENTITY_RETRY_DELAY: Duration = Duration::from_secs(5);
 const FORBIDDEN_ENTITLEMENTS: &[&str] = &[
     "com.apple.security.get-task-allow",
     "com.apple.security.cs.debugger",
@@ -38,7 +42,8 @@ const FORBIDDEN_ENTITLEMENTS: &[&str] = &[
     "com.apple.security.cs.disable-executable-page-protection",
 ];
 
-static INSTALLATION: OnceCell<Option<Arc<Installation>>> = OnceCell::const_new();
+static INSTALLATION: VerifiedCache<Installation> = VerifiedCache::new(IDENTITY_RETRY_DELAY);
+static PREPARED: OnceCell<()> = OnceCell::const_new();
 static NATIVE_CHECKS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(MAX_NATIVE_CHECKS)));
 
@@ -58,17 +63,26 @@ enum Role {
 /// Pin the verified installation before accepting requests. Standalone/debug
 /// builds retain public health access but cannot authorize privileged peers.
 pub(super) async fn prepare() {
-    INSTALLATION
+    // Keep public health accepts responsive after a failed eager check.
+    // Only privileged calls retry initialization after its cooldown.
+    PREPARED
         .get_or_init(|| async {
-            match load().await {
-                Ok(installation) => Some(Arc::new(installation)),
-                Err(error) => {
-                    eprintln!("net: privileged IPC unavailable: {error}");
-                    None
-                }
-            }
+            let _ = installation().await;
         })
         .await;
+}
+
+async fn installation() -> io::Result<Arc<Installation>> {
+    INSTALLATION
+        .get_or_try_init(|| async {
+            let result = load().await;
+            if let Err(error) = &result {
+                eprintln!("net: privileged IPC unavailable: {error}");
+            }
+            result
+        })
+        .await
+        .map_err(|_| denied())
 }
 
 pub(super) async fn require(stream: &UnixStream) -> io::Result<()> {
@@ -78,12 +92,7 @@ pub(super) async fn require(stream: &UnixStream) -> io::Result<()> {
         .into_iter()
         .flat_map(u32::to_ne_bytes)
         .collect::<Vec<_>>();
-    prepare().await;
-    let installation = INSTALLATION
-        .get()
-        .and_then(Option::as_ref)
-        .ok_or_else(denied)?
-        .clone();
+    let installation = installation().await?;
     native(move || {
         let data = CFData::from_buffer(&token);
         let mut attributes = GuestAttributes::new();
