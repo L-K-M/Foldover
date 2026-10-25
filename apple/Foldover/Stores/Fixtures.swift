@@ -18,6 +18,11 @@ enum Fixtures {
     /// earlier run.
     static let resetArgument = "-foldover-reset-defaults"
     static let accessReminderArgument = "-foldover-access-reminder"
+    /// `-foldover-slow-fold 8` moves the fold and runs syncs eight times
+    /// slower, so a tour can keep frames of the leaf in motion.
+    private static let slowFoldKey = "foldover-slow-fold"
+
+    static var foldTimeScale: Double { max(1, UserDefaults.standard.double(forKey: slowFoldKey)) }
 
     static var isEnabled: Bool { ProcessInfo.processInfo.arguments.contains(launchArgument) }
 
@@ -324,12 +329,20 @@ actor FixtureSyncClient: SyncClient {
         Fixtures.projectsID: Fixtures.history(for: Fixtures.projectsID),
     ]
     private var excluded: [String: Set<Data>] = [:]
+    /// Choices made on previewed changes, by path: what the next preview
+    /// plans instead.
+    private var turned: [String: [Data: ChangeAction]] = [:]
     private var jobs: [String: (job: Job, polls: Int)] = [:]
     private var tokens = 0
     /// Runs finished so far; each names its own archive folder, as the
     /// engine's millisecond run names do.
     private var runs = 0
     private static let polls = 6
+
+    /// Polls a job takes; a slow-motion tour stretches runs with the fold.
+    private static func polls(_ job: Job) -> Int {
+        job == .run ? polls * Int(Fixtures.foldTimeScale) : polls
+    }
 
     init(pairs: FixturePairClient, scenario: FixtureScenario? = nil) {
         self.pairs = pairs
@@ -340,14 +353,37 @@ actor FixtureSyncClient: SyncClient {
 
     private func plan(for id: String) async -> PreviewSummary {
         tokens += 1
+        return Fixtures.summary(current(id), token: "tour-\(tokens)", revision: await pairs.revision(of: id))
+    }
+
+    /// The pair's changes after the skips and choices made so far.
+    private func current(_ id: String) -> [PlannedChange] {
         let skipped = excluded[id] ?? []
-        let changes = Fixtures.changes(for: id).filter { !skipped.contains($0.path) }
-        return Fixtures.summary(changes, token: "tour-\(tokens)", revision: await pairs.revision(of: id))
+        let choices = turned[id] ?? [:]
+        return Fixtures.changes(for: id).compactMap { change in
+            guard !skipped.contains(change.path) else { return nil }
+            guard let action = choices[change.path] else { return change }
+            return PlannedChange(path: change.path, action: action, bytes: change.bytes, movedFrom: change.movedFrom)
+        }
+    }
+
+    /// What the engine's next preview plans after keeping `keep`'s
+    /// version: that version, or its absence, carries over to the other
+    /// folder.
+    private static func choice(_ action: ChangeAction, keep: FolderSide) -> ChangeAction? {
+        let other: FolderSide = keep == .a ? .b : .a
+        switch action {
+        case .conflict: return .copy(to: other)
+        case .copy(let to) where to == keep: return .archive(on: other)
+        case .archive(let on) where on == keep: return .copy(to: other)
+        case .update(let to) where to == keep: return .update(to: other)
+        default: return nil
+        }
     }
 
     private func progress(_ job: Job, polls: Int, for id: String) -> WorkProgress {
-        let done = UInt64(Self.polls - polls)
-        let steps = UInt64(Self.polls)
+        let done = UInt64(Self.polls(job) - polls)
+        let steps = UInt64(Self.polls(job))
         switch job {
         case .preview:
             return WorkProgress(listed: 48_211, checked: 48_211 * done / steps)
@@ -360,16 +396,18 @@ actor FixtureSyncClient: SyncClient {
     }
 
     func preview(_ id: String) async throws -> PairSyncState {
-        jobs[id] = (.preview, Self.polls)
-        let state = PairSyncState.working(.preview, cancelling: false, progress: progress(.preview, polls: Self.polls, for: id))
+        jobs[id] = (.preview, Self.polls(.preview))
+        let state = PairSyncState.working(.preview, cancelling: false,
+                                          progress: progress(.preview, polls: Self.polls(.preview), for: id))
         states[id] = state
         return state
     }
 
     func run(_ id: String, approvedA: UInt64, approvedB: UInt64,
              reviewToken: String?) async throws -> PairSyncState {
-        jobs[id] = (.run, Self.polls)
-        let state = PairSyncState.working(.run, cancelling: false, progress: progress(.run, polls: Self.polls, for: id))
+        jobs[id] = (.run, Self.polls(.run))
+        let state = PairSyncState.working(.run, cancelling: false,
+                                          progress: progress(.run, polls: Self.polls(.run), for: id))
         states[id] = state
         return state
     }
@@ -396,7 +434,7 @@ actor FixtureSyncClient: SyncClient {
     }
 
     private func finish(_ id: String, cancelled: Bool) -> RunSummary {
-        let changes = Fixtures.changes(for: id).filter { !(excluded[id] ?? []).contains($0.path) }
+        let changes = current(id)
         func count(_ matches: (ChangeAction) -> Bool) -> UInt64 {
             UInt64(changes.filter { matches($0.action) }.count)
         }
@@ -443,7 +481,10 @@ actor FixtureSyncClient: SyncClient {
 
     func resolve(_ id: String, path: Data, keep: FolderSide,
                  reviewToken: String) async throws -> PairSyncState {
-        excluded[id, default: []].insert(path)
+        if let change = current(id).first(where: { $0.path == path }),
+           let action = Self.choice(change.action, keep: keep) {
+            turned[id, default: [:]][path] = action
+        }
         return states[id] ?? .idle
     }
 
@@ -462,9 +503,7 @@ actor FixtureSyncClient: SyncClient {
     func changes(_ id: String, after: Data?, filter: ChangeFilter?,
                  reviewToken: String) async throws -> ChangePage {
         guard after == nil else { return ChangePage(changes: [], more: false) }
-        let skipped = excluded[id] ?? []
-        let changes = Fixtures.changes(for: id).filter { change in
-            guard !skipped.contains(change.path) else { return false }
+        let changes = current(id).filter { change in
             switch (filter, change.action) {
             case (nil, _), (.copies, .copy), (.updates, .update), (.archives, .archive),
                  (.conflicts, .conflict), (.moves, .move):

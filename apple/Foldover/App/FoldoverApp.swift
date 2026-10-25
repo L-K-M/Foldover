@@ -97,6 +97,14 @@ struct FoldoverApp: App {
     }
     #endif
 
+    /// How much slower the fold moves: 1, or a tour's slow motion.
+    private static var foldTimeScale: Double {
+        #if DEBUG
+        if Fixtures.isEnabled { return Fixtures.foldTimeScale }
+        #endif
+        return 1
+    }
+
     var body: some Scene {
         // The one main window (PLAN.md §7.1): everything is reachable
         // from it, and the menu bar extra shares its selection and editor.
@@ -106,6 +114,7 @@ struct FoldoverApp: App {
                     FullDiskAccessReminder(viewModel: SettingsViewModel(store: settings))
                 }
                 MainView(viewModel: viewModel)
+                    .environment(\.foldTimeScale, Self.foldTimeScale)
             }
         }
         .defaultSize(width: 1000, height: 640)
