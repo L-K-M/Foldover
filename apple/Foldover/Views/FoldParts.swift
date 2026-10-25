@@ -1,4 +1,4 @@
-// The sheet's smaller parts: a folder's label on its half, the imprint a
+// The sheet's smaller parts: a folder's label on its half, the card a
 // run leaves, the light that passes down the page while comparing, and
 // the motions lines make (printing in, refusing a turn).
 
@@ -16,10 +16,12 @@ struct FoldFolderLabel: View {
         let text = viewModel.folderText(folder)
         VStack(alignment: side == .a ? .leading : .trailing, spacing: 1) {
             Text(PairSyncViewModel.folderName(side))
-                .font(FoldType.meta)
-                .foregroundStyle(FoldPalette.pencil)
+                .font(FoldType.eyebrow)
+                .textCase(.uppercase)
+                .tracking(FoldType.eyebrowTracking)
+                .foregroundStyle(FoldPalette.slate)
             Label(text, systemImage: viewModel.folderSymbol(folder))
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(FoldPalette.ink(side))
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -44,44 +46,54 @@ struct FoldFolderLabel: View {
     }
 }
 
-/// The run's imprint, set across the crease: its title, its counts in
-/// large figures, and what it left for a person.
+/// The card a run leaves, set across the crease: a square of the
+/// paper's cerulean back with its title and its counts in large white
+/// figures, and under it what the run left for a person.
 struct FoldImprintView: View {
     let imprint: FoldImprint
-    let ink: Color
+
+    private static let corner: CGFloat = 14
 
     var body: some View {
-        VStack(spacing: 8) {
-            Text(imprint.title)
-                .font(FoldType.imprintTitle)
-                .tracking(2)
-                .foregroundStyle(FoldPalette.pencil)
-            HStack(alignment: .firstTextBaseline, spacing: 22) {
-                ForEach(imprint.figures, id: \.label) { figure in
-                    VStack(spacing: 0) {
-                        Text(figure.value)
-                            .font(FoldType.figure)
-                        Text(figure.label)
-                            .font(FoldType.meta)
-                    }
-                }
-            }
-            .foregroundStyle(ink)
-            .letterpress()
+        VStack(spacing: 12) {
+            card
             ForEach(imprint.notes, id: \.self) { note in
                 Text(note)
                     .font(.callout)
-                    .foregroundStyle(FoldPalette.pencil)
+                    .foregroundStyle(FoldPalette.slate)
+                    .multilineTextAlignment(.center)
             }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var card: some View {
+        VStack(spacing: 10) {
+            Text(imprint.title)
+                .font(FoldType.eyebrow)
+                .textCase(.uppercase)
+                .tracking(FoldType.eyebrowTracking * 1.5)
+                .foregroundStyle(.white.opacity(0.85))
+            HStack(alignment: .firstTextBaseline, spacing: 26) {
+                ForEach(imprint.figures, id: \.label) { figure in
+                    VStack(spacing: 2) {
+                        Text(figure.value)
+                            .font(FoldType.figure)
+                        Text(figure.label)
+                            .font(FoldType.eyebrow)
+                            .textCase(.uppercase)
+                            .tracking(FoldType.eyebrowTracking)
+                            .opacity(0.85)
+                    }
+                }
+            }
+            .foregroundStyle(.white)
         }
         .padding(.vertical, 18)
         .padding(.horizontal, 30)
-        .overlay {
-            RoundedRectangle(cornerRadius: 2)
-                .strokeBorder(ink.opacity(0.3), lineWidth: 1.25)
-                .padding(3)
-        }
-        .accessibilityElement(children: .combine)
+        .background(Kami().clipShape(RoundedRectangle(cornerRadius: Self.corner, style: .continuous)))
+        // Cast onto the paper, as the icon's folds cast onto the navy.
+        .shadow(color: FoldPalette.deskShade.opacity(0.35), radius: 14, x: 0, y: 8)
     }
 }
 

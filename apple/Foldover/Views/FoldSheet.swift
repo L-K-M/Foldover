@@ -4,7 +4,7 @@
 //   ┌──────────────── paper ─────────────────┐
 //   │◤ Folder A         ⇄          Folder B ◥│  dog-ears: drag to fold
 //   │   2026/Trip/day2  │  3 changes          │
-//   │    IMG_2041.RAW   →   IMG_2041.RAW  copy│  ink │ impression
+//   │    IMG_2041.RAW   →   IMG_2041.RAW  copy│  ink │ arriving
 //   │      header.psd   ●   header.psd   both │  a pin holds conflicts
 //   └─────────────────────────────────────────┘
 //    5 to copy (120 MB), 2 to archive …   [Sync]   ← the desk strip
@@ -50,7 +50,8 @@ struct FoldSheet: View {
     let rows: [ChangeRow]
     let focus: FocusState<MainPane?>.Binding
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReducesMotion
+    @Environment(\.foldMotionPolicy) private var motionPolicy
     @Environment(\.foldTimeScale) private var timeScale
 
     /// How far the leaf has swung: 0 open … 1 folded flat. Animations
@@ -231,6 +232,8 @@ struct FoldSheet: View {
         Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
+    private var reduceMotion: Bool { motionPolicy == .system && systemReducesMotion }
+
     private var halfWidth: CGFloat { paperSize.width / 2 }
     private var compact: Bool { halfWidth < FoldMetrics.compactHalf }
 
@@ -252,6 +255,10 @@ struct FoldSheet: View {
     /// The half lifted off the page as the leaf, at swing `progress`.
     private func lifted(_ side: FolderSide, _ progress: Double) -> Bool { progress > 0 && leafSide == side }
 
+    /// The crease's own marks go up with the leaf, gone by upright,
+    /// rather than stand half covered along its edge.
+    private func creaseInk(_ progress: Double) -> Double { max(0, 1 - progress * 2) }
+
     private func folder(_ side: FolderSide) -> SelectedFolder {
         side == .a ? pair.settings.left : pair.settings.right
     }
@@ -268,12 +275,14 @@ struct FoldSheet: View {
             header(progress)
             content(scene: scene, lines: lines, progress: progress)
         }
-        // The page's shadow falls on the desk from the paper alone, not
-        // from every line of text on it.
+        // The page's shadow falls on the navy from the paper alone, not
+        // from every line of text on it: a tight contact shadow and the
+        // icon's soft, deep cast.
         .background {
             halves(progress)
                 .compositingGroup()
-                .shadow(color: .black.opacity(0.16), radius: 5, x: 0, y: 2)
+                .shadow(color: .black.opacity(0.22), radius: 1.5, x: 0, y: 1)
+                .shadow(color: FoldPalette.deskShade.opacity(0.6), radius: 18, x: 0, y: 10)
                 // In the paper, under the ink printed across it.
                 .overlay { Crease(depth: progress) }
         }
@@ -312,7 +321,7 @@ struct FoldSheet: View {
     private func half(_ side: FolderSide, _ progress: Double) -> some View {
         if sync.missingSide == side {
             RoundedRectangle(cornerRadius: 4)
-                .strokeBorder(FoldPalette.pencil.opacity(0.55), style: StrokeStyle(lineWidth: 1, dash: [6, 4]))
+                .strokeBorder(.white.opacity(0.45), style: StrokeStyle(lineWidth: 1, dash: [6, 4]))
                 .padding(3)
         } else if lifted(side, progress) {
             Color.clear
@@ -327,8 +336,9 @@ struct FoldSheet: View {
                 .opacity(lifted(.a, progress) ? 0 : 1)
             Image(systemName: pair.settings.mode.symbol)
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(FoldPalette.pencil)
+                .foregroundStyle(FoldPalette.slate)
                 .frame(width: FoldMetrics.creaseWidth)
+                .opacity(creaseInk(progress))
                 .help(pair.settings.mode.title)
                 .accessibilityLabel(pair.settings.mode.title)
             FoldFolderLabel(viewModel: viewModel, folder: pair.settings.right, side: .b)
@@ -347,7 +357,7 @@ struct FoldSheet: View {
                 // Stamped mid-page, or above the failures it lists.
                 VStack(spacing: 0) {
                     if let imprint = sync.imprint {
-                        FoldImprintView(imprint: imprint, ink: imprintInk)
+                        FoldImprintView(imprint: imprint)
                             .padding(.top, 18)
                             .padding(.bottom, 10)
                             .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 1.04)),
@@ -362,7 +372,7 @@ struct FoldSheet: View {
                     ProgressView().controlSize(.small)
                     Text(sync.statusText)
                         .font(.callout)
-                        .foregroundStyle(FoldPalette.pencil)
+                        .foregroundStyle(FoldPalette.slate)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if !lines.isEmpty {
@@ -374,13 +384,13 @@ struct FoldSheet: View {
             } else if scene == .comparing {
                 VStack(spacing: 10) {
                     Text(sync.statusText)
-                        .font(.system(size: 13, design: .serif).italic())
-                        .foregroundStyle(FoldPalette.pencil)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(FoldPalette.slate)
                         .multilineTextAlignment(.center)
                         .accessibilityAddTraits(.updatesFrequently)
                     if let fraction = sync.progressFraction {
                         ProgressView(value: fraction)
-                            .tint(FoldPalette.pencil)
+                            .tint(FoldPalette.slate)
                             .frame(width: 180)
                             .accessibilityLabel("Progress")
                     }
@@ -396,16 +406,6 @@ struct FoldSheet: View {
         .animation(reduceMotion ? nil : .spring(duration: 0.45 * timeScale, bounce: 0.15), value: scene)
     }
 
-    /// The imprint's ink: a one-way run prints in its source's ink, a
-    /// two-way one in neutral pencil, since both inks crossed.
-    private var imprintInk: Color {
-        switch pair.settings.mode {
-        case .sync: FoldPalette.pencil
-        case .mirrorLeft, .backupLeft: FoldPalette.ink(.a)
-        case .mirrorRight, .backupRight: FoldPalette.ink(.b)
-        }
-    }
-
     @ViewBuilder
     private var placeholder: some View {
         if sync.showsSearch, rows.isEmpty, sync.placeholder == nil {
@@ -414,12 +414,12 @@ struct FoldSheet: View {
             VStack(spacing: 10) {
                 Image(systemName: placeholder.symbol)
                     .font(.system(size: 26, weight: .light))
-                    .foregroundStyle(FoldPalette.pencil)
+                    .foregroundStyle(FoldPalette.slate)
                 Text(placeholder.title)
-                    .font(.system(size: 17, design: .serif))
+                    .font(.system(size: 17, weight: .semibold))
                 Text(placeholder.message)
                     .font(.callout)
-                    .foregroundStyle(FoldPalette.pencil)
+                    .foregroundStyle(FoldPalette.slate)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 380)
                     .textSelection(.enabled)
@@ -473,9 +473,10 @@ struct FoldSheet: View {
                     .opacity(lifted(.a, progress) ? 0 : 1)
                 Image(systemName: "folder")
                     .font(.system(size: 8))
-                    .foregroundStyle(FoldPalette.pencil.opacity(0.7))
+                    .foregroundStyle(FoldPalette.slate.opacity(0.7))
                     .frame(width: FoldMetrics.creaseWidth)
                     .padding(.top, 6)
+                    .opacity(creaseInk(progress))
                 FoldHeadingHalf(path: path, count: count, side: .b)
                     .opacity(lifted(.b, progress) ? 0 : 1)
             }
@@ -499,12 +500,13 @@ struct FoldSheet: View {
             pip(line, staged: stagedFlow, interactive: interactive)
                 .frame(width: FoldMetrics.creaseWidth)
                 .modifier(Shake(count: nudge.lineID == line.id ? nudge.count : 0))
+                .opacity(creaseInk(progress))
             FoldHalf(line: line, side: .b, compact: compact, peek: leafSide == .b ? 0 : peek)
                 .opacity(lifted(.b, progress) ? 0 : 1)
         }
         .frame(height: FoldMetrics.rowHeight)
         .background {
-            if selected { Highlighter(focused: focus.wrappedValue == .changes) }
+            if selected { SelectionTint(focused: focus.wrappedValue == .changes) }
         }
         .contentShape(Rectangle())
         .onTapGesture { if interactive { select(line) } }
@@ -688,7 +690,7 @@ struct FoldSheet: View {
             ZStack {
                 DogEar(side: side, part: .cut).fill(FoldPalette.desk)
                 DogEar(side: side, part: .flap)
-                    .fill(FoldPalette.paperBack)
+                    .fill(FoldPalette.kami)
                     .shadow(color: .black.opacity(0.28), radius: 1.5, x: side == .a ? 1 : -1, y: 1)
             }
             .frame(width: size, height: size)
@@ -907,18 +909,19 @@ struct FoldSheet: View {
         if let text { AccessibilityNotification.Announcement(text).post() }
     }
 
-    /// What the folded leaf's back says while the run presses: the
-    /// run's own progress, never a claim about any one line.
+    /// What the folded leaf's cerulean back says while the run presses,
+    /// in white: the run's own progress, never a claim about any one line.
     private var pressReadout: some View {
         VStack(spacing: 10) {
             Text(pair.settings.mode.title)
-                .font(FoldType.imprintTitle)
-                .tracking(1.5)
-                .foregroundStyle(FoldPalette.pencil)
+                .font(FoldType.eyebrow)
+                .textCase(.uppercase)
+                .tracking(FoldType.eyebrowTracking * 1.5)
+                .foregroundStyle(.white.opacity(0.85))
             Text(sync.progressFraction.map { $0.formatted(.percent.precision(.fractionLength(0))) }
                  ?? String(localized: "Pressing"))
                 .font(FoldType.figure)
-                .foregroundStyle(FoldPalette.ink(leafSide))
+                .foregroundStyle(.white)
                 .contentTransition(.numericText())
             Group {
                 if let fraction = sync.progressFraction {
@@ -927,18 +930,20 @@ struct FoldSheet: View {
                     ProgressView().progressViewStyle(.linear)
                 }
             }
-            .tint(FoldPalette.ink(leafSide))
+            .tint(.white)
             .frame(maxWidth: 220)
             .accessibilityLabel("Progress")
             Text(sync.statusText)
                 .font(.callout)
-                .foregroundStyle(FoldPalette.pencil)
+                .foregroundStyle(.white.opacity(0.85))
                 .multilineTextAlignment(.center)
                 .lineLimit(3)
                 .accessibilityAddTraits(.updatesFrequently)
             Button("Stop") { Task { await sync.cancel() } }
                 .disabled(!sync.canCancel)
         }
+        // Controls drawn for a dark ground, legible on the cerulean.
+        .environment(\.colorScheme, .dark)
         .padding(24)
         .frame(width: halfWidth)
         .frame(maxHeight: .infinity)
@@ -948,7 +953,8 @@ struct FoldSheet: View {
     // MARK: Desk
 
     /// The strip under the sheet: what the sheet says in words, and what
-    /// can follow it.
+    /// can follow it. It lies on the navy, so it is drawn for a dark
+    /// ground in either appearance.
     private func desk(scene: FoldScene) -> some View {
         HStack(alignment: .center, spacing: 12) {
             deskText(scene: scene)
@@ -958,6 +964,7 @@ struct FoldSheet: View {
                 .fixedSize()
         }
         .frame(minHeight: 28)
+        .environment(\.colorScheme, .dark)
     }
 
     @ViewBuilder
@@ -1026,10 +1033,18 @@ struct FoldSheet: View {
     }
 }
 
+/// Whether the fold follows Reduce Motion.
+enum FoldMotionPolicy {
+    case system
+    /// Swing regardless: a Debug tour filming the leaf.
+    case full
+}
+
 extension EnvironmentValues {
     /// How much slower the fold moves than it should: 1, except in a
     /// Debug tour that keeps frames of it in motion.
     @Entry var foldTimeScale: Double = 1
+    @Entry var foldMotionPolicy: FoldMotionPolicy = .system
 }
 
 private extension FoldEntry {

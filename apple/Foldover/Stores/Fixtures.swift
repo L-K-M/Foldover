@@ -21,8 +21,12 @@ enum Fixtures {
     /// `-foldover-slow-fold 8` moves the fold and runs syncs eight times
     /// slower, so a tour can keep frames of the leaf in motion.
     private static let slowFoldKey = "foldover-slow-fold"
+    /// `-foldover-full-motion YES` swings the leaf even under Reduce
+    /// Motion, which the CI runners have on, so a tour can film it.
+    private static let fullMotionKey = "foldover-full-motion"
 
     static var foldTimeScale: Double { max(1, UserDefaults.standard.double(forKey: slowFoldKey)) }
+    static var forcesFullMotion: Bool { UserDefaults.standard.bool(forKey: fullMotionKey) }
 
     static var isEnabled: Bool { ProcessInfo.processInfo.arguments.contains(launchArgument) }
 

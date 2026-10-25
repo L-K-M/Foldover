@@ -48,8 +48,9 @@ final class FoldTourTests: XCTestCase {
         corner.click(forDuration: 0.2, thenDragTo: corner.withOffset(CGVector(dx: half * 0.85, dy: 0)))
         tour.frames("fold-06-falls", count: 8, every: 0.35)
         tour.snap("fold-07-pressing")
-        tour.pause(14)
-        tour.frames("fold-08-opens", count: 12, every: 0.5)
+        // The imprint's Undo appears on the desk as the leaf starts to open.
+        XCTAssertTrue(app.buttons["Undo Sync"].waitForExistence(timeout: 60), "The run should end on its imprint")
+        tour.frames("fold-08-opens", count: 8, every: 0.3)
         tour.pause(2)
         tour.snap("fold-09-imprint")
 

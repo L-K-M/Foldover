@@ -28,8 +28,9 @@ struct Tour {
 
     /// `scenario` names a launch state from `FixtureScenario`, such as an
     /// agent that answers slowly; none is the tour's usual state.
-    /// `slowFold` slows the fold and runs by that factor, so frames of
-    /// the leaf in motion can be kept.
+    /// `slowFold` slows the fold and runs by that factor and swings the
+    /// leaf even under Reduce Motion, so frames of it in motion can be
+    /// kept.
     init(_ test: XCTestCase, appearance: TourAppearance, scenario: String? = nil,
          launchState: TourLaunchState = .fresh, slowFold: Int? = nil) {
         self.test = test
@@ -48,7 +49,9 @@ struct Tour {
         }
         if appearance == .dark { app.launchArguments += ["-foldover-dark", "YES"] }
         if let scenario { app.launchArguments += ["-foldover-scenario", scenario] }
-        if let slowFold { app.launchArguments += ["-foldover-slow-fold", "\(slowFold)"] }
+        if let slowFold {
+            app.launchArguments += ["-foldover-slow-fold", "\(slowFold)", "-foldover-full-motion", "YES"]
+        }
     }
 
     func launch() {

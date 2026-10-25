@@ -17,9 +17,13 @@ struct PairDetailView: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 12)
                     .padding(.bottom, 8)
+                    // On the navy field in either appearance.
+                    .environment(\.colorScheme, .dark)
                 FoldSheet(viewModel: viewModel, sync: sync, pair: pair, rows: sync.rows, focus: focus)
             }
-            .background(FoldPalette.desk)
+            // The field starts under the toolbar, whose title is drawn for
+            // the window's own appearance.
+            .background { Desk() }
         }
         // The dialog acts on the request captured when it was presented,
         // so a state change cannot redirect the tap to another plan.

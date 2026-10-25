@@ -1,11 +1,11 @@
 // The leaf: the half of the sheet that lifts off and swings over the
 // crease. It carries what its half showed at the moment it lifted, its
-// front darkening as it turns away from the light overhead, then shows
-// the paper's back once past upright.
+// face darkening as it turns away from the light overhead, then shows
+// the paper's cerulean back once past upright, as origami paper does.
 //
 //        open           upright           folded
 //   ┌─────┬─────┐       ┌─┬─────┐       ┌─────┬─────┐
-//   │  A  │  B  │  →    │▌│  B  │  →    │desk │back │
+//   │  A  │  B  │  →    │▌│  B  │  →    │navy │◤ ◢ │  the back
 //   └─────┴─────┘       └─┴─────┘       └─────┴─────┘
 
 import SwiftUI
@@ -62,7 +62,7 @@ struct FoldLeafView<Label: View>: View {
                     .frame(width: half, height: pageSize.height)
                     .opacity(1 - progress)
                     .offset(x: side == .a ? 0 : half)
-                Paper(tone: FoldPalette.paperBack)
+                Kami()
                     .frame(width: half, height: pageSize.height)
                     .opacity(progress)
                     .offset(x: side == .a ? half : 0)
@@ -83,7 +83,7 @@ struct FoldLeafView<Label: View>: View {
         return ZStack {
             if progress >= FoldMotion.tippingPoint {
                 // Mirrored so it reads the right way round once turned.
-                Paper(tone: FoldPalette.paperBack)
+                Kami()
                     .overlay(Color.black.opacity(0.14 * light))
                     .scaleEffect(x: -1)
             } else {
@@ -108,15 +108,20 @@ struct FoldLeafView<Label: View>: View {
             VStack(spacing: 0) {
                 label
                     .frame(height: headerHeight)
-                VStack(spacing: 0) {
-                    ForEach(window) { entry in
-                        cell(entry)
-                            .frame(height: FoldMetrics.rowHeight)
+                // The rows hang from under the label and are cut at the
+                // page's foot. Laid out directly they would be taller than
+                // the page, and the leaf would center them above it.
+                Color.clear
+                    .overlay(alignment: .top) {
+                        VStack(spacing: 0) {
+                            ForEach(window) { entry in
+                                cell(entry)
+                                    .frame(height: FoldMetrics.rowHeight)
+                            }
+                        }
+                        .offset(y: CGFloat(first) * FoldMetrics.rowHeight - scrollOffset + listInset)
                     }
-                }
-                .offset(y: CGFloat(first) * FoldMetrics.rowHeight - scrollOffset + listInset)
-                .frame(maxHeight: .infinity, alignment: .top)
-                .clipped()
+                    .clipped()
             }
             // The leaf reaches the middle of the crease; the half's lines
             // stop at its edge.

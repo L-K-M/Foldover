@@ -13,27 +13,30 @@ committing to it, and the relief after.
 sheet, with a mode that decides which half carries wet ink. Sync moves
 ink both ways; Mirror and Backup only from the source.
 
-**Before.** The detail pane is a sheet of warm paper creased down the
-middle: Folder A's half on the left, B's on the right. Every planned
-change is one 30 pt line across the crease. A folder's own version is
-printed in its ink (A Prussian blue, B vermilion). Where a copy will
-land, the name is blind-embossed, pressed into the paper without ink. An
-archive's other half says "no copy". A pip on the crease shows the
-direction; a conflict gets a pin. ← or → on a line stages a turn and
+**Before.** The detail pane is the icon's navy field. On it lies a
+sheet of ivory origami paper creased down the middle: Folder A's half on
+the left, B's on the right. Every planned change is one 30 pt line
+across the crease. A folder's own version is in its ink (A navy, B
+cerulean). Where a copy will land, its name is faint. An archive's other
+half says "no copy". A disc on the crease shows the direction; a
+conflict gets a pin. ← or → on a line stages a turn and
 names it ("Archive in Folder A"). Return runs it.
 
 **During.** Drag the dog-ear toward the crease. Nothing moves for 8 pt,
-then the half swings up in perspective. The impressions underneath take
-on its ink as it approaches, so the outcome can be seen before
+then the half swings up in perspective. The faint names underneath fill
+with its ink as it approaches, so the outcome can be seen before
 committing. Upright is the threshold: the trackpad ticks there. Let go
 before upright and the leaf falls back. Let go past it and the leaf
-falls, presses, and the sync starts. Its back shows the run's progress.
+falls, presses, and the sync starts. Like origami paper, the sheet is
+colored on its back: past upright the leaf turns cerulean, and its back
+shows the run's progress in white.
 
-**After.** The leaf peels open on an imprint: the run's own counts in
-large serif figures, framed like a printer's mark. Undo lifts it.
+**After.** The leaf peels open on a cerulean card: the run's own counts
+in large white figures. Undo lifts it.
 
-**You have to see this:** the impressions darkening under the
-approaching leaf, then the thump.
+**You have to see this:** the names filling with ink under the
+approaching leaf, the blue back turning over, then the thump. Folded,
+the sheet is the icon: ivory and cerulean on navy.
 
 **Everyday:** direction is spatial, ⌘S folds automatically, and every
 command is in menus and VoiceOver actions.
@@ -91,6 +94,11 @@ and VoiceOver gets a summary by folder.
 The Fold is the only concept that comes from what this app is named for
 and what it does: it makes two halves match. A ten-second demo needs no
 caption: the leaf rises, falls, presses and opens on what happened.
+
+The look comes from the app's icon, not from stationery: colored paper
+stock, crisp facets lit from the top left, soft cast shadows, SF Pro
+throughout, no ornament. The two inks differ in lightness as well as hue,
+so they hold in grayscale.
 
 It also makes the tool better, not just prettier:
 

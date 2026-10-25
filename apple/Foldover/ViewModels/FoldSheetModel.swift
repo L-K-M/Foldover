@@ -26,8 +26,8 @@ enum FoldMark: Equatable, Sendable {
     case blank
     /// The item as this folder holds it, printed in the folder's ink.
     case ink
-    /// Where the other folder's copy lands: a blind impression the
-    /// press inks.
+    /// Where the other folder's copy lands: its name, faint until the
+    /// fold fills it with that folder's ink.
     case impression
     /// An item the sync takes out of this folder into its archive.
     case lift
@@ -213,7 +213,7 @@ struct FoldPlan: Equatable {
 }
 
 /// What the leaf leaves on the sheet when it opens: the run's own
-/// counts, set like a printer's imprint across the crease. Undo lifts it.
+/// counts, on a card set across the crease. Undo lifts it.
 struct FoldImprint: Equatable {
     /// One count, e.g. 5 "copied".
     struct Figure: Equatable {
