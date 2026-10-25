@@ -136,8 +136,11 @@ struct InkIn: ViewModifier {
             .opacity(shown ? 1 : 0)
             .blur(radius: shown ? 0 : 2.5)
             .scaleEffect(shown ? 1 : 1.015)
-            .onAppear {
-                guard active else { return }
+            // Printing usually begins just after the line first appears,
+            // so this follows `active`, not the appearance alone.
+            .onChange(of: active, initial: true) { _, printing in
+                guard printing else { return }
+                inked = false
                 withAnimation(.easeOut(duration: 0.3).delay(delay)) { inked = true }
             }
     }

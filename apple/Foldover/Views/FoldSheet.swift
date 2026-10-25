@@ -53,6 +53,7 @@ struct FoldSheet: View {
     @Environment(\.accessibilityReduceMotion) private var systemReducesMotion
     @Environment(\.foldMotionPolicy) private var motionPolicy
     @Environment(\.foldTimeScale) private var timeScale
+    @Environment(\.colorScheme) private var colorScheme
 
     /// How far the leaf has swung: 0 open … 1 folded flat. Animations
     /// set it to their end at once; drawing reads the swing in between
@@ -334,6 +335,7 @@ struct FoldSheet: View {
         HStack(spacing: 0) {
             FoldFolderLabel(viewModel: viewModel, folder: pair.settings.left, side: .a)
                 .opacity(lifted(.a, progress) ? 0 : 1)
+                .environment(\.colorScheme, ground(.a))
             Image(systemName: pair.settings.mode.symbol)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(FoldPalette.slate)
@@ -343,8 +345,15 @@ struct FoldSheet: View {
                 .accessibilityLabel(pair.settings.mode.title)
             FoldFolderLabel(viewModel: viewModel, folder: pair.settings.right, side: .b)
                 .opacity(lifted(.b, progress) ? 0 : 1)
+                .environment(\.colorScheme, ground(.b))
         }
         .frame(height: Self.headerHeight)
+    }
+
+    /// What `side`'s label is printed on: its paper, or the navy where a
+    /// missing folder's half would be, which needs the dark appearance.
+    private func ground(_ side: FolderSide) -> ColorScheme {
+        sync.missingSide == side ? .dark : colorScheme
     }
 
     /// The page's body. The line list keeps one identity while a plan is
@@ -431,6 +440,10 @@ struct FoldSheet: View {
             }
             .padding(24)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // A missing folder's half has no paper to print on: the
+            // message keeps to the half that is there.
+            .frame(width: sync.missingSide == nil ? nil : halfWidth)
+            .frame(maxWidth: .infinity, alignment: sync.missingSide == .a ? .trailing : .leading)
         }
     }
 
@@ -714,8 +727,13 @@ struct FoldSheet: View {
             .updating($pointerDown) { _, down, _ in down = true }
             .onChanged { value in
                 if drag == nil {
-                    // The other half waits until this one is back down.
-                    guard scene == .plan, !leafDown, approval == nil, !opening || side == leafSide else { return }
+                    // A drag that cannot lift the leaf now stays dead until
+                    // let go, rather than jump to the pointer later. The
+                    // other half waits until this one is back down.
+                    guard scene == .plan, !leafDown, approval == nil, !opening || side == leafSide else {
+                        drag = LeafDrag(side: side, token: plan?.token, cancelled: true)
+                        return
+                    }
                     drag = LeafDrag(side: side, token: plan?.token)
                     leafSide = side
                     focus.wrappedValue = .changes
@@ -758,7 +776,9 @@ struct FoldSheet: View {
             open()
             return
         }
-        leafSide = side ?? FoldLeaf.automatic(pair.settings.mode, lines: plan?.lines ?? [])
+        // A leaf still swinging open folds again from where it is; which
+        // half folds is only how the sync looks.
+        if !opening { leafSide = side ?? FoldLeaf.automatic(pair.settings.mode, lines: plan?.lines ?? []) }
         self.voice = voice
         if let request = sync.foldApproval {
             approval = request

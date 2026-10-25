@@ -115,7 +115,7 @@ struct FoldSheetModelTests {
         let run = RunSummary(cancelled: false, copied: 5, updated: 0, archived: 2, recovered: 0, conflicts: 3,
                              failures: [], failureCount: 1, archive: "run", moved: 1)
         let imprint = FoldImprint(result: run)
-        #expect(imprint.title == "Pressed")
+        #expect(imprint.title == "Folded")
         #expect(imprint.figures == [.init(value: "5", label: "copied"), .init(value: "2", label: "archived"),
                                     .init(value: "1", label: "renamed")])
         #expect(imprint.notes == ["3 conflicts left as they were", "1 items failed; the next sync retries them"])

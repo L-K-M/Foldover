@@ -227,7 +227,7 @@ struct FoldImprint: Equatable {
     let notes: [String]
 
     init(result: RunSummary) {
-        title = result.cancelled ? String(localized: "Stopped Partway") : String(localized: "Pressed")
+        title = result.cancelled ? String(localized: "Stopped Partway") : String(localized: "Folded")
         figures = Self.figures([
             (result.copied, String(localized: "copied")),
             (result.updated, String(localized: "updated")),
@@ -248,7 +248,7 @@ struct FoldImprint: Equatable {
     }
 
     init(undo: UndoSummary) {
-        title = undo.cancelled ? String(localized: "Lifted Partway") : String(localized: "Lifted")
+        title = undo.cancelled ? String(localized: "Unfolded Partway") : String(localized: "Unfolded")
         figures = Self.figures([
             (undo.restored, String(localized: "put back")),
             (undo.removed, String(localized: "archived")),
