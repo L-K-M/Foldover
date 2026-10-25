@@ -472,7 +472,17 @@ final class SyncStore {
     /// Bumped whenever a pair's listed rows can change: a new state, or
     /// another page of changes. Display bookkeeping for row caching.
     private(set) var rowsRevisions: [String: Int] = [:]
-    private(set) var requestErrors: [String: String] = [:]
+    private enum FailureSource {
+        case status
+        case other
+    }
+    private struct RequestFailure {
+        let sequence: Int
+        let source: FailureSource
+        let message: String
+    }
+    private var requestErrors: [String: RequestFailure] = [:]
+    private var failureSequence = 0
     private(set) var histories: [String: [RunRecord]] = [:]
     private(set) var listings: [String: ChangeListing] = [:]
     /// The text narrowing each pair's listed changes; view state held
@@ -498,6 +508,7 @@ final class SyncStore {
     func checkAll(_ pairs: [SyncPair]) async {
         for pair in pairs where polling[pair.id] == nil && pendingOperations[pair.id] == nil {
             let previous = states[pair.id]
+            let previousFailure = requestErrors[pair.id]
             let generation = generations[pair.id] ?? 0
             let reply: PairSyncState
             do {
@@ -509,6 +520,7 @@ final class SyncStore {
             // A local write while the request was in flight is newer.
             guard (generations[pair.id] ?? 0) == generation else { continue }
             let state = normalized(pair.id, reply)
+            clearRecoveredStatusFailure(pair.id, previousFailure)
             knownStates.insert(pair.id)
             set(pair.id, state)
             if previous != state { await refreshHistory(pair.id) }
@@ -583,7 +595,7 @@ final class SyncStore {
             rowsRevisions[id, default: 0] += 1
         } catch {
             guard listingRequests[id] == ticket, !Task.isCancelled else { return }
-            requestErrors[id] = PairStore.message(for: error)
+            recordFailure(PairStore.message(for: error), for: id, source: .other)
         }
     }
 
@@ -596,7 +608,23 @@ final class SyncStore {
     }
 
     func history(for id: String) -> [RunRecord] { histories[id] ?? [] }
-    func requestError(for id: String) -> String? { requestErrors[id] }
+    func requestError(for id: String) -> String? { requestErrors[id]?.message }
+
+    private func recordFailure(_ message: String, for id: String, source: FailureSource) {
+        // A failed observation cannot replace a command's uncertain
+        // outcome or an unrelated request's actionable error.
+        if source == .status, let current = requestErrors[id], current.source != .status { return }
+        failureSequence += 1
+        requestErrors[id] = RequestFailure(sequence: failureSequence, source: source, message: message)
+    }
+
+    /// A successful observation recovers only the status error it saw
+    /// before awaiting. Other requests and newer failures retain ownership.
+    private func clearRecoveredStatusFailure(_ id: String, _ previous: RequestFailure?) {
+        guard let previous, previous.source == .status,
+              requestErrors[id]?.sequence == previous.sequence else { return }
+        requestErrors[id] = nil
+    }
     /// A foreground command, a job start or a conflict choice, is on
     /// the wire and unanswered.
     func isBusy(_ id: String) -> Bool { pendingOperations[id] != nil }
@@ -628,7 +656,7 @@ final class SyncStore {
         // race it.
         guard pendingOperations[id] == nil else { return }
         let client = client
-        await perform(id, .other) { try await client.status(id) }
+        await perform(id, .status) { try await client.status(id) }
         await refreshHistory(id)
     }
 
@@ -707,7 +735,7 @@ final class SyncStore {
             pendingOperations[id] = nil
             guard !Task.isCancelled, (generations[id] ?? 0) == generation else { return }
             knownStates.remove(id)
-            requestErrors[id] = PairStore.message(for: error)
+            recordFailure(PairStore.message(for: error), for: id, source: .other)
             return
         }
         // A cancelled or superseded choice releases the pair instead of
@@ -723,7 +751,7 @@ final class SyncStore {
 
     /// Show a failed request made elsewhere for this pair, e.g. a skip rule.
     func report(_ message: String, for id: String) {
-        requestErrors[id] = message
+        recordFailure(message, for: id, source: .other)
     }
 
     /// Keep the reviewed changes visible after declining an approval.
@@ -736,12 +764,12 @@ final class SyncStore {
         set(id, .previewed(preview))
     }
 
-    /// Whether a foreground request is an explicit job start. A start's
-    /// answer releases the pair's pending command and — when its reply is
-    /// the newest — spends the declined approval, so the job resurfaces
-    /// reviewable results; every other request leaves both alone.
+    /// A start releases its pending command and re-arms approvals. A
+    /// status read can recover its own failure without dismissing errors
+    /// from commands whose outcome may still be unknown.
     private enum RequestKind {
         case start
+        case status
         case other
     }
 
@@ -764,7 +792,8 @@ final class SyncStore {
     /// caller — is dropped instead of landing on the pair's current job.
     private func perform(_ id: String, _ kind: RequestKind,
                          _ request: @Sendable () async throws -> PairSyncState) async {
-        requestErrors[id] = nil
+        let previousFailure = requestErrors[id]
+        if kind != .status { requestErrors[id] = nil }
         knownStates.remove(id)
         let generation = generations[id] ?? 0
         let reply: PairSyncState
@@ -773,13 +802,15 @@ final class SyncStore {
         } catch {
             if kind == .start { pendingOperations[id] = nil }
             guard !Task.isCancelled, (generations[id] ?? 0) == generation else { return }
-            requestErrors[id] = PairStore.message(for: error)
+            recordFailure(PairStore.message(for: error), for: id,
+                          source: kind == .status ? .status : .other)
             return
         }
         if kind == .start { pendingOperations[id] = nil }
         guard !Task.isCancelled, (generations[id] ?? 0) == generation else { return }
         // An explicit job that ran re-arms approval requests for the pair.
         if kind == .start { declined[id] = nil }
+        if kind == .status { clearRecoveredStatusFailure(id, previousFailure) }
         knownStates.insert(id)
         set(id, normalized(id, reply))
         await pollWhileWorking(id)
@@ -805,6 +836,7 @@ final class SyncStore {
                 return
             }
             guard polling[id] == owner, !Task.isCancelled else { return }
+            let previousFailure = requestErrors[id]
             let generation = generations[id] ?? 0
             let reply: PairSyncState
             do {
@@ -813,11 +845,12 @@ final class SyncStore {
                 guard polling[id] == owner, !Task.isCancelled,
                       (generations[id] ?? 0) == generation else { return }
                 knownStates.remove(id)
-                requestErrors[id] = PairStore.message(for: error)
+                recordFailure(PairStore.message(for: error), for: id, source: .status)
                 return
             }
             guard polling[id] == owner,
                   (generations[id] ?? 0) == generation else { return }
+            clearRecoveredStatusFailure(id, previousFailure)
             knownStates.insert(id)
             set(id, normalized(id, reply))
         }
