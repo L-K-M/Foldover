@@ -78,7 +78,12 @@ Pin the validated app code hash and peer requirements for the process
 lifetime. Each private call resolves a fresh kernel audit token, checks the
 live peer's exact code identity and revalidates the pinned bundle. A changed
 installation fails closed until the process restarts and enrolls the current
-verified bundle. There is no client-supplied trust argument or PID lookup.
+verified bundle. A failed initial verification does not enroll an installation:
+private calls remain denied, and one later caller may retry after a five-second
+cooldown. Concurrent initialization requests share one attempt; cancellation
+also starts the cooldown. Public health requests do not trigger retries. The
+first successful verification stays pinned and is never replaced by a retry.
+There is no client-supplied trust argument or PID lookup.
 
 The agent accepts the installed app/CLI identities; clients accept only the
 installed agent identity. Clients verify before sending private parameters.
@@ -92,10 +97,12 @@ a bounded blocking pool whose permits survive caller timeouts. Diagnostics
 stay on stderr; authorization replies contain no installation paths.
 
 Portable tests cover ambiguous signing-output rejection and the public-method
-allowlist. Apple-target cross-checks run locally. macOS CI runs real signed
-process fixtures for installed app/CLI access, relocated identity,
-same-identifier lookalikes, interpreters, changed bundles, restart rotation
-and fake agents receiving no private payload. This transport policy does not
+allowlist. Deterministic cache tests cover failed and cancelled initialization,
+retry cooldowns, concurrent callers and permanent successful pinning.
+Apple-target cross-checks run locally. macOS CI runs real signed process
+fixtures for startup verification recovery, installed app/CLI access,
+relocated identity, same-identifier lookalikes, interpreters, changed bundles,
+restart rotation and fake agents receiving no private payload. This transport policy does not
 enable pair APIs or establish their method/root scope.
 
 ## Rebuilt agent registration

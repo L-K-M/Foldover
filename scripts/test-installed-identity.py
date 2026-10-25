@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 
 
 COMMAND_SECONDS = 20
@@ -124,6 +125,25 @@ def main():
         shutil.copy2(cli, relocated)
         endpoint = root / "runtime/s"
 
+        # A failed startup verification must recover without restarting the server.
+        parked_cli = root / "parked-cli"
+        cli.rename(parked_cli)
+        with server(agent, endpoint):
+            if exchange(endpoint, "daemon.status").get("result") != "public":
+                raise RuntimeError("Unavailable installation lost public health access")
+            require_denied(invoke(main, "raw", endpoint))
+            parked_cli.rename(cli)
+            deadline = time.monotonic() + COMMAND_SECONDS
+            while True:
+                response = invoke(main, "call", endpoint)
+                if response.get("result", {}).get("marker") == "trusted":
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f"Startup verification never recovered: {response}")
+                time.sleep(0.25)
+            require_denied(invoke(lookalike, "raw", endpoint))
+            require_denied(exchange(endpoint, "fixture.private"))
+
         with server(agent, endpoint):
             if exchange(endpoint, "daemon.status").get("result") != "public":
                 raise RuntimeError("Public health access requires code identity")
@@ -181,7 +201,7 @@ def main():
         with server(agent, endpoint):
             require_denied(invoke(main, "raw", endpoint))
 
-        print("Installed app/CLI, relocated identity, lookalike/interpreter rejection, "
+        print("Startup recovery, installed app/CLI, relocated identity, lookalike/interpreter rejection, "
               "update pinning, restart rotation, debug/runtime policy and fake-server "
               "payload protection passed")
 
