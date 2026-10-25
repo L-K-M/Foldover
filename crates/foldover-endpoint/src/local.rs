@@ -8,7 +8,7 @@ mod identity;
 mod lock;
 pub(crate) mod version;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -426,6 +426,73 @@ pub struct Observation {
     pub(crate) unstable: Vec<Option<SyncPath>>,
 }
 
+/// An unavailable path also covers each descendant. Probe only component
+/// prefixes, rather than comparing every entry with every failed subtree.
+#[derive(Default)]
+struct UnavailablePaths {
+    roots: BTreeSet<Vec<u8>>,
+}
+
+impl UnavailablePaths {
+    fn from_paths(paths: &[SyncPath]) -> Self {
+        Self {
+            roots: paths.iter().map(|path| path.as_bytes().to_vec()).collect(),
+        }
+    }
+
+    fn insert(&mut self, path: &SyncPath) {
+        self.roots.insert(path.as_bytes().to_vec());
+    }
+
+    fn contains(&self, path: &SyncPath) -> bool {
+        if self.roots.is_empty() {
+            return false;
+        }
+        let bytes = path.as_bytes();
+        std::iter::once(bytes)
+            .chain(
+                bytes
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, byte)| (*byte == b'/').then_some(&bytes[..index])),
+            )
+            .any(|prefix| self.roots.contains(prefix))
+    }
+
+    fn retain_entries(
+        &self,
+        entries: &mut BTreeMap<SyncPath, ObservedEntry>,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), ScanError> {
+        let mut cancelled = false;
+        entries.retain(|path, _| {
+            if cancelled {
+                return true;
+            }
+            if control() == ScanControl::Cancel {
+                cancelled = true;
+                return true;
+            }
+            !self.contains(path)
+        });
+        if cancelled || control() == ScanControl::Cancel {
+            return Err(ScanError::Cancelled);
+        }
+        Ok(())
+    }
+
+    fn skip_error(
+        &mut self,
+        observation: &mut Observation,
+        error: ScanError,
+    ) -> Result<(), ScanError> {
+        let issue = error.into_issue()?;
+        self.insert(&issue.path);
+        observation.skip_issue(issue);
+        Ok(())
+    }
+}
+
 impl Observation {
     /// Listings that changed while traversed. Read entries remain usable,
     /// but missing paths below these folders do not prove deletion. `None`
@@ -439,16 +506,13 @@ impl Observation {
     }
 
     pub(crate) fn skip_error(&mut self, error: ScanError) -> Result<(), ScanError> {
-        let issue = error.into_issue()?;
-        self.unavailable.push(issue.path.clone());
-        self.issues.push(issue);
+        self.skip_issue(error.into_issue()?);
         Ok(())
     }
 
-    fn is_unavailable(&self, path: &SyncPath) -> bool {
-        self.unavailable
-            .iter()
-            .any(|root| root == path || root.is_ancestor_of(path))
+    fn skip_issue(&mut self, issue: ScanIssue) {
+        self.unavailable.push(issue.path.clone());
+        self.issues.push(issue);
     }
 
     pub fn entries(&self) -> &BTreeMap<SyncPath, ObservedEntry> {
@@ -1112,11 +1176,12 @@ impl LocalEndpoint {
             issues: stats.issues,
             unstable: stats.unstable,
         };
+        let mut unavailable = UnavailablePaths::from_paths(&observation.unavailable);
         for mut entry in entries {
             if control() == ScanControl::Cancel {
                 return Err(ScanError::Cancelled);
             }
-            if observation.is_unavailable(&entry.path) {
+            if unavailable.contains(&entry.path) {
                 progress(ObserveStep::Checked);
                 continue;
             }
@@ -1139,7 +1204,7 @@ impl LocalEndpoint {
                         let error = current
                             .err()
                             .unwrap_or_else(|| ScanError::Changed(Some(entry.path.clone())));
-                        observation.skip_error(error)?;
+                        unavailable.skip_error(&mut observation, error)?;
                         progress(ObserveStep::Checked);
                         continue;
                     }
@@ -1156,7 +1221,7 @@ impl LocalEndpoint {
             let version = match self.entry_version(&entry, policy, control) {
                 Ok(version) => version,
                 Err(error) => {
-                    observation.skip_error(error)?;
+                    unavailable.skip_error(&mut observation, error)?;
                     progress(ObserveStep::Checked);
                     continue;
                 }
@@ -1170,12 +1235,9 @@ impl LocalEndpoint {
             );
             progress(ObserveStep::Checked);
         }
-        let unavailable = &observation.unavailable;
-        observation.entries.retain(|path, _| {
-            !unavailable
-                .iter()
-                .any(|root| root == path || root.is_ancestor_of(path))
-        });
+        // A directory can fail after its children were inserted. Suppress
+        // those children too, without repeating every failed-root comparison.
+        unavailable.retain_entries(&mut observation.entries, control)?;
         observation.unstable.sort();
         observation.unstable.dedup();
         Ok(observation)
@@ -1404,6 +1466,8 @@ fn at_scan<T>(path: &Option<SyncPath>, result: io::Result<T>) -> Result<T, ScanE
 
 #[cfg(test)]
 mod churn_tests;
+#[cfg(test)]
+mod filtering_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
