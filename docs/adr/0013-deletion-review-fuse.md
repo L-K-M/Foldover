@@ -25,19 +25,32 @@ counts fail before assessment; an empty analysis permits zero deletions only.
 ## Boundary
 
 `WithinLimits` reports only this fuse's requirement. It does not authorize
-filesystem operations. Root availability/identity, sudden emptiness, canary,
-space, first-run destructive-review, freshness and journal gates remain
-required. Extra confirmation binds to the exact reviewed plan and
-configuration revision: a preview carries an opaque `review_token`, a
-deterministic fingerprint of the pair, its revision, the counts and every
-planned item's path, action, versions and bytes — including items beyond a
-response page. The agent holds each pair's latest preview, and a run
-executes a nonzero approval only when the presented token names that held
-preview and a fresh preview still equals it. A changed or superseded plan
-stops for review again rather than reusing old counts, so an approval can
-never follow a preview another client published after it. `sync.resolve`
-and `sync.items` bind the same way: a missing or stale token fails with
-`PREVIEW_REQUIRED` before any write or page.
+filesystem operations. Root availability/identity, canary, space, freshness
+and journal checks remain required. Sudden emptiness is an additional review
+stop when removal protection is enabled. Extra confirmation binds
+to the exact reviewed plan and configuration revision: a preview carries an
+opaque `review_token`, a deterministic fingerprint of the pair, its revision,
+the counts and every planned item's path, action, versions and bytes —
+including items beyond a response page. The agent holds each pair's latest
+preview, and a run executes a nonzero approval only when the presented token
+names that held preview and a fresh preview still equals it. A changed or
+superseded plan stops for review again rather than reusing old counts, so an
+approval can never follow a preview another client published after it.
+`sync.resolve` and `sync.items` bind the same way: a missing or stale token
+fails with `PREVIEW_REQUIRED` before any write or page.
+
+The owner selected two independent per-pair settings on 2026-10-25 after a live
+home-folder backup repeatedly rescanned and requested approval without copying.
+`Require approval before syncing` defaults off (`--review automatic`). Turning
+it on (`required`) requires a reviewed plan on every run. Ordinary syncs use
+one fresh observation and execute without an extra review scan.
+
+`Stop unusually large removals` defaults on (`--removal-protection enabled`).
+It preserves the numeric fuse and the sudden-empty review stop independently
+of routine approval. Disabling it allows those removals under the remaining
+filesystem checks. It does not disable archiving or root identity, canary,
+space, lease, revision and per-file freshness checks. Explicit approval of a
+stopped plan still requires the held token and an unchanged fresh plan.
 
 ## Verification
 

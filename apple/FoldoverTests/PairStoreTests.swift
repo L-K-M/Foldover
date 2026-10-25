@@ -797,3 +797,53 @@ func planSentenceListsOnlyUnusualChoices() {
     editor.options.syncModificationTimes = false
     #expect(editor.planText.contains("modification dates don't sync"))
 }
+
+@MainActor
+@Test
+func reviewPolicyAndRemovalProtectionDefaultsComeFromEngine() {
+    let defaults = PairOptions.defaults
+    #expect(defaults.reviewPolicy == .automatic)
+    #expect(defaults.removalProtection == .enabled)
+}
+
+@MainActor
+@Test
+func reviewPolicyAndRemovalProtectionTogglesIndependently() {
+    let store = PairStore(client: PairFixtureClient())
+    let editor = PairEditorViewModel(store: store)
+    #expect(!editor.requiresSyncApproval)
+    #expect(editor.stopsLargeRemovals)
+
+    editor.requiresSyncApproval = true
+    #expect(editor.options.reviewPolicy == .required)
+    #expect(editor.options.removalProtection == .enabled)
+
+    editor.stopsLargeRemovals = false
+    #expect(editor.options.reviewPolicy == .required)
+    #expect(editor.options.removalProtection == .disabled)
+
+    editor.requiresSyncApproval = false
+    #expect(editor.options.reviewPolicy == .automatic)
+    #expect(editor.options.removalProtection == .disabled)
+}
+
+@MainActor
+@Test
+func reviewPolicyAndRemovalProtectionSurviveSaveAndReload() async {
+    let client = PairFixtureClient()
+    let store = PairStore(client: client)
+    let editor = PairEditorViewModel(store: store)
+    editor.name = "Photos"
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/a")]), side: .left)
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/b")]), side: .right)
+    editor.requiresSyncApproval = true
+    editor.stopsLargeRemovals = false
+    #expect(await editor.save())
+    #expect(await client.savedSettings?.options.reviewPolicy == .required)
+    #expect(await client.savedSettings?.options.removalProtection == .disabled)
+    #expect(store.pairs.first?.settings.options.reviewPolicy == .required)
+    #expect(store.pairs.first?.settings.options.removalProtection == .disabled)
+    let reloaded = PairEditorViewModel(store: store, editing: store.pairs.first)
+    #expect(reloaded.requiresSyncApproval)
+    #expect(!reloaded.stopsLargeRemovals)
+}

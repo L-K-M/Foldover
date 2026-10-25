@@ -568,8 +568,8 @@ impl Jobs {
     }
 
     /// Reserve the pair for `work` while a job runs. Unattended work never
-    /// replaces a result waiting for a person (ADR 0022): a stopped run
-    /// stays stopped until a manual preview or sync releases the pair.
+    /// replaces a stopped result waiting for a person (ADR 0022). An
+    /// optional preview alone does not suspend the pair's schedule.
     fn claim(&self, id: PairId, work: Work, cancel: &Arc<AtomicBool>) -> Result<Claim, RpcError> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let blocked = if state.mutating.contains(&id) {
@@ -581,8 +581,7 @@ impl Jobs {
                 }
                 // An undo waits too: an unattended run would redo it unseen.
                 Some(
-                    SyncStatus::Previewed { .. }
-                    | SyncStatus::NeedsApproval { .. }
+                    SyncStatus::NeedsApproval { .. }
                     | SyncStatus::Undone { .. }
                     | SyncStatus::Failed { .. },
                 ) if matches!(work, Work::Scheduled) => {
@@ -873,7 +872,7 @@ fn preview(preview: &Preview) -> SyncPreview {
         SyncDeletions {
             deletions: counts.deletions(),
             paths: counts.paths(),
-            needs_approval: counts.review(RunContext::Interactive)
+            needs_approval: preview.deletion_review(side, RunContext::Interactive)
                 == DeletionReview::ConfirmationRequired,
         }
     };

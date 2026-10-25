@@ -46,14 +46,14 @@ const EXCLUDED_BY_BACKUPD: &[u8] = b"bplist00_\x10\x11com.apple.backupd\x08\0\0\
 /// until it runs its program, which a busy machine can stretch.
 const WRITER_WAIT: Duration = Duration::from_millis(500);
 const WRITER_RETRY: Duration = Duration::from_millis(20);
-const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary, schedule_time, schedule_days, records, bandwidth_limit";
+const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary, schedule_time, schedule_days, records, bandwidth_limit, review_policy, removal_protection";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 25] = [
+const MIGRATIONS: [&str; 26] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
     SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, SCHEMA_V15, SCHEMA_V16,
     SCHEMA_V17, SCHEMA_V18, SCHEMA_V19, SCHEMA_V20, SCHEMA_V21, SCHEMA_V22, SCHEMA_V23, SCHEMA_V24,
-    SCHEMA_V25,
+    SCHEMA_V25, SCHEMA_V26,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -401,6 +401,13 @@ UPDATE state_meta SET minimum_reader=max(minimum_reader,24) WHERE singleton=1;
 const SCHEMA_V25: &str = "
 ALTER TABLE pair ADD COLUMN bandwidth_limit INTEGER CHECK(bandwidth_limit IS NULL OR bandwidth_limit >= 100000);
 ";
+// Per-pair sync safety settings: review policy and removal protection.
+// Older readers cannot enforce them, so the floor rises.
+const SCHEMA_V26: &str = "
+ALTER TABLE pair ADD COLUMN review_policy TEXT NOT NULL DEFAULT 'automatic' CHECK(review_policy IN ('automatic','required'));
+ALTER TABLE pair ADD COLUMN removal_protection TEXT NOT NULL DEFAULT 'enabled' CHECK(removal_protection IN ('enabled','disabled'));
+UPDATE state_meta SET minimum_reader=max(minimum_reader,26) WHERE singleton=1;
+";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -525,6 +532,8 @@ pub struct PairValues {
     pub schedule_days: Option<i64>,
     pub records: String,
     pub bandwidth_limit: Option<i64>,
+    pub review_policy: String,
+    pub removal_protection: String,
 }
 
 #[derive(Clone, Debug)]
@@ -619,7 +628,7 @@ impl Database {
     pub fn create_pair(&mut self, values: &PairValues) -> Result<PairRow, Error> {
         let id = uuid::Uuid::new_v4().into_bytes();
         self.connection.execute(
-            "INSERT INTO pair (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,schedule,schedule_minutes,filters,size_limit,age_limit,canary,schedule_time,schedule_days,records,bandwidth_limit) VALUES (?1,1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+            "INSERT INTO pair (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,schedule,schedule_minutes,filters,size_limit,age_limit,canary,schedule_time,schedule_days,records,bandwidth_limit,review_policy,removal_protection) VALUES (?1,1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
             params![
                 id.as_slice(),
                 values.name,
@@ -639,7 +648,9 @@ impl Database {
                 values.schedule_time,
                 values.schedule_days,
                 values.records,
-                values.bandwidth_limit
+                values.bandwidth_limit,
+                values.review_policy,
+                values.removal_protection
             ],
         )?;
         self.pair(&id)?
@@ -708,7 +719,7 @@ impl Database {
             // with the source: a folder without records has an identity
             // only this agent knows. SET expressions read the row as it
             // was, so `records=?19` and `mode=?6` hold only when unchanged.
-            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,schedule=?11,schedule_minutes=?12,filters=?13,size_limit=?14,age_limit=?15,canary=?16,schedule_time=?17,schedule_days=?18,records=?19,bandwidth_limit=?20,left_identity=CASE WHEN left_root=?4 AND records=?19 AND (records='both' OR mode=?6) THEN left_identity END,right_identity=CASE WHEN right_root=?5 AND records=?19 AND (records='both' OR mode=?6) THEN right_identity END,left_mount=CASE WHEN left_root=?4 THEN left_mount END,right_mount=CASE WHEN right_root=?5 THEN right_mount END WHERE id=?1 AND revision=?2",
+            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,schedule=?11,schedule_minutes=?12,filters=?13,size_limit=?14,age_limit=?15,canary=?16,schedule_time=?17,schedule_days=?18,records=?19,bandwidth_limit=?20,review_policy=?21,removal_protection=?22,left_identity=CASE WHEN left_root=?4 AND records=?19 AND (records='both' OR mode=?6) THEN left_identity END,right_identity=CASE WHEN right_root=?5 AND records=?19 AND (records='both' OR mode=?6) THEN right_identity END,left_mount=CASE WHEN left_root=?4 THEN left_mount END,right_mount=CASE WHEN right_root=?5 THEN right_mount END WHERE id=?1 AND revision=?2",
             params![
                 id,
                 revision,
@@ -729,7 +740,9 @@ impl Database {
                 values.schedule_time,
                 values.schedule_days,
                 values.records,
-                values.bandwidth_limit
+                values.bandwidth_limit,
+                values.review_policy,
+                values.removal_protection
             ],
         )?;
         if changed == 0 {
@@ -1185,6 +1198,8 @@ fn pair_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairRow> {
             schedule_days: row.get(17)?,
             records: row.get(18)?,
             bandwidth_limit: row.get(19)?,
+            review_policy: row.get(20)?,
+            removal_protection: row.get(21)?,
         },
     })
 }
@@ -1223,6 +1238,8 @@ pub(super) mod tests {
             schedule_days: None,
             records: "both".into(),
             bandwidth_limit: None,
+            review_policy: "automatic".into(),
+            removal_protection: "enabled".into(),
         }
     }
 
@@ -1860,9 +1877,10 @@ pub(super) mod tests {
         assert_eq!(minimum_reader(&legacy.connection), legacy_reader);
         drop(legacy);
 
-        // v24 raised the floor last: older readers cannot undo a move.
+        // v26 raised the floor last: older readers cannot enforce review
+        // policy or removal protection.
         let mut database = Database::open(&location).unwrap();
-        assert_eq!(minimum_reader(&database.connection), 24);
+        assert_eq!(minimum_reader(&database.connection), 26);
         assert_eq!(
             database
                 .connection
@@ -1874,8 +1892,9 @@ pub(super) mod tests {
             let mut expected = expected.clone();
             if *table == "pair" {
                 // V19's canary, V21's schedule columns and V25's
-                // bandwidth limit read NULL on every migrated row, and
-                // V23's records their default.
+                // bandwidth limit read NULL on every migrated row,
+                // V23's records their default, and V26's safety
+                // settings their defaults.
                 for row in &mut expected {
                     row.extend([
                         rusqlite::types::Value::Null,
@@ -1883,6 +1902,8 @@ pub(super) mod tests {
                         rusqlite::types::Value::Null,
                         rusqlite::types::Value::Text("both".into()),
                         rusqlite::types::Value::Null,
+                        rusqlite::types::Value::Text("automatic".into()),
+                        rusqlite::types::Value::Text("enabled".into()),
                     ]);
                 }
             }
@@ -2130,5 +2151,97 @@ pub(super) mod tests {
         database.update_pair(&pair.id, 2, &ignoring).unwrap();
         assert!(database.snapshot(&pair.id, "left").unwrap().is_empty());
         assert!(database.snapshot(&pair.id, "right").unwrap().is_empty());
+    }
+
+    #[test]
+    fn v25_to_v26_migration_preserves_existing_data_and_adds_safety_columns() {
+        let (directory, location) = location();
+        let path = directory.path().join(DATABASE_NAME);
+        drop(private_file(&path).unwrap());
+        let connection = Connection::open(&path).unwrap();
+        for statements in &MIGRATIONS[..25] {
+            connection.execute_batch(statements).unwrap();
+        }
+        connection
+            .pragma_update(None, "application_id", APPLICATION_ID)
+            .unwrap();
+        connection.pragma_update(None, "user_version", 25).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .unwrap();
+        let writer = private_file(&directory.path().join(WRITER_LOCK)).unwrap();
+        writer.try_lock().unwrap();
+        let mut legacy = Database {
+            connection,
+            _writer: writer,
+            directory: directory.path().to_owned(),
+        };
+        let id = [7; 16];
+        // Insert with the shipping schema's columns; current create_pair
+        // intentionally requires the two new columns.
+        legacy.connection.execute(
+            "INSERT INTO pair (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,schedule,schedule_minutes,filters,size_limit) VALUES (?1,2,'Home backup',?2,?3,'backup-left','sync','sync','sync','standard','every',60,'GitHub/',1000000000)",
+            params![id.as_slice(), b"/home/user".as_slice(), b"/target/backup".as_slice()],
+        ).unwrap();
+        legacy
+            .record_identities(&id, 2, &[1; 16], &[2; 16])
+            .unwrap();
+        legacy
+            .change_base(
+                &id,
+                2,
+                &[put(b"kept", b"version")],
+                JournalChange::Record {
+                    run: "writing-run",
+                    rows: &[JournalRow {
+                        seq: 1,
+                        path: b"kept".to_vec(),
+                        side: "right".into(),
+                        action: "create".into(),
+                        version: b"version".to_vec(),
+                        base: None,
+                        source: None,
+                    }],
+                },
+            )
+            .unwrap();
+        legacy.set_pause(Some(PauseRow { until_ms: None })).unwrap();
+        let before: Vec<_> = ["pair", "base_entry", "run_journal", "automation_pause"]
+            .into_iter()
+            .map(|table| (table, stored_rows(&legacy.connection, table)))
+            .collect();
+        drop(legacy);
+
+        let database = Database::open(&location).unwrap();
+        for (table, mut expected) in before {
+            if table == "pair" {
+                for row in &mut expected {
+                    row.extend([
+                        rusqlite::types::Value::Text("automatic".into()),
+                        rusqlite::types::Value::Text("enabled".into()),
+                    ]);
+                }
+            }
+            assert_eq!(
+                stored_rows(&database.connection, table),
+                expected,
+                "{table}"
+            );
+        }
+        let schema: i64 = database
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let minimum: i64 = database
+            .connection
+            .query_row(
+                "SELECT minimum_reader FROM state_meta WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((schema, minimum), (26, 26));
+        assert!(minimum > 25, "a shipping reader must refuse these policies");
+        assert_eq!(database.pair(&id).unwrap().unwrap().revision, 2);
     }
 }

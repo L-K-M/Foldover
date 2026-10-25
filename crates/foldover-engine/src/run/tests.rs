@@ -189,6 +189,8 @@ struct Fixture {
     durability: foldover_types::Durability,
     records: foldover_types::FolderRecords,
     bandwidth_limit: Option<u64>,
+    review_policy: ReviewPolicy,
+    removal_protection: RemovalProtection,
     right_kind: RightKind,
     journal: Option<foldover_state::Journal>,
     /// In-memory folders that replace both temporary directories.
@@ -236,6 +238,8 @@ fn fixture(mode: SyncMode) -> Fixture {
         durability: foldover_types::Durability::Standard,
         records: foldover_types::FolderRecords::Both,
         bandwidth_limit: None,
+        review_policy: ReviewPolicy::Automatic,
+        removal_protection: RemovalProtection::Enabled,
         right_kind: RightKind::Local,
         journal: None,
         memory: None,
@@ -353,7 +357,9 @@ impl Fixture {
             .unwrap()
             .with_records(self.records)
             .with_bandwidth_limit(self.bandwidth_limit)
-            .unwrap(),
+            .unwrap()
+            .with_review_policy(self.review_policy)
+            .with_removal_protection(self.removal_protection),
         );
         let pair =
             PairConfig::from_stored(PairId::from_bytes([1; 16]).unwrap(), self.revision, draft)
@@ -1067,8 +1073,9 @@ impl RunProgress for CancelAfterPlan {
 /// identities all the same, so every later run — scheduled ones
 /// included — skipped the first-run review gate.
 #[test]
-fn an_aborted_first_run_keeps_its_review_gate() {
+fn an_aborted_run_keeps_its_opted_in_review_gate() {
     let mut pair = fixture(SyncMode::Sync);
+    pair.review_policy = ReviewPolicy::Required;
     fs::write(pair.left.path().join("notes"), b"content").unwrap();
     let cancel = CancelAfterPlan {
         planned: std::cell::Cell::new(false),
@@ -1186,27 +1193,7 @@ fn batched_first_runs_reopen_safely_before_the_identity_commit() {
     assert_eq!(engine.pair(pair.id()).unwrap().revision(), pair.revision());
     assert_eq!(engine.run_inputs(pair.id()).unwrap().base.len(), count);
     assert!(!engine.first_synced(pair.id()).unwrap());
-    let prepared = PairRun::prepare(
-        engine.run_inputs(pair.id()).unwrap(),
-        &mut proceed,
-        &NoProgress,
-    )
-    .unwrap();
-    assert!(matches!(
-        prepared
-            .execute(
-                Approval::default(),
-                RunContext::Unattended,
-                STARTED,
-                &mut |revision, commit| engine.commit_run(pair.id(), revision, commit),
-                &mut proceed,
-                &NoProgress,
-            )
-            .unwrap(),
-        RunOutcome::NeedsApproval(_)
-    ));
-
-    // The same stored revision accepts the identities; later runs need no review.
+    // The same stored revision resumes and records identities without mandatory review.
     for context in [RunContext::Reviewed, RunContext::Unattended] {
         let prepared = PairRun::prepare(
             engine.run_inputs(pair.id()).unwrap(),
@@ -1269,6 +1256,7 @@ fn mass_deletions_need_approval_and_unattended_runs_stop() {
 #[test]
 fn mirror_archives_target_extras_and_backup_keeps_them() {
     let mut mirror = fixture(SyncMode::Mirror { source: Side::Left });
+    mirror.review_policy = ReviewPolicy::Required;
     fs::write(mirror.left.path().join("kept"), b"k").unwrap();
     fs::write(mirror.right.path().join("extra"), b"e").unwrap();
     // A first run waits for a reviewed preview (§3.2, §3.6).
@@ -2221,8 +2209,10 @@ fn full_durability_rejects_a_run_with_an_sftp_side() {
 }
 
 #[test]
-fn a_first_run_waits_for_a_reviewed_preview_even_when_it_only_copies() {
+fn required_review_stops_every_run_even_when_removal_protection_is_disabled() {
     let mut pair = fixture(SyncMode::Sync);
+    pair.review_policy = ReviewPolicy::Required;
+    pair.removal_protection = RemovalProtection::Disabled;
     fs::write(pair.left.path().join("new"), b"n").unwrap();
 
     for context in [RunContext::Interactive, RunContext::Unattended] {
@@ -2241,6 +2231,73 @@ fn a_first_run_waits_for_a_reviewed_preview_even_when_it_only_copies() {
     };
     assert_eq!(report.copied(), 1);
     assert!(pair.identities.side(Side::Right).is_some());
+    fs::write(pair.left.path().join("later"), b"next run").unwrap();
+    for context in [RunContext::Interactive, RunContext::Unattended] {
+        assert!(matches!(
+            pair.run(Approval::default(), context),
+            RunOutcome::NeedsApproval(_)
+        ));
+        assert!(!pair.right.path().join("later").exists());
+    }
+}
+
+#[test]
+fn automatic_first_runs_copy_without_review() {
+    for mode in [SyncMode::Sync, SyncMode::Backup { source: Side::Left }] {
+        for context in [RunContext::Interactive, RunContext::Unattended] {
+            let mut pair = fixture(mode);
+            fs::write(pair.left.path().join("new"), b"current content").unwrap();
+            let RunOutcome::Ran(report) = pair.run(Approval::default(), context) else {
+                panic!("automatic first copy must run without review");
+            };
+            assert_eq!(report.copied(), 1);
+            assert_eq!(
+                fs::read(pair.right.path().join("new")).unwrap(),
+                b"current content"
+            );
+        }
+    }
+}
+
+#[test]
+fn disabling_removal_protection_allows_mass_and_sudden_empty_archives() {
+    for count in [3, 61] {
+        for context in [RunContext::Interactive, RunContext::Unattended] {
+            let mut pair = fixture(SyncMode::Sync);
+            pair.removal_protection = RemovalProtection::Disabled;
+            for index in 0..count {
+                fs::write(
+                    pair.left.path().join(format!("{index}")),
+                    b"kept in archive",
+                )
+                .unwrap();
+            }
+            pair.sync();
+            for index in 0..count {
+                fs::remove_file(pair.right.path().join(format!("{index}"))).unwrap();
+            }
+            let preview = pair.prepare().preview();
+            assert_eq!(
+                preview.deletion_review(Side::Left, context),
+                DeletionReview::WithinLimits
+            );
+            let RunOutcome::Ran(report) = pair.run(Approval::default(), context) else {
+                panic!("disabled removal protection should allow the fresh plan");
+            };
+            assert_eq!(report.archived(), count);
+            assert_eq!(
+                fs::read(
+                    pair.left
+                        .path()
+                        .join(".foldover/archive")
+                        .join(report.archive())
+                        .join("0")
+                )
+                .unwrap(),
+                b"kept in archive"
+            );
+        }
+    }
 }
 
 #[test]

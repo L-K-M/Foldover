@@ -146,7 +146,7 @@ foldover sync ID --changes       # every preview item, across all pages
 foldover sync ID --changes conflicts  # only conflicts in the held preview
 foldover sync ID --progress      # distinct working statuses, then the result
 foldover sync --all              # every pair, at most four at once
-foldover sync ID                 # run; a pair's first run needs review
+foldover sync ID                 # run; routine approval is off by default
 foldover sync ID --approve 60 0 --review TOKEN  # approve the reviewed deletions
 foldover sync ID --keep-right PATH --review TOKEN  # keep B's reviewed version
 foldover sync ID --keep-both PATH --review TOKEN   # keep both reviewed versions

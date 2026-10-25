@@ -24,7 +24,7 @@ execute: deletion gate ─▶ archive leftovers
   every file copied to it plus a 256 MiB reserve. Replaced versions stay in
   the archive on the same volume, so a replacement needs its full size.
   Otherwise the run stops with `InsufficientSpace` and writes nothing.
-- **Gate:** per target, the plan's deletions are reviewed
+- **Removal protection:** when enabled (the default), each target's deletions are reviewed
   ([ADR 0013](0013-deletion-review-fuse.md)). Interactive runs above the
   limit need an `Approval` covering at least that many deletions; unattended
   runs above their limit always stop. A stopped run writes nothing and
@@ -38,15 +38,15 @@ execute: deletion gate ─▶ archive leftovers
   approval can never authorize deletions a person did not see, even when
   another client's preview replaced the held plan. A matching review also
   marks the run `RunContext::Reviewed`.
-- **First run:** while either root lacks a recorded identity, every run
-  stops with its preview unless it is `Reviewed` — the first run of every
-  pair is previewed (PLAN.md §3.2, §3.6), which also confirms a non-empty
-  target. A `Reviewed` retry of the unchanged plan proceeds.
-- **Emptied side:** when one side holds no entries while the base
-  remembers some, a plan that archives on the other side stops for review
-  even below the fuse, so a wiped folder or a stale empty copy cannot
-  empty its partner unseen (PLAN.md §3.6). Copies into an emptied side,
-  such as a Backup target, need no review.
+- **Routine review:** the per-pair review policy defaults to `automatic`.
+  Initial and later runs execute their fresh observed plans. With `required`,
+  every run stops unless its plan is `Reviewed`. A reviewed plan must still
+  match the new observation; stale plans are never executed.
+- **Emptied side:** with removal protection enabled, when one side holds no
+  entries while the base remembers some, a plan that archives on the other
+  side stops for review even below the numeric fuse. Copies into an emptied
+  side, such as a Backup target, need no review. Disabling removal protection
+  disables this review stop as well as the numeric fuse.
 - **Roots during the run:** writes go through handles held on each root.
   Both roots' identity files are read again before the first write and
   every 256 planned entries; a missing, unreadable or different identity

@@ -1156,9 +1156,146 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_automatic_backup_runs_on_its_first_scheduled_tick() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "FirstScheduled");
+        input["mode"] = json!({"kind": "backup", "source": "left"});
+        input["options"]["schedule"] = json!({"kind": "every", "minutes": 1});
+        let left = directory.path().join("FirstScheduled-left");
+        let right = directory.path().join("FirstScheduled-right");
+        fs::write(left.join("note"), b"first unattended backup").unwrap();
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        let key = json!({"id": created["id"]});
+        let due = service.scheduler.started() + std::time::Duration::from_secs(61);
+
+        assert_eq!(run_due_started(&service, due).await, [id]);
+        let result = settled(&service, &key).await;
+        assert_eq!(result["state"], "finished", "{result}");
+        assert_eq!(result["result"]["copied"], 1);
+        assert_eq!(
+            fs::read(right.join("note")).unwrap(),
+            b"first unattended backup"
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_review_and_removal_settings_are_independent() {
+        for review in ["automatic", "required"] {
+            for removal in ["enabled", "disabled"] {
+                let (directory, service) = fixture();
+                let mut input = input(directory.path(), "Policies");
+                input["mode"] = json!({"kind": "backup", "source": "left"});
+                input["options"]["schedule"] = json!({"kind": "every", "minutes": 1});
+                input["options"]["review_policy"] = json!(review);
+                input["options"]["removal_protection"] = json!(removal);
+                fs::write(directory.path().join("Policies-left/file"), b"copy").unwrap();
+                let pair = service
+                    .handle(Request::call(1, PAIR_CREATE, Some(input)))
+                    .await
+                    .unwrap();
+                let id = pair["id"].as_str().unwrap().parse().unwrap();
+                let key = json!({"id": pair["id"]});
+                let due = service.scheduler.started() + std::time::Duration::from_secs(61);
+                assert_eq!(run_due_started(&service, due).await, [id]);
+                let result = settled(&service, &key).await;
+                let expected = if review == "required" {
+                    "needsApproval"
+                } else {
+                    "finished"
+                };
+                assert_eq!(result["state"], expected, "{review}/{removal}: {result}");
+                assert_eq!(
+                    directory.path().join("Policies-right/file").exists(),
+                    review == "automatic"
+                );
+                if review == "required" {
+                    // A stopped run remains held, without another scheduled scan.
+                    assert!(
+                        service
+                            .run_due(due + std::time::Duration::from_secs(61))
+                            .is_empty()
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_automatic_backup_uses_fresh_changes_after_an_optional_preview() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Churning");
+        input["mode"] = json!({"kind": "backup", "source": "left"});
+        let left = directory.path().join("Churning-left");
+        let right = directory.path().join("Churning-right");
+        fs::write(left.join("note"), b"before review").unwrap();
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        service
+            .handle(Request::call(2, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        assert_eq!(settled(&service, &key).await["state"], "previewed");
+        fs::write(left.join("note"), b"changed while reviewing").unwrap();
+        fs::write(left.join("new"), b"new since preview").unwrap();
+
+        let run = json!({"id": created["id"], "approved_left_deletions": 0,
+                         "approved_right_deletions": 0});
+        service
+            .handle(Request::call(3, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        let result = settled(&service, &key).await;
+        assert_eq!(result["state"], "finished", "{result}");
+        assert_eq!(result["result"]["copied"], 2);
+        assert_eq!(
+            fs::read(right.join("note")).unwrap(),
+            b"changed while reviewing"
+        );
+        assert_eq!(fs::read(right.join("new")).unwrap(), b"new since preview");
+    }
+
+    #[tokio::test]
+    async fn optional_preview_does_not_block_the_next_automatic_backup() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "PreviewedBackup");
+        input["mode"] = json!({"kind": "backup", "source": "left"});
+        input["options"]["schedule"] = json!({"kind": "every", "minutes": 1});
+        let left = directory.path().join("PreviewedBackup-left");
+        let right = directory.path().join("PreviewedBackup-right");
+        fs::write(left.join("file"), b"previewed").unwrap();
+        let pair = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let id = pair["id"].as_str().unwrap().parse().unwrap();
+        let key = json!({"id": pair["id"]});
+        service
+            .handle(Request::call(2, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        assert_eq!(settled(&service, &key).await["state"], "previewed");
+        fs::write(left.join("file"), b"changed since preview").unwrap();
+        let due = service.scheduler.started() + std::time::Duration::from_secs(61);
+        assert_eq!(run_due_started(&service, due).await, [id]);
+        assert_eq!(settled(&service, &key).await["state"], "finished");
+        assert_eq!(
+            fs::read(right.join("file")).unwrap(),
+            b"changed since preview"
+        );
+    }
+
+    #[tokio::test]
     async fn previews_and_runs_execute_as_background_jobs() {
         let (directory, service) = fixture();
-        let input = input(directory.path(), "Docs");
+        let mut input = input(directory.path(), "Docs");
+        input["options"]["review_policy"] = json!("required");
         let left = directory.path().join("Docs-left");
         let right = directory.path().join("Docs-right");
         fs::write(left.join("file"), b"data").unwrap();
@@ -1190,8 +1327,8 @@ mod tests {
         );
         assert!(!right.join("file").exists());
 
-        // PLAN.md §3.2: a pair's first run is always reviewed. Unreviewed
-        // it stops with the plan a person must see; nothing is written.
+        // The pair opted into review. An unreviewed run stops with the
+        // plan a person must see; nothing is written.
         let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
         service
             .handle(Request::call(4, SYNC_RUN, Some(run.clone())))
@@ -1328,8 +1465,6 @@ mod tests {
         let start = service.scheduler.started();
         let at = |seconds| start + std::time::Duration::from_secs(seconds);
 
-        // A first run is always reviewed by a person.
-        assert!(service.run_due(at(120)).is_empty());
         assert_eq!(first_sync(&service, &key).await["result"]["copied"], 1);
 
         fs::write(left.join("b"), b"b").unwrap();
@@ -3063,9 +3198,6 @@ mod tests {
 
         // States a person must see are never replaced by the scheduler.
         for status in [
-            SyncStatus::Previewed {
-                preview: sync_preview(),
-            },
             SyncStatus::NeedsApproval {
                 preview: sync_preview(),
             },
@@ -3143,6 +3275,7 @@ mod tests {
     async fn a_first_mirror_run_on_a_nonempty_target_waits_for_review() {
         let (directory, service) = fixture();
         let mut input = input(directory.path(), "Photos");
+        input["options"]["review_policy"] = json!("required");
         input["mode"] = json!({"kind": "mirror", "source": "left"});
         let right = directory.path().join("Photos-right");
         fs::write(right.join("extra"), b"keep me").unwrap();
@@ -3153,8 +3286,8 @@ mod tests {
         let key = json!({"id": created["id"]});
         let run = |right_deletions| json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": right_deletions});
 
-        // PLAN.md §3.6: a non-empty target needs explicit confirmation on the
-        // first run, even below the deletion fuse. Nothing may be archived yet.
+        // Opt-in review protects this non-empty target even below the
+        // removal fuse. Nothing may be archived yet.
         service
             .handle(Request::call(2, SYNC_RUN, Some(run(0))))
             .await
@@ -3184,6 +3317,7 @@ mod tests {
     async fn a_first_mirror_run_that_overwrites_target_content_waits_for_review() {
         let (directory, service) = fixture();
         let mut input = input(directory.path(), "Photos");
+        input["options"]["review_policy"] = json!("required");
         input["mode"] = json!({"kind": "mirror", "source": "left"});
         let left = directory.path().join("Photos-left");
         let right = directory.path().join("Photos-right");
@@ -3196,8 +3330,7 @@ mod tests {
         let key = json!({"id": created["id"]});
         let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
 
-        // The first run replaces existing target content: a non-empty target
-        // needs explicit confirmation even when nothing is deleted (§3.6).
+        // Opt-in review applies even when the run only replaces content.
         service
             .handle(Request::call(2, SYNC_RUN, Some(run.clone())))
             .await

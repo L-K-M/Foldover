@@ -191,6 +191,22 @@ pub enum FolderRecords {
     SourceOnly,
 }
 
+/// Whether a sync run requires human approval before it applies changes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum SyncReviewPolicy {
+    /// Apply changes automatically after previewing.
+    Automatic,
+    /// Wait for the user to approve the preview before applying.
+    Required,
+}
+
+/// Whether unusually large removals are stopped for review.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum LargeRemovalProtection {
+    Enabled,
+    Disabled,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct LocalPairOptions {
     pub modification_times: MetadataSync,
@@ -211,6 +227,8 @@ pub struct LocalPairOptions {
     pub records: FolderRecords,
     /// File data bytes per second the pair's copies share at most.
     pub bandwidth_limit: Option<u64>,
+    pub review_policy: SyncReviewPolicy,
+    pub removal_protection: LargeRemovalProtection,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -318,6 +336,14 @@ impl From<&foldover_client::PairOptions> for LocalPairOptions {
                 foldover_client::FolderRecords::SourceOnly => FolderRecords::SourceOnly,
             },
             bandwidth_limit: options.bandwidth_limit(),
+            review_policy: match options.review_policy() {
+                foldover_client::ReviewPolicy::Automatic => SyncReviewPolicy::Automatic,
+                foldover_client::ReviewPolicy::Required => SyncReviewPolicy::Required,
+            },
+            removal_protection: match options.removal_protection() {
+                foldover_client::RemovalProtection::Enabled => LargeRemovalProtection::Enabled,
+                foldover_client::RemovalProtection::Disabled => LargeRemovalProtection::Disabled,
+            },
         }
     }
 }
@@ -369,12 +395,29 @@ impl TryFrom<LocalPairOptions> for foldover_client::PairOptions {
                 .map_err(|_| foldover_client::InvalidPair::Canary)?,
         )
         .map(|converted| {
-            converted.with_records(match options.records {
-                FolderRecords::Both => foldover_client::FolderRecords::Both,
-                FolderRecords::SourceOnly => foldover_client::FolderRecords::SourceOnly,
-            })
+            converted
+                .with_records(match options.records {
+                    FolderRecords::Both => foldover_client::FolderRecords::Both,
+                    FolderRecords::SourceOnly => foldover_client::FolderRecords::SourceOnly,
+                })
+                .with_bandwidth_limit(options.bandwidth_limit)
+                .map(|o| {
+                    o.with_review_policy(match options.review_policy {
+                        SyncReviewPolicy::Automatic => foldover_client::ReviewPolicy::Automatic,
+                        SyncReviewPolicy::Required => foldover_client::ReviewPolicy::Required,
+                    })
+                    .with_removal_protection(
+                        match options.removal_protection {
+                            LargeRemovalProtection::Enabled => {
+                                foldover_client::RemovalProtection::Enabled
+                            }
+                            LargeRemovalProtection::Disabled => {
+                                foldover_client::RemovalProtection::Disabled
+                            }
+                        },
+                    )
+                })
         })?
-        .with_bandwidth_limit(options.bandwidth_limit)
     }
 }
 
@@ -635,6 +678,8 @@ mod tests {
                     canary: Some(b"docs/canary.txt".to_vec()),
                     records: FolderRecords::SourceOnly,
                     bandwidth_limit: Some(2_000_000),
+                    review_policy: SyncReviewPolicy::Required,
+                    removal_protection: LargeRemovalProtection::Enabled,
                 },
             };
             let domain = foldover_client::PairDraft::try_from(draft.clone()).unwrap();
@@ -713,5 +758,49 @@ mod tests {
     #[test]
     fn core_version_is_the_package_version() {
         assert_eq!(super::core_version(), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn default_options_carry_review_policy_and_removal_protection() {
+        let defaults = default_pair_options();
+        assert!(
+            matches!(defaults.review_policy, SyncReviewPolicy::Automatic),
+            "review policy defaults to Automatic"
+        );
+        assert!(
+            matches!(defaults.removal_protection, LargeRemovalProtection::Enabled),
+            "removal protection defaults to Enabled"
+        );
+    }
+
+    #[test]
+    fn review_policy_and_removal_protection_round_trip_all_combinations() {
+        let policies = [SyncReviewPolicy::Automatic, SyncReviewPolicy::Required];
+        let protections = [
+            LargeRemovalProtection::Enabled,
+            LargeRemovalProtection::Disabled,
+        ];
+        for policy in policies {
+            for protection in protections {
+                let base = default_pair_options();
+                let options = LocalPairOptions {
+                    review_policy: policy,
+                    removal_protection: protection,
+                    ..base
+                };
+                let domain = foldover_client::PairOptions::try_from(options.clone()).unwrap();
+                let round_tripped: LocalPairOptions = (&domain).into();
+                assert_eq!(
+                    round_tripped.review_policy, policy,
+                    "round-trip failed for policy={:?}, protection={:?}",
+                    policy, protection
+                );
+                assert_eq!(
+                    round_tripped.removal_protection, protection,
+                    "round-trip failed for policy={:?}, protection={:?}",
+                    policy, protection
+                );
+            }
+        }
     }
 }

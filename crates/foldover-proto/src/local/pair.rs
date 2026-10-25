@@ -1,7 +1,7 @@
 use foldover_types::{
     DailySchedule, Durability, Filters, FolderRecords, InvalidPair, MetadataPolicy, PairConfig,
-    PairDraft, PairOptions, PairRoot, Propagation, Schedule, ScheduleInterval, Side, SyncMode,
-    SyncPath, TimeOfDay, Weekday, Weekdays,
+    PairDraft, PairOptions, PairRoot, Propagation, RemovalProtection, ReviewPolicy, Schedule,
+    ScheduleInterval, Side, SyncMode, SyncPath, TimeOfDay, Weekday, Weekdays,
 };
 use serde::{Deserialize, Serialize};
 
@@ -106,6 +106,60 @@ impl PairRecords {
     }
 }
 
+/// Whether a sync run requires a person to review the preview first.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PairReviewPolicy {
+    #[default]
+    Automatic,
+    Required,
+}
+
+/// Whether unusually large removals or sudden emptying stop for review.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PairRemovalProtection {
+    #[default]
+    Enabled,
+    Disabled,
+}
+
+impl From<ReviewPolicy> for PairReviewPolicy {
+    fn from(policy: ReviewPolicy) -> Self {
+        match policy {
+            ReviewPolicy::Automatic => Self::Automatic,
+            ReviewPolicy::Required => Self::Required,
+        }
+    }
+}
+
+impl From<PairReviewPolicy> for ReviewPolicy {
+    fn from(policy: PairReviewPolicy) -> Self {
+        match policy {
+            PairReviewPolicy::Automatic => Self::Automatic,
+            PairReviewPolicy::Required => Self::Required,
+        }
+    }
+}
+
+impl From<RemovalProtection> for PairRemovalProtection {
+    fn from(protection: RemovalProtection) -> Self {
+        match protection {
+            RemovalProtection::Enabled => Self::Enabled,
+            RemovalProtection::Disabled => Self::Disabled,
+        }
+    }
+}
+
+impl From<PairRemovalProtection> for RemovalProtection {
+    fn from(protection: PairRemovalProtection) -> Self {
+        match protection {
+            PairRemovalProtection::Enabled => Self::Enabled,
+            PairRemovalProtection::Disabled => Self::Disabled,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairSettings {
@@ -130,6 +184,12 @@ pub struct PairSettings {
     /// File data bytes per second the pair's copies share at most.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bandwidth_limit: Option<u64>,
+    /// Whether a sync run requires a person to review the preview first.
+    #[serde(default)]
+    pub review_policy: PairReviewPolicy,
+    /// Whether unusually large removals or sudden emptying stop for review.
+    #[serde(default)]
+    pub removal_protection: PairRemovalProtection,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -236,6 +296,8 @@ impl From<&PairOptions> for PairSettings {
                 FolderRecords::SourceOnly => PairRecords::SourceOnly,
             },
             bandwidth_limit: options.bandwidth_limit(),
+            review_policy: options.review_policy().into(),
+            removal_protection: options.removal_protection().into(),
         }
     }
 }
@@ -285,12 +347,18 @@ impl TryFrom<PairSettings> for PairOptions {
                 .map_err(|_| InvalidPair::Canary)?,
         )
         .map(|options| {
-            options.with_records(match settings.records {
-                PairRecords::Both => FolderRecords::Both,
-                PairRecords::SourceOnly => FolderRecords::SourceOnly,
-            })
+            options
+                .with_records(match settings.records {
+                    PairRecords::Both => FolderRecords::Both,
+                    PairRecords::SourceOnly => FolderRecords::SourceOnly,
+                })
+                .with_bandwidth_limit(settings.bandwidth_limit)
+                .map(|options| {
+                    options
+                        .with_review_policy(settings.review_policy.into())
+                        .with_removal_protection(settings.removal_protection.into())
+                })
         })?
-        .with_bandwidth_limit(settings.bandwidth_limit)
     }
 }
 
@@ -547,6 +615,59 @@ mod tests {
         assert_eq!(json["records"], json!("sourceOnly"));
         let read: PairSettings = serde_json::from_value(json).unwrap();
         assert_eq!(PairOptions::try_from(read).unwrap(), source_only);
+    }
+
+    #[test]
+    fn safety_settings_round_trip_all_combinations_and_defaults() {
+        // All four combinations round-trip through the wire.
+        for review in [ReviewPolicy::Automatic, ReviewPolicy::Required] {
+            for removal in [RemovalProtection::Enabled, RemovalProtection::Disabled] {
+                let options = PairOptions::default()
+                    .with_review_policy(review)
+                    .with_removal_protection(removal);
+                let settings = PairSettings::from(&options);
+                let json = serde_json::to_value(&settings).unwrap();
+                let read: PairSettings = serde_json::from_value(json).unwrap();
+                let restored = PairOptions::try_from(read).unwrap();
+                assert_eq!(restored.review_policy(), review);
+                assert_eq!(restored.removal_protection(), removal);
+            }
+        }
+        // Omitted wire fields yield defaults.
+        let minimal: PairSettings = serde_json::from_value(json!({
+            "modification_times":"sync","extended_attributes":"sync",
+            "permissions":"sync","durability":"standard",
+            "schedule":{"kind":"manual"},
+            "filters":[],"size_limit":null,"age_limit":null,
+        }))
+        .unwrap();
+        let from_minimal = PairOptions::try_from(minimal).unwrap();
+        assert_eq!(from_minimal.review_policy(), ReviewPolicy::Automatic);
+        assert_eq!(
+            from_minimal.removal_protection(),
+            RemovalProtection::Enabled
+        );
+        // Invalid enum strings are rejected by serde.
+        assert!(
+            serde_json::from_value::<PairSettings>(json!({
+                "modification_times":"sync","extended_attributes":"sync",
+                "permissions":"sync","durability":"standard",
+                "schedule":{"kind":"manual"},
+                "filters":[],"size_limit":null,"age_limit":null,
+                "review_policy":"unknown",
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<PairSettings>(json!({
+                "modification_times":"sync","extended_attributes":"sync",
+                "permissions":"sync","durability":"standard",
+                "schedule":{"kind":"manual"},
+                "filters":[],"size_limit":null,"age_limit":null,
+                "removal_protection":"unknown",
+            }))
+            .is_err()
+        );
     }
 
     #[test]

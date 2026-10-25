@@ -51,6 +51,18 @@ enum PairRecords: Hashable, Sendable {
     case sourceOnly
 }
 
+/// Whether a sync run requires human approval before it applies changes.
+enum PairReviewPolicy: Hashable, Sendable {
+    case automatic
+    case required
+}
+
+/// Whether unusually large removals are stopped for review.
+enum PairRemovalProtection: Hashable, Sendable {
+    case enabled
+    case disabled
+}
+
 /// Metadata categories and flush strength a pair uses.
 struct PairOptions: Equatable, Sendable {
     var syncModificationTimes: Bool
@@ -70,6 +82,8 @@ struct PairOptions: Equatable, Sendable {
     var records: PairRecords
     /// File data bytes per second the pair's copies share at most.
     var bandwidthLimit: UInt64?
+    var reviewPolicy: PairReviewPolicy
+    var removalProtection: PairRemovalProtection
 
     /// The engine's defaults, so the app never restates them.
     static var defaults: PairOptions { pairOptions(FoldoverCore.defaultPairOptions()) }
@@ -262,6 +276,14 @@ private func pairOptions(_ options: LocalPairOptions) -> PairOptions {
     case .standard: .standard
     case .full: .full
     }
+    let reviewPolicy: PairReviewPolicy = switch options.reviewPolicy {
+    case .automatic: .automatic
+    case .required: .required
+    }
+    let removalProtection: PairRemovalProtection = switch options.removalProtection {
+    case .enabled: .enabled
+    case .disabled: .disabled
+    }
     return PairOptions(
         syncModificationTimes: options.modificationTimes == .sync,
         syncExtendedAttributes: options.extendedAttributes == .sync,
@@ -273,7 +295,9 @@ private func pairOptions(_ options: LocalPairOptions) -> PairOptions {
         ageLimit: options.ageLimit,
         canary: options.canary,
         records: options.records == .sourceOnly ? .sourceOnly : .both,
-        bandwidthLimit: options.bandwidthLimit
+        bandwidthLimit: options.bandwidthLimit,
+        reviewPolicy: reviewPolicy,
+        removalProtection: removalProtection
     )
 }
 
@@ -325,6 +349,14 @@ private func corePairOptions(_ options: PairOptions) -> LocalPairOptions {
     case .standard: .standard
     case .full: .full
     }
+    let reviewPolicy: SyncReviewPolicy = switch options.reviewPolicy {
+    case .automatic: .automatic
+    case .required: .required
+    }
+    let removalProtection: LargeRemovalProtection = switch options.removalProtection {
+    case .enabled: .enabled
+    case .disabled: .disabled
+    }
     return LocalPairOptions(
         modificationTimes: metadata(options.syncModificationTimes),
         extendedAttributes: metadata(options.syncExtendedAttributes),
@@ -336,7 +368,9 @@ private func corePairOptions(_ options: PairOptions) -> LocalPairOptions {
         ageLimit: options.ageLimit,
         canary: options.canary,
         records: options.records == .sourceOnly ? .sourceOnly : .both,
-        bandwidthLimit: options.bandwidthLimit
+        bandwidthLimit: options.bandwidthLimit,
+        reviewPolicy: reviewPolicy,
+        removalProtection: removalProtection
     )
 }
 
