@@ -25,7 +25,8 @@ pub use metadata_policy::{MetadataPolicy, Propagation};
 pub use names::{CaseMatching, NameMatching, UnicodeMatching};
 pub use options::{
     DailySchedule, Durability, Filters, FolderRecords, LocalDateTime, MIN_BANDWIDTH_LIMIT,
-    PairOptions, Schedule, ScheduleInterval, TimeOfDay, Weekday, Weekdays,
+    PairOptions, RemovalProtection, ReviewPolicy, Schedule, ScheduleInterval, TimeOfDay, Weekday,
+    Weekdays,
 };
 pub use review::{InvalidReviewToken, ReviewToken};
 pub use root::{PairRoot, PeerRoot, SftpRoot};

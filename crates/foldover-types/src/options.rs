@@ -250,6 +250,22 @@ pub enum FolderRecords {
     SourceOnly,
 }
 
+/// Whether a sync run requires a person to review the preview first.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum ReviewPolicy {
+    #[default]
+    Automatic,
+    Required,
+}
+
+/// Whether unusually large removals or sudden emptying stop for review.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum RemovalProtection {
+    #[default]
+    Enabled,
+    Disabled,
+}
+
 /// Gitignore-style exclusion rules, one per line, and an optional file
 /// size limit. They apply to both folders, so an excluded entry never
 /// looks deleted on one side.
@@ -334,6 +350,8 @@ pub struct PairOptions {
     records: FolderRecords,
     /// File data bytes per second the pair's copies share at most.
     bandwidth_limit: Option<u64>,
+    review_policy: ReviewPolicy,
+    removal_protection: RemovalProtection,
 }
 
 impl PairOptions {
@@ -350,6 +368,8 @@ impl PairOptions {
             canary: None,
             records: FolderRecords::Both,
             bandwidth_limit: None,
+            review_policy: ReviewPolicy::Automatic,
+            removal_protection: RemovalProtection::Enabled,
         }
     }
 
@@ -421,6 +441,28 @@ impl PairOptions {
 
     pub fn filters(&self) -> &Filters {
         &self.filters
+    }
+
+    pub fn with_review_policy(self, review_policy: ReviewPolicy) -> Self {
+        Self {
+            review_policy,
+            ..self
+        }
+    }
+
+    pub const fn review_policy(&self) -> ReviewPolicy {
+        self.review_policy
+    }
+
+    pub fn with_removal_protection(self, removal_protection: RemovalProtection) -> Self {
+        Self {
+            removal_protection,
+            ..self
+        }
+    }
+
+    pub const fn removal_protection(&self) -> RemovalProtection {
+        self.removal_protection
     }
 }
 
@@ -539,6 +581,24 @@ mod tests {
                 .bandwidth_limit(),
             None
         );
+    }
+
+    #[test]
+    fn safety_settings_default_to_automatic_and_enabled() {
+        let options = PairOptions::default();
+        assert_eq!(options.review_policy(), ReviewPolicy::Automatic);
+        assert_eq!(options.removal_protection(), RemovalProtection::Enabled);
+        // Builders set and preserve values.
+        let adjusted = options
+            .with_review_policy(ReviewPolicy::Required)
+            .with_removal_protection(RemovalProtection::Disabled);
+        assert_eq!(adjusted.review_policy(), ReviewPolicy::Required);
+        assert_eq!(adjusted.removal_protection(), RemovalProtection::Disabled);
+        // Switching back.
+        let back = adjusted
+            .with_review_policy(ReviewPolicy::Automatic)
+            .with_removal_protection(RemovalProtection::Enabled);
+        assert_eq!(back, PairOptions::default());
     }
 
     #[test]

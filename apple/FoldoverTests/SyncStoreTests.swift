@@ -500,6 +500,27 @@ func previewsPollUntilTheJobFinishes() async {
 
 @MainActor
 @Test
+func ordinarySyncUsesAFreshPlanAndOptedInReviewKeepsTheToken() async {
+    for reviewPolicy in [PairReviewPolicy.automatic, .required] {
+        let summary = preview(archivesInA: 0, needsApproval: false)
+        let client = ScriptedSyncClient([.previewed(summary), .idle])
+        let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+        let original = pair()
+        var options = original.settings.options
+        options.reviewPolicy = reviewPolicy
+        let configured = SyncPair(id: original.id, revision: original.revision,
+            settings: PairSettings(name: original.settings.name, left: original.settings.left,
+                right: original.settings.right, mode: original.settings.mode, options: options))
+        let viewModel = PairSyncViewModel(pair: configured, store: store, pairs: catalog(), agentConnected: true)
+        await viewModel.preview()
+        await viewModel.sync()
+        let tokens = await client.approvals.map(\.2)
+        #expect(tokens == [reviewPolicy == .required ? summary.reviewToken : nil])
+    }
+}
+
+@MainActor
+@Test
 func runsNeedingApprovalRetryWithTheReviewedCountsOrKeepThePreview() async throws {
     let summary = preview(archivesInA: 60, needsApproval: true)
     let result = RunSummary(cancelled: false, copied: 1, updated: 0, archived: 60, recovered: 0,
@@ -1844,7 +1865,12 @@ func outdatedPreviewsOfferNoReviewActions() async {
     )
     let current = preview(archivesInA: 2, needsApproval: false,
                           reviewToken: reviewTokenB, pairRevision: 1)
-    let pair = pair()
+    let original = pair()
+    var options = original.settings.options
+    options.reviewPolicy = .required
+    let pair = SyncPair(id: original.id, revision: original.revision,
+        settings: PairSettings(name: original.settings.name, left: original.settings.left,
+            right: original.settings.right, mode: original.settings.mode, options: options))
     #expect(pair.revision == 1)
     #expect(SyncStore.alert(for: pair, state: .needsApproval(stale)) == nil)
 

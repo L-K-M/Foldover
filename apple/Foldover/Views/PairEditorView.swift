@@ -50,7 +50,7 @@ struct PairEditorView: View {
                 .accessibilityAddTraits(.isHeader)
             InfoButton(
                 title: Text("Saving a Pair"),
-                message: Text("Saving configures the pair. Nothing is copied until you preview and sync.\n\nChoose the folders and direction, then review the live plan at the bottom. Run the first sync yourself before automatic syncs can start.")
+                message: Text("Saving configures the folders, direction and schedule. A scheduled pair can start its first sync automatically after saving.\n\nUse Preview to inspect a plan, or enable Require approval before syncing if you want every run to wait for you.")
             )
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -210,7 +210,7 @@ struct PairEditorView: View {
                 .pickerStyle(.menu)
                 InfoButton(
                     title: Text("Sync Automatically"),
-                    message: Text("Automatic syncs start after the first sync you run yourself. Choose a schedule to keep the folders in step while the app is closed; the background agent must be running and both folders must be available.\n\nAutomatic syncs stop for review instead of asking when they would archive many items. Power and network restrictions can also postpone a run.\(viewModel.scheduleNote.map { "\n\n\($0)" } ?? "")")
+                    message: Text("Choose a schedule to keep the folders in step while the app is closed. The background agent must be running and both folders must be available.\n\nRuns wait if you require approval before syncing. With removal protection enabled, unusually large removals stop for review. Power and network restrictions can also postpone a run.\(viewModel.scheduleNote.map { "\n\n\($0)" } ?? "")")
                 )
             }
             if viewModel.showsDailySettings {
@@ -219,6 +219,13 @@ struct PairEditorView: View {
                 if let warning = viewModel.dailyWarning {
                     WarningLabel(text: warning)
                 }
+            }
+            HStack {
+                Toggle("Require approval before syncing", isOn: $viewModel.requiresSyncApproval)
+                InfoButton(
+                    title: Text("Require approval before syncing"),
+                    message: Text("When enabled, every sync waits for you to approve its plan. Scheduled backups wait too.")
+                )
             }
         } header: {
             Text("Sync")
@@ -331,6 +338,13 @@ struct PairEditorView: View {
             }
             if let warning = viewModel.durabilityWarning {
                 WarningLabel(text: warning)
+            }
+            HStack {
+                Toggle("Stop unusually large removals", isOn: $viewModel.stopsLargeRemovals)
+                InfoButton(
+                    title: Text("Stop unusually large removals"),
+                    message: Text("Stops unusually large removals or changes that would empty the other folder after one folder suddenly becomes empty. Review the plan to continue.")
+                )
             }
         }
     }

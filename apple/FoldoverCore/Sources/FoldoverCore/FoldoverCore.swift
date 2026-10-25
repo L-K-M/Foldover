@@ -1212,6 +1212,8 @@ public struct LocalPairOptions: Equatable, Hashable {
      * File data bytes per second the pair's copies share at most.
      */
     public var bandwidthLimit: UInt64?
+    public var reviewPolicy: SyncReviewPolicy
+    public var removalProtection: LargeRemovalProtection
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1232,7 +1234,7 @@ public struct LocalPairOptions: Equatable, Hashable {
          */canary: Data?, records: FolderRecords, 
         /**
          * File data bytes per second the pair's copies share at most.
-         */bandwidthLimit: UInt64?) {
+         */bandwidthLimit: UInt64?, reviewPolicy: SyncReviewPolicy, removalProtection: LargeRemovalProtection) {
         self.modificationTimes = modificationTimes
         self.extendedAttributes = extendedAttributes
         self.permissions = permissions
@@ -1244,6 +1246,8 @@ public struct LocalPairOptions: Equatable, Hashable {
         self.canary = canary
         self.records = records
         self.bandwidthLimit = bandwidthLimit
+        self.reviewPolicy = reviewPolicy
+        self.removalProtection = removalProtection
     }
 
     
@@ -1272,7 +1276,9 @@ public struct FfiConverterTypeLocalPairOptions: FfiConverterRustBuffer {
                 ageLimit: FfiConverterOptionUInt32.read(from: &buf), 
                 canary: FfiConverterOptionData.read(from: &buf), 
                 records: FfiConverterTypeFolderRecords.read(from: &buf), 
-                bandwidthLimit: FfiConverterOptionUInt64.read(from: &buf)
+                bandwidthLimit: FfiConverterOptionUInt64.read(from: &buf), 
+                reviewPolicy: FfiConverterTypeSyncReviewPolicy.read(from: &buf), 
+                removalProtection: FfiConverterTypeLargeRemovalProtection.read(from: &buf)
         )
     }
 
@@ -1288,6 +1294,8 @@ public struct FfiConverterTypeLocalPairOptions: FfiConverterRustBuffer {
         FfiConverterOptionData.write(value.canary, into: &buf)
         FfiConverterTypeFolderRecords.write(value.records, into: &buf)
         FfiConverterOptionUInt64.write(value.bandwidthLimit, into: &buf)
+        FfiConverterTypeSyncReviewPolicy.write(value.reviewPolicy, into: &buf)
+        FfiConverterTypeLargeRemovalProtection.write(value.removalProtection, into: &buf)
     }
 }
 
@@ -3166,6 +3174,75 @@ public func FfiConverterTypeFolderRecords_lower(_ value: FolderRecords) -> RustB
 
 
 /**
+ * Whether unusually large removals are stopped for review.
+ */
+
+public enum LargeRemovalProtection: Equatable, Hashable {
+    
+    case enabled
+    case disabled
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension LargeRemovalProtection: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLargeRemovalProtection: FfiConverterRustBuffer {
+    typealias SwiftType = LargeRemovalProtection
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LargeRemovalProtection {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .enabled
+        
+        case 2: return .disabled
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: LargeRemovalProtection, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .enabled:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .disabled:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLargeRemovalProtection_lift(_ buf: RustBuffer) throws -> LargeRemovalProtection {
+    return try FfiConverterTypeLargeRemovalProtection.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLargeRemovalProtection_lower(_ value: LargeRemovalProtection) -> RustBuffer {
+    return FfiConverterTypeLargeRemovalProtection.lower(value)
+}
+
+
+
+/**
  * The person's choice for automatic syncs in Low Power Mode.
  */
 
@@ -4362,6 +4439,81 @@ public func FfiConverterTypeSyncJobState_lift(_ buf: RustBuffer) throws -> SyncJ
 #endif
 public func FfiConverterTypeSyncJobState_lower(_ value: SyncJobState) -> RustBuffer {
     return FfiConverterTypeSyncJobState.lower(value)
+}
+
+
+
+/**
+ * Whether a sync run requires human approval before it applies changes.
+ */
+
+public enum SyncReviewPolicy: Equatable, Hashable {
+    
+    /**
+     * Apply changes automatically after previewing.
+     */
+    case automatic
+    /**
+     * Wait for the user to approve the preview before applying.
+     */
+    case required
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SyncReviewPolicy: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSyncReviewPolicy: FfiConverterRustBuffer {
+    typealias SwiftType = SyncReviewPolicy
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SyncReviewPolicy {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .automatic
+        
+        case 2: return .required
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SyncReviewPolicy, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .automatic:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .required:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncReviewPolicy_lift(_ buf: RustBuffer) throws -> SyncReviewPolicy {
+    return try FfiConverterTypeSyncReviewPolicy.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncReviewPolicy_lower(_ value: SyncReviewPolicy) -> RustBuffer {
+    return FfiConverterTypeSyncReviewPolicy.lower(value)
 }
 
 

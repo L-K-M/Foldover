@@ -624,12 +624,13 @@ struct PairSyncViewModel {
     }
 
     func preview() async { await store.preview(pair.id) }
-    /// Run the shown plan, or an unreviewed sync when none is shown. A
-    /// preview made for another pair revision never falls back to a run
-    /// the changed pair did not ask for; preview again first.
+    /// Routine syncs use a fresh plan without binding to an optional
+    /// preview. Opt-in review and explicit removal approvals keep exact
+    /// review tokens. An obsolete configuration still needs a new preview.
     func sync() async {
         guard canSync else { return }
-        await store.run(pair.id, reviewToken: reviewable?.reviewToken)
+        let token = pair.settings.options.reviewPolicy == .required ? reviewable?.reviewToken : nil
+        await store.run(pair.id, reviewToken: token)
     }
     func cancel() async { await store.cancel(pair.id) }
     /// Reverse the shown sync. Automatic syncs then wait for a person.

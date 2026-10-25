@@ -47,12 +47,16 @@ is skipped until its job ends.
 - Changes inside `.foldover`, temporaries and `.DS_Store` are ignored. A
   run's own writes still mark the pair changed, so one quick follow-up run
   finds nothing to do.
-- **Reviewed first:** a pair runs unattended only after a first sync has
-  recorded its folder identities. The first run is always one a person
-  started.
-- **Unattended gate:** unattended runs never carry approvals. Above the
-  unattended deletion limit they stop with `NeedsApproval`, which the app
-  shows ([ADR 0013](0013-deletion-review-fuse.md)).
+- **First run:** new pairs become due on the configured cadence. The default
+  `automatic` review policy permits unattended initial copies. The optional
+  `required` policy stops every run with `NeedsApproval` until a person
+  approves its unchanged plan. Folder identities are recorded only after a
+  run completes; root checks apply on every run.
+- **Unattended gate:** unattended runs never carry approvals. With the separate
+  removal-protection setting enabled (the default), above-limit removals and
+  suddenly empty folders stop with `NeedsApproval`, which the app shows
+  ([ADR 0013](0013-deletion-review-fuse.md)). An optional `Previewed` result
+  alone does not suspend scheduling; the next due run observes a fresh plan.
 - **Pause** (state schema v11): `automation.pause` holds automatic runs
   for every pair, for 1 minute to 1 week or until `automation.resume`.
   It survives agent restarts. Changes noticed meanwhile stay recorded and

@@ -56,7 +56,8 @@ Details in [competitors.md](docs/research/competitors.md).
 ### 3.2 Principles
 
 1. **The preview is the product.** Every pair carries a live plain-language
-   plan; the first run of every pair is previewed.
+   plan; ordinary scheduled syncs execute the fresh preview without stopping.
+   Pairs may opt in to `--review required` to review every run.
 2. **Never lose anything quietly.** Replaced and deleted files are archived;
    conflicts wait in a queue; mass deletions stop for confirmation.
 3. **Speak plainly.** Three modes, named for their effect. No "Blind Backup"
@@ -102,18 +103,28 @@ during runs.
 
 ### 3.6 Safety defaults
 
-- **First run** of a pair: preview required; Backup and Sync never propagate
-  deletions; a non-empty target needs explicit confirmation.
+- **Require approval before syncing** is a per-pair setting, off by default
+  (`--review automatic`). Ordinary manual and scheduled syncs, including the
+  initial backup, execute the fresh observed plan. Turning it on
+  (`--review required`) requires approval on every run. Explicit approvals
+  remain bound to the exact reviewed plan; changes require a new review.
+- **Stop unusually large removals** is a separate per-pair setting, on by
+  default (`--removal-protection enabled`). It stops numeric mass removals and
+  propagation from a suddenly empty folder for review. Turning it off disables
+  these two review stops; root identity, canary, space, lease, revision and
+  per-file freshness checks remain enforced.
+- **First run:** Sync and Backup have no prior base from which to infer source
+  deletions. Mirror may archive target extras under the configured policies.
 - **Archive:** replaced and deleted files go to the endpoint's
   `.foldover/archive/` (30-day retention, browsable, "Put back").
-- **Gates before any destructive step:**
+- **Checks before destructive steps:**
   - the root is present and its volume identity is unchanged;
-  - the target is not suddenly empty;
   - the optional canary file is unchanged;
   - there is enough free space;
-  - mass-deletion fuse: in a preview, deleting more than 50 files or 1 % of
-    the pair (whichever is higher) needs an extra confirmation, and an
-    unattended run that would delete more than 50 % stops for review.
+  - with removal protection enabled, a suddenly empty folder cannot empty
+    its partner without review, and removing more than 50 paths **and** 1% of
+    existing target paths needs confirmation. Unattended runs that would remove
+    more than 50% stop, including small pairs.
 - **Readiness warnings at pair creation:**
   - a root inside a cloud-managed folder (iCloud Drive, Desktop & Documents,
     a File Provider domain) gets a warning that another sync engine manages

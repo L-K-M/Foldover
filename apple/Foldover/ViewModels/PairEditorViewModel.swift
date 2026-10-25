@@ -112,6 +112,18 @@ final class PairEditorViewModel: Identifiable {
         return String(localized: "Foldover keeps no .foldover folder in \(target): files a sync replaces there are deleted, not archived, Undo isn't available, and another Mac syncing to it at the same time goes unnoticed.")
     }
 
+    /// Whether the user must approve each sync preview before changes apply.
+    var requiresSyncApproval: Bool {
+        get { options.reviewPolicy == .required }
+        set { options.reviewPolicy = newValue ? .required : .automatic }
+    }
+
+    /// Whether unusually large removals are stopped for review.
+    var stopsLargeRemovals: Bool {
+        get { options.removalProtection == .enabled }
+        set { options.removalProtection = newValue ? .enabled : .disabled }
+    }
+
     /// A folder that cannot hold Foldover's records can only be a
     /// Backup's target that keeps none (PLAN.md §3.6); until it is,
     /// saving is blocked, since every sync would fail.

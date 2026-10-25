@@ -7,7 +7,8 @@ use foldover_db::{
 use foldover_types::{
     BaselineEntry, DailySchedule, Durability, EndpointId, Filters, FolderRecords, InvalidPair,
     LocalRoot, MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions, PairRoot, Propagation,
-    Resolution, Schedule, ScheduleInterval, Side, SyncMode, SyncPath, TimeOfDay, Weekdays,
+    RemovalProtection, Resolution, ReviewPolicy, Schedule, ScheduleInterval, Side, SyncMode,
+    SyncPath, TimeOfDay, Weekdays,
 };
 
 use crate::BaseUpdate;
@@ -47,6 +48,10 @@ const DAILY_SCHEDULE: &str = "daily";
 const FULL_DURABILITY: &str = "full";
 const RECORDS_IN_BOTH: &str = "both";
 const RECORDS_IN_SOURCE: &str = "source";
+const REVIEW_AUTOMATIC: &str = "automatic";
+const REVIEW_REQUIRED: &str = "required";
+const REMOVAL_ENABLED: &str = "enabled";
+const REMOVAL_DISABLED: &str = "disabled";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -426,6 +431,16 @@ fn values(draft: &PairDraft) -> PairValues {
         bandwidth_limit: options
             .bandwidth_limit()
             .map(|rate| i64::try_from(rate).unwrap_or(i64::MAX)),
+        review_policy: match options.review_policy() {
+            ReviewPolicy::Automatic => REVIEW_AUTOMATIC,
+            ReviewPolicy::Required => REVIEW_REQUIRED,
+        }
+        .to_owned(),
+        removal_protection: match options.removal_protection() {
+            RemovalProtection::Enabled => REMOVAL_ENABLED,
+            RemovalProtection::Disabled => REMOVAL_DISABLED,
+        }
+        .to_owned(),
     }
 }
 
@@ -525,6 +540,16 @@ fn from_row(row: PairRow) -> Result<PairConfig, Error> {
         .bandwidth_limit
         .map(|rate| u64::try_from(rate).map_err(|_| Error::InvalidStored("bandwidth limit")))
         .transpose()?;
+    let review_policy = match row.values.review_policy.as_str() {
+        REVIEW_AUTOMATIC => ReviewPolicy::Automatic,
+        REVIEW_REQUIRED => ReviewPolicy::Required,
+        _ => return Err(Error::InvalidStored("review policy")),
+    };
+    let removal_protection = match row.values.removal_protection.as_str() {
+        REMOVAL_ENABLED => RemovalProtection::Enabled,
+        REMOVAL_DISABLED => RemovalProtection::Disabled,
+        _ => return Err(Error::InvalidStored("removal protection")),
+    };
     let draft = PairDraft::new(
         row.values.name,
         PairRoot::from_bytes(row.values.left_root)?,
@@ -537,7 +562,9 @@ fn from_row(row: PairRow) -> Result<PairConfig, Error> {
             .with_filters(filters)
             .with_canary(canary)?
             .with_records(records)
-            .with_bandwidth_limit(bandwidth_limit)?,
+            .with_bandwidth_limit(bandwidth_limit)?
+            .with_review_policy(review_policy)
+            .with_removal_protection(removal_protection),
     );
     let revision = u64::try_from(row.revision).map_err(|_| Error::InvalidStored("revision"))?;
     Ok(PairConfig::from_stored(id, revision, draft)?)
@@ -681,6 +708,8 @@ mod tests {
                 schedule_days: None,
                 records: RECORDS_IN_BOTH.into(),
                 bandwidth_limit: None,
+                review_policy: REVIEW_AUTOMATIC.into(),
+                removal_protection: REMOVAL_ENABLED.into(),
             })
             .unwrap();
         drop(database);
@@ -715,6 +744,8 @@ mod tests {
                 schedule_days: None,
                 records: RECORDS_IN_BOTH.into(),
                 bandwidth_limit: None,
+                review_policy: REVIEW_AUTOMATIC.into(),
+                removal_protection: REMOVAL_ENABLED.into(),
             })
             .unwrap();
         let id = PairId::from_bytes(row.id.try_into().unwrap()).unwrap();
@@ -1144,5 +1175,68 @@ mod tests {
             store.base(pair.id()),
             Err(Error::InvalidStored(_))
         ));
+    }
+
+    #[test]
+    fn safety_settings_round_trip_all_combinations_through_db_and_state() {
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        for review in [ReviewPolicy::Automatic, ReviewPolicy::Required] {
+            for removal in [RemovalProtection::Enabled, RemovalProtection::Disabled] {
+                let d = draft(SyncMode::Sync).with_options(
+                    PairOptions::default()
+                        .with_review_policy(review)
+                        .with_removal_protection(removal),
+                );
+                let saved = store.create(&d).unwrap();
+                assert_eq!(saved.draft().options().review_policy(), review);
+                assert_eq!(saved.draft().options().removal_protection(), removal);
+            }
+        }
+        // Reopen and verify all four pairs.
+        drop(store);
+        let store = PairStore::open(&location).unwrap();
+        let pairs = store.pairs().unwrap();
+        assert_eq!(pairs.len(), 4);
+        let combos: Vec<_> = pairs
+            .iter()
+            .map(|p| {
+                (
+                    p.draft().options().review_policy(),
+                    p.draft().options().removal_protection(),
+                )
+            })
+            .collect();
+        assert!(combos.contains(&(ReviewPolicy::Automatic, RemovalProtection::Enabled)));
+        assert!(combos.contains(&(ReviewPolicy::Automatic, RemovalProtection::Disabled)));
+        assert!(combos.contains(&(ReviewPolicy::Required, RemovalProtection::Enabled)));
+        assert!(combos.contains(&(ReviewPolicy::Required, RemovalProtection::Disabled)));
+    }
+
+    #[test]
+    fn new_pairs_preserve_default_policies_after_reopening() {
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        let d = draft(SyncMode::Sync).with_options(PairOptions::default());
+        let saved = store.create(&d).unwrap();
+        assert_eq!(
+            saved.draft().options().review_policy(),
+            ReviewPolicy::Automatic
+        );
+        assert_eq!(
+            saved.draft().options().removal_protection(),
+            RemovalProtection::Enabled
+        );
+        drop(store);
+        // Reopen and verify defaults persist.
+        let store = PairStore::open(&location).unwrap();
+        let pairs = store.pairs().unwrap();
+        assert_eq!(pairs.len(), 1);
+        let p = &pairs[0];
+        assert_eq!(p.draft().options().review_policy(), ReviewPolicy::Automatic);
+        assert_eq!(
+            p.draft().options().removal_protection(),
+            RemovalProtection::Enabled
+        );
     }
 }

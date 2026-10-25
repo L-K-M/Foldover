@@ -3,8 +3,9 @@
 
 use foldover_client::{
     DailySchedule, Durability, Filters, FolderRecords, MetadataPolicy, PairConfig, PairDraft,
-    PairId, PairOptions, PairRoot, Propagation, ReviewToken, Schedule, ScheduleInterval, Side,
-    SocketLocation, SyncMode, SyncPath, TimeOfDay, Weekday, Weekdays,
+    PairId, PairOptions, PairRoot, Propagation, RemovalProtection, ReviewPolicy, ReviewToken,
+    Schedule, ScheduleInterval, Side, SocketLocation, SyncMode, SyncPath, TimeOfDay, Weekday,
+    Weekdays,
 };
 use foldover_client::{DeviceId, PeerStatus, ShareId, SyncItemKind, SyncStatus};
 use foldover_proto::local::PairRecord;
@@ -59,7 +60,7 @@ const USAGE: &str = "usage: foldover --version
        foldover servers [browse sftp://[user@]host[:port]/path] [--socket PATH]
 LEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)
 MODE: sync | mirror-left | mirror-right | backup-left | backup-right
-OPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --records (both | source: a backup-* target that cannot hold .foldover keeps nothing, archives nothing); --schedule (manual | changes | MINUTES | daily@HH:MM[:DAYS]); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --bandwidth-limit (MEGABYTES per second | none); --canary (PATH | none)
+OPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --records (both | source: a backup-* target that cannot hold .foldover keeps nothing, archives nothing); --schedule (manual | changes | MINUTES | daily@HH:MM[:DAYS]); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --bandwidth-limit (MEGABYTES per second | none); --canary (PATH | none); --review (automatic | required); --removal-protection (enabled | disabled)
 Updates keep options that are not named.";
 
 enum Request {
@@ -213,6 +214,8 @@ struct OptionChanges {
     records: Option<FolderRecords>,
     /// `Some(None)` removes the limit.
     bandwidth_limit: Option<Option<u64>>,
+    review_policy: Option<ReviewPolicy>,
+    removal_protection: Option<RemovalProtection>,
 }
 
 impl OptionChanges {
@@ -243,6 +246,8 @@ impl OptionChanges {
         .with_records(self.records.unwrap_or(base.records()))
         .with_bandwidth_limit(self.bandwidth_limit.unwrap_or(base.bandwidth_limit()))
         .expect("the bandwidth limit is checked when parsed")
+        .with_review_policy(self.review_policy.unwrap_or(base.review_policy()))
+        .with_removal_protection(self.removal_protection.unwrap_or(base.removal_protection()))
     }
 }
 
@@ -690,6 +695,22 @@ fn option_changes(args: &[OsString]) -> Option<OptionChanges> {
                     minutes => {
                         Schedule::Every(ScheduleInterval::from_minutes(minutes.parse().ok()?).ok()?)
                     }
+                })
+                .is_some(),
+            "--review" => changes
+                .review_policy
+                .replace(match value {
+                    "automatic" => ReviewPolicy::Automatic,
+                    "required" => ReviewPolicy::Required,
+                    _ => return None,
+                })
+                .is_some(),
+            "--removal-protection" => changes
+                .removal_protection
+                .replace(match value {
+                    "enabled" => RemovalProtection::Enabled,
+                    "disabled" => RemovalProtection::Disabled,
+                    _ => return None,
                 })
                 .is_some(),
             _ => return None,
@@ -1453,6 +1474,73 @@ mod tests {
 
     fn req(args: &[&str]) -> Request {
         request(args.iter().map(|argument| OsString::from(*argument)))
+    }
+
+    #[test]
+    fn review_and_removal_options_are_independent_and_updates_preserve_them() {
+        let Request::Pairs(_, PairCommand::Add(draft)) = req(&[
+            "pairs",
+            "add",
+            "Unattended",
+            "/a",
+            "/b",
+            "backup-left",
+            "--review",
+            "required",
+            "--removal-protection",
+            "disabled",
+        ]) else {
+            panic!("both safety settings must be accepted");
+        };
+        assert_eq!(
+            draft.options().review_policy(),
+            foldover_client::ReviewPolicy::Required
+        );
+        assert_eq!(
+            draft.options().removal_protection(),
+            foldover_client::RemovalProtection::Disabled
+        );
+        let changes =
+            option_changes(&[OsString::from("--times"), OsString::from("ignore")]).unwrap();
+        let updated = changes.apply(draft.options().clone());
+        assert_eq!(
+            updated.review_policy(),
+            foldover_client::ReviewPolicy::Required
+        );
+        assert_eq!(
+            updated.removal_protection(),
+            foldover_client::RemovalProtection::Disabled
+        );
+
+        let changes =
+            option_changes(&[OsString::from("--review"), OsString::from("automatic")]).unwrap();
+        let updated = changes.apply(updated);
+        assert_eq!(
+            updated.review_policy(),
+            foldover_client::ReviewPolicy::Automatic
+        );
+        assert_eq!(
+            updated.removal_protection(),
+            foldover_client::RemovalProtection::Disabled
+        );
+    }
+
+    #[test]
+    fn review_and_removal_options_reject_unknown_or_duplicate_values() {
+        for options in [
+            vec!["--review", "sometimes"],
+            vec!["--removal-protection", "sometimes"],
+            vec!["--review", "automatic", "--review", "required"],
+            vec![
+                "--removal-protection",
+                "enabled",
+                "--removal-protection",
+                "disabled",
+            ],
+        ] {
+            let values: Vec<_> = options.iter().map(OsString::from).collect();
+            assert!(option_changes(&values).is_none(), "{options:?}");
+        }
     }
 
     #[test]

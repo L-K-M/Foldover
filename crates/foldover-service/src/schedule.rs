@@ -8,8 +8,8 @@
 //! computer's changes (shares, SFTP) are checked every few minutes
 //! (PLAN.md §3.5, §4.8). `Daily` pairs are due once
 //! their latest scheduled local moment has passed the last run's start.
-//! Pairs that never completed a first sync are skipped: their first run
-//! is reviewed by a person.
+//! New pairs are due on the same cadence. The run enforces the pair's
+//! independent review and large-removal settings.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -622,7 +622,6 @@ impl Service {
             let candidates = pairs
                 .into_iter()
                 .filter(|pair| pair.draft().options().schedule() != Schedule::Manual)
-                .filter(|pair| engine.first_synced(pair.id()).unwrap_or(false))
                 // After an undo; an unreadable hold counts as held.
                 .filter(|pair| !engine.automation_held(pair.id()).unwrap_or(true))
                 .collect::<Vec<_>>();

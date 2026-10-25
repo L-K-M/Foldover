@@ -4,7 +4,7 @@
 //! ```text
 //! prepare: keep the Mac awake ─▶ open roots ─▶ observe both sides
 //!          ─▶ plan against the base
-//! execute: first-run, emptiness and deletion gates ─▶ root identities
+//! execute: configured review and removal gates ─▶ root identities
 //!          ─▶ archive leftovers
 //!          ─▶ forward pass (parents first): copies, metadata, base records
 //!          ─▶ reverse pass (children first): archives
@@ -38,7 +38,8 @@ use foldover_state::{
 use foldover_types::{
     BaselineEntry, ChangeKind, ConflictKind, Durability, EndpointId, EntryContent, EntryDecision,
     EntryKind, EntryVersion, NameMatching, PairConfig, PairId, PairOptions, Propagation,
-    Resolution, ReviewToken, ScanControl, Side, Skip, SyncPath, UnicodeMatching,
+    RemovalProtection, Resolution, ReviewPolicy, ReviewToken, ScanControl, Side, Skip, SyncPath,
+    UnicodeMatching,
 };
 use unicode_normalization::UnicodeNormalization;
 
@@ -334,6 +335,7 @@ pub struct Preview {
     items: Vec<PreviewItem>,
     left_deletions: DeletionCounts,
     right_deletions: DeletionCounts,
+    removal_protection: RemovalProtection,
     failures: Vec<Failure>,
 }
 
@@ -362,6 +364,14 @@ impl Preview {
         match side {
             Side::Left => self.left_deletions,
             Side::Right => self.right_deletions,
+        }
+    }
+
+    /// The configured large-removal fuse for this observed plan.
+    pub fn deletion_review(&self, side: Side, context: RunContext) -> DeletionReview {
+        match self.removal_protection {
+            RemovalProtection::Enabled => self.deletions(side).review(context),
+            RemovalProtection::Disabled => DeletionReview::WithinLimits,
         }
     }
 
@@ -951,6 +961,7 @@ impl PairRun {
             items,
             left_deletions: self.plan.deletions(Side::Left),
             right_deletions: self.plan.deletions(Side::Right),
+            removal_protection: self.options.removal_protection(),
             failures: self.failures.clone(),
         }
     }
@@ -1015,30 +1026,27 @@ impl PairRun {
             }
         }
 
-        // PLAN.md §3.2, §3.6: the first run of every pair is previewed,
-        // which also covers a non-empty target's confirmation. Only the
-        // exact plan a person saw (`RunContext::Reviewed`) writes; anything
-        // else returns the plan for review.
-        let first_run = self.identities.side(Side::Left).is_none()
-            || self.identities.side(Side::Right).is_none();
-        if first_run && context != RunContext::Reviewed {
+        // Routine runs use the freshly observed plan. Opting into review
+        // requires a matching reviewed plan on every run, including copies.
+        if options.review_policy() == ReviewPolicy::Required && context != RunContext::Reviewed {
             return Ok(RunOutcome::NeedsApproval(self.preview()));
         }
-        // PLAN.md §3.6: a folder that is suddenly empty — wiped, or a stale
-        // copy put in its place — must not empty the other side unseen,
-        // even below the mass-deletion fuse.
-        if self.emptied_side_archives() && context != RunContext::Reviewed {
-            return Ok(RunOutcome::NeedsApproval(self.preview()));
-        }
-        for side in [Side::Left, Side::Right] {
-            let approved = self.plan.deletions(side).deletions() <= approval.deletions(side);
-            let allowed = match self.plan.deletion_review(side, context) {
-                DeletionReview::WithinLimits => true,
-                DeletionReview::ConfirmationRequired => approved,
-                DeletionReview::StopUnattended => false,
-            };
-            if !allowed {
+        if options.removal_protection() == RemovalProtection::Enabled {
+            // A suddenly empty source must not empty the other side unseen,
+            // even when its removal count is below the numeric fuse.
+            if self.emptied_side_archives() && context != RunContext::Reviewed {
                 return Ok(RunOutcome::NeedsApproval(self.preview()));
+            }
+            for side in [Side::Left, Side::Right] {
+                let approved = self.plan.deletions(side).deletions() <= approval.deletions(side);
+                let allowed = match self.plan.deletion_review(side, context) {
+                    DeletionReview::WithinLimits => true,
+                    DeletionReview::ConfirmationRequired => approved,
+                    DeletionReview::StopUnattended => false,
+                };
+                if !allowed {
+                    return Ok(RunOutcome::NeedsApproval(self.preview()));
+                }
             }
         }
 

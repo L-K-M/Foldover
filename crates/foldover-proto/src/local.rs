@@ -48,12 +48,12 @@ mod pair;
 pub use pair::{
     PAIR_CHECK, PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_REMOVE, PAIR_UPDATE,
     PairDay, PairDurability, PairInput, PairKey, PairList, PairMode, PairPage, PairPropagation,
-    PairRecord, PairRevision, PairSchedule, PairSettings, PairSide, PairUpdate, PairWarning,
-    PairWarnings,
+    PairRecord, PairRemovalProtection, PairReviewPolicy, PairRevision, PairSchedule, PairSettings,
+    PairSide, PairUpdate, PairWarning, PairWarnings,
 };
 
 pub const JSON_RPC_VERSION: &str = "2.0";
-pub const PROTOCOL_VERSION: u32 = 16;
+pub const PROTOCOL_VERSION: u32 = 17;
 pub const SESSION_HELLO: &str = "session.hello";
 pub const DAEMON_STATUS: &str = "daemon.status";
 /// Leave crash-loop safe mode and sync again.
