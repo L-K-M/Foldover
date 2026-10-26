@@ -42,6 +42,17 @@ if ! printf '%s' "$version" | grep -Eq "$shape"; then
   echo "error: CFBundleShortVersionString '$version' is not X.Y.Z(-suffix); the update check could never compare it" >&2
   exit 1
 fi
+# Third-party notices (embed-agent.sh): present, non-empty and naming
+# crates certain to ship, including the MPL-2.0 UniFFI runtime and the
+# UniFFI template code in the generated bindings.
+notices="$app/Contents/Resources/Third-Party-Notices.txt"
+std_notices="$app/Contents/Resources/Rust-Licenses.html"
+test -s "$notices"
+test -s "$std_notices"
+grep -q '^tokio ' "$notices"
+grep -q '^uniffi ' "$notices"
+grep -q '^UniFFI-generated Swift bindings ' "$notices"
+grep -q 'Copyright notices for The Rust Standard Library' "$std_notices"
 codesign --verify --deep --strict --verbose=2 "$app"
 codesign -d --verbose=4 "$app" 2>&1 | grep -Fx 'Signature=adhoc'
 for executable in foldoverd foldover; do
@@ -61,3 +72,8 @@ python3 "$ROOT/scripts/test-agent.py" \
   "$app/Contents/Library/LaunchServices/foldover"
 
 ditto -c -k --sequesterRsrc --keepParent "$app" "$OUTPUT"
+
+# What users download carries the notices too.
+for notice in Third-Party-Notices.txt Rust-Licenses.html; do
+  unzip -l "$OUTPUT" "Foldover.app/Contents/Resources/$notice" >/dev/null
+done
