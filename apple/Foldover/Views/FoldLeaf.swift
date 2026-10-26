@@ -53,10 +53,10 @@ struct FoldLeafView<Label: View>: View {
     private static var perspective: CGFloat { 0.24 }
     /// How far either side of upright the paper's edge shows, and how
     /// tall it looks there, its near end lifted toward the viewer.
-    private static let edgeWindow = 0.05
-    private static let edgeReach: CGFloat = 1.12
+    private static var edgeWindow: Double { 0.05 }
+    private static var edgeReach: CGFloat { 1.12 }
     /// How wide the glint on the back is, in fractions of its diagonal.
-    private static let glintBand = 0.18
+    private static var glintBand: Double { 0.18 }
 
     private var half: CGFloat { pageSize.width / 2 }
 
