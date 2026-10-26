@@ -40,6 +40,7 @@ The roadmap is PLAN.md §7.
 | Regenerate the Swift bindings (commit the result) | `cargo xtask ffi --bindings-only` |
 | Bindings + arm64 XCFramework (macOS) | `cargo xtask ffi` |
 | Dependency licenses and advisories | `cargo deny check` |
+| Check the app's Rust license notices (CI's `deny` job) | `python3 scripts/rust-notices.py -p foldoverd -p foldover-cli -p foldover-ffi --target aarch64-apple-darwin --overrides licenses/rust-overrides.json --own-license Unlicense --rust-std Rust-Licenses.html --check` |
 | Generate the Xcode project | `xcodegen generate --spec apple/project.yml` |
 | UI tour: drive the Debug app on canned data, screenshot every stop (macOS; the `ui-tour` workflow uploads them) | `xcodebuild test -project apple/Foldover.xcodeproj -scheme FoldoverUITour` |
 | Build everything this host can → `dist/` | `scripts/build.sh [core] [app] [--debug] [--clean] [--check]` |
@@ -67,6 +68,7 @@ tests, builds the XCFramework, and runs `xcodebuild build test`.
 | `apple/FoldoverSystem/` | Native service-registration boundary, imported only by stores |
 | `apple/FoldoverUITests/` | The UI tour; `-foldover-fixtures` (Debug only, `Stores/Fixtures.swift`) feeds it canned agent answers |
 | `scripts/` | Build/release orchestration, agent embedding and process smoke |
+| `licenses/` | Overrides and third-party texts for the app's license notices |
 | `tools/doccheck/` | Documentation checks run by CI |
 
 ## Architecture rules
@@ -141,6 +143,20 @@ never breaks the build.
   `scripts/test-agent-registration.py` checks consecutive real signed
   updates under an isolated namespace. Never `launchctl kickstart`
   the agent after an install.
+
+## Licensing
+
+- Foldover's own code is Unlicense (`LICENSE`). Keep the crates'
+  `license`, the README and other license statements consistent with it.
+- Before adding a dependency, vendored file or bundled asset, confirm
+  its license allows redistribution in the app. `deny.toml` gates the
+  licenses; never vendor third-party code without its license file.
+- `embed-agent.sh` runs `scripts/rust-notices.py` to write
+  `Third-Party-Notices.txt` and `Rust-Licenses.html` into the app's
+  `Contents/Resources`. It fails on a linked crate without license
+  text: record the gap as a commented entry in
+  `licenses/rust-overrides.json`, never drop it. Keep the `deny` job's
+  check and `package-app.sh`'s notice checks passing.
 
 <!-- shared-rules:start -->
 
