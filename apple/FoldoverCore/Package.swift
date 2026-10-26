@@ -5,6 +5,11 @@
 // macOS; `FoldoverCore` is the generated Swift surface on top of it.
 // Everything in `Sources/` and `Headers/` is generated — only this
 // manifest is handwritten.
+//
+// The generated files contain code from UniFFI's Swift and C templates
+// (uniffi_bindgen 0.32.2, https://github.com/mozilla/uniffi-rs), which
+// is under the MPL-2.0, not the repository's Unlicense. The app's
+// Third-Party-Notices.txt carries that license and the source location.
 
 import PackageDescription
 

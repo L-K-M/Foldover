@@ -205,4 +205,18 @@ access requires separate permissions.
 
 ## License
 
-Public domain ([Unlicense](LICENSE)).
+Foldover's own code is released into the public domain under the
+[Unlicense](LICENSE). The app and its embedded `foldoverd` and
+`foldover` helpers bundle third-party Rust crates and the Rust standard
+library, which keep their own licenses: mostly MIT and Apache-2.0, also
+ISC, BSD-3-Clause, Unicode-3.0, and MPL-2.0 for UniFFI. Their notices
+ship in the app's `Contents/Resources` as `Third-Party-Notices.txt` and
+`Rust-Licenses.html`. The UniFFI crates are used unmodified; the
+notices file gives the location of their source. `foldoverd` also
+includes SQLite, which is in the public domain.
+
+The Unlicense covers Foldover's own code only. The generated Swift
+bindings in `apple/FoldoverCore/Sources` and `apple/FoldoverCore/Headers`
+contain code from UniFFI's templates, which keeps its MPL-2.0 license.
+`licenses/` holds third-party license texts for the notices, not
+Foldover's license.

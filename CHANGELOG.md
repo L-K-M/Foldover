@@ -82,6 +82,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- The app ships the license notices of its bundled Rust crates and the
+  Rust standard library in `Contents/Resources` as
+  `Third-Party-Notices.txt` and `Rust-Licenses.html`.
 - CLI help, live `sync ID --progress`, complete filtered preview listings
   with `--changes [KIND]`, and bounded concurrent `sync --all`.
 - Agent-measured copy throughput and ETA, labeled progress indicators,
