@@ -805,6 +805,25 @@ func changeRowsAreBuiltOncePerPageAndSharedAcrossViewModels() async {
 
 @MainActor
 @Test
+func aContextMenuSteersExactlyOneRow() async {
+    let store = SyncStore(client: ScriptedSyncClient([.previewed(preview(archivesInA: 0, needsApproval: false))]))
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(),
+                                      agentConnected: true, rowCache: ChangeRowsCache())
+    await viewModel.preview()
+    let rows = viewModel.listedRows
+    #expect(rows.count == 2)
+
+    #expect(ChangeRowActions.steerable([rows[0].id], in: rows)?.id == rows[0].id)
+    #expect(ChangeRowActions.steerable([rows[1].id], in: rows)?.id == rows[1].id)
+    // Steering several at once needs a batch choice the agent does not have.
+    #expect(ChangeRowActions.steerable(Set(rows.map(\.id)), in: rows) == nil)
+    #expect(ChangeRowActions.steerable([], in: rows) == nil)
+    // A selection that no longer lists steers nothing.
+    #expect(ChangeRowActions.steerable([99], in: rows) == nil)
+}
+
+@MainActor
+@Test
 func cachedRowsAdoptANewTokenEvenWhenChangesAreIdentical() async {
     let first = preview(archivesInA: 3, needsApproval: false)
     let next = preview(archivesInA: 3, needsApproval: false, reviewToken: reviewTokenB)

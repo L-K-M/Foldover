@@ -294,7 +294,7 @@ struct PairDetailView: View {
         .alternatingRowBackgrounds()
         .focused(focus, equals: .changes)
         .contextMenu(forSelectionType: ChangeRow.ID.self) { ids in
-            if let row = rows.first(where: { ids.contains($0.id) }) {
+            if let row = ChangeRowActions.steerable(ids, in: rows) {
                 ChangeRowActions(viewModel: viewModel, sync: sync, row: row)
             }
         } primaryAction: { ids in
@@ -350,6 +350,17 @@ struct ChangeRowActions: View {
     static func hasActions(_ row: ChangeRow) -> Bool {
         row.look != nil || row.resolvable != nil || row.keepsBoth || row.otherWay != nil
             || row.item != nil || row.skippable != nil
+    }
+
+    /// The one row a context menu can steer, or nil when the selection holds
+    /// none or several. Steering several at once needs a batch choice the
+    /// agent does not have: each row's review token names the preview it came
+    /// from, and the first choice replaces that preview, so the rest would be
+    /// refused as stale. Offering nothing is better than quietly steering one
+    /// row of many.
+    static func steerable(_ ids: Set<ChangeRow.ID>, in rows: [ChangeRow]) -> ChangeRow? {
+        guard ids.count == 1 else { return nil }
+        return rows.first(where: { ids.contains($0.id) })
     }
 
     var body: some View {
