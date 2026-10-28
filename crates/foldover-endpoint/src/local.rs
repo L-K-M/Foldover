@@ -1468,6 +1468,41 @@ fn at_scan<T>(path: &Option<SyncPath>, result: io::Result<T>) -> Result<T, ScanE
 mod churn_tests;
 #[cfg(test)]
 mod filtering_tests;
+
+/// How long a filesystem may take to show a mutation in an entry's stat
+/// key. `ctime` advances in coarse ticks on several filesystems, so a
+/// mutation made in the same tick as the observation leaves the key — and
+/// every fingerprint derived from it — unchanged.
+#[cfg(test)]
+const STAT_SETTLE_STEP: Duration = Duration::from_millis(20);
+#[cfg(test)]
+const STAT_SETTLE_ATTEMPTS: u32 = 50;
+
+/// Repeat `mutate` until the entry's stat key differs from the one it had
+/// before, so a test can observe its own edit on any filesystem. A
+/// fingerprint that cannot see the edit is exactly the case `REREAD`
+/// covers, so the wait is what makes the assertion deterministic.
+#[cfg(test)]
+pub(crate) fn settled_stat(endpoint: &LocalEndpoint, path: &SyncPath, mut mutate: impl FnMut()) {
+    let key = || {
+        endpoint
+            .entry_at(path)
+            .expect("the entry is reachable")
+            .expect("the entry exists")
+            .metadata()
+            .stat_key()
+    };
+    let before = key();
+    for _ in 0..STAT_SETTLE_ATTEMPTS {
+        mutate();
+        if key() != before {
+            return;
+        }
+        std::thread::sleep(STAT_SETTLE_STEP);
+    }
+    panic!("the filesystem never showed the mutation in the entry's stat key");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2153,13 +2188,18 @@ mod tests {
                 )
             })
             .collect();
-        fs::write(root.join("edited"), b"TWO").unwrap();
-        fs::File::options()
-            .write(true)
-            .open(root.join("edited"))
-            .unwrap()
-            .set_modified(past)
-            .unwrap();
+        // The edit keeps the size and the modification time, so only the
+        // stat key can tell it apart from an unchanged entry.
+        let edited = SyncPath::try_from(b"edited".as_slice()).unwrap();
+        settled_stat(&endpoint, &edited, || {
+            fs::write(root.join("edited"), b"TWO").unwrap();
+            fs::File::options()
+                .write(true)
+                .open(root.join("edited"))
+                .unwrap()
+                .set_modified(past)
+                .unwrap();
+        });
         let second = endpoint
             .observe_from(ALL, &Filter::none(), &previous, &mut || {
                 ScanControl::Continue

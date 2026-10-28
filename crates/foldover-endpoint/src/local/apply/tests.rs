@@ -272,9 +272,13 @@ fn settled_fingerprints_still_catch_rewrites_that_restore_size_and_mtime() {
     handle.set_modified(past).unwrap();
     let (left, right) = (observe(&pair.left), observe(&pair.right));
 
-    fs::write(&target, b"odd").unwrap();
-    handle.set_modified(past).unwrap();
     let file = path(b"file");
+    // The edit keeps the size and the modification time, so only the stat key
+    // can tell it apart from the destination the plan was made for.
+    crate::local::settled_stat(&pair.right, &file, || {
+        fs::write(&target, b"odd").unwrap();
+        handle.set_modified(past).unwrap();
+    });
     assert!(matches!(
         pair.right.copy_from(
             &pair.left,

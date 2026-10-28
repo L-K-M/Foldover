@@ -92,8 +92,23 @@ fn cancellation_mutations_and_stale_observations_never_produce_complete_metadata
     let mut changed = false;
     let result = root.read_extended_metadata(&path(), &metadata, &mut |bytes| {
         if bytes > 0 && !changed {
-            set(&file, c"user.foldover.test", b"new");
             changed = true;
+            // `ctime` advances in coarse ticks on several filesystems, so an
+            // xattr write made in the tick the read started in leaves the
+            // stat key — the only thing this read compares before and after
+            // — unchanged. Repeat it until the key moves.
+            for _ in 0..50 {
+                set(&file, c"user.foldover.test", b"new");
+                if root.metadata(&path()).unwrap().stat_key() != metadata.stat_key() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert_ne!(
+                root.metadata(&path()).unwrap().stat_key(),
+                metadata.stat_key(),
+                "the filesystem never showed the xattr write in the stat key"
+            );
         }
         ScanControl::Continue
     });
