@@ -142,13 +142,30 @@ final class PairEditorViewModel: Identifiable {
         return String(localized: "\(name) can't hold Foldover's .foldover folder, so it can only be a Backup's target. Choose a Backup to \(name), then keep nothing in it.")
     }
 
-    /// Exclusion rules as editable text, one per line.
+    /// Exclusion rules as editable text, one per line. The text is kept as
+    /// typed, blank lines included, because the rules box is bound live and
+    /// dropping a newline here would stop a person from starting the next
+    /// rule; blank rules are left out where the pair is saved instead. Only
+    /// line-ending spellings are normalized, so a pasted list keeps its rules.
     var filterText: String {
         get { options.filters.joined(separator: "\n") }
         set {
-            options.filters = newValue.split(separator: "\n", omittingEmptySubsequences: false)
+            let lines = newValue.replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+            options.filters = lines.split(separator: "\n", omittingEmptySubsequences: false)
                 .map(String.init)
         }
+    }
+
+    /// The options to store: the rules as typed, without the blank lines
+    /// between them, which gitignore ignores anyway. A line break counts as
+    /// blank too, since the agent refuses a rule that carries one.
+    private var storableOptions: PairOptions {
+        var options = options
+        options.filters = options.filters.filter {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        return options
     }
 
     /// Sizes in whole decimal megabytes, as Finder shows them.
@@ -712,7 +729,8 @@ final class PairEditorViewModel: Identifiable {
         defer { isSaving = false }
         do {
             let saved = try await store.save(PairSettings(
-                name: name, left: left, right: right, mode: mode, options: options
+                name: name, left: left, right: right, mode: mode,
+                options: storableOptions
             ), editing: editing)
             savedPairID = saved.id
             return true
