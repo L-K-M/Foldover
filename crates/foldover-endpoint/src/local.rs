@@ -1482,8 +1482,9 @@ const STAT_SETTLE_ATTEMPTS: u32 = 250;
 /// before, so a test can observe its own edit on any filesystem. A
 /// fingerprint that cannot see the edit is exactly the case `REREAD`
 /// covers, so the wait is what makes the assertion deterministic.
-/// `mutate` runs once per attempt, so it must tolerate being applied
-/// repeatedly.
+/// `mutate` runs once per attempt, up to `STAT_SETTLE_ATTEMPTS` times, so it
+/// must be idempotent: every call has to leave the fixture in the state one
+/// call would, or the retries compound it.
 #[cfg(test)]
 pub(crate) fn settled_stat(endpoint: &LocalEndpoint, path: &SyncPath, mut mutate: impl FnMut()) {
     let key = || {

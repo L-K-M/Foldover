@@ -96,15 +96,18 @@ fn cancellation_mutations_and_stale_observations_never_produce_complete_metadata
             // `ctime` advances in coarse ticks on several filesystems, so an
             // xattr write made in the tick the read started in leaves the
             // stat key — the only thing this read compares before and after
-            // — unchanged. Repeat it until the key moves. Keep the bound in
-            // step with `STAT_SETTLE_ATTEMPTS` in foldover-endpoint's tests,
-            // which settles the same way.
-            for _ in 0..250 {
+            // — unchanged. Repeat it, one tick apart, until the key moves.
+            // The bound and the step match `STAT_SETTLE_ATTEMPTS` and
+            // `STAT_SETTLE_STEP` in foldover-endpoint's tests, which settle
+            // the same way; both are named here so the numbers are not bare.
+            const ATTEMPTS: u32 = 250;
+            const STEP: std::time::Duration = std::time::Duration::from_millis(20);
+            for _ in 0..ATTEMPTS {
                 set(&file, c"user.foldover.test", b"new");
                 if root.metadata(&path()).unwrap().stat_key() != metadata.stat_key() {
                     break;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(20));
+                std::thread::sleep(STEP);
             }
             assert_ne!(
                 root.metadata(&path()).unwrap().stat_key(),
