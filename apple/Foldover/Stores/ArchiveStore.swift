@@ -192,20 +192,32 @@ final class ArchiveStore {
     /// Keep loading pages while nothing matches the current text. The items
     /// are in path order, so this costs the same as pressing Show More until
     /// something appears, and stops after `searchPages` pages so a name that
-    /// is not there does not walk the whole run on its own.
+    /// is not there does not walk the whole run on its own. A text that
+    /// changes under a walk is walked again, so the empty state always stands
+    /// for the newest text.
     func search() async {
-        guard !isSearching else { return }
-        isSearching = true
-        defer { isSearching = false }
-        for _ in 0..<Self.searchPages where matching.isEmpty {
-            // A page is already loading for this listing; wait for it and
-            // re-check rather than giving up on the whole query and reporting
-            // a match-free run that was never searched.
-            while fetchingPage, !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(10))
+        while !Task.isCancelled {
+            guard !isSearching else { return }
+            isSearching = true
+            let walked = searchText
+            for _ in 0..<Self.searchPages
+                where !searchText.trimmingCharacters(in: .whitespaces).isEmpty
+                    && matching.isEmpty {
+                // A page is already loading for this listing; wait for it and
+                // re-check rather than giving up on the whole query and
+                // reporting a match-free run that was never searched.
+                while fetchingPage, !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(10))
+                }
+                guard !Task.isCancelled, hasMoreItems, let last = items.last else { break }
+                await loadItems(after: last.path)
             }
-            guard hasMoreItems, let last = items.last else { return }
-            await loadItems(after: last.path)
+            isSearching = false
+            // A keystroke that landed mid-walk was turned away by the guard;
+            // walk again so the newest text is the one the empty state stands
+            // for. A walk that found something, or whose text did not change,
+            // is done.
+            if !matching.isEmpty || searchText == walked { return }
         }
     }
 

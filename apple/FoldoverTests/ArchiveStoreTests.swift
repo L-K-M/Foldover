@@ -299,6 +299,60 @@ func aSearchWaitsForAPageAlreadyLoading() async {
     #expect(viewModel.itemRows.map(\.path) == ["c"])
 }
 
+/// A walk that is waiting on a page when the text changes must answer the
+/// newest text, not the one it started with.
+@MainActor
+@Test
+func aSearchThatLandsMidWalkAnswersTheNewestText() async {
+    let client = ArchiveFixtureClient()
+    let viewModel = ArchiveViewModel(pair: docs(), store: ArchiveStore(client: client),
+                                     agentConnected: true)
+    await viewModel.show(.b)
+    #expect(viewModel.itemRows.map(\.path) == ["a", "b"])
+
+    // The walk waits on the run's second page, as a Show More holds it.
+    await client.holdNextPage()
+    let more = Task { await viewModel.loadMore() }
+    await client.waitForHeldPage()
+
+    viewModel.searchText = "zzz"
+    let searching = Task { await viewModel.search() }
+    try? await Task.sleep(for: .milliseconds(30))
+    viewModel.searchText = "c"
+
+    await client.releasePage()
+    await more.value
+    await searching.value
+    #expect(viewModel.itemRows.map(\.path) == ["c"])
+}
+
+/// A walk whose task is cancelled while it waits on a page must not fetch one.
+@MainActor
+@Test
+func aCancelledSearchFetchesNoFurtherPage() async {
+    let client = ArchiveFixtureClient()
+    let viewModel = ArchiveViewModel(pair: docs(), store: ArchiveStore(client: client),
+                                     agentConnected: true)
+    await viewModel.show(.b)
+    #expect(viewModel.itemRows.map(\.path) == ["a", "b"])
+
+    await client.holdNextPage()
+    let more = Task { await viewModel.loadMore() }
+    await client.waitForHeldPage()
+    viewModel.searchText = "c"
+    let searching = Task { await viewModel.search() }
+    try? await Task.sleep(for: .milliseconds(30))
+
+    searching.cancel()
+    try? await Task.sleep(for: .milliseconds(30))
+    let requested = await client.pageRequests
+
+    await client.releasePage()
+    await more.value
+    await searching.value
+    #expect(await client.pageRequests == requested)
+}
+
 @MainActor
 @Test
 func aWholeRunPutBackOutranksTheLastItemInTheStatusLine() async {
