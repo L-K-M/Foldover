@@ -284,7 +284,7 @@ func aSearchWaitsForAPageAlreadyLoading() async {
     #expect(viewModel.itemRows.map(\.path) == ["a", "b"])
 
     // A Show More is in flight when the person types.
-    client.holdNextPage()
+    await client.holdNextPage()
     let more = Task { await viewModel.loadMore() }
     await client.waitForHeldPage()
 
@@ -293,7 +293,7 @@ func aSearchWaitsForAPageAlreadyLoading() async {
     // Let the search reach the in-flight page before it lands.
     try? await Task.sleep(for: .milliseconds(30))
 
-    client.releasePage()
+    await client.releasePage()
     await more.value
     await searching.value
     #expect(viewModel.itemRows.map(\.path) == ["c"])
