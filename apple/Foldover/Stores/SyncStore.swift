@@ -512,15 +512,19 @@ final class SyncStore {
     /// The reads run at once, so one slow endpoint cannot hold the rest of
     /// the catalog behind its five-second request timeout.
     func checkAll(_ pairs: [SyncPair]) async {
-        var running: [Task<Void, Never>] = []
-        for pair in pairs where polling[pair.id] == nil && pendingOperations[pair.id] == nil {
-            if running.count >= Self.concurrentStatuses {
-                await running.removeFirst().value
+        await withTaskGroup(of: Void.self) { group in
+            var inFlight = 0
+            for pair in pairs where polling[pair.id] == nil && pendingOperations[pair.id] == nil {
+                // A slot frees as soon as any read finishes, not when the
+                // oldest one does, so one unreachable endpoint cannot hold
+                // the pass at its own timeout.
+                if inFlight == Self.concurrentStatuses {
+                    await group.next()
+                    inFlight -= 1
+                }
+                group.addTask { await self.check(pair) }
+                inFlight += 1
             }
-            running.append(Task { await self.check(pair) })
-        }
-        for task in running {
-            await task.value
         }
     }
 
