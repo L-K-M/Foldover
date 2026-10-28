@@ -71,7 +71,7 @@ struct FoldFolderLabel: View {
     /// server's address or another Mac's folder, is all name.
     static func parts(_ text: String) -> (name: String, location: String) {
         var path = Substring(text)
-        if path.count > 1, path.hasSuffix("/") { path = path.dropLast() }
+        while path.count > 1, path.hasSuffix("/") { path = path.dropLast() }
         guard let slash = path.lastIndex(of: "/"), path.index(after: slash) < path.endIndex else {
             return (String(path), "")
         }

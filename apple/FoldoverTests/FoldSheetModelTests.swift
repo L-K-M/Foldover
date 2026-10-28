@@ -152,6 +152,7 @@ struct FoldSheetModelTests {
         let rename = FoldLine(row: row("2026/Trip/day1/IMG_1990.HEIC", .move(on: .b),
                                        movedFrom: "2026/Inbox/IMG_1990.HEIC"))
         #expect(rename.badge(.b) == .arrives(.toB))
+        #expect(rename.badge(.a) == nil)
 
         // What holds or waits marks both folders; a failure marks its line once.
         let conflict = FoldLine(row: row("header.psd", .conflict(.bothChanged), resolvable: true))
@@ -189,6 +190,8 @@ struct FoldSheetModelTests {
         #expect(FoldLeaf.messagePage(.backupRight, missing: nil) == .a)
         #expect(FoldLeaf.messagePage(.mirrorLeft, missing: .b) == .a)
         #expect(FoldLeaf.messagePage(.sync, missing: .a) == .b)
+        #expect(FoldLeaf.messagePage(.sync, missing: .b) == .a)
+        #expect(FoldLeaf.messagePage(.backupRight, missing: .a) == .b)
         #expect(FoldLeaf.landing(.a) == .b)
         #expect(FoldLeaf.landing(.b) == .a)
     }
@@ -203,9 +206,17 @@ struct FoldSheetModelTests {
         #expect(FoldMotion.landingInk(0) == 1)
         #expect(FoldMotion.landingInk(FoldMotion.tippingPoint) == 1)
         #expect(FoldMotion.landingInk(1) < 0.2)
-        // The plan held for approval reads complete.
+        // The plan held for approval reads complete, and letting go there
+        // would not fold it.
         #expect(FoldMotion.peek(0) == 0)
         #expect(FoldMotion.peek(FoldMotion.heldUpright) == 1)
+        #expect(!FoldMotion.commits(swing: FoldMotion.heldUpright))
+        for step in 0...100 {
+            let swing = Double(step) / 100
+            #expect((0.0...1.0).contains(FoldMotion.faceInk(swing)))
+            #expect((0.0...1.0).contains(FoldMotion.landingInk(swing)))
+            #expect((0.0...1.0).contains(FoldMotion.peek(swing)))
+        }
     }
 
     /// Under Reduce Motion one face is gone before the other comes, so
@@ -230,6 +241,7 @@ struct FoldSheetModelTests {
         #expect(parts("sftp://mynas.local/~/Photos") == ["Photos", "mynas.local/~"])
         #expect(parts("sftp://mynas.local/Photos") == ["Photos", "mynas.local"])
         #expect(parts("/Volumes/Media/Music/") == ["Music", "/Volumes/Media"])
+        #expect(parts("/Volumes/Media/Music//") == ["Music", "/Volumes/Media"])
         #expect(parts("/Photos") == ["Photos", "/"])
         #expect(parts("/") == ["/", ""])
         #expect(parts("sftp://mynas.local") == ["sftp://mynas.local", ""])

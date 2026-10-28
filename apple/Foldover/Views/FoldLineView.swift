@@ -87,6 +87,8 @@ struct FoldHalf: View {
             if let turn, badge != nil {
                 Button(action: turn.cycle) {
                     FoldBadgeView(badge: badge, side: side, outlined: staged != nil)
+                        // The whole mark takes the click, not just its glyph.
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 // Return belongs to the staged turn, not to a focused mark.
@@ -285,7 +287,7 @@ struct FoldBadgeView: View {
                 Color.clear
             }
         }
-        .frame(width: 18, height: 18)
+        .frame(width: FoldMetrics.markWidth, height: FoldMetrics.markWidth)
     }
 
     @ViewBuilder

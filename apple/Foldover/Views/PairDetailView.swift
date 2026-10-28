@@ -64,6 +64,8 @@ struct PairDetailView: View {
                     .help(viewModel.planText(for: pair))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            // One stop for VoiceOver: the mode, then its sentence.
+            .accessibilityElement(children: .combine)
             if sync.showsChangeFilter {
                 Picker("Show", selection: Binding(
                     get: { sync.changeFilter },
