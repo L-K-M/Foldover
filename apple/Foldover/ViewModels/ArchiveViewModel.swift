@@ -53,11 +53,23 @@ struct ArchiveViewModel {
     }
 
     var itemRows: [ArchiveItemRow] {
-        store.items.map {
+        store.matching.map {
             ArchiveItemRow(id: $0.path, path: PairSyncViewModel.pathText($0.path),
                            size: PairSyncViewModel.byteText($0.size))
         }
     }
+
+    /// The text narrowing the listed items, as the change table's does; it
+    /// never refetches a page that is already loaded.
+    var searchText: String { store.searchText }
+    /// A search is loading pages looking for a match.
+    var isSearching: Bool { store.isSearching }
+
+    /// Whether a search is narrowing the list, so an empty table is its
+    /// result rather than an empty run.
+    var hasSearch: Bool { !searchText.trimmingCharacters(in: .whitespaces).isEmpty }
+
+    func search(_ text: String) async { await store.search(text) }
 
     /// Why a list is empty, once loading finished.
     var emptyText: String? {

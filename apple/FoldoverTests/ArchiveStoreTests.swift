@@ -242,6 +242,31 @@ func puttingBackSeveralRowsGoesOneAtATime() async {
     #expect(ArchiveViewModel.sideTitle(.b) == "Folder B")
 }
 
+/// The archive has no search, so a known name is found by pressing Show More
+/// once per page. A search loads pages until one matches.
+@MainActor
+@Test
+func searchingTheArchiveLoadsPagesUntilSomethingMatches() async {
+    let viewModel = ArchiveViewModel(pair: docs(), store: ArchiveStore(client: ArchiveFixtureClient()),
+                                     agentConnected: true)
+    await viewModel.show(.b)
+    #expect(viewModel.itemRows.map(\.path) == ["a", "b"])
+
+    // The first page holds no "c", so the search walks on to the next one.
+    await viewModel.search("c")
+    #expect(viewModel.itemRows.map(\.path) == ["c"])
+    #expect(viewModel.isSearching == false)
+
+    // A name that is not there stops at the end of the run's items.
+    await viewModel.search("zzz")
+    #expect(viewModel.itemRows.isEmpty)
+    #expect(viewModel.hasSearch)
+
+    // Clearing the search lists everything loaded again.
+    await viewModel.search("")
+    #expect(viewModel.itemRows.map(\.path) == ["a", "b", "c"])
+}
+
 @MainActor
 @Test
 func aWholeRunPutBackOutranksTheLastItemInTheStatusLine() async {

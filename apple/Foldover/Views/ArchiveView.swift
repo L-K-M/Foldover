@@ -64,6 +64,7 @@ struct ArchiveView: View {
                 .navigationTitle(viewModel.pairName)
                 .navigationSubtitle("Archive")
         }
+        .searchable(text: searchText, placement: .toolbar, prompt: "Filter Archived Items")
         .toolbar { archiveToolbar(selected: selected) }
         .confirmationDialog("Put Back All?", isPresented: $confirmingPutBackAll) {
             Button("Put Back All") { Task { await viewModel.putBackAll() } }
@@ -127,6 +128,13 @@ struct ArchiveView: View {
     private func content(_ items: [ArchiveItemRow]) -> some View {
         if !items.isEmpty {
             itemTable(items)
+        } else if viewModel.isSearching {
+            // The search is still walking the run's pages for a match.
+            ProgressView()
+                .controlSize(.large)
+                .accessibilityLabel("Searching Archived Items")
+        } else if viewModel.hasSearch {
+            ContentUnavailableView.search(text: viewModel.searchText)
         } else if hasStarted, let empty = viewModel.emptyText {
             ContentUnavailableView {
                 Label("Nothing Archived", systemImage: "archivebox")
@@ -240,6 +248,16 @@ struct ArchiveView: View {
         Binding(
             get: { viewModel.side },
             set: { side in Task { await viewModel.show(side) } }
+        )
+    }
+
+    /// The search field narrows the loaded pages, and the store keeps
+    /// paging while nothing matches, so a known name is found without
+    /// pressing Show More once per page.
+    private var searchText: Binding<String> {
+        Binding(
+            get: { viewModel.searchText },
+            set: { text in Task { await viewModel.search(text) } }
         )
     }
 

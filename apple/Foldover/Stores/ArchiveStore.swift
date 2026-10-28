@@ -16,6 +16,11 @@ struct ArchiveItem: Equatable, Identifiable, Sendable {
     let size: UInt64
 
     var id: Data { path }
+
+    /// Whether the item's path contains `text`, case-insensitively.
+    func matches(_ text: String) -> Bool {
+        String(decoding: path, as: UTF8.self).range(of: text, options: .caseInsensitive) != nil
+    }
 }
 
 struct ArchiveRuns: Equatable, Sendable {
@@ -105,12 +110,20 @@ final class ArchiveStore {
     private(set) var isPuttingBack = false
     /// What the last whole-run put-back did.
     private(set) var restore: RunRestore?
+    /// The text narrowing the listed items. It never refetches a page that
+    /// is already loaded.
+    private(set) var searchText = ""
+    /// A search is loading pages looking for a match.
+    private(set) var isSearching = false
     /// Bumped whenever the item list starts over, so a page asked for
     /// before, say, Put Back All never lands in the fresh list.
     private var listing = 0
     /// The listing a page is loading for; one page at a time, so a second
     /// Show More cannot fetch the same page twice.
     private var loadingListing: Int?
+    /// Pages one search loads before it stops and leaves Show More to
+    /// finish, so a name that is not there costs a bounded walk.
+    private static let searchPages = 50
 
     init(client: any ArchiveClient = CoreArchiveClient()) {
         self.client = client
@@ -130,6 +143,7 @@ final class ArchiveStore {
         run = nil
         items = []
         hasMoreItems = false
+        searchText = ""
         error = nil
         placed = nil
         placedCount = 0
@@ -152,10 +166,34 @@ final class ArchiveStore {
         listing += 1
         items = []
         hasMoreItems = false
+        searchText = ""
         placed = nil
         placedCount = 0
         restore = nil
         await loadItems(after: nil)
+    }
+
+    /// The loaded items the search narrows to; all of them when it is empty.
+    var matching: [ArchiveItem] {
+        let text = searchText.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty else { return items }
+        return items.filter { $0.matches(text) }
+    }
+
+    /// Narrow the listed items to those whose path contains `text`, and keep
+    /// loading pages while nothing matches. The items are in path order, so
+    /// this costs the same as pressing Show More until something appears,
+    /// and stops after `searchPages` pages so a name that is not there does
+    /// not walk the whole run on its own.
+    func search(_ text: String) async {
+        searchText = text
+        guard !isSearching else { return }
+        isSearching = true
+        defer { isSearching = false }
+        for _ in 0..<Self.searchPages where matching.isEmpty {
+            guard hasMoreItems, loadingListing != listing, let last = items.last else { return }
+            await loadItems(after: last.path)
+        }
     }
 
     /// Put back everything the selected run archived, then list what is left.
