@@ -1,13 +1,16 @@
-// One entry of the sheet in three parts: Folder A's half, the crease and
-// Folder B's half. The leaf carries a half's part on its own while it
-// folds, so each half draws without the others. Names sit against the
-// crease on both sides, mirrored, so the two versions of a path face
-// each other across the fold; the verb and size sit at the outer edge
-// of the half the change arrives in.
+// One entry of the sheet as two pages and the gutter between them, as in
+// a book's spread. Each page reads left to right and is a whole reading
+// of its folder at the path, so the leaf can carry one page on its own
+// while it folds. The page that changes carries a mark in its outer
+// margin, the verb and size end Folder B's page, and nothing is printed
+// in the gutter.
 //
-//   2026/Trip/day2  ·  │  · 3 changes
-//       IMG_2041.RAW   →   IMG_2041.RAW ······ copy · 41 MB
-//            no copy   →   old-banner.psd ···· archive · 66 MB
+//   ┌─ Folder A ────────────────┐   ┌─ Folder B ─────────────────────┐
+//   │ ▢ 2026/Trip/day2          │ ┆ │ 2026/Trip/day2       3 changes │
+//   │   IMG_2041.RAW            │ ┆ │ IMG_2041.RAW    copy · 41 MB → │
+//   │ ← notes.md                │ ┆ │ notes.md        copy · 12 KB   │
+//   │   no copy                 │ ┆ │ old-banner.psd       archive ▤ │
+//   └───────────────────────────┘   └────────────────────────────────┘
 
 import SwiftUI
 
@@ -15,94 +18,130 @@ enum FoldMetrics {
     /// Every entry is one line tall, so the leaf can find the visible
     /// lines from the scroll offset alone.
     static let rowHeight: CGFloat = 26
-    /// The crease column the pips sit in.
-    static let creaseWidth: CGFloat = 30
-    /// A half narrower than this shows impressions as short stubs.
-    static let compactHalf: CGFloat = 190
+    /// The gutter down the middle of the sheet: only the crease is drawn
+    /// in it.
+    static let creaseWidth: CGFloat = 32
+    /// A page's margin beside the gutter.
+    static let innerMargin: CGFloat = 8
+    /// The outer margins, beyond the marks. Folder B's is wider: the
+    /// list's overlay scroller passes over it.
+    static let outerMarginA: CGFloat = 12
+    static let outerMarginB: CGFloat = 18
+    /// The mark column and the space between it and the words.
+    static let markWidth: CGFloat = 18
+    static let markGap: CGFloat = 6
 }
 
-/// One half of a line: what that folder holds at the path.
+/// A mark a click can turn: it stages the line's next way, as ← and → do.
+struct FoldTurnControl {
+    let enabled: Bool
+    /// The ways the line can turn, by name.
+    let help: String
+    let cycle: @MainActor () -> Void
+}
+
+/// One page of a line: what that folder holds at the path, and what
+/// happens to it there.
 struct FoldHalf: View {
     let line: FoldLine
     let side: FolderSide
-    let compact: Bool
     /// How near the folding leaf is, 0…1: arriving copies fill with the
     /// incoming ink as it approaches.
     var peek: Double = 0
+    /// A turn ← or → staged on the line, marked where it would land.
+    var staged: FoldFlow?
+    /// Refused turns so far: each one shakes the mark.
+    var shakes = 0
+    /// What a click on the mark does; without it the mark is only print.
+    var turn: FoldTurnControl?
     @Environment(\.colorSchemeContrast) private var contrast
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 0) {
             if side == .a {
-                meta
-                Spacer(minLength: 4)
-                mark
+                margin
+                    .padding(.trailing, FoldMetrics.markGap)
+                name
+                    .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                mark
-                Spacer(minLength: 4)
-                meta
+                HStack(spacing: 8) {
+                    name
+                    Spacer(minLength: 0)
+                    note
+                }
+                .frame(maxWidth: .infinity)
+                margin
+                    .padding(.leading, FoldMetrics.markGap)
             }
         }
-        .padding(.leading, side == .a ? 14 : 6)
-        .padding(.trailing, side == .a ? 6 : 14)
+        .padding(.leading, side == .a ? FoldMetrics.outerMarginA : FoldMetrics.innerMargin)
+        .padding(.trailing, side == .a ? FoldMetrics.innerMargin : FoldMetrics.outerMarginB)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// The verb and size, on the half the change arrives in.
-    @ViewBuilder
-    private var meta: some View {
-        if side == Self.arrivalSide(line.flow) {
-            Group {
-                if line.flow == .failed {
-                    // Keep the cause visible; hover and inspection show it in full.
-                    Text(line.actionText)
-                        .help(line.actionText)
-                } else {
-                    ViewThatFits(in: .horizontal) {
-                        if !line.sizeText.isEmpty { Text("\(line.verb) · \(line.sizeText)") }
-                        Text(line.verb)
-                        Color.clear.frame(width: 0, height: 0)
-                    }
+    /// The outer margin's mark: a button while a click can turn the line.
+    private var margin: some View {
+        let badge = line.badge(side, staged: staged)
+        return Group {
+            if let turn, badge != nil {
+                Button(action: turn.cycle) {
+                    FoldBadgeView(badge: badge, side: side, outlined: staged != nil)
+                }
+                .buttonStyle(.plain)
+                // Return belongs to the staged turn, not to a focused mark.
+                .focusable(false)
+                .disabled(!turn.enabled)
+                .help(turn.help)
+                .accessibilityHidden(true)
+            } else {
+                FoldBadgeView(badge: badge, side: side, outlined: staged != nil)
+            }
+        }
+        .frame(width: FoldMetrics.markWidth)
+        .modifier(Shake(count: shakes))
+    }
+
+    /// The line's verb and size, at the end of Folder B's page, or what
+    /// went wrong, in full on hover.
+    private var note: some View {
+        Group {
+            if line.flow == .failed {
+                Text(line.actionText)
+                    .help(line.actionText)
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    if !line.sizeText.isEmpty { Text("\(line.verb) · \(line.sizeText)") }
+                    Text(line.verb)
+                    Color.clear.frame(width: 0, height: 0)
                 }
             }
-            .font(FoldType.meta)
-            .foregroundStyle(line.flow == .failed ? FoldPalette.failure : FoldPalette.umber)
-            .lineLimit(1)
-            .layoutPriority(-1)
         }
+        .font(FoldType.meta)
+        .foregroundStyle(line.flow == .failed ? FoldPalette.failure : FoldPalette.umber)
+        .lineLimit(1)
+        .layoutPriority(-1)
     }
 
     @ViewBuilder
-    private var mark: some View {
+    private var name: some View {
         switch line.mark(side) {
-        case .ink:
-            name.foregroundStyle(FoldPalette.ink(side))
+        case .ink, .retouch:
+            nameText.foregroundStyle(FoldPalette.ink(side))
         case .impression:
             impression
         case .lift:
-            HStack(spacing: 4) {
-                Image(systemName: "archivebox")
-                    .font(.system(size: 9, weight: .semibold))
-                name.strikethrough(color: FoldPalette.ink(side).opacity(0.6))
-            }
-            .foregroundStyle(FoldPalette.ink(side).opacity(0.72))
-            .offset(y: -1)
-        case .retouch:
-            HStack(spacing: 4) {
-                name.foregroundStyle(FoldPalette.ink(side))
-                Image(systemName: "tag.fill")
-                    .font(.system(size: 8))
-                    .foregroundStyle(FoldPalette.ink(side == .a ? .b : .a))
-            }
+            nameText
+                .strikethrough(color: FoldPalette.ink(side).opacity(0.6))
+                .foregroundStyle(FoldPalette.ink(side).opacity(0.72))
         case .faint:
-            name.foregroundStyle(FoldPalette.umber.opacity(0.6))
+            nameText.foregroundStyle(FoldPalette.umber.opacity(0.6))
         case .blank:
             absence
         }
     }
 
-    private var name: some View {
+    private var nameText: some View {
         Text(line.name)
             .font(FoldType.name)
             .lineLimit(1)
@@ -114,36 +153,38 @@ struct FoldHalf: View {
     @ViewBuilder
     private var impression: some View {
         let from: FolderSide = side == .a ? .b : .a
-        let incoming = FoldPalette.ink(from)
         let faint = arriving(from)
-        let ink = faint + (1 - faint) * peek
-        if compact {
-            Capsule()
-                .fill(incoming.opacity(ink))
-                .frame(width: 26, height: 4)
-        } else {
-            HStack(spacing: 4) {
-                if let from = line.movedFrom {
-                    Text(Self.lastComponent(from))
+        let arrivingName = Text(line.name)
+            .font(FoldType.arrivingName)
+            .foregroundStyle(FoldPalette.ink(from).opacity(faint + (1 - faint) * peek))
+        if let origin = line.movedFrom {
+            // A rename shows the name it had while the page has room.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 4) {
+                    Text(Self.lastComponent(origin))
                         .font(.system(size: 11))
                         .strikethrough()
                         .foregroundStyle(FoldPalette.umber.opacity(0.7))
-                        .lineLimit(1)
                     Image(systemName: "arrow.right")
                         .font(.system(size: 8, weight: .semibold))
                         .foregroundStyle(FoldPalette.umber)
+                    arrivingName
                 }
-                Text(line.name)
-                    .font(FoldType.arrivingName)
+                .lineLimit(1)
+                arrivingName
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .foregroundStyle(incoming.opacity(ink))
             }
+        } else {
+            arrivingName
+                .lineLimit(1)
+                .truncationMode(.middle)
         }
     }
 
     /// An archive's other half: say there is no copy rather than leave a
-    /// hole that reads as "nothing happens here".
+    /// hole that reads as "nothing happens here". A failure names its
+    /// item once, on Folder A's page.
     @ViewBuilder
     private var absence: some View {
         if line.mark(side == .a ? .b : .a) == .lift {
@@ -155,12 +196,7 @@ struct FoldHalf: View {
                 .overlay(RoundedRectangle(cornerRadius: 3)
                     .strokeBorder(FoldPalette.umber.opacity(0.45), style: StrokeStyle(lineWidth: 0.75, dash: [2, 2])))
         } else if line.flow == .failed, side == .a {
-            HStack(spacing: 4) {
-                Image(systemName: "xmark.octagon.fill")
-                    .font(.system(size: 10))
-                name
-            }
-            .foregroundStyle(FoldPalette.failure)
+            nameText.foregroundStyle(FoldPalette.failure)
         }
     }
 
@@ -177,79 +213,105 @@ struct FoldHalf: View {
         }
     }
 
-    /// The half whose edge names the change: where it arrives, or the
-    /// right-hand half when nothing moves.
-    static func arrivalSide(_ flow: FoldFlow) -> FolderSide {
-        flow == .toA ? .a : .b
-    }
-
     private static func lastComponent(_ path: String) -> String {
         path.split(separator: "/").last.map(String.init) ?? path
     }
 }
 
-/// A folder heading's half: the folder on A's side, its count on B's.
+/// A folder heading on one page: the folder on both, its count at the
+/// end of Folder B's.
 struct FoldHeadingHalf: View {
     let path: String
     let count: Int
     let side: FolderSide
 
+    /// The count as the heading says it, e.g. "3 changes".
+    static func countText(_ count: Int) -> String {
+        count == 1 ? String(localized: "1 change") : String(localized: "\(count) changes")
+    }
+
     var body: some View {
-        HStack {
+        HStack(spacing: 0) {
             if side == .a {
-                Spacer(minLength: 4)
-                Text(path)
-                    .font(FoldType.heading)
-                    .lineLimit(1)
-                    .truncationMode(.head)
-            } else {
-                Text(count == 1 ? String(localized: "1 change") : String(localized: "\(count) changes"))
+                Image(systemName: "folder")
+                    .font(.system(size: 9))
+                    .foregroundStyle(FoldPalette.umber.opacity(0.7))
+                    .frame(width: FoldMetrics.markWidth)
+                    .padding(.trailing, FoldMetrics.markGap)
+            }
+            Text(path)
+                .font(FoldType.heading)
+                .lineLimit(1)
+                .truncationMode(.head)
+            Spacer(minLength: 8)
+            if side == .b {
+                Text(Self.countText(count))
                     .font(FoldType.meta)
-                Spacer(minLength: 4)
+                    .lineLimit(1)
+                    .fixedSize()
+                // In line with the notes under it, clear of the marks.
+                Color.clear
+                    .frame(width: FoldMetrics.markWidth + FoldMetrics.markGap, height: 0)
             }
         }
         .foregroundStyle(FoldPalette.umber)
-        .padding(.leading, side == .a ? 14 : 6)
-        .padding(.trailing, side == .a ? 6 : 14)
+        .padding(.leading, side == .a ? FoldMetrics.outerMarginA : FoldMetrics.innerMargin)
+        .padding(.trailing, side == .a ? FoldMetrics.innerMargin : FoldMetrics.outerMarginB)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(.top, 4)
     }
 }
 
-/// The pip on the crease: a disc in the source folder's ink with the
-/// way the line flows, or the pin that holds a conflict. A staged turn
-/// shows its new direction in outline until Return runs it.
-struct FoldPip: View {
-    let flow: FoldFlow
-    var staged: FoldFlow?
+/// A page's margin mark: a disc in the arriving version's ink with the
+/// way it travels, the pin that holds a conflict, or what else happens
+/// to the folder there. A staged turn shows its disc in outline until
+/// Return runs it.
+struct FoldBadgeView: View {
+    let badge: FoldBadge?
+    /// The page the mark is on.
+    let side: FolderSide
+    var outlined = false
 
     var body: some View {
-        let shown = staged ?? flow
         Group {
-            switch shown {
-            case .toB: arrow("arrow.right", ink: FoldPalette.ink(.a))
-            case .toA: arrow("arrow.left", ink: FoldPalette.ink(.b))
-            case .held: Pin()
-            case .waiting:
-                Image(systemName: "hourglass")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(FoldPalette.umber)
-            case .still:
-                Image(systemName: "equal")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(FoldPalette.umber)
-            case .failed:
-                Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(FoldPalette.failure)
+            if let badge {
+                mark(badge)
+            } else {
+                Color.clear
             }
         }
         .frame(width: 18, height: 18)
     }
 
-    private func arrow(_ symbol: String, ink: Color) -> some View {
-        let outlined = staged != nil
-        return Image(systemName: symbol)
+    @ViewBuilder
+    private func mark(_ badge: FoldBadge) -> some View {
+        switch badge {
+        case .arrives(let flow):
+            disc(flow == .toA ? "arrow.left" : "arrow.right", ink: FoldPalette.ink(FoldLine.keptSide(flow) ?? side))
+        case .retouch:
+            // The other folder's metadata, in its ink.
+            Image(systemName: "tag.fill")
+                .font(.system(size: 8))
+                .foregroundStyle(FoldPalette.ink(side == .a ? .b : .a))
+        case .lift:
+            Image(systemName: "archivebox")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(FoldPalette.ink(side).opacity(0.72))
+        case .held:
+            Pin()
+        case .waiting:
+            Image(systemName: "hourglass")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(FoldPalette.umber)
+        case .failed:
+            Image(systemName: "xmark.octagon.fill")
+                .font(.system(size: 10))
+                .foregroundStyle(FoldPalette.failure)
+        }
+    }
+
+    private func disc(_ symbol: String, ink: Color) -> some View {
+        Image(systemName: symbol)
             .font(.system(size: 8, weight: .heavy))
             .foregroundStyle(outlined ? ink : FoldPalette.paper)
             .frame(width: 16, height: 16)

@@ -1,14 +1,15 @@
 // The fold (PLAN.md §3.8, "the preview is the product"): a preview laid
-// out as one sheet of paper creased between the pair's two folders.
-// Every change is a line across the crease. Each half shows what its
-// folder holds at that path, and the crease shows which way the sync
-// carries it:
+// out as one sheet of paper creased between the pair's two folders,
+// like a book's spread. Every change is a line on both pages. Each page
+// shows what its folder holds at that path, and the page that changes
+// carries a mark in its outer margin saying what happens there. Nothing
+// is printed in the gutter:
 //
-//   Folder A                  crease                  Folder B
-//   IMG_2041.RAW    ink         →        impression   IMG_2041.RAW
-//   notes.md        impression  ←        ink          notes.md
-//   header.psd      ink         ⚑        ink          header.psd
-//                   blank       →        lift         old-banner.psd
+//   Folder A                   gutter                    Folder B
+//      IMG_2041.RAW    ink       ┆   IMG_2041.RAW   impression   copy →
+//   ←  notes.md        impression┆   notes.md       ink          copy
+//   ⚑  header.psd      ink       ┆   header.psd     ink  both changed ⚑
+//      no copy         blank     ┆   old-banner.psd lift      archive ▤
 //
 // Syncing folds the source half over the other, the way a monotype
 // print transfers wet ink. When the run ends the leaf opens on an
@@ -50,6 +51,24 @@ enum FoldFlow: Equatable, Sendable {
     /// Left as it is.
     case still
     /// Could not be checked, or failed in the last run.
+    case failed
+}
+
+/// The mark in a page's outer margin: what happens to that folder at the
+/// line's path. A page that stays as it is carries none.
+enum FoldBadge: Equatable, Sendable {
+    /// The other folder's version, its rename or its absence arrives
+    /// here, carried the way the flow points.
+    case arrives(FoldFlow)
+    /// Only the other folder's metadata lands here.
+    case retouch
+    /// The item here goes into this folder's archive.
+    case lift
+    /// A conflict holds the line in both folders.
+    case held
+    /// Waits for a conflict in an enclosing folder, in both folders.
+    case waiting
+    /// Could not be checked, or failed in the last run: marked once.
     case failed
 }
 
@@ -103,6 +122,28 @@ struct FoldLine: Identifiable, Equatable {
 
     /// The mark on `side`'s half.
     func mark(_ side: FolderSide) -> FoldMark { side == .a ? a : b }
+
+    /// The margin mark on `side`'s page. A staged turn is marked only on
+    /// the page it would land on, so the change it proposes reads alone.
+    func badge(_ side: FolderSide, staged: FoldFlow? = nil) -> FoldBadge? {
+        if let staged {
+            guard let kept = Self.keptSide(staged) else { return nil }
+            return kept == side ? nil : .arrives(staged)
+        }
+        switch flow {
+        case .held: return .held
+        case .waiting: return .waiting
+        case .still: return nil
+        case .failed: return side == .a ? .failed : nil
+        case .toA, .toB: break
+        }
+        switch mark(side) {
+        case .impression: return .arrives(flow)
+        case .retouch: return .retouch
+        case .lift: return .lift
+        case .blank, .ink, .faint: return nil
+        }
+    }
 
     /// The folder whose version a turn to `flow` keeps: carrying A over
     /// to B keeps A's.
@@ -217,7 +258,7 @@ struct FoldPlan: Equatable {
 }
 
 /// What the leaf leaves on the sheet when it opens: the run's own
-/// counts, on a card set across the crease. Undo lifts it.
+/// counts, on a card set on the page it pressed. Undo lifts it.
 struct FoldImprint: Equatable {
     /// One count, e.g. 5 "copied".
     struct Figure: Equatable {
@@ -303,6 +344,17 @@ enum FoldLeaf {
         let toB = lines.count { $0.flow == .toB }
         return toA > toB ? .b : .a
     }
+
+    /// The page a leaf from `side` comes down on.
+    static func landing(_ side: FolderSide) -> FolderSide { side == .a ? .b : .a }
+
+    /// The page a message is set on, so no sentence crosses the gutter:
+    /// the page that is there when a folder is missing, else the page a
+    /// one-way mode writes to, else Folder B's.
+    static func messagePage(_ mode: PairMode, missing: FolderSide?) -> FolderSide {
+        if let missing { return landing(missing) }
+        return sides(mode) == [.b] ? .a : .b
+    }
 }
 
 /// How the sheet moves: the leaf's swing while a person folds it, and
@@ -327,4 +379,34 @@ enum FoldMotion {
     /// Whether letting go of the leaf here folds it: only past upright.
     /// No flick: a fold commits a sync, so it takes the full travel.
     static func commits(swing: Double) -> Bool { swing >= tippingPoint }
+
+    /// Where the leaf waits while the approval dialog asks: nearly
+    /// upright, still visibly lifted.
+    static let heldUpright: Double = 0.42
+
+    /// How much of its print the turning leaf still shows: all of it
+    /// while it lies nearly flat, none by about 25°, before perspective
+    /// squeezes the letters. Type bars stand in for it from there.
+    static func faceInk(_ swing: Double) -> Double { 1 - smoothstep(0.03, 0.14, swing) }
+
+    /// The print on the page the leaf comes down on: whole while it can
+    /// be read, fading as the leaf closes over it, so the strip past the
+    /// leaf's free edge shows paper rather than cut-off words.
+    static func landingInk(_ swing: Double) -> Double { 1 - 0.85 * smoothstep(0.62, 0.9, swing) }
+
+    /// How far arriving names have filled with the leaf's ink: fully by
+    /// the time the leaf stands where approval holds it, so the plan
+    /// being approved reads complete.
+    static func peek(_ swing: Double) -> Double { min(1, max(0, swing / heldUpright)) }
+
+    /// Under Reduce Motion the leaf crossfades in place of turning: its
+    /// face fades out before its back fades in, so neither ever lies
+    /// half-transparent over the other page's lines.
+    static func reducedFace(_ swing: Double) -> Double { 1 - min(1, max(0, swing) / tippingPoint) }
+    static func reducedBack(_ swing: Double) -> Double { max(0, (swing - tippingPoint) / (1 - tippingPoint)) }
+
+    private static func smoothstep(_ low: Double, _ high: Double, _ value: Double) -> Double {
+        let t = min(max((value - low) / (high - low), 0), 1)
+        return t * t * (3 - 2 * t)
+    }
 }
