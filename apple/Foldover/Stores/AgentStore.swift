@@ -189,6 +189,25 @@ final class AgentStore {
                 await repairUnreachable(request: request)
                 return
             }
+            // A connection that answered nothing is an agent still starting,
+            // not one that refused. A cold agent opening a large state
+            // database outlasts one probe, and reporting a failure there
+            // turns the status dot red and offers to restart a healthy
+            // agent. Ask again for the rest of the launch window first.
+            if Self.unanswered(error) {
+                let rest = startupTimeout - startupProbe
+                if let report = try? await answer(within: rest, request: request),
+                   generation == request {
+                    connection = .connected(version: report.version)
+                    note(report)
+                    return
+                }
+                guard generation == request else { return }
+                guard !Task.isCancelled else {
+                    connection = lastSettled ?? .disconnected
+                    return
+                }
+            }
             connection = .failed(message: message(for: error))
         }
     }
@@ -381,10 +400,19 @@ final class AgentStore {
         system.openLoginItems()
     }
 
+    /// Whether `error` says the agent was reached but answered nothing, so
+    /// waiting is worthwhile, rather than that it refused or failed.
+    private static func unanswered(_ error: Error) -> Bool {
+        if error is StatusError { return true }
+        guard let error = error as? AgentError else { return false }
+        if case AgentError.Connection = error { return true }
+        return false
+    }
+
     private func message(for error: Error) -> String {
         switch error {
         case StatusError.timedOut:
-            String(localized: "The background agent is not responding. Choose Turn On to restart it.")
+            String(localized: "The background agent did not answer. Wait a moment; choose Turn On to restart it.")
         case let error as AgentNotRunning: error.message
         case AgentError.Connection(let message), AgentError.NotRunning(let message),
              AgentError.Request(let message): message
