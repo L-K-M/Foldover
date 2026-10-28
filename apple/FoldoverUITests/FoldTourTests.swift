@@ -31,8 +31,24 @@ final class FoldTourTests: XCTestCase {
 
     @MainActor
     func testFoldWaitsForApproval() {
+        checkApprovalHold(motion: .full)
+    }
+
+    @MainActor
+    func testReducedMotionFoldWaitsForApproval() {
+        checkApprovalHold(motion: .reduced)
+    }
+
+    private enum Motion { case full, reduced }
+
+    @MainActor
+    private func checkApprovalHold(motion: Motion) {
         let tour = Tour(self, appearance: .light, scenario: "fold-approval")
         let app = tour.app
+        switch motion {
+        case .full: app.launchArguments += ["-foldover-full-motion", "YES"]
+        case .reduced: app.launchArguments += ["-foldover-reduced-motion", "YES"]
+        }
         tour.launch()
         defer { app.terminate() }
         tour.click(app.outlines.firstMatch.staticTexts["Photos"].firstMatch, "Photos in the sidebar")
@@ -46,7 +62,7 @@ final class FoldTourTests: XCTestCase {
 
         let approve = app.buttons["Archive and Sync"].firstMatch
         XCTAssertTrue(approve.waitForExistence(timeout: 5), "The fold must ask before applying the plan")
-        tour.snap("fold-held-for-approval")
+        tour.snap(motion == .full ? "fold-held-for-approval" : "fold-reduced-motion-approval")
         tour.key(.escape)
         XCTAssertTrue(line.exists, "Cancelling approval must keep the reviewed plan")
         XCTAssertFalse(app.buttons["Undo Sync"].exists, "Cancelling must not start a run")

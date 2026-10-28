@@ -24,9 +24,11 @@ enum Fixtures {
     /// `-foldover-full-motion YES` swings the leaf even under Reduce
     /// Motion, which the CI runners have on, so a tour can film it.
     private static let fullMotionKey = "foldover-full-motion"
+    private static let reducedMotionKey = "foldover-reduced-motion"
 
     static var foldTimeScale: Double { max(1, UserDefaults.standard.double(forKey: slowFoldKey)) }
     static var forcesFullMotion: Bool { UserDefaults.standard.bool(forKey: fullMotionKey) }
+    static var forcesReducedMotion: Bool { UserDefaults.standard.bool(forKey: reducedMotionKey) }
 
     static var isEnabled: Bool { ProcessInfo.processInfo.arguments.contains(launchArgument) }
 

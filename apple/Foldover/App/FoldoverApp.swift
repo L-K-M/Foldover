@@ -109,6 +109,7 @@ struct FoldoverApp: App {
     /// filming the swing.
     private static var foldMotionPolicy: FoldMotionPolicy {
         #if DEBUG
+        if Fixtures.isEnabled, Fixtures.forcesReducedMotion { return .reduced }
         if Fixtures.isEnabled, Fixtures.forcesFullMotion { return .full }
         #endif
         return .system

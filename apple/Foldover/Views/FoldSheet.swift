@@ -263,7 +263,9 @@ struct FoldSheet: View {
         Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
-    private var reduceMotion: Bool { motionPolicy == .system && systemReducesMotion }
+    private var reduceMotion: Bool {
+        motionPolicy == .reduced || (motionPolicy == .system && systemReducesMotion)
+    }
 
     private var halfWidth: CGFloat { paperSize.width / 2 }
     private var compact: Bool { halfWidth < FoldMetrics.compactHalf }
@@ -1166,6 +1168,8 @@ enum FoldMotionPolicy {
     case system
     /// Swing regardless: a Debug tour filming the leaf.
     case full
+    /// Exercise Reduce Motion regardless of the test runner's preference.
+    case reduced
 }
 
 extension EnvironmentValues {
