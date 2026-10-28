@@ -211,6 +211,9 @@ final class ArchiveStore {
                 }
                 guard !Task.isCancelled, hasMoreItems, let last = items.last else { break }
                 await loadItems(after: last.path)
+                // A failed page ends the walk; asking again repeats the
+                // same request while its error sits on screen.
+                guard error == nil else { break }
             }
             isSearching = false
             // A keystroke that landed mid-walk was turned away by the guard;
