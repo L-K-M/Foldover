@@ -607,7 +607,6 @@ final class MainViewModel {
             await task.value
         }
     }
-    }
 
     /// At launch, before `monitor`: restart the agent from this app when
     /// the app changed since the agent was registered (see
