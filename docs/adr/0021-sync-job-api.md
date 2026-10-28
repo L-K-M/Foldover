@@ -56,7 +56,9 @@ The CLI starts a job, polls every 250 ms and prints the final status as one
 JSON line: `foldover sync ID [--preview | --cancel | --approve LEFT RIGHT
 --review TOKEN]`. `--review` is the preview's `review_token`, echoed by a
 stopped run's hint; it is never looked up implicitly. A run that needs
-approval exits 3; failures and cancellations exit 1.
+approval exits 3, including `--changes`; failed or interrupted jobs exit 1.
+`--cancel` succeeds when the stop leaves no failures or conflicts. Entry
+failures exit 1; unresolved conflicts exit 4.
 
 The app's `SyncStore` keeps generated values inside one actor, starts jobs
 and polls every 500 ms while one works. A run that needs approval shows the
