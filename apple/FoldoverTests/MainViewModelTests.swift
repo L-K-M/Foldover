@@ -96,6 +96,91 @@ func setupGuidesFromAgentToFirstPair() async {
 
 private enum SetupFixtureError: Error { case off }
 
+/// Every run blocks until released, so a test can see how many pairs are in
+/// flight at once.
+private actor GatedSyncClient: SyncClient {
+    private var entered = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var peak = 0
+
+    func run(_ id: String, approvedA: UInt64, approvedB: UInt64,
+             reviewToken: String?) async throws -> PairSyncState {
+        entered += 1
+        peak = max(peak, entered)
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+        entered -= 1
+        return .finished(RunSummary(cancelled: false, copied: 1, updated: 0, archived: 0,
+                                    recovered: 0, conflicts: 0, failures: [], failureCount: 0,
+                                    archive: "run"))
+    }
+
+    func release() {
+        for waiter in waiters { waiter.resume() }
+        waiters.removeAll()
+    }
+
+    func preview(_ id: String) async throws -> PairSyncState { .idle }
+    func status(_ id: String) async throws -> PairSyncState { .idle }
+    func cancel(_ id: String) async throws -> PairSyncState { .idle }
+    func undo(_ id: String) async throws -> PairSyncState { .idle }
+    func resolve(_ id: String, path: Data, keep: FolderSide,
+                 reviewToken: String) async throws -> PairSyncState { .idle }
+    func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
+    func skipOnce(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
+    func history(_ id: String) async throws -> [RunRecord] { [] }
+    func changes(_ id: String, after: Data?, filter: ChangeFilter?,
+                 reviewToken: String) async throws -> ChangePage {
+        ChangePage(changes: [], more: false)
+    }
+}
+
+private actor ThreePairClient: PairClient {
+    private let pairs = (1...3).map { index in
+        SyncPair(id: String(repeating: "\(index)", count: 32), revision: 1,
+                 settings: PairSettings(name: "Pair \(index)",
+                                        left: SelectedFolder(bytes: Data("/a\(index)".utf8)),
+                                        right: SelectedFolder(bytes: Data("/b\(index)".utf8)),
+                                        mode: .sync))
+    }
+
+    func page(after: String?) async throws -> PairCatalogPage {
+        PairCatalogPage(pairs: after == nil ? pairs : [], next: nil)
+    }
+    func create(_ settings: PairSettings) async throws -> SyncPair { pairs[0] }
+    func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { pair }
+    func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
+    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { [] }
+    func servers() async throws -> [NearbyServer] { [] }
+    func browse(_ locator: String) async throws -> ServerListing {
+        ServerListing(locator: locator, parent: nil, folders: [])
+    }
+}
+
+/// Sync All awaits each pair in turn, so the last of five pairs started fifty
+/// minutes after the click while the agent and the CLI ran four at once.
+@MainActor
+@Test
+func syncAllRunsPairsAtOnceInsteadOfOneAtATime() async {
+    let client = GatedSyncClient()
+    let viewModel = MainViewModel(
+        appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { AgentReport(version: "1.0") }),
+        pairs: PairStore(client: ThreePairClient()), sync: SyncStore(client: client)
+    )
+    await viewModel.refreshAgent()
+    #expect(viewModel.pairs.count == 3)
+    let all = Task { await viewModel.syncAll() }
+    // Every pair must be in flight before any of them is allowed to finish.
+    for _ in 0..<300 {
+        if await client.peak >= 3 { break }
+        try? await Task.sleep(for: .milliseconds(5))
+    }
+    await client.release()
+    await all.value
+    #expect(await client.peak == 3)
+}
+
 private actor EmptyCatalogClient: PairClient {
     func page(after: String?) async throws -> PairCatalogPage { PairCatalogPage(pairs: [], next: nil) }
     func create(_ settings: PairSettings) async throws -> SyncPair {
