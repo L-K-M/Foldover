@@ -663,35 +663,40 @@ func automaticOutcomesThatNeedAPersonBecomeAlertsOnlyOnChange() async {
     #expect(await recorder.alerts.count == 1)
 }
 
-/// The first status read blocks until released and the rest answer at once,
-/// so a test can see how many pairs are read before the slowest one lands.
+/// Every status read blocks until released, so a test can see how many pairs
+/// are read at once and which of them a slot waits on.
 private actor BlockingStatusClient: SyncClient {
     private var entered = 0
     private var attempts = 0
-    private var held: CheckedContinuation<PairSyncState, any Error>?
+    private var waiters: [CheckedContinuation<PairSyncState, any Error>] = []
     private(set) var peak = 0
 
     func status(_ id: String) async throws -> PairSyncState {
         attempts += 1
         entered += 1
         peak = max(peak, entered)
-        if attempts == 1 {
-            let reply = try await withCheckedThrowingContinuation { continuation in
-                held = continuation
-            }
-            entered -= 1
-            return reply
+        let reply = try await withCheckedThrowingContinuation { continuation in
+            waiters.append(continuation)
         }
         entered -= 1
-        return .idle
+        return reply
     }
 
-    /// Reads started so far, the held one included.
+    /// Reads started so far.
     func calls() async -> Int { attempts }
 
+    /// Release every read but the first, which stands in for an unreachable
+    /// endpoint sitting out its timeout.
+    func releaseAllButTheFirst() {
+        let held = waiters.isEmpty ? nil : waiters.removeFirst()
+        for waiter in waiters { waiter.resume(returning: .idle) }
+        waiters.removeAll()
+        if let held { waiters.append(held) }
+    }
+
     func release() {
-        held?.resume(returning: .idle)
-        held = nil
+        for waiter in waiters { waiter.resume(returning: .idle) }
+        waiters.removeAll()
     }
 
     func preview(_ id: String) async throws -> PairSyncState { .idle }
@@ -734,10 +739,17 @@ func checkAllReadsPairsAtOnceInsteadOfOneAtATime() async {
         if await client.peak >= 4 { break }
         try? await Task.sleep(for: .milliseconds(5))
     }
-    // The four reads the bound allows are in flight. The fifth has already
-    // started, because a slot freed on the first of them to finish rather
-    // than on the held one — a head-of-line wait would leave it unread here.
+    // The four reads the bound allows are in flight together.
     #expect(await client.peak == 4)
+
+    // The rest answer, as fast endpoints do. The fifth read starts because a
+    // slot freed on the first of them to finish rather than on the held one;
+    // a head-of-line wait would leave it unread until the held read landed.
+    await client.releaseAllButTheFirst()
+    for _ in 0..<300 {
+        if await client.calls() >= 5 { break }
+        try? await Task.sleep(for: .milliseconds(5))
+    }
     #expect(await client.calls() == 5)
 
     await client.release()
