@@ -219,6 +219,8 @@ enum FixtureScenario: String {
     /// A background sync keeps running after the main window closes.
     case syncing
     case syncingReduced = "syncing-reduced"
+    case failedRun = "failed-run"
+    case foldApproval = "fold-approval"
 
     static var current: FixtureScenario? {
         UserDefaults.standard.string(forKey: "foldover-scenario").flatMap(FixtureScenario.init)
@@ -233,7 +235,7 @@ enum FixtureScenario: String {
             return AgentReport(version: "0.1.0", safeModeStops: 3)
         case .agentFailed:
             throw FixtureError.agentUnavailable
-        case .noPairs, .manyPairs, .pairsFail, .syncing, .syncingReduced:
+        case .noPairs, .manyPairs, .pairsFail, .syncing, .syncingReduced, .failedRun, .foldApproval:
             return AgentReport(version: "0.1.0")
         }
     }
@@ -352,6 +354,22 @@ actor FixtureSyncClient: SyncClient {
         self.pairs = pairs
         if scenario == .syncing || scenario == .syncingReduced {
             states[Fixtures.photosID] = .working(.run, cancelling: false)
+        }
+        if scenario == .failedRun {
+            states[Fixtures.photosID] = .finished(RunSummary(
+                cancelled: false, copied: 1, updated: 0, archived: 0, recovered: 0, conflicts: 0,
+                failures: [
+                    RunFailure(path: Data("2026/Trip/header.txt".utf8), message: "Permission denied."),
+                    RunFailure(path: Data("2026/Trip/notes.md".utf8), message: "The server disconnected."),
+                ], failureCount: 2, archive: "tour-failed-run"))
+        }
+        if scenario == .foldApproval {
+            let changes = Fixtures.changes(for: Fixtures.photosID)
+            states[Fixtures.photosID] = .previewed(PreviewSummary(
+                changes: changes, copies: 4, updates: 1, archives: 2, conflicts: 3, blocked: 1, kept: 0,
+                a: DeletionCheck(deletions: 0, paths: 0, needsApproval: false),
+                b: DeletionCheck(deletions: 2, paths: 2, needsApproval: true),
+                reviewToken: "tour-approval", pairRevision: 1, moves: 1))
         }
     }
 

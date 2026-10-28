@@ -10,6 +10,50 @@ final class FoldTourTests: XCTestCase {
     private static let slowMotion = 8
 
     @MainActor
+    func testCompletedFailuresRemainInspectable() {
+        let tour = Tour(self, appearance: .light, scenario: "failed-run")
+        let app = tour.app
+        tour.launch()
+        defer { app.terminate() }
+        tour.click(app.outlines.firstMatch.staticTexts["Photos"].firstMatch, "Photos in the sidebar")
+
+        let failure = tour.line("2026/Trip/notes.md")
+        guard tour.click(failure, "completed failure") else { return }
+        XCTAssertTrue((failure.value as? String)?.contains("The server disconnected.") == true,
+                      "The accessibility value must explain the failure")
+        XCTAssertTrue(app.windows.staticTexts["The server disconnected."].firstMatch.waitForExistence(timeout: 5),
+                      "Selecting a completed failure must show its explanation in the inspector")
+        tour.snap("fold-failure-selected")
+
+        tour.key(.upArrow)
+        XCTAssertTrue(app.windows.staticTexts["Permission denied."].firstMatch.waitForExistence(timeout: 5),
+                      "Keyboard selection must work on completed failures")
+    }
+
+    @MainActor
+    func testFoldWaitsForApproval() {
+        let tour = Tour(self, appearance: .light, scenario: "fold-approval")
+        let app = tour.app
+        tour.launch()
+        defer { app.terminate() }
+        tour.click(app.outlines.firstMatch.staticTexts["Photos"].firstMatch, "Photos in the sidebar")
+
+        let line = tour.line("2026/Trip/notes.md")
+        XCTAssertTrue(line.waitForExistence(timeout: 5))
+        let ear = app.windows.descendants(matching: .any)["Fold Folder A’s Half to Sync"].firstMatch
+        guard ear.waitForExistence(timeout: 5) else { return XCTFail("Missing fold handle") }
+        let corner = ear.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.25))
+        corner.click(forDuration: 0.2, thenDragTo: corner.withOffset(CGVector(dx: line.frame.width * 0.45, dy: 0)))
+
+        let approve = app.buttons["Archive and Sync"].firstMatch
+        XCTAssertTrue(approve.waitForExistence(timeout: 5), "The fold must ask before applying the plan")
+        tour.snap("fold-held-for-approval")
+        tour.click(app.buttons["Cancel"].firstMatch, "cancel approval")
+        XCTAssertTrue(line.exists, "Cancelling approval must keep the reviewed plan")
+        XCTAssertFalse(app.buttons["Undo Sync"].exists, "Cancelling must not start a run")
+    }
+
+    @MainActor
     func testFoldInMotion() {
         continueAfterFailure = true
         let tour = Tour(self, appearance: .light, slowFold: Self.slowMotion)
