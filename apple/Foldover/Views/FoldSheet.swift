@@ -347,7 +347,8 @@ struct FoldSheet: View {
             if progress > 0, paperSize.width > 0 {
                 FoldLeafView(side: leafSide, progress: progress, entries: entries, pageSize: paperSize,
                              scrollOffset: scrollMark.offset, headerHeight: Self.headerHeight,
-                             listInset: Self.listInset, reduceMotion: reduceMotion) {
+                             listInset: Self.listInset, reduceMotion: reduceMotion,
+                             selection: leafSelection(scene), staged: staged.map { (id: $0.lineID, flow: $0.flow) }) {
                     FoldFolderLabel(viewModel: viewModel, folder: folder(leafSide), side: leafSide)
                 }
                 .allowsHitTesting(false)
@@ -363,6 +364,12 @@ struct FoldSheet: View {
         }
         .overlay(alignment: .top) { dogEars(scene: scene, progress: progress) }
         .onGeometryChange(for: CGSize.self) { $0.size } action: { paperSize = $0 }
+    }
+
+    /// The selected line as the leaf carries it, tinted as its page was.
+    private func leafSelection(_ scene: FoldScene) -> (id: ChangeRow.ID, tint: SelectionTint)? {
+        guard scene.allowsInspection, let id = viewModel.selectedChangeID else { return nil }
+        return (id: id, tint: SelectionTint(focused: focus.wrappedValue == .changes))
     }
 
     /// The two halves of the page: paper, the desk where the leaf lifted
@@ -467,6 +474,7 @@ struct FoldSheet: View {
                     .padding(24)
                     .frame(maxHeight: .infinity)
                 }
+                .opacity(pageInk(messagePage, progress))
             } else if !entries.isEmpty {
                 lineList(entries, scene: scene, progress: progress)
                     .opacity(scene == .comparing ? 0.42 : 1)
@@ -491,13 +499,16 @@ struct FoldSheet: View {
                     .padding(24)
                     .frame(maxHeight: .infinity)
                 }
+                .opacity(pageInk(messagePage, progress))
                 .frame(maxHeight: .infinity)
                 // Light may cross the gutter; print may not.
                 .overlay { ComparingSweep(paused: reduceMotion, timeScale: timeScale) }
             } else if scene != .pressing {
                 // A run attached to mid-press has no lines here; the leaf
                 // covers one half and the navy shows through the other.
+                // A message lifts and fades with its page, as lines do.
                 placeholder
+                    .opacity(pageInk(messagePage, progress))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -751,8 +762,9 @@ struct FoldSheet: View {
     }
 
     private func shake(_ line: FoldLine) {
-        // Without motion, the Mac's alert sound refuses instead.
-        guard !reduceMotion else {
+        // Without motion, or with no mark on either page to move (a kept
+        // line), the Mac's alert sound refuses instead.
+        guard !reduceMotion, line.badge(.a) != nil || line.badge(.b) != nil else {
             NSSound.beep()
             return
         }

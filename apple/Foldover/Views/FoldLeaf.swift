@@ -42,6 +42,10 @@ struct FoldLeafView<Label: View>: View {
     let headerHeight: CGFloat
     let listInset: CGFloat
     let reduceMotion: Bool
+    /// The selected line and its tint, and a turn staged on a line: the
+    /// leaf carries them as its page showed them.
+    let selection: (id: ChangeRow.ID, tint: SelectionTint)?
+    let staged: (id: ChangeRow.ID, flow: FoldFlow)?
     /// The folder label printed at the top of the half.
     @ViewBuilder let label: Label
 
@@ -208,7 +212,10 @@ struct FoldLeafView<Label: View>: View {
         case .folder(let path, let count):
             FoldHeadingHalf(path: path, count: count, side: side)
         case .line(let line):
-            FoldHalf(line: line, side: side)
+            FoldHalf(line: line, side: side, staged: staged?.id == line.id ? staged?.flow : nil)
+                .background {
+                    if let selection, selection.id == line.id { selection.tint }
+                }
         }
     }
 }
