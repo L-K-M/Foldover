@@ -663,26 +663,35 @@ func automaticOutcomesThatNeedAPersonBecomeAlertsOnlyOnChange() async {
     #expect(await recorder.alerts.count == 1)
 }
 
-/// Every status read blocks until released, so a test can see how many pairs
-/// are being read at once.
+/// The first status read blocks until released and the rest answer at once,
+/// so a test can see how many pairs are read before the slowest one lands.
 private actor BlockingStatusClient: SyncClient {
     private var entered = 0
-    private var waiters: [CheckedContinuation<PairSyncState, any Error>] = []
+    private var attempts = 0
+    private var held: CheckedContinuation<PairSyncState, any Error>?
     private(set) var peak = 0
 
     func status(_ id: String) async throws -> PairSyncState {
+        attempts += 1
         entered += 1
         peak = max(peak, entered)
-        let reply = try await withCheckedThrowingContinuation { continuation in
-            waiters.append(continuation)
+        if attempts == 1 {
+            let reply = try await withCheckedThrowingContinuation { continuation in
+                held = continuation
+            }
+            entered -= 1
+            return reply
         }
         entered -= 1
-        return reply
+        return .idle
     }
 
+    /// Reads started so far, the held one included.
+    func calls() async -> Int { attempts }
+
     func release() {
-        for waiter in waiters { waiter.resume(returning: .idle) }
-        waiters.removeAll()
+        held?.resume(returning: .idle)
+        held = nil
     }
 
     func preview(_ id: String) async throws -> PairSyncState { .idle }
@@ -719,14 +728,21 @@ private func pairs(_ count: Int) -> [SyncPair] {
 func checkAllReadsPairsAtOnceInsteadOfOneAtATime() async {
     let client = BlockingStatusClient()
     let store = SyncStore(client: client, pollInterval: .milliseconds(1))
-    let all = Task { await store.checkAll(pairs(3)) }
+    // More pairs than the pass reads at once, so the bound is exercised.
+    let all = Task { await store.checkAll(pairs(5)) }
     for _ in 0..<300 {
-        if await client.peak >= 3 { break }
+        if await client.peak >= 4 { break }
         try? await Task.sleep(for: .milliseconds(5))
     }
+    // The four reads the bound allows are in flight. The fifth has already
+    // started, because a slot freed on the first of them to finish rather
+    // than on the held one — a head-of-line wait would leave it unread here.
+    #expect(await client.peak == 4)
+    #expect(await client.calls() == 5)
+
     await client.release()
     await all.value
-    #expect(await client.peak == 3)
+    #expect(await client.calls() == 5)
 }
 
 @Test
