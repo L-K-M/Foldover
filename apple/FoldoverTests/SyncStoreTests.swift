@@ -663,6 +663,72 @@ func automaticOutcomesThatNeedAPersonBecomeAlertsOnlyOnChange() async {
     #expect(await recorder.alerts.count == 1)
 }
 
+/// Every status read blocks until released, so a test can see how many pairs
+/// are being read at once.
+private actor BlockingStatusClient: SyncClient {
+    private var entered = 0
+    private var waiters: [CheckedContinuation<PairSyncState, any Error>] = []
+    private(set) var peak = 0
+
+    func status(_ id: String) async throws -> PairSyncState {
+        entered += 1
+        peak = max(peak, entered)
+        let reply = try await withCheckedThrowingContinuation { continuation in
+            waiters.append(continuation)
+        }
+        entered -= 1
+        return reply
+    }
+
+    func release() {
+        for waiter in waiters { waiter.resume(returning: .idle) }
+        waiters.removeAll()
+    }
+
+    func preview(_ id: String) async throws -> PairSyncState { .idle }
+    func run(_ id: String, approvedA: UInt64, approvedB: UInt64,
+             reviewToken: String?) async throws -> PairSyncState { .idle }
+    func cancel(_ id: String) async throws -> PairSyncState { .idle }
+    func undo(_ id: String) async throws -> PairSyncState { .idle }
+    func resolve(_ id: String, path: Data, keep: FolderSide,
+                 reviewToken: String) async throws -> PairSyncState { .idle }
+    func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
+    func skipOnce(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
+    func history(_ id: String) async throws -> [RunRecord] { [] }
+    func changes(_ id: String, after: Data?, filter: ChangeFilter?,
+                 reviewToken: String) async throws -> ChangePage {
+        ChangePage(changes: [], more: false)
+    }
+}
+
+private func pairs(_ count: Int) -> [SyncPair] {
+    (1...count).map { index in
+        SyncPair(id: String(repeating: "\(index)", count: 32), revision: 1,
+                 settings: PairSettings(name: "Pair \(index)",
+                                        left: SelectedFolder(bytes: Data("/a\(index)".utf8)),
+                                        right: SelectedFolder(bytes: Data("/b\(index)".utf8)),
+                                        mode: .sync))
+    }
+}
+
+/// A pair on an unreachable endpoint holds its status read for the client's
+/// five-second timeout, so reading them one at a time left the whole catalog
+/// waiting on the slowest member.
+@MainActor
+@Test
+func checkAllReadsPairsAtOnceInsteadOfOneAtATime() async {
+    let client = BlockingStatusClient()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let all = Task { await store.checkAll(pairs(3)) }
+    for _ in 0..<300 {
+        if await client.peak >= 3 { break }
+        try? await Task.sleep(for: .milliseconds(5))
+    }
+    await client.release()
+    await all.value
+    #expect(await client.peak == 3)
+}
+
 @Test
 func alertTextsNameTheProblem() {
     let conflicted = RunSummary(cancelled: false, copied: 0, updated: 0, archived: 0, recovered: 0,
