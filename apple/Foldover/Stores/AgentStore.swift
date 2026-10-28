@@ -416,7 +416,10 @@ final class AgentStore {
     }
 
     /// Whether `error` says the agent did not answer, so waiting is
-    /// worthwhile, rather than that it refused or failed.
+    /// worthwhile, rather than that it refused or failed. `StatusError` has
+    /// only the timeout case today; naming it rather than the type keeps a
+    /// future case from silently burning the launch window on retries that
+    /// cannot help.
     private static func unanswered(_ error: Error) -> Bool {
         if case StatusError.timedOut = error { return true }
         guard let error = error as? AgentError else { return false }

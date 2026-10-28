@@ -109,7 +109,12 @@ private actor StallingThenFailingStatus {
     func status() async throws -> AgentReport {
         attempts += 1
         if attempts == 1 {
-            await withCheckedContinuation { (_: CheckedContinuation<Void, Never>) in }
+            // Never answers, as an agent that accepted the socket and stalled.
+            // Waiting rather than parking a continuation nobody resumes keeps
+            // the task, and this actor, collectable.
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+            }
         }
         throw AgentError.Request(message: "Cannot read agent state")
     }
