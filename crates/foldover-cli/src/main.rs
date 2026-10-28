@@ -924,6 +924,7 @@ async fn sync(
     if let SyncCommand::Changes(kind) = command {
         return sync_changes(location, id, kind, progress).await;
     }
+    let cancelling = matches!(&command, SyncCommand::Cancel);
     let status = match command {
         SyncCommand::Preview => foldover_client::start_preview(location, id).await?,
         // A plain run goes through `run_one` so `sync ID` and `sync
@@ -959,27 +960,57 @@ async fn sync(
             preview.left.deletions, preview.right.deletions, preview.review_token
         );
     }
+    if cancelling {
+        return Ok(cancel_exit_code(&status));
+    }
     Ok(status_code(&status))
 }
 
-/// Errors take precedence over conflicts, then approval, then success.
+/// Interrupted jobs fail even when no individual entry failed.
 fn status_code(status: &SyncStatus) -> ExitCode {
     match status {
         SyncStatus::Idle | SyncStatus::Previewed { .. } => ExitCode::SUCCESS,
-        SyncStatus::Finished { result }
-            if result.failure_count == 0 && !result.cancelled && result.conflicts > 0 =>
-        {
-            ExitCode::from(CONFLICT_EXIT)
+        SyncStatus::Finished { result } if result.failure_count > 0 || result.cancelled => {
+            ExitCode::FAILURE
         }
-        SyncStatus::Finished { result } if result.failure_count == 0 && !result.cancelled => {
-            ExitCode::SUCCESS
-        }
+        SyncStatus::Finished { result } if result.conflicts > 0 => ExitCode::from(CONFLICT_EXIT),
+        SyncStatus::Finished { .. } => ExitCode::SUCCESS,
         // Entries left as they were are listed and fail the command.
         SyncStatus::Undone { result } if result.not_undone_count == 0 && !result.cancelled => {
             ExitCode::SUCCESS
         }
         SyncStatus::NeedsApproval { .. } => ExitCode::from(APPROVAL_EXIT),
         _ => ExitCode::FAILURE,
+    }
+}
+
+/// A requested stop succeeds unless the run left failures or conflicts.
+fn cancel_exit_code(status: &SyncStatus) -> ExitCode {
+    match status {
+        SyncStatus::Finished { result } if result.failure_count == 0 => {
+            if result.conflicts > 0 {
+                return ExitCode::from(CONFLICT_EXIT);
+            }
+            ExitCode::SUCCESS
+        }
+        _ => status_code(status),
+    }
+}
+
+/// Listing every change is a read, so it succeeds; a plan that still needs
+/// approval reports what `--preview` reports, since nothing was applied and
+/// a person has to decide. Every variant is named so a new one cannot quietly
+/// start exiting zero.
+fn changes_exit_code(status: &SyncStatus) -> ExitCode {
+    match status {
+        SyncStatus::NeedsApproval { .. } => ExitCode::from(APPROVAL_EXIT),
+        SyncStatus::Idle
+        | SyncStatus::Working { .. }
+        | SyncStatus::Previewed { .. }
+        | SyncStatus::Finished { .. }
+        | SyncStatus::Undone { .. }
+        | SyncStatus::Failed { .. }
+        | SyncStatus::Waiting { .. } => ExitCode::SUCCESS,
     }
 }
 
@@ -1180,7 +1211,7 @@ async fn sync_changes(
         }
         match page.items.last() {
             Some(item) if page.more => after = Some(item.path.clone()),
-            _ => return Ok(ExitCode::SUCCESS),
+            _ => return Ok(changes_exit_code(&status)),
         }
     }
 }
@@ -1470,6 +1501,92 @@ mod tests {
         .await;
         assert!(matches!(result, Ok(SyncStatus::Idle)));
         assert_eq!(polls, 0);
+    }
+
+    fn finished(cancelled: bool, conflicts: u64, failures: u64) -> SyncStatus {
+        SyncStatus::Finished {
+            result: foldover_client::SyncResult {
+                cancelled,
+                copied: 1,
+                moved: 0,
+                updated: 0,
+                archived: 0,
+                recovered: 0,
+                conflicts,
+                failures: Vec::new(),
+                failure_count: failures,
+                archive: "run".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn interrupted_jobs_do_not_report_completion() {
+        assert_eq!(status_code(&finished(true, 0, 0)), ExitCode::FAILURE);
+        assert_eq!(status_code(&finished(true, 2, 0)), ExitCode::FAILURE);
+        assert_eq!(status_code(&finished(true, 2, 1)), ExitCode::FAILURE);
+    }
+
+    /// A stop is the outcome `--cancel` asked for, so the command succeeds
+    /// whatever the run had already done; only its own failed entries or
+    /// the conflicts it left fail it.
+    #[test]
+    fn a_cancelled_run_is_not_a_failed_command() {
+        assert_eq!(cancel_exit_code(&finished(true, 0, 0)), ExitCode::SUCCESS);
+        assert_eq!(
+            cancel_exit_code(&finished(true, 2, 0)),
+            ExitCode::from(CONFLICT_EXIT)
+        );
+        assert_eq!(cancel_exit_code(&finished(true, 0, 3)), ExitCode::FAILURE);
+        assert_eq!(status_code(&finished(false, 0, 0)), ExitCode::SUCCESS);
+        assert_eq!(
+            status_code(&finished(false, 2, 0)),
+            ExitCode::from(CONFLICT_EXIT)
+        );
+        assert_eq!(status_code(&finished(false, 0, 1)), ExitCode::FAILURE);
+        // Errors outrank conflicts when a run left both.
+        assert_eq!(status_code(&finished(false, 2, 1)), ExitCode::FAILURE);
+        assert_eq!(cancel_exit_code(&finished(true, 2, 1)), ExitCode::FAILURE);
+        assert_eq!(cancel_exit_code(&SyncStatus::Idle), ExitCode::SUCCESS);
+        assert_eq!(
+            cancel_exit_code(&SyncStatus::Failed {
+                message: "Cannot stop".into()
+            }),
+            ExitCode::FAILURE
+        );
+    }
+
+    /// Listing a plan that still needs approval is the outcome `--preview`
+    /// reports: nothing was applied and a person must decide.
+    #[test]
+    fn listing_changes_reports_a_plan_that_needs_approval() {
+        let needs_approval = SyncStatus::NeedsApproval { preview: preview() };
+        assert_eq!(
+            changes_exit_code(&needs_approval),
+            ExitCode::from(APPROVAL_EXIT)
+        );
+        assert_eq!(changes_exit_code(&SyncStatus::Idle), ExitCode::SUCCESS);
+    }
+
+    fn preview() -> foldover_client::SyncPreview {
+        foldover_client::SyncPreview {
+            items: Vec::new(),
+            counts: foldover_client::SyncCounts::default(),
+            review_token: "token".into(),
+            pair_revision: 1,
+            left: deletions(0),
+            right: deletions(0),
+            failures: Vec::new(),
+            failure_count: 0,
+        }
+    }
+
+    fn deletions(count: u64) -> foldover_client::SyncDeletions {
+        foldover_client::SyncDeletions {
+            deletions: count,
+            paths: count,
+            needs_approval: false,
+        }
     }
 
     fn req(args: &[&str]) -> Request {
