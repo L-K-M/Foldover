@@ -341,6 +341,9 @@ func filterTextKeepsOneRulePerLine() {
     editor.filterText = "*.tmp\nbuild/"
     #expect(editor.options.filters == ["*.tmp", "build/"])
     #expect(editor.filterText == "*.tmp\nbuild/")
+    // A blank line is not a rule; gitignore ignores one anyway.
+    editor.filterText = "*.tmp\n\nbuild/\n"
+    #expect(editor.options.filters == ["*.tmp", "build/"])
 }
 
 @MainActor

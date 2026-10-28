@@ -142,11 +142,13 @@ final class PairEditorViewModel: Identifiable {
         return String(localized: "\(name) can't hold Foldover's .foldover folder, so it can only be a Backup's target. Choose a Backup to \(name), then keep nothing in it.")
     }
 
-    /// Exclusion rules as editable text, one per line.
+    /// Exclusion rules as editable text, one per line. Blank lines are left
+    /// out: gitignore ignores them anyway, so keeping them would only put
+    /// rules the pair cannot use into its stored settings.
     var filterText: String {
         get { options.filters.joined(separator: "\n") }
         set {
-            options.filters = newValue.split(separator: "\n", omittingEmptySubsequences: false)
+            options.filters = newValue.split(separator: "\n", omittingEmptySubsequences: true)
                 .map(String.init)
         }
     }

@@ -496,10 +496,11 @@ final class PairStore {
     }
 
     /// An anchored gitignore rule for exactly `path`: `docs/a*.txt`
-    /// becomes `/docs/a\*.txt`. Nil when the path is not UTF-8 text,
-    /// which rules cannot express.
+    /// becomes `/docs/a\*.txt`. Nil when the path is not UTF-8 text, which
+    /// rules cannot express, or names nothing, whose rule would anchor at
+    /// the root and exclude everything.
     static func skipRule(for path: Data) -> String? {
-        guard let text = String(data: path, encoding: .utf8) else { return nil }
+        guard let text = String(data: path, encoding: .utf8), !text.isEmpty else { return nil }
         let body = text.reversed().drop(while: { $0 == " " }).reversed()
         let trailingSpaces = text.count - body.count
         var rule = "/"
