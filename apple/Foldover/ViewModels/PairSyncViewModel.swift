@@ -48,6 +48,10 @@ struct ChangeRow: Identifiable, Equatable {
     var actionText = ""
     /// The data a copy moves; empty when there is none.
     var sizeText = ""
+    /// The planned change; nil for a failure, which plans nothing.
+    var action: ChangeAction?
+    /// For a move, the path it had.
+    var movedFrom: String?
 }
 
 /// What the content area shows instead of an empty table.
@@ -450,7 +454,12 @@ struct PairSyncViewModel {
         guard case .needsApproval(let preview) = state,
               preview.pairRevision == pair.revision,
               !store.isBusy(pair.id) else { return nil }
-        return ApprovalRequest(
+        return approval(of: preview)
+    }
+
+    /// The request approving `preview`'s removals, with its wording.
+    private func approval(of preview: PreviewSummary) -> ApprovalRequest {
+        ApprovalRequest(
             pairID: pair.id, pairRevision: preview.pairRevision,
             reviewToken: preview.reviewToken,
             approvedA: preview.a.deletions, approvedB: preview.b.deletions,
@@ -459,6 +468,57 @@ struct PairSyncViewModel {
                 + " " + Self.archiveCounts(preview)
                 + " " + String(localized: "Archived items stay in .foldover/archive for 30 days.")
         )
+    }
+
+    // MARK: The fold
+
+    /// The job the agent works on for this pair; nil when it works on none.
+    var job: SyncJob? {
+        if case .working(let job, _, _) = state { return job }
+        return nil
+    }
+
+    /// The folder an automatic sync waits for, e.g. an unmounted disk.
+    var missingSide: FolderSide? {
+        if case .waiting(let side) = state { return side }
+        return nil
+    }
+
+    /// The previewed plan's lines, while the plan can still be reviewed.
+    var foldPlan: FoldPlan? {
+        guard let preview = reviewable else { return nil }
+        return FoldPlan(token: preview.reviewToken, lines: listedRows.map(FoldLine.init), changes: preview.total)
+    }
+
+    /// What the last run or undo reports it did, for the opened sheet.
+    var imprint: FoldImprint? {
+        switch state {
+        case .finished(let result): FoldImprint(result: result)
+        case .undone(let result): FoldImprint(undo: result)
+        default: nil
+        }
+    }
+
+    /// A previewed plan that removes enough to need approval asks before
+    /// the leaf falls, not after the run refuses: the fold holds upright
+    /// on this request until the person answers.
+    var foldApproval: ApprovalRequest? {
+        guard case .previewed(let preview) = state, reviewable != nil, !store.isBusy(pair.id),
+              preview.a.needsApproval || preview.b.needsApproval else { return nil }
+        return approval(of: preview)
+    }
+
+    /// Turn a line another way: keep the folder whose version the new
+    /// flow carries over. A conflict keeps either side; another change
+    /// only turns toward the folder it would have changed.
+    func turn(_ row: ChangeRow, to flow: FoldFlow) async {
+        guard let side = FoldLine.keptSide(flow) else { return }
+        if row.resolvable != nil {
+            await keep(side, for: row)
+            return
+        }
+        guard row.otherWay == side else { return }
+        await copyOtherWay(row)
     }
 
     /// The kind of changes listed; nil lists all.
@@ -529,7 +589,9 @@ struct PairSyncViewModel {
                                   symbol: Self.symbol(change.action),
                                   tone: Self.tone(change.action),
                                   actionText: Self.actionText(change),
-                                  sizeText: change.bytes > 0 ? Self.byteText(change.bytes) : "")
+                                  sizeText: change.bytes > 0 ? Self.byteText(change.bytes) : "",
+                                  action: change.action,
+                                  movedFrom: change.movedFrom.map(Self.pathText))
                     }
                 // Error rows have stable negative IDs, separate from paged changes.
                 let failures = preview.failures.enumerated().map { index, failure in

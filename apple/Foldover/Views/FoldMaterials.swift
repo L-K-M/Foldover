@@ -1,0 +1,311 @@
+// The fold's materials, after the app icon: origami paper (kami), ivory
+// on its face and cerulean on its back, laid on a navy field and lit
+// from the top left. Surfaces are flat planes that meet at hard creases;
+// shading comes from which way a plane faces the light, not from gloss.
+// The sheet is the paper's face; the leaf shows the back once it turns,
+// so a folded sheet looks like the icon. Each folder keeps one ink
+// everywhere, so a line's color always says whose version it is;
+// position and a written verb say the same thing for anyone who cannot
+// tell the inks apart.
+//
+//   navy field  ┌─ lit ──┬─ shaded ─┐
+//               │ A ink  │  B ink   │   the back, once turned:
+//               └────────┴──────────┘   ◤ cerulean, two facets ◢
+
+import AppKit
+import SwiftUI
+
+enum FoldPalette {
+    /// Folder A writes in navy, Folder B in cerulean: far apart in
+    /// lightness, so they hold in grayscale and for every kind of color
+    /// vision. On dark paper navy gives way to the icon's ivory.
+    static func ink(_ side: FolderSide) -> Color {
+        switch side {
+        case .a: dynamic(light: 0x123E80, dark: 0xEDE3D3)
+        case .b: dynamic(light: 0x0A66BD, dark: 0x5BB8FF)
+        }
+    }
+
+    /// The paper's face: the icon's ivory, or the same ivory in shade in
+    /// Dark Mode, set apart from the navy by its warmth. The crease tilts
+    /// A's half toward the light and B's half away from it.
+    static let paper = dynamic(light: 0xF5EDE2, dark: 0x2C2A26)
+    static let paperShade = dynamic(light: 0xEEE5D8, dark: 0x27251F)
+    /// The paper's back, cerulean like the icon's arrowhead: a lit and a
+    /// shaded facet, flat, white type legible on both, and the light
+    /// catching their crease and the paper's top and left edges.
+    static let kamiLit = dynamic(light: 0x1A84D8, dark: 0x1475C8)
+    static let kamiShade = dynamic(light: 0x0A62BE, dark: 0x0954A8)
+    static let kamiRidge = dynamic(light: 0x7FD0FF, dark: 0x5DB4F0)
+    /// The navy field under the sheet: where the light falls, and the
+    /// vignette it fades into.
+    static let desk = dynamic(light: 0x0B5AA6, dark: 0x052A55)
+    static let deskShade = dynamic(light: 0x002457, dark: 0x000A1A)
+    /// Headings, sizes and verbs: the icon's warm umber, not a cool gray.
+    static let umber = dynamic(light: 0x6E5D50, dark: 0xA89B8C)
+    /// Words set on the navy field: readable where it is brightest.
+    static let deskInk = Color.white.opacity(0.8)
+    /// Shadows the paper casts onto the navy field.
+    static let castShadow = Color(red: 0, green: 10 / 255, blue: 24 / 255)
+    /// Shadows that fall on the paper itself.
+    static let foldShadow = dynamic(light: 0x4B3C30, dark: 0x000000)
+    /// The pin through a conflict.
+    static let pin = Color(nsColor: .systemOrange)
+    static let failure = Color(nsColor: .systemRed)
+
+    private static func dynamic(light: UInt32, dark: UInt32) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            return NSColor(rgb: isDark ? dark : light)
+        })
+    }
+}
+
+private extension NSColor {
+    convenience init(rgb: UInt32) {
+        self.init(srgbRed: CGFloat((rgb >> 16) & 0xFF) / 255, green: CGFloat((rgb >> 8) & 0xFF) / 255,
+                  blue: CGFloat(rgb & 0xFF) / 255, alpha: 1)
+    }
+}
+
+enum FoldType {
+    /// File names in a half; an arriving copy's name is set lighter.
+    static let name = Font.system(size: 13, weight: .medium)
+    static let arrivingName = Font.system(size: 13)
+    /// Verbs and sizes at a half's outer edge.
+    static let meta = Font.system(size: 11).monospacedDigit()
+    /// Small labels above a value, set in capitals: "FOLDER A".
+    static let eyebrow = Font.system(size: 9.5, weight: .semibold)
+    static let eyebrowTracking: CGFloat = 0.8
+    /// Folder headings in the list.
+    static let heading = Font.system(size: 11, weight: .semibold)
+    /// Large counts and the run's percentage.
+    static let figure = Font.system(size: 36, weight: .semibold).monospacedDigit()
+    /// Small capitals set in white on the cerulean back.
+    static let backEyebrow = Font.system(size: 10.5, weight: .semibold)
+}
+
+/// A fine, fixed grain: the same fibres at every size, so a resize
+/// never makes the paper shimmer. It has no inputs, so a swinging leaf
+/// does not redraw it; only a new size does.
+private struct Grain: View {
+    /// Past this many fibres a large window gains no texture, only
+    /// drawing time.
+    private static let maxFibres = 12_000
+
+    var body: some View {
+        Canvas { context, size in
+            var random = SplitMix(seed: 0xF01D)
+            let fibres = min(Int(size.width * size.height / 160), Self.maxFibres)
+            for _ in 0..<fibres {
+                let x = random.unit() * size.width
+                let y = random.unit() * size.height
+                let length = 0.5 + random.unit() * 1.6
+                let dark = random.unit() < 0.5
+                let rect = CGRect(x: x, y: y, width: length, height: 0.5)
+                context.fill(Path(rect), with: .color(dark ? .black.opacity(0.04) : .white.opacity(0.05)))
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+/// Which way a half faces the light from the top left.
+enum PaperFacet {
+    case lit
+    case shaded
+
+    init(_ side: FolderSide) {
+        self = side == .a ? .lit : .shaded
+    }
+}
+
+/// The paper's face: flat, its top edge catching the light and its foot
+/// a hair in shadow; the lit half's outer edge catches the light too.
+struct Paper: View {
+    var facet: PaperFacet = .lit
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        let edge = Color.white.opacity(scheme == .dark ? 0.14 : 0.8)
+        Rectangle()
+            .fill(facet == .lit ? FoldPalette.paper : FoldPalette.paperShade)
+            .overlay { Grain() }
+            .overlay(alignment: .top) { edge.frame(height: 1) }
+            .overlay(alignment: .leading) {
+                if facet == .lit { edge.frame(width: 1) }
+            }
+            .overlay(alignment: .bottom) {
+                FoldPalette.foldShadow.opacity(scheme == .dark ? 0.5 : 0.25).frame(height: 1)
+            }
+            .accessibilityHidden(true)
+    }
+}
+
+/// The paper's back: cerulean in two flat facets split along the
+/// diagonal, lit from the top left as the icon's arrowhead is, the light
+/// catching their crease and the top and left edges.
+struct Kami: View {
+    var body: some View {
+        Rectangle()
+            .fill(FoldPalette.kamiShade)
+            .overlay { LitFacet().fill(FoldPalette.kamiLit) }
+            .overlay { Ridges().stroke(FoldPalette.kamiRidge.opacity(0.8), lineWidth: 1) }
+            .overlay { Grain() }
+            .accessibilityHidden(true)
+    }
+
+    /// The triangle above the diagonal from the top right corner to the
+    /// bottom left one.
+    private struct LitFacet: Shape {
+        func path(in rect: CGRect) -> Path {
+            var path = Path()
+            path.addLines([CGPoint(x: rect.minX, y: rect.minY), CGPoint(x: rect.maxX, y: rect.minY),
+                           CGPoint(x: rect.minX, y: rect.maxY)])
+            path.closeSubpath()
+            return path
+        }
+    }
+
+    /// The facets' crease and the lit top and left edges, inset so the
+    /// whole line shows.
+    private struct Ridges: Shape {
+        func path(in rect: CGRect) -> Path {
+            let box = rect.insetBy(dx: 0.5, dy: 0.5)
+            var path = Path()
+            path.move(to: CGPoint(x: box.maxX, y: box.minY))
+            path.addLine(to: CGPoint(x: box.minX, y: box.maxY))
+            path.move(to: CGPoint(x: box.minX, y: box.maxY))
+            path.addLine(to: CGPoint(x: box.minX, y: box.minY))
+            path.addLine(to: CGPoint(x: box.maxX, y: box.minY))
+            return path
+        }
+    }
+}
+
+/// The paper with a dog-ear's corner gone: the triangle at the top
+/// outer corner of `side`'s half, `size` on a side; 0 keeps it whole.
+struct CornerCut: Shape {
+    let side: FolderSide
+    var size: CGFloat
+
+    var animatableData: CGFloat {
+        get { size }
+        set { size = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        if side == .a {
+            path.addLines([CGPoint(x: rect.minX + size, y: rect.minY), CGPoint(x: rect.maxX, y: rect.minY),
+                           CGPoint(x: rect.maxX, y: rect.maxY), CGPoint(x: rect.minX, y: rect.maxY),
+                           CGPoint(x: rect.minX, y: rect.minY + size)])
+        } else {
+            path.addLines([CGPoint(x: rect.minX, y: rect.minY), CGPoint(x: rect.maxX - size, y: rect.minY),
+                           CGPoint(x: rect.maxX, y: rect.minY + size), CGPoint(x: rect.maxX, y: rect.maxY),
+                           CGPoint(x: rect.minX, y: rect.maxY)])
+        }
+        path.closeSubpath()
+        return path
+    }
+}
+
+/// The navy field the sheet lies on: light pools at the top left and
+/// falls away to the far corner, as on the icon.
+struct Desk: View {
+    var body: some View {
+        EllipticalGradient(colors: [FoldPalette.desk, FoldPalette.deskShade], center: .topLeading,
+                           startRadiusFraction: 0, endRadiusFraction: 1.3)
+            .overlay { Grain() }
+            .accessibilityHidden(true)
+    }
+}
+
+/// The fold line down the middle of the sheet, a hard edge: A's half
+/// catches the light along it, and B's half falls into the fold's
+/// shadow, deeper while the sheet is folded. The lit edge is faint on
+/// dark paper, where a bright line would glow.
+struct Crease: View {
+    /// 0 flat … 1 folded.
+    var depth: Double = 0
+    @Environment(\.colorScheme) private var scheme
+
+    private static let shadowWidth: CGFloat = 10
+
+    var body: some View {
+        let dark = scheme == .dark
+        HStack(spacing: 0) {
+            Color.clear.frame(width: Self.shadowWidth)
+            Rectangle().fill(.white.opacity(dark ? 0.1 : 0.7)).frame(width: 1)
+            LinearGradient(colors: [FoldPalette.foldShadow.opacity((dark ? 0.4 : 0.16) + 0.12 * depth), .clear],
+                           startPoint: .leading, endPoint: .trailing)
+                .frame(width: Self.shadowWidth)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+/// A flat tint behind the selected line: the system accent while the
+/// sheet has the keys, gray while it does not, as selection reads
+/// everywhere on the Mac.
+struct SelectionTint: View {
+    var focused: Bool
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 6, style: .continuous)
+            .fill(focused ? Color.accentColor.opacity(0.28) : Color.gray.opacity(0.18))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .accessibilityHidden(true)
+    }
+}
+
+/// The turned-down corner a person drags to fold the half it sits on:
+/// the flap, folded in over the paper; `CornerCut` takes away the corner
+/// it came from.
+struct DogEar: Shape {
+    let side: FolderSide
+
+    func path(in rect: CGRect) -> Path {
+        // Corners of the square, starting top-left, clockwise.
+        let tl = CGPoint(x: rect.minX, y: rect.minY), tr = CGPoint(x: rect.maxX, y: rect.minY)
+        let br = CGPoint(x: rect.maxX, y: rect.maxY), bl = CGPoint(x: rect.minX, y: rect.maxY)
+        let points: [CGPoint] = side == .a ? [tr, br, bl] : [tl, br, bl]
+        var path = Path()
+        path.addLines(points)
+        path.closeSubpath()
+        return path
+    }
+}
+
+/// The pin through a conflict's line: nothing on it moves until a person
+/// chooses a version.
+struct Pin: View {
+    var body: some View {
+        Circle()
+            .fill(FoldPalette.pin)
+            .overlay(Circle().strokeBorder(FoldPalette.paper, lineWidth: 1.5))
+            .frame(width: 11, height: 11)
+            .shadow(color: .black.opacity(0.25), radius: 1, x: 0, y: 0.5)
+    }
+}
+
+/// A seeded generator: the grain is drawn the same every time.
+private struct SplitMix {
+    private var state: UInt64
+
+    init(seed: UInt64) { state = seed }
+
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
+    }
+
+    /// A value in 0..<1.
+    mutating func unit() -> Double { Double(next() >> 11) / Double(1 << 53) }
+}

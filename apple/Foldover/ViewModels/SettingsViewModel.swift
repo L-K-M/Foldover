@@ -35,6 +35,14 @@ struct SettingsViewModel {
 
     func openFullDiskAccess() { store.openFullDiskAccess() }
 
+    var playsPaperSounds: Bool { store.paperSounds }
+
+    var paperSoundsNote: String {
+        String(localized: "The sheet makes quiet paper sounds when you fold it to sync, when it opens, and when you turn a change the other way. Syncs that run on their own make no sound. macOS's \"Play user interface sound effects\" setting also silences them.")
+    }
+
+    func setPaperSounds(_ on: Bool) { store.setPaperSounds(on) }
+
     func setLoginLaunch(_ launch: LoginLaunch) {
         store.setLoginLaunch(launch)
     }

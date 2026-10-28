@@ -135,6 +135,8 @@ final class MainViewModel {
     private let automation: AutomationStore
     /// Paired Macs, for folders they share and how those read.
     private let macToMac: MacToMacStore
+    /// The fold's paper sounds.
+    private let sounds: FoldSoundStore
     var selectedPairID: String?
     private(set) var editor: PairEditorViewModel?
     private(set) var removalTarget: SyncPair?
@@ -164,7 +166,8 @@ final class MainViewModel {
     /// initializer.
     init(appInfo: AppInfoStore, agent: AgentStore = AgentStore(), pairs: PairStore = PairStore(),
          sync: SyncStore = SyncStore(), archive: ArchiveStore = ArchiveStore(),
-         automation: AutomationStore = AutomationStore(), macToMac: MacToMacStore = MacToMacStore()) {
+         automation: AutomationStore = AutomationStore(), macToMac: MacToMacStore = MacToMacStore(),
+         sounds: FoldSoundStore = FoldSoundStore()) {
         self.appInfo = appInfo
         self.agent = agent
         pairStore = pairs
@@ -172,7 +175,11 @@ final class MainViewModel {
         archiveStore = archive
         self.automation = automation
         self.macToMac = macToMac
+        self.sounds = sounds
     }
+
+    /// Play one of the fold's sounds for something done in the window.
+    func play(_ sound: FoldSound) { sounds.play(sound) }
 
     /// How a pair's folder reads: its path, or a paired Mac's folder by
     /// name.

@@ -29,7 +29,7 @@ final class TourTests: XCTestCase {
         tour.click(sidebarRow(app, "Photos"), "Photos in the sidebar")
         tour.key("r", .command)
         tour.pause(5)
-        tour.click(text(app, "2026/Trip/header.txt"), "header.txt change")
+        tour.click(tour.line("2026/Trip/header.txt"), "header.txt change")
         tour.snap("01-preview")
         tour.key("i", .command)
         tour.pause(1)
@@ -58,7 +58,7 @@ final class TourTests: XCTestCase {
         app.outlines.firstMatch.staticTexts[name].firstMatch
     }
 
-    /// A row of a table found by the text it shows, such as a path.
+    /// A row of a table found by the text it shows, such as an archived path.
     @MainActor
     private func text(_ app: XCUIApplication, _ label: String) -> XCUIElement {
         app.windows.staticTexts[label].firstMatch
@@ -150,7 +150,7 @@ final class TourTests: XCTestCase {
         tour.snap("04-preview")
         checkMenu(tour, "Pair", "Sync Now", enabled: true, snap: "menu-pair")
 
-        tour.click(text(app, "2026/Trip/header.txt"), "header.txt change")
+        tour.click(tour.line("2026/Trip/header.txt"), "header.txt change")
         tour.snap("05-change-selected")
         checkMenu(tour, "Pair", "Keep Folder A’s Version", enabled: true)
 
@@ -159,7 +159,7 @@ final class TourTests: XCTestCase {
         tour.snap("06-quick-look")
         tour.key(.escape)
 
-        let row = text(app, "2026/Trip/day2/IMG_2041.txt")
+        let row = tour.line("2026/Trip/day2/IMG_2041.txt")
         if row.waitForExistence(timeout: 3) {
             row.rightClick()
             tour.pause(0.6)

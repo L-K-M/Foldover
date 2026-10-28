@@ -48,6 +48,9 @@ final class SettingsStore {
     private let appBuild: Data?
     private let defaults: UserDefaults
     private let canResetFullDiskAccess: @MainActor () -> Bool
+    /// Where the fold's sound switch lives: the main window's sound store
+    /// reads the same key.
+    private let sounds: FoldSoundStore
     private static let reviewedBuildKey = "fullDiskAccessReviewedBuild"
     private(set) var loginStatus: LoginStatus
     private(set) var error: String?
@@ -64,14 +67,27 @@ final class SettingsStore {
          },
          appBuild: Data? = BackgroundAgent().appBuild,
          defaults: UserDefaults = .standard,
-         canResetFullDiskAccess: @escaping @MainActor () -> Bool = { true }) {
+         canResetFullDiskAccess: @escaping @MainActor () -> Bool = { true },
+         sounds: FoldSoundStore? = nil) {
         self.loginItem = loginItem
         self.showFullDiskAccess = showFullDiskAccess
         self.resetFullDiskAccess = resetFullDiskAccess
         self.appBuild = appBuild
         self.defaults = defaults
         self.canResetFullDiskAccess = canResetFullDiskAccess
+        // The sounds' preference lives with the other settings' defaults.
+        let sounds = sounds ?? FoldSoundStore(defaults: defaults)
+        self.sounds = sounds
         loginStatus = loginItem.status
+        paperSounds = sounds.isEnabled
+    }
+
+    /// Whether folding, opening and turning lines make paper sounds.
+    private(set) var paperSounds = true
+
+    func setPaperSounds(_ on: Bool) {
+        sounds.isEnabled = on
+        paperSounds = on
     }
 
     /// macOS has no supported Full Disk Access status API. A changed signed

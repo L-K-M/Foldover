@@ -28,8 +28,11 @@ struct Tour {
 
     /// `scenario` names a launch state from `FixtureScenario`, such as an
     /// agent that answers slowly; none is the tour's usual state.
+    /// `slowFold` slows the fold and runs by that factor and swings the
+    /// leaf even under Reduce Motion, so frames of it in motion can be
+    /// kept.
     init(_ test: XCTestCase, appearance: TourAppearance, scenario: String? = nil,
-         launchState: TourLaunchState = .fresh) {
+         launchState: TourLaunchState = .fresh, slowFold: Int? = nil) {
         self.test = test
         self.appearance = appearance
         // Every flag takes a value. AppKit reads the arguments as `-key
@@ -46,6 +49,9 @@ struct Tour {
         }
         if appearance == .dark { app.launchArguments += ["-foldover-dark", "YES"] }
         if let scenario { app.launchArguments += ["-foldover-scenario", scenario] }
+        if let slowFold {
+            app.launchArguments += ["-foldover-slow-fold", "\(slowFold)", "-foldover-full-motion", "YES"]
+        }
     }
 
     func launch() {
@@ -104,6 +110,22 @@ struct Tour {
     func key(_ key: String, _ modifiers: XCUIElement.KeyModifierFlags = []) {
         app.typeKey(key, modifierFlags: modifiers)
         pause(0.6)
+    }
+
+    /// A line of the selected pair's sheet, found by its path.
+    func line(_ path: String) -> XCUIElement {
+        app.windows.descendants(matching: .any).matching(identifier: "fold-line")
+            .matching(NSPredicate(format: "label == %@", path)).firstMatch
+    }
+
+    /// Keep `count` screenshots `interval` seconds apart, named
+    /// "<name>-1", "<name>-2", …: frames of something in motion.
+    func frames(_ name: String, count: Int, every interval: TimeInterval) {
+        guard count > 0 else { return }
+        for index in 1...count {
+            snap("\(name)-\(index)")
+            pause(interval)
+        }
     }
 
     /// Open a menu-bar menu, keep a screenshot of it, and close it.

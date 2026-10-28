@@ -34,6 +34,14 @@ struct SettingsView: View {
                 if let error = viewModel.error {
                     ErrorNote(message: error)
                 }
+                NoteToggle(
+                    title: Text("Play paper sounds"),
+                    note: Text(viewModel.paperSoundsNote),
+                    isOn: Binding(
+                        get: { viewModel.playsPaperSounds },
+                        set: { viewModel.setPaperSounds($0) }
+                    )
+                )
             }
             Section("Automatic Syncs") {
                 NoteToggle(
