@@ -717,6 +717,9 @@ func skipRulesMatchExactlyOnePath() {
     #expect(PairStore.skipRule(for: Data([0x6f, 0xff])) == nil)
     // A rule for nothing would anchor at the root and exclude everything.
     #expect(PairStore.skipRule(for: Data()) == nil)
+    // A line break would split the rule in two and steer other paths.
+    #expect(PairStore.skipRule(for: Data("a\nb".utf8)) == nil)
+    #expect(PairStore.skipRule(for: Data("a\rb".utf8)) == nil)
 }
 
 @MainActor

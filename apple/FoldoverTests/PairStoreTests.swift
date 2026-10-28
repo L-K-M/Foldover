@@ -335,14 +335,25 @@ func editedOptionsAreSavedAndOnlyMetadataChangesResetHistory() async {
 
 @MainActor
 @Test
-func filterTextKeepsOneRulePerLine() {
-    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()))
+func filterTextKeepsOneRulePerLine() async {
+    let client = PairFixtureClient(catalog: [pairFixture()])
+    let store = PairStore(client: client)
+    await store.refresh()
+    let editor = PairEditorViewModel(store: store, editing: pairFixture())
     #expect(editor.filterText.isEmpty)
     editor.filterText = "*.tmp\nbuild/"
     #expect(editor.options.filters == ["*.tmp", "build/"])
     #expect(editor.filterText == "*.tmp\nbuild/")
-    // A blank line is not a rule; gitignore ignores one anyway.
+    // The text is kept as typed: the rules box is bound live, so dropping a
+    // newline here would stop a person from starting the next rule.
     editor.filterText = "*.tmp\n\nbuild/\n"
+    #expect(editor.filterText == "*.tmp\n\nbuild/\n")
+    #expect(editor.options.filters == ["*.tmp", "", "build/", ""])
+    // Blank rules are left out where the pair is saved.
+    #expect(await editor.save())
+    #expect(await client.savedSettings?.options.filters == ["*.tmp", "build/"])
+    // A carriage return from a pasted list does not survive into a rule.
+    editor.filterText = "*.tmp\r\nbuild/"
     #expect(editor.options.filters == ["*.tmp", "build/"])
 }
 

@@ -382,7 +382,7 @@ private enum PairStoreError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .unskippablePath: String(localized: "This name is not valid UTF-8 text, so a rule cannot skip it. Add a pattern in the pair's settings instead.")
+        case .unskippablePath: String(localized: "This name cannot be written as one filter rule, so it cannot be skipped. Add a pattern in the pair's settings instead.")
         case .invalidFolder: String(localized: "Choose a folder on this Mac or a mounted volume.")
         case .invalidPage: String(localized: "The agent returned an invalid pair page. Refresh to try again.")
         case .saving: String(localized: "Wait for the current settings to finish saving.")
@@ -496,11 +496,12 @@ final class PairStore {
     }
 
     /// An anchored gitignore rule for exactly `path`: `docs/a*.txt`
-    /// becomes `/docs/a\*.txt`. Nil when the path is not UTF-8 text, which
-    /// rules cannot express, or names nothing, whose rule would anchor at
-    /// the root and exclude everything.
+    /// becomes `/docs/a\*.txt`. Nil when no single-line rule can express the
+    /// path: it is not UTF-8 text, it is empty, or it contains a line break,
+    /// whose rule would split into two and steer other paths.
     static func skipRule(for path: Data) -> String? {
-        guard let text = String(data: path, encoding: .utf8), !text.isEmpty else { return nil }
+        guard let text = String(data: path, encoding: .utf8), !text.isEmpty,
+              !text.contains(where: { $0.isNewline }) else { return nil }
         let body = text.reversed().drop(while: { $0 == " " }).reversed()
         let trailingSpaces = text.count - body.count
         var rule = "/"
