@@ -437,7 +437,10 @@ struct FoldSheet: View {
                     if let imprint = sync.imprint, progress == 0 {
                         onPage(FoldLeaf.landing(leafSide)) {
                             VStack(spacing: 8) {
+                                // What the run left for a person comes before
+                                // where its archive is, when lines run short.
                                 FoldImprintView(imprint: imprint)
+                                    .layoutPriority(1)
                                 if let note = sync.archiveNote {
                                     Text(note)
                                         .font(.caption)

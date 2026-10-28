@@ -95,8 +95,10 @@ struct FoldImprintView: View {
     var body: some View {
         VStack(spacing: 12) {
             card
-            ForEach(imprint.notes, id: \.self) { note in
-                Text(note)
+            // One text, so on a narrow page the notes wrap together
+            // rather than vie for lines and cut each other short.
+            if !imprint.notes.isEmpty {
+                Text(imprint.notes.joined(separator: "\n"))
                     .font(.callout)
                     .foregroundStyle(FoldPalette.umber)
                     .multilineTextAlignment(.center)
