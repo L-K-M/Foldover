@@ -16,9 +16,11 @@ private actor ArchiveFixtureClient: ArchiveClient {
     private var holdsRestore = false
     private var heldRestore: CheckedContinuation<Void, Never>?
     private var refusesRestore = false
+    private var refusesNextPage = false
 
     func holdRestore() { holdsRestore = true }
     func refuseRestore() { refusesRestore = true }
+    func refuseNextPage() { refusesNextPage = true }
 
     func waitForHeldRestore() async -> Bool {
         let deadline = ContinuousClock.now + .seconds(3)
@@ -59,6 +61,7 @@ private actor ArchiveFixtureClient: ArchiveClient {
         let page = ArchivePage(items: rest.prefix(2).map { ArchiveItem(path: $0, size: 1) }, more: rest.count > 2)
         guard after != nil else { return page }
         pageRequests += 1
+        if refusesNextPage { throw TwoRunFixtureError.refused }
         if holdsNextPage {
             holdsNextPage = false
             await withCheckedContinuation { held = $0 }
@@ -351,6 +354,27 @@ func aCancelledSearchFetchesNoFurtherPage() async {
     await more.value
     await searching.value
     #expect(await client.pageRequests == requested)
+}
+
+/// A next page that fails ends the walk: what was listed stays listed,
+/// the error shows, and the same page is not asked for fifty times.
+@MainActor
+@Test
+func aFailedPageStopsTheSearchAndKeepsItsItems() async {
+    let client = ArchiveFixtureClient()
+    let store = ArchiveStore(client: client)
+    let viewModel = ArchiveViewModel(pair: docs(), store: store, agentConnected: true)
+    await viewModel.show(.b)
+    #expect(viewModel.itemRows.map(\.path) == ["a", "b"])
+    await client.refuseNextPage()
+
+    viewModel.searchText = "zzz"
+    await viewModel.search()
+
+    #expect(await client.pageRequests == 1)
+    #expect(store.items.map(\.path) == [Data("a".utf8), Data("b".utf8)])
+    #expect(viewModel.error != nil)
+    #expect(!viewModel.isSearching)
 }
 
 @MainActor
