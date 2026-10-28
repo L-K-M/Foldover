@@ -770,6 +770,31 @@ func checkAllReadsPairsAtOnceInsteadOfOneAtATime() async {
     #expect(await client.calls() == 5)
 }
 
+/// A queued read must recheck ownership after another read frees its slot.
+@MainActor
+@Test
+func queuedStatusReadSkipsAPairWhoseCommandStartedWhileWaiting() async {
+    let client = DeferredSyncClient()
+    await client.holdStartReplies()
+    let store = SyncStore(client: client)
+    let catalog = pairs(5)
+    let waitingID = catalog[4].id
+    let all = Task { await store.checkAll(catalog) }
+    #expect(await client.waitForStatusCalls(4, timeout: .seconds(2)))
+
+    let starting = Task { await store.run(waitingID) }
+    #expect(await client.waitForStartCalls(.run, 1, timeout: .seconds(2)))
+    #expect(store.isBusy(waitingID))
+
+    await client.finishPolling(.idle)
+    await all.value
+    #expect(await client.statusCalls == 4, "The queued pair now belongs to its command")
+    #expect(!store.hasKnownState(for: waitingID), "A status read must not publish over the pending command")
+
+    await client.resumeStarts(replying: .idle)
+    await starting.value
+}
+
 @Test
 func alertTextsNameTheProblem() {
     let conflicted = RunSummary(cancelled: false, copied: 0, updated: 0, archived: 0, recovered: 0,
