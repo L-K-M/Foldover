@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build and ad-hoc-sign the agent/CLI inside an Xcode build product.
+# Build and ad-hoc-sign the agent/CLI inside an Xcode build product,
+# and write the bundle's third-party license notices.
 # Usage: bash scripts/embed-agent.sh <Foldover.app>
 # Requires macOS 27, Xcode 27, Python 3 and the pinned Rust toolchain.
 set -euo pipefail
@@ -25,6 +26,18 @@ mkdir -p "$HELPERS" "$AGENTS"
 cp "$TARGET_DIR/$TARGET/release/foldoverd" "$HELPERS/foldoverd"
 cp "$TARGET_DIR/$TARGET/release/foldover" "$HELPERS/foldover"
 cp "$ROOT/packaging/macos/$BUNDLE_ID.agent.plist" "$AGENTS/"
+
+# Notices for the Rust crates and the Rust standard library linked into
+# the app (FoldoverCoreFFI staticlib) and both helpers. Written here so
+# Xcode's signature covers them. The generator fails when a linked crate
+# has no license text; licenses/rust-overrides.json records the gaps.
+RESOURCES="$APP/Contents/Resources"
+mkdir -p "$RESOURCES"
+python3 "$ROOT/scripts/rust-notices.py" --manifest-path "$ROOT/Cargo.toml" \
+  -p foldoverd -p foldover-cli -p foldover-ffi --target "$TARGET" \
+  --title Foldover --overrides "$ROOT/licenses/rust-overrides.json" \
+  --out "$RESOURCES/Third-Party-Notices.txt" \
+  --rust-std "$RESOURCES/Rust-Licenses.html"
 
 for executable in foldoverd foldover; do
   identifier="$BUNDLE_ID.cli"

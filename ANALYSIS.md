@@ -1167,3 +1167,342 @@ Verified against the source so they are not re-reported:
 Verdict: merge the reviewed, bounded improvements after native checks;
 next address stalled peer cancellation, wrong-folder selection and stale
 recovery state. Then complete large-preview search and progress.
+
+## Fifth review pass (28 October 2026)
+
+A fresh independent pass over the tree at `5019fc1`, written locally as
+`Step.md` and never committed. Every blocking and important finding from it
+has an open pull request, so none of them is listed as backlog below; the
+record of what was found and where it went is kept here so the pass is not
+lost. The remaining entries are the pass's nice-to-haves, in the schema used
+above, ordered by focus area. Findings that duplicate an entry already in this
+document are folded into that entry and cross-referenced rather than repeated.
+
+### Implemented in open pull requests
+
+| Finding | Severity | Pull request |
+|---|---|---|
+| Three tests fail on filesystems with coarse `st_ctime`, so the Linux gate is red or flaky | blocking | 191 |
+| `foldover sync ID --cancel` exits 1 when the cancel succeeded | important | 192 |
+| A slow first agent status becomes "not responding, choose Turn On" | important | 193 |
+| Sync All in the app runs pairs one at a time | important | 194 |
+| The app polls pair statuses one at a time | important | 195 |
+| The archive browser has no search | important | 196 |
+| The editor stores blank lines as filter rules; `skipRule` builds `/` for an empty path | nice-to-have | 197 |
+| The change table's context menu acts on one row of a multi-selection | nice-to-have | 198 |
+
+Verification record for the pass: the Rust-side findings were reproduced
+before they were fixed — the three failing tests, the `--cancel` and
+`--changes` exit codes against a real `foldoverd` on a private socket, and the
+GLM reviewer's follow-ups on 191 and 192. The Swift-side findings could not be
+executed here: the host has no Xcode and its Swift toolchain cannot start
+(`swiftc: error while loading shared libraries: libncurses.so.6`), so they were
+reviewed by hand and their Swift Testing regressions run in the queued macOS
+jobs. PR 194's first revision broke the macOS build with a stray closing brace
+and was fixed in a follow-up commit; that is the class of error the native jobs
+exist to catch.
+
+### General issues — nice-to-have
+
+#### `AgentCapability` has three variants but the agent only ever emits `Sync`
+
+general issues — nice-to-have
+
+`crates/foldover-proto/src/local.rs:91-105`,
+`crates/foldover-service/src/lib.rs:612-617`, `crates/foldover-ffi/src/lib.rs:116-122`,
+`crates/foldover-cli/src/main.rs:377-384`. `health()` hardcodes
+`AgentCapability::Sync` on every path, including crash-loop safe mode, where
+`safe_mode` carries the real state instead. The FFI and the CLI each carry full
+handling for `HealthOnly` and `PairConfiguration`, and the CLI's own test only
+exercises `Sync`. A client asking "can this agent sync?" reads a field that
+always answers yes, and two branches that look like supported states can never
+be reached.
+
+Suggested fix: pick one. Either emit `PairConfiguration`/`HealthOnly` where the
+agent genuinely cannot sync and let clients branch on it, or delete the unused
+variants and keep `safe_mode` as the single signal.
+
+#### `ChangeRowsCache` has no builder tag in its key
+
+general issues — nice-to-have
+
+`apple/Foldover/ViewModels/PairSyncViewModel.swift:104-131`. The cache is keyed
+by pair plus `store.rowsRevision`. Its own comment warns that every builder
+sharing the cache must be distinguishable by those fields, but nothing enforces
+it, and only one builder exists today. A second builder over the same source —
+bulk-selection rows, a filtered copy for export — would silently receive the
+first builder's rows.
+
+Suggested fix: add a builder identity to `RowsSource` so a collision cannot
+compile.
+
+#### Two unreachable UTF-8 fallbacks
+
+general issues — nice-to-have
+
+`apple/Foldover/ViewModels/PairSyncViewModel.swift:914-917` and `:675-696`.
+`String(data:encoding:.utf8) ?? String(decoding:as:)` can never take the
+fallback, because the second initializer substitutes replacement characters
+rather than failing. The code reads as if invalid UTF-8 is handled when it is
+not; `PairEditorViewModel.pathText` has the correct form with an explicit
+message.
+
+Suggested fix: drop the dead fallback, or use the editor's form and say the path
+contains non-UTF-8 bytes.
+
+#### `InfoButton`'s popover has no height limit
+
+general issues — nice-to-have
+
+`apple/Foldover/Views/InfoButton.swift:20-36`. The popover is `frame(width: 360)`
+with `fixedSize(horizontal: false, vertical: true)`, so its height grows with the
+note. The "Skip" and "Folders" notes run past 500 characters; at an accessibility
+text size the popover can grow taller than the display and lose its content
+off-screen.
+
+Suggested fix: wrap the message in a `ScrollView` with `.frame(maxHeight: 360)`.
+
+### Performance problems, stuttering, and jank — nice-to-have
+
+#### Put-back of many items is quadratic on the main thread
+
+performance problems, stuttering, and jank — nice-to-have
+
+`apple/Foldover/ViewModels/ArchiveViewModel.swift:121-124`.
+`rows.compactMap { row in store.items.first { $0.path == row.id } }` is
+O(rows × items). Selecting the whole 1,000-item page does a million comparisons
+before the request is even sent, stalling the main thread.
+
+Suggested fix: build a `[Data: ArchivedItem]` dictionary once per page and look
+up by row id.
+
+#### Settings polls the agent twice a second while it is open
+
+performance problems, stuttering, and jank — nice-to-have
+
+`apple/Foldover/Views/MacToMacView.swift:102`,
+`apple/Foldover/Stores/MacToMacStore.swift:162-189`. `MacToMacView`'s `.task`
+starts a 1 Hz loop that issues two IPC round trips per pass. The task belongs to
+the Settings window, so the General tab keeps polling Mac-to-Mac state and
+shared folders for as long as the window is open — two agent round trips and a
+timer wakeup per second on a window that is usually idle.
+
+Suggested fix: monitor only while the Mac-to-Mac tab is selected, and stretch
+the interval to 2–3 s; pairing codes are not sub-second events.
+
+#### The change table re-filters every loaded row on each keystroke
+
+performance problems, stuttering, and jank — nice-to-have
+
+`apple/Foldover/ViewModels/PairSyncViewModel.swift:556-560`. `listedRows.filter`
+runs over every downloaded page on each keystroke. The row build is cached, but
+the filter is not, so a 1,000-row listing costs 1,000 case-insensitive substring
+searches per character typed.
+
+Suggested fix: cache the filtered result against `(searchText, rowsRevision)` the
+way `ChangeRowsCache` caches the build, or debounce the search by about 100 ms.
+
+### Missing features — nice-to-have
+
+#### Archived items cannot be looked at before they are put back
+
+missing features — nice-to-have
+
+`apple/Foldover/Views/ArchiveView.swift:165-170`. The only command is "Put Back".
+A user recovering a file cannot preview it, confirm it is the version they want,
+or see where it came from. For a local side the archived copy is reachable at
+`.foldover/archive/<run>/<path>`, so Quick Look and "Show in Finder" are both
+implementable without new agent support.
+
+Suggested fix: offer Quick Look and "Show in Finder" for rows on a local side,
+built from the pair's root plus the archive path.
+
+#### Archive runs carry no size, so the right one is found by opening each
+
+missing features — nice-to-have
+
+`apple/Foldover/ViewModels/ArchiveViewModel.swift:37-41`,
+`apple/Foldover/Views/ArchiveView.swift:85-99`. The run list shows only a title.
+A pair with thirty runs forces the user to open them one at a time to find the
+sync that archived the file they want.
+
+Suggested fix: show item count and total bytes per run. `ArchiveRun`
+(`crates/foldover-proto/src/local/archive.rs:24-31`) needs two more fields, which
+the agent can sum while it lists the run's folder.
+
+#### The editor accepts the same folder on both sides until Save
+
+missing features — nice-to-have
+
+`apple/Foldover/ViewModels/PairEditorViewModel.swift:80` and `:130-143`. The
+agent rejects identical and nested roots
+(`crates/foldover-types/src/pair.rs:98`,
+`crates/foldover-engine/src/configuration.rs:641`), but the editor has no local
+check, so picking the same folder twice shows no warning and the failure only
+appears after clicking Save Pair.
+
+Suggested fix: add a `foldersWarning` that names the problem and include it in
+`canSave`, mirroring `dailyWarning`.
+
+#### Older archive runs stay unreachable
+
+missing features — nice-to-have
+
+Folded into SOL-08 above. `ARCHIVE_RUN_LIMIT` is 1000 with a `more` flag but no
+cursor in `ArchiveKey`, so a pair that syncs often enough exhausts it; the app
+surfaces it as "Older syncs are not listed."
+(`apple/Foldover/Views/ArchiveView.swift:90`).
+
+### Visual issues and layout problems — nice-to-have
+
+#### Attention is red in the menu bar and orange everywhere else
+
+visual issues and layout problems — nice-to-have
+
+`apple/Foldover/Assets.xcassets/MenuBarArrowAttention.imageset/arrow.svg`
+hardcodes `fill="#ff3b30"`, while `.orange` is used in
+`apple/Foldover/Views/PairSidebar.swift:125` and `:143`,
+`apple/Foldover/Views/PairDetailView.swift:137` and `:335`, and
+`apple/Foldover/Views/MenuBarView.swift:127`. The same semantic state reads as an
+alarm in the menu bar and as a caution in every window, and the palette is not
+stated anywhere so the two cannot be reconciled by inspection.
+
+Suggested fix: recolour the attention asset to the system orange and record the
+semantic palette in one place.
+
+#### The app icon is a set of rasters with no macOS 26 vector asset
+
+visual issues and layout problems — nice-to-have
+
+`apple/Foldover/Assets.xcassets/AppIcon.appiconset/Contents.json` — see MIMO-17.
+Ten PNGs from 16 px to 1024 px and no `.icon`/Icon Composer asset, so the icon
+cannot take the platform's current glass and shadow treatment and scales less
+crisply than a vector one. The menu-bar arrows are vector SVG templates, so the
+inconsistency is visible in the same asset catalog.
+
+Suggested fix: author the icon as an Icon Composer `.icon` asset and keep the
+rasters only as a fallback.
+
+### Aesthetics and theming — nice-to-have
+
+#### The semantic palette is scattered across nine files
+
+aesthetics and theming — nice-to-have
+
+`apple/Foldover/Views/PairDetailView.swift:331-338`,
+`apple/Foldover/Views/PairSidebar.swift:140-154` and `:208-215`,
+`apple/Foldover/Views/MenuBarView.swift:127`,
+`apple/Foldover/Views/ArchiveView.swift:202` and the menu-bar asset above. Orange
+means attention in five places, red means failure in seven, green means connected
+in one, and the menu bar uses a hardcoded `#ff3b30`. There is no single
+definition to check a new surface against, so drift is invisible until someone
+compares two windows side by side.
+
+Suggested fix: introduce one semantic-colour enum with `attention`, `failure`,
+`connected` and `working`, and route every call site through it. See SOL-14.
+
+#### Freshness colouring is the app's best idea and is underused
+
+aesthetics and theming — nice-to-have
+
+`apple/Foldover/Views/PairSidebar.swift:104-110` and `:134-154`. The sidebar's
+three-tier freshness tint — primary within an hour, secondary within a day, soft
+orange beyond — is the quietest, most useful trust signal in the app, and it
+exists nowhere else. The menu bar's pair rows and the inspector's "Recent Syncs"
+both show the same age as flat grey text.
+
+Suggested fix: reuse the same tier function for the menu bar's pair status and
+the inspector's history rows, so "how stale is this?" reads the same way in all
+three surfaces.
+
+### Usability — nice-to-have
+
+#### Sync All gives no feedback about what is queued or finished
+
+usability — nice-to-have
+
+`apple/Foldover/ViewModels/MainViewModel.swift`, `apple/Foldover/App/Commands.swift:160-162`,
+`apple/Foldover/Views/MenuBarView.swift:34-36`. The button and the menu item
+disable while any pair cannot sync, then go silent. Nothing says how many pairs
+are running, how many are waiting, or when the last one finished, so a user who
+clicks Sync All and switches away has no way to tell whether it is still working.
+
+Suggested fix: carry a small aggregate state on `MainViewModel` ("Syncing 2 of
+5") and show it beside the menu bar's status line. This falls out of the
+concurrency fix in pull request 194.
+
+#### Space for Quick Look is undocumented
+
+usability — nice-to-have
+
+`apple/Foldover/Views/PairDetailView.swift:306-310`. The change table handles
+Space as Quick Look, as Finder does, but no menu item, help tag or column header
+mentions it. The Pair menu's "Quick Look" has no shortcut, so the only
+discoverable path is the context menu.
+
+Suggested fix: put a shortcut on the Pair menu's "Quick Look" item and add a help
+tag to the table naming the key.
+
+#### The first-run guide's third step can never complete
+
+usability — nice-to-have
+
+`apple/Foldover/ViewModels/MainViewModel.swift:667-672` and `:644`. Step 3 is
+hardcoded `.upcoming`, and `showsSetup` requires `pairs.isEmpty`, so the guide
+disappears the moment a pair exists. The row reads as unfinished work that was
+never finished.
+
+Suggested fix: either drop the third step, or mark it informational with no
+progress badge.
+
+### Novel, delightful, or quirky ideas worth trying — nice-to-have
+
+#### A one-shot completion pulse on the menu-bar icon
+
+novel, delightful, or quirky ideas worth trying — nice-to-have
+
+`apple/Foldover/ViewModels/MenuBarAnimation.swift:41-64`. The working animation
+already cycles four fold-arrow frames at 400 ms and respects Reduce Motion by not
+running at all. A single two-frame "settle" when a run finishes would give the
+menu bar the same completion beat the main window's completion card has, without
+adding a permanent animation. Reuse `MotionStore.preference` so Reduce Motion
+users get a static swap.
+
+#### Archive run rows as a timeline of the pair's recent life
+
+novel, delightful, or quirky ideas worth trying — nice-to-have
+
+`apple/Foldover/Views/ArchiveView.swift:85-99`. The run list is a plain list of
+titles. Because every run already has a start time and, with the size fields
+above, a byte total, a compact horizontal bar per run would turn the archive into
+a readable history of how much the pair moved and when — the same story the
+inspector's "Recent Syncs" tells in words.
+
+#### Let the plan sentence be the shareable artefact
+
+novel, delightful, or quirky ideas worth trying — nice-to-have
+
+`apple/Foldover/ViewModels/PairEditorViewModel.swift:332-339`,
+`apple/Foldover/Views/PairEditorView.swift:363-369`. The editor rewrites
+"Changes in either folder go to the other; a file deleted in one folder is
+archived in the other. Syncs every 15 minutes." as settings change, which is the
+clearest explanation of a sync pair anywhere in the product. Offering "Copy
+Summary" on that sentence, and showing the same sentence in the completion
+notification, would let a user paste an accurate description into a message to
+whoever else uses the folders.
+
+#### Reveal the archived file from the change table
+
+novel, delightful, or quirky ideas worth trying — nice-to-have
+
+`apple/Foldover/ViewModels/PairSyncViewModel.swift:621-624`. A finished sync
+already tells the user the archive folder name. Making that note a link that
+opens `.foldover/archive/<run>` in Finder closes the loop between "it archived 48
+items" and "here they are" in one click, and needs no new agent support for a
+local side.
+
+Verdict for this pass: the blocking and important findings are all in open pull
+requests and should be merged after their native checks. What remains here is
+polish, and the largest single item is the archive prefix cursor behind the
+search in pull request 196, which would let a search find a name without reading
+the pages before it.

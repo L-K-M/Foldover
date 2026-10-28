@@ -62,6 +62,16 @@ jobs:
       - name: cargo deny check
         run: cargo deny check
 
+      # The notices embed-agent.sh writes into the app, checked early on
+      # Linux: fails on a linked crate without license text, a workspace
+      # crate not under the Unlicense, or a toolchain without the Rust
+      # standard library notices.
+      - name: Rust license notices
+        run: |
+          python3 scripts/rust-notices.py -p foldoverd -p foldover-cli -p foldover-ffi \
+            --target aarch64-apple-darwin --overrides licenses/rust-overrides.json \
+            --own-license Unlicense --rust-std Rust-Licenses.html --check
+
   # House style for the shell scripts; the runner image's shellcheck
   # version drifts, so the tool is pinned like cargo-deny.
   shellcheck:
