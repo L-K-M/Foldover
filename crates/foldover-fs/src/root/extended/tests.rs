@@ -96,8 +96,10 @@ fn cancellation_mutations_and_stale_observations_never_produce_complete_metadata
             // `ctime` advances in coarse ticks on several filesystems, so an
             // xattr write made in the tick the read started in leaves the
             // stat key — the only thing this read compares before and after
-            // — unchanged. Repeat it until the key moves.
-            for _ in 0..50 {
+            // — unchanged. Repeat it until the key moves. Keep the bound in
+            // step with `STAT_SETTLE_ATTEMPTS` in foldover-endpoint's tests,
+            // which settles the same way.
+            for _ in 0..250 {
                 set(&file, c"user.foldover.test", b"new");
                 if root.metadata(&path()).unwrap().stat_key() != metadata.stat_key() {
                     break;

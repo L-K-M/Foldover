@@ -1476,12 +1476,14 @@ mod filtering_tests;
 #[cfg(test)]
 const STAT_SETTLE_STEP: Duration = Duration::from_millis(20);
 #[cfg(test)]
-const STAT_SETTLE_ATTEMPTS: u32 = 50;
+const STAT_SETTLE_ATTEMPTS: u32 = 250;
 
 /// Repeat `mutate` until the entry's stat key differs from the one it had
 /// before, so a test can observe its own edit on any filesystem. A
 /// fingerprint that cannot see the edit is exactly the case `REREAD`
 /// covers, so the wait is what makes the assertion deterministic.
+/// `mutate` runs once per attempt, so it must tolerate being applied
+/// repeatedly.
 #[cfg(test)]
 pub(crate) fn settled_stat(endpoint: &LocalEndpoint, path: &SyncPath, mut mutate: impl FnMut()) {
     let key = || {
