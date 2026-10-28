@@ -126,13 +126,16 @@ struct FoldImprintView: View {
                         }
                     }
                 }
-                // The narrowest page: each count over its label.
+                // The narrowest page: each count over its label, which
+                // shrinks a little rather than break mid-word.
                 VStack(spacing: 6) {
                     ForEach(imprint.figures, id: \.label) { figure in
                         VStack(spacing: 2) {
                             Text(figure.value)
                                 .font(FoldType.smallFigure)
                             figureLabel(figure)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
                         }
                     }
                 }
@@ -164,9 +167,6 @@ struct FoldImprintView: View {
             .font(FoldType.backEyebrow)
             .textCase(.uppercase)
             .tracking(FoldType.eyebrowTracking)
-            // Shrinks a little rather than break mid-word.
-            .lineLimit(1)
-            .minimumScaleFactor(0.8)
     }
 }
 
