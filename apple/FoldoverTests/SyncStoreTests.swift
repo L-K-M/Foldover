@@ -670,12 +670,19 @@ private actor BlockingStatusClient: SyncClient {
     private var attempts = 0
     private var held: CheckedContinuation<PairSyncState, any Error>?
     private var waiters: [CheckedContinuation<PairSyncState, any Error>] = []
+    /// Set by `release`, so a read that starts afterwards answers at once and
+    /// the pass can always finish.
+    private var answering = false
     private(set) var peak = 0
 
     func status(_ id: String) async throws -> PairSyncState {
         attempts += 1
         entered += 1
         peak = max(peak, entered)
+        guard !answering else {
+            entered -= 1
+            return .idle
+        }
         // The first read is held apart from the rest, so releasing them
         // cannot touch it.
         let reply = try await withCheckedThrowingContinuation { continuation in
@@ -695,7 +702,12 @@ private actor BlockingStatusClient: SyncClient {
         waiters.removeAll()
     }
 
+    /// Let the pass finish: the held read and any others are released, and
+    /// reads that start from here on answer at once.
     func release() {
+        answering = true
+        held?.resume(returning: .idle)
+        held = nil
         for waiter in waiters { waiter.resume(returning: .idle) }
         waiters.removeAll()
     }
