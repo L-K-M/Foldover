@@ -594,9 +594,27 @@ final class MainViewModel {
         return after.requestError ?? after.statusText
     }
 
+    /// Pairs `Sync All` runs at once; more would thrash disks and SFTP
+    /// servers rather than finish sooner. The agent runs each pair as its
+    /// own job, and the CLI's `sync --all` uses the same bound.
+    private static let concurrentSyncs = 4
+
     func syncAll() async {
-        for pair in pairs where sync(for: pair).canSync {
-            await sync(for: pair).sync()
+        let pending = pairs.filter { sync(for: $0).canSync }
+        guard !pending.isEmpty else { return }
+        await withTaskGroup(of: Void.self) { group in
+            var inFlight = 0
+            for pair in pending {
+                if Task.isCancelled { break }
+                // A slot frees as soon as any sync finishes, so one long pair
+                // does not hold the ones behind it.
+                if inFlight == Self.concurrentSyncs {
+                    await group.next()
+                    inFlight -= 1
+                }
+                group.addTask { await self.sync(for: pair).sync() }
+                inFlight += 1
+            }
         }
     }
 

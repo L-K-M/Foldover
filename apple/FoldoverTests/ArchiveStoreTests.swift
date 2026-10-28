@@ -16,9 +16,12 @@ private actor ArchiveFixtureClient: ArchiveClient {
     private var holdsRestore = false
     private var heldRestore: CheckedContinuation<Void, Never>?
     private var refusesRestore = false
+    private var refusesNextPage = false
 
     func holdRestore() { holdsRestore = true }
     func refuseRestore() { refusesRestore = true }
+    func refuseNextPage() { refusesNextPage = true }
+    func permitNextPage() { refusesNextPage = false }
 
     func waitForHeldRestore() async -> Bool {
         let deadline = ContinuousClock.now + .seconds(3)
@@ -59,6 +62,7 @@ private actor ArchiveFixtureClient: ArchiveClient {
         let page = ArchivePage(items: rest.prefix(2).map { ArchiveItem(path: $0, size: 1) }, more: rest.count > 2)
         guard after != nil else { return page }
         pageRequests += 1
+        if refusesNextPage { throw TwoRunFixtureError.refused }
         if holdsNextPage {
             holdsNextPage = false
             await withCheckedContinuation { held = $0 }
@@ -240,6 +244,146 @@ func puttingBackSeveralRowsGoesOneAtATime() async {
     #expect(viewModel.pairName == "Docs")
     #expect(ArchiveViewModel.sideTitle(.a) == "Folder A")
     #expect(ArchiveViewModel.sideTitle(.b) == "Folder B")
+}
+
+/// The archive has no search, so a known name is found by pressing Show More
+/// once per page. A search loads pages until one matches.
+@MainActor
+@Test
+func searchingTheArchiveLoadsPagesUntilSomethingMatches() async {
+    let viewModel = ArchiveViewModel(pair: docs(), store: ArchiveStore(client: ArchiveFixtureClient()),
+                                     agentConnected: true)
+    await viewModel.show(.b)
+    #expect(viewModel.itemRows.map(\.path) == ["a", "b"])
+
+    // The first page holds no "c", so the search walks on to the next one.
+    viewModel.searchText = "c"
+    await viewModel.search()
+    #expect(viewModel.itemRows.map(\.path) == ["c"])
+    #expect(viewModel.isSearching == false)
+
+    // A name that is not there stops at the end of the run's items.
+    viewModel.searchText = "zzz"
+    await viewModel.search()
+    #expect(viewModel.itemRows.isEmpty)
+    #expect(viewModel.hasSearch)
+    // The run is exhausted, so there is nothing left to keep searching.
+    #expect(!viewModel.canKeepSearching)
+
+    // Clearing the search lists everything loaded again.
+    viewModel.searchText = ""
+    await viewModel.search()
+    #expect(viewModel.itemRows.map(\.path) == ["a", "b", "c"])
+}
+
+/// A search that starts while a page is already loading must wait for it
+/// rather than give up on the query and report a run it never searched.
+@MainActor
+@Test
+func aSearchWaitsForAPageAlreadyLoading() async {
+    let client = ArchiveFixtureClient()
+    let viewModel = ArchiveViewModel(pair: docs(), store: ArchiveStore(client: client),
+                                     agentConnected: true)
+    await viewModel.show(.b)
+    #expect(viewModel.itemRows.map(\.path) == ["a", "b"])
+
+    // A Show More is in flight when the person types.
+    await client.holdNextPage()
+    let more = Task { await viewModel.loadMore() }
+    await client.waitForHeldPage()
+
+    viewModel.searchText = "c"
+    let searching = Task { await viewModel.search() }
+    // Let the search reach the in-flight page before it lands.
+    try? await Task.sleep(for: .milliseconds(30))
+
+    await client.releasePage()
+    await more.value
+    await searching.value
+    #expect(viewModel.itemRows.map(\.path) == ["c"])
+}
+
+/// A walk that is waiting on a page when the text changes must answer the
+/// newest text, not the one it started with.
+@MainActor
+@Test
+func aSearchThatLandsMidWalkAnswersTheNewestText() async {
+    let client = ArchiveFixtureClient()
+    let viewModel = ArchiveViewModel(pair: docs(), store: ArchiveStore(client: client),
+                                     agentConnected: true)
+    await viewModel.show(.b)
+    #expect(viewModel.itemRows.map(\.path) == ["a", "b"])
+
+    // The walk waits on the run's second page, as a Show More holds it.
+    await client.holdNextPage()
+    let more = Task { await viewModel.loadMore() }
+    await client.waitForHeldPage()
+
+    viewModel.searchText = "zzz"
+    let searching = Task { await viewModel.search() }
+    try? await Task.sleep(for: .milliseconds(30))
+    viewModel.searchText = "c"
+
+    await client.releasePage()
+    await more.value
+    await searching.value
+    #expect(viewModel.itemRows.map(\.path) == ["c"])
+}
+
+/// A walk whose task is cancelled while it waits on a page must not fetch one.
+@MainActor
+@Test
+func aCancelledSearchFetchesNoFurtherPage() async {
+    let client = ArchiveFixtureClient()
+    let viewModel = ArchiveViewModel(pair: docs(), store: ArchiveStore(client: client),
+                                     agentConnected: true)
+    await viewModel.show(.b)
+    #expect(viewModel.itemRows.map(\.path) == ["a", "b"])
+
+    await client.holdNextPage()
+    let more = Task { await viewModel.loadMore() }
+    await client.waitForHeldPage()
+    viewModel.searchText = "c"
+    let searching = Task { await viewModel.search() }
+    try? await Task.sleep(for: .milliseconds(30))
+
+    searching.cancel()
+    try? await Task.sleep(for: .milliseconds(30))
+    let requested = await client.pageRequests
+
+    await client.releasePage()
+    await more.value
+    await searching.value
+    #expect(await client.pageRequests == requested)
+}
+
+/// A next page that fails ends the walk: what was listed stays listed,
+/// the error shows, and the same page is not asked for fifty times.
+@MainActor
+@Test
+func aFailedPageStopsTheSearchAndKeepsItsItems() async {
+    let client = ArchiveFixtureClient()
+    let store = ArchiveStore(client: client)
+    let viewModel = ArchiveViewModel(pair: docs(), store: store, agentConnected: true)
+    await viewModel.show(.b)
+    #expect(viewModel.itemRows.map(\.path) == ["a", "b"])
+    await client.refuseNextPage()
+
+    viewModel.searchText = "zzz"
+    await viewModel.search()
+
+    #expect(await client.pageRequests == 1)
+    #expect(store.items.map(\.path) == [Data("a".utf8), Data("b".utf8)])
+    #expect(viewModel.error != nil)
+    #expect(!viewModel.isSearching)
+
+    // The error a failed page left does not end the next walk: the first
+    // page request clears it, so this search finishes the run.
+    await client.permitNextPage()
+    await viewModel.search()
+    #expect(await client.pageRequests == 2)
+    #expect(store.items.map(\.path) == [Data("a".utf8), Data("b".utf8), Data("c".utf8)])
+    #expect(viewModel.error == nil)
 }
 
 @MainActor

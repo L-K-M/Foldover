@@ -663,6 +663,138 @@ func automaticOutcomesThatNeedAPersonBecomeAlertsOnlyOnChange() async {
     #expect(await recorder.alerts.count == 1)
 }
 
+/// Every status read blocks until released, so a test can see how many pairs
+/// are read at once and which of them a slot waits on.
+private actor BlockingStatusClient: SyncClient {
+    private var entered = 0
+    private var attempts = 0
+    private var held: CheckedContinuation<PairSyncState, any Error>?
+    private var waiters: [CheckedContinuation<PairSyncState, any Error>] = []
+    /// Set by `release`, so a read that starts afterwards answers at once and
+    /// the pass can always finish.
+    private var answering = false
+    private(set) var peak = 0
+
+    func status(_ id: String) async throws -> PairSyncState {
+        attempts += 1
+        entered += 1
+        peak = max(peak, entered)
+        guard !answering else {
+            entered -= 1
+            return .idle
+        }
+        // The first read is held apart from the rest, so releasing them
+        // cannot touch it.
+        let reply = try await withCheckedThrowingContinuation { continuation in
+            if held == nil { held = continuation } else { waiters.append(continuation) }
+        }
+        entered -= 1
+        return reply
+    }
+
+    /// Reads started so far.
+    func calls() async -> Int { attempts }
+
+    /// Release every read but the held one, which stands in for an
+    /// unreachable endpoint sitting out its timeout.
+    func releaseAllButTheHeld() {
+        for waiter in waiters { waiter.resume(returning: .idle) }
+        waiters.removeAll()
+    }
+
+    /// Let the pass finish: the held read and any others are released, and
+    /// reads that start from here on answer at once.
+    func release() {
+        answering = true
+        held?.resume(returning: .idle)
+        held = nil
+        for waiter in waiters { waiter.resume(returning: .idle) }
+        waiters.removeAll()
+    }
+
+    func preview(_ id: String) async throws -> PairSyncState { .idle }
+    func run(_ id: String, approvedA: UInt64, approvedB: UInt64,
+             reviewToken: String?) async throws -> PairSyncState { .idle }
+    func cancel(_ id: String) async throws -> PairSyncState { .idle }
+    func undo(_ id: String) async throws -> PairSyncState { .idle }
+    func resolve(_ id: String, path: Data, keep: FolderSide,
+                 reviewToken: String) async throws -> PairSyncState { .idle }
+    func keepBoth(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
+    func skipOnce(_ id: String, path: Data, reviewToken: String) async throws -> PairSyncState { .idle }
+    func history(_ id: String) async throws -> [RunRecord] { [] }
+    func changes(_ id: String, after: Data?, filter: ChangeFilter?,
+                 reviewToken: String) async throws -> ChangePage {
+        ChangePage(changes: [], more: false)
+    }
+}
+
+private func pairs(_ count: Int) -> [SyncPair] {
+    (1...count).map { index in
+        SyncPair(id: String(repeating: "\(index)", count: 32), revision: 1,
+                 settings: PairSettings(name: "Pair \(index)",
+                                        left: SelectedFolder(bytes: Data("/a\(index)".utf8)),
+                                        right: SelectedFolder(bytes: Data("/b\(index)".utf8)),
+                                        mode: .sync))
+    }
+}
+
+/// A pair on an unreachable endpoint holds its status read for the client's
+/// five-second timeout, so reading them one at a time left the whole catalog
+/// waiting on the slowest member.
+@MainActor
+@Test
+func checkAllReadsPairsAtOnceInsteadOfOneAtATime() async {
+    let client = BlockingStatusClient()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    // More pairs than the pass reads at once, so the bound is exercised.
+    let all = Task { await store.checkAll(pairs(5)) }
+    for _ in 0..<300 {
+        if await client.peak >= 4 { break }
+        try? await Task.sleep(for: .milliseconds(5))
+    }
+    // The four reads the bound allows are in flight together.
+    #expect(await client.peak == 4)
+
+    // The rest answer, as fast endpoints do. The fifth read starts because a
+    // slot freed on the first of them to finish rather than on the held one;
+    // a head-of-line wait would leave it unread until the held read landed.
+    await client.releaseAllButTheHeld()
+    for _ in 0..<300 {
+        if await client.calls() >= 5 { break }
+        try? await Task.sleep(for: .milliseconds(5))
+    }
+    #expect(await client.calls() == 5)
+
+    await client.release()
+    await all.value
+    #expect(await client.calls() == 5)
+}
+
+/// A queued read must recheck ownership after another read frees its slot.
+@MainActor
+@Test
+func queuedStatusReadSkipsAPairWhoseCommandStartedWhileWaiting() async {
+    let client = DeferredSyncClient()
+    await client.holdStartReplies()
+    let store = SyncStore(client: client)
+    let catalog = pairs(5)
+    let waitingID = catalog[4].id
+    let all = Task { await store.checkAll(catalog) }
+    #expect(await client.waitForStatusCalls(4, timeout: .seconds(2)))
+
+    let starting = Task { await store.run(waitingID) }
+    #expect(await client.waitForStartCalls(.run, 1, timeout: .seconds(2)))
+    #expect(store.isBusy(waitingID))
+
+    await client.finishPolling(.idle)
+    await all.value
+    #expect(await client.statusCalls == 4, "The queued pair now belongs to its command")
+    #expect(!store.hasKnownState(for: waitingID), "A status read must not publish over the pending command")
+
+    await client.resumeStarts(replying: .idle)
+    await starting.value
+}
+
 @Test
 func alertTextsNameTheProblem() {
     let conflicted = RunSummary(cancelled: false, copied: 0, updated: 0, archived: 0, recovered: 0,

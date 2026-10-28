@@ -16,6 +16,11 @@ struct ArchiveItem: Equatable, Identifiable, Sendable {
     let size: UInt64
 
     var id: Data { path }
+
+    /// Whether the item's path contains `text`, case-insensitively.
+    func matches(_ text: String) -> Bool {
+        String(decoding: path, as: UTF8.self).range(of: text, options: .caseInsensitive) != nil
+    }
 }
 
 struct ArchiveRuns: Equatable, Sendable {
@@ -105,12 +110,22 @@ final class ArchiveStore {
     private(set) var isPuttingBack = false
     /// What the last whole-run put-back did.
     private(set) var restore: RunRestore?
+    /// The text narrowing the listed items. It never refetches a page that
+    /// is already loaded.
+    private(set) var searchText = ""
+    /// A search is loading pages looking for a match.
+    private(set) var isSearching = false
     /// Bumped whenever the item list starts over, so a page asked for
     /// before, say, Put Back All never lands in the fresh list.
     private var listing = 0
     /// The listing a page is loading for; one page at a time, so a second
     /// Show More cannot fetch the same page twice.
     private var loadingListing: Int?
+    /// A page is being fetched for the current listing.
+    private var fetchingPage = false
+    /// Pages one search loads before it stops and leaves Keep Searching to
+    /// finish, so a name that is not there costs a bounded walk.
+    private static let searchPages = 50
 
     init(client: any ArchiveClient = CoreArchiveClient()) {
         self.client = client
@@ -130,6 +145,7 @@ final class ArchiveStore {
         run = nil
         items = []
         hasMoreItems = false
+        searchText = ""
         error = nil
         placed = nil
         placedCount = 0
@@ -152,10 +168,67 @@ final class ArchiveStore {
         listing += 1
         items = []
         hasMoreItems = false
+        searchText = ""
         placed = nil
         placedCount = 0
         restore = nil
         await loadItems(after: nil)
+    }
+
+    /// The loaded items the search narrows to; all of them when it is empty.
+    var matching: [ArchiveItem] {
+        let text = searchText.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty else { return items }
+        return items.filter { $0.matches(text) }
+    }
+
+    /// Set the text narrowing the listed items. Kept apart from the walk so a
+    /// keystroke updates what is shown in order, whichever task then loads
+    /// the pages.
+    func setSearchText(_ text: String) {
+        searchText = text
+    }
+
+    /// Keep loading pages while nothing matches the current text. The items
+    /// are in path order, so this costs the same as pressing Show More until
+    /// something appears, and stops after `searchPages` pages so a name that
+    /// is not there does not walk the whole run on its own. A text that
+    /// changes under a walk is walked again, so the empty state always stands
+    /// for the newest text.
+    func search() async {
+        while !Task.isCancelled {
+            guard !isSearching else { return }
+            isSearching = true
+            let walked = searchText
+            for _ in 0..<Self.searchPages
+                where !searchText.trimmingCharacters(in: .whitespaces).isEmpty
+                    && matching.isEmpty {
+                // A page is already loading for this listing; wait for it and
+                // re-check rather than giving up on the whole query and
+                // reporting a match-free run that was never searched.
+                while fetchingPage, !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(10))
+                }
+                guard !Task.isCancelled, hasMoreItems, let last = items.last else { break }
+                await loadItems(after: last.path)
+                // A failed page ends the walk; asking again repeats the
+                // same request while its error sits on screen.
+                guard error == nil else { break }
+            }
+            isSearching = false
+            // A keystroke that landed mid-walk was turned away by the guard;
+            // walk again so the newest text is the one the empty state stands
+            // for. A walk that found something, or whose text did not change,
+            // is done.
+            if !matching.isEmpty || searchText == walked { return }
+        }
+    }
+
+    /// Whether the listed items have more pages a search could still walk,
+    /// so "no match yet" is not the same as "not in this run".
+    var canKeepSearching: Bool {
+        let text = searchText.trimmingCharacters(in: .whitespaces)
+        return !text.isEmpty && matching.isEmpty && hasMoreItems
     }
 
     /// Put back everything the selected run archived, then list what is left.
@@ -177,7 +250,7 @@ final class ArchiveStore {
     }
 
     func loadMore() async {
-        guard hasMoreItems, loadingListing != listing, let last = items.last else { return }
+        guard hasMoreItems, !fetchingPage, let last = items.last else { return }
         await loadItems(after: last.path)
     }
 
@@ -215,11 +288,13 @@ final class ArchiveStore {
         let side = side
         let ticket = listing
         loadingListing = ticket
+        fetchingPage = true
         error = nil
         isLoading = true
         defer {
             if loadingListing == ticket {
                 loadingListing = nil
+                fetchingPage = false
                 isLoading = false
             }
         }

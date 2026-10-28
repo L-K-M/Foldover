@@ -497,6 +497,10 @@ final class SyncStore {
     }
 
     private static let alerts = UserAlerts()
+    /// Pair statuses read at once. Each read is one request with its own
+    /// five-second timeout, so an unreachable endpoint must not hold the
+    /// rest of the catalog behind it.
+    private static let concurrentStatuses = 4
 
     private static func postAlert(_ alert: SyncAlert) async {
         await alerts.post(identifier: alert.pairID, title: alert.title, body: alert.body)
@@ -505,30 +509,52 @@ final class SyncStore {
     /// Check every pair once. Automatic runs change state without the app;
     /// outcomes that need a person become notifications. A pair's first
     /// observation never alerts, so launching the app does not replay them.
+    /// The reads run at once, so one slow endpoint cannot hold the rest of
+    /// the catalog behind its five-second request timeout.
     func checkAll(_ pairs: [SyncPair]) async {
-        for pair in pairs where polling[pair.id] == nil && pendingOperations[pair.id] == nil {
-            let previous = states[pair.id]
-            let previousFailure = requestErrors[pair.id]
-            let generation = generations[pair.id] ?? 0
-            let reply: PairSyncState
-            do {
-                reply = try await client.status(pair.id)
-            } catch {
-                if (generations[pair.id] ?? 0) == generation { knownStates.remove(pair.id) }
-                continue
+        await withTaskGroup(of: Void.self) { group in
+            var inFlight = 0
+            for pair in pairs where polling[pair.id] == nil && pendingOperations[pair.id] == nil {
+                // A slot frees as soon as any read finishes, not when the
+                // oldest one does, so one unreachable endpoint cannot hold
+                // the pass at its own timeout.
+                if inFlight == Self.concurrentStatuses {
+                    await group.next()
+                    inFlight -= 1
+                }
+                group.addTask { await self.check(pair) }
+                inFlight += 1
             }
-            // A local write while the request was in flight is newer.
-            guard (generations[pair.id] ?? 0) == generation else { continue }
-            let state = normalized(pair.id, reply)
-            clearRecoveredStatusFailure(pair.id, previousFailure)
-            knownStates.insert(pair.id)
-            set(pair.id, state)
-            if previous != state { await refreshHistory(pair.id) }
-            guard let previous, previous != state, let alert = Self.alert(for: pair, state: state) else {
-                continue
-            }
-            await self.alert(alert)
         }
+    }
+
+    /// One pair's status: publish it when nothing newer was written while the
+    /// read was in flight, refresh its history if it changed, and alert when
+    /// the new state needs a person.
+    private func check(_ pair: SyncPair) async {
+        // A command may have claimed the pair while this read waited for a slot.
+        guard polling[pair.id] == nil, pendingOperations[pair.id] == nil else { return }
+        let previous = states[pair.id]
+        let previousFailure = requestErrors[pair.id]
+        let generation = generations[pair.id] ?? 0
+        let reply: PairSyncState
+        do {
+            reply = try await client.status(pair.id)
+        } catch {
+            if (generations[pair.id] ?? 0) == generation { knownStates.remove(pair.id) }
+            return
+        }
+        // A local write while the request was in flight is newer.
+        guard (generations[pair.id] ?? 0) == generation else { return }
+        let state = normalized(pair.id, reply)
+        clearRecoveredStatusFailure(pair.id, previousFailure)
+        knownStates.insert(pair.id)
+        set(pair.id, state)
+        if previous != state { await refreshHistory(pair.id) }
+        guard let previous, previous != state, let alert = Self.alert(for: pair, state: state) else {
+            return
+        }
+        await self.alert(alert)
     }
 
     nonisolated static func alert(for pair: SyncPair, state: PairSyncState) -> SyncAlert? {
