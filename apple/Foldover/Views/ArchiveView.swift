@@ -134,7 +134,18 @@ struct ArchiveView: View {
                 .controlSize(.large)
                 .accessibilityLabel("Searching Archived Items")
         } else if viewModel.hasSearch {
-            ContentUnavailableView.search(text: viewModel.searchText)
+            if viewModel.canKeepSearching {
+                // The walk stopped at its page budget; the run has more.
+                ContentUnavailableView {
+                    Label("No Match Yet", systemImage: "magnifyingglass")
+                } description: {
+                    Text("Nothing in the pages searched so far matches.")
+                } actions: {
+                    Button("Keep Searching") { Task { await viewModel.search() } }
+                }
+            } else {
+                ContentUnavailableView.search(text: viewModel.searchText)
+            }
         } else if hasStarted, let empty = viewModel.emptyText {
             ContentUnavailableView {
                 Label("Nothing Archived", systemImage: "archivebox")
@@ -251,13 +262,16 @@ struct ArchiveView: View {
         )
     }
 
-    /// The search field narrows the loaded pages, and the store keeps
-    /// paging while nothing matches, so a known name is found without
-    /// pressing Show More once per page.
+    /// The search field narrows the loaded pages, and the store keeps paging
+    /// while nothing matches, so a known name is found without pressing Show
+    /// More once per page. The text is set in order; only the walk is tasked.
     private var searchText: Binding<String> {
         Binding(
             get: { viewModel.searchText },
-            set: { text in Task { await viewModel.search(text) } }
+            set: { text in
+                viewModel.searchText = text
+                Task { await viewModel.search() }
+            }
         )
     }
 

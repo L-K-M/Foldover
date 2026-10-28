@@ -121,7 +121,9 @@ final class ArchiveStore {
     /// The listing a page is loading for; one page at a time, so a second
     /// Show More cannot fetch the same page twice.
     private var loadingListing: Int?
-    /// Pages one search loads before it stops and leaves Show More to
+    /// A page is being fetched for the current listing.
+    private var fetchingPage = false
+    /// Pages one search loads before it stops and leaves Keep Searching to
     /// finish, so a name that is not there costs a bounded walk.
     private static let searchPages = 50
 
@@ -180,20 +182,38 @@ final class ArchiveStore {
         return items.filter { $0.matches(text) }
     }
 
-    /// Narrow the listed items to those whose path contains `text`, and keep
-    /// loading pages while nothing matches. The items are in path order, so
-    /// this costs the same as pressing Show More until something appears,
-    /// and stops after `searchPages` pages so a name that is not there does
-    /// not walk the whole run on its own.
-    func search(_ text: String) async {
+    /// Set the text narrowing the listed items. Kept apart from the walk so a
+    /// keystroke updates what is shown in order, whichever task then loads
+    /// the pages.
+    func setSearchText(_ text: String) {
         searchText = text
+    }
+
+    /// Keep loading pages while nothing matches the current text. The items
+    /// are in path order, so this costs the same as pressing Show More until
+    /// something appears, and stops after `searchPages` pages so a name that
+    /// is not there does not walk the whole run on its own.
+    func search() async {
         guard !isSearching else { return }
         isSearching = true
         defer { isSearching = false }
         for _ in 0..<Self.searchPages where matching.isEmpty {
-            guard hasMoreItems, loadingListing != listing, let last = items.last else { return }
+            // A page is already loading for this listing; wait for it and
+            // re-check rather than giving up on the whole query and reporting
+            // a match-free run that was never searched.
+            while fetchingPage, !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            guard hasMoreItems, let last = items.last else { return }
             await loadItems(after: last.path)
         }
+    }
+
+    /// Whether the listed items have more pages a search could still walk,
+    /// so "no match yet" is not the same as "not in this run".
+    var canKeepSearching: Bool {
+        let text = searchText.trimmingCharacters(in: .whitespaces)
+        return !text.isEmpty && matching.isEmpty && hasMoreItems
     }
 
     /// Put back everything the selected run archived, then list what is left.
@@ -215,7 +235,7 @@ final class ArchiveStore {
     }
 
     func loadMore() async {
-        guard hasMoreItems, loadingListing != listing, let last = items.last else { return }
+        guard hasMoreItems, !fetchingPage, let last = items.last else { return }
         await loadItems(after: last.path)
     }
 
@@ -253,11 +273,13 @@ final class ArchiveStore {
         let side = side
         let ticket = listing
         loadingListing = ticket
+        fetchingPage = true
         error = nil
         isLoading = true
         defer {
             if loadingListing == ticket {
                 loadingListing = nil
+                fetchingPage = false
                 isLoading = false
             }
         }

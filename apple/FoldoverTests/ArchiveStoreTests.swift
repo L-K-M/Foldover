@@ -253,18 +253,50 @@ func searchingTheArchiveLoadsPagesUntilSomethingMatches() async {
     #expect(viewModel.itemRows.map(\.path) == ["a", "b"])
 
     // The first page holds no "c", so the search walks on to the next one.
-    await viewModel.search("c")
+    viewModel.searchText = "c"
+    await viewModel.search()
     #expect(viewModel.itemRows.map(\.path) == ["c"])
     #expect(viewModel.isSearching == false)
 
     // A name that is not there stops at the end of the run's items.
-    await viewModel.search("zzz")
+    viewModel.searchText = "zzz"
+    await viewModel.search()
     #expect(viewModel.itemRows.isEmpty)
     #expect(viewModel.hasSearch)
+    // The run is exhausted, so there is nothing left to keep searching.
+    #expect(!viewModel.canKeepSearching)
 
     // Clearing the search lists everything loaded again.
-    await viewModel.search("")
+    viewModel.searchText = ""
+    await viewModel.search()
     #expect(viewModel.itemRows.map(\.path) == ["a", "b", "c"])
+}
+
+/// A search that starts while a page is already loading must wait for it
+/// rather than give up on the query and report a run it never searched.
+@MainActor
+@Test
+func aSearchWaitsForAPageAlreadyLoading() async {
+    let client = ArchiveFixtureClient()
+    let viewModel = ArchiveViewModel(pair: docs(), store: ArchiveStore(client: client),
+                                     agentConnected: true)
+    await viewModel.show(.b)
+    #expect(viewModel.itemRows.map(\.path) == ["a", "b"])
+
+    // A Show More is in flight when the person types.
+    client.holdNextPage()
+    let more = Task { await viewModel.loadMore() }
+    await client.waitForHeldPage()
+
+    viewModel.searchText = "c"
+    let searching = Task { await viewModel.search() }
+    // Let the search reach the in-flight page before it lands.
+    try? await Task.sleep(for: .milliseconds(30))
+
+    client.releasePage()
+    await more.value
+    await searching.value
+    #expect(viewModel.itemRows.map(\.path) == ["c"])
 }
 
 @MainActor
