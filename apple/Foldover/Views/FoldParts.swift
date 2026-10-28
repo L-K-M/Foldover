@@ -65,8 +65,9 @@ struct FoldFolderLabel: View {
         }
     }
 
-    /// A folder's text as its name and where it is: "Photos" in
-    /// "sftp://mynas.local/~". Text without a folder above it, such as a
+    /// A folder's text as its name and where it is: "Photos" on
+    /// "mynas.local/~". The scheme is left out, since the symbol already
+    /// says it is a server. Text without a folder above it, such as a
     /// server's address or another Mac's folder, is all name.
     static func parts(_ text: String) -> (name: String, location: String) {
         var path = Substring(text)
@@ -74,10 +75,11 @@ struct FoldFolderLabel: View {
         guard let slash = path.lastIndex(of: "/"), path.index(after: slash) < path.endIndex else {
             return (String(path), "")
         }
-        let location = String(path[..<slash])
+        var location = path[..<slash]
         // "sftp://host" names a server, not a folder inside "sftp:/".
         guard !location.hasSuffix(":/") else { return (String(path), "") }
-        return (String(path[path.index(after: slash)...]), location.isEmpty ? "/" : location)
+        if let scheme = location.range(of: "://") { location = location[scheme.upperBound...] }
+        return (String(path[path.index(after: slash)...]), location.isEmpty ? "/" : String(location))
     }
 }
 

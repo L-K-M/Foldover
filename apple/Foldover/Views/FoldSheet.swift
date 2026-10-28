@@ -446,6 +446,9 @@ struct FoldSheet: View {
                         .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 1.1)),
                                                 removal: .opacity.combined(with: .offset(y: -10))))
                         .id(imprint.title)
+                        // Its notes wrap on a narrow page; failures listed
+                        // under it take the room that is left.
+                        .layoutPriority(1)
                     }
                     if !entries.isEmpty { lineList(entries, scene: scene, progress: progress) }
                 }

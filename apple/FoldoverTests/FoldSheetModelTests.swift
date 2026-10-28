@@ -227,7 +227,8 @@ struct FoldSheetModelTests {
             return [parts.name, parts.location]
         }
         #expect(parts("/var/folders/5n/T/Foldover Tour/Photos") == ["Photos", "/var/folders/5n/T/Foldover Tour"])
-        #expect(parts("sftp://mynas.local/~/Photos") == ["Photos", "sftp://mynas.local/~"])
+        #expect(parts("sftp://mynas.local/~/Photos") == ["Photos", "mynas.local/~"])
+        #expect(parts("sftp://mynas.local/Photos") == ["Photos", "mynas.local"])
         #expect(parts("/Volumes/Media/Music/") == ["Music", "/Volumes/Media"])
         #expect(parts("/Photos") == ["Photos", "/"])
         #expect(parts("/") == ["/", ""])
