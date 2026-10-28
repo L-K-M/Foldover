@@ -158,10 +158,13 @@ final class PairEditorViewModel: Identifiable {
     }
 
     /// The options to store: the rules as typed, without the blank lines
-    /// between them, which gitignore ignores anyway.
+    /// between them, which gitignore ignores anyway. Newlines count as blank
+    /// too, so a rule left over from an older splitter does not survive.
     private var storableOptions: PairOptions {
         var options = options
-        options.filters = options.filters.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        options.filters = options.filters.filter {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
         return options
     }
 

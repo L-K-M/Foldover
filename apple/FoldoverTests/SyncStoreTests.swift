@@ -720,6 +720,7 @@ func skipRulesMatchExactlyOnePath() {
     // A line break would split the rule in two and steer other paths.
     #expect(PairStore.skipRule(for: Data("a\nb".utf8)) == nil)
     #expect(PairStore.skipRule(for: Data("a\rb".utf8)) == nil)
+    #expect(PairStore.skipRule(for: Data("a\r\nb".utf8)) == nil)
 }
 
 @MainActor
