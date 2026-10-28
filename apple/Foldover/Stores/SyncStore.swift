@@ -532,6 +532,8 @@ final class SyncStore {
     /// read was in flight, refresh its history if it changed, and alert when
     /// the new state needs a person.
     private func check(_ pair: SyncPair) async {
+        // A command may have claimed the pair while this read waited for a slot.
+        guard polling[pair.id] == nil, pendingOperations[pair.id] == nil else { return }
         let previous = states[pair.id]
         let previousFailure = requestErrors[pair.id]
         let generation = generations[pair.id] ?? 0
