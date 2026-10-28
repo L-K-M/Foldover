@@ -245,10 +245,15 @@ struct FoldHeadingHalf: View {
                 .truncationMode(.head)
             Spacer(minLength: 8)
             if side == .b {
-                Text(Self.countText(count))
-                    .font(FoldType.meta)
-                    .lineLimit(1)
-                    .fixedSize()
+                // The count before the path's head; a bare number on a
+                // narrow page.
+                ViewThatFits(in: .horizontal) {
+                    Text(Self.countText(count))
+                    Text(count, format: .number)
+                }
+                .font(FoldType.meta)
+                .lineLimit(1)
+                .layoutPriority(1)
                 // In line with the notes under it, clear of the marks.
                 Color.clear
                     .frame(width: FoldMetrics.markWidth + FoldMetrics.markGap, height: 0)
