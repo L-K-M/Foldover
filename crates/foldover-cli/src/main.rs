@@ -924,6 +924,7 @@ async fn sync(
     if let SyncCommand::Changes(kind) = command {
         return sync_changes(location, id, kind, progress).await;
     }
+    let cancelling = matches!(&command, SyncCommand::Cancel);
     let status = match command {
         SyncCommand::Preview => foldover_client::start_preview(location, id).await?,
         // A plain run goes through `run_one` so `sync ID` and `sync
@@ -959,17 +960,19 @@ async fn sync(
             preview.left.deletions, preview.right.deletions, preview.review_token
         );
     }
+    if cancelling {
+        return Ok(cancel_exit_code(&status));
+    }
     Ok(status_code(&status))
 }
 
-/// Errors take precedence over conflicts, then approval, then success. A
-/// cancelled run is not a failure: the stop happened and the status line
-/// lists what it left, so only its own failed entries or the conflicts it
-/// left behind produce a nonzero exit.
+/// Interrupted jobs fail even when no individual entry failed.
 fn status_code(status: &SyncStatus) -> ExitCode {
     match status {
         SyncStatus::Idle | SyncStatus::Previewed { .. } => ExitCode::SUCCESS,
-        SyncStatus::Finished { result } if result.failure_count > 0 => ExitCode::FAILURE,
+        SyncStatus::Finished { result } if result.failure_count > 0 || result.cancelled => {
+            ExitCode::FAILURE
+        }
         SyncStatus::Finished { result } if result.conflicts > 0 => ExitCode::from(CONFLICT_EXIT),
         SyncStatus::Finished { .. } => ExitCode::SUCCESS,
         // Entries left as they were are listed and fail the command.
@@ -978,6 +981,19 @@ fn status_code(status: &SyncStatus) -> ExitCode {
         }
         SyncStatus::NeedsApproval { .. } => ExitCode::from(APPROVAL_EXIT),
         _ => ExitCode::FAILURE,
+    }
+}
+
+/// A requested stop succeeds unless the run left failures or conflicts.
+fn cancel_exit_code(status: &SyncStatus) -> ExitCode {
+    match status {
+        SyncStatus::Finished { result } if result.failure_count == 0 => {
+            if result.conflicts > 0 {
+                return ExitCode::from(CONFLICT_EXIT);
+            }
+            ExitCode::SUCCESS
+        }
+        _ => status_code(status),
     }
 }
 
@@ -1504,17 +1520,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn interrupted_jobs_do_not_report_completion() {
+        assert_eq!(status_code(&finished(true, 0, 0)), ExitCode::FAILURE);
+        assert_eq!(status_code(&finished(true, 2, 0)), ExitCode::FAILURE);
+        assert_eq!(status_code(&finished(true, 2, 1)), ExitCode::FAILURE);
+    }
+
     /// A stop is the outcome `--cancel` asked for, so the command succeeds
     /// whatever the run had already done; only its own failed entries or
     /// the conflicts it left fail it.
     #[test]
     fn a_cancelled_run_is_not_a_failed_command() {
-        assert_eq!(status_code(&finished(true, 0, 0)), ExitCode::SUCCESS);
+        assert_eq!(cancel_exit_code(&finished(true, 0, 0)), ExitCode::SUCCESS);
         assert_eq!(
-            status_code(&finished(true, 2, 0)),
+            cancel_exit_code(&finished(true, 2, 0)),
             ExitCode::from(CONFLICT_EXIT)
         );
-        assert_eq!(status_code(&finished(true, 0, 3)), ExitCode::FAILURE);
+        assert_eq!(cancel_exit_code(&finished(true, 0, 3)), ExitCode::FAILURE);
         assert_eq!(status_code(&finished(false, 0, 0)), ExitCode::SUCCESS);
         assert_eq!(
             status_code(&finished(false, 2, 0)),
@@ -1523,7 +1546,14 @@ mod tests {
         assert_eq!(status_code(&finished(false, 0, 1)), ExitCode::FAILURE);
         // Errors outrank conflicts when a run left both.
         assert_eq!(status_code(&finished(false, 2, 1)), ExitCode::FAILURE);
-        assert_eq!(status_code(&finished(true, 2, 1)), ExitCode::FAILURE);
+        assert_eq!(cancel_exit_code(&finished(true, 2, 1)), ExitCode::FAILURE);
+        assert_eq!(cancel_exit_code(&SyncStatus::Idle), ExitCode::SUCCESS);
+        assert_eq!(
+            cancel_exit_code(&SyncStatus::Failed {
+                message: "Cannot stop".into()
+            }),
+            ExitCode::FAILURE
+        );
     }
 
     /// Listing a plan that still needs approval is the outcome `--preview`
