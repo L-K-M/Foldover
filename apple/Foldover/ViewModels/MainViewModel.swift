@@ -595,16 +595,19 @@ final class MainViewModel {
     func syncAll() async {
         let pending = pairs.filter { sync(for: $0).canSync }
         guard !pending.isEmpty else { return }
-        var running: [Task<Void, Never>] = []
-        for pair in pending {
-            if Task.isCancelled { break }
-            if running.count >= Self.concurrentSyncs {
-                await running.removeFirst().value
+        await withTaskGroup(of: Void.self) { group in
+            var inFlight = 0
+            for pair in pending {
+                if Task.isCancelled { break }
+                // A slot frees as soon as any sync finishes, so one long pair
+                // does not hold the ones behind it.
+                if inFlight == Self.concurrentSyncs {
+                    await group.next()
+                    inFlight -= 1
+                }
+                group.addTask { await self.sync(for: pair).sync() }
+                inFlight += 1
             }
-            running.append(Task { await self.sync(for: pair).sync() })
-        }
-        for task in running {
-            await task.value
         }
     }
 
