@@ -21,6 +21,7 @@ private actor ArchiveFixtureClient: ArchiveClient {
     func holdRestore() { holdsRestore = true }
     func refuseRestore() { refusesRestore = true }
     func refuseNextPage() { refusesNextPage = true }
+    func permitNextPage() { refusesNextPage = false }
 
     func waitForHeldRestore() async -> Bool {
         let deadline = ContinuousClock.now + .seconds(3)
@@ -375,6 +376,14 @@ func aFailedPageStopsTheSearchAndKeepsItsItems() async {
     #expect(store.items.map(\.path) == [Data("a".utf8), Data("b".utf8)])
     #expect(viewModel.error != nil)
     #expect(!viewModel.isSearching)
+
+    // The error a failed page left does not end the next walk: the first
+    // page request clears it, so this search finishes the run.
+    await client.permitNextPage()
+    await viewModel.search()
+    #expect(await client.pageRequests == 2)
+    #expect(store.items.map(\.path) == [Data("a".utf8), Data("b".utf8), Data("c".utf8)])
+    #expect(viewModel.error == nil)
 }
 
 @MainActor
