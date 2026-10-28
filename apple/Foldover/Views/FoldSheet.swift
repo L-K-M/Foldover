@@ -33,6 +33,8 @@ private enum FoldScene: Equatable {
     case imprint
     /// Anything else: no preview yet, out of date, stopped, waiting.
     case message
+
+    var allowsInspection: Bool { self == .plan || self == .imprint }
 }
 
 /// Sounds accompany what a person did here; a fold that starts on its
@@ -430,7 +432,7 @@ struct FoldSheet: View {
                                                 removal: .opacity.combined(with: .offset(y: -10))))
                         .id(imprint.title)
                     }
-                    if !entries.isEmpty { lineList(entries, interactive: false, progress: progress) }
+                    if !entries.isEmpty { lineList(entries, scene: scene, progress: progress) }
                 }
                 .frame(maxHeight: .infinity, alignment: entries.isEmpty ? .center : .top)
                 // A stamp lands once and stays: no bounce.
@@ -444,7 +446,7 @@ struct FoldSheet: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if !entries.isEmpty {
-                lineList(entries, interactive: scene == .plan, progress: progress)
+                lineList(entries, scene: scene, progress: progress)
                     .opacity(scene == .comparing ? 0.42 : 1)
                     .overlay {
                         if scene == .comparing { ComparingSweep(paused: reduceMotion, timeScale: timeScale) }
@@ -510,13 +512,13 @@ struct FoldSheet: View {
 
     // MARK: Lines
 
-    private func lineList(_ entries: [FoldEntry], interactive: Bool, progress: Double) -> some View {
-        let lookup = interactive ? rowsByID : [:]
-        let selectedID = interactive ? viewModel.selectedChangeID : nil
+    private func lineList(_ entries: [FoldEntry], scene: FoldScene, progress: Double) -> some View {
+        let lookup = scene.allowsInspection ? rowsByID : [:]
+        let selectedID = scene.allowsInspection ? viewModel.selectedChangeID : nil
         return ScrollView {
             LazyVStack(spacing: 0) {
                 ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
-                    entryRow(entry, row: entry.lineID.flatMap { lookup[$0] }, interactive: interactive,
+                    entryRow(entry, row: entry.lineID.flatMap { lookup[$0] }, scene: scene,
                              selected: entry.lineID != nil && entry.lineID == selectedID, progress: progress)
                         .modifier(InkIn(delay: Double(index) * Self.printStagger * timeScale,
                                         active: printing != nil && index < Self.printedLines))
@@ -537,7 +539,7 @@ struct FoldSheet: View {
     }
 
     @ViewBuilder
-    private func entryRow(_ entry: FoldEntry, row: ChangeRow?, interactive: Bool, selected: Bool,
+    private func entryRow(_ entry: FoldEntry, row: ChangeRow?, scene: FoldScene, selected: Bool,
                           progress: Double) -> some View {
         switch entry {
         case .folder(let path, let count):
@@ -557,20 +559,20 @@ struct FoldSheet: View {
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(.isHeader)
         case .line(let line):
-            lineRow(line, row: row, interactive: interactive, selected: selected, progress: progress)
+            lineRow(line, row: row, scene: scene, selected: selected, progress: progress)
         }
     }
 
-    private func lineRow(_ line: FoldLine, row: ChangeRow?, interactive: Bool, selected: Bool,
+    private func lineRow(_ line: FoldLine, row: ChangeRow?, scene: FoldScene, selected: Bool,
                          progress: Double) -> some View {
         let stagedFlow = staged?.lineID == line.id ? staged?.flow : nil
         // Impressions on the half the leaf comes down on take its ink as
         // it approaches: a peek at the outcome before letting go.
-        let peek = interactive ? min(1, progress * 1.6) : 0
+        let peek = scene == .plan ? min(1, progress * 1.6) : 0
         return HStack(spacing: 0) {
             FoldHalf(line: line, side: .a, compact: compact, peek: leafSide == .a ? 0 : peek)
                 .opacity(lifted(.a, progress) ? 0 : 1)
-            pip(line, staged: stagedFlow, interactive: interactive)
+            pip(line, staged: stagedFlow, scene: scene)
                 .frame(width: FoldMetrics.creaseWidth)
                 .modifier(Shake(count: shakes[line.id] ?? 0))
                 .opacity(acrossInk(progress))
@@ -582,8 +584,8 @@ struct FoldSheet: View {
             if selected { SelectionTint(focused: focus.wrappedValue == .changes).opacity(acrossInk(progress)) }
         }
         .contentShape(Rectangle())
-        .onTapGesture { if interactive { select(line) } }
-        .simultaneousGesture(TapGesture(count: 2).onEnded { if interactive { quickLook(row) } })
+        .onTapGesture { if scene.allowsInspection { select(line) } }
+        .simultaneousGesture(TapGesture(count: 2).onEnded { if scene.allowsInspection { quickLook(row) } })
         .contextMenu {
             if let row { ChangeRowActions(viewModel: viewModel, sync: sync, row: row) }
         }
@@ -592,22 +594,10 @@ struct FoldSheet: View {
         .accessibilityValue(Self.spoken(line))
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityIdentifier("fold-line")
+        .accessibilityAction { if scene.allowsInspection { select(line) } }
         .accessibilityActions {
-            if let row, interactive {
-                ForEach(line.turnFlows, id: \.self) { flow in
-                    if let title = line.turns[flow] {
-                        Button(title) { Task { await sync.turn(row, to: flow) } }
-                    }
-                }
-                if row.keepsBoth {
-                    Button("Keep Both Versions") { Task { await sync.keepBoth(for: row) } }
-                }
-                if row.look != nil {
-                    Button("Quick Look") { quickLook(row) }
-                }
-                if row.item != nil {
-                    Button("Skip Once") { Task { await sync.skipOnce(row) } }
-                }
+            if let row {
+                ChangeRowActions(viewModel: viewModel, sync: sync, row: row)
             }
         }
     }
@@ -615,8 +605,8 @@ struct FoldSheet: View {
     /// The pip. Clicking it stages the next way the line can turn, as ←
     /// and → do; nothing changes until Return or the desk's button.
     @ViewBuilder
-    private func pip(_ line: FoldLine, staged stagedFlow: FoldFlow?, interactive: Bool) -> some View {
-        if interactive, !line.turns.isEmpty {
+    private func pip(_ line: FoldLine, staged stagedFlow: FoldFlow?, scene: FoldScene) -> some View {
+        if scene == .plan, !line.turns.isEmpty {
             Button { cycleStage(line) } label: {
                 FoldPip(flow: line.flow, staged: stagedFlow)
             }
@@ -657,7 +647,7 @@ struct FoldSheet: View {
     /// ↑ and ↓ walk the lines in the order the sheet shows them: grouped
     /// by folder, not in raw path order.
     private func move(_ press: KeyPress, in entries: [FoldEntry], proxy: ScrollViewProxy) -> KeyPress.Result {
-        guard plain(press), scene == .plan, drag == nil else { return .ignored }
+        guard plain(press), scene.allowsInspection, drag == nil else { return .ignored }
         let shown = entries.compactMap(\.line)
         guard !shown.isEmpty else { return .ignored }
         let step = press.key == .upArrow ? -1 : 1

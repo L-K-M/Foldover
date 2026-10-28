@@ -19,8 +19,7 @@ final class FoldTourTests: XCTestCase {
 
         let failure = tour.line("2026/Trip/notes.md")
         guard tour.click(failure, "completed failure") else { return }
-        XCTAssertTrue((failure.value as? String)?.contains("The server disconnected.") == true,
-                      "The accessibility value must explain the failure")
+        XCTAssertEqual(failure.value as? String, "The server disconnected.", failure.debugDescription)
         XCTAssertTrue(app.windows.staticTexts["The server disconnected."].firstMatch.waitForExistence(timeout: 5),
                       "Selecting a completed failure must show its explanation in the inspector")
         tour.snap("fold-failure-selected")
@@ -48,7 +47,7 @@ final class FoldTourTests: XCTestCase {
         let approve = app.buttons["Archive and Sync"].firstMatch
         XCTAssertTrue(approve.waitForExistence(timeout: 5), "The fold must ask before applying the plan")
         tour.snap("fold-held-for-approval")
-        tour.click(app.buttons["Cancel"].firstMatch, "cancel approval")
+        tour.key(.escape)
         XCTAssertTrue(line.exists, "Cancelling approval must keep the reviewed plan")
         XCTAssertFalse(app.buttons["Undo Sync"].exists, "Cancelling must not start a run")
     }

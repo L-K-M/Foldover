@@ -53,12 +53,18 @@ struct FoldHalf: View {
     @ViewBuilder
     private var meta: some View {
         if side == Self.arrivalSide(line.flow) {
-            // With no room even for the verb, the line drops it rather
-            // than show a stray letter; VoiceOver and the inspector say it.
-            ViewThatFits(in: .horizontal) {
-                if !line.sizeText.isEmpty { Text("\(line.verb) · \(line.sizeText)") }
-                Text(line.verb)
-                Color.clear.frame(width: 0, height: 0)
+            Group {
+                if line.flow == .failed {
+                    // Keep the cause visible; hover and inspection show it in full.
+                    Text(line.actionText)
+                        .help(line.actionText)
+                } else {
+                    ViewThatFits(in: .horizontal) {
+                        if !line.sizeText.isEmpty { Text("\(line.verb) · \(line.sizeText)") }
+                        Text(line.verb)
+                        Color.clear.frame(width: 0, height: 0)
+                    }
+                }
             }
             .font(FoldType.meta)
             .foregroundStyle(line.flow == .failed ? FoldPalette.failure : FoldPalette.umber)
