@@ -12,29 +12,38 @@ func agentRefreshReportsTheConnectedVersion() async {
     #expect(store.connection == .connected(version: "test-version"))
 }
 
+/// Status calls the first `deferring` of which block until `finishFirst`;
+/// the rest answer at once, as an agent that started while the app waited.
 private actor DeferredStatus {
     private var calls = 0
-    private var first: CheckedContinuation<String, Error>?
+    private var deferred = 0
+    private var pending: [CheckedContinuation<String, Error>] = []
     private var started: CheckedContinuation<Void, Never>?
+
+    init(deferring: Int = 1) {
+        deferred = deferring
+    }
 
     func status() async throws -> String {
         calls += 1
-        if calls > 1 { return "new" }
-        return try await withCheckedThrowingContinuation { continuation in
-            first = continuation
-            started?.resume()
-            started = nil
+        if deferred > 0 {
+            deferred -= 1
+            return try await withCheckedThrowingContinuation { continuation in
+                pending.append(continuation)
+                started?.resume()
+                started = nil
+            }
         }
+        return "new"
     }
 
     func waitUntilStarted() async {
-        if first != nil { return }
+        if !pending.isEmpty { return }
         await withCheckedContinuation { started = $0 }
     }
 
     func finishFirst() {
-        first?.resume(returning: "old")
-        first = nil
+        pending.removeFirst().resume(returning: "old")
     }
 }
 
@@ -56,7 +65,9 @@ func staleAgentRefreshCannotReplaceANewerResult() async {
 @MainActor
 @Test
 func anUnansweredHealthCheckTimesOutAndIgnoresItsLateReply() async throws {
-    let client = DeferredStatus()
+    // Every call blocks, as a hung agent does, so the whole launch window
+    // elapses before anything is reported.
+    let client = DeferredStatus(deferring: .max)
     let store = AgentStore(statusRequest: { AgentReport(version: try await client.status()) },
                            startupTimeout: .milliseconds(100))
     let checking = Task { await store.refresh() }
@@ -64,7 +75,7 @@ func anUnansweredHealthCheckTimesOutAndIgnoresItsLateReply() async throws {
     try await Task.sleep(for: .milliseconds(150))
     let timedOut = store.connection
     if case .failed(let message) = timedOut {
-        #expect(message.contains("not responding"))
+        #expect(message.contains("did not answer"))
     } else {
         Issue.record("Expected a timeout, got \(timedOut)")
     }
@@ -72,6 +83,61 @@ func anUnansweredHealthCheckTimesOutAndIgnoresItsLateReply() async throws {
     await client.finishFirst()
     await checking.value
     #expect(store.connection == timedOut)
+}
+
+/// A cold agent can outlast the first probe. The store keeps asking to the
+/// end of the launch window instead of reporting a failure that turns the
+/// status dot red and offers to restart a healthy agent.
+@MainActor
+@Test
+func aSlowFirstStatusConnectsInsteadOfReportingAFailure() async {
+    let client = DeferredStatus()
+    let store = AgentStore(statusRequest: { AgentReport(version: try await client.status()) },
+                           startupTimeout: .milliseconds(300), startupPoll: .milliseconds(10))
+    let checking = Task { await store.refresh() }
+    await client.waitUntilStarted()
+    await checking.value
+    #expect(store.connection == .connected(version: "new"))
+}
+
+/// Answers nothing on the first call, as an agent that accepted the socket and
+/// stalled, and a concrete failure afterwards, as one whose state cannot be
+/// read.
+private actor StallingThenFailingStatus {
+    private var attempts = 0
+
+    func status() async throws -> AgentReport {
+        attempts += 1
+        if attempts == 1 {
+            // Never answers, as an agent that accepted the socket and stalled.
+            // Waiting rather than parking a continuation nobody resumes keeps
+            // the task, and this actor, collectable.
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+            }
+        }
+        throw AgentError.Request(message: "Cannot read agent state")
+    }
+
+    func calls() async -> Int { attempts }
+}
+
+/// The first probe hears nothing, but the retry learns the agent's state
+/// cannot be read. That is newer information than "did not answer", so it is
+/// what the store reports.
+@MainActor
+@Test
+func aRetryThatLearnsSomethingConcreteReportsIt() async {
+    let client = StallingThenFailingStatus()
+    let store = AgentStore(statusRequest: { try await client.status() },
+                           startupTimeout: .milliseconds(200), startupPoll: .milliseconds(10))
+    await store.refresh()
+    guard case .failed(let message) = store.connection else {
+        Issue.record("Expected a failure, got \(store.connection)")
+        return
+    }
+    #expect(message == "Cannot read agent state")
+    #expect(await client.calls() > 1)
 }
 
 @MainActor

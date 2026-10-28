@@ -189,6 +189,40 @@ final class AgentStore {
                 await repairUnreachable(request: request)
                 return
             }
+            // A connection that answered nothing is an agent still starting,
+            // not one that refused. A cold agent opening a large state
+            // database outlasts one probe, and reporting a failure there
+            // turns the status dot red and offers to restart a healthy
+            // agent. Ask again for the rest of the launch window first.
+            if Self.unanswered(error) {
+                let rest = startupTimeout - startupProbe
+                var report: AgentReport?
+                var retryError: Error?
+                do {
+                    report = try await answer(within: rest, request: request)
+                } catch {
+                    retryError = error
+                }
+                if let report {
+                    // A newer check owns the connection by now.
+                    guard generation == request else { return }
+                    connection = .connected(version: report.version)
+                    note(report)
+                    return
+                }
+                guard generation == request else { return }
+                guard !Task.isCancelled else {
+                    connection = lastSettled ?? .disconnected
+                    return
+                }
+                // The retry learned something concrete, as a state it cannot
+                // read; that is newer information than the first probe's
+                // generic "no answer".
+                if let retryError, !Self.unanswered(retryError) {
+                    connection = .failed(message: message(for: retryError))
+                    return
+                }
+            }
             connection = .failed(message: message(for: error))
         }
     }
@@ -381,10 +415,22 @@ final class AgentStore {
         system.openLoginItems()
     }
 
+    /// Whether `error` says the agent did not answer, so waiting is
+    /// worthwhile, rather than that it refused or failed. `StatusError` has
+    /// only the timeout case today; naming it rather than the type keeps a
+    /// future case from silently burning the launch window on retries that
+    /// cannot help.
+    private static func unanswered(_ error: Error) -> Bool {
+        if case StatusError.timedOut = error { return true }
+        guard let error = error as? AgentError else { return false }
+        if case AgentError.Connection = error { return true }
+        return false
+    }
+
     private func message(for error: Error) -> String {
         switch error {
         case StatusError.timedOut:
-            String(localized: "The background agent is not responding. Choose Turn On to restart it.")
+            String(localized: "The background agent did not answer. Wait a moment; choose Turn On to restart it.")
         case let error as AgentNotRunning: error.message
         case AgentError.Connection(let message), AgentError.NotRunning(let message),
              AgentError.Request(let message): message
