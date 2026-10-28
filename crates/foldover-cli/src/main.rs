@@ -964,7 +964,8 @@ async fn sync(
 
 /// Errors take precedence over conflicts, then approval, then success. A
 /// cancelled run is not a failure: the stop happened and the status line
-/// lists what it left, so only its own failed entries fail the command.
+/// lists what it left, so only its own failed entries or the conflicts it
+/// left behind produce a nonzero exit.
 fn status_code(status: &SyncStatus) -> ExitCode {
     match status {
         SyncStatus::Idle | SyncStatus::Previewed { .. } => ExitCode::SUCCESS,
@@ -982,11 +983,18 @@ fn status_code(status: &SyncStatus) -> ExitCode {
 
 /// Listing every change is a read, so it succeeds; a plan that still needs
 /// approval reports what `--preview` reports, since nothing was applied and
-/// a person has to decide.
+/// a person has to decide. Every variant is named so a new one cannot quietly
+/// start exiting zero.
 fn changes_exit_code(status: &SyncStatus) -> ExitCode {
     match status {
         SyncStatus::NeedsApproval { .. } => ExitCode::from(APPROVAL_EXIT),
-        _ => ExitCode::SUCCESS,
+        SyncStatus::Idle
+        | SyncStatus::Working { .. }
+        | SyncStatus::Previewed { .. }
+        | SyncStatus::Finished { .. }
+        | SyncStatus::Undone { .. }
+        | SyncStatus::Failed { .. }
+        | SyncStatus::Waiting { .. } => ExitCode::SUCCESS,
     }
 }
 
@@ -1513,6 +1521,9 @@ mod tests {
             ExitCode::from(CONFLICT_EXIT)
         );
         assert_eq!(status_code(&finished(false, 0, 1)), ExitCode::FAILURE);
+        // Errors outrank conflicts when a run left both.
+        assert_eq!(status_code(&finished(false, 2, 1)), ExitCode::FAILURE);
+        assert_eq!(status_code(&finished(true, 2, 1)), ExitCode::FAILURE);
     }
 
     /// Listing a plan that still needs approval is the outcome `--preview`
