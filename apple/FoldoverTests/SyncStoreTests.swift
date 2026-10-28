@@ -668,6 +668,7 @@ func automaticOutcomesThatNeedAPersonBecomeAlertsOnlyOnChange() async {
 private actor BlockingStatusClient: SyncClient {
     private var entered = 0
     private var attempts = 0
+    private var held: CheckedContinuation<PairSyncState, any Error>?
     private var waiters: [CheckedContinuation<PairSyncState, any Error>] = []
     private(set) var peak = 0
 
@@ -675,8 +676,10 @@ private actor BlockingStatusClient: SyncClient {
         attempts += 1
         entered += 1
         peak = max(peak, entered)
+        // The first read is held apart from the rest, so releasing them
+        // cannot touch it.
         let reply = try await withCheckedThrowingContinuation { continuation in
-            waiters.append(continuation)
+            if held == nil { held = continuation } else { waiters.append(continuation) }
         }
         entered -= 1
         return reply
@@ -685,13 +688,11 @@ private actor BlockingStatusClient: SyncClient {
     /// Reads started so far.
     func calls() async -> Int { attempts }
 
-    /// Release every read but the first, which stands in for an unreachable
-    /// endpoint sitting out its timeout.
-    func releaseAllButTheFirst() {
-        let held = waiters.isEmpty ? nil : waiters.removeFirst()
+    /// Release every read but the held one, which stands in for an
+    /// unreachable endpoint sitting out its timeout.
+    func releaseAllButTheHeld() {
         for waiter in waiters { waiter.resume(returning: .idle) }
         waiters.removeAll()
-        if let held { waiters.append(held) }
     }
 
     func release() {
@@ -745,7 +746,7 @@ func checkAllReadsPairsAtOnceInsteadOfOneAtATime() async {
     // The rest answer, as fast endpoints do. The fifth read starts because a
     // slot freed on the first of them to finish rather than on the held one;
     // a head-of-line wait would leave it unread until the held read landed.
-    await client.releaseAllButTheFirst()
+    await client.releaseAllButTheHeld()
     for _ in 0..<300 {
         if await client.calls() >= 5 { break }
         try? await Task.sleep(for: .milliseconds(5))
