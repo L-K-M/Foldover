@@ -5,31 +5,51 @@
 import AppKit
 import SwiftUI
 
-/// One of the pair's folders on its half of the page: where it is, its
-/// full path on hover, and a menu to show it in Finder or copy its path.
+/// One of the pair's folders at the head of its page: its name, where it
+/// is, its full path on hover, and a menu to show it in Finder or copy
+/// its path. It reads left to right like the page's lines under it.
 struct FoldFolderLabel: View {
     let viewModel: MainViewModel
     let folder: SelectedFolder
     let side: FolderSide
 
+    /// Clear of the dog-ear at Folder B's outer corner.
+    private static let earRoom: CGFloat = 30
+
     var body: some View {
         let text = viewModel.folderText(folder)
-        VStack(alignment: side == .a ? .leading : .trailing, spacing: 1) {
+        let parts = Self.parts(text)
+        VStack(alignment: .leading, spacing: 1) {
             Text(PairSyncViewModel.folderName(side))
                 .font(FoldType.eyebrow)
                 .textCase(.uppercase)
                 .tracking(FoldType.eyebrowTracking)
                 .foregroundStyle(FoldPalette.umber)
-            Label(text, systemImage: viewModel.folderSymbol(folder))
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(FoldPalette.ink(side))
-                .lineLimit(1)
-                .truncationMode(.middle)
+            // The name stays whole as long as it can; where the folder
+            // is gives way first, keeping its nearest folders.
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Label(parts.name, systemImage: viewModel.folderSymbol(folder))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(FoldPalette.ink(side))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .layoutPriority(1)
+                if !parts.location.isEmpty {
+                    Text(parts.location)
+                        .font(FoldType.meta)
+                        .foregroundStyle(FoldPalette.umber)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                }
+            }
         }
-        // Room at the outer edge for the dog-ear.
-        .padding(.leading, side == .a ? 30 : 8)
-        .padding(.trailing, side == .a ? 8 : 30)
-        .frame(maxWidth: .infinity, alignment: side == .a ? .leading : .trailing)
+        // In line with the page's names, and clear of the dog-ears: A's
+        // names start past its marks, which clear its ear.
+        .padding(.leading, side == .a
+                 ? FoldMetrics.outerMarginA + FoldMetrics.markWidth + FoldMetrics.markGap
+                 : FoldMetrics.innerMargin)
+        .padding(.trailing, side == .a ? FoldMetrics.innerMargin : Self.earRoom)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .help(text)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text("\(PairSyncViewModel.folderName(side)): \(text)"))
@@ -44,11 +64,28 @@ struct FoldFolderLabel: View {
             }
         }
     }
+
+    /// A folder's text as its name and where it is: "Photos" on
+    /// "mynas.local/~". The scheme is left out, since the symbol already
+    /// says it is a server. Text without a folder above it, such as a
+    /// server's address or another Mac's folder, is all name.
+    static func parts(_ text: String) -> (name: String, location: String) {
+        var path = Substring(text)
+        while path.count > 1, path.hasSuffix("/") { path = path.dropLast() }
+        guard let slash = path.lastIndex(of: "/"), path.index(after: slash) < path.endIndex else {
+            return (String(path), "")
+        }
+        var location = path[..<slash]
+        // "sftp://host" names a server, not a folder inside "sftp:/".
+        guard !location.hasSuffix(":/") else { return (String(path), "") }
+        if let scheme = location.range(of: "://") { location = location[scheme.upperBound...] }
+        return (String(path[path.index(after: slash)...]), location.isEmpty ? "/" : String(location))
+    }
 }
 
-/// The card a run leaves, set across the crease: a square of the
-/// paper's cerulean back with its title and its counts in large white
-/// figures, and under it what the run left for a person.
+/// The card a run leaves on the page the leaf pressed: a flat square of
+/// the paper's cerulean back with its title and its counts in large
+/// white figures, and under it what the run left for a person.
 struct FoldImprintView: View {
     let imprint: FoldImprint
 
@@ -58,8 +95,10 @@ struct FoldImprintView: View {
     var body: some View {
         VStack(spacing: 12) {
             card
-            ForEach(imprint.notes, id: \.self) { note in
-                Text(note)
+            // One text, so on a narrow page the notes wrap together
+            // rather than vie for lines and cut each other short.
+            if !imprint.notes.isEmpty {
+                Text(imprint.notes.joined(separator: "\n"))
                     .font(.callout)
                     .foregroundStyle(FoldPalette.umber)
                     .multilineTextAlignment(.center)
@@ -74,25 +113,60 @@ struct FoldImprintView: View {
                 .font(FoldType.backEyebrow)
                 .textCase(.uppercase)
                 .tracking(FoldType.eyebrowTracking * 1.5)
-            HStack(alignment: .firstTextBaseline, spacing: 26) {
-                ForEach(imprint.figures, id: \.label) { figure in
-                    VStack(spacing: 2) {
-                        Text(figure.value)
-                            .font(FoldType.figure)
-                        Text(figure.label)
-                            .font(FoldType.backEyebrow)
-                            .textCase(.uppercase)
-                            .tracking(FoldType.eyebrowTracking)
+            // The counts abreast while the page holds them, else a list.
+            ViewThatFits(in: .horizontal) {
+                abreast(spacing: 26, font: FoldType.figure)
+                abreast(spacing: 14, font: FoldType.smallFigure)
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(imprint.figures, id: \.label) { figure in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(figure.value)
+                                .font(FoldType.smallFigure)
+                            figureLabel(figure)
+                        }
+                    }
+                }
+                // The narrowest page: each count over its label, which
+                // shrinks a little rather than break mid-word.
+                VStack(spacing: 6) {
+                    ForEach(imprint.figures, id: \.label) { figure in
+                        VStack(spacing: 2) {
+                            Text(figure.value)
+                                .font(FoldType.smallFigure)
+                            figureLabel(figure)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                        }
                     }
                 }
             }
         }
         .foregroundStyle(.white)
         .padding(.vertical, 18)
-        .padding(.horizontal, 30)
-        .background(Kami().clipShape(RoundedRectangle(cornerRadius: Self.corner, style: .continuous)))
+        .padding(.horizontal, 22)
+        // Flat: no facet ridge runs through the figures.
+        .background(Kami(finish: .flat).clipShape(RoundedRectangle(cornerRadius: Self.corner, style: .continuous)))
         // Cast onto the paper down and to the right, away from the light.
         .shadow(color: FoldPalette.foldShadow.opacity(0.28), radius: 12, x: 3, y: 8)
+    }
+
+    private func abreast(spacing: CGFloat, font: Font) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: spacing) {
+            ForEach(imprint.figures, id: \.label) { figure in
+                VStack(spacing: 2) {
+                    Text(figure.value)
+                        .font(font)
+                    figureLabel(figure)
+                }
+            }
+        }
+    }
+
+    private func figureLabel(_ figure: FoldImprint.Figure) -> some View {
+        Text(figure.label)
+            .font(FoldType.backEyebrow)
+            .textCase(.uppercase)
+            .tracking(FoldType.eyebrowTracking)
     }
 }
 

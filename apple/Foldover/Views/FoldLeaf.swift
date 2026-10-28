@@ -2,6 +2,8 @@
 // crease. It carries what its half showed at the moment it lifted, its
 // face darkening as it turns away from the light overhead, then shows
 // the paper's cerulean back once past upright, as origami paper does.
+// Its words give way to type bars as it starts to turn, so perspective
+// never squeezes letters into slivers.
 //
 //        open           upright           folded
 //   ┌─────┬─────┐       ┌─┬─────┐       ┌─────┬─────┐
@@ -39,8 +41,11 @@ struct FoldLeafView<Label: View>: View {
     let scrollOffset: CGFloat
     let headerHeight: CGFloat
     let listInset: CGFloat
-    let compact: Bool
     let reduceMotion: Bool
+    /// The selected line and its tint, and a turn staged on a line: the
+    /// leaf carries them as its page showed them.
+    let selection: (id: ChangeRow.ID, tint: SelectionTint)?
+    let staged: (id: ChangeRow.ID, flow: FoldFlow)?
     /// The folder label printed at the top of the half.
     @ViewBuilder let label: Label
 
@@ -48,13 +53,15 @@ struct FoldLeafView<Label: View>: View {
     /// forward: A's leaf turns positive, B's negative, so each free edge
     /// rises toward the viewer rather than sinking behind the page.
     private static var turnSign: Double { 1 }
-    /// Upright, the free edge stands nearest and looks about a fifth
-    /// taller than the page: depth without spilling far past it.
-    private static var perspective: CGFloat { 0.24 }
+    /// Upright, the free edge stands nearest and looks a little taller
+    /// than the page: depth without spilling over the words around it.
+    private static var perspective: CGFloat { 0.16 }
     /// How far either side of upright the paper's edge shows, and how
     /// tall it looks there, its near end lifted toward the viewer.
     private static var edgeWindow: Double { 0.05 }
-    private static var edgeReach: CGFloat { 1.12 }
+    private static var edgeReach: CGFloat { 1.08 }
+    /// How dark the type bars print: lines, not words.
+    private static var barInk: Double { 0.45 }
     /// How wide the glint on the back is, in fractions of its diagonal.
     private static var glintBand: Double { 0.18 }
 
@@ -62,16 +69,17 @@ struct FoldLeafView<Label: View>: View {
 
     var body: some View {
         if reduceMotion {
-            // No swing: the half fades from where it lay as its back fades
-            // in over the other half.
+            // No swing: the half fades from where it lay, then its back
+            // fades in over the other half. One is gone before the other
+            // comes, so neither lies half-transparent over a page's lines.
             ZStack(alignment: .topLeading) {
-                front
+                front(ink: 1)
                     .frame(width: half, height: pageSize.height)
-                    .opacity(1 - progress)
+                    .opacity(FoldMotion.reducedFace(progress))
                     .offset(x: side == .a ? 0 : half)
                 Kami()
                     .frame(width: half, height: pageSize.height)
-                    .opacity(progress)
+                    .opacity(FoldMotion.reducedBack(progress))
                     .offset(x: side == .a ? half : 0)
             }
         } else {
@@ -102,7 +110,7 @@ struct FoldLeafView<Label: View>: View {
                     .overlay { glint }
                     .scaleEffect(x: -1)
             } else {
-                front
+                front(ink: FoldMotion.faceInk(progress))
                     .overlay(FoldPalette.deskShade.opacity(0.12 * light))
             }
         }
@@ -152,37 +160,50 @@ struct FoldLeafView<Label: View>: View {
             .offset(x: half - 0.75, y: -pageSize.height * (Self.edgeReach - 1) / 2)
     }
 
+    /// The paper's face with what was printed on it: words at `ink`, and
+    /// type bars where the words fade.
+    private func front(ink: Double) -> some View {
+        ZStack(alignment: .topLeading) {
+            Paper(facet: PaperFacet(side))
+            if ink < 1 {
+                printed
+                    .redacted(reason: .placeholder)
+                    .opacity((1 - ink) * Self.barInk)
+            }
+            if ink > 0 {
+                printed.opacity(ink)
+            }
+        }
+    }
+
     /// The half's folder label and the lines that were in view, frozen
     /// where the list was scrolled.
-    private var front: some View {
+    private var printed: some View {
         let offset = max(0, scrollOffset - listInset)
         let first = min(entries.count, Int(offset / FoldMetrics.rowHeight))
         let visible = Int(pageSize.height / FoldMetrics.rowHeight) + 2
         let window = Array(entries.dropFirst(first).prefix(visible))
-        return ZStack(alignment: .topLeading) {
-            Paper(facet: PaperFacet(side))
-            VStack(spacing: 0) {
-                label
-                    .frame(height: headerHeight)
-                // The rows hang from under the label and are cut at the
-                // page's foot. Laid out directly they would be taller than
-                // the page, and the leaf would center them above it.
-                Color.clear
-                    .overlay(alignment: .top) {
-                        VStack(spacing: 0) {
-                            ForEach(window) { entry in
-                                cell(entry)
-                                    .frame(height: FoldMetrics.rowHeight)
-                            }
+        return VStack(spacing: 0) {
+            label
+                .frame(height: headerHeight)
+            // The rows hang from under the label and are cut at the
+            // page's foot. Laid out directly they would be taller than
+            // the page, and the leaf would center them above it.
+            Color.clear
+                .overlay(alignment: .top) {
+                    VStack(spacing: 0) {
+                        ForEach(window) { entry in
+                            cell(entry)
+                                .frame(height: FoldMetrics.rowHeight)
                         }
-                        .offset(y: CGFloat(first) * FoldMetrics.rowHeight - scrollOffset + listInset)
                     }
-                    .clipped()
-            }
-            // The leaf reaches the middle of the crease; the half's lines
-            // stop at its edge.
-            .padding(side == .a ? .trailing : .leading, FoldMetrics.creaseWidth / 2)
+                    .offset(y: CGFloat(first) * FoldMetrics.rowHeight - scrollOffset + listInset)
+                }
+                .clipped()
         }
+        // The leaf reaches the middle of the gutter; the page's lines
+        // stop at its edge.
+        .padding(side == .a ? .trailing : .leading, FoldMetrics.creaseWidth / 2)
     }
 
     @ViewBuilder
@@ -191,7 +212,10 @@ struct FoldLeafView<Label: View>: View {
         case .folder(let path, let count):
             FoldHeadingHalf(path: path, count: count, side: side)
         case .line(let line):
-            FoldHalf(line: line, side: side, compact: compact)
+            FoldHalf(line: line, side: side, staged: staged?.id == line.id ? staged?.flow : nil)
+                .background {
+                    if let selection, selection.id == line.id { selection.tint }
+                }
         }
     }
 }

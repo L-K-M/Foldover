@@ -1,6 +1,7 @@
-// The fold's rules: which mark each half of a line carries, what it is
-// called, which ways a person may turn it, how lines group under
-// folders, and which half folds.
+// The fold's rules: which mark each half of a line carries and which
+// page's margin is marked, what a line is called, which ways a person
+// may turn it, how lines group under folders, which half folds, which
+// page a message keeps to, and how print gives way as the leaf turns.
 
 import Foundation
 import Testing
@@ -130,6 +131,121 @@ struct FoldSheetModelTests {
                                notUndoneCount: 0, archive: "undo")
         #expect(FoldImprint(undo: undo).figures == [.init(value: "1", label: "put back"),
                                                     .init(value: "2", label: "archived")])
+    }
+
+    /// The page that changes carries the mark, in its outer margin; a
+    /// page that stays as it is carries none.
+    @Test func marksSitOnThePageThatChanges() {
+        let toB = FoldLine(row: row("2026/Trip/day2/IMG_2041.RAW", .copy(to: .b)))
+        #expect(toB.badge(.a) == nil)
+        #expect(toB.badge(.b) == .arrives(.toB))
+        let toA = FoldLine(row: row("notes.md", .copy(to: .a)))
+        #expect(toA.badge(.a) == .arrives(.toA))
+        #expect(toA.badge(.b) == nil)
+
+        let archive = FoldLine(row: row("2024/drafts/old-banner.psd", .archive(on: .b)))
+        #expect(archive.badge(.a) == nil)
+        #expect(archive.badge(.b) == .lift)
+        let metadata = FoldLine(row: row("IMG_0042.txt", .update(to: .a)))
+        #expect(metadata.badge(.a) == .retouch)
+        #expect(metadata.badge(.b) == nil)
+        let rename = FoldLine(row: row("2026/Trip/day1/IMG_1990.HEIC", .move(on: .b),
+                                       movedFrom: "2026/Inbox/IMG_1990.HEIC"))
+        #expect(rename.badge(.b) == .arrives(.toB))
+        #expect(rename.badge(.a) == nil)
+
+        // What holds or waits marks both folders; a failure marks its line once.
+        let conflict = FoldLine(row: row("header.psd", .conflict(.bothChanged), resolvable: true))
+        #expect(conflict.badge(.a) == .held)
+        #expect(conflict.badge(.b) == .held)
+        let waiting = FoldLine(row: row("day3", .blocked))
+        #expect(waiting.badge(.a) == .waiting)
+        #expect(waiting.badge(.b) == .waiting)
+        let kept = FoldLine(row: row("kept.txt", .keep))
+        #expect(kept.badge(.a) == nil)
+        #expect(kept.badge(.b) == nil)
+        let failed = FoldLine(row: row("locked.txt", nil, id: -1))
+        #expect(failed.badge(.a) == .failed)
+        #expect(failed.badge(.b) == nil)
+    }
+
+    /// A staged turn is marked only on the page it would land on.
+    @Test func aStagedTurnIsMarkedWhereItWouldLand() {
+        let conflict = FoldLine(row: row("header.psd", .conflict(.bothChanged), resolvable: true))
+        #expect(conflict.badge(.a, staged: .toB) == nil)
+        #expect(conflict.badge(.b, staged: .toB) == .arrives(.toB))
+        #expect(conflict.badge(.a, staged: .toA) == .arrives(.toA))
+        #expect(conflict.badge(.b, staged: .toA) == nil)
+
+        let toB = FoldLine(row: row("IMG_2042.RAW", .copy(to: .b), otherWay: .b))
+        #expect(toB.badge(.a, staged: .toA) == .arrives(.toA))
+        #expect(toB.badge(.b, staged: .toA) == nil)
+    }
+
+    /// Messages keep to one page: the one a one-way pair writes to, B's in
+    /// a two-way pair, or the one that is there when a folder is missing.
+    @Test func messagesKeepToOnePage() {
+        #expect(FoldLeaf.messagePage(.sync, missing: nil) == .b)
+        #expect(FoldLeaf.messagePage(.mirrorLeft, missing: nil) == .b)
+        #expect(FoldLeaf.messagePage(.backupRight, missing: nil) == .a)
+        #expect(FoldLeaf.messagePage(.mirrorLeft, missing: .b) == .a)
+        #expect(FoldLeaf.messagePage(.sync, missing: .a) == .b)
+        #expect(FoldLeaf.messagePage(.sync, missing: .b) == .a)
+        #expect(FoldLeaf.messagePage(.backupRight, missing: .a) == .b)
+        #expect(FoldLeaf.landing(.a) == .b)
+        #expect(FoldLeaf.landing(.b) == .a)
+    }
+
+    /// The turning leaf's words are gone before perspective squeezes
+    /// them, and the page under it keeps its words until it closes over.
+    @Test func printGivesWayBeforeTheLeafTurnsFar() {
+        #expect(FoldMotion.faceInk(0) == 1)
+        #expect(FoldMotion.faceInk(0.03) == 1)
+        #expect(FoldMotion.faceInk(0.14) == 0)
+        #expect(FoldMotion.faceInk(FoldMotion.heldUpright) == 0)
+        #expect(FoldMotion.landingInk(0) == 1)
+        #expect(FoldMotion.landingInk(FoldMotion.tippingPoint) == 1)
+        #expect(FoldMotion.landingInk(1) < 0.2)
+        // The plan held for approval reads complete, and letting go there
+        // would not fold it.
+        #expect(FoldMotion.peek(0) == 0)
+        #expect(FoldMotion.peek(FoldMotion.heldUpright) == 1)
+        #expect(!FoldMotion.commits(swing: FoldMotion.heldUpright))
+        for step in 0...100 {
+            let swing = Double(step) / 100
+            #expect((0.0...1.0).contains(FoldMotion.faceInk(swing)))
+            #expect((0.0...1.0).contains(FoldMotion.landingInk(swing)))
+            #expect((0.0...1.0).contains(FoldMotion.peek(swing)))
+        }
+    }
+
+    /// Under Reduce Motion one face is gone before the other comes, so
+    /// nothing translucent lies over a page's lines, even while held.
+    @Test func reducedMotionNeverShowsBothFaces() {
+        for step in 0...100 {
+            let swing = Double(step) / 100
+            #expect(min(FoldMotion.reducedFace(swing), FoldMotion.reducedBack(swing)) == 0)
+        }
+        #expect(FoldMotion.reducedFace(0) == 1)
+        #expect(FoldMotion.reducedBack(1) == 1)
+        #expect(FoldMotion.reducedBack(FoldMotion.heldUpright) == 0)
+    }
+
+    /// A folder's label names it and says where it is.
+    @Test func folderLabelsSplitNameFromPlace() {
+        func parts(_ text: String) -> [String] {
+            let parts = FoldFolderLabel.parts(text)
+            return [parts.name, parts.location]
+        }
+        #expect(parts("/var/folders/5n/T/Foldover Tour/Photos") == ["Photos", "/var/folders/5n/T/Foldover Tour"])
+        #expect(parts("sftp://mynas.local/~/Photos") == ["Photos", "mynas.local/~"])
+        #expect(parts("sftp://mynas.local/Photos") == ["Photos", "mynas.local"])
+        #expect(parts("/Volumes/Media/Music/") == ["Music", "/Volumes/Media"])
+        #expect(parts("/Volumes/Media/Music//") == ["Music", "/Volumes/Media"])
+        #expect(parts("/Photos") == ["Photos", "/"])
+        #expect(parts("/") == ["/", ""])
+        #expect(parts("sftp://mynas.local") == ["sftp://mynas.local", ""])
+        #expect(parts("Photos on Studio Mac") == ["Photos on Studio Mac", ""])
     }
 
     @Test func theLeafWaitsForTheDeadZoneAndTipsPastUpright() {

@@ -50,12 +50,22 @@ struct PairDetailView: View {
             // No vertical fixedSize in a split-view column: a minimum height
             // that depends on the width makes the column's size limits
             // change on every layout pass, which AppKit ends with a crash.
-            Text(viewModel.planText(for: pair))
-                .font(.callout)
-                .foregroundStyle(FoldPalette.deskInk)
-                .lineLimit(2)
-                .help(viewModel.planText(for: pair))
-                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                // The mode's direction, here rather than on the sheet's fold.
+                Image(systemName: pair.settings.mode.symbol)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(FoldPalette.deskInk)
+                    .help(pair.settings.mode.title)
+                    .accessibilityLabel(pair.settings.mode.title)
+                Text(viewModel.planText(for: pair))
+                    .font(.callout)
+                    .foregroundStyle(FoldPalette.deskInk)
+                    .lineLimit(2)
+                    .help(viewModel.planText(for: pair))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            // One stop for VoiceOver: the mode, then its sentence.
+            .accessibilityElement(children: .combine)
             if sync.showsChangeFilter {
                 Picker("Show", selection: Binding(
                     get: { sync.changeFilter },

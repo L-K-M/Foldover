@@ -79,8 +79,10 @@ enum FoldType {
     static let eyebrowTracking: CGFloat = 0.8
     /// Folder headings in the list.
     static let heading = Font.system(size: 11, weight: .semibold)
-    /// Large counts and the run's percentage.
+    /// Large counts and the run's percentage; smaller where a page is
+    /// too narrow for the counts abreast.
     static let figure = Font.system(size: 36, weight: .semibold).monospacedDigit()
+    static let smallFigure = Font.system(size: 26, weight: .semibold).monospacedDigit()
     /// Small capitals set in white on the cerulean back.
     static let backEyebrow = Font.system(size: 10.5, weight: .semibold)
 }
@@ -143,15 +145,29 @@ struct Paper: View {
     }
 }
 
+/// How the paper's back is finished.
+enum KamiFinish {
+    /// Two flat facets split along the diagonal, as on the icon.
+    case faceted
+    /// One flat plane in the shaded facet's blue, for a back that carries
+    /// words: no ridge runs through them, and white reads clearly on it.
+    case flat
+}
+
 /// The paper's back: cerulean in two flat facets split along the
 /// diagonal, lit from the top left as the icon's arrowhead is, the light
-/// catching their crease and the top and left edges.
+/// catching their crease and the top and left edges; or one flat plane
+/// where words are printed on it.
 struct Kami: View {
+    var finish: KamiFinish = .faceted
+
     var body: some View {
         Rectangle()
             .fill(FoldPalette.kamiShade)
-            .overlay { LitFacet().fill(FoldPalette.kamiLit) }
-            .overlay { Ridges().stroke(FoldPalette.kamiRidge.opacity(0.8), lineWidth: 1) }
+            .overlay {
+                if finish == .faceted { LitFacet().fill(FoldPalette.kamiLit) }
+            }
+            .overlay { Ridges(finish: finish).stroke(FoldPalette.kamiRidge.opacity(0.8), lineWidth: 1) }
             .overlay { Grain() }
             .accessibilityHidden(true)
     }
@@ -168,14 +184,18 @@ struct Kami: View {
         }
     }
 
-    /// The facets' crease and the lit top and left edges, inset so the
-    /// whole line shows.
+    /// The facets' crease, on a faceted back, and the lit top and left
+    /// edges, inset so the whole line shows.
     private struct Ridges: Shape {
+        let finish: KamiFinish
+
         func path(in rect: CGRect) -> Path {
             let box = rect.insetBy(dx: 0.5, dy: 0.5)
             var path = Path()
-            path.move(to: CGPoint(x: box.maxX, y: box.minY))
-            path.addLine(to: CGPoint(x: box.minX, y: box.maxY))
+            if finish == .faceted {
+                path.move(to: CGPoint(x: box.maxX, y: box.minY))
+                path.addLine(to: CGPoint(x: box.minX, y: box.maxY))
+            }
             path.move(to: CGPoint(x: box.minX, y: box.maxY))
             path.addLine(to: CGPoint(x: box.minX, y: box.minY))
             path.addLine(to: CGPoint(x: box.maxX, y: box.minY))
