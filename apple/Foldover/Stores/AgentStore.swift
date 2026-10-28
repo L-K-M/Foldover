@@ -196,8 +196,16 @@ final class AgentStore {
             // agent. Ask again for the rest of the launch window first.
             if Self.unanswered(error) {
                 let rest = startupTimeout - startupProbe
-                if let report = try? await answer(within: rest, request: request),
-                   generation == request {
+                var report: AgentReport?
+                var retryError: Error?
+                do {
+                    report = try await answer(within: rest, request: request)
+                } catch {
+                    retryError = error
+                }
+                if let report {
+                    // A newer check owns the connection by now.
+                    guard generation == request else { return }
                     connection = .connected(version: report.version)
                     note(report)
                     return
@@ -205,6 +213,13 @@ final class AgentStore {
                 guard generation == request else { return }
                 guard !Task.isCancelled else {
                     connection = lastSettled ?? .disconnected
+                    return
+                }
+                // The retry learned something concrete, as a state it cannot
+                // read; that is newer information than the first probe's
+                // generic "no answer".
+                if let retryError, !Self.unanswered(retryError) {
+                    connection = .failed(message: message(for: retryError))
                     return
                 }
             }
@@ -400,10 +415,10 @@ final class AgentStore {
         system.openLoginItems()
     }
 
-    /// Whether `error` says the agent was reached but answered nothing, so
-    /// waiting is worthwhile, rather than that it refused or failed.
+    /// Whether `error` says the agent did not answer, so waiting is
+    /// worthwhile, rather than that it refused or failed.
     private static func unanswered(_ error: Error) -> Bool {
-        if error is StatusError { return true }
+        if case StatusError.timedOut = error { return true }
         guard let error = error as? AgentError else { return false }
         if case AgentError.Connection = error { return true }
         return false

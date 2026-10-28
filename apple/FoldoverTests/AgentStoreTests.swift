@@ -100,6 +100,41 @@ func aSlowFirstStatusConnectsInsteadOfReportingAFailure() async {
     #expect(store.connection == .connected(version: "new"))
 }
 
+/// Answers nothing on the first call, as an agent that accepted the socket and
+/// stalled, and a concrete failure afterwards, as one whose state cannot be
+/// read.
+private actor StallingThenFailingStatus {
+    private var attempts = 0
+
+    func status() async throws -> AgentReport {
+        attempts += 1
+        if attempts == 1 {
+            await withCheckedContinuation { (_: CheckedContinuation<Void, Never>) in }
+        }
+        throw AgentError.Request(message: "Cannot read agent state")
+    }
+
+    func calls() async -> Int { attempts }
+}
+
+/// The first probe hears nothing, but the retry learns the agent's state
+/// cannot be read. That is newer information than "did not answer", so it is
+/// what the store reports.
+@MainActor
+@Test
+func aRetryThatLearnsSomethingConcreteReportsIt() async {
+    let client = StallingThenFailingStatus()
+    let store = AgentStore(statusRequest: { try await client.status() },
+                           startupTimeout: .milliseconds(200), startupPoll: .milliseconds(10))
+    await store.refresh()
+    guard case .failed(let message) = store.connection else {
+        Issue.record("Expected a failure, got \(store.connection)")
+        return
+    }
+    #expect(message == "Cannot read agent state")
+    #expect(await client.calls() > 1)
+}
+
 @MainActor
 @Test
 func cancellingTheFirstHealthCheckRestoresTheOffState() async {
