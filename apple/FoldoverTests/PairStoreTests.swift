@@ -956,6 +956,25 @@ func homeCacheOptOutPersistsAndCanBeExplicitlyReenabled() {
 }
 
 @MainActor
+@Test(arguments: [[], ["/Library/Caches/"]], [PairMode.backupLeft, .sync])
+func existingHomeBackupsCleanUpOnlyNewPresetRules(rules: [String], nextMode: PairMode) {
+    var options = PairOptions.defaults
+    options.filters = rules
+    let pair = SyncPair(id: pairFixture().id, revision: 1, settings: PairSettings(
+        name: "Home", left: SelectedFolder(bytes: Data(NSHomeDirectory().utf8)),
+        right: SelectedFolder(bytes: Data("/b".utf8)), mode: .backupLeft, options: options
+    ))
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()), editing: pair)
+    editor.homeBackupPresetEnabled = true
+    editor.filterText += "\n*.local"
+    editor.mode = nextMode
+    if nextMode == .backupLeft {
+        editor.chooseFolder(.success([URL(fileURLWithPath: "/data")]), side: .left)
+    }
+    #expect(editor.options.filters == rules + ["*.local"])
+}
+
+@MainActor
 @Test
 func editedCacheDefaultsAreNotRestoredAndOnlyAutomaticRulesAreRemoved() {
     let editor = homeBackupEditor()

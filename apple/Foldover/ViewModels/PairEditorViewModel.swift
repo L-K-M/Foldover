@@ -228,12 +228,11 @@ final class PairEditorViewModel: Identifiable {
     /// Clean up automatic defaults even after an edit, while preserving
     /// custom rules and the user's decision not to restore defaults.
     private func syncHomeBackupPreset() {
-        guard editing == nil else { return }
         guard sourceIsHome else {
             removeAutoAddedHomeExclusions()
             return
         }
-        guard !userEditedHomeExclusions else { return }
+        guard editing == nil, !userEditedHomeExclusions else { return }
         applyHomeBackupCacheExclusions()
     }
 
