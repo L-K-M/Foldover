@@ -14,6 +14,7 @@ mod hold;
 mod journal;
 mod mounts;
 mod pause;
+mod pending;
 mod settings;
 mod share;
 mod starts;
@@ -49,11 +50,11 @@ const WRITER_RETRY: Duration = Duration::from_millis(20);
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary, schedule_time, schedule_days, records, bandwidth_limit, review_policy, removal_protection";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 26] = [
+const MIGRATIONS: [&str; 27] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
     SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, SCHEMA_V15, SCHEMA_V16,
     SCHEMA_V17, SCHEMA_V18, SCHEMA_V19, SCHEMA_V20, SCHEMA_V21, SCHEMA_V22, SCHEMA_V23, SCHEMA_V24,
-    SCHEMA_V25, SCHEMA_V26,
+    SCHEMA_V25, SCHEMA_V26, SCHEMA_V27,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -409,6 +410,41 @@ ALTER TABLE pair ADD COLUMN removal_protection TEXT NOT NULL DEFAULT 'enabled' C
 UPDATE state_meta SET minimum_reader=max(minimum_reader,26) WHERE singleton=1;
 ";
 
+// Saved edits remain separate while a run commits under the active revision.
+// Older agents cannot honor the pending settings, so they must refuse the state.
+const SCHEMA_V27: &str = "
+CREATE TABLE pending_pair (
+    id BLOB PRIMARY KEY NOT NULL REFERENCES pair(id) ON DELETE CASCADE CHECK(length(id) = 16 AND id != zeroblob(16)),
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    name TEXT NOT NULL CHECK(length(trim(name)) > 0 AND instr(name, char(0)) = 0),
+    left_root BLOB NOT NULL CHECK(length(left_root) > 0 AND instr(left_root,x'00') = 0 AND
+        (substr(left_root,1,1) = x'2f' OR (length(left_root) > length('sftp://') AND substr(left_root,1,length('sftp://')) = CAST('sftp://' AS BLOB)) OR
+         (length(left_root) > length('peer://') AND substr(left_root,1,length('peer://')) = CAST('peer://' AS BLOB)))),
+    right_root BLOB NOT NULL CHECK(length(right_root) > 0 AND instr(right_root,x'00') = 0 AND
+        (substr(right_root,1,1) = x'2f' OR (length(right_root) > length('sftp://') AND substr(right_root,1,length('sftp://')) = CAST('sftp://' AS BLOB)) OR
+         (length(right_root) > length('peer://') AND substr(right_root,1,length('peer://')) = CAST('peer://' AS BLOB)))),
+    mode TEXT NOT NULL CHECK(mode IN ('sync','mirror-left','mirror-right','backup-left','backup-right')),
+    modification_times TEXT NOT NULL DEFAULT 'sync' CHECK(modification_times IN ('sync','ignore')),
+    extended_attributes TEXT NOT NULL DEFAULT 'sync' CHECK(extended_attributes IN ('sync','ignore')),
+    permissions TEXT NOT NULL DEFAULT 'ignore' CHECK(permissions IN ('sync','ignore')),
+    durability TEXT NOT NULL DEFAULT 'standard' CHECK(durability IN ('standard','full')),
+    schedule TEXT NOT NULL DEFAULT 'manual' CHECK(schedule IN ('manual','every','changes','daily')),
+    schedule_minutes INTEGER CHECK(schedule_minutes IS NULL OR schedule_minutes BETWEEN 1 AND 10080),
+    filters TEXT NOT NULL DEFAULT '' CHECK(instr(filters, char(0)) = 0),
+    size_limit INTEGER CHECK(size_limit IS NULL OR size_limit > 0),
+    age_limit INTEGER CHECK(age_limit IS NULL OR age_limit > 0),
+    canary BLOB CHECK(canary IS NULL OR length(canary) > 0),
+    schedule_time INTEGER CHECK(schedule_time IS NULL OR schedule_time BETWEEN 0 AND 1439),
+    schedule_days INTEGER CHECK(schedule_days IS NULL OR schedule_days BETWEEN 1 AND 127),
+    records TEXT NOT NULL CHECK(records IN ('both','source')),
+    bandwidth_limit INTEGER CHECK(bandwidth_limit IS NULL OR bandwidth_limit >= 100000),
+    review_policy TEXT NOT NULL CHECK(review_policy IN ('automatic','required')),
+    removal_protection TEXT NOT NULL CHECK(removal_protection IN ('enabled','disabled')),
+    CHECK(left_root != right_root)
+) STRICT;
+UPDATE state_meta SET minimum_reader=max(minimum_reader,27) WHERE singleton=1;
+";
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("State I/O: {0}")]
@@ -659,7 +695,8 @@ impl Database {
 
     pub fn pairs(&self) -> Result<Vec<PairRow>, Error> {
         let mut statement = self.connection.prepare(&format!(
-            "SELECT {PAIR_COLUMNS} FROM pair ORDER BY name COLLATE BINARY,id"
+            "SELECT {PAIR_COLUMNS} FROM {} ORDER BY name COLLATE BINARY,id",
+            pending::visible_pairs()
         ))?;
         let rows = statement.query_map([], pair_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -671,7 +708,8 @@ impl Database {
             .filter(|limit| *limit > 0)
             .ok_or(Error::InvalidState("Pair page limit must be positive"))?;
         let mut statement = self.connection.prepare(&format!(
-            "SELECT {PAIR_COLUMNS} FROM pair WHERE ?1 IS NULL OR id > ?1 ORDER BY id LIMIT ?2"
+            "SELECT {PAIR_COLUMNS} FROM {} WHERE ?1 IS NULL OR id > ?1 ORDER BY id LIMIT ?2",
+            pending::visible_pairs()
         ))?;
         let rows = statement.query_map(params![after, limit], pair_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -681,7 +719,10 @@ impl Database {
         Ok(self
             .connection
             .query_row(
-                &format!("SELECT {PAIR_COLUMNS} FROM pair WHERE id=?1"),
+                &format!(
+                    "SELECT {PAIR_COLUMNS} FROM {} WHERE id=?1",
+                    pending::visible_pairs()
+                ),
                 [id],
                 pair_row,
             )
@@ -697,62 +738,12 @@ impl Database {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // A base and conflict choices hold versions of these roots under
-        // these metadata categories; changing either invalidates them.
-        for table in ["base_entry", "resolution", "snapshot_entry", "run_journal"] {
-            transaction.execute(
-                &format!("DELETE FROM {table} WHERE pair_id=?1 AND EXISTS (SELECT 1 FROM pair WHERE id=?1 AND revision=?2 AND (left_root!=?3 OR right_root!=?4 OR modification_times!=?5 OR extended_attributes!=?6 OR permissions!=?7))"),
-                params![
-                    id,
-                    revision,
-                    values.left_root,
-                    values.right_root,
-                    values.modification_times,
-                    values.extended_attributes,
-                    values.permissions
-                ],
-            )?;
-        }
-        let changed = transaction.execute(
-            // A changed root is a different endpoint; forget its identity.
-            // So do changed records, or a changed mode while records stay
-            // with the source: a folder without records has an identity
-            // only this agent knows. SET expressions read the row as it
-            // was, so `records=?19` and `mode=?6` hold only when unchanged.
-            "UPDATE pair SET revision=revision+1,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,schedule=?11,schedule_minutes=?12,filters=?13,size_limit=?14,age_limit=?15,canary=?16,schedule_time=?17,schedule_days=?18,records=?19,bandwidth_limit=?20,review_policy=?21,removal_protection=?22,left_identity=CASE WHEN left_root=?4 AND records=?19 AND (records='both' OR mode=?6) THEN left_identity END,right_identity=CASE WHEN right_root=?5 AND records=?19 AND (records='both' OR mode=?6) THEN right_identity END,left_mount=CASE WHEN left_root=?4 THEN left_mount END,right_mount=CASE WHEN right_root=?5 THEN right_mount END WHERE id=?1 AND revision=?2",
-            params![
-                id,
-                revision,
-                values.name,
-                values.left_root,
-                values.right_root,
-                values.mode,
-                values.modification_times,
-                values.extended_attributes,
-                values.permissions,
-                values.durability,
-                values.schedule,
-                values.schedule_minutes,
-                values.filters,
-                values.size_limit,
-                values.age_limit,
-                values.canary,
-                values.schedule_time,
-                values.schedule_days,
-                values.records,
-                values.bandwidth_limit,
-                values.review_policy,
-                values.removal_protection
-            ],
-        )?;
-        if changed == 0 {
-            return Err(revision_error(&transaction, id)?);
-        }
-        let row = transaction.query_row(
-            &format!("SELECT {PAIR_COLUMNS} FROM pair WHERE id=?1"),
-            [id],
-            pair_row,
-        )?;
+        pending::check_revision(&transaction, id, revision)?;
+        let active_revision = pending::active_revision(&transaction, id)?;
+        let next_revision = revision
+            .checked_add(1)
+            .ok_or(Error::InvalidState("Pair revision overflow"))?;
+        let row = pending::apply_update(&transaction, id, active_revision, next_revision, values)?;
         transaction.commit()?;
         Ok(row)
     }
@@ -965,13 +956,8 @@ impl Database {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if transaction.execute(
-            "DELETE FROM pair WHERE id=?1 AND revision=?2",
-            params![id, revision],
-        )? == 0
-        {
-            return Err(revision_error(&transaction, id)?);
-        }
+        pending::check_revision(&transaction, id, revision)?;
+        transaction.execute("DELETE FROM pair WHERE id=?1", [id])?;
         transaction.commit()?;
         Ok(())
     }
@@ -1877,10 +1863,9 @@ pub(super) mod tests {
         assert_eq!(minimum_reader(&legacy.connection), legacy_reader);
         drop(legacy);
 
-        // v26 raised the floor last: older readers cannot enforce review
-        // policy or removal protection.
+        // v27 raised the floor last: older readers cannot honor deferred edits.
         let mut database = Database::open(&location).unwrap();
-        assert_eq!(minimum_reader(&database.connection), 26);
+        assert_eq!(minimum_reader(&database.connection), 27);
         assert_eq!(
             database
                 .connection
@@ -2240,7 +2225,7 @@ pub(super) mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!((schema, minimum), (26, 26));
+        assert_eq!((schema, minimum), (27, 27));
         assert!(minimum > 25, "a shipping reader must refuse these policies");
         assert_eq!(database.pair(&id).unwrap().unwrap().revision, 2);
     }

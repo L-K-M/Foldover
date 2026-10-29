@@ -148,8 +148,11 @@ Per-pair rules, gitignore-style: name and path patterns, plus size and
 modification-date terms. Exclusions win. A `.foldoverignore` file in a root
 is honored. Built-in exclusions, which aren't user filters and can't be
 switched off: `.foldover/` and Foldover's temp files. `.DS_Store` is skipped
-by default. Editing filters triggers a **re-baseline**: snapshots and base are
-rebuilt under the new rules, so newly excluded files never look deleted.
+by default. New home-folder Backups offer editable cache exclusions, with
+additional exclusions chosen explicitly. Existing pairs are unchanged.
+The same rules apply to both folders; excluded entries are forgotten
+instead of deleted, and existing target copies stay untouched
+([ADR 0024](docs/adr/0024-filters.md)).
 
 ### 3.8 UI surfaces
 

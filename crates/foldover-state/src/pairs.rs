@@ -106,6 +106,40 @@ impl PairStore {
         self.database.pair(id.as_bytes())?.map(from_row).transpose()
     }
 
+    /// The configuration an already-running job is using.
+    pub fn active_pair(&self, id: PairId) -> Result<Option<PairConfig>, Error> {
+        self.database
+            .active_pair(id.as_bytes())?
+            .map(from_row)
+            .transpose()
+    }
+
+    /// Save edits while an old revision's run is still committing progress.
+    pub fn defer_update(
+        &mut self,
+        id: PairId,
+        revision: u64,
+        draft: &PairDraft,
+    ) -> Result<PairConfig, Error> {
+        let revision = database_revision(revision)?;
+        from_row(
+            self.database
+                .defer_pair_update(id.as_bytes(), revision, &values(draft))?,
+        )
+    }
+
+    /// Activate saved edits before a new run reads its inputs.
+    pub fn activate_update(&mut self, id: PairId) -> Result<(), Error> {
+        self.pair(id)?.ok_or(Error::PairNotFound)?;
+        Ok(self.database.activate_pair_update(id.as_bytes())?)
+    }
+
+    /// After restart there are no old runs to retain an active configuration.
+    pub fn activate_updates(&mut self) -> Result<(), Error> {
+        self.pairs()?;
+        Ok(self.database.activate_pair_updates()?)
+    }
+
     pub fn pairs_after(
         &self,
         after: Option<PairId>,
@@ -682,6 +716,44 @@ mod tests {
             Err(Error::StaleRevision)
         ));
         assert_eq!(store.pair(original.id()).unwrap(), Some(updated));
+    }
+
+    #[test]
+    fn saved_settings_survive_reopen_without_switching_the_active_pair() {
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        let original = store.create(&draft(SyncMode::Sync)).unwrap();
+        let replacement = PairDraft::new(
+            "Next home backup".into(),
+            LocalRoot::from_bytes(b"/home/\xff".to_vec()).unwrap(),
+            PairRoot::from_bytes(b"sftp://nas/backup".to_vec()).unwrap(),
+            SyncMode::Backup { source: Side::Left },
+        )
+        .unwrap()
+        .with_options(
+            PairOptions::default()
+                .with_filters(Filters::new(vec!["/Library/Caches/".into()]).unwrap()),
+        );
+        let pending = store
+            .defer_update(original.id(), original.revision(), &replacement)
+            .unwrap();
+        assert_eq!(pending.revision(), 2);
+        assert_eq!(
+            store.active_pair(original.id()).unwrap(),
+            Some(original.clone())
+        );
+        assert_eq!(store.pair(original.id()).unwrap(), Some(pending.clone()));
+        drop(store);
+
+        let mut store = PairStore::open(&location).unwrap();
+        assert_eq!(store.pair(original.id()).unwrap(), Some(pending.clone()));
+        assert_eq!(store.active_pair(original.id()).unwrap(), Some(original));
+        store.activate_updates().unwrap();
+        assert_eq!(
+            store.active_pair(pending.id()).unwrap(),
+            Some(pending.clone())
+        );
+        assert_eq!(store.pairs().unwrap(), [pending]);
     }
 
     #[test]

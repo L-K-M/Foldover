@@ -252,6 +252,9 @@ struct PairEditorView: View {
 
     private var skipSection: some View {
         Section {
+            if viewModel.sourceIsHome {
+                homeBackupPresetControls
+            }
             TextEditor(text: $viewModel.filterText)
                 .font(.body.monospaced())
                 .frame(minHeight: 72)
@@ -290,6 +293,33 @@ struct PairEditorView: View {
                 title: Text("Skip"),
                 message: Text("Leave out temporary files, caches or other content you do not want to sync. Enter one rule per line, like .gitignore: *.tmp skips temporary files, and build/ skips folders named build.\n\nRules apply to both folders; a .foldoverignore file in either folder adds more. Skipped files are left alone, including copies already present in the other folder. Removing a rule brings those files back into the next comparison.")
             )
+        }
+    }
+
+    // MARK: Home backup preset controls
+
+    private var homeBackupPresetControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Toggle("Home backup cache exclusions", isOn: $viewModel.homeBackupPresetEnabled)
+                InfoButton(
+                    title: Text("Home backup cache exclusions"),
+                    message: Text(viewModel.homeBackupPresetNote)
+                )
+            }
+            if viewModel.homeBackupPresetEnabled {
+                Text(viewModel.homeBackupPresetNote)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Menu("Add Exclusions…") {
+                ForEach(PairStore.HomeExclusionPreset.allCases, id: \.self) { preset in
+                    Button(preset.title) {
+                        viewModel.addHomeExclusionPreset(preset)
+                    }
+                }
+            }
+            .fixedSize()
         }
     }
 
@@ -359,6 +389,10 @@ struct PairEditorView: View {
                     .textSelection(.enabled)
                     .accessibilityLabel(String(localized: "Settings were not confirmed: \(message)"))
             }
+            Text(PairEditorViewModel.saveHelperText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 12) {
                 // The plan sentence rewrites itself as settings change (PLAN.md §3.8).
                 Text(viewModel.planText)

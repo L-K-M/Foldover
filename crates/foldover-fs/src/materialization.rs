@@ -106,6 +106,16 @@ mod tests {
             let metadata = root.metadata(&path).unwrap();
             assert_eq!(policy().unwrap(), IOPOL_MATERIALIZE_DATALESS_FILES_OFF);
 
+            let outside = tempfile::tempdir().unwrap();
+            let protected = Root::open(outside.path()).unwrap();
+            set_policy(IOPOL_MATERIALIZE_DATALESS_FILES_ON).unwrap();
+            assert!(
+                !root
+                    .path_reaches(&path, &protected, crate::PathScope::Entry)
+                    .unwrap()
+            );
+            assert_eq!(policy().unwrap(), IOPOL_MATERIALIZE_DATALESS_FILES_OFF);
+
             let entries = root.entries(DirectoryScope::Root).unwrap();
             std::thread::spawn(move || {
                 set_policy(IOPOL_MATERIALIZE_DATALESS_FILES_ON).unwrap();

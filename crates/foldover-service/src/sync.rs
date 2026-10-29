@@ -184,6 +184,12 @@ struct Claim {
     acknowledged: SyncStatus,
 }
 
+#[derive(Clone, Copy)]
+enum MutationScope {
+    Idle,
+    Settings,
+}
+
 #[derive(Default)]
 struct State {
     jobs: HashMap<PairId, Job>,
@@ -200,9 +206,16 @@ pub(crate) struct Jobs {
     /// Test-only rendezvous inside a mutating pair command.
     #[cfg(test)]
     mutation_gate: Mutex<Option<(Sender<()>, Receiver<()>)>>,
+    /// Holds a claimed job before its worker reads configuration.
+    #[cfg(test)]
+    job_gate: Mutex<Option<(Sender<()>, Receiver<()>)>>,
 }
 
 impl Jobs {
+    pub(crate) fn is_working(&self, id: PairId) -> bool {
+        matches!(self.status(id), SyncStatus::Working { .. })
+    }
+
     pub(crate) fn status(&self, id: PairId) -> SyncStatus {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(job) = state.jobs.get(&id) else {
@@ -244,7 +257,7 @@ impl Jobs {
         keep: Side,
         token: Option<ReviewToken>,
     ) -> Result<(), RpcError> {
-        let (revision, _, (left, right)) = self.choice(id, path, token)?;
+        let (revision, _, (left, right)) = self.choice(engine, id, path, token)?;
         engine
             .lock()
             .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?
@@ -264,7 +277,7 @@ impl Jobs {
         let _mutation = self.mutation(id)?;
         #[cfg(test)]
         self.wait_mutation_gate();
-        let (revision, action, (_, right)) = self.choice(id, path, token)?;
+        let (revision, action, (_, right)) = self.choice(engine, id, path, token)?;
         let (Action::Conflict(ConflictKind::BothChanged), Some(right)) = (action, right) else {
             return Err(RpcError::new(
                 INVALID_PARAMS,
@@ -304,12 +317,13 @@ impl Jobs {
     /// sides still hold what the person saw (PLAN.md §3.8, skip once).
     pub(crate) fn skip(
         self: &Arc<Self>,
+        engine: &Mutex<Engine>,
         id: PairId,
         path: &SyncPath,
         token: Option<ReviewToken>,
     ) -> Result<(), RpcError> {
         let _mutation = self.mutation(id)?;
-        let (_, _, (left, right)) = self.choice(id, path, token)?;
+        let (_, _, (left, right)) = self.choice(engine, id, path, token)?;
         self.state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -326,6 +340,7 @@ impl Jobs {
     /// conflict above them.
     fn choice(
         &self,
+        engine: &Mutex<Engine>,
         id: PairId,
         path: &SyncPath,
         token: Option<ReviewToken>,
@@ -336,6 +351,12 @@ impl Jobs {
                 "This change is not in the pair's latest preview; preview again",
             )
         };
+        let revision = engine
+            .lock()
+            .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?
+            .pair(id)
+            .map_err(crate::engine_error)?
+            .revision();
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let job = state.jobs.get(&id).ok_or_else(stale)?;
         if matches!(job.status, SyncStatus::Working { .. }) {
@@ -345,7 +366,7 @@ impl Jobs {
             ));
         }
         let reviewed = job.reviewed.as_ref().ok_or_else(stale)?;
-        if token != Some(reviewed.token) {
+        if token != Some(reviewed.token) || reviewed.revision != revision {
             return Err(stale());
         }
         let item = reviewed.item(path).ok_or_else(stale)?;
@@ -462,17 +483,40 @@ impl Jobs {
         work: Work,
     ) -> Result<SyncStatus, RpcError> {
         let cancel = Arc::new(AtomicBool::new(false));
+        // Activation and claiming use the same engine-lock boundary as
+        // configuration writes. A later edit is staged and cannot change
+        // the active settings before this job's worker reads its inputs.
+        let (claim, activation) = match engine.lock() {
+            Ok(mut engine) => {
+                let claim = self.claim(id, work, &cancel)?;
+                (
+                    claim,
+                    engine
+                        .activate_pair_update(id)
+                        .map_err(|error| error.to_string()),
+                )
+            }
+            Err(_) => (
+                self.claim(id, work, &cancel)?,
+                Err("The sync engine failed".into()),
+            ),
+        };
         let Claim {
             held,
             skips,
             progress,
             acknowledged,
-        } = self.claim(id, work, &cancel)?;
+        } = claim;
         let engine = Arc::clone(engine);
         let jobs = Arc::clone(self);
-        self.spawn(id, move || {
+        self.spawn(id, Some(Arc::clone(&engine)), move || {
             let started = SystemTime::now();
-            let (status, reviewed) = perform(&engine, id, work, &cancel, held, skips, &progress);
+            #[cfg(test)]
+            jobs.wait_job_gate();
+            let (status, reviewed) = match activation {
+                Ok(()) => perform(&engine, id, work, &cancel, held, skips, &progress),
+                Err(message) => (SyncStatus::Failed { message }, None),
+            };
             crate::history::record(&engine, id, work, started, &status);
             // A skip lasts one executed run.
             if matches!(status, SyncStatus::Finished { .. }) {
@@ -494,7 +538,7 @@ impl Jobs {
         let acknowledged = self
             .claim(id, work, &Arc::new(AtomicBool::new(false)))?
             .acknowledged;
-        self.spawn(id, run);
+        self.spawn(id, None, run);
         Ok(acknowledged)
     }
 
@@ -516,7 +560,7 @@ impl Jobs {
             );
     }
 
-    /// Park the next mutating pair command between its busy check and the
+    /// Park the next mutating pair command after its reservation and before the
     /// engine write. Returns a reached receiver and a release sender.
     #[cfg(test)]
     pub(crate) fn gate_mutation(&self) -> (Receiver<()>, Sender<()>) {
@@ -527,6 +571,22 @@ impl Jobs {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some((reached, release));
         (reached_rx, release_tx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn gate_job(&self) -> (Receiver<()>, Sender<()>) {
+        let (reached, reached_rx) = std::sync::mpsc::channel();
+        let (release_tx, release) = std::sync::mpsc::channel();
+        *self.job_gate.lock().unwrap() = Some((reached, release));
+        (reached_rx, release_tx)
+    }
+
+    #[cfg(test)]
+    fn wait_job_gate(&self) {
+        if let Some((reached, release)) = self.job_gate.lock().unwrap().take() {
+            let _ = reached.send(());
+            let _ = release.recv_timeout(std::time::Duration::from_secs(10));
+        }
     }
 
     /// Wait on the rendezvous armed by `gate_mutation`, if any.
@@ -543,17 +603,28 @@ impl Jobs {
         }
     }
 
-    /// Reserve the pair for a configuration change (update or removal)
-    /// while no job runs. New claims are refused until the returned guard
+    /// Reserve the pair for an operation that requires no running job.
+    /// New claims are refused until the returned guard
     /// drops; the reservation is made under the same lock as `claim`, so a
     /// job cannot start between the busy check and the write that follows.
     pub(crate) fn mutation(self: &Arc<Self>, id: PairId) -> Result<Mutation, RpcError> {
+        self.reserve(id, MutationScope::Idle)
+    }
+
+    /// Edits may coexist with a running job, but reserve the pair against
+    /// new claims and other mutations until the saved write completes.
+    pub(crate) fn editing(self: &Arc<Self>, id: PairId) -> Result<Mutation, RpcError> {
+        self.reserve(id, MutationScope::Settings)
+    }
+
+    fn reserve(self: &Arc<Self>, id: PairId, scope: MutationScope) -> Result<Mutation, RpcError> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.mutating.contains(&id)
-            || matches!(
-                state.jobs.get(&id).map(|job| &job.status),
-                Some(SyncStatus::Working { .. })
-            )
+            || matches!(scope, MutationScope::Idle)
+                && matches!(
+                    state.jobs.get(&id).map(|job| &job.status),
+                    Some(SyncStatus::Working { .. })
+                )
         {
             return Err(RpcError::new(
                 SYNC_BUSY,
@@ -637,6 +708,7 @@ impl Jobs {
     fn spawn(
         self: &Arc<Self>,
         id: PairId,
+        engine: Option<Arc<Mutex<Engine>>>,
         run: impl FnOnce() -> (SyncStatus, Option<Reviewed>) + Send + 'static,
     ) {
         let jobs = Arc::clone(self);
@@ -649,8 +721,23 @@ impl Jobs {
                     None,
                 )
             };
-            let (status, reviewed) =
+            let (mut status, mut reviewed) =
                 catch_unwind(AssertUnwindSafe(run)).unwrap_or_else(|_| crashed());
+            // The engine guard spans activation and publication. An edit
+            // cannot see the old job Working after activation and leave
+            // a replacement stranded. No jobs lock spans database work.
+            let mut engine = engine.as_ref().map(|engine| engine.lock());
+            let activation = match engine.as_mut() {
+                Some(Ok(engine)) => engine
+                    .activate_pair_update(id)
+                    .map_err(|error| error.to_string()),
+                Some(Err(_)) => Err("The sync engine failed".into()),
+                None => Ok(()),
+            };
+            if let Err(message) = activation {
+                status = SyncStatus::Failed { message };
+                reviewed = None;
+            }
             let mut state = jobs.state.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(job) = state.jobs.get_mut(&id) {
                 job.status = status;
@@ -688,9 +775,10 @@ fn perform(
 ) -> (SyncStatus, Option<Reviewed>) {
     let failed = |message: String| (SyncStatus::Failed { message }, None);
     let stored = match engine.lock() {
-        Ok(engine) => engine
-            .run_inputs(id)
-            .and_then(|inputs| Ok((inputs, engine.pair(id)?, engine.mounts(id)?))),
+        Ok(engine) => engine.run_inputs(id).and_then(|inputs| {
+            let pair = inputs.configuration().clone();
+            Ok((inputs, pair, engine.mounts(id)?))
+        }),
         Err(_) => return failed("The sync engine failed".into()),
     };
     let (inputs, pair, mounts) = match stored {

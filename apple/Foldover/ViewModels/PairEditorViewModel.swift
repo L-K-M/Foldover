@@ -24,6 +24,7 @@ final class PairEditorViewModel: Identifiable {
             // Only a Backup's target may go without records.
             if backupTarget == nil { options.records = .both }
             queueReadinessCheck()
+            syncHomeBackupPreset()
         }
     }
     var options: PairOptions {
@@ -62,6 +63,13 @@ final class PairEditorViewModel: Identifiable {
     /// Only the latest browse answers, when a person clicks faster than
     /// the server replies.
     private var browseGeneration = 0
+    /// Tracks which filter rules were auto-added by the home backup preset.
+    /// Only these rules are removed when the preset is disabled or the
+    /// source/mode changes away from a home backup.
+    private var autoAddedHomeExclusionRules: Set<String> = []
+    /// Whether the user has explicitly edited any auto-added home exclusion
+    /// rule, preventing automatic re-addition after removal.
+    private var userEditedHomeExclusions = false
 
     init(store: PairStore, editing: SyncPair? = nil, macs: MacToMacStore? = nil) {
         self.store = store
@@ -152,10 +160,98 @@ final class PairEditorViewModel: Identifiable {
         set {
             let lines = newValue.replacingOccurrences(of: "\r\n", with: "\n")
                 .replacingOccurrences(of: "\r", with: "\n")
-            options.filters = lines.split(separator: "\n", omittingEmptySubsequences: false)
+            let newFilters = lines.split(separator: "\n", omittingEmptySubsequences: false)
                 .map(String.init)
+            if autoAddedHomeExclusionRules.contains(where: { !newFilters.contains($0) }) {
+                userEditedHomeExclusions = true
+            }
+            options.filters = newFilters
+            autoAddedHomeExclusionRules.formIntersection(Set(newFilters))
         }
     }
+
+    // MARK: Home backup presets
+
+    /// The backup source folder, depending on the mode direction.
+    private var backupSource: SelectedFolder? {
+        switch mode {
+        case .backupLeft: left
+        case .backupRight: right
+        case .sync, .mirrorLeft, .mirrorRight: nil
+        }
+    }
+
+    /// True when the backup source is the current user's home directory.
+    var sourceIsHome: Bool {
+        guard let source = backupSource else { return false }
+        return store.folderIsHome(source)
+    }
+
+    /// Reflect saved rules too, without opting existing pairs into defaults.
+    var homeBackupPresetEnabled: Bool {
+        get {
+            guard sourceIsHome else { return false }
+            let presetRules = PairStore.homeBackupCacheExclusions
+            return presetRules.allSatisfy { options.filters.contains($0) }
+        }
+        set {
+            guard sourceIsHome else { return }
+            if newValue {
+                userEditedHomeExclusions = false
+                applyHomeBackupCacheExclusions()
+            } else {
+                removePresetCacheRules()
+                userEditedHomeExclusions = true
+            }
+        }
+    }
+
+    private func applyHomeBackupCacheExclusions() {
+        let presetRules = PairStore.homeBackupCacheExclusions
+        for rule in presetRules where !options.filters.contains(rule) {
+            options.filters.append(rule)
+            autoAddedHomeExclusionRules.insert(rule)
+        }
+    }
+
+    private func removePresetCacheRules() {
+        let presetRules = Set(PairStore.homeBackupCacheExclusions)
+        options.filters.removeAll { presetRules.contains($0) }
+        autoAddedHomeExclusionRules.removeAll()
+    }
+
+    private func removeAutoAddedHomeExclusions() {
+        options.filters.removeAll { autoAddedHomeExclusionRules.contains($0) }
+        autoAddedHomeExclusionRules.removeAll()
+    }
+
+    /// Clean up automatic defaults even after an edit, while preserving
+    /// custom rules and the user's decision not to restore defaults.
+    private func syncHomeBackupPreset() {
+        guard sourceIsHome else {
+            removeAutoAddedHomeExclusions()
+            return
+        }
+        guard editing == nil, !userEditedHomeExclusions else { return }
+        applyHomeBackupCacheExclusions()
+    }
+
+    /// Add the rules from an explicitly chosen home exclusion preset,
+    /// appending without duplicates. Only applies when the source is home.
+    func addHomeExclusionPreset(_ preset: PairStore.HomeExclusionPreset) {
+        guard sourceIsHome else { return }
+        let presetRules = preset.rules
+        for rule in presetRules where !options.filters.contains(rule) {
+            options.filters.append(rule)
+        }
+    }
+
+    /// Explanation text shown when the home backup preset is available.
+    var homeBackupPresetNote: String {
+        String(localized: "Cache exclusions can be edited below. Existing target copies stay untouched.")
+    }
+
+    static let saveHelperText: String = String(localized: "Saved changes apply to the next preview or sync when one is already running.")
 
     /// The options to store: the rules as typed, without the blank lines
     /// between them, which gitignore ignores anyway. A line break counts as
@@ -545,6 +641,7 @@ final class PairEditorViewModel: Identifiable {
         }
         errorMessage = nil
         queueReadinessCheck()
+        syncHomeBackupPreset()
     }
 
     func chooseFolder(_ result: Result<[URL], Error>, side: PairFolderSide) {
@@ -557,6 +654,7 @@ final class PairEditorViewModel: Identifiable {
             }
             errorMessage = nil
             queueReadinessCheck()
+            syncHomeBackupPreset()
         } catch {
             errorMessage = PairStore.message(for: error)
         }
@@ -585,6 +683,7 @@ final class PairEditorViewModel: Identifiable {
         }
         errorMessage = nil
         queueReadinessCheck()
+        syncHomeBackupPreset()
     }
 
     /// List the folders in `serverLocator`'s folder on its server, to
