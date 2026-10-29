@@ -14,8 +14,8 @@ use foldover_types::{MetadataPolicy, ScanControl};
 const DIRECTORIES: usize = 25;
 const SUBDIRECTORIES: usize = 20;
 const FILES_PER_SUBDIRECTORY: usize = 20;
-// 25 * 20 * 20 = 10_000 files in 525 directories. The payload is small
-// and constant: the scan reads metadata, never content.
+// 25 * 20 * 20 = 10_000 files in 525 directories. Small, constant payloads
+// keep this full-observation benchmark focused on per-entry overhead.
 const FILE_CONTENT: &[u8] = &[0x5a; 128];
 const EXPECTED_ENTRIES: usize = DIRECTORIES
     + DIRECTORIES * SUBDIRECTORIES

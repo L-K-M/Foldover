@@ -81,6 +81,50 @@ permissions, cloud-provider policy, free space, capabilities, canaries or
 execution freshness. Concurrent namespace changes still require execution-time
 revalidation. Configuration never reads file contents or changes endpoints.
 
+### Protected path checks
+
+When a root contains the agent state, every path-level check descends its
+directory components once through held, no-follow handles. It probes live
+physical ancestry at each named directory, including aliases. Only a subtree
+mutation checks whether its actual target contains state; reading an ancestor
+of state is allowed. Before permitting the operation, a second linear descent
+checks the observed directory identities against the current root-relative
+bindings. Renamed or replaced ancestors fail the check. Decisions are never
+cached across operations, and operation-level freshness checks still apply.
+
+The previous check reopened every root-relative ancestor separately and
+searched state ancestry even for reads that permit containing directories.
+For a seven-component ordinary file path, the regression fixture measured
+28 directory-component opens and 135 ancestry probes before the change;
+the revised check uses 13 opens and 77 probes on the same developer host.
+These counts cover the guard, not the subsequent content or metadata read.
+
+`scan_protected_home_1k` measures a complete uncached local observation of
+a synthetic tree: 20 branches, six directory components per branch, 50 files
+of 128 bytes per branch, and an excluded
+`Library/Application Support/Foldover/pairs.sqlite` state file. It includes
+the metadata inventory, content hashes and extended metadata. No personal
+home-directory contents are read. The explicit `protected_scan` target keeps
+this measurement out of the ordinary scan budget gate. Reproduce with the
+same benchmark file and manifest entry added to `d581af8` and the revised
+checkout. Build both targets with `cargo bench -p foldover-endpoint --bench
+protected_scan --no-run` before measuring, then run these commands sequentially
+without concurrent builds, sharing only Criterion's result directory:
+
+```sh
+criterion_results="$(mktemp -d)"
+CRITERION_HOME="$criterion_results" cargo bench -p foldover-endpoint --bench protected_scan -- scan_protected_home --sample-size 10 --warm-up-time 1 --measurement-time 1 --save-baseline protected-before
+CRITERION_HOME="$criterion_results" cargo bench -p foldover-endpoint --bench protected_scan -- scan_protected_home --sample-size 10 --warm-up-time 1 --measurement-time 1 --baseline protected-before
+```
+
+On the macOS developer host on 2026-10-29, ten samples per revision gave a
+mean of 7.40 s before (95% confidence interval 6.62–8.12 s) and 4.16 s after
+(3.58–4.80 s). Criterion estimated 43.9% less comparison time, with a 95%
+interval of 32.6–52.8% and p < 0.05. These local synthetic measurements do
+not predict a real home folder's or NAS share's comparison time. First
+comparisons still read uncached file contents; this change reduces
+protected-path overhead.
+
 ## Native controls
 
 The main window lists configured pairs and edits them in a folder-selection

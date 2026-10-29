@@ -417,6 +417,41 @@ fn an_aliased_root_still_protects_the_state_directory() {
     ));
 }
 
+#[test]
+fn moved_state_is_protected_under_its_new_spelling() {
+    let temporary = tempfile::tempdir().unwrap();
+    let home = temporary.path();
+    let state = home.join("Library/Application Support/Foldover");
+    fs::create_dir_all(state.join("inside")).unwrap();
+    fs::write(state.join("inside/records"), b"private").unwrap();
+    fs::create_dir(home.join("Documents")).unwrap();
+    let protected = LocalEndpoint::open_protecting(home, Some(&state)).unwrap();
+    let documents = path(b"Documents");
+    protected.guarded_subtree(&documents).unwrap();
+
+    fs::rename(&state, home.join("Documents/relocated")).unwrap();
+
+    assert!(matches!(
+        protected.guarded_subtree(&documents),
+        Err(ScanError::ProtectedPath(_))
+    ));
+    protected.guarded(&documents).unwrap();
+    for inside in [
+        b"Documents/relocated".as_slice(),
+        b"Documents/relocated/inside/records",
+        b"Documents/relocated/new/absent",
+    ] {
+        assert!(matches!(
+            protected.guarded(&path(inside)),
+            Err(ScanError::ProtectedPath(_))
+        ));
+    }
+    assert_eq!(
+        fs::read(home.join("Documents/relocated/inside/records")).unwrap(),
+        b"private"
+    );
+}
+
 /// A root that is the state directory, or sits inside it, protects every
 /// entry; a missing state directory protects nothing.
 #[test]

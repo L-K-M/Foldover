@@ -115,7 +115,7 @@ async fn open(engine: &Arc<Mutex<Engine>>, id: &str, side: Side) -> Result<PairA
         let engine = engine
             .lock()
             .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?;
-        let pair = engine.pair(id).map_err(crate::engine_error)?;
+        let pair = engine.active_pair(id).map_err(crate::engine_error)?;
         Ok::<_, RpcError>((pair, engine.reach()))
     })
     .await

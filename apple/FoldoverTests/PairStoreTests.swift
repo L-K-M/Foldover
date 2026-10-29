@@ -861,3 +861,147 @@ func reviewPolicyAndRemovalProtectionSurviveSaveAndReload() async {
     #expect(reloaded.requiresSyncApproval)
     #expect(!reloaded.stopsLargeRemovals)
 }
+
+private enum HomeBackupSetupOrder: CaseIterable {
+    case foldersFirst
+    case modeFirst
+}
+
+@MainActor
+private func homeBackupEditor(client: PairFixtureClient = PairFixtureClient()) -> PairEditorViewModel {
+    let editor = PairEditorViewModel(store: PairStore(client: client))
+    editor.name = "Home Backup"
+    editor.mode = .backupLeft
+    editor.chooseFolder(.success([URL(fileURLWithPath: NSHomeDirectory())]), side: .left)
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/b")]), side: .right)
+    return editor
+}
+
+@MainActor
+@Test(arguments: [PairMode.backupLeft, .backupRight], HomeBackupSetupOrder.allCases)
+private func homeCacheDefaultsFollowTheBackupSource(mode: PairMode, order: HomeBackupSetupOrder) {
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()))
+    let source: PairFolderSide = mode == .backupLeft ? .left : .right
+    let target: PairFolderSide = mode == .backupLeft ? .right : .left
+    if order == .modeFirst { editor.mode = mode }
+    editor.chooseFolder(.success([URL(fileURLWithPath: NSHomeDirectory())]), side: source)
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/b")]), side: target)
+    if order == .foldersFirst { editor.mode = mode }
+    #expect(editor.sourceIsHome)
+    #expect(editor.homeBackupPresetEnabled)
+    #expect(editor.options.filters == ["/Library/Caches/", "/Library/Containers/*/Data/Library/Caches/"])
+}
+
+@MainActor
+@Test(arguments: [PairMode.sync, .mirrorLeft, .mirrorRight])
+private func homeCacheDefaultsDoNotChangeOtherModes(mode: PairMode) {
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()))
+    editor.mode = mode
+    editor.chooseFolder(.success([URL(fileURLWithPath: NSHomeDirectory())]), side: .left)
+    #expect(!editor.sourceIsHome)
+    #expect(editor.options.filters.isEmpty)
+}
+
+@MainActor
+@Test
+func homeCacheDefaultsRequireTheActualLocalHomeSource() {
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()))
+    editor.mode = .backupLeft
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/a")]), side: .left)
+    editor.chooseFolder(.success([URL(fileURLWithPath: NSHomeDirectory())]), side: .right)
+    #expect(!editor.sourceIsHome)
+    #expect(editor.options.filters.isEmpty)
+    editor.chooseServer("sftp://nas/home/user", side: .left)
+    editor.addHomeExclusionPreset(.trash)
+    #expect(!editor.sourceIsHome)
+    #expect(editor.options.filters.isEmpty)
+}
+
+@MainActor
+@Test(arguments: [[], ["/Library/Caches/"], ["/Library/Caches/", "/Library/Containers/*/Data/Library/Caches/"]])
+func existingHomeBackupsKeepTheirSavedRules(rules: [String]) async {
+    let client = PairFixtureClient()
+    let store = PairStore(client: client)
+    var options = PairOptions.defaults
+    options.filters = rules
+    let pair = SyncPair(id: pairFixture().id, revision: 4, settings: PairSettings(
+        name: "Home", left: SelectedFolder(bytes: Data(NSHomeDirectory().utf8)),
+        right: SelectedFolder(bytes: Data("/b".utf8)), mode: .backupLeft, options: options
+    ))
+    let editor = PairEditorViewModel(store: store, editing: pair)
+    #expect(editor.homeBackupPresetEnabled == (rules.count == 2))
+    editor.name = "Renamed"
+    #expect(await editor.save())
+    #expect(await client.savedSettings?.options.filters == rules)
+    #expect(await client.updatedRevision == 4)
+    editor.homeBackupPresetEnabled = false
+    #expect(editor.options.filters.isEmpty)
+    editor.homeBackupPresetEnabled = true
+    #expect(editor.homeBackupPresetEnabled)
+}
+
+@MainActor
+@Test
+func homeCacheOptOutPersistsAndCanBeExplicitlyReenabled() {
+    let editor = homeBackupEditor()
+    editor.filterText += "\n*.local"
+    editor.homeBackupPresetEnabled = false
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/c")]), side: .right)
+    editor.mode = .sync
+    editor.mode = .backupLeft
+    #expect(editor.options.filters == ["*.local"])
+    editor.homeBackupPresetEnabled = true
+    #expect(editor.homeBackupPresetEnabled)
+    #expect(editor.options.filters.contains("*.local"))
+}
+
+@MainActor
+@Test
+func editedCacheDefaultsAreNotRestoredAndOnlyAutomaticRulesAreRemoved() {
+    let editor = homeBackupEditor()
+    editor.filterText = "/Library/Caches/SomeApp/\n/Library/Containers/*/Data/Library/Caches/\n*.local"
+    #expect(!editor.homeBackupPresetEnabled)
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/c")]), side: .right)
+    #expect(!editor.options.filters.contains("/Library/Caches/"))
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/data")]), side: .left)
+    #expect(editor.options.filters == ["/Library/Caches/SomeApp/", "*.local"])
+    editor.chooseFolder(.success([URL(fileURLWithPath: NSHomeDirectory())]), side: .left)
+    #expect(!editor.homeBackupPresetEnabled)
+}
+
+@MainActor
+@Test
+func changingAwayFromHomePreservesPreexistingRules() {
+    let editor = PairEditorViewModel(store: PairStore(client: PairFixtureClient()))
+    editor.filterText = "/Library/Caches/\n*.local"
+    editor.mode = .backupLeft
+    editor.chooseFolder(.success([URL(fileURLWithPath: NSHomeDirectory())]), side: .left)
+    #expect(editor.homeBackupPresetEnabled)
+    editor.mode = .sync
+    #expect(editor.options.filters == ["/Library/Caches/", "*.local"])
+}
+
+@MainActor
+@Test
+func homeBackupSavePersistsEditableRulesWithoutBlankLines() async {
+    let client = PairFixtureClient()
+    let editor = homeBackupEditor(client: client)
+    editor.filterText = "\n" + editor.filterText + "\n\n*.local\n"
+    #expect(await editor.save())
+    let saved = await client.savedSettings
+    #expect(saved?.options.filters == ["/Library/Caches/", "/Library/Containers/*/Data/Library/Caches/", "*.local"])
+    #expect(saved?.left.bytes == PairStore.folderBytes(URL(fileURLWithPath: NSHomeDirectory())))
+    #expect(saved?.right.bytes == Data("/b".utf8))
+}
+
+@MainActor
+@Test(arguments: PairStore.HomeExclusionPreset.allCases)
+func optionalHomeExclusionsRequireAnExplicitChoice(preset: PairStore.HomeExclusionPreset) {
+    let editor = homeBackupEditor()
+    #expect(!preset.rules.contains(where: { editor.options.filters.contains($0) }))
+    editor.addHomeExclusionPreset(preset)
+    editor.addHomeExclusionPreset(preset)
+    for rule in preset.rules {
+        #expect(editor.options.filters.filter { $0 == rule }.count == 1)
+    }
+}

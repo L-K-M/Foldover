@@ -20,6 +20,15 @@ therefore unnecessary, and the base is kept.
   temporaries, `.DS_Store`) are not rules and cannot be switched off.
 - Rules are checked when a pair is saved; invalid rules are rejected.
   A `.foldoverignore` that is not UTF-8 text stops the run before planning.
+- A new Backup with the current local home folder as its source starts
+  with visible, editable cache rules: `/Library/Caches/` and
+  `/Library/Containers/*/Data/Library/Caches/`. These are ordinary pair
+  rules. The Home backup control can remove or restore them, and editing
+  them prevents automatic re-addition. Changing away from a home backup
+  removes only rules added automatically. Existing pairs are unchanged.
+  Trash, logs, Xcode DerivedData and developer download caches are separate
+  explicit choices. Other modes and roots receive no home defaults; hidden
+  files, user documents and the rest of `Library` remain included.
 - Excluding an AppleDouble pattern such as `._*` skips sidecars instead of
   stopping the scan.
 - **Size limit** (state schema v10): files larger than the limit are not

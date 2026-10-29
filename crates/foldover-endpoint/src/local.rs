@@ -16,7 +16,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use foldover_fs::{
     DataResidency, DirectoryEntry, DirectoryScope, EntryMetadata, ExtendedMetadata, FileIdentity,
-    FilesystemFeatures, HashError, Medium, MetadataReadError, NodeKind, Root, RootRelation,
+    FilesystemFeatures, HashError, Medium, MetadataReadError, NodeKind, PathScope, Root,
+    RootRelation,
 };
 #[cfg(target_os = "macos")]
 use foldover_fs::{DeclaredSupport, FilesystemFeature};
@@ -686,7 +687,7 @@ impl LocalEndpoint {
         if self.protects(path) {
             return Err(ScanError::ProtectedPath(path.clone()));
         }
-        self.alias_guard(path, false)
+        self.alias_guard(path, PathScope::Entry)
     }
 
     /// `guarded`, and `path` must not be a directory holding the state
@@ -695,46 +696,22 @@ impl LocalEndpoint {
         if self.shelters(path) || self.protects(path) {
             return Err(ScanError::ProtectedPath(path.clone()));
         }
-        self.alias_guard(path, true)
+        self.alias_guard(path, PathScope::Subtree)
     }
 
     /// The prefix only sees the canonical spelling; an alias — a bind
     /// mount, a firmlink, a case-folded name — resolves to the same
     /// directories. `path` and each ancestor are opened and compared by
     /// held-directory identity, which no spelling can evade.
-    fn alias_guard(&self, path: &SyncPath, subtree: bool) -> Result<(), ScanError> {
+    fn alias_guard(&self, path: &SyncPath, scope: PathScope) -> Result<(), ScanError> {
         let Some(state) = &self.state else {
             return Ok(());
         };
-        // Runs per guarded call — including every listed directory of a
-        // holding root — opening and fstat'ing each ancestor. If scans of
-        // large home folders regress, cache ancestor identities populated
-        // during scan descent instead of re-walking here.
-        let mut at_path = Some(path.clone());
-        // `Contains` refuses only on the target: `path` itself holding the
-        // state directory is what a subtree mutator must not destroy. An
-        // ancestor of `path` holding it — as the root of `~` does — means
-        // nothing about what mutating `path` reaches.
-        let mut target = true;
-        while let Some(dir) = at_path {
-            // Fail-open is fine: the guarded operation resolves `path`
-            // through this same `Root` (`open_dir_nofollow` per component),
-            // so an ancestor that fails `open_directory` here (besides the
-            // expected NotFound for not-yet-created leaves) fails the
-            // operation's own traversal too.
-            if let Ok(held) = self.root.open_directory(&dir) {
-                match at(&Some(dir.clone()), held.relation_to(&state.root))? {
-                    RootRelation::Same | RootRelation::Within => {
-                        return Err(ScanError::ProtectedPath(path.clone()));
-                    }
-                    RootRelation::Contains if target && subtree => {
-                        return Err(ScanError::ProtectedPath(path.clone()));
-                    }
-                    _ => {}
-                }
-            }
-            target = false;
-            at_path = dir.parent();
+        if at(
+            &Some(path.clone()),
+            self.root.path_reaches(path, &state.root, scope),
+        )? {
+            return Err(ScanError::ProtectedPath(path.clone()));
         }
         Ok(())
     }

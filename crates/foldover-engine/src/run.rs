@@ -567,6 +567,11 @@ pub struct RunInputs {
 }
 
 impl RunInputs {
+    /// The immutable configuration captured for this job.
+    pub fn configuration(&self) -> &PairConfig {
+        &self.pair
+    }
+
     pub fn new(
         pair: PairConfig,
         base: BTreeMap<SyncPath, BaselineEntry>,

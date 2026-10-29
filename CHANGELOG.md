@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Pair edits save during a preview or sync and apply to subsequent runs.
+  The current job keeps its original settings and finishes normally.
 - An aborted first sync still requires review on retry. Editing a pair's
   folders re-subscribes its change watchers. Peer scan counters cannot
   claim unbounded work in one progress report.
@@ -35,6 +37,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Home-folder comparisons avoid repeatedly reopening the same ancestors
+  while protecting Foldover's state directory.
 - CLI syncs with unresolved conflicts and no failures now exit with
   status 4 instead of 0. Partial `--put-back-all` restores exit with
   status 1 instead of 0 and still print the restore report as JSON.
@@ -82,6 +86,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- New home-folder Backups start with editable cache exclusions. Trash,
+  logs, Xcode DerivedData and developer download caches can be added
+  explicitly; existing pairs keep their current rules.
 - The app ships the license notices of its bundled Rust crates and the
   Rust standard library in `Contents/Resources` as
   `Third-Party-Notices.txt` and `Rust-Licenses.html`.

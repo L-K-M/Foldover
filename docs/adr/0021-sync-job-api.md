@@ -26,6 +26,17 @@ Idle ─start─▶ Working ─▶ Previewed | NeedsApproval | Finished | Failed
 | `sync.items` | `id`, `review_token`, `after` path, optional `kind` | The next 100 items of the latest preview, in path order |
 
 - Starting a job while one is working fails with `SYNC_BUSY` (-32007).
+- Pair edits are saved while a job works. State schema v27 keeps the
+  replacement separately, with its own revision; catalog reads show the
+  saved settings immediately. The job keeps its original configuration
+  and revision for observations, writes and journal commits. Its completion
+  activates the latest saved replacement before another job can start;
+  activation also runs at job admission and after an agent restart.
+  Activation retains the normal root and metadata invalidation rules.
+  Both current and saved roots stay reserved against other pairs until
+  activation. Removal and archive restores still require an idle pair;
+  archive browsing uses the current job's roots while it runs. Old preview
+  tokens cannot approve changes or resolve items after settings change.
 - A `working` status carries live `progress` (protocol 6): `listed` and
   `checked` count entries found in both folders and those whose version
   is known; once the plan is ready, `changes` and `bytes` give its size

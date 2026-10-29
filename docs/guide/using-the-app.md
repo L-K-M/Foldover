@@ -41,6 +41,17 @@ The window remembers the selected pair and whether the inspector is
 shown. Closing it leaves Foldover running in the menu bar; open it again
 from the menu bar extra, the Dock or the Window menu.
 
+## Editing a pair
+
+You can save settings while a preview or sync runs. That job keeps the
+settings it started with; the next preview or sync uses your saved changes.
+
+When you create a Backup whose source is your home folder, the Skip section
+starts with cache exclusions. You can turn them off or edit the rules.
+Add Exclusions offers Trash, logs, Xcode DerivedData and developer download
+caches as separate choices. These rules leave existing target copies alone.
+Existing pairs keep their current rules until you change them.
+
 ## Reviewing changes
 
 Select a change and press Space to look at its file with Quick Look, or

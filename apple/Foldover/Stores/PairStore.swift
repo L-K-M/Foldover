@@ -558,4 +558,48 @@ final class PairStore {
         default: error.localizedDescription
         }
     }
+
+    // MARK: Home backup presets
+
+    /// Returns true when `folder` is the current user's home directory.
+    /// Compares standardized local directory URLs against
+    /// `FileManager.default.homeDirectoryForCurrentUser`.
+    func folderIsHome(_ folder: SelectedFolder) -> Bool {
+        guard let url = Self.localURL(folder) else { return false }
+        return url.standardizedFileURL == FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL
+    }
+
+    /// The narrow cache exclusion rules applied by default when a new
+    /// backup pair's source is the user's home directory.
+    static let homeBackupCacheExclusions: [String] = [
+        "/Library/Caches/",
+        "/Library/Containers/*/Data/Library/Caches/",
+    ]
+
+    /// Additional home-relative exclusion presets the user may explicitly
+    /// add; each entry carries a title and the gitignore-style rules.
+    enum HomeExclusionPreset: CaseIterable, Hashable {
+        case trash
+        case logs
+        case xcodeDerivedData
+        case developerDownloadCaches
+
+        var title: String {
+            switch self {
+            case .trash: String(localized: "Trash")
+            case .logs: String(localized: "Logs")
+            case .xcodeDerivedData: String(localized: "Xcode DerivedData")
+            case .developerDownloadCaches: String(localized: "Developer download caches")
+            }
+        }
+
+        var rules: [String] {
+            switch self {
+            case .trash: ["/.Trash/"]
+            case .logs: ["/Library/Logs/"]
+            case .xcodeDerivedData: ["/Library/Developer/Xcode/DerivedData/"]
+            case .developerDownloadCaches: ["/.npm/", "/.cache/pip/", "/.cargo/registry/", "/.cargo/git/db/"]
+            }
+        }
+    }
 }

@@ -120,7 +120,10 @@ pub struct Engine {
 
 impl Engine {
     pub fn open(location: &StateLocation) -> Result<Self, Error> {
-        let pairs = PairStore::open(location)?;
+        let mut pairs = PairStore::open(location)?;
+        // No job survives an agent restart. Recover edits saved during
+        // the previous process's last job before admitting new work.
+        pairs.activate_updates()?;
         let root = pairs.root()?;
         // Resolve once: protection checks below compare this path against
         // canonical paths (watch events, scans, peer requests).
@@ -161,6 +164,12 @@ impl Engine {
         self.pairs.pair(id)?.ok_or(Error::PairNotFound)
     }
 
+    /// The settings still held by a current job. Archive reads use the
+    /// same roots until that job finishes and activates saved edits.
+    pub fn active_pair(&self, id: PairId) -> Result<PairConfig, Error> {
+        self.pairs.active_pair(id)?.ok_or(Error::PairNotFound)
+    }
+
     pub fn create_pair(&mut self, draft: &PairDraft) -> Result<PairConfig, Error> {
         validate_options(draft)?;
         self.validate_roots(draft, None)?;
@@ -179,6 +188,28 @@ impl Engine {
         validate_options(draft)?;
         self.validate_roots(draft, Some(id))?;
         Ok(self.pairs.update(id, revision, draft)?)
+    }
+
+    /// Save an edit without replacing the configuration an active job
+    /// uses for its snapshots, progress and journal commits.
+    pub fn defer_pair_update(
+        &mut self,
+        id: PairId,
+        revision: u64,
+        draft: &PairDraft,
+    ) -> Result<PairConfig, Error> {
+        if self.pair(id)?.revision() != revision {
+            return Err(Error::StaleRevision);
+        }
+        validate_options(draft)?;
+        self.validate_roots(draft, Some(id))?;
+        Ok(self.pairs.defer_update(id, revision, draft)?)
+    }
+
+    /// The service calls this under its job-claim boundary, with no
+    /// previous job still running for this pair.
+    pub fn activate_pair_update(&mut self, id: PairId) -> Result<(), Error> {
+        Ok(self.pairs.activate_update(id)?)
     }
 
     /// Reach folders on paired Macs through `link`.
@@ -212,7 +243,7 @@ impl Engine {
                 .collect())
         };
         Ok(RunInputs::new(
-            self.pair(id)?,
+            self.active_pair(id)?,
             self.pairs.base(id)?,
             self.pairs.identities(id)?,
             self.pairs.resolutions(id)?,
@@ -240,6 +271,9 @@ impl Engine {
         path: &SyncPath,
         resolution: Resolution,
     ) -> Result<(), Error> {
+        if self.pair(id)?.revision() != revision {
+            return Err(Error::StaleRevision);
+        }
         Ok(self
             .pairs
             .record_resolution(id, revision, path, resolution)?)
@@ -550,10 +584,23 @@ impl Engine {
                 if Some(pair.id()) == replacing {
                     continue;
                 }
+                // Saved roots reserve their next run, while the active
+                // roots remain reserved for a job finishing the old one.
+                let active = self.pairs.active_pair(pair.id())?.filter(|active| {
+                    active.draft().left() != pair.draft().left()
+                        || active.draft().right() != pair.draft().right()
+                });
+                let roots = [pair.draft().left(), pair.draft().right()]
+                    .into_iter()
+                    .chain(
+                        active
+                            .iter()
+                            .flat_map(|active| [active.draft().left(), active.draft().right()]),
+                    );
                 // Local roots are compared on disk; SFTP and paired Macs'
                 // roots by locator, so changing the catalog never waits on a
                 // server or another Mac.
-                for existing in [pair.draft().left(), pair.draft().right()] {
+                for existing in roots {
                     let overlapping = match existing {
                         PairRoot::Local(_) => {
                             let existing =
@@ -775,6 +822,39 @@ mod tests {
         drop(engine);
         let engine = Engine::open(&location).unwrap();
         assert_eq!(engine.pair(saved.id()).unwrap(), updated);
+    }
+
+    #[test]
+    fn pending_edits_reserve_both_sets_of_roots_and_recover_on_restart() {
+        let temporary = tempfile::tempdir().unwrap();
+        let location = StateLocation::Directory(temporary.path().join("state"));
+        let mut engine = Engine::open(&location).unwrap();
+        let paths = ["a", "b", "c", "d", "e"].map(|name| temporary.path().join(name));
+        for path in &paths {
+            fs::create_dir(path).unwrap();
+        }
+        let original = engine.create_pair(&draft(&paths[0], &paths[1])).unwrap();
+        let saved = engine
+            .defer_pair_update(original.id(), 1, &draft(&paths[2], &paths[3]))
+            .unwrap();
+        assert_eq!(engine.pair(original.id()).unwrap(), saved);
+        assert_eq!(
+            engine.run_inputs(original.id()).unwrap().configuration(),
+            &original
+        );
+        for reserved in [&paths[0], &paths[2]] {
+            assert!(
+                matches!(engine.create_pair(&draft(reserved, &paths[4])), Err(Error::CatalogOverlap(id)) if id == original.id())
+            );
+        }
+        drop(engine);
+        let mut engine = Engine::open(&location).unwrap();
+        assert_eq!(
+            engine.run_inputs(original.id()).unwrap().configuration(),
+            &saved
+        );
+        // Restart recovered the saved roots, so the old roots are free.
+        engine.create_pair(&draft(&paths[0], &paths[4])).unwrap();
     }
 
     /// Full durability cannot be promised on SFTP: the check precedes

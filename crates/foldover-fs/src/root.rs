@@ -59,6 +59,20 @@ pub enum RootRelation {
     Disjoint,
 }
 
+/// Whether accessing a directory can replace or remove its descendants.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PathScope {
+    Entry,
+    Subtree,
+}
+
+#[cfg(test)]
+thread_local! {
+    static DIRECTORY_COMPONENT_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ANCESTOR_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static BEFORE_PATH_REVALIDATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NodeKind {
     File,
@@ -605,6 +619,78 @@ impl Root {
         Ok(RootRelation::Disjoint)
     }
 
+    /// Whether a named path reaches `protected`, including aliases along its
+    /// directory chain. A subtree access also reaches a protected descendant
+    /// of the target itself. This is a fresh observation, not an execution lock.
+    /// An unopenable component is left to the operation's own no-follow lookup;
+    /// ancestry errors on an opened directory still fail the check.
+    pub fn path_reaches(
+        &self,
+        path: &SyncPath,
+        protected: &Self,
+        scope: PathScope,
+    ) -> io::Result<bool> {
+        let protected_identity = protected.root_metadata()?.identity();
+        if self.has_ancestor(protected_identity)? {
+            return Ok(true);
+        }
+        let mut directory = self.try_clone()?;
+        let mut checked = Vec::new();
+        let mut components = path.components().peekable();
+        while let Some(component) = components.next() {
+            #[cfg(test)]
+            DIRECTORY_COMPONENT_OPENS.update(|count| count + 1);
+            let child = match directory
+                .directory
+                .open_dir_nofollow(Path::new(OsStr::from_bytes(component)))
+            {
+                Ok(child) => child,
+                Err(_) => return self.revalidate_path(path, &checked),
+            };
+            directory = Self { directory: child };
+            checked.push(directory.root_metadata()?.identity());
+            // Every named ancestor is checked: a mount can enter and later
+            // leave the protected tree. Keep these live per-call observations;
+            // caching a previous path's decision would miss renamed state.
+            if directory.has_ancestor(protected_identity)? {
+                return Ok(true);
+            }
+            // Only replacing the target's subtree can displace protected state
+            // below it. Reading an ancestor of state remains permitted.
+            if components.peek().is_none()
+                && scope == PathScope::Subtree
+                && protected.has_ancestor(directory.root_metadata()?.identity())?
+            {
+                return Ok(true);
+            }
+        }
+        self.revalidate_path(path, &checked)
+    }
+
+    fn revalidate_path(&self, path: &SyncPath, checked: &[FileIdentity]) -> io::Result<bool> {
+        #[cfg(test)]
+        if let Some(checkpoint) = BEFORE_PATH_REVALIDATION.with(|hook| hook.borrow_mut().take()) {
+            checkpoint();
+        }
+        // A checked parent may have been renamed while deeper names were
+        // visited through its held handle. Rewalk once from the selected root
+        // so those detached handles cannot approve a replacement namespace.
+        // This remains an observation; the operation still checks freshness.
+        prevent_materialization()?;
+        let mut directory = self.directory.try_clone()?;
+        for (component, expected) in path.components().zip(checked) {
+            #[cfg(test)]
+            DIRECTORY_COMPONENT_OPENS.update(|count| count + 1);
+            directory = directory.open_dir_nofollow(Path::new(OsStr::from_bytes(component)))?;
+            if FileIdentity::from_cap(&directory.dir_metadata()?) != *expected {
+                return Err(io::Error::other(
+                    "Directory changed during protected path check",
+                ));
+            }
+        }
+        Ok(false)
+    }
+
     /// Hold a descendant directory without following any symlink component.
     pub fn open_directory(&self, path: &SyncPath) -> io::Result<Self> {
         Ok(Self {
@@ -647,6 +733,8 @@ impl Root {
         let mut directory = self.directory.try_clone()?;
         let mut visited = HashSet::new();
         for _ in 0..MAX_ROOT_ANCESTORS {
+            #[cfg(test)]
+            ANCESTOR_PROBES.update(|count| count + 1);
             let identity = FileIdentity::from_cap(&directory.dir_metadata()?);
             if identity == target {
                 return Ok(true);
@@ -674,6 +762,8 @@ impl Root {
         let mut directory = self.directory.try_clone()?;
         // One component per open makes no-follow apply to every ancestor.
         for component in path.components() {
+            #[cfg(test)]
+            DIRECTORY_COMPONENT_OPENS.update(|count| count + 1);
             directory = directory.open_dir_nofollow(Path::new(OsStr::from_bytes(component)))?;
         }
         Ok(directory)
@@ -889,6 +979,148 @@ mod tests {
     }
 
     #[test]
+    fn protected_path_checks_keep_namespace_walks_linear() {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temporary.path().join("a/b/c/d/e/f")).unwrap();
+        fs::write(temporary.path().join("a/b/c/d/e/f/file"), b"data").unwrap();
+        fs::create_dir_all(
+            temporary
+                .path()
+                .join("Library/Application Support/Foldover"),
+        )
+        .unwrap();
+        let root = Root::open(temporary.path()).unwrap();
+        let state = Root::open(
+            &temporary
+                .path()
+                .join("Library/Application Support/Foldover"),
+        )
+        .unwrap();
+        let file = path(b"a/b/c/d/e/f/file");
+        DIRECTORY_COMPONENT_OPENS.set(0);
+        ANCESTOR_PROBES.set(0);
+
+        assert!(!root.path_reaches(&file, &state, PathScope::Entry).unwrap());
+
+        let opens = DIRECTORY_COMPONENT_OPENS.get();
+        let probes = ANCESTOR_PROBES.get();
+        eprintln!("protected path: {opens} component opens, {probes} ancestry probes");
+        assert!(
+            opens <= 2 * file.components().count(),
+            "reopened {opens} components"
+        );
+    }
+
+    #[test]
+    fn protected_path_checks_reject_replaced_ancestors() {
+        let temporary = tempfile::tempdir().unwrap();
+        let home = temporary.path();
+        fs::create_dir_all(home.join("ordinary/b/c")).unwrap();
+        fs::create_dir_all(home.join("state/b/c")).unwrap();
+        fs::write(home.join("ordinary/b/c/file"), b"ordinary").unwrap();
+        fs::write(home.join("state/b/c/file"), b"private").unwrap();
+        let root = Root::open(home).unwrap();
+        let state = Root::open(&home.join("state")).unwrap();
+        let home = home.to_path_buf();
+        BEFORE_PATH_REVALIDATION.set(Some(Box::new(move || {
+            fs::rename(home.join("ordinary"), home.join("old")).unwrap();
+            fs::rename(home.join("state"), home.join("ordinary")).unwrap();
+        })));
+
+        assert!(
+            root.path_reaches(&path(b"ordinary/b/c/file"), &state, PathScope::Entry)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn protected_paths_distinguish_entry_access_from_subtree_changes() {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temporary.path().join("Library/Support/state/inside")).unwrap();
+        fs::write(
+            temporary
+                .path()
+                .join("Library/Support/state/inside/records"),
+            b"private",
+        )
+        .unwrap();
+        fs::write(temporary.path().join("Library/Support/neighbor"), b"keep").unwrap();
+        let root = Root::open(temporary.path()).unwrap();
+        let state = Root::open(&temporary.path().join("Library/Support/state")).unwrap();
+
+        for directory in [b"Library".as_slice(), b"Library/Support"] {
+            assert!(
+                !root
+                    .path_reaches(&path(directory), &state, PathScope::Entry)
+                    .unwrap()
+            );
+            assert!(
+                root.path_reaches(&path(directory), &state, PathScope::Subtree)
+                    .unwrap()
+            );
+        }
+        for protected in [
+            b"Library/Support/state".as_slice(),
+            b"Library/Support/state/inside",
+            b"Library/Support/state/inside/records",
+            b"Library/Support/state/new/absent",
+        ] {
+            for scope in [PathScope::Entry, PathScope::Subtree] {
+                assert!(root.path_reaches(&path(protected), &state, scope).unwrap());
+            }
+        }
+        for scope in [PathScope::Entry, PathScope::Subtree] {
+            assert!(
+                !root
+                    .path_reaches(&path(b"Library/Support/neighbor"), &state, scope)
+                    .unwrap()
+            );
+        }
+        let inside = Root::open(&temporary.path().join("Library/Support/state/inside")).unwrap();
+        assert!(
+            state
+                .path_reaches(&path(b"inside/records"), &state, PathScope::Entry)
+                .unwrap()
+        );
+        assert!(
+            inside
+                .path_reaches(&path(b"records"), &state, PathScope::Entry)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn protected_paths_recheck_a_moved_directory_without_caching() {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temporary.path().join("state/inside")).unwrap();
+        fs::create_dir(temporary.path().join("other")).unwrap();
+        let root = Root::open(temporary.path()).unwrap();
+        let state = Root::open(&temporary.path().join("state")).unwrap();
+        let other = path(b"other");
+        assert!(
+            !root
+                .path_reaches(&other, &state, PathScope::Subtree)
+                .unwrap()
+        );
+
+        fs::rename(
+            temporary.path().join("state"),
+            temporary.path().join("other/moved"),
+        )
+        .unwrap();
+
+        assert!(
+            root.path_reaches(&other, &state, PathScope::Subtree)
+                .unwrap()
+        );
+        assert!(!root.path_reaches(&other, &state, PathScope::Entry).unwrap());
+        assert!(
+            root.path_reaches(&path(b"other/moved/inside"), &state, PathScope::Entry)
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn root_relations_follow_held_directories_after_moves() {
         let temporary = tempfile::tempdir().unwrap();
         let selected = temporary.path().join("selected");
@@ -927,14 +1159,26 @@ mod tests {
         let alias = temporary.path().join("mixedcase");
         fs::create_dir(&selected).unwrap();
         let original = Root::open(&selected).unwrap();
+        let home = Root::open(temporary.path()).unwrap();
         match Root::open(&alias) {
-            Ok(alias) => assert_eq!(original.relation_to(&alias).unwrap(), RootRelation::Same),
+            Ok(alias) => {
+                assert_eq!(original.relation_to(&alias).unwrap(), RootRelation::Same);
+                assert!(
+                    home.path_reaches(&path(b"mixedcase/new"), &original, PathScope::Entry)
+                        .unwrap()
+                );
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 fs::create_dir(&alias).unwrap();
                 let alias = Root::open(&alias).unwrap();
                 assert_eq!(
                     original.relation_to(&alias).unwrap(),
                     RootRelation::Disjoint
+                );
+                assert!(
+                    !home
+                        .path_reaches(&path(b"mixedcase/new"), &original, PathScope::Entry)
+                        .unwrap()
                 );
             }
             Err(error) => panic!("Cannot probe case alias: {error}"),

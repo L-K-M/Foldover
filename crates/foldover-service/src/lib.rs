@@ -4,6 +4,8 @@
 
 mod archive;
 mod automation;
+#[cfg(test)]
+mod deferred_tests;
 mod history;
 mod peer;
 mod safe_mode;
@@ -236,7 +238,10 @@ impl Service {
             // write below. The jobs lock itself is never held across the
             // engine lock, keeping the two lock orders disjoint.
             let _mutation = if let Some(id) = command.mutation_target() {
-                let mutation = jobs.mutation(id)?;
+                let mutation = match command {
+                    Command::Update { .. } => jobs.editing(id)?,
+                    _ => jobs.mutation(id)?,
+                };
                 #[cfg(test)]
                 jobs.wait_mutation_gate();
                 Some(mutation)
@@ -246,7 +251,7 @@ impl Service {
             let mut engine = engine
                 .lock()
                 .map_err(|_| RpcError::new(INTERNAL_ERROR, "Configuration worker failed"))?;
-            command.execute(&mut engine)
+            command.execute(&mut engine, &jobs)
         })
         .await
         .map_err(|_| RpcError::new(INTERNAL_ERROR, "Configuration worker failed"))?
@@ -275,7 +280,7 @@ impl Service {
                     ConflictKeep::Left => jobs.resolve(&engine, id, &path, Side::Left, token),
                     ConflictKeep::Right => jobs.resolve(&engine, id, &path, Side::Right, token),
                     ConflictKeep::Both => jobs.keep_both(&engine, id, &path, token),
-                    ConflictKeep::Skip => jobs.skip(id, &path, token),
+                    ConflictKeep::Skip => jobs.skip(&engine, id, &path, token),
                 })
                 .await
                 .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))??;
@@ -288,14 +293,14 @@ impl Service {
                     params.approved_left_deletions,
                     params.approved_right_deletions,
                 );
-                self.jobs
-                    .start(&self.engine, pair(&params.id)?, Work::Run(approval, token))?
+                self.start_job(pair(&params.id)?, Work::Run(approval, token))
+                    .await?
             }
             method => {
                 let id = pair(&parameters::<SyncKey>(request)?.id)?;
                 match method {
-                    SYNC_PREVIEW => self.jobs.start(&self.engine, id, Work::Preview)?,
-                    SYNC_UNDO => self.jobs.start(&self.engine, id, Work::Undo)?,
+                    SYNC_PREVIEW => self.start_job(id, Work::Preview).await?,
+                    SYNC_UNDO => self.start_job(id, Work::Undo).await?,
                     SYNC_CANCEL => {
                         self.jobs.cancel(id);
                         self.jobs.status(id)
@@ -305,6 +310,19 @@ impl Service {
             }
         };
         encode(status)
+    }
+
+    async fn start_job(
+        &self,
+        id: PairId,
+        work: Work,
+    ) -> Result<foldover_proto::local::SyncStatus, RpcError> {
+        let (jobs, engine) = (Arc::clone(&self.jobs), Arc::clone(&self.engine));
+        // Job claims activate saved settings under the engine lock. Wait
+        // off the runtime so cancellation and status remain responsive.
+        tokio::task::spawn_blocking(move || jobs.start(&engine, id, work))
+            .await
+            .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?
     }
 }
 
@@ -380,7 +398,7 @@ impl Command {
         }
     }
 
-    fn execute(self, engine: &mut Engine) -> Result<Value, RpcError> {
+    fn execute(self, engine: &mut Engine, jobs: &Jobs) -> Result<Value, RpcError> {
         match self {
             Self::List(after) => {
                 let mut pairs = engine
@@ -411,11 +429,15 @@ impl Command {
                 id,
                 revision,
                 configuration,
-            } => encode(PairRecord::from(
-                &engine
-                    .update_pair(id, revision, &configuration)
-                    .map_err(engine_error)?,
-            )),
+            } => {
+                let saved = if jobs.is_working(id) {
+                    engine.defer_pair_update(id, revision, &configuration)
+                } else {
+                    engine.update_pair(id, revision, &configuration)
+                }
+                .map_err(engine_error)?;
+                encode(PairRecord::from(&saved))
+            }
             Self::Remove { id, revision } => encode(PairRecord::from(
                 &engine.remove_pair(id, revision).map_err(engine_error)?,
             )),
@@ -3920,7 +3942,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_pair_with_a_running_job_cannot_be_updated() {
+    async fn edits_during_a_job_are_saved_for_the_next_run() {
         let (directory, service) = fixture();
         let input = input(directory.path(), "Docs");
         let pair = service
@@ -3948,17 +3970,32 @@ mod tests {
                 progress: SyncProgress::default(),
             },
         );
-        assert_eq!(
-            service.handle(update()).await.unwrap_err().code(),
-            foldover_proto::local::SYNC_BUSY
-        );
-        // The rejected update changed nothing.
+        let saved = service.handle(update()).await.unwrap();
+        assert_eq!(saved["revision"], 2);
         assert_eq!(
             service
                 .handle(Request::call(3, PAIR_GET, Some(json!({"id": pair["id"]}))))
                 .await
                 .unwrap()["configuration"]["name"],
-            "Docs"
+            "Renamed"
+        );
+
+        // A claimed job still reads and commits under its original
+        // revision, even if its worker has not read the inputs yet.
+        {
+            let engine = service.engine.lock().unwrap();
+            let inputs = engine.run_inputs(id).unwrap();
+            let run = foldover_engine::PairRun::prepare(
+                inputs,
+                &mut || foldover_types::ScanControl::Continue,
+                &sync::Progress::default(),
+            )
+            .unwrap();
+            assert_eq!(run.revision(), 1);
+        }
+        assert_eq!(
+            service.handle(update()).await.unwrap_err().code(),
+            STALE_REVISION
         );
 
         service.jobs.force_status(
@@ -3967,9 +4004,98 @@ mod tests {
                 message: "read error".into(),
             },
         );
+        let mut next = renamed.clone();
+        next["options"]["filters"] = json!(["*.cache"]);
+        let updated = service
+            .handle(Request::call(
+                4,
+                PAIR_UPDATE,
+                Some(json!({"id": pair["id"], "revision": 2, "configuration": next})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(updated["revision"], 3);
+    }
+
+    #[tokio::test]
+    async fn an_edit_before_a_claimed_worker_starts_only_changes_the_next_job() {
+        let (directory, service) = fixture();
+        let configuration = input(directory.path(), "Docs");
+        let left = directory.path().join("Docs-left");
+        let right = directory.path().join("Docs-right");
+        fs::write(left.join("first.cache"), b"original run").unwrap();
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(configuration.clone())))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        service
+            .handle(Request::call(2, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        let preview = settled(&service, &key).await;
+
+        let (reached, release) = service.jobs.gate_job();
+        service
+            .handle(Request::call(
+                3,
+                SYNC_RUN,
+                Some(json!({
+                    "id": created["id"], "approved_left_deletions": 0,
+                    "approved_right_deletions": 0,
+                    "review_token": preview["preview"]["review_token"],
+                })),
+            ))
+            .await
+            .unwrap();
+        tokio::task::spawn_blocking(move || {
+            reached
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap()
+        })
+        .await
+        .unwrap();
+
+        let mut edited = configuration;
+        edited["options"]["filters"] = json!(["*.cache"]);
+        let saved = service
+            .handle(Request::call(
+                4,
+                PAIR_UPDATE,
+                Some(json!({
+                    "id": created["id"], "revision": 1, "configuration": edited,
+                })),
+            ))
+            .await;
+        release.send(()).unwrap();
+        assert_eq!(saved.unwrap()["revision"], 2);
+        let finished = settled(&service, &key).await;
+        assert_eq!(finished["state"], "finished", "{finished}");
         assert_eq!(
-            service.handle(update()).await.unwrap()["configuration"]["name"],
-            "Renamed"
+            fs::read(right.join("first.cache")).unwrap(),
+            b"original run"
+        );
+
+        fs::write(left.join("next.cache"), b"excluded next run").unwrap();
+        fs::write(left.join("next.txt"), b"included next run").unwrap();
+        service
+            .handle(Request::call(5, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        let next = settled(&service, &key).await;
+        assert_eq!(next["state"], "previewed", "{next}");
+        assert_eq!(next["preview"]["pair_revision"], 2);
+        let items = next["preview"]["items"].as_array().unwrap();
+        assert!(items.iter().any(|item| item["path"] == json!(b"next.txt")));
+        assert!(
+            !items
+                .iter()
+                .any(|item| item["path"] == json!(b"next.cache"))
+        );
+        assert!(!right.join("next.cache").exists());
+        assert_eq!(
+            fs::read(right.join("first.cache")).unwrap(),
+            b"original run"
         );
     }
 
