@@ -10,7 +10,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-rusqlite = { version = "0.40.2", default-features = false, features = ["libsqlite3-sys", "bundled", "backup"] }
+rusqlite = { version = "0.41.0", default-features = false, features = ["libsqlite3-sys", "bundled", "backup"] }
 rustix = { version = "1", features = ["fs", "process"] }
 thiserror = "2"
 uuid = { version = "1.28.0", features = ["v4"] }
