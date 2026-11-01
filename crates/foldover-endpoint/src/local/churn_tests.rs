@@ -120,7 +120,8 @@ fn nested_directory_child_added_after_listing_preserves_existing_entries() {
 /// Copies another Mac sends at once each stage a file in the shared root
 /// and rename it into place. A name the access probe listed could be gone
 /// before it read its metadata, and the probe called the whole folder
-/// unreadable, failing the copy it guarded.
+/// unreadable, failing the copy it guarded. On one core the race is
+/// rarely hit; the next test checks the rule without timing.
 #[test]
 fn a_name_gone_between_listing_and_reading_still_proves_access() {
     let temporary = tempfile::tempdir().unwrap();
@@ -140,4 +141,14 @@ fn a_name_gone_between_listing_and_reading_still_proves_access() {
         done.store(true, Ordering::Relaxed);
         probed.unwrap();
     });
+}
+
+#[test]
+fn a_first_name_gone_before_its_metadata_still_proves_access() {
+    for kind in [io::ErrorKind::NotFound, io::ErrorKind::NotADirectory] {
+        assert!(listing_allowed(Some(Err(kind.into()))).is_ok(), "{kind:?}");
+    }
+    assert!(listing_allowed(None).is_ok());
+    let refused = listing_allowed(Some(Err(io::ErrorKind::PermissionDenied.into())));
+    assert!(refused.is_err_and(|error| error.is_access_denied()));
 }
