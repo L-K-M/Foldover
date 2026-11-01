@@ -823,16 +823,58 @@ impl Database {
             Some(current) if current != revision => return Err(Error::StaleRevision),
             Some(_) => {}
         }
-        transaction.execute(
-            "DELETE FROM snapshot_entry WHERE pair_id=?1 AND side=?2",
-            params![pair, side],
-        )?;
+        // Merge in the order the table returns: SQLite sorts BLOB paths by
+        // memcmp, the same order Vec<u8>'s Ord gives.
+        let mut given: Vec<&SnapshotRow> = rows.iter().collect();
+        given.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut removed = Vec::new();
+        let mut added = Vec::new();
+        let mut changed = Vec::new();
+        // Borrowed blobs keep an unchanged row allocation-free, and the
+        // read finishes before any write reuses the table.
         {
+            let mut statement = transaction.prepare(
+                "SELECT path,fingerprint,version FROM snapshot_entry WHERE pair_id=?1 AND side=?2 ORDER BY path",
+            )?;
+            let mut stored = statement.query(params![pair, side])?;
+            let mut next = 0;
+            while let Some(row) = stored.next()? {
+                let path = borrowed(row, 0)?;
+                while next < given.len() && given[next].path.as_slice() < path {
+                    added.push(given[next]);
+                    next += 1;
+                }
+                if next < given.len() && given[next].path.as_slice() == path {
+                    let candidate = given[next];
+                    if candidate.fingerprint.as_slice() != borrowed(row, 1)?
+                        || candidate.version.as_slice() != borrowed(row, 2)?
+                    {
+                        changed.push(candidate);
+                    }
+                    next += 1;
+                } else {
+                    removed.push(path.to_vec());
+                }
+            }
+            added.extend_from_slice(&given[next..]);
+        }
+        {
+            let mut remove = transaction
+                .prepare("DELETE FROM snapshot_entry WHERE pair_id=?1 AND side=?2 AND path=?3")?;
             let mut insert = transaction.prepare(
                 "INSERT INTO snapshot_entry (pair_id,side,path,fingerprint,version) VALUES (?1,?2,?3,?4,?5)",
             )?;
-            for row in rows {
+            let mut update = transaction.prepare(
+                "UPDATE snapshot_entry SET fingerprint=?4,version=?5 WHERE pair_id=?1 AND side=?2 AND path=?3",
+            )?;
+            for path in &removed {
+                remove.execute(params![pair, side, path])?;
+            }
+            for row in &added {
                 insert.execute(params![pair, side, row.path, row.fingerprint, row.version])?;
+            }
+            for row in &changed {
+                update.execute(params![pair, side, row.path, row.fingerprint, row.version])?;
             }
         }
         transaction.commit()?;
@@ -961,6 +1003,14 @@ impl Database {
         transaction.commit()?;
         Ok(())
     }
+}
+
+/// Borrow a column's bytes from the row instead of copying them out.
+fn borrowed<'a>(row: &'a rusqlite::Row<'_>, column: usize) -> Result<&'a [u8], Error> {
+    Ok(row
+        .get_ref(column)?
+        .as_blob()
+        .map_err(rusqlite::Error::from)?)
 }
 
 fn revision_error(connection: &Connection, id: &[u8]) -> Result<Error, Error> {
@@ -2136,6 +2186,203 @@ pub(super) mod tests {
         database.update_pair(&pair.id, 2, &ignoring).unwrap();
         assert!(database.snapshot(&pair.id, "left").unwrap().is_empty());
         assert!(database.snapshot(&pair.id, "right").unwrap().is_empty());
+    }
+
+    fn snapshot_row(path: &[u8]) -> SnapshotRow {
+        SnapshotRow {
+            path: path.to_vec(),
+            fingerprint: b"f".to_vec(),
+            version: b"v".to_vec(),
+        }
+    }
+
+    #[test]
+    fn restoring_an_identical_snapshot_writes_nothing() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        let rows = [snapshot_row(b"a"), snapshot_row(b"b"), snapshot_row(b"c")];
+        database
+            .replace_snapshot(&pair.id, 1, "left", &rows)
+            .unwrap();
+
+        let written = database.connection.total_changes();
+        database
+            .replace_snapshot(&pair.id, 1, "left", &rows)
+            .unwrap();
+        assert_eq!(database.connection.total_changes(), written);
+        assert_eq!(database.snapshot(&pair.id, "left").unwrap(), rows);
+    }
+
+    #[test]
+    fn replacing_a_snapshot_writes_only_the_difference() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        let stored: Vec<_> = (0..50)
+            .map(|index| snapshot_row(format!("p-{index:02}").as_bytes()))
+            .collect();
+        database
+            .replace_snapshot(&pair.id, 1, "left", &stored)
+            .unwrap();
+
+        let mut replacement = stored.clone();
+        replacement[0].fingerprint = b"changed".to_vec();
+        replacement.remove(1);
+        replacement.push(snapshot_row(b"p-50"));
+        let written = database.connection.total_changes();
+        database
+            .replace_snapshot(&pair.id, 1, "left", &replacement)
+            .unwrap();
+
+        // One update, one delete, one insert among the untouched 48.
+        assert_eq!(database.connection.total_changes() - written, 3);
+        assert_eq!(database.snapshot(&pair.id, "left").unwrap(), replacement);
+    }
+
+    #[test]
+    fn replacing_a_snapshot_accepts_unsorted_input() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        let unsorted = [
+            snapshot_row(b"c"),
+            snapshot_row(b"a"),
+            snapshot_row(b"d"),
+            snapshot_row(b"b"),
+        ];
+        database
+            .replace_snapshot(&pair.id, 1, "left", &unsorted)
+            .unwrap();
+        let mut sorted = unsorted.to_vec();
+        sorted.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(database.snapshot(&pair.id, "left").unwrap(), sorted);
+
+        // Unsorted input also merges against rows stored earlier.
+        let unsorted = [snapshot_row(b"d"), snapshot_row(b"b"), snapshot_row(b"e")];
+        database
+            .replace_snapshot(&pair.id, 1, "left", &unsorted)
+            .unwrap();
+        let mut sorted = unsorted.to_vec();
+        sorted.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(database.snapshot(&pair.id, "left").unwrap(), sorted);
+    }
+
+    #[test]
+    fn a_duplicate_snapshot_path_fails_and_keeps_the_stored_rows() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        let stored = [snapshot_row(b"a"), snapshot_row(b"b")];
+        database
+            .replace_snapshot(&pair.id, 1, "left", &stored)
+            .unwrap();
+
+        assert!(
+            database
+                .replace_snapshot(
+                    &pair.id,
+                    1,
+                    "left",
+                    &[snapshot_row(b"c"), snapshot_row(b"c")],
+                )
+                .is_err()
+        );
+        // A path already stored is a duplicate too.
+        assert!(
+            database
+                .replace_snapshot(
+                    &pair.id,
+                    1,
+                    "left",
+                    &[snapshot_row(b"a"), snapshot_row(b"a")],
+                )
+                .is_err()
+        );
+        assert_eq!(database.snapshot(&pair.id, "left").unwrap(), stored);
+    }
+
+    #[test]
+    fn replacing_a_snapshot_leaves_the_other_side_and_other_pairs_alone() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        let other = database.create_pair(&values()).unwrap();
+        database
+            .replace_snapshot(&pair.id, 1, "left", &[snapshot_row(b"gone")])
+            .unwrap();
+        database
+            .replace_snapshot(&pair.id, 1, "right", &[snapshot_row(b"kept")])
+            .unwrap();
+        database
+            .replace_snapshot(&other.id, 1, "left", &[snapshot_row(b"also-kept")])
+            .unwrap();
+
+        database
+            .replace_snapshot(&pair.id, 1, "left", &[snapshot_row(b"new")])
+            .unwrap();
+        assert_eq!(
+            database.snapshot(&pair.id, "right").unwrap(),
+            [snapshot_row(b"kept")]
+        );
+        assert_eq!(
+            database.snapshot(&other.id, "left").unwrap(),
+            [snapshot_row(b"also-kept")]
+        );
+    }
+
+    #[test]
+    fn snapshot_paths_compare_as_raw_bytes_around_the_separator() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        // BLOB order is memcmp: '-' < '.' < '/' < '0'.
+        database
+            .replace_snapshot(
+                &pair.id,
+                1,
+                "left",
+                &[
+                    snapshot_row(b"a/x"),
+                    snapshot_row(b"a0"),
+                    snapshot_row(b"a"),
+                    snapshot_row(b"a.txt"),
+                    snapshot_row(b"a-b"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            database.snapshot(&pair.id, "left").unwrap(),
+            [
+                snapshot_row(b"a"),
+                snapshot_row(b"a-b"),
+                snapshot_row(b"a.txt"),
+                snapshot_row(b"a/x"),
+                snapshot_row(b"a0"),
+            ]
+        );
+
+        // Merging against stored neighbors keeps the same order.
+        database
+            .replace_snapshot(
+                &pair.id,
+                1,
+                "left",
+                &[
+                    snapshot_row(b"a0"),
+                    snapshot_row(b"a-b/x"),
+                    snapshot_row(b"a"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            database.snapshot(&pair.id, "left").unwrap(),
+            [
+                snapshot_row(b"a"),
+                snapshot_row(b"a-b/x"),
+                snapshot_row(b"a0"),
+            ]
+        );
     }
 
     #[test]

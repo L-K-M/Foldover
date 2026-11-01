@@ -5,6 +5,8 @@
 
 db_commit_100k = 1000
 db_read_100k = 300
+db_snapshot_rewrite_100k = 4000
+db_snapshot_unchanged_100k = 200
 hash_64_mib = 60
 plan_100k_entries = 350
 # PLAN.md §5.3: a cold scan reads at least 10k entries per second.

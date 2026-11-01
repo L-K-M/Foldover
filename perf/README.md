@@ -18,6 +18,8 @@ ids are the bench function names; estimates land in
 | `plan_100k_entries` | `foldover-engine` | `plan_candidates` over two 100_000-entry sides with a synthetic base mixing unchanged, copied, conflicting, new and deleted files |
 | `db_commit_100k` | `foldover-state` | `PairStore::update_base` committing 100_000 base entries |
 | `db_read_100k` | `foldover-state` | `PairStore::base` reading the 100_000-entry base back |
+| `db_snapshot_unchanged_100k` | `foldover-state` | `PairStore::replace_snapshot` storing the same 100_000-entry observation again |
+| `db_snapshot_rewrite_100k` | `foldover-state` | `PairStore::replace_snapshot` with every one of the 100_000 fingerprints changed |
 
 Fixtures are built in temp directories on every run; nothing outside
 `target/` and the system temp directory is touched.
