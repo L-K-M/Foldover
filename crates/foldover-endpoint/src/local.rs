@@ -737,10 +737,13 @@ impl LocalEndpoint {
     }
 
     /// Read the root's first entry: macOS privacy protection and file
-    /// permissions refuse listings, not opening the folder.
+    /// permissions refuse listings, not opening the folder. A name gone
+    /// before its metadata was read was still listed: a write here, such
+    /// as another copy placing its staged file, moved it in between.
     pub fn probe_access(&self) -> Result<(), ScanError> {
         let mut entries = at(&None, self.root.entries(DirectoryScope::Root))?;
         match entries.next() {
+            Some(Err(error)) if gone(&error) => Ok(()),
             Some(Err(source)) => Err(ScanError::Io { path: None, source }),
             Some(Ok(_)) | None => Ok(()),
         }

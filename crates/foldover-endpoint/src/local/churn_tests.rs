@@ -1,5 +1,6 @@
 use super::*;
 use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const ALL: MetadataPolicy = MetadataPolicy::new(
     foldover_types::Propagation::Sync,
@@ -114,4 +115,29 @@ fn nested_directory_child_added_after_listing_preserves_existing_entries() {
             .contains(&Some(SyncPath::try_from(b"sub".as_slice()).unwrap()))
     );
     assert!(observation.unavailable().is_empty());
+}
+
+/// Copies another Mac sends at once each stage a file in the shared root
+/// and rename it into place. A name the access probe listed could be gone
+/// before it read its metadata, and the probe called the whole folder
+/// unreadable, failing the copy it guarded.
+#[test]
+fn a_name_gone_between_listing_and_reading_still_proves_access() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let endpoint = LocalEndpoint::open(root).unwrap();
+    let done = AtomicBool::new(false);
+    std::thread::scope(|threads| {
+        threads.spawn(|| {
+            let (staged, placed) = (root.join(".foldover-tmp-copy"), root.join("copy"));
+            while !done.load(Ordering::Relaxed) {
+                fs::write(&staged, b"").unwrap();
+                fs::rename(&staged, &placed).unwrap();
+                fs::remove_file(&placed).unwrap();
+            }
+        });
+        let probed = (0..1_000).try_for_each(|_| endpoint.probe_access());
+        done.store(true, Ordering::Relaxed);
+        probed.unwrap();
+    });
 }
