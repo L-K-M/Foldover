@@ -1828,6 +1828,155 @@ mod tests {
         assert_eq!(fs::read(left.join("file")).unwrap(), b"data");
     }
 
+    const ARCHIVED_RUN: &str = "2026-10-18T09-30-00.123Z";
+
+    /// One pair whose right folder holds an archived run of `count` items,
+    /// named so path order is number order. Returns what `archive_page`
+    /// and the items' folder need.
+    async fn archived_pair(
+        count: usize,
+    ) -> (tempfile::TempDir, Service, Value, std::path::PathBuf) {
+        let (directory, service) = fixture();
+        let created = service
+            .handle(Request::call(
+                1,
+                PAIR_CREATE,
+                Some(input(directory.path(), "Docs")),
+            ))
+            .await
+            .unwrap();
+        let run = directory
+            .path()
+            .join("Docs-right/.foldover/archive")
+            .join(ARCHIVED_RUN);
+        fs::create_dir_all(&run).unwrap();
+        for index in 0..count {
+            fs::write(run.join(archived_name(index)), b"data").unwrap();
+        }
+        (directory, service, created["id"].clone(), run)
+    }
+
+    fn archived_name(index: usize) -> String {
+        format!("i-{index:05}")
+    }
+
+    /// The page after item `after`, as item names, and whether more follow.
+    async fn archive_page(
+        service: &Service,
+        id: &Value,
+        after: Option<usize>,
+    ) -> (Vec<String>, bool) {
+        let after = after.map(|index| archived_name(index).into_bytes());
+        let query = json!({"id": id, "side": "right", "run": ARCHIVED_RUN, "after": after});
+        let page = service
+            .handle(Request::call(5, ARCHIVE_ITEMS, Some(query)))
+            .await
+            .unwrap();
+        let page: foldover_proto::local::ArchiveItems = serde_json::from_value(page).unwrap();
+        let names = page.items.into_iter();
+        (
+            names
+                .map(|item| String::from_utf8(item.path).unwrap())
+                .collect(),
+            page.more,
+        )
+    }
+
+    /// Paging crosses from one read-ahead to the next without a short page,
+    /// which would end the CLI's listing early.
+    #[tokio::test]
+    async fn an_archived_run_pages_whole_across_read_aheads() {
+        const ITEMS: usize = 1_050;
+        let (_directory, service, id, _run) = archived_pair(ITEMS).await;
+
+        let mut listed = Vec::new();
+        loop {
+            let after = listed.len().checked_sub(1);
+            let (names, more) = archive_page(&service, &id, after).await;
+            listed.extend(names.iter().cloned());
+            if !more {
+                assert_eq!(
+                    names.len(),
+                    ITEMS % foldover_proto::local::ARCHIVE_ITEM_LIMIT
+                );
+                break;
+            }
+            assert_eq!(names.len(), foldover_proto::local::ARCHIVE_ITEM_LIMIT);
+        }
+
+        assert_eq!(listed, (0..ITEMS).map(archived_name).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn pages_reuse_what_the_first_read_and_the_first_page_reads_again() {
+        let (_directory, service, id, run) = archived_pair(250).await;
+        archive_page(&service, &id, None).await;
+
+        // Only a page answered from memory can still name this item.
+        fs::remove_file(run.join(archived_name(150))).unwrap();
+        let (names, _) = archive_page(&service, &id, Some(99)).await;
+        assert!(names.contains(&archived_name(150)));
+
+        // Opening the run shows what it holds now.
+        archive_page(&service, &id, None).await;
+        let (names, _) = archive_page(&service, &id, Some(99)).await;
+        assert!(!names.contains(&archived_name(150)));
+    }
+
+    #[tokio::test]
+    async fn putting_back_forgets_what_was_read() {
+        let (directory, service, id, _run) = archived_pair(250).await;
+        archive_page(&service, &id, None).await;
+
+        let name = archived_name(150);
+        let put_back =
+            json!({"id": id, "side": "right", "run": ARCHIVED_RUN, "path": name.as_bytes()});
+        service
+            .handle(Request::call(6, ARCHIVE_PUT_BACK, Some(put_back)))
+            .await
+            .unwrap();
+        assert!(directory.path().join("Docs-right").join(&name).exists());
+
+        let (names, _) = archive_page(&service, &id, Some(99)).await;
+        assert!(!names.contains(&name));
+    }
+
+    /// A job may archive or prune: what was read before it starts is
+    /// dropped, and so is what a listing keeps while it runs.
+    #[tokio::test]
+    async fn a_job_forgets_what_was_read_when_it_starts_and_when_it_ends() {
+        let (_directory, service, id, run) = archived_pair(250).await;
+        archive_page(&service, &id, None).await;
+        fs::remove_file(run.join(archived_name(150))).unwrap();
+
+        let (reached, release) = service.jobs.gate_job();
+        let key = json!({"id": id});
+        service
+            .handle(Request::call(3, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        tokio::task::spawn_blocking(move || {
+            reached
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap()
+        })
+        .await
+        .unwrap();
+
+        let (names, _) = archive_page(&service, &id, Some(99)).await;
+        assert!(!names.contains(&archived_name(150)));
+
+        // What that page kept stops answering once the job ends.
+        fs::remove_file(run.join(archived_name(160))).unwrap();
+        let (names, _) = archive_page(&service, &id, Some(99)).await;
+        assert!(names.contains(&archived_name(160)));
+
+        release.send(()).unwrap();
+        settled(&service, &key).await;
+        let (names, _) = archive_page(&service, &id, Some(99)).await;
+        assert!(!names.contains(&archived_name(160)));
+    }
+
     #[tokio::test]
     async fn runs_but_not_previews_enter_the_history() {
         let (directory, service) = fixture();

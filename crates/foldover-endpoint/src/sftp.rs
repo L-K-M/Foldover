@@ -35,7 +35,9 @@ use foldover_types::{
 
 use crate::lease::{LEASE_LIMIT, LockFile};
 use crate::local::Archiving;
-use crate::local::archive::{ARCHIVE_ROOT, archive_time, date_name, sibling_name};
+use crate::local::archive::{
+    ARCHIVE_ROOT, Found, archive_time, archived_page, date_name, sibling_name,
+};
 use crate::local::filter::{IGNORE_FILE, IGNORE_FILE_LIMIT, parse_ignore_file};
 use crate::local::version::{Observed, Payload, entry_version, metadata_version};
 use crate::local::{Fingerprint, TEMPORARY_PREFIX, child_path, protected, temporary};
@@ -1223,42 +1225,33 @@ impl SftpEndpoint {
         Ok(runs)
     }
 
-    /// Files and links `run` archived, in path order after `after`.
+    /// Files and links `run` archived, in path order after `after`. Only
+    /// the folders the page reaches are listed.
     pub fn archived_items(
         &self,
         run: &str,
         after: Option<&SyncPath>,
         limit: usize,
     ) -> Result<(Vec<ArchivedItem>, bool), ScanError> {
-        let folder = crate::local::archive::run_folder(run).ok_or(ScanError::UnknownArchiveRun)?;
-        let mut items = Vec::new();
-        let mut pending: Vec<Option<SyncPath>> = vec![None];
-        while let Some(relative) = pending.pop() {
-            let directory = match &relative {
-                None => folder.clone(),
-                Some(relative) => crate::local::archive::join(&folder, relative.as_bytes())?,
-            };
+        archived_page(run, after, limit, |directory| {
             let entries = self
                 .session()
                 .read_dir(&self.remote(directory.as_bytes()))
-                .map_err(|source| at(Some(&directory), source))?;
-            for (name, attributes) in entries {
-                let path = child_path(relative.as_ref(), &name)?;
-                match attributes.kind() {
-                    FileKind::Directory => pending.push(Some(path)),
-                    FileKind::File | FileKind::Symlink
-                        if after.is_none_or(|after| &path > after) =>
-                    {
-                        items.push(ArchivedItem::new(path, attributes.size.unwrap_or(0)));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        items.sort_by(|left, right| left.path().cmp(right.path()));
-        let more = items.len() > limit;
-        items.truncate(limit);
-        Ok((items, more))
+                .map_err(|source| at(Some(directory), source))?;
+            Ok(entries
+                .into_iter()
+                .map(|(name, attributes)| {
+                    let found = match attributes.kind() {
+                        FileKind::Directory => Found::Folder,
+                        FileKind::File | FileKind::Symlink => Found::Item {
+                            size: attributes.size.unwrap_or(0),
+                        },
+                        FileKind::Other => Found::Ignored,
+                    };
+                    (name, found)
+                })
+                .collect())
+        })
     }
 
     /// Put an archived item back at its path, or beside it as

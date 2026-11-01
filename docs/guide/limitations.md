@@ -145,6 +145,10 @@ you might expect. Only the last one below blocks saving
   ([ADR 0028](../adr/0028-sftp-endpoints.md)).
 - Full durability is not available
   ([ADR 0028](../adr/0028-sftp-endpoints.md)).
+- A preview or sync reads files on several sessions, so it can open up to
+  four SSH connections, plus one for leases. A server that limits
+  connections per user may refuse some
+  ([ADR 0046](../adr/0046-snapshot-archive-sftp-performance.md)).
 
 ## Archives and Undo
 
@@ -156,6 +160,10 @@ you might expect. Only the last one below blocks saving
   path as `name (restored).ext`, then `(restored 2)`; the next sync
   copies it to the other folder like any new entry
   ([ADR 0025](../adr/0025-archive-browser.md)).
+- **Archive listings can lag.** Pages after a run's first may be up to 30
+  seconds old when another computer changed the archive. Put Back on an
+  item that is gone fails with an error and changes nothing
+  ([ADR 0046](../adr/0046-snapshot-archive-sftp-performance.md)).
 - **Undo covers only the newest run that wrote.** It restores content a
   run created, replaced or archived, but never metadata, which is not
   kept, and never the other folder's side. Entries changed since the

@@ -2,18 +2,23 @@
 //! configuration under the engine lock, then walks the folder on the
 //! blocking pool without it.
 
-use std::sync::{Arc, Mutex};
-use std::time::UNIX_EPOCH;
+mod read_ahead;
 
-use foldover_engine::{ArchiveError, ArchiveErrorKind, Engine, PairArchive};
+use std::sync::{Arc, Mutex};
+use std::time::{Instant, UNIX_EPOCH};
+
+use foldover_engine::{ArchiveError, ArchiveErrorKind, Engine, PairArchive, Reach};
 use foldover_proto::local::{
     ARCHIVE_ITEM_LIMIT, ARCHIVE_ITEMS, ARCHIVE_NOT_FOUND, ARCHIVE_PUT_BACK_ALL, ARCHIVE_RUN_LIMIT,
-    ARCHIVE_RUNS, ArchiveItem, ArchiveItemQuery, ArchiveItems, ArchiveKey, ArchivePlaced,
-    ArchivePutBack, ArchiveRestored, ArchiveRun, ArchiveRunKey, ArchiveRuns, INTERNAL_ERROR,
-    INVALID_PARAMS, ROOT_UNAVAILABLE, Request, RpcError, SyncFailure,
+    ARCHIVE_RUNS, ArchiveItem, ArchiveItemQuery, ArchiveKey, ArchivePlaced, ArchivePutBack,
+    ArchiveRestored, ArchiveRun, ArchiveRunKey, ArchiveRuns, INTERNAL_ERROR, INVALID_PARAMS,
+    ROOT_UNAVAILABLE, Request, RpcError, SyncFailure,
 };
-use foldover_types::{PairId, Side, SyncPath};
+use foldover_types::{PairConfig, PairId, Side, SyncPath};
 use serde_json::Value;
+
+pub(crate) use read_ahead::ReadAhead;
+use read_ahead::{READ_AHEAD, RunKey};
 
 use crate::sync::Jobs;
 use crate::{encode, parameters};
@@ -44,10 +49,30 @@ pub(crate) async fn handle(
         ARCHIVE_ITEMS => {
             let params: ArchiveItemQuery = parameters(request)?;
             let after = params.after.map(sync_path).transpose()?;
-            let archive = open(engine, &params.id, params.side.into()).await?;
+            let side = params.side.into();
+            let (pair, reach) = configuration(engine, &params.id).await?;
+            let key = RunKey {
+                id: pair.id(),
+                revision: pair.revision(),
+                side,
+                run: params.run.clone(),
+            };
+            let read_ahead = jobs.read_ahead();
+
+            // The first page always reads the folder, so opening a run
+            // shows what it holds now.
+            let kept = after
+                .as_ref()
+                .and_then(|after| read_ahead.page(&key, after, Instant::now()));
+            if let Some(page) = kept {
+                return encode(page);
+            }
+
+            let walk = read_ahead.begin(Instant::now());
+            let archive = opened(pair, side, reach).await?;
+            let start = after.clone();
             let (items, more) =
-                blocking(move || archive.items(&params.run, after.as_ref(), ARCHIVE_ITEM_LIMIT))
-                    .await?;
+                blocking(move || archive.items(&params.run, after.as_ref(), READ_AHEAD)).await?;
             let items = items
                 .iter()
                 .map(|item| ArchiveItem {
@@ -55,7 +80,7 @@ pub(crate) async fn handle(
                     size: item.size(),
                 })
                 .collect();
-            encode(ArchiveItems { items, more })
+            encode(read_ahead.keep(walk, key, start, items, more))
         }
         ARCHIVE_PUT_BACK_ALL => {
             let params: ArchiveRunKey = parameters(request)?;
@@ -109,9 +134,17 @@ pub(crate) async fn handle(
 }
 
 async fn open(engine: &Arc<Mutex<Engine>>, id: &str, side: Side) -> Result<PairArchive, RpcError> {
+    let (pair, reach) = configuration(engine, id).await?;
+    opened(pair, side, reach).await
+}
+
+async fn configuration(
+    engine: &Arc<Mutex<Engine>>,
+    id: &str,
+) -> Result<(PairConfig, Reach), RpcError> {
     let id = pair_id(id)?;
     let engine = Arc::clone(engine);
-    let (pair, reach) = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         let engine = engine
             .lock()
             .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?;
@@ -119,7 +152,10 @@ async fn open(engine: &Arc<Mutex<Engine>>, id: &str, side: Side) -> Result<PairA
         Ok::<_, RpcError>((pair, engine.reach()))
     })
     .await
-    .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))??;
+    .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?
+}
+
+async fn opened(pair: PairConfig, side: Side, reach: Reach) -> Result<PairArchive, RpcError> {
     blocking(move || PairArchive::open(&pair, side, &reach)).await
 }
 

@@ -33,6 +33,8 @@ use foldover_types::{
     Skip, SyncPath,
 };
 
+use crate::archive::ReadAhead;
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Work {
     Preview,
@@ -203,6 +205,8 @@ struct State {
 #[derive(Default)]
 pub(crate) struct Jobs {
     state: Mutex<State>,
+    /// Archive listings kept between pages; what changes archives drops them.
+    read_ahead: ReadAhead,
     /// Test-only rendezvous inside a mutating pair command.
     #[cfg(test)]
     mutation_gate: Mutex<Option<(Sender<()>, Receiver<()>)>>,
@@ -212,6 +216,10 @@ pub(crate) struct Jobs {
 }
 
 impl Jobs {
+    pub(crate) fn read_ahead(&self) -> &ReadAhead {
+        &self.read_ahead
+    }
+
     pub(crate) fn is_working(&self, id: PairId) -> bool {
         matches!(self.status(id), SyncStatus::Working { .. })
     }
@@ -686,6 +694,9 @@ impl Jobs {
             )
             .and_then(|previous| previous.reviewed);
         let skips = state.skips.get(&id).cloned().unwrap_or_default();
+        drop(state);
+        // The job may archive or prune; the listing must not outlive that.
+        self.read_ahead.forget(id);
         Ok(Claim {
             held,
             skips,
@@ -723,6 +734,9 @@ impl Jobs {
             };
             let (mut status, mut reviewed) =
                 catch_unwind(AssertUnwindSafe(run)).unwrap_or_else(|_| crashed());
+            // Before the result shows, for a client that lists once it does:
+            // a walk during the job may have kept what the job then changed.
+            jobs.read_ahead.forget(id);
             // The engine guard spans activation and publication. An edit
             // cannot see the old job Working after activation and leave
             // a replacement stranded. No jobs lock spans database work.
@@ -755,6 +769,7 @@ pub(crate) struct Mutation {
 
 impl Drop for Mutation {
     fn drop(&mut self) {
+        self.jobs.read_ahead.forget(self.id);
         self.jobs
             .state
             .lock()

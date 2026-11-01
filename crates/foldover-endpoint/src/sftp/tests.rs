@@ -1039,6 +1039,50 @@ fn identities_removals_and_pruning_follow_the_local_rules() {
     assert!(remote.archived_runs().unwrap().is_empty());
 }
 
+/// Folders sort as `name/` across a run, so `a/x` falls between `a.txt`
+/// and `a0`, and a page reads only the folders it reaches: `z` is unreadable
+/// while the first page is listed.
+#[test]
+fn archived_items_page_in_path_order_without_listing_past_the_page() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    let name = crate::local::archive::archive_name(UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+    let run = directory.path().join(".foldover/archive").join(&name);
+    for folder in ["a", "z"] {
+        fs::create_dir_all(run.join(folder)).unwrap();
+    }
+    for file in ["a-b", "a.txt", "a/x", "a0", "z/y"] {
+        fs::write(run.join(file), b"data").unwrap();
+    }
+    let set_mode = |mode| fs::set_permissions(run.join("z"), fs::Permissions::from_mode(mode));
+    let paths = |items: &[crate::ArchivedItem]| -> Vec<Vec<u8>> {
+        items
+            .iter()
+            .map(|item| item.path().as_bytes().to_vec())
+            .collect()
+    };
+
+    set_mode(0o000).unwrap();
+    let first = remote.archived_items(&name, None, 3);
+    set_mode(0o755).unwrap();
+
+    let (first, more) = first.unwrap();
+    assert_eq!(
+        paths(&first),
+        [b"a-b".to_vec(), b"a.txt".to_vec(), b"a/x".to_vec()]
+    );
+    assert!(more);
+    let (rest, more) = remote
+        .archived_items(&name, first.last().map(|item| item.path()), 3)
+        .unwrap();
+    assert_eq!(paths(&rest), [b"a0".to_vec(), b"z/y".to_vec()]);
+    assert!(!more);
+}
+
 /// Review of composed names: put back found an archived item in either
 /// spelling but renamed the spelling given, which failed.
 #[test]
