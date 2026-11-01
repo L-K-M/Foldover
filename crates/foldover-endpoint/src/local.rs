@@ -322,6 +322,11 @@ impl Fingerprint {
         }
     }
 
+    /// Whether this fingerprint records the stat `key` of `size` bytes.
+    pub(crate) fn same_stat(&self, key: &[u8], size: u64) -> bool {
+        self.key == key && self.size == size
+    }
+
     fn proves_unchanged_by(&self, key: &[u8], modified: SystemTime) -> bool {
         // Equal keys include equal mtimes, so `modified` is the current one.
         let settled = self

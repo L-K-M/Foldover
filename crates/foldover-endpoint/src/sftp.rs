@@ -12,6 +12,7 @@
 //! - `Durability::Full` is refused, not downgraded: namespace changes
 //!   have no protocol flush.
 
+mod readers;
 mod sessions;
 mod spelling;
 mod transfer;
@@ -20,7 +21,7 @@ pub(crate) use transfer::{copy, update_metadata};
 
 use sessions::{Borrowed, Connect, Sessions};
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::num::NonZeroUsize;
 use std::sync::{Mutex, PoisonError};
@@ -469,7 +470,7 @@ impl SftpEndpoint {
         &self,
         policy: MetadataPolicy,
         filter: &Filter,
-        previous: &std::collections::BTreeMap<SyncPath, ObservedEntry>,
+        previous: &BTreeMap<SyncPath, ObservedEntry>,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<Observation, ScanError> {
         self.observe_reporting(policy, filter, previous, control, &mut |_| {})
@@ -481,7 +482,7 @@ impl SftpEndpoint {
         &self,
         policy: MetadataPolicy,
         filter: &Filter,
-        _previous: &std::collections::BTreeMap<SyncPath, ObservedEntry>,
+        previous: &BTreeMap<SyncPath, ObservedEntry>,
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<Observation, ScanError> {
@@ -539,29 +540,38 @@ impl SftpEndpoint {
                 listed.push((path, attributes));
             }
         }
+        // Folders read nothing, and one that fails rules out what is below
+        // it, so they settle before any read starts.
+        let mut reads = Vec::new();
         for (path, attributes) in listed {
+            if attributes.kind() != FileKind::Directory {
+                reads.push((path, attributes));
+                continue;
+            }
             if control() == ScanControl::Cancel {
                 return Err(ScanError::Cancelled);
             }
-            if observation
-                .unavailable
-                .iter()
-                .any(|root| root == &path || root.is_ancestor_of(&path))
-            {
-                progress(ObserveStep::Checked);
-                continue;
+            if !unavailable(&observation, &path) {
+                let entry = self.observe_entry(&path, &attributes, previous, policy, control);
+                record(&mut observation, &path, entry)?;
             }
-            let entry = match self.observe_entry(&path, &attributes, policy, control) {
-                Ok(entry) => entry,
-                Err(error) => {
-                    observation.skip_error(error)?;
-                    progress(ObserveStep::Checked);
-                    continue;
-                }
-            };
-            observation.entries.insert(path, entry);
             progress(ObserveStep::Checked);
         }
+        reads.retain(|(path, _)| {
+            let skipped = unavailable(&observation, path);
+            if skipped {
+                progress(ObserveStep::Checked);
+            }
+            !skipped
+        });
+        self.observe_reads(
+            &reads,
+            previous,
+            policy,
+            &mut observation,
+            control,
+            progress,
+        )?;
         let unavailable = &observation.unavailable;
         observation.entries.retain(|path, _| {
             !unavailable
@@ -571,19 +581,77 @@ impl SftpEndpoint {
         Ok(observation)
     }
 
+    /// Observe `reads`, on as many sessions as the server takes. One at a
+    /// time on the calling thread when only one can run, in listed order.
+    fn observe_reads(
+        &self,
+        reads: &[(SyncPath, Attributes)],
+        previous: &BTreeMap<SyncPath, ObservedEntry>,
+        policy: MetadataPolicy,
+        observation: &mut Observation,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+    ) -> Result<(), ScanError> {
+        let workers = self.workers();
+        if workers == NonZeroUsize::MIN || reads.len() < 2 {
+            for (path, attributes) in reads {
+                if control() == ScanControl::Cancel {
+                    return Err(ScanError::Cancelled);
+                }
+                let entry = self.observe_entry(path, attributes, previous, policy, control);
+                record(observation, path, entry)?;
+                progress(ObserveStep::Checked);
+            }
+            return Ok(());
+        }
+
+        readers::read_each(
+            reads,
+            workers,
+            |(path, attributes), asked| {
+                self.observe_entry(path, attributes, previous, policy, &mut || asked())
+            },
+            |(path, _), entry| {
+                record(observation, path, entry)?;
+                progress(ObserveStep::Checked);
+                Ok(())
+            },
+            control,
+        )?;
+
+        // Reads land in any order; what a run reports should not.
+        observation
+            .issues
+            .sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(())
+    }
+
     fn observe_entry(
         &self,
         path: &SyncPath,
         attributes: &Attributes,
+        previous: &BTreeMap<SyncPath, ObservedEntry>,
         policy: MetadataPolicy,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<ObservedEntry, ScanError> {
         let key = stat_key(attributes);
+        let size = attributes.size.unwrap_or(0);
         let observed_at = SystemTime::now();
         let version = self.version(path, attributes, policy, control)?;
+
+        // Read again and found the same: the stored observation stands, so
+        // the snapshot has nothing to rewrite for this entry. The older
+        // time misleads nobody, since SFTP versions are never reused unread.
+        if let Some(known) = previous.get(path)
+            && known.version == version
+            && known.fingerprint.same_stat(&key, size)
+        {
+            return Ok(known.clone());
+        }
+
         Ok(ObservedEntry {
             version,
-            fingerprint: Fingerprint::from_key(key, attributes.size.unwrap_or(0), observed_at),
+            fingerprint: Fingerprint::from_key(key, size, observed_at),
         })
     }
 
@@ -1495,6 +1563,29 @@ fn temporary_name() -> Vec<u8> {
 }
 
 /// Available stat fields, useful as observations but not unchanged-data proof.
+/// Whether `path` is, or lies below, what the observation could not read.
+fn unavailable(observation: &Observation, path: &SyncPath) -> bool {
+    observation
+        .unavailable
+        .iter()
+        .any(|root| root == path || root.is_ancestor_of(path))
+}
+
+/// Keep what observing `path` found, or skip it when its error allows.
+fn record(
+    observation: &mut Observation,
+    path: &SyncPath,
+    entry: Result<ObservedEntry, ScanError>,
+) -> Result<(), ScanError> {
+    match entry {
+        Ok(entry) => {
+            observation.entries.insert(path.clone(), entry);
+            Ok(())
+        }
+        Err(error) => observation.skip_error(error),
+    }
+}
+
 fn stat_key(attributes: &Attributes) -> Vec<u8> {
     let mut key = b"sftp".to_vec();
     key.extend_from_slice(&attributes.size.unwrap_or(u64::MAX).to_le_bytes());
