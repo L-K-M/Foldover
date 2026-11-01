@@ -740,10 +740,7 @@ impl LocalEndpoint {
     /// permissions refuse listings, not opening the folder.
     pub fn probe_access(&self) -> Result<(), ScanError> {
         let mut entries = at(&None, self.root.entries(DirectoryScope::Root))?;
-        match entries.next() {
-            Some(Err(source)) => Err(ScanError::Io { path: None, source }),
-            Some(Ok(_)) | None => Ok(()),
-        }
+        listing_allowed(entries.next())
     }
 
     /// One directory's entries for a quick change check; `None` once the
@@ -1415,6 +1412,18 @@ pub(crate) fn protected(name: &[u8]) -> bool {
 pub(crate) fn temporary(name: &[u8]) -> bool {
     name.get(..TEMPORARY_PREFIX.len())
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case(TEMPORARY_PREFIX))
+}
+
+/// Whether a root's first listed entry shows that listing it is allowed.
+/// A name gone before its metadata was read was still listed: a write
+/// there, such as another copy placing its staged file, moved it in
+/// between.
+fn listing_allowed(first: Option<io::Result<DirectoryEntry>>) -> Result<(), ScanError> {
+    match first {
+        Some(Err(error)) if gone(&error) => Ok(()),
+        Some(Err(source)) => Err(ScanError::Io { path: None, source }),
+        Some(Ok(_)) | None => Ok(()),
+    }
 }
 
 /// The directory a listing asked for no longer exists as one.
