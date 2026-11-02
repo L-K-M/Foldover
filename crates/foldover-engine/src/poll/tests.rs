@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, UNIX_EPOCH};
 
 use foldover_types::{LocalRoot, PairDraft, PairId, SyncMode};
 
@@ -84,6 +85,50 @@ fn an_active_directory_that_vanished_is_a_change_once() {
     assert!(poll.check(&folder, &everything()).unwrap());
     assert!(poll.active.is_empty());
     assert!(!poll.check(&folder, &everything()).unwrap());
+}
+
+/// `was_listed` must answer what a scan of the whole listing would.
+#[test]
+fn a_listing_is_searched_by_name_and_compared_whole() {
+    let directory = tempfile::tempdir().unwrap();
+    for name in ["a", "a-b", "a.d", "b", "c"] {
+        fs::create_dir(directory.path().join(name)).unwrap();
+    }
+    fs::write(directory.path().join("file"), b"data").unwrap();
+    let folder = endpoint(directory.path());
+    let sorted = || {
+        let mut listing = folder.list(None, &everything()).unwrap().unwrap();
+        listing.sort_by(|a, b| a.name().cmp(b.name()));
+        listing
+    };
+    let before = sorted();
+    for entry in &before {
+        assert!(was_listed(&before, entry));
+    }
+
+    // Same name and kind, another modification time: not what was listed.
+    let touched = directory.path().join("b");
+    fs::File::open(&touched)
+        .unwrap()
+        .set_modified(UNIX_EPOCH + Duration::from_secs(1_000))
+        .unwrap();
+    fs::create_dir(directory.path().join("0-new")).unwrap();
+    let after = sorted();
+    for entry in &after {
+        assert_eq!(was_listed(&before, entry), before.contains(entry));
+    }
+    let named = |listing: &[ListedEntry], name: &[u8]| {
+        let found = listing.iter().find(|entry| entry.name() == name);
+        found.unwrap().clone()
+    };
+    assert!(!was_listed(&before, &named(&after, b"b")));
+    assert!(!was_listed(&before, &named(&after, b"0-new")));
+
+    // A server may answer a name twice: any of its entries can match.
+    let doubled = [named(&before, b"b"), named(&after, b"b")];
+    assert!(was_listed(&doubled, &doubled[0]));
+    assert!(was_listed(&doubled, &doubled[1]));
+    assert!(!was_listed(&[], &doubled[0]));
 }
 
 #[test]

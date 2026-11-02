@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use foldover_fs::{DirectoryScope, NodeKind, WriteError};
 use foldover_types::{Durability, SyncPath};
 
-use super::{ApplyError, LocalEndpoint, ScanError, protected};
+use super::{ApplyError, LocalEndpoint, ScanError, child_path, protected};
 
 /// Names tried for one put-back: the original, then `(restored)`,
 /// `(restored 2)` and so on.
@@ -157,6 +157,110 @@ pub(crate) fn join(parent: &SyncPath, child: &[u8]) -> Result<SyncPath, ScanErro
     Ok(SyncPath::try_from(bytes)?)
 }
 
+/// What one entry of a folder listing is: only files and links become
+/// items; folders are walked, never through a link; other kinds are
+/// ignored.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Found {
+    Folder,
+    Item { size: u64 },
+    Ignored,
+}
+
+/// One entry of a folder listing under its sort key: a folder's key is
+/// its name plus `/`, so its whole subtree sorts into one contiguous
+/// range right after the key.
+struct Entry {
+    key: Vec<u8>,
+    path: SyncPath,
+    found: Found,
+}
+
+/// One page of `run`'s items in path order after `after`: at most
+/// `limit` items and whether more follow, reading only the folders the
+/// page reaches. `list` lists one folder of the run, given the folder's
+/// path inside the root.
+///
+/// Path order is plain byte order over whole relative paths, so
+/// everything below folder `a` starts with `a/` and one folder's items
+/// are one contiguous range: with the names `a-b`, `a.txt`, `a/x` and
+/// `a0`, folder `a`'s contents sort between `a.txt` and `a0` because
+/// `-` is 0x2d, `.` 0x2e, `/` 0x2f and `0` 0x30. Sorting one folder's
+/// entries by name, with a folder's key being its name plus `/`, and
+/// walking depth first therefore yields global path order, so a page
+/// stops once it fills and skips the folders before its cursor.
+pub(crate) fn archived_page(
+    run: &str,
+    after: Option<&SyncPath>,
+    limit: usize,
+    mut list: impl FnMut(&SyncPath) -> Result<Vec<(Vec<u8>, Found)>, ScanError>,
+) -> Result<(Vec<ArchivedItem>, bool), ScanError> {
+    let folder = run_folder(run).ok_or(ScanError::UnknownArchiveRun)?;
+    let mut items = Vec::new();
+    // One frame per listed folder; entries come off descending, so the
+    // walk visits them in ascending path order.
+    let mut stack = vec![listing(None, &folder, after, &mut list)?];
+    loop {
+        let Some(entry) = stack.last_mut().and_then(Vec::pop) else {
+            if stack.pop().is_none() {
+                return Ok((items, false));
+            }
+            continue;
+        };
+        match entry.found {
+            // `listing` drops these; kept for exhaustiveness.
+            Found::Ignored => {}
+            Found::Folder => stack.push(listing(Some(&entry.path), &folder, after, &mut list)?),
+            Found::Item { size } => {
+                // The extra item proves more follow; nothing beyond it
+                // is read. `limit + 1` is never computed, so
+                // `usize::MAX` pages are safe.
+                if items.len() == limit {
+                    return Ok((items, true));
+                }
+                items.push(ArchivedItem::new(entry.path, size));
+            }
+        }
+    }
+}
+
+/// The page-reachable entries of one folder, sorted descending by key.
+fn listing(
+    relative: Option<&SyncPath>,
+    folder: &SyncPath,
+    after: Option<&SyncPath>,
+    list: &mut impl FnMut(&SyncPath) -> Result<Vec<(Vec<u8>, Found)>, ScanError>,
+) -> Result<Vec<Entry>, ScanError> {
+    let directory = match relative {
+        None => folder.clone(),
+        Some(relative) => join(folder, relative.as_bytes())?,
+    };
+    let mut entries = Vec::new();
+    for (name, found) in list(&directory)? {
+        let path = child_path(relative, &name)?;
+        let key = match found {
+            Found::Folder => [name.as_slice(), b"/"].concat(),
+            Found::Item { .. } | Found::Ignored => name,
+        };
+        entries.push(Entry { key, path, found });
+    }
+    entries.retain(|entry| match entry.found {
+        // Never an item and never walked.
+        Found::Ignored => false,
+        Found::Item { .. } => after.is_none_or(|after| &entry.path > after),
+        // One contiguous range, kept when `after` is before it
+        // (`after < "d/"`) or inside it (starts with `d/`); `after` is
+        // a client's cursor and may name a folder or no existing path.
+        Found::Folder => after.is_none_or(|after| {
+            let below = [entry.path.as_bytes(), b"/"].concat();
+            after.as_bytes() < below.as_slice() || after.as_bytes().starts_with(&below)
+        }),
+    });
+    // Descending, so popping from the end visits ascending.
+    entries.sort_unstable_by(|left, right| right.key.cmp(&left.key));
+    Ok(entries)
+}
+
 impl LocalEndpoint {
     /// Archived runs, newest first. Other folders in the archive are skipped.
     pub fn archived_runs(&self) -> Result<Vec<ArchivedRun>, ScanError> {
@@ -186,46 +290,34 @@ impl LocalEndpoint {
     }
 
     /// Files and links `run` archived, in path order after `after`: at most
-    /// `limit`, and whether there are more.
+    /// `limit`, and whether there are more. Only the folders the page
+    /// reaches are listed.
     pub fn archived_items(
         &self,
         run: &str,
         after: Option<&SyncPath>,
         limit: usize,
     ) -> Result<(Vec<ArchivedItem>, bool), ScanError> {
-        let folder = run_folder(run).ok_or(ScanError::UnknownArchiveRun)?;
-        let mut items = Vec::new();
-        let mut pending: Vec<Option<SyncPath>> = vec![None];
-        while let Some(relative) = pending.pop() {
-            let directory = match &relative {
-                None => folder.clone(),
-                Some(relative) => join(&folder, relative.as_bytes())?,
-            };
+        archived_page(run, after, limit, |directory| {
             let entries = self
                 .root
-                .entries(DirectoryScope::At(&directory))
-                .map_err(|source| scan_error(&directory, source))?;
-            for entry in entries {
-                let entry = entry.map_err(|source| scan_error(&directory, source))?;
-                let path = match &relative {
-                    None => SyncPath::try_from(entry.name())?,
-                    Some(relative) => join(relative, entry.name())?,
-                };
-                let listed = after.is_none_or(|after| &path > after);
-                match entry.metadata().kind() {
-                    NodeKind::Directory => pending.push(Some(path)),
-                    NodeKind::File | NodeKind::Symlink if listed => items.push(ArchivedItem {
-                        path,
-                        size: entry.metadata().size(),
-                    }),
-                    NodeKind::File | NodeKind::Symlink | NodeKind::Other => {}
-                }
-            }
-        }
-        items.sort_by(|left, right| left.path.cmp(&right.path));
-        let more = items.len() > limit;
-        items.truncate(limit);
-        Ok((items, more))
+                .entries(DirectoryScope::At(directory))
+                .map_err(|source| scan_error(directory, source))?;
+            entries
+                .map(|entry| {
+                    let entry = entry.map_err(|source| scan_error(directory, source))?;
+                    let metadata = entry.metadata();
+                    let found = match metadata.kind() {
+                        NodeKind::Directory => Found::Folder,
+                        NodeKind::File | NodeKind::Symlink => Found::Item {
+                            size: metadata.size(),
+                        },
+                        NodeKind::Other => Found::Ignored,
+                    };
+                    Ok((entry.name().to_vec(), found))
+                })
+                .collect()
+        })
     }
 
     /// Put an archived item back at its original path, or beside it when
@@ -372,12 +464,304 @@ fn io_error(path: &SyncPath, source: std::io::Error) -> ApplyError {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
     use std::fs;
+
+    use proptest::prelude::*;
 
     use super::*;
 
     fn at(millis: u64) -> SystemTime {
         UNIX_EPOCH + Duration::from_millis(millis)
+    }
+
+    /// A tiny in-memory run behind `archived_page`'s closure, with no
+    /// filesystem.
+    #[derive(Clone, Debug)]
+    enum Node {
+        Folder(BTreeMap<Vec<u8>, Node>),
+        Item(u64),
+        Ignored,
+    }
+
+    fn folder<T: AsRef<[u8]>>(entries: impl IntoIterator<Item = (T, Node)>) -> Node {
+        Node::Folder(
+            entries
+                .into_iter()
+                .map(|(name, node)| (name.as_ref().to_vec(), node))
+                .collect(),
+        )
+    }
+
+    /// The closure listing `tree`, recording the relative folder each
+    /// call reads.
+    fn in_memory<'a>(
+        tree: &'a Node,
+        run: &str,
+        listed: &'a RefCell<Vec<Vec<u8>>>,
+    ) -> impl FnMut(&SyncPath) -> Result<Vec<(Vec<u8>, Found)>, ScanError> + 'a {
+        let prefix = format!(".foldover/archive/{run}").into_bytes();
+        move |directory| {
+            let relative = directory
+                .as_bytes()
+                .strip_prefix(prefix.as_slice())
+                .expect("a listed folder is under the run")
+                .strip_prefix(b"/")
+                .unwrap_or(b"");
+            listed.borrow_mut().push(relative.to_vec());
+            let mut node = tree;
+            for name in relative
+                .split(|byte| *byte == b'/')
+                .filter(|name| !name.is_empty())
+            {
+                let Node::Folder(entries) = node else {
+                    return Ok(Vec::new());
+                };
+                node = entries.get(name).expect("a listed folder exists");
+            }
+            let Node::Folder(entries) = node else {
+                return Ok(Vec::new());
+            };
+            Ok(entries
+                .iter()
+                .map(|(name, child)| {
+                    let found = match child {
+                        Node::Folder(_) => Found::Folder,
+                        Node::Item(size) => Found::Item { size: *size },
+                        Node::Ignored => Found::Ignored,
+                    };
+                    (name.clone(), found)
+                })
+                .collect())
+        }
+    }
+
+    /// Every item of `tree` in path order: the reference a page must
+    /// match (keep `> after`, sort, truncate, `more` when any is left).
+    fn naive(tree: &Node) -> Vec<(Vec<u8>, u64)> {
+        fn collect(node: &Node, prefix: &[u8], items: &mut Vec<(Vec<u8>, u64)>) {
+            let Node::Folder(entries) = node else {
+                return;
+            };
+            for (name, child) in entries {
+                let mut path = prefix.to_vec();
+                if !path.is_empty() {
+                    path.push(b'/');
+                }
+                path.extend_from_slice(name);
+                match child {
+                    Node::Folder(_) => collect(child, &path, items),
+                    Node::Item(size) => items.push((path, *size)),
+                    Node::Ignored => {}
+                }
+            }
+        }
+        let mut items = Vec::new();
+        collect(tree, b"", &mut items);
+        items.sort();
+        items
+    }
+
+    /// The naive page after `after`, as (path, size) pairs.
+    fn naive_page(tree: &Node, after: Option<&[u8]>, limit: usize) -> (Vec<(Vec<u8>, u64)>, bool) {
+        let kept: Vec<_> = naive(tree)
+            .into_iter()
+            .filter(|(path, _)| after.is_none_or(|after| path.as_slice() > after))
+            .collect();
+        let more = kept.len() > limit;
+        let mut kept = kept;
+        kept.truncate(limit);
+        (kept, more)
+    }
+
+    /// The paths of one page, for comparison with byte names.
+    fn paths(items: &[ArchivedItem]) -> Vec<Vec<u8>> {
+        items
+            .iter()
+            .map(|item| item.path().as_bytes().to_vec())
+            .collect()
+    }
+
+    /// A page of the walk over `tree`, as (path, size) pairs.
+    fn page(
+        tree: &Node,
+        run: &str,
+        after: Option<&SyncPath>,
+        limit: usize,
+    ) -> (Vec<(Vec<u8>, u64)>, bool) {
+        let listed = RefCell::new(Vec::new());
+        let (items, more) =
+            archived_page(run, after, limit, in_memory(tree, run, &listed)).unwrap();
+        let items = items
+            .into_iter()
+            .map(|item| (item.path().as_bytes().to_vec(), item.size()))
+            .collect();
+        (items, more)
+    }
+
+    /// The paths a run holds and the paths that never existed but a
+    /// client can still name as a cursor.
+    fn cursors(tree: &Node) -> Vec<Option<SyncPath>> {
+        fn collect(node: &Node, prefix: &[u8], cursors: &mut Vec<Option<Vec<u8>>>) {
+            let Node::Folder(entries) = node else {
+                return;
+            };
+            for (name, child) in entries {
+                let mut path = prefix.to_vec();
+                if !path.is_empty() {
+                    path.push(b'/');
+                }
+                path.extend_from_slice(name);
+                cursors.push(Some(path.clone()));
+                if matches!(child, Node::Folder(_)) {
+                    let mut below = path.clone();
+                    below.extend_from_slice(b"/zzz");
+                    cursors.push(Some(below.clone()));
+                    below.extend_from_slice(b"/yyy");
+                    cursors.push(Some(below));
+                }
+                collect(child, &path, cursors);
+            }
+        }
+        let mut raw = vec![None];
+        collect(tree, b"", &mut raw);
+        raw.extend([b"a-".as_slice(), b"zzz", b"a/aa", b"z0"].map(|name| Some(name.to_vec())));
+        raw.into_iter()
+            .map(|path| {
+                path.map(|bytes| SyncPath::try_from(bytes).expect("a cursor is a valid path"))
+            })
+            .collect()
+    }
+
+    const NAMES: [&[u8]; 6] = [b"a", b"a-b", b"a.txt", b"a0", b"b", b"z"];
+
+    /// Random runs to depth 3 with names that order around `/`.
+    fn nodes(depth: u32) -> impl Strategy<Value = Node> {
+        let leaf = prop_oneof![Just(Node::Ignored), (0u64..4).prop_map(Node::Item)];
+        if depth == 0 {
+            return leaf.boxed();
+        }
+        prop_oneof![
+            leaf,
+            proptest::collection::btree_map(
+                proptest::sample::select(NAMES.map(Vec::from).to_vec()),
+                nodes(depth - 1),
+                0..6,
+            )
+            .prop_map(Node::Folder),
+        ]
+        .boxed()
+    }
+
+    #[test]
+    fn a_page_lists_only_the_folders_it_reaches() {
+        let run = archive_name(at(1_000));
+        let tree = folder([
+            (
+                b"a",
+                folder([
+                    (b"i0", Node::Item(0)),
+                    (b"i1", Node::Item(0)),
+                    (b"i2", Node::Item(0)),
+                ]),
+            ),
+            (b"b", folder([(b"i0", Node::Item(0))])),
+            (
+                b"z",
+                folder([
+                    (b"i0", Node::Item(0)),
+                    (b"i1", Node::Item(0)),
+                    (b"i2", Node::Item(0)),
+                    (b"i3", Node::Item(0)),
+                ]),
+            ),
+        ]);
+        let listed = RefCell::new(Vec::new());
+
+        // The page fills inside the first folder: only the run's top
+        // folder and that folder are read.
+        let (items, more) = archived_page(&run, None, 2, in_memory(&tree, &run, &listed)).unwrap();
+        assert_eq!(paths(&items), [b"a/i0".to_vec(), b"a/i1".to_vec()]);
+        assert!(more);
+        assert_eq!(*listed.borrow(), [b"".to_vec(), b"a".to_vec()]);
+
+        // A page starting inside the last folder never reads the
+        // earlier siblings.
+        listed.borrow_mut().clear();
+        let after = SyncPath::try_from(b"z/i1".as_slice()).unwrap();
+        let (items, more) =
+            archived_page(&run, Some(&after), 2, in_memory(&tree, &run, &listed)).unwrap();
+        assert_eq!(paths(&items), [b"z/i2".to_vec(), b"z/i3".to_vec()]);
+        assert!(!more);
+        assert_eq!(*listed.borrow(), [b"".to_vec(), b"z".to_vec()]);
+    }
+
+    proptest! {
+        /// Every page equals the naive walk: keep `> after`, sort,
+        /// truncate, `more` when any is left.
+        #[test]
+        fn fuzz_archive_pages_match_the_naive_walk(
+            tree in nodes(3),
+            pick in any::<usize>(),
+            limit in prop_oneof![Just(0usize), Just(1), Just(2), Just(usize::MAX), 0..5usize],
+        ) {
+            let run = archive_name(at(1_000));
+            let options = cursors(&tree);
+            let after = options[pick % options.len()].as_ref();
+            let expected = naive_page(&tree, after.map(|path| path.as_bytes()), limit);
+            prop_assert_eq!(page(&tree, &run, after, limit), expected);
+        }
+
+        /// Paging a whole run by feeding each page's last path back as
+        /// the cursor visits every item once, in order.
+        #[test]
+        fn fuzz_archive_paging_visits_every_item_once(
+            tree in nodes(3),
+            limit in prop_oneof![Just(1usize), Just(2), Just(usize::MAX), 1..5usize],
+        ) {
+            let run = archive_name(at(1_000));
+            let all = naive(&tree);
+            let mut seen = Vec::new();
+            let mut after = None;
+            let mut pages = 0;
+            loop {
+                let (items, more) = page(&tree, &run, after.as_ref(), limit);
+                pages += 1;
+                prop_assert!(pages <= all.len() + 2, "paging did not advance");
+                seen.extend(items.iter().cloned());
+                if !more {
+                    break;
+                }
+                after = items.last().map(|(path, _)| SyncPath::try_from(path.as_slice()).unwrap());
+            }
+            prop_assert_eq!(seen, all);
+        }
+    }
+
+    #[test]
+    fn names_around_slash_page_in_byte_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let run = archive_name(at(1_000));
+        let root = directory.path().join(".foldover/archive").join(&run);
+        fs::create_dir_all(root.join("a")).unwrap();
+        fs::write(root.join("a-b"), b"").unwrap();
+        fs::write(root.join("a.txt"), b"").unwrap();
+        fs::write(root.join("a/x"), b"").unwrap();
+        fs::write(root.join("a0"), b"").unwrap();
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+
+        let (items, more) = endpoint.archived_items(&run, None, 3).unwrap();
+        assert_eq!(
+            paths(&items),
+            [b"a-b".to_vec(), b"a.txt".to_vec(), b"a/x".to_vec()]
+        );
+        assert!(more);
+        let (rest, more) = endpoint
+            .archived_items(&run, Some(items[2].path()), 3)
+            .unwrap();
+        assert_eq!(paths(&rest), [b"a0".to_vec()]);
+        assert!(!more);
     }
 
     #[test]

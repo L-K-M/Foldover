@@ -9,9 +9,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use foldover_state::{BaseUpdate, JournalUpdate, PairStore, StateLocation};
+use foldover_state::{BaseUpdate, JournalUpdate, PairStore, SnapshotEntry, StateLocation};
 use foldover_types::{
-    BaselineEntry, Digest, EntryContent, EntryVersion, LocalRoot, PairDraft, SyncMode, SyncPath,
+    BaselineEntry, Digest, EntryContent, EntryVersion, LocalRoot, PairDraft, Side, SyncMode,
+    SyncPath,
 };
 
 const DIRECTORIES: usize = 1_000;
@@ -90,6 +91,73 @@ fn db_commit_100k(c: &mut Criterion) {
     });
 }
 
+/// The same paths `updates` builds, as one side's stored observation;
+/// `salt` rewrites every fingerprint without touching the paths.
+fn snapshots(salt: u8) -> Vec<SnapshotEntry> {
+    let mut entries = Vec::with_capacity(EXPECTED_ENTRIES);
+    for folder in 0..DIRECTORIES {
+        let name = format!("d-{folder:04}");
+        entries.push(snapshot_entry(
+            name.as_bytes(),
+            (EXPECTED_ENTRIES + folder) as u32,
+            salt,
+        ));
+        for file in 0..FILES_PER_DIRECTORY {
+            let seed = (folder * FILES_PER_DIRECTORY + file) as u32;
+            entries.push(snapshot_entry(
+                format!("{name}/f-{file:02}").as_bytes(),
+                seed,
+                salt,
+            ));
+        }
+    }
+    entries
+}
+
+fn snapshot_entry(bytes: &[u8], seed: u32, salt: u8) -> SnapshotEntry {
+    SnapshotEntry {
+        path: path(bytes),
+        fingerprint: digest(seed, salt).as_bytes().to_vec(),
+        version: entry(seed).left(),
+    }
+}
+
+fn db_snapshot_unchanged_100k(c: &mut Criterion) {
+    let (_directory, mut store, pair) = store();
+    let entries = snapshots(0);
+    // One warm store, so every measured iteration is the steady state:
+    // the same 100_000 observations stored again after a run.
+    store
+        .replace_snapshot(pair.id(), pair.revision(), Side::Left, &entries)
+        .unwrap();
+    c.bench_function("db_snapshot_unchanged_100k", |b| {
+        b.iter(|| {
+            store
+                .replace_snapshot(pair.id(), pair.revision(), Side::Left, &entries)
+                .unwrap();
+        })
+    });
+}
+
+fn db_snapshot_rewrite_100k(c: &mut Criterion) {
+    let (_directory, mut store, pair) = store();
+    // Alternating sets with every fingerprint different makes each
+    // iteration update all 100_000 rows, the worst case for the merge.
+    let sets = [snapshots(0), snapshots(1)];
+    let mut turn = 0;
+    store
+        .replace_snapshot(pair.id(), pair.revision(), Side::Left, &sets[0])
+        .unwrap();
+    c.bench_function("db_snapshot_rewrite_100k", |b| {
+        b.iter(|| {
+            turn = 1 - turn;
+            store
+                .replace_snapshot(pair.id(), pair.revision(), Side::Left, &sets[turn])
+                .unwrap();
+        })
+    });
+}
+
 fn db_read_100k(c: &mut Criterion) {
     let (_directory, mut store, pair) = store();
     let updates = updates();
@@ -105,6 +173,6 @@ fn db_read_100k(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = db_commit_100k, db_read_100k
+    targets = db_commit_100k, db_read_100k, db_snapshot_unchanged_100k, db_snapshot_rewrite_100k
 }
 criterion_main!(benches);

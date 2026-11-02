@@ -215,6 +215,233 @@ fn the_whole_tree_is_listed_before_any_entry_is_checked() {
     assert_eq!(steps, [listed, checked].concat());
 }
 
+/// An endpoint that can open more sessions, each started through a shell
+/// that appends a line to `log`, or `None` without a server.
+fn pooled(directory: &Path, log: &Path) -> Option<SftpEndpoint> {
+    let Some(server) = server() else {
+        eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
+        return None;
+    };
+    let script = format!(
+        "echo session >> '{}'; exec '{}' -d /",
+        log.display(),
+        server.display()
+    );
+    let endpoint = SftpEndpoint::spawn(
+        Path::new("/bin/sh"),
+        &[OsStr::new("-c"), OsStr::new(&script)],
+        directory.as_os_str().as_encoded_bytes(),
+    )
+    .unwrap();
+    Some(endpoint)
+}
+
+/// PLAN.md §4.9: reading a folder's files uses several sessions, and finds
+/// exactly what one session finds, down to what it could not read.
+#[test]
+fn several_sessions_observe_what_one_session_does() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const FOLDERS: usize = 8;
+    const FILES_PER_FOLDER: usize = 25;
+
+    let (directory, logs) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let log = logs.path().join("sessions");
+    let Some(pooled) = pooled(directory.path(), &log) else {
+        return;
+    };
+    let single = sftp(directory.path()).unwrap();
+    assert_eq!(pooled.workers().get(), 4);
+    assert_eq!(single.workers().get(), 1);
+
+    for folder in 0..FOLDERS {
+        let folder = directory.path().join(format!("folder-{folder}"));
+        fs::create_dir(&folder).unwrap();
+        for file in 0..FILES_PER_FOLDER {
+            let name = folder.join(format!("{file}.txt"));
+            fs::write(name, format!("{} {file}", folder.display())).unwrap();
+        }
+    }
+    std::os::unix::fs::symlink("folder-0", directory.path().join("link")).unwrap();
+    let (locked, sealed) = (
+        directory.path().join("folder-1/locked"),
+        directory.path().join("sealed"),
+    );
+    fs::write(&locked, b"secret").unwrap();
+    fs::create_dir(&sealed).unwrap();
+    fs::write(sealed.join("inside"), b"secret").unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o0)).unwrap();
+    fs::set_permissions(&sealed, fs::Permissions::from_mode(0o0)).unwrap();
+
+    let observe = |endpoint: &SftpEndpoint| {
+        let mut steps = Vec::new();
+        let observation = endpoint
+            .observe_reporting(
+                PairOptions::default().metadata(),
+                &Filter::none(),
+                &BTreeMap::new(),
+                &mut proceed,
+                &mut |step| steps.push(step),
+            )
+            .unwrap();
+        (observation, steps)
+    };
+    let (one, one_steps) = observe(&single);
+    let (several, several_steps) = observe(&pooled);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(&sealed, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let versions = |observation: &Observation| -> Vec<_> {
+        let entries = observation.entries().iter();
+        entries
+            .map(|(path, entry)| (path.clone(), entry.version()))
+            .collect()
+    };
+    let unread = |observation: &Observation| -> Vec<_> {
+        let issues = observation.issues().iter();
+        issues.map(|issue| issue.path().clone()).collect()
+    };
+    assert_eq!(versions(&several), versions(&one));
+    assert_eq!(unread(&several), unread(&one));
+    assert_eq!(
+        unread(&several),
+        [path(b"folder-1/locked"), path(b"sealed")]
+    );
+
+    let count = |steps: &[ObserveStep], wanted: ObserveStep| {
+        steps.iter().filter(|&&step| step == wanted).count()
+    };
+    assert_eq!(
+        count(&several_steps, ObserveStep::Checked),
+        count(&one_steps, ObserveStep::Checked)
+    );
+    assert_eq!(
+        count(&several_steps, ObserveStep::Listed),
+        count(&several_steps, ObserveStep::Checked)
+    );
+
+    let sessions = fs::read_to_string(&log).unwrap().lines().count();
+    assert!(sessions > 1, "observed on {sessions} session");
+}
+
+#[test]
+fn cancelling_stops_an_observation_on_several_sessions() {
+    const FILES: usize = 64;
+
+    let (directory, logs) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let Some(pooled) = pooled(directory.path(), &logs.path().join("sessions")) else {
+        return;
+    };
+    for file in 0..FILES {
+        fs::write(directory.path().join(format!("{file}.txt")), b"data").unwrap();
+    }
+
+    // The first call lets the root be listed; the next stops the reads.
+    let mut calls = 0;
+    let observed = pooled.observe_from(
+        PairOptions::default().metadata(),
+        &Filter::none(),
+        &BTreeMap::new(),
+        &mut || {
+            calls += 1;
+            if calls > 1 {
+                ScanControl::Cancel
+            } else {
+                ScanControl::Continue
+            }
+        },
+    );
+    assert!(
+        matches!(observed, Err(ScanError::Cancelled)),
+        "{observed:?}"
+    );
+
+    // The sessions came back: the same endpoint observes again.
+    let observed = pooled.observe_from(
+        PairOptions::default().metadata(),
+        &Filter::none(),
+        &BTreeMap::new(),
+        &mut proceed,
+    );
+    assert_eq!(observed.unwrap().entries().len(), FILES);
+}
+
+/// Storing a snapshot writes only what differs, so an entry read again and
+/// found the same must keep its exact stored observation.
+#[test]
+fn an_entry_read_unchanged_keeps_its_stored_observation() {
+    // A stored fingerprint starts with when it was observed.
+    const OBSERVED_AT_BYTES: usize = 8 + 4;
+
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    let (kept, edited, retouched) = (
+        directory.path().join("kept"),
+        directory.path().join("edited"),
+        directory.path().join("retouched"),
+    );
+    fs::write(&kept, b"same").unwrap();
+    fs::write(&edited, b"before").unwrap();
+    fs::write(&retouched, b"before").unwrap();
+    fs::create_dir(directory.path().join("folder")).unwrap();
+
+    let policy = PairOptions::default().metadata();
+    let observe = |previous: &BTreeMap<SyncPath, ObservedEntry>| {
+        remote
+            .observe_from(policy, &Filter::none(), previous, &mut proceed)
+            .unwrap()
+            .entries()
+            .clone()
+    };
+    let first = observe(&BTreeMap::new());
+
+    // Observed long ago, so a rewritten fingerprint would show.
+    let aged: BTreeMap<_, _> = first
+        .iter()
+        .map(|(path, entry)| {
+            let mut fingerprint = entry.fingerprint_bytes();
+            fingerprint[..OBSERVED_AT_BYTES].fill(0);
+            let entry = ObservedEntry::restore(entry.version(), &fingerprint).unwrap();
+            (path.clone(), entry)
+        })
+        .collect();
+
+    // Other bytes of the same length under the same stat: only reading tells.
+    let stat = fs::metadata(&edited).unwrap();
+    fs::write(&edited, b"after!").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&edited)
+        .unwrap()
+        .set_modified(stat.modified().unwrap())
+        .unwrap();
+    // The same bytes under a new stat.
+    fs::File::options()
+        .write(true)
+        .open(&retouched)
+        .unwrap()
+        .set_modified(UNIX_EPOCH + Duration::from_secs(1_000))
+        .unwrap();
+    let second = observe(&aged);
+
+    assert_eq!(second[&path(b"kept")], aged[&path(b"kept")]);
+    assert_eq!(second[&path(b"folder")], aged[&path(b"folder")]);
+    assert_ne!(
+        second[&path(b"edited")].version(),
+        first[&path(b"edited")].version()
+    );
+    assert_ne!(
+        second[&path(b"edited")].fingerprint_bytes(),
+        aged[&path(b"edited")].fingerprint_bytes()
+    );
+    assert_ne!(
+        second[&path(b"retouched")].fingerprint_bytes(),
+        aged[&path(b"retouched")].fingerprint_bytes()
+    );
+}
+
 #[test]
 fn unreadable_directories_still_complete_scan_progress() {
     use std::os::unix::fs::PermissionsExt;
@@ -805,6 +1032,120 @@ fn identities_removals_and_pruning_follow_the_local_rules() {
         .unwrap();
     assert_eq!(pruned, 1);
     assert!(remote.archived_runs().unwrap().is_empty());
+}
+
+/// Sol review: with the only session lost and every reconnect refused,
+/// readers waited for a session for as long as the outage lasted, and
+/// cancelling waited for them.
+#[test]
+fn a_server_that_went_away_does_not_hold_up_cancelling() {
+    const FILES: usize = 16;
+    const PATIENCE: Duration = Duration::from_secs(60);
+
+    let (directory, logs) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let Some(server) = server() else {
+        eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
+        return;
+    };
+    for file in 0..FILES {
+        fs::write(directory.path().join(format!("{file}.txt")), b"data").unwrap();
+    }
+
+    // Only the first session reaches the server, whose process id stays
+    // the shell's through `exec`.
+    let pid = logs.path().join("pid");
+    let script = format!(
+        "[ -e '{pid}' ] && exit 1; echo $$ > '{pid}'; exec '{server}' -d /",
+        pid = pid.display(),
+        server = server.display()
+    );
+    let endpoint = SftpEndpoint::spawn(
+        Path::new("/bin/sh"),
+        &[OsStr::new("-c"), OsStr::new(&script)],
+        directory.path().as_os_str().as_encoded_bytes(),
+    )
+    .unwrap();
+
+    // The first ask lets the root be listed; the next takes the server
+    // away, and the one after cancels.
+    let (sender, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut calls = 0;
+        let observed = endpoint.observe_from(
+            PairOptions::default().metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut || {
+                calls += 1;
+                if calls == 2 {
+                    let id = fs::read_to_string(&pid).unwrap();
+                    std::process::Command::new("kill")
+                        .args(["-9", id.trim()])
+                        .status()
+                        .unwrap();
+                }
+                match calls {
+                    0..=2 => ScanControl::Continue,
+                    _ => ScanControl::Cancel,
+                }
+            },
+        );
+        let _ = sender.send(observed.map(|_| ()));
+    });
+
+    // The lost connection or the cancel ends it, whichever lands first;
+    // what must not happen is waiting on for the server.
+    let observed = finished
+        .recv_timeout(PATIENCE)
+        .expect("the observation never ended");
+    assert!(
+        matches!(observed, Err(ScanError::Cancelled | ScanError::Io { .. })),
+        "{observed:?}"
+    );
+}
+
+/// Folders sort as `name/` across a run, so `a/x` falls between `a.txt`
+/// and `a0`, and a page reads only the folders it reaches: `z` is unreadable
+/// while the first page is listed.
+#[test]
+fn archived_items_page_in_path_order_without_listing_past_the_page() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    let name = crate::local::archive::archive_name(UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+    let run = directory.path().join(".foldover/archive").join(&name);
+    for folder in ["a", "z"] {
+        fs::create_dir_all(run.join(folder)).unwrap();
+    }
+    for file in ["a-b", "a.txt", "a/x", "a0", "z/y"] {
+        fs::write(run.join(file), b"data").unwrap();
+    }
+    let set_mode = |mode| fs::set_permissions(run.join("z"), fs::Permissions::from_mode(mode));
+    let paths = |items: &[crate::ArchivedItem]| -> Vec<Vec<u8>> {
+        items
+            .iter()
+            .map(|item| item.path().as_bytes().to_vec())
+            .collect()
+    };
+
+    set_mode(0o000).unwrap();
+    let first = remote.archived_items(&name, None, 3);
+    set_mode(0o755).unwrap();
+
+    let (first, more) = first.unwrap();
+    assert_eq!(
+        paths(&first),
+        [b"a-b".to_vec(), b"a.txt".to_vec(), b"a/x".to_vec()]
+    );
+    assert!(more);
+    let (rest, more) = remote
+        .archived_items(&name, first.last().map(|item| item.path()), 3)
+        .unwrap();
+    assert_eq!(paths(&rest), [b"a0".to_vec(), b"z/y".to_vec()]);
+    assert!(!more);
 }
 
 /// Review of composed names: put back found an archived item in either

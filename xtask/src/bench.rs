@@ -11,9 +11,10 @@ use crate::{ToolError, cargo, workspace_root};
 /// The bench target per hot path, in the crate that owns the code.
 /// Criterion ids are the bench function names, so `target/criterion/
 /// <id>/new/estimates.json` is keyed by the same ids as the budgets.
-const BENCHES: [(&str, &str); 4] = [
+const BENCHES: [(&str, &str); 5] = [
     ("foldover-fs", "hash"),
     ("foldover-endpoint", "scan"),
+    ("foldover-endpoint", "archive"),
     ("foldover-engine", "plan"),
     ("foldover-state", "db"),
 ];

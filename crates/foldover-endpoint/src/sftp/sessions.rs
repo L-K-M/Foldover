@@ -70,11 +70,44 @@ impl Sessions {
     /// A session to use alone until the guard drops; `connect` opens
     /// another when none is idle and the limit allows.
     pub(super) fn borrow(&self, connect: Option<&Connect>) -> Borrowed<'_> {
+        self.acquire(connect, None).expect("only a stop gives up")
+    }
+
+    /// `borrow`, or `None` once `stopped` says so while none is idle. With
+    /// every session lost and connects failing, a borrower otherwise waits
+    /// as long as the outage lasts, and a cancelled run must not.
+    pub(super) fn borrow_unless(
+        &self,
+        connect: Option<&Connect>,
+        stopped: &mut dyn FnMut() -> bool,
+    ) -> Option<Borrowed<'_>> {
+        self.acquire(connect, Some(stopped))
+    }
+
+    fn acquire(
+        &self,
+        connect: Option<&Connect>,
+        mut stopped: Option<&mut dyn FnMut() -> bool>,
+    ) -> Option<Borrowed<'_>> {
         let mut pool = self.lock();
         loop {
             if let Some(session) = pool.idle.pop() {
                 drop(pool);
-                return self.lend(session);
+                return Some(self.lend(session));
+            }
+            // Asked without the lock: other borrowers should not wait on
+            // a run's control. One may have come back meanwhile, its
+            // wake-up going to nobody, so look again.
+            if let Some(stopped) = stopped.as_mut() {
+                drop(pool);
+                if stopped() {
+                    return None;
+                }
+                pool = self.lock();
+                if let Some(session) = pool.idle.pop() {
+                    drop(pool);
+                    return Some(self.lend(session));
+                }
             }
             if let Some(connect) = connect
                 && (pool.open < pool.limit
@@ -95,7 +128,7 @@ impl Sessions {
                         pool.limit = pool.limit.saturating_add(1).min(pool.wanted);
                         drop(pool);
                         self.returned.notify_one();
-                        return self.lend(session);
+                        return Some(self.lend(session));
                     }
                     // The server takes no more: share the ones it took.
                     // One may have come back meanwhile, so look again.
@@ -118,9 +151,10 @@ impl Sessions {
                     }
                 }
             }
-            // A timed wait only pays off with a connect to probe for
-            // the pool's recovery; without one it is pure polling.
-            pool = if connect.is_some() && pool.limit < pool.wanted {
+            // A timed wait only pays off with a stop to ask or a connect
+            // to probe for the pool's recovery; otherwise it is pure
+            // polling.
+            pool = if stopped.is_some() || connect.is_some() && pool.limit < pool.wanted {
                 self.wait_for(pool, RETRY)
             } else {
                 self.wait(pool)
@@ -328,6 +362,53 @@ mod tests {
             assert!(waiter.join().unwrap());
         });
         assert_eq!(sessions.lock().limit, 1);
+    }
+
+    #[test]
+    fn a_borrow_that_may_stop_gives_up_while_the_server_refuses() {
+        let Some(server) = server() else {
+            eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
+            return;
+        };
+        let refused: Connect = Box::new(|| Err(io::Error::other("no route to host")));
+        let sessions = Sessions::new(spawn(&server).unwrap(), 2);
+        let held = sessions.borrow(Some(&refused));
+        let stop = AtomicBool::new(false);
+
+        std::thread::scope(|threads| {
+            let waiter = threads.spawn(|| {
+                let mut stopped = || stop.load(Ordering::SeqCst);
+                sessions
+                    .borrow_unless(Some(&refused), &mut stopped)
+                    .is_none()
+            });
+            std::thread::sleep(2 * RETRY);
+            assert!(!waiter.is_finished());
+            stop.store(true, Ordering::SeqCst);
+            assert!(waiter.join().unwrap());
+        });
+
+        // Nothing leaked: the held session comes back and is lent again.
+        assert_eq!(sessions.lock().open, 1);
+        drop(held);
+        assert!(sessions.borrow_unless(None, &mut || true).is_some());
+    }
+
+    #[test]
+    fn a_borrow_that_may_stop_is_woken_by_a_returned_session() {
+        let Some(server) = server() else {
+            eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
+            return;
+        };
+        let sessions = Sessions::new(spawn(&server).unwrap(), 1);
+        let held = sessions.borrow(None);
+
+        std::thread::scope(|threads| {
+            let waiter = threads.spawn(|| sessions.borrow_unless(None, &mut || false).is_some());
+            std::thread::sleep(RETRY / 2);
+            drop(held);
+            assert!(waiter.join().unwrap());
+        });
     }
 
     #[test]

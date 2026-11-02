@@ -149,7 +149,7 @@ impl FolderPoll {
                     newly_active.extend(directory.clone());
                 }
                 for entry in &listing {
-                    if entry.kind() != ListedKind::Directory || before.contains(entry) {
+                    if entry.kind() != ListedKind::Directory || was_listed(before, entry) {
                         continue;
                     }
                     let Ok(path) = child(directory.as_ref(), entry.name()) else {
@@ -184,6 +184,17 @@ impl FolderPoll {
         self.seen = seen;
         Ok(changed)
     }
+}
+
+/// Whether `listing`, sorted by name, holds exactly `entry`. A folder can
+/// hold many thousands of directories, and each is looked up on every
+/// check, so a scan per entry would grow with the square of the folder.
+fn was_listed(listing: &[ListedEntry], entry: &ListedEntry) -> bool {
+    let first = listing.partition_point(|listed| listed.name() < entry.name());
+    listing[first..]
+        .iter()
+        .take_while(|listed| listed.name() == entry.name())
+        .any(|listed| listed == entry)
 }
 
 /// Make room to list one more directory this check: the least recently

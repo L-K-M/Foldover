@@ -37,8 +37,10 @@ lose the end of their stem, never the extension, and stay valid UTF-8.
 
 ## Consequences
 
-- Each page walks the whole run folder. Runs that archived hundreds of
-  thousands of items list slowly.
+- Each page used to walk the whole run folder;
+  [ADR 0046](0046-snapshot-archive-sftp-performance.md) walks in path
+  order and reads ahead. A single folder holding very many items still
+  lists slowly.
 - Folders are not archive items: removals only delete empty folders, so
   putting a file back recreates the folders above it.
 - Leftover temporaries archived by recovery are listed but cannot be put
