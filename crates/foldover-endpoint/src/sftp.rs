@@ -203,6 +203,18 @@ impl SftpEndpoint {
         self.sessions.borrow(self.connect.as_ref())
     }
 
+    /// `session`, unless `control` cancels while none is free: a server
+    /// that went away must not hold up cancelling.
+    fn session_unless_cancelled(
+        &self,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<Borrowed<'_>, ScanError> {
+        let mut stopped = || control() == ScanControl::Cancel;
+        self.sessions
+            .borrow_unless(self.connect.as_ref(), &mut stopped)
+            .ok_or(ScanError::Cancelled)
+    }
+
     /// How many copies the server takes at once: one without a way to
     /// open more sessions.
     pub fn workers(&self) -> NonZeroUsize {
@@ -501,7 +513,8 @@ impl SftpEndpoint {
                 None => self.root.clone(),
                 Some(path) => self.remote(path.as_bytes()),
             };
-            let entries = match self.session().read_dir(&remote) {
+            let listing = self.session_unless_cancelled(control)?.read_dir(&remote);
+            let entries = match listing {
                 Ok(entries) => entries,
                 Err(source) => {
                     observation.skip_error(at(directory.as_ref(), source))?;
@@ -673,7 +686,12 @@ impl SftpEndpoint {
             }
             FileKind::Directory => Ok(entry_version(Payload::Directory, &observed, policy)),
             FileKind::Symlink => {
-                let target = self.read_link(path)?;
+                let mut session = self.session_unless_cancelled(control)?;
+                let target = self
+                    .on_stored_with(&mut session, path.as_bytes(), |session, remote| {
+                        session.read_link(remote)
+                    })
+                    .map_err(|source| at(Some(path), source))?;
                 Ok(entry_version(Payload::Symlink(&target), &observed, policy))
             }
             FileKind::Other => Err(ScanError::UnsupportedEntry(path.clone())),
@@ -716,7 +734,7 @@ impl SftpEndpoint {
         sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
     ) -> Result<Digest, ScanError> {
         // The handle is valid only on the session that opened it.
-        let mut session = self.session();
+        let mut session = self.session_unless_cancelled(control)?;
         let (handle, remote) = self
             .on_stored_with(&mut session, path.as_bytes(), |session, remote| {
                 session

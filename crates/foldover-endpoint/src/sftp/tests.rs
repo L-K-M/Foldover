@@ -1039,6 +1039,76 @@ fn identities_removals_and_pruning_follow_the_local_rules() {
     assert!(remote.archived_runs().unwrap().is_empty());
 }
 
+/// Sol review: with the only session lost and every reconnect refused,
+/// readers waited for a session for as long as the outage lasted, and
+/// cancelling waited for them.
+#[test]
+fn a_server_that_went_away_does_not_hold_up_cancelling() {
+    const FILES: usize = 16;
+    const PATIENCE: Duration = Duration::from_secs(60);
+
+    let (directory, logs) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let Some(server) = server() else {
+        eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
+        return;
+    };
+    for file in 0..FILES {
+        fs::write(directory.path().join(format!("{file}.txt")), b"data").unwrap();
+    }
+
+    // Only the first session reaches the server, whose process id stays
+    // the shell's through `exec`.
+    let pid = logs.path().join("pid");
+    let script = format!(
+        "[ -e '{pid}' ] && exit 1; echo $$ > '{pid}'; exec '{server}' -d /",
+        pid = pid.display(),
+        server = server.display()
+    );
+    let endpoint = SftpEndpoint::spawn(
+        Path::new("/bin/sh"),
+        &[OsStr::new("-c"), OsStr::new(&script)],
+        directory.path().as_os_str().as_encoded_bytes(),
+    )
+    .unwrap();
+
+    // The first ask lets the root be listed; the next takes the server
+    // away, and the one after cancels.
+    let (sender, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut calls = 0;
+        let observed = endpoint.observe_from(
+            PairOptions::default().metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut || {
+                calls += 1;
+                if calls == 2 {
+                    let id = fs::read_to_string(&pid).unwrap();
+                    std::process::Command::new("kill")
+                        .args(["-9", id.trim()])
+                        .status()
+                        .unwrap();
+                }
+                match calls {
+                    0..=2 => ScanControl::Continue,
+                    _ => ScanControl::Cancel,
+                }
+            },
+        );
+        let _ = sender.send(observed.map(|_| ()));
+    });
+
+    // The lost connection or the cancel ends it, whichever lands first;
+    // what must not happen is waiting on for the server.
+    let observed = finished
+        .recv_timeout(PATIENCE)
+        .expect("the observation never ended");
+    assert!(
+        matches!(observed, Err(ScanError::Cancelled | ScanError::Io { .. })),
+        "{observed:?}"
+    );
+}
+
 /// Folders sort as `name/` across a run, so `a/x` falls between `a.txt`
 /// and `a0`, and a page reads only the folders it reaches: `z` is unreadable
 /// while the first page is listed.

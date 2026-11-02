@@ -254,14 +254,28 @@ mod tests {
     #[test]
     fn a_panicking_read_stops_the_others_and_is_raised() {
         let items: Vec<u32> = (0..8).collect();
+        let waiting = AtomicUsize::new(0);
+        let stopped = AtomicUsize::new(0);
 
+        // The first read fails once another is in progress. The patience
+        // panic in `until_cancelled` would pass for the raised one, so what
+        // counts is that the other read ended on its own.
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
             read_each(
                 &items,
                 WORKERS,
                 |item, asked| {
-                    assert_ne!(*item, 0, "the read failed");
+                    if *item == 0 {
+                        let started = Instant::now();
+                        while waiting.load(Ordering::SeqCst) == 0 {
+                            assert!(started.elapsed() < PATIENCE, "no other read started");
+                            thread::yield_now();
+                        }
+                        panic!("the read failed");
+                    }
+                    waiting.fetch_add(1, Ordering::SeqCst);
                     until_cancelled(asked);
+                    stopped.fetch_add(1, Ordering::SeqCst);
                 },
                 |_, ()| Ok(()),
                 &mut proceed,
@@ -269,5 +283,8 @@ mod tests {
         }));
 
         assert!(outcome.is_err());
+        let waited = waiting.load(Ordering::SeqCst);
+        assert!(waited > 0);
+        assert_eq!(stopped.load(Ordering::SeqCst), waited);
     }
 }
