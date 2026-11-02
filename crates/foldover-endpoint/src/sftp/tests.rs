@@ -298,13 +298,8 @@ fn several_sessions_observe_what_one_session_does() {
             .collect()
     };
     let unread = |observation: &Observation| -> Vec<_> {
-        let mut paths: Vec<_> = observation
-            .issues()
-            .iter()
-            .map(|issue| issue.path().clone())
-            .collect();
-        paths.sort();
-        paths
+        let issues = observation.issues().iter();
+        issues.map(|issue| issue.path().clone()).collect()
     };
     assert_eq!(versions(&several), versions(&one));
     assert_eq!(unread(&several), unread(&one));

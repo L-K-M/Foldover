@@ -96,14 +96,18 @@ impl Sessions {
                 return Some(self.lend(session));
             }
             // Asked without the lock: other borrowers should not wait on
-            // a run's control. A session returned meanwhile is seen after
-            // the timed wait below at the latest.
+            // a run's control. One may have come back meanwhile, its
+            // wake-up going to nobody, so look again.
             if let Some(stopped) = stopped.as_mut() {
                 drop(pool);
                 if stopped() {
                     return None;
                 }
                 pool = self.lock();
+                if let Some(session) = pool.idle.pop() {
+                    drop(pool);
+                    return Some(self.lend(session));
+                }
             }
             if let Some(connect) = connect
                 && (pool.open < pool.limit

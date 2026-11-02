@@ -144,7 +144,7 @@ fn db_snapshot_rewrite_100k(c: &mut Criterion) {
     // Alternating sets with every fingerprint different makes each
     // iteration update all 100_000 rows, the worst case for the merge.
     let sets = [snapshots(0), snapshots(1)];
-    let mut turn = 1;
+    let mut turn = 0;
     store
         .replace_snapshot(pair.id(), pair.revision(), Side::Left, &sets[0])
         .unwrap();

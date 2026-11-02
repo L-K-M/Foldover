@@ -617,24 +617,24 @@ impl SftpEndpoint {
                 record(observation, path, entry)?;
                 progress(ObserveStep::Checked);
             }
-            return Ok(());
+        } else {
+            readers::read_each(
+                reads,
+                workers,
+                |(path, attributes), asked| {
+                    self.observe_entry(path, attributes, previous, policy, &mut || asked())
+                },
+                |(path, _), entry| {
+                    record(observation, path, entry)?;
+                    progress(ObserveStep::Checked);
+                    Ok(())
+                },
+                control,
+            )?;
         }
 
-        readers::read_each(
-            reads,
-            workers,
-            |(path, attributes), asked| {
-                self.observe_entry(path, attributes, previous, policy, &mut || asked())
-            },
-            |(path, _), entry| {
-                record(observation, path, entry)?;
-                progress(ObserveStep::Checked);
-                Ok(())
-            },
-            control,
-        )?;
-
-        // Reads land in any order; what a run reports should not.
+        // Reads land in any order, and folders come first; what a run
+        // reports should depend on neither, nor on how many sessions read.
         observation
             .issues
             .sort_by(|left, right| left.path.cmp(&right.path));

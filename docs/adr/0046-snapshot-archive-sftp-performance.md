@@ -64,7 +64,9 @@ Mac, NAS or real WAN was measured.
 | 32 × 4 MiB SFTP files | 29.9 s, 30.7 s | 8.0 s, 6.3 s |
 
 Two values are two runs. A third round of the full rewrite hit a host stall
-on both old and new code and is left out.
+on both old and new code and is left out. A GitHub runner's medians, which
+the budgets allow for: 37 ms for the endpoint's archive pages, 45 ms for an
+unchanged snapshot and 275 ms for a full rewrite.
 
 ## Consequences
 
