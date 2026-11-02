@@ -161,8 +161,9 @@ you might expect. Only the last one below blocks saving
   copies it to the other folder like any new entry
   ([ADR 0025](../adr/0025-archive-browser.md)).
 - **Archive listings can lag.** Pages after a run's first may be up to 30
-  seconds old when another computer changed the archive. Put Back on an
-  item that is gone fails with an error and changes nothing
+  seconds old while a sync runs or when another computer changed the
+  archive. Put Back on an item that is gone fails with an error and
+  changes nothing
   ([ADR 0046](../adr/0046-snapshot-archive-sftp-performance.md)).
 - **Undo covers only the newest run that wrote.** It restores content a
   run created, replaced or archived, but never metadata, which is not

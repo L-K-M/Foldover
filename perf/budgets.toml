@@ -3,6 +3,7 @@
 # about 3x a local median so slower, noisier CI runners still pass.
 # How to update them: perf/README.md.
 
+archive_pages_5k = 160
 db_commit_100k = 1000
 db_read_100k = 300
 db_snapshot_rewrite_100k = 4000

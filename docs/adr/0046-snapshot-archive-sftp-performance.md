@@ -38,35 +38,44 @@ A performance audit found four costs that grow with a pair's size:
   for at most 30 seconds. The first page always reads the folder. A job's start
   and end and the end of any mutation drop the pair's window, and a walk
   overlapping one of those keeps nothing. The window never answers with a
-  short page while more follow, because clients stop on those.
+  short page while more follow: a walk would not, and an empty page ends
+  the CLI's listing.
 - **SFTP reads:** folders settle first, then files are read on up to four
   sessions of the existing pool. As in ADR 0043, only the run's thread
   records results and asks the run's control. Content verification is
-  unchanged. Endpoints without a session pool stay serial.
+  unchanged. Endpoints without a session pool stay serial. A read waiting
+  for a session gives up when the run cancels, so a server that went away
+  cannot hold up cancelling.
 
 ## Measurements
 
-Local Linux host under heavy unrelated load, synthetic data. No Mac, NAS
-or real WAN was measured.
+Local Linux host with heavy, varying unrelated load, synthetic data,
+release builds. SFTP latency is simulated at 5 ms per server message. No
+Mac, NAS or real WAN was measured.
 
 | What | Before | After |
 |---|---|---|
-| Unchanged snapshot, 100,000 rows | about 1.64 s | about 50 ms |
-| Every row of a snapshot changed, 100,000 rows | about 1.44 s | about 1.24 s |
+| Unchanged snapshot, 100,000 rows | 1.64 s | 46 ms |
+| Every row of a snapshot changed, 100,000 rows | 1.59 s, 1.80 s | 1.50 s, 1.26 s |
 | Poll lookups, 20,000 directories | 1.32 s | 6.38 ms |
-| 300 × 1 KiB SFTP files, 5 ms per server message | 55.0 s, 58.4 s | 14.5 s, 14.2 s |
-| 32 × 4 MiB SFTP files, 5 ms per server message | 29.9 s, 30.7 s | 8.0 s, 6.3 s |
+| Archive pages at the endpoint, 5,000 items in 50 folders | 913 ms | 52 ms |
+| Archive pages through the service, 5,000 items in one folder | 905 ms | 92 ms |
+| 300 × 1 KiB SFTP files | 55.0 s, 58.4 s | 14.5 s, 14.2 s |
+| 32 × 4 MiB SFTP files | 29.9 s, 30.7 s | 8.0 s, 6.3 s |
+
+Two values are two runs. A third round of the full rewrite hit a host stall
+on both old and new code and is left out.
 
 ## Consequences
 
 - Another computer's change to an archive can take up to 30 seconds to
-  show in pages after the first. Put Back on an item that is gone fails
-  with a clear error.
+  show in pages after the first, as can a change a job makes before it
+  ends. Put Back on an item that is gone fails with a clear error.
 - An archive page answered from memory does not touch the folder, so a
   root that went away shows at the next walk.
-- A run holding more than one page may still take long to walk when one
-  folder holds very many items: the folder is listed once per 1,000 items.
+- A single folder holding very many items is still listed once per 1,000
+  items, so such a run lists slowly.
 - A preview or sync on an SFTP folder can open up to four SSH connections
   for reading, plus the run's lease connection.
 - Budgets `db_snapshot_unchanged_100k`, `db_snapshot_rewrite_100k` and
-  `archive_pages_5k` guard the first and third of these.
+  `archive_pages_5k` guard the snapshot and archive costs.

@@ -1882,8 +1882,8 @@ mod tests {
         )
     }
 
-    /// Paging crosses from one read-ahead to the next without a short page,
-    /// which would end the CLI's listing early.
+    /// Paging crosses from one read-ahead to the next as a single walk
+    /// would: every page full until the last.
     #[tokio::test]
     async fn an_archived_run_pages_whole_across_read_aheads() {
         const ITEMS: usize = 1_050;
