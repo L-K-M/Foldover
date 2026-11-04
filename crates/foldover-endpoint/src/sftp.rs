@@ -383,8 +383,8 @@ impl SftpEndpoint {
             .map_err(io_error)
     }
 
-    /// Write `file` unless it exists; whether it was written. A plain SFTP
-    /// rename refuses an existing target, which makes the create exclusive.
+    /// Write `file` unless it exists; whether it was written. The final path
+    /// is opened exclusively, independent of the server's rename semantics.
     pub(crate) fn create_lock_file(
         &self,
         file: LockFile,
@@ -392,14 +392,38 @@ impl SftpEndpoint {
     ) -> Result<bool, ApplyError> {
         let remote = self.remote(file.path());
         self.on_lease_session(|session| {
-            let temporary = self.stage_lock(session, file, content)?;
-            let Err(error) = self.renamed_on(session, &temporary, &remote) else {
-                return Ok(true);
+            self.make_directories_on(session, INTERNAL_DIRECTORY, PRIVATE_DIRECTORY)?;
+            let handle = match session.create_new(&remote, PRIVATE_FILE) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    if !Self::answered(&error) {
+                        self.forget_parent(&remote);
+                    }
+                    return match read_small_on(session, &remote, LEASE_LIMIT) {
+                        Ok(Some(_)) => {
+                            self.note_added(&remote);
+                            Ok(false)
+                        }
+                        Ok(None) => Err(error),
+                        Err(read_error) => Err(read_error),
+                    };
+                }
             };
-            let _ = self.removed_file_on(session, &temporary);
-            match read_small_on(session, &remote, LEASE_LIMIT)? {
-                Some(_) => Ok(false),
-                None => Err(error),
+            self.note_added(&remote);
+            let written = session.write_chunks(&handle, |sink| sink(content));
+            let closed = session.close(handle);
+            match written.and(closed) {
+                Ok(()) => match read_small_on(session, &remote, LEASE_LIMIT) {
+                    Ok(Some(written)) if written == content => Ok(true),
+                    // A reclaimer may have replaced an incomplete file while
+                    // this write was delayed. Never claim its record as ours.
+                    Ok(_) => Ok(false),
+                    Err(error) => Err(error),
+                },
+                // A conditional remove is unavailable. Leave a partial or
+                // uncertain record for TTL recovery: deleting by name could
+                // remove a successor that reclaimed it while this call hung.
+                Err(error) => Err(error),
             }
         })
         .map_err(|source| write_error(&lock_path(file), source))

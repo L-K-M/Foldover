@@ -61,11 +61,12 @@ take:   create lock exclusively ──ok──▶ held
 - **Release:** dropping a lease removes the lock only if it still names
   this run.
 - **Transport:** local roots use exclusive create and rename-replace on
-  the held directory handle. SFTP renames a staged file into place, which
-  OpenSSH refuses over an existing one, over a second session opened for
-  leases: a transfer holds the main session while it calls back into the
-  run, so a beat on it would wait for the transfer, or deadlock. A shared
-  folder forwards each step to the Mac that shares it
+  the held directory handle. SFTP opens the final lock or claim with
+  `OPEN_CREATE|OPEN_EXCLUSIVE`, and uses OpenSSH's atomic replacing rename
+  for renewal and claim promotion, over a second session opened for leases:
+  a transfer holds the main session while it calls back into the run, so a
+  beat on it would wait for the transfer, or deadlock. A shared folder
+  forwards each step to the Mac that shares it
   (`FolderOp::Lease`), so the file operations run there.
 - A lock in any other format, such as one a newer version wrote, is
   honoured as live until it stays unchanged for a TTL.
@@ -79,9 +80,9 @@ take:   create lock exclusively ──ok──▶ held
 - Each beat costs one read and one write per root; on SFTP and shared
   folders, two round trips every 15 s. A run on an SFTP folder opens a
   second SSH connection.
+- An interrupted SFTP exclusive create can leave an incomplete lock. It is
+  kept rather than removed by name, since a delayed cleanup could delete a
+  successor's lock; the ordinary invalid-record TTL recovery reclaims it.
 - Fencing runs at beats, not at every write: after a takeover, the old
   holder may write for up to one beat before it stops. Staged writes
   and archived replacements keep that window recoverable.
-- An SFTP server whose rename replaces an existing file breaks the
-  exclusive create: two Macs could both take a free lease until the next
-  beat shows one of them that it lost.
