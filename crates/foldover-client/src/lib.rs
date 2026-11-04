@@ -32,8 +32,8 @@ use foldover_proto::local::{
 use foldover_proto::local::{ENDPOINT_BROWSE, EndpointBrowse, NETWORK_SERVERS, NetworkServers};
 pub use foldover_proto::local::{NetworkServer, ServerFolderList, ServerFolderRecord};
 use foldover_proto::local::{
-    PAIR_CHECK, PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_UPDATE, PairInput, PairKey,
-    PairList, PairRecord, PairUpdate, PairWarnings,
+    PAIR_CHECK, PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_UPDATE, PairCheck,
+    PairInput, PairKey, PairList, PairRecord, PairUpdate, PairWarnings,
 };
 use foldover_proto::local::{
     PEER_CANCEL, PEER_CONFIRM, PEER_PAIR, PEER_PAIRING_CLOSE, PEER_PAIRING_OPEN, PEER_REVOKE,
@@ -374,18 +374,19 @@ pub async fn create_pair(
 }
 
 /// What will not work as a person might expect with `draft`'s folders
-/// (PLAN.md §3.6). Warnings never block saving.
+/// (PLAN.md §3.6); `editing` is the pair the draft would replace. Only an
+/// overlap names something saving would refuse.
 pub async fn check_pair(
     location: &SocketLocation,
     draft: &PairDraft,
+    editing: Option<PairId>,
 ) -> Result<Vec<PairWarning>, Error> {
+    let check = PairCheck {
+        id: editing.map(|id| id.to_string()),
+        configuration: PairInput::from(draft),
+    };
     let warnings: PairWarnings = serde_json::from_value(
-        call(
-            location,
-            PAIR_CHECK,
-            Some(serde_json::to_value(PairInput::from(draft))?),
-        )
-        .await?,
+        call(location, PAIR_CHECK, Some(serde_json::to_value(check)?)).await?,
     )?;
     Ok(warnings.warnings)
 }

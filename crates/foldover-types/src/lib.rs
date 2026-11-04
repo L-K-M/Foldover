@@ -15,8 +15,8 @@ mod share;
 mod sync_path;
 
 pub use pair::{
-    InvalidPair, LocalRoot, MAX_LOCAL_ROOT_BYTES, MAX_PAIR_NAME_BYTES, PairConfig, PairDraft,
-    PairId,
+    FolderRole, InvalidPair, LocalRoot, MAX_LOCAL_ROOT_BYTES, MAX_PAIR_NAME_BYTES, PairConfig,
+    PairDraft, PairId,
 };
 
 pub use device::{DeviceId, InvalidDeviceId};

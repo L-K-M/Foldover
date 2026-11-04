@@ -884,7 +884,7 @@ async fn pairs(
         PairCommand::Check(draft) => {
             warn_sftp([draft.left(), draft.right()]);
             // JSON lines keep the machine-readable kinds and raw sides.
-            for warning in foldover_client::check_pair(location, &draft).await? {
+            for warning in foldover_client::check_pair(location, &draft, None).await? {
                 println!("{}", serde_json::to_string(&warning)?);
             }
             Ok(())
