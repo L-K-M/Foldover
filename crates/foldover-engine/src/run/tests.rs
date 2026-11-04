@@ -1367,6 +1367,34 @@ fn failed_folders_skip_their_contents_and_later_runs_recover_leftovers() {
 }
 
 #[test]
+fn an_immediate_stop_leaves_leftovers_for_the_next_run() {
+    let mut pair = fixture(SyncMode::Sync);
+    let leftover = pair.left.path().join(".foldover-tmp-interrupted");
+    fs::write(&leftover, b"unfinished").unwrap();
+    let prepared = pair.prepare();
+    let mut store = pair.store();
+    let outcome = prepared
+        .execute(
+            Approval::default(),
+            RunContext::Reviewed,
+            STARTED,
+            &mut |revision, commit| store.apply(revision, commit),
+            &mut || ScanControl::Cancel,
+            &NoProgress,
+        )
+        .unwrap();
+    let RunOutcome::Ran(report) = outcome else {
+        panic!("a stopped run reports itself, not an approval request")
+    };
+
+    assert_eq!(report.completion(), Completion::Cancelled);
+    assert_eq!(report.recovered(), 0);
+    assert!(report.failures().is_empty());
+    assert_eq!(fs::read(leftover).unwrap(), b"unfinished");
+    assert!(!pair.left.path().join(".foldover/archive").exists());
+}
+
+#[test]
 fn a_replaced_folder_at_the_same_path_stops_before_any_change() {
     let mut pair = fixture(SyncMode::Sync);
     for index in 0..3 {
@@ -1435,6 +1463,49 @@ fn completed_runs_name_their_archive_and_prune_expired_runs() {
             ))
             .exists()
     );
+}
+
+#[test]
+fn a_stop_after_the_sync_commit_skips_retention_but_the_run_stays_finished() {
+    let mut pair = fixture(SyncMode::Sync);
+    pair.sync();
+    let expired = pair
+        .left
+        .path()
+        .join(".foldover/archive/1970-01-01T00-00-00.000Z");
+    fs::create_dir_all(&expired).unwrap();
+    fs::write(expired.join("kept"), b"keep me").unwrap();
+
+    let prepared = pair.prepare();
+    let stop = std::cell::Cell::new(false);
+    let mut store = pair.store();
+    let outcome = prepared
+        .execute(
+            Approval::default(),
+            RunContext::Interactive,
+            STARTED + ARCHIVE_RETENTION + Duration::from_secs(1),
+            &mut |revision, commit| {
+                let synced = matches!(commit, Commit::Base { .. });
+                store.apply(revision, commit)?;
+                if synced {
+                    stop.set(true);
+                }
+                Ok(())
+            },
+            &mut || match stop.get() {
+                true => ScanControl::Cancel,
+                false => ScanControl::Continue,
+            },
+            &NoProgress,
+        )
+        .unwrap();
+    let RunOutcome::Ran(report) = outcome else {
+        panic!("a completed sync reports itself")
+    };
+
+    assert_eq!(report.completion(), Completion::Finished);
+    assert_eq!(report.pruned(), 0);
+    assert_eq!(fs::read(expired.join("kept")).unwrap(), b"keep me");
 }
 
 #[test]
