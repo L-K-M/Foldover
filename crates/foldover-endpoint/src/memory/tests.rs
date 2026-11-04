@@ -93,6 +93,11 @@ fn archive_pruning_removes_only_timestamped_directories() {
     );
     assert!(
         state
+            .get(format!(".foldover/archive/{run}/file").as_bytes())
+            .is_none()
+    );
+    assert!(
+        state
             .get(format!(".foldover/archive/{timestamp_file}").as_bytes())
             .is_some()
     );
