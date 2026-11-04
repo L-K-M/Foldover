@@ -156,12 +156,9 @@ final class PairEditorViewModel: Identifiable {
         return String(localized: "\(name) can't hold Foldover's .foldover folder, so it can only be a Backup's target. Choose a Backup to \(name), then keep nothing in it.")
     }
 
-    /// A folder another pair already uses can be shared only as a
-    /// Mirror's or Backup's source; saving refuses anything else, so the
-    /// editor blocks it (PLAN.md §3.6). One sentence per overlapping
-    /// side, then the rule.
     /// Saving refuses while another pair's folder cannot be read: whether
-    /// the picked folders overlap it is unknown (ADR 0048).
+    /// the picked folders overlap it is unknown (ADR 0048). One sentence
+    /// per pair, then what to do.
     var uncheckedWarning: String? {
         guard !uncheckedPairs.isEmpty else { return nil }
         var sentences = uncheckedPairs.map { pairName in
@@ -171,6 +168,10 @@ final class PairEditorViewModel: Identifiable {
         return sentences.joined(separator: " ")
     }
 
+    /// A folder another pair already uses can be shared only as a
+    /// Mirror's or Backup's source; saving refuses anything else, so the
+    /// editor blocks it (PLAN.md §3.6). One sentence per overlapping
+    /// side, then the rule.
     var overlapWarning: String? {
         guard !folderOverlaps.isEmpty else { return nil }
         var sentences = folderOverlaps.map { overlap in

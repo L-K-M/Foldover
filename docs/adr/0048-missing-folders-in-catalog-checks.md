@@ -35,12 +35,16 @@ A configured local folder is compared in one of three ways:
   identity, so no spelling of that ancestor evades the check. A chosen
   folder that is that ancestor, or above it, would hold the missing one
   once it is back, and overlaps. Anything else is beside it: the first
-  missing name is in no folder, so nothing chosen can be inside it.
+  missing name is in no folder, so nothing chosen can be inside it. A
+  link on the way that points at nothing, say into an ejected disk, is
+  followed: the folder would be at its target, not beside the link.
 - **Its identity file.** If the pair synced, it recorded the folder's
   identity. A chosen folder carrying that identity is the same folder,
-  mounted or moved elsewhere, and overlaps.
-- **Unreadable folders** still fail closed. The error names the pair and
-  the folder:
+  mounted or moved elsewhere, and overlaps. An identity file that cannot
+  be read clears nothing.
+- **Unreadable folders** still fail closed, as does a missing folder
+  whose nearest existing ancestor, or a chosen folder's identity file,
+  cannot be read. The error names the pair and the folder:
 
   ```text
   Can't check the chosen folders against “Photos backup”, whose folder

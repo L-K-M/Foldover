@@ -59,6 +59,17 @@ pub enum RootRelation {
     Disjoint,
 }
 
+/// Links `Root::relation_to_missing` follows before calling the path a
+/// loop, as many as a lookup on macOS and Linux follows.
+const MISSING_PATH_LINKS: usize = 32;
+
+/// Where one pass over a missing path's ancestors got to.
+enum Missing {
+    Found(RootRelation),
+    /// A link on the way points at nothing; the folder would be here.
+    Link(PathBuf),
+}
+
 /// Whether accessing a directory can replace or remove its descendants.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PathScope {
@@ -625,8 +636,26 @@ impl Root {
     /// spelling of it evades the check. This root holds `path` when it is
     /// that ancestor or above it. Anything else is beside `path`: the
     /// first missing name is in no folder, so this root cannot be inside
-    /// it. Should `path` be back, the real relation is returned.
+    /// it. A link on the way whose target is missing is followed, since
+    /// the folder would be where it points. Should `path` be back, the
+    /// real relation is returned.
     pub fn relation_to_missing(&self, path: &Path) -> io::Result<RootRelation> {
+        let mut path = path.to_path_buf();
+        // As many links as the kernel follows in one lookup.
+        for _ in 0..MISSING_PATH_LINKS {
+            match self.missing_step(&path)? {
+                Missing::Found(relation) => return Ok(relation),
+                Missing::Link(target) => path = target,
+            }
+        }
+        Err(io::Error::from_raw_os_error(
+            rustix::io::Errno::LOOP.raw_os_error(),
+        ))
+    }
+
+    /// One pass of `relation_to_missing` over `path`'s ancestors: the
+    /// relation, or the path to follow when a link on the way dangles.
+    fn missing_step(&self, path: &Path) -> io::Result<Missing> {
         for (depth, ancestor) in path.ancestors().enumerate() {
             let existing = match Self::open(ancestor) {
                 Ok(existing) => existing,
@@ -636,20 +665,27 @@ impl Root {
                         io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
                     ) =>
                 {
+                    // A name that is a link to nothing: the folder would
+                    // be at its target, with the rest of `path` below it.
+                    if let Ok(target) = std::fs::read_link(ancestor) {
+                        let parent = ancestor.parent().unwrap_or(Path::new("/"));
+                        let rest = path.strip_prefix(ancestor).unwrap_or(Path::new(""));
+                        return Ok(Missing::Link(parent.join(target).join(rest)));
+                    }
                     continue;
                 }
                 Err(error) => return Err(error),
             };
             let relation = self.relation_to(&existing)?;
             if depth == 0 {
-                return Ok(relation);
+                return Ok(Missing::Found(relation));
             }
-            return Ok(match relation {
+            return Ok(Missing::Found(match relation {
                 RootRelation::Same | RootRelation::Contains => RootRelation::Contains,
                 RootRelation::Within | RootRelation::Disjoint => RootRelation::Disjoint,
-            });
+            }));
         }
-        Ok(RootRelation::Disjoint)
+        Ok(Missing::Found(RootRelation::Disjoint))
     }
 
     /// Whether a named path reaches `protected`, including aliases along its
@@ -1188,6 +1224,33 @@ mod tests {
                 .unwrap(),
             RootRelation::Contains
         );
+        // A link to nothing is followed to where the folder would be:
+        // not inside the folder holding the link, but at its target.
+        let ejected = base.join("ejected");
+        std::os::unix::fs::symlink(base.join("parent/disk"), &ejected).unwrap();
+        assert_eq!(
+            open(&base.join("parent"))
+                .relation_to_missing(&ejected.join("folder"))
+                .unwrap(),
+            RootRelation::Contains
+        );
+        assert_eq!(
+            open(&base.join("parent/sibling"))
+                .relation_to_missing(&ejected.join("folder"))
+                .unwrap(),
+            RootRelation::Disjoint
+        );
+        let elsewhere = base.join("parent/sibling/away");
+        std::os::unix::fs::symlink("/nonexistent-volume/photos", &elsewhere).unwrap();
+        assert_eq!(
+            open(&base.join("parent/sibling"))
+                .relation_to_missing(&elsewhere)
+                .unwrap(),
+            RootRelation::Disjoint
+        );
+        let looped = base.join("looped");
+        std::os::unix::fs::symlink(&looped, &looped).unwrap();
+        assert!(open(&base).relation_to_missing(&looped).is_err());
         // A file where a folder would be is as missing as nothing.
         fs::write(base.join("parent/file"), b"").unwrap();
         assert_eq!(

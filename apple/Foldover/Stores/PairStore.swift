@@ -124,8 +124,9 @@ struct PairCatalogPage: Sendable {
 }
 
 /// What will not work as a person might expect with a picked folder
-/// (PLAN.md §3.6). The editor blocks saving over refused records and
-/// folder overlaps; saving itself would refuse an overlap.
+/// (PLAN.md §3.6). The editor blocks saving over refused records, folder
+/// overlaps and folders it cannot check; saving itself would refuse the
+/// last two.
 struct PairReadinessWarning: Equatable, Sendable {
     enum Kind: Equatable, Sendable {
         /// Another sync engine manages this folder; `provider` names it.
@@ -455,7 +456,8 @@ final class PairStore {
 
     /// What will not work as a person might expect with `settings`' folders
     /// (PLAN.md §3.6); `editing` is the pair the settings would replace.
-    /// Only an overlap names something saving would refuse.
+    /// Only an overlap, or a folder that cannot be checked, names something
+    /// saving would refuse.
     func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] {
         try await client.check(settings, editing: editing)
     }

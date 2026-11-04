@@ -375,7 +375,8 @@ pub async fn create_pair(
 
 /// What will not work as a person might expect with `draft`'s folders
 /// (PLAN.md §3.6); `editing` is the pair the draft would replace. Only an
-/// overlap names something saving would refuse.
+/// overlap, or a folder that cannot be checked, names something saving
+/// would refuse.
 pub async fn check_pair(
     location: &SocketLocation,
     draft: &PairDraft,

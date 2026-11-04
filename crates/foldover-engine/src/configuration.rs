@@ -695,9 +695,15 @@ impl Engine {
                     };
                     let overlapping = match overlapping(draft, &selected, &sides, &existing) {
                         Ok(overlapping) => overlapping,
-                        Err(error) => match offline {
-                            Offline::Refuse => return Err(error),
-                            Offline::Report => {
+                        Err(source) => match (offline, root(owner, owner_side)) {
+                            // Only local folders are compared on disk.
+                            (Offline::Refuse, PairRoot::Local(path)) => {
+                                return Err(unreadable(path, source));
+                            }
+                            (Offline::Refuse, PairRoot::Sftp(_) | PairRoot::Peer(_)) => {
+                                return Err(source.into());
+                            }
+                            (Offline::Report, _) => {
                                 for &side in &sides {
                                     found[side as usize] =
                                         Some(finding(side, OverlapKind::Unverified));
@@ -771,7 +777,7 @@ fn overlapping(
     selected: &[Option<&Endpoint>; 2],
     sides: &[Side],
     existing: &Existing<'_>,
-) -> Result<Vec<Side>, Error> {
+) -> Result<Vec<Side>, ScanError> {
     let mut overlapping = Vec::new();
     for &side in sides {
         let overlaps = match existing {
@@ -783,11 +789,13 @@ fn overlapping(
             // folder, carrying its identity, at another path: the disk
             // mounted elsewhere, or the folder moved.
             Existing::Missing { path, identity } => match selected[side as usize] {
+                // An identity file that cannot be read cannot clear it.
                 Some(endpoint) => {
                     endpoint.relation_to_missing(path)? != RootRelation::Disjoint
-                        || identity.is_some_and(|identity| {
-                            endpoint.identity().ok().flatten() == Some(identity)
-                        })
+                        || match identity {
+                            Some(identity) => endpoint.identity()? == Some(*identity),
+                            None => false,
+                        }
                 }
                 None => false,
             },
@@ -1076,6 +1084,53 @@ mod tests {
                 "{holds}"
             );
         }
+
+        // Unreadable, the identity file cannot clear the folder.
+        let id_file = carried.join(".foldover/id");
+        fs::set_permissions(&id_file, fs::Permissions::from_mode(0o000)).unwrap();
+        let refused = engine.create_pair(&draft(&free, &carried));
+        fs::set_permissions(&id_file, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            matches!(&refused, Err(Error::CatalogUnavailable { pair, .. }) if *pair == saved.id()),
+            "{refused:?}"
+        );
+    }
+
+    /// A missing folder whose nearest existing folder cannot be read
+    /// cannot be placed: saving names the pair, and the check reports it.
+    #[test]
+    fn a_missing_folder_behind_an_unreadable_one_cannot_be_checked() {
+        let temporary = tempfile::tempdir().unwrap();
+        let base = temporary.path().canonicalize().unwrap();
+        let mut engine = Engine::open(&StateLocation::Directory(base.join("state"))).unwrap();
+        let [locked, target, free, other] =
+            ["locked", "target", "free", "other"].map(|name| base.join(name));
+        let missing = locked.join("disk/photos");
+        for path in [&missing, &target, &free, &other] {
+            fs::create_dir_all(path).unwrap();
+        }
+        let saved = engine.create_pair(&draft(&missing, &target)).unwrap();
+        fs::remove_dir_all(locked.join("disk")).unwrap();
+        // Searchable, so the missing folder is missing, but not listable.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o100)).unwrap();
+        let refused = engine.create_pair(&draft(&free, &other));
+        let checked = engine.check_pair(&draft(&free, &other), None);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = refused.unwrap_err();
+        assert!(
+            matches!(&error, Error::CatalogUnavailable { pair, .. } if *pair == saved.id()),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("“Pair”"), "{error}");
+        let unverified = |side| ReadinessWarning::Unverified {
+            side,
+            pair: saved.id(),
+            name: "Pair".into(),
+        };
+        assert_eq!(
+            checked.unwrap(),
+            [unverified(Side::Left), unverified(Side::Right)]
+        );
     }
 
     fn one_way(left: &Path, right: &Path, mode: SyncMode) -> PairDraft {
