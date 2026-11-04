@@ -65,9 +65,12 @@ final class FoldTourTests: XCTestCase {
         checkPlate(tour, reads: "Comparing")
         tour.snap("fold-unpreviewed-comparing")
         checkPlate(tour, reads: "Syncing", timeout: 20)
+        // The count dissolves into the share as the stage changes.
+        tour.pause(1)
         tour.snap("fold-unpreviewed-syncing")
         XCTAssertTrue(app.buttons["Undo Sync"].waitForExistence(timeout: 60), "The run should end on its imprint")
-        tour.pause(2)
+        // In slow motion the peel takes about 3.4 s and the stamp 1.8 s.
+        tour.pause(6)
         tour.snap("fold-unpreviewed-imprint")
     }
 
