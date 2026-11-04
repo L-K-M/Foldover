@@ -64,8 +64,8 @@ pub enum FolderOp {
     /// `volume`: whether the folder is on a network volume of the
     /// answering Mac.
     Volume,
-    /// `progress` replies while scanning, entries as data frames, then
-    /// `observed`.
+    /// `progress` replies while scanning and once with its final counts,
+    /// entries as data frames, then `observed`.
     Observe { scan: ScanSettings },
     /// Prove `path` still holds `entry`, then send it: `reading`, a file's
     /// data frames from byte `from` and their end, then `done`.
