@@ -1554,7 +1554,6 @@ fn lock_files_are_created_exclusively_and_replaced_by_a_promoted_claim() {
         Some(&b"first"[..])
     );
 
-    remote.replace_lock_file(LockFile::Lock, b"beat").unwrap();
     assert!(remote.create_lock_file(LockFile::Claim, b"claim").unwrap());
     remote.promote_claim().unwrap();
     assert_eq!(

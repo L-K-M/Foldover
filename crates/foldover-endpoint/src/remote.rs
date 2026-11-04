@@ -277,17 +277,6 @@ impl PeerEndpoint {
         }
     }
 
-    pub(crate) fn replace_lock_file(
-        &self,
-        file: LockFile,
-        content: &[u8],
-    ) -> Result<(), ApplyError> {
-        let action = LeaseAction::Replace {
-            content: content.to_vec(),
-        };
-        done(self.reply(lease_op(file, action))?)
-    }
-
     pub(crate) fn remove_lock_file(&self, file: LockFile) -> Result<(), ApplyError> {
         done(self.reply(lease_op(file, LeaseAction::Remove))?)
     }

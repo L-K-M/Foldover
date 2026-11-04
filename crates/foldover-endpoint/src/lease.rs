@@ -96,7 +96,6 @@ impl From<ScanError> for LeaseError {
 pub struct HeldLease<'a> {
     endpoint: &'a Endpoint,
     holder: LeaseHolder,
-    beat: Cell<u64>,
     renewed: Cell<Instant>,
     timing: LeaseTiming,
 }
@@ -190,7 +189,7 @@ impl<'a> HeldLease<'a> {
         loop {
             let ours = Record::of(&holder, 0);
             if endpoint.create_lock_file(LockFile::Lock, &ours.bytes())? {
-                return Ok(Self::held(endpoint, holder, 0, timing));
+                return Ok(Self::held(endpoint, holder, timing));
             }
             match endpoint.read_lock_file(LockFile::Lock)? {
                 // Released meanwhile: try again at once. A lock that keeps
@@ -204,12 +203,12 @@ impl<'a> HeldLease<'a> {
                 Some(bytes) => {
                     released = false;
                     if Record::parse(&bytes).is_some_and(|record| record.holder == holder.id) {
-                        return Ok(Self::held(endpoint, holder, 0, timing));
+                        return Ok(Self::held(endpoint, holder, timing));
                     }
                     if Seen::dead(&mut lock, &bytes, timing.ttl)
                         && Self::take_over(endpoint, &holder, &bytes, &mut claim, timing.ttl)?
                     {
-                        return Ok(Self::held(endpoint, holder, 0, timing));
+                        return Ok(Self::held(endpoint, holder, timing));
                     }
                 }
             }
@@ -264,11 +263,10 @@ impl<'a> HeldLease<'a> {
             .is_some_and(|record| record.holder == holder.id))
     }
 
-    fn held(endpoint: &'a Endpoint, holder: LeaseHolder, beat: u64, timing: LeaseTiming) -> Self {
+    fn held(endpoint: &'a Endpoint, holder: LeaseHolder, timing: LeaseTiming) -> Self {
         Self {
             endpoint,
             holder,
-            beat: Cell::new(beat),
             renewed: Cell::new(Instant::now()),
             timing,
         }
@@ -283,19 +281,71 @@ impl<'a> HeldLease<'a> {
         self.renew()
     }
 
-    /// Move the beat, after checking the lease is still this run's.
+    /// Replace this run's exact lock through an exclusive claim. The claim
+    /// serializes a beat or release with a concurrent dead-lock takeover.
+    fn advance_through_claim(&self) -> Result<Option<u64>, LeaseError> {
+        let Some(current) = self.endpoint.read_lock_file(LockFile::Lock)? else {
+            return Ok(None);
+        };
+        let Some(record) = Record::parse(&current) else {
+            return Ok(None);
+        };
+        if record.holder != self.holder.id {
+            return Ok(None);
+        }
+        let Some(beat) = record.beat.checked_add(1) else {
+            return Ok(None);
+        };
+        let next = Record::of(&self.holder, beat).bytes();
+        let claimed = Instant::now();
+        if !self.endpoint.create_lock_file(LockFile::Claim, &next)? {
+            return Ok(None);
+        }
+
+        let unchanged = match self.endpoint.read_lock_file(LockFile::Lock) {
+            Ok(lock) => lock.as_deref() == Some(current.as_slice()),
+            Err(error) => {
+                self.abandon_claim(claimed)?;
+                return Err(error.into());
+            }
+        };
+        if !unchanged {
+            self.abandon_claim(claimed)?;
+            return Ok(None);
+        }
+
+        // A failed promotion can still have reached the endpoint. Re-reading
+        // the exact record decides the result without retrying a replacement.
+        // Once promotion is attempted, never remove the claim path: another
+        // reclaimer can create its own there as soon as ours moves.
+        let promoted = self.endpoint.promote_claim();
+        match self.endpoint.read_lock_file(LockFile::Lock) {
+            Ok(Some(bytes)) if bytes == next && claimed.elapsed() < self.timing.ttl => {
+                Ok(Some(beat))
+            }
+            Ok(Some(bytes)) if bytes == next => Ok(None),
+            Ok(_) => promoted.map(|()| None).map_err(Into::into),
+            Err(error) => match promoted {
+                Ok(()) => Err(error.into()),
+                Err(promote) => Err(promote.into()),
+            },
+        }
+    }
+
+    /// Remove the claim this call created while no stale-claim reclaimer can
+    /// yet have replaced it. Once a TTL passes, recovery owns its cleanup.
+    fn abandon_claim(&self, claimed: Instant) -> Result<(), LeaseError> {
+        if claimed.elapsed() < self.timing.ttl {
+            self.endpoint.remove_lock_file(LockFile::Claim)?;
+        }
+        Ok(())
+    }
+
+    /// Move the beat after fencing it against a concurrent takeover.
     pub fn renew(&self) -> Result<(), LeaseError> {
-        let current = self.endpoint.read_lock_file(LockFile::Lock)?;
-        if !current
-            .and_then(|bytes| Record::parse(&bytes))
-            .is_some_and(|record| record.holder == self.holder.id)
-        {
+        if self.advance_through_claim()?.is_none() {
             return Err(LeaseError::Lost);
         }
-        let beat = self.beat.get() + 1;
-        self.endpoint
-            .replace_lock_file(LockFile::Lock, &Record::of(&self.holder, beat).bytes())?;
-        self.beat.set(beat);
         self.renewed.set(Instant::now());
         Ok(())
     }
@@ -303,15 +353,9 @@ impl<'a> HeldLease<'a> {
 
 impl Drop for HeldLease<'_> {
     fn drop(&mut self) {
-        // Only this run's lease is removed; a takeover leaves the new one.
-        let ours = self
-            .endpoint
-            .read_lock_file(LockFile::Lock)
-            .ok()
-            .flatten()
-            .and_then(|bytes| Record::parse(&bytes))
-            .is_some_and(|record| record.holder == self.holder.id);
-        if ours {
+        // Promote our claim before removal. A crash then leaves an ordinary
+        // advanced lease, never a free lock beside a stale claim.
+        if matches!(self.advance_through_claim(), Ok(Some(_))) {
             let _ = self.endpoint.remove_lock_file(LockFile::Lock);
         }
     }

@@ -76,6 +76,69 @@ fn a_dead_lease_is_taken_over_and_its_holder_learns_it_lost() {
 }
 
 #[test]
+fn renewal_does_not_overwrite_a_pending_takeover_claim() {
+    let (directory, a, _) = folder();
+    let held = take(&a, holder("a/run", "Laptop"), QUICK, &mut proceed).unwrap();
+    let lock = directory.path().join(".foldover/lock");
+    let claim = directory.path().join(".foldover/lock.claim");
+    let before = fs::read(&lock).unwrap();
+    let successor = Record::of(&holder("b/run", "Studio"), 0).bytes();
+    fs::write(&claim, &successor).unwrap();
+
+    assert!(matches!(held.renew(), Err(LeaseError::Lost)));
+    assert_eq!(fs::read(lock).unwrap(), before);
+    assert_eq!(fs::read(claim).unwrap(), successor);
+}
+
+#[test]
+fn release_does_not_remove_a_lock_with_a_pending_takeover_claim() {
+    let (directory, a, b) = folder();
+    let held = take(&a, holder("a/run", "Laptop"), QUICK, &mut proceed).unwrap();
+    let lock = directory.path().join(".foldover/lock");
+    let claim = directory.path().join(".foldover/lock.claim");
+    let before = fs::read(&lock).unwrap();
+    let successor = Record::of(&holder("b/run", "Studio"), 0).bytes();
+    fs::write(&claim, &successor).unwrap();
+
+    drop(held);
+    assert_eq!(fs::read(&lock).unwrap(), before);
+    assert_eq!(fs::read(&claim).unwrap(), successor);
+
+    b.promote_claim().unwrap();
+    assert_eq!(fs::read(lock).unwrap(), successor);
+    assert!(!claim.exists());
+}
+
+#[test]
+fn renewal_and_release_consume_their_claims() {
+    let (directory, a, _) = folder();
+    let held = take(&a, holder("a/run", "Laptop"), QUICK, &mut proceed).unwrap();
+    let lock = directory.path().join(".foldover/lock");
+    let claim = directory.path().join(".foldover/lock.claim");
+
+    held.renew().unwrap();
+    assert_eq!(Record::parse(&fs::read(&lock).unwrap()).unwrap().beat, 1);
+    assert!(!claim.exists());
+
+    drop(held);
+    assert!(!lock.exists());
+    assert!(!claim.exists());
+}
+
+#[test]
+fn a_maximum_beat_is_lost_instead_of_wrapping() {
+    let (directory, a, _) = folder();
+    let held = take(&a, holder("a/run", "Laptop"), QUICK, &mut proceed).unwrap();
+    let lock = directory.path().join(".foldover/lock");
+    let maximum = Record::of(&holder("a/run", "Laptop"), u64::MAX).bytes();
+    fs::write(&lock, &maximum).unwrap();
+
+    assert!(matches!(held.renew(), Err(LeaseError::Lost)));
+    drop(held);
+    assert_eq!(fs::read(lock).unwrap(), maximum);
+}
+
+#[test]
 fn a_live_holder_keeps_its_lease_while_beating() {
     let (_directory, a, b) = folder();
     let held = take(&a, holder("a/run", "Laptop"), QUICK, &mut proceed).unwrap();

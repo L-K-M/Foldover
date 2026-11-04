@@ -52,14 +52,18 @@ take:   create lock exclusively ──ok──▶ held
   winner; the move and re-read settle any remaining tie. A claim is a
   lease too, so one left by a Mac that died mid-takeover is removed by
   the same rule.
-- **Fencing:** each beat first re-reads the lock. A run that finds
-  another holder cancels at its next checkpoint, commits what it did,
-  and fails with "Another Mac took over this folder".
+- **Fencing:** each beat creates `lock.claim` exclusively with its next
+  record, re-reads the exact lock, promotes the claim and verifies the
+  promoted bytes. A competing claim or changed lock loses the lease. The
+  run cancels at its next checkpoint, commits what it did, and fails with
+  "Another Mac took over this folder".
 - **Ordering:** a run takes its two leases in root-identity order, so two
   Macs syncing the same two folders cannot each hold one and wait on the
   other. Undo takes the same leases.
-- **Release:** dropping a lease removes the lock only if it still names
-  this run.
+- **Release:** dropping a lease advances through the same claim protocol,
+  then removes the promoted lock. A competing claim leaves the lock alone;
+  a crash between promotion and removal leaves an ordinary live lease for
+  TTL recovery, never a free lock beside a stale claim.
 - **Transport:** local roots use exclusive create and rename-replace on
   the held directory handle. SFTP renames a staged file into place, which
   OpenSSH refuses over an existing one, over a second session opened for
@@ -76,9 +80,9 @@ take:   create lock exclusively ──ok──▶ held
   to two minutes; the next run waits that out and takes over.
 - A Mac whose clock jumps cannot steal a live lease: only the beat and
   the reader's own monotonic clock count.
-- Each beat costs one read and one write per root; on SFTP and shared
-  folders, two round trips every 15 s. A run on an SFTP folder opens a
-  second SSH connection.
+- Each beat costs three reads, one exclusive claim create and one promotion
+  per root. A run on an SFTP folder opens a second SSH connection so a
+  transfer holding the main one cannot block its lease traffic.
 - Fencing runs at beats, not at every write: after a takeover, the old
   holder may write for up to one beat before it stops. Staged writes
   and archived replacements keep that window recoverable.

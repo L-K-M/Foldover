@@ -405,19 +405,6 @@ impl SftpEndpoint {
         .map_err(|source| write_error(&lock_path(file), source))
     }
 
-    pub(crate) fn replace_lock_file(
-        &self,
-        file: LockFile,
-        content: &[u8],
-    ) -> Result<(), ApplyError> {
-        let remote = self.remote(file.path());
-        self.on_lease_session(|session| {
-            let temporary = self.stage_lock(session, file, content)?;
-            self.rename_replacing_on(session, &temporary, &remote)
-        })
-        .map_err(|source| write_error(&lock_path(file), source))
-    }
-
     pub(crate) fn remove_lock_file(&self, file: LockFile) -> Result<(), ApplyError> {
         let remote = self.remote(file.path());
         self.on_lease_session(|session| match self.removed_file_on(session, &remote) {
