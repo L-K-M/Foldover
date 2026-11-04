@@ -12,7 +12,7 @@ All notable changes to this project are documented here. The format follows
   The current job keeps its original settings and finishes normally.
 - An aborted first sync still requires review on retry. Editing a pair's
   folders re-subscribes its change watchers. Peer scan counters cannot
-  claim unbounded work in one progress report.
+  claim unbounded work in a scan, however many reports they send.
 - Put Back All reserves the archive through its reload and shows recovery
   activity. Periodic health probes keep pair commands enabled.
 - Unicode spelling preparation counts aliases once, and preview rows are

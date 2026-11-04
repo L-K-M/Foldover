@@ -48,16 +48,25 @@ pub use serve::{FolderCache, serve_folder};
 /// between two reports.
 const MAX_STEPS_PER_REPORT: u64 = 1_000_000;
 
+/// The most scan steps all of one scan's reports together can stand for,
+/// per counter, however many reports the other Mac sends: a hundred times
+/// the million files PLAN.md §5.3 budgets for.
+const MAX_STEPS_PER_SCAN: u64 = 100_000_000;
+
 /// Report the steps a peer's cumulative counter grew, at most
-/// `MAX_STEPS_PER_REPORT` of them, then adopt the counter as it stands.
-/// Progress is what "Comparing… N items" counts; it decides nothing.
+/// `MAX_STEPS_PER_REPORT` of them and none past `MAX_STEPS_PER_SCAN`,
+/// then adopt the counter as it stands. A call reports at most
+/// `min(now, MAX_STEPS_PER_SCAN) - adopted` steps and leaves `adopted` at
+/// least `now`, so all of a scan's calls report `MAX_STEPS_PER_SCAN` at
+/// most. Progress is what "Comparing… N items" counts; it decides nothing.
 fn report_steps(
     adopted: &mut u64,
     now: u64,
     step: ObserveStep,
     progress: &mut impl FnMut(ObserveStep),
 ) {
-    for _ in 0..now.saturating_sub(*adopted).min(MAX_STEPS_PER_REPORT) {
+    let bounded = now.min(MAX_STEPS_PER_SCAN);
+    for _ in 0..bounded.saturating_sub(*adopted).min(MAX_STEPS_PER_REPORT) {
         progress(step);
     }
     *adopted = (*adopted).max(now);
