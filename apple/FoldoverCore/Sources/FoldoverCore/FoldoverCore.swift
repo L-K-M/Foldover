@@ -1807,7 +1807,7 @@ public struct ReadinessWarning: Equatable, Hashable {
      */
     public var provider: String?
     /**
-     * The other pair's name, for `Overlap` only.
+     * The other pair's name, for `Overlap` and `Unverified` only.
      */
     public var pairName: String?
 
@@ -1818,7 +1818,7 @@ public struct ReadinessWarning: Equatable, Hashable {
          * The other sync engine's name, for `CloudManaged` only.
          */provider: String?, 
         /**
-         * The other pair's name, for `Overlap` only.
+         * The other pair's name, for `Overlap` and `Unverified` only.
          */pairName: String?) {
         self.side = side
         self.kind = kind
@@ -3599,6 +3599,11 @@ public enum ReadinessWarningKind: Equatable, Hashable {
      * saving would refuse it.
      */
     case overlap
+    /**
+     * A folder of the pair named `pair_name` is there but cannot be read,
+     * so this folder cannot be checked against it; saving would refuse.
+     */
+    case unverified
 
 
 
@@ -3630,6 +3635,8 @@ public struct FfiConverterTypeReadinessWarningKind: FfiConverterRustBuffer {
         
         case 5: return .overlap
         
+        case 6: return .unverified
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -3656,6 +3663,10 @@ public struct FfiConverterTypeReadinessWarningKind: FfiConverterRustBuffer {
         
         case .overlap:
             writeInt(&buf, Int32(5))
+        
+        
+        case .unverified:
+            writeInt(&buf, Int32(6))
         
         }
     }
@@ -5285,7 +5296,8 @@ public func agentStatus()async throws  -> AgentHealth  {
 /**
  * What will not work as a person might expect with `configuration`'s
  * folders (PLAN.md §3.6); `editing` is the pair the draft would
- * replace. Only an overlap names something saving would refuse.
+ * replace. Only an overlap, or a folder that cannot be checked, names
+ * something saving would refuse.
  */
 public func checkPair(configuration: LocalPairDraft, editing: String?)async throws  -> [ReadinessWarning]  {
     return
@@ -5936,7 +5948,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_foldover_ffi_checksum_func_agent_status() != 7308) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_foldover_ffi_checksum_func_check_pair() != 64567) {
+    if (uniffi_foldover_ffi_checksum_func_check_pair() != 11016) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_core_version() != 27554) {

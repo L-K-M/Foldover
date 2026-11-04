@@ -15,7 +15,7 @@ use foldover_types::{
     CaseMatching, NameMatching, PairConfig, PairDraft, PairId, PairRoot, Propagation, Side,
 };
 
-use crate::configuration::Offline;
+use crate::configuration::{CatalogOverlap, Offline, OverlapKind};
 use crate::{Engine, Error};
 
 /// Mount `side`'s share again from `source`, its recorded mount source;
@@ -34,8 +34,8 @@ pub fn missing_side(pair: &PairConfig, reach: &Reach) -> Option<Side> {
 }
 
 /// What will not work as a person might expect with the folders they
-/// picked (PLAN.md §3.6). Only `Overlap` names something saving would
-/// refuse; the others never block it.
+/// picked (PLAN.md §3.6). Only `Overlap` and `Unverified` name something
+/// saving would refuse; the others never block it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReadinessWarning {
     /// Another sync engine manages this side's folder.
@@ -56,14 +56,23 @@ pub enum ReadinessWarning {
         pair: PairId,
         name: String,
     },
+    /// A folder of the pair named `name` is there but cannot be read, so
+    /// this side cannot be checked against it. Saving refuses it until
+    /// the folder can be read (ADR 0048).
+    Unverified {
+        side: Side,
+        pair: PairId,
+        name: String,
+    },
 }
 
 impl Engine {
     /// What will not work as a person might expect with `draft`'s
     /// folders; `editing` names the pair the draft would replace, whose
     /// own folders never overlap it. A root that cannot be opened yields
-    /// no warnings for its side, and an existing pair whose folder cannot
-    /// be opened none at all: saving reports both itself.
+    /// no warnings for its side: saving reports that itself. An existing
+    /// pair's folder that is missing is compared by where it would be;
+    /// one that cannot be read is reported as `Unverified`.
     pub fn check_pair(
         &self,
         draft: &PairDraft,
@@ -120,17 +129,20 @@ impl Engine {
             draft,
             [left.as_ref(), right.as_ref()],
             editing,
-            Offline::Skip,
+            Offline::Report,
         )?;
-        warnings.extend(
-            overlaps
-                .into_iter()
-                .map(|overlap| ReadinessWarning::Overlap {
-                    side: overlap.side,
-                    pair: overlap.pair,
-                    name: overlap.name,
-                }),
-        );
+        warnings.extend(overlaps.into_iter().map(|overlap| {
+            let CatalogOverlap {
+                side,
+                pair,
+                name,
+                kind,
+            } = overlap;
+            match kind {
+                OverlapKind::Overlaps => ReadinessWarning::Overlap { side, pair, name },
+                OverlapKind::Unverified => ReadinessWarning::Unverified { side, pair, name },
+            }
+        }));
         Ok(warnings)
     }
 }
@@ -299,6 +311,34 @@ mod tests {
                 .check_pair(&draft(&third, &second, SyncMode::Sync), None)
                 .unwrap(),
             []
+        );
+    }
+
+    /// A folder of another pair that is there but cannot be read keeps
+    /// both sides from being checked; the editor names the pair.
+    #[test]
+    fn an_unreadable_folder_of_another_pair_leaves_both_sides_unverified() {
+        use std::os::unix::fs::PermissionsExt;
+        let (temporary, mut engine) = engine();
+        let paths = ["a", "b", "c", "d"].map(|name| temporary.path().join(name));
+        for path in &paths {
+            fs::create_dir(path).unwrap();
+        }
+        let draft = |left: &Path, right: &Path| {
+            PairDraft::new("Photos".into(), root(left), root(right), SyncMode::Sync).unwrap()
+        };
+        let existing = engine.create_pair(&draft(&paths[0], &paths[1])).unwrap();
+        fs::set_permissions(&paths[0], fs::Permissions::from_mode(0o000)).unwrap();
+        let warnings = engine.check_pair(&draft(&paths[2], &paths[3]), None);
+        fs::set_permissions(&paths[0], fs::Permissions::from_mode(0o755)).unwrap();
+        let unverified = |side| ReadinessWarning::Unverified {
+            side,
+            pair: existing.id(),
+            name: "Photos".into(),
+        };
+        assert_eq!(
+            warnings.unwrap(),
+            [unverified(Side::Left), unverified(Side::Right)]
         );
     }
 

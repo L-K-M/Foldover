@@ -48,7 +48,7 @@ What you need to know before trusting a pair with your data.
 ## Readiness warnings
 
 While you edit a pair, Foldover warns about sides that will not work as
-you might expect. Only the last two below block saving
+you might expect. Only the last three below block saving
 ([ADR 0037](../adr/0037-readiness-warnings.md)):
 
 - A folder another sync engine manages: iCloud Drive, Desktop &
@@ -67,7 +67,14 @@ you might expect. Only the last two below block saving
   Pairs share folders only as the source of a Mirror or Backup, so you
   can back up one folder to several targets, or a folder and one inside
   it separately; a folder any pair writes stays its own
-  ([ADR 0047](../adr/0047-shared-one-way-sources.md)).
+  ([ADR 0047](../adr/0047-shared-one-way-sources.md)). A folder of
+  another pair on a disk that is not connected is compared by where it
+  would be, and by its identity file should it be mounted elsewhere
+  ([ADR 0048](../adr/0048-missing-folders-in-catalog-checks.md)).
+- Another pair's folder that is there but cannot be read, say because
+  Foldover may not access it: the folders you chose cannot be checked
+  against it until it can be read
+  ([ADR 0048](../adr/0048-missing-folders-in-catalog-checks.md)).
 
 ## Several Macs on one folder
 

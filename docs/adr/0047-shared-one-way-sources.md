@@ -43,7 +43,9 @@ share folders only as Mirror or Backup sources
 and answers `{ "kind": "overlap", "side", "pairName" }` for each side
 that saving would refuse. `id` names the pair being edited, which never
 overlaps itself. An existing pair whose folder will not open is left to
-saving, which fails closed as before ([ADR 0011](0011-pair-configuration-api.md)).
+saving, which fails closed as before ([ADR 0011](0011-pair-configuration-api.md));
+[ADR 0048](0048-missing-folders-in-catalog-checks.md) compares a missing one
+by where it would be and reports an unreadable one before saving.
 The editor blocks Save while an overlap is reported, as it does for a
 folder refusing records ([ADR 0040](0040-backup-targets-without-records.md)).
 

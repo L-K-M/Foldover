@@ -141,6 +141,9 @@ struct PairReadinessWarning: Equatable, Sendable {
         /// `pairName`; only Mirror and Backup sources may share one, so
         /// saving would refuse it.
         case overlap(pairName: String)
+        /// A folder of the pair `pairName` is there but cannot be read, so
+        /// this folder cannot be checked against it; saving would refuse.
+        case unverified(pairName: String)
     }
 
     let side: FolderSide
@@ -238,6 +241,7 @@ private actor CorePairClient: PairClient {
         case .namesDiffer: .namesDiffer
         case .recordsUnsupported: .recordsUnsupported
         case .overlap: .overlap(pairName: warning.pairName ?? "")
+        case .unverified: .unverified(pairName: warning.pairName ?? "")
         }
         return PairReadinessWarning(side: side, kind: kind)
     }

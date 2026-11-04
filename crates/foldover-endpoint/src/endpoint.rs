@@ -12,8 +12,8 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime};
 
 use foldover_types::{
-    CaseMatching, Durability, EndpointId, EntryVersion, MetadataPolicy, NameMatching, PairOptions,
-    PairRoot, ScanControl, SyncPath, UnicodeMatching,
+    CaseMatching, Durability, EndpointId, EntryVersion, LocalRoot, MetadataPolicy, NameMatching,
+    PairOptions, PairRoot, ScanControl, SyncPath, UnicodeMatching,
 };
 
 use crate::lease::LockFile;
@@ -543,6 +543,17 @@ impl Endpoint {
             Self::Peer(endpoint) => endpoint.promote_claim(),
             #[cfg(feature = "simulation")]
             Self::Memory(endpoint) => endpoint.promote_claim(),
+        }
+    }
+
+    /// How this root nests with a local folder that is missing, e.g. on a
+    /// disk that is not mounted. Only a local root can hold it.
+    pub fn relation_to_missing(&self, missing: &LocalRoot) -> Result<RootRelation, ScanError> {
+        match self {
+            Self::Local(endpoint) => {
+                endpoint.relation_to_missing(Path::new(OsStr::from_bytes(missing.as_bytes())))
+            }
+            _ => Ok(RootRelation::Disjoint),
         }
     }
 

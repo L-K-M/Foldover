@@ -619,6 +619,39 @@ impl Root {
         Ok(RootRelation::Disjoint)
     }
 
+    /// How this root nests with `path` while nothing is there, e.g. its
+    /// disk or share is not mounted. The deepest ancestor of `path` that
+    /// exists is compared by held identity, as `relation_to` does, so no
+    /// spelling of it evades the check. This root holds `path` when it is
+    /// that ancestor or above it. Anything else is beside `path`: the
+    /// first missing name is in no folder, so this root cannot be inside
+    /// it. Should `path` be back, the real relation is returned.
+    pub fn relation_to_missing(&self, path: &Path) -> io::Result<RootRelation> {
+        for (depth, ancestor) in path.ancestors().enumerate() {
+            let existing = match Self::open(ancestor) {
+                Ok(existing) => existing,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let relation = self.relation_to(&existing)?;
+            if depth == 0 {
+                return Ok(relation);
+            }
+            return Ok(match relation {
+                RootRelation::Same | RootRelation::Contains => RootRelation::Contains,
+                RootRelation::Within | RootRelation::Disjoint => RootRelation::Disjoint,
+            });
+        }
+        Ok(RootRelation::Disjoint)
+    }
+
     /// Whether a named path reaches `protected`, including aliases along its
     /// directory chain. A subtree access also reaches a protected descendant
     /// of the target itself. This is a fresh observation, not an execution lock.
@@ -1117,6 +1150,57 @@ mod tests {
         assert!(
             root.path_reaches(&path(b"other/moved/inside"), &state, PathScope::Entry)
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_missing_folder_is_held_only_by_roots_at_or_above_its_nearest_ancestor() {
+        let temporary = tempfile::tempdir().unwrap();
+        let base = temporary.path().canonicalize().unwrap();
+        fs::create_dir_all(base.join("parent/sibling/deeper")).unwrap();
+        let missing = base.join("parent/disk/folder");
+        let open = |path: &Path| Root::open(path).unwrap();
+        // The nearest existing ancestor, and anything above it, would hold it.
+        for holder in [base.join("parent"), base.clone()] {
+            assert_eq!(
+                open(&holder).relation_to_missing(&missing).unwrap(),
+                RootRelation::Contains,
+                "{holder:?}"
+            );
+        }
+        // Beside it, below that ancestor, nothing can be inside it.
+        for beside in [
+            base.join("parent/sibling"),
+            base.join("parent/sibling/deeper"),
+        ] {
+            assert_eq!(
+                open(&beside).relation_to_missing(&missing).unwrap(),
+                RootRelation::Disjoint,
+                "{beside:?}"
+            );
+        }
+        // An alias of the ancestor is seen through.
+        let alias = base.join("alias");
+        std::os::unix::fs::symlink(base.join("parent"), &alias).unwrap();
+        assert_eq!(
+            open(&base.join("parent"))
+                .relation_to_missing(&alias.join("disk/folder"))
+                .unwrap(),
+            RootRelation::Contains
+        );
+        // A file where a folder would be is as missing as nothing.
+        fs::write(base.join("parent/file"), b"").unwrap();
+        assert_eq!(
+            open(&base.join("parent/sibling"))
+                .relation_to_missing(&base.join("parent/file/folder"))
+                .unwrap(),
+            RootRelation::Disjoint
+        );
+        // Once it is back, the relation is the real one.
+        fs::create_dir_all(&missing).unwrap();
+        assert_eq!(
+            open(&missing).relation_to_missing(&missing).unwrap(),
+            RootRelation::Same
         );
     }
 

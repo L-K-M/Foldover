@@ -192,6 +192,9 @@ struct PairEditorView: View {
             if let warning = viewModel.overlapWarning {
                 WarningLabel(text: warning)
             }
+            if let warning = viewModel.uncheckedWarning {
+                WarningLabel(text: warning)
+            }
             if viewModel.offersKeepingNothing {
                 HStack {
                     Toggle(viewModel.keepingNothingTitle, isOn: $viewModel.keepsNothingInTarget)
