@@ -32,7 +32,7 @@ private actor OnePairClient: PairClient {
     func create(_ settings: PairSettings) async throws -> SyncPair { pair }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { pair }
     func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { [] }
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { [] }
     func servers() async throws -> [NearbyServer] { [] }
     func browse(_ locator: String) async throws -> ServerListing {
         ServerListing(locator: locator, parent: nil, folders: [])
@@ -151,7 +151,7 @@ private actor ThreePairClient: PairClient {
     func create(_ settings: PairSettings) async throws -> SyncPair { pairs[0] }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { pair }
     func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { [] }
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { [] }
     func servers() async throws -> [NearbyServer] { [] }
     func browse(_ locator: String) async throws -> ServerListing {
         ServerListing(locator: locator, parent: nil, folders: [])
@@ -188,7 +188,7 @@ private actor EmptyCatalogClient: PairClient {
     }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { pair }
     func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { [] }
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { [] }
     func servers() async throws -> [NearbyServer] { [] }
     func browse(_ locator: String) async throws -> ServerListing {
         ServerListing(locator: locator, parent: nil, folders: [])
@@ -336,7 +336,7 @@ private actor CatalogProbe: PairClient {
     func remove(_ pair: SyncPair) async throws -> SyncPair {
         throw MonitorFixtureError.unreachable
     }
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { [] }
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { [] }
     func servers() async throws -> [NearbyServer] { [] }
     func browse(_ locator: String) async throws -> ServerListing {
         ServerListing(locator: locator, parent: nil, folders: [])

@@ -60,7 +60,7 @@ private actor WindowCatalog: PairClient {
         throw WindowFixtureError.unexpected
     }
     func remove(_ pair: SyncPair) async throws -> SyncPair { throw WindowFixtureError.unexpected }
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { [] }
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { [] }
     func servers() async throws -> [NearbyServer] { [] }
     func browse(_ locator: String) async throws -> ServerListing {
         ServerListing(locator: locator, parent: nil, folders: [])

@@ -1806,16 +1806,24 @@ public struct ReadinessWarning: Equatable, Hashable {
      * The other sync engine's name, for `CloudManaged` only.
      */
     public var provider: String?
+    /**
+     * The other pair's name, for `Overlap` only.
+     */
+    public var pairName: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(side: SyncSide, kind: ReadinessWarningKind, 
         /**
          * The other sync engine's name, for `CloudManaged` only.
-         */provider: String?) {
+         */provider: String?, 
+        /**
+         * The other pair's name, for `Overlap` only.
+         */pairName: String?) {
         self.side = side
         self.kind = kind
         self.provider = provider
+        self.pairName = pairName
     }
 
     
@@ -1836,7 +1844,8 @@ public struct FfiConverterTypeReadinessWarning: FfiConverterRustBuffer {
             try ReadinessWarning(
                 side: FfiConverterTypeSyncSide.read(from: &buf), 
                 kind: FfiConverterTypeReadinessWarningKind.read(from: &buf), 
-                provider: FfiConverterOptionString.read(from: &buf)
+                provider: FfiConverterOptionString.read(from: &buf), 
+                pairName: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -1844,6 +1853,7 @@ public struct FfiConverterTypeReadinessWarning: FfiConverterRustBuffer {
         FfiConverterTypeSyncSide.write(value.side, into: &buf)
         FfiConverterTypeReadinessWarningKind.write(value.kind, into: &buf)
         FfiConverterOptionString.write(value.provider, into: &buf)
+        FfiConverterOptionString.write(value.pairName, into: &buf)
     }
 }
 
@@ -3583,6 +3593,12 @@ public enum ReadinessWarningKind: Equatable, Hashable {
      * only be a Backup target that keeps none.
      */
     case recordsUnsupported
+    /**
+     * This folder is, holds or sits inside a folder of the pair named
+     * `pair_name`; only Mirror and Backup sources may share one, so
+     * saving would refuse it.
+     */
+    case overlap
 
 
 
@@ -3612,6 +3628,8 @@ public struct FfiConverterTypeReadinessWarningKind: FfiConverterRustBuffer {
         
         case 4: return .recordsUnsupported
         
+        case 5: return .overlap
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -3634,6 +3652,10 @@ public struct FfiConverterTypeReadinessWarningKind: FfiConverterRustBuffer {
         
         case .recordsUnsupported:
             writeInt(&buf, Int32(4))
+        
+        
+        case .overlap:
+            writeInt(&buf, Int32(5))
         
         }
     }
@@ -5262,13 +5284,14 @@ public func agentStatus()async throws  -> AgentHealth  {
 }
 /**
  * What will not work as a person might expect with `configuration`'s
- * folders (PLAN.md §3.6). Warnings never block saving.
+ * folders (PLAN.md §3.6); `editing` is the pair the draft would
+ * replace. Only an overlap names something saving would refuse.
  */
-public func checkPair(configuration: LocalPairDraft)async throws  -> [ReadinessWarning]  {
+public func checkPair(configuration: LocalPairDraft, editing: String?)async throws  -> [ReadinessWarning]  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_foldover_ffi_fn_func_check_pair(FfiConverterTypeLocalPairDraft_lower(configuration)
+                uniffi_foldover_ffi_fn_func_check_pair(FfiConverterTypeLocalPairDraft_lower(configuration),FfiConverterOptionString.lower(editing)
                 )
             },
             pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
@@ -5913,7 +5936,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_foldover_ffi_checksum_func_agent_status() != 7308) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_foldover_ffi_checksum_func_check_pair() != 41529) {
+    if (uniffi_foldover_ffi_checksum_func_check_pair() != 64567) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_core_version() != 27554) {

@@ -22,6 +22,7 @@ private actor PairFixtureClient: PairClient {
     private(set) var updatedRevision: UInt64?
     private(set) var savedSettings: PairSettings?
     private(set) var removedRevision: UInt64?
+    private(set) var checks: [(editing: String?, mode: PairMode)] = []
 
     init(catalog: [SyncPair] = [], outcome: SaveOutcome = .succeeds,
          warnings: [PairReadinessWarning] = [], servers: [NearbyServer] = [],
@@ -57,7 +58,10 @@ private actor PairFixtureClient: PairClient {
         return pair
     }
 
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { warnings }
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] {
+        checks.append((editing, settings.mode))
+        return warnings
+    }
 
     func servers() async throws -> [NearbyServer] { servers }
 
@@ -110,7 +114,7 @@ private actor DeferredPairClient: PairClient {
     func create(_ settings: PairSettings) async throws -> SyncPair { pairFixture() }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { pair }
     func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { [] }
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { [] }
     func servers() async throws -> [NearbyServer] { [] }
     func browse(_ locator: String) async throws -> ServerListing { throw PairFixtureError.changedElsewhere }
 }
@@ -138,7 +142,7 @@ private actor FailingPairPageClient: PairClient {
     func create(_ settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func remove(_ pair: SyncPair) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { throw PairFixtureError.changedElsewhere }
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { throw PairFixtureError.changedElsewhere }
     func servers() async throws -> [NearbyServer] { throw PairFixtureError.changedElsewhere }
     func browse(_ locator: String) async throws -> ServerListing { throw PairFixtureError.changedElsewhere }
 }
@@ -520,7 +524,7 @@ private actor WarningOnAttributesClient: PairClient {
     func create(_ settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func remove(_ pair: SyncPair) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] {
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] {
         settings.options.syncExtendedAttributes ? [warning] : []
     }
     func servers() async throws -> [NearbyServer] { [] }
@@ -581,12 +585,61 @@ private actor RecordsRefusingClient: PairClient {
     func create(_ settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func remove(_ pair: SyncPair) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] {
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] {
         let spared = settings.mode == .backupLeft && settings.options.records == .sourceOnly
         return spared ? [] : [PairReadinessWarning(side: .b, kind: .recordsUnsupported)]
     }
     func servers() async throws -> [NearbyServer] { [] }
     func browse(_ locator: String) async throws -> ServerListing { throw PairFixtureError.changedElsewhere }
+}
+
+@MainActor
+@Test
+func anOverlappingFolderNamesThePairAndBlocksSaving() async {
+    let client = PairFixtureClient(warnings: [
+        PairReadinessWarning(side: .a, kind: .overlap(pairName: "Photos")),
+        PairReadinessWarning(side: .b, kind: .overlap(pairName: "Media")),
+    ])
+    let editor = PairEditorViewModel(store: PairStore(client: client))
+    editor.name = "Archive"
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/a")]), side: .left)
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/b")]), side: .right)
+    await editor.awaitReadinessCheck()
+    #expect(editor.readinessWarnings.isEmpty)
+    #expect(editor.overlapWarning == "Folder A overlaps a folder of “Photos”. Folder B overlaps a folder of “Media”. Pairs can share a folder only as the source of a Mirror or Backup.")
+    #expect(!editor.canSave)
+    #expect(await editor.save() == false)
+}
+
+@MainActor
+@Test
+func editingAPairSendsItsIDToTheCheck() async {
+    let client = PairFixtureClient()
+    let store = PairStore(client: client)
+    let editor = PairEditorViewModel(store: store, editing: pairFixture())
+    await editor.awaitReadinessCheck()
+    #expect(await client.checks.map { $0.editing } == [pairFixture().id])
+    let fresh = PairEditorViewModel(store: store)
+    fresh.chooseFolder(.success([URL(fileURLWithPath: "/a")]), side: .left)
+    fresh.chooseFolder(.success([URL(fileURLWithPath: "/b")]), side: .right)
+    await fresh.awaitReadinessCheck()
+    #expect(await client.checks.count > 1)
+    #expect(await client.checks.last?.editing == nil)
+}
+
+@MainActor
+@Test
+func changingTheModeRerunsTheReadinessCheck() async {
+    let client = PairFixtureClient()
+    let editor = PairEditorViewModel(store: PairStore(client: client))
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/a")]), side: .left)
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/b")]), side: .right)
+    await editor.awaitReadinessCheck()
+    let checksBefore = await client.checks.count
+    editor.mode = .mirrorRight
+    await editor.awaitReadinessCheck()
+    #expect(await client.checks.count > checksBefore)
+    #expect(await client.checks.last?.mode == .mirrorRight)
 }
 
 @MainActor

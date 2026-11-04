@@ -251,7 +251,7 @@ uint64_t uniffi_foldover_ffi_fn_func_agent_status(void
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_CHECK_PAIR
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_CHECK_PAIR
-uint64_t uniffi_foldover_ffi_fn_func_check_pair(RustBuffer configuration
+uint64_t uniffi_foldover_ffi_fn_func_check_pair(RustBuffer configuration, RustBuffer editing
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_CORE_VERSION
