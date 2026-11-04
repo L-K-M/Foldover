@@ -625,6 +625,26 @@ private actor SharedSourceClient: PairClient {
     func browse(_ locator: String) async throws -> ServerListing { throw PairFixtureError.changedElsewhere }
 }
 
+/// ADR 0048: another pair's folder that cannot be read blocks Save, once
+/// per pair however many sides wait on it.
+@MainActor
+@Test
+func anUnreadableFolderOfAnotherPairBlocksSaving() async {
+    let client = PairFixtureClient(warnings: [
+        PairReadinessWarning(side: .a, kind: .unverified(pairName: "Photos")),
+        PairReadinessWarning(side: .b, kind: .unverified(pairName: "Photos")),
+    ])
+    let editor = PairEditorViewModel(store: PairStore(client: client))
+    editor.name = "Second backup"
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/a")]), side: .left)
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/b")]), side: .right)
+    await editor.awaitReadinessCheck()
+    #expect(editor.readinessWarnings.isEmpty)
+    #expect(editor.uncheckedWarning == "A folder of “Photos” can't be read, so these folders can't be checked against it. Connect it, or give Foldover access to it, to save.")
+    #expect(!editor.canSave)
+    #expect(await editor.save() == false)
+}
+
 /// Review: Save comes back once a mode change lets the folders share.
 @MainActor
 @Test

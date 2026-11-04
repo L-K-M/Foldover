@@ -725,6 +725,12 @@ impl LocalEndpoint {
         at(&None, self.root.relation_to(&other.root))
     }
 
+    /// How this root nests with `path`, where nothing is now: `Contains`
+    /// when it would hold `path`, else `Disjoint` (`Root::relation_to_missing`).
+    pub fn relation_to_missing(&self, path: &Path) -> Result<RootRelation, ScanError> {
+        at(&None, self.root.relation_to_missing(path))
+    }
+
     /// Where the root's volume is mounted from when it is a network share,
     /// e.g. `smb://alice@nas.local/Photos`.
     pub fn network_source(&self) -> Result<Option<String>, ScanError> {
