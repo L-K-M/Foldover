@@ -171,8 +171,9 @@ you might expect. Only the last two below block saving
 - **Each pair sees its own runs.** A run's folder is named after its
   start time and its pair. Pairs sharing a folder, on this Mac or
   others, each list theirs; another pair's runs there go after 60 days.
-  A Mac with an older Foldover sharing the folder neither lists nor
-  prunes the new runs until it is updated
+  Paired Macs need this version on both; a Mac with an older Foldover
+  syncing the same share or server folder neither lists nor prunes the
+  new runs until it is updated
   ([ADR 0047](../adr/0047-shared-one-way-sources.md)).
 - **Put Back never replaces.** A restored item goes beside an occupied
   path as `name (restored).ext`, then `(restored 2)`; the next sync

@@ -84,8 +84,10 @@ time alone, written before this change, belong to every pair.
   Mac whose clock runs ahead cannot take another pair's runs early, yet
   the runs of a pair that no longer exists still go.
 - **Another Mac's folder.** The Mac sharing a folder prunes all of it by
-  its own clock, as before ([ADR 0031](0031-mac-to-mac.md)), so the peer
-  protocol is unchanged and still carries run names as strings.
+  its own clock, as before ([ADR 0031](0031-mac-to-mac.md)). Requests
+  still carry run names as strings, but peer protocol 2 refuses a Mac
+  of version 1: it would take writes into the new run folders, then fail
+  to list them, put them back or undo from them.
 
 **Busy folders.** A run that gives up on a folder another run keeps
 leased (`RunError::folder_busy`) still fails with "<Mac> is syncing
@@ -109,6 +111,10 @@ again for the same message while retries keep failing.
 - A busy failure on an interval schedule retries after one interval; on
   a changes schedule, on the next change or the hourly check; on a
   daily schedule, the next day.
-- A Mac with an older Foldover sharing a folder neither lists nor prunes
-  the new run folders there until it is updated.
+- Paired Macs must both run this version or newer; until then each
+  refuses the other with "That Mac runs another Foldover version; update
+  both Macs".
+- A Mac with an older Foldover syncing the same share or server folder
+  neither lists nor prunes the new run folders there until it is
+  updated; they are not its runs.
 - Every new run folder name is 33 bytes longer.
