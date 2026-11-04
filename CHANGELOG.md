@@ -19,6 +19,8 @@ All notable changes to this project are documented here. The format follows
   cached across renders and searches.
 - Remote requests, including archive listings, get longer client timeouts.
   Read timeouts invite retry; saves retain the uncertain-commit warning.
+- A comparison another Mac refuses, for example because it paused syncing,
+  says why instead of reporting that the Mac answered out of order.
 - The menu-bar pair list scrolls while commands remain reachable. Its
   error captions are bounded and selectable, and busy pairs offer Stop.
 

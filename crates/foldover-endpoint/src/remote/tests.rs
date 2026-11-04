@@ -192,6 +192,84 @@ fn a_folder_another_mac_keeps_on_a_network_volume_says_so() {
     assert!(other.on_network_volume().unwrap());
 }
 
+/// Why `RefusingScans` refuses, as a Mac that paused syncing says it.
+const REFUSAL_REASON: &str = "That Mac paused syncing";
+
+/// Serves like `Sharing`, but refuses every scan, as a Mac that paused
+/// syncing or stopped sharing the folder after it was opened does.
+struct RefusingScans(Sharing);
+
+impl PeerHost for RefusingScans {
+    fn paired(&self, device: DeviceId, name: String) -> Result<(), NotRecorded> {
+        self.0.paired(device, name)
+    }
+
+    fn serve(&self, device: DeviceId, call: PeerCall, answer: &mut Answer) {
+        match call {
+            PeerCall::Folder { op, .. } if matches!(*op, FolderOp::Observe { .. }) => {
+                let _ = answer.reply(&PeerReply::Refused {
+                    reason: REFUSAL_REASON.into(),
+                });
+            }
+            call => self.0.serve(device, call, answer),
+        }
+    }
+}
+
+/// A scan the other Mac refuses says why, as every other refused call
+/// does, instead of reporting that the other Mac answered out of order.
+#[test]
+fn a_refused_scan_says_why() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let identities = [Identity::generate().unwrap(), Identity::generate().unwrap()];
+    let devices = identities
+        .each_ref()
+        .map(|identity| DeviceId::from_bytes(*identity.id().as_bytes()));
+    let [a_identity, b_identity] = identities;
+    let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let sharing = |path: &[u8]| Sharing {
+        root: LocalRoot::from_bytes(path.to_vec()).unwrap(),
+        cache: FolderCache::default(),
+        state: None,
+    };
+    let (a, _b) = runtime.block_on(async {
+        let b = PeerLink::start(
+            b_identity,
+            "Studio".into(),
+            loopback,
+            Presence::Unlisted,
+            [devices[0]],
+            Arc::new(RefusingScans(sharing(
+                folder.path().as_os_str().as_encoded_bytes(),
+            ))),
+        )
+        .unwrap();
+        let a = PeerLink::start(
+            a_identity,
+            "Laptop".into(),
+            loopback,
+            Presence::Unlisted,
+            [devices[1]],
+            Arc::new(sharing(b"/")),
+        )
+        .unwrap();
+        a.reach(devices[1], b.address().unwrap());
+        (a, b)
+    });
+
+    let root = PeerRoot::new(devices[1], ShareId::from_bytes([7; ShareId::BYTE_LEN]));
+    let other = Endpoint::Peer(PeerEndpoint::open(a, &root).unwrap());
+    let scanned = observe(&other);
+    assert!(
+        matches!(&scanned, Err(ScanError::MacUnreachable(reason)) if reason == REFUSAL_REASON),
+        "{scanned:?}"
+    );
+}
+
 /// PLAN.md §4.9: copies to and from another Mac run several at once, each
 /// on its own stream, and every file arrives whole.
 #[test]
