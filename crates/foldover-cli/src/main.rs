@@ -1420,6 +1420,13 @@ mod tests {
             job: foldover_client::SyncJob::Run,
             cancelling: false,
             progress: foldover_client::SyncProgress::default(),
+            pair: foldover_client::SyncPairContext {
+                revision: 1,
+                name: "Test pair".into(),
+                left_root: b"/left".to_vec(),
+                right_root: b"/right".to_vec(),
+                mode: foldover_client::PairMode::Sync,
+            },
         }
     }
 

@@ -188,9 +188,48 @@ struct WorkProgress: Equatable, Sendable {
     static func == (_: WorkProgress, _: WorkProgress) -> Bool { true }
 }
 
+/// The compact pair presentation a working job captured at claim time.
+/// It deliberately excludes options that may already have changed for the
+/// next run.
+struct RunningPair: Equatable, Sendable {
+    let revision: UInt64
+    let name: String
+    let left: SelectedFolder
+    let right: SelectedFolder
+    let mode: PairMode
+
+    init(revision: UInt64, name: String, left: SelectedFolder,
+         right: SelectedFolder, mode: PairMode) {
+        self.revision = revision
+        self.name = name
+        self.left = left
+        self.right = right
+        self.mode = mode
+    }
+
+    init(_ pair: SyncPair) {
+        self.init(revision: pair.revision, name: pair.settings.name,
+                  left: pair.settings.left, right: pair.settings.right,
+                  mode: pair.settings.mode)
+    }
+
+    init(_ pair: RunningPairSnapshot) {
+        let mode: PairMode = switch pair.mode {
+        case .sync: .sync
+        case .mirrorLeft: .mirrorLeft
+        case .mirrorRight: .mirrorRight
+        case .backupLeft: .backupLeft
+        case .backupRight: .backupRight
+        }
+        self.init(revision: pair.revision, name: pair.name,
+                  left: SelectedFolder(bytes: pair.leftRoot),
+                  right: SelectedFolder(bytes: pair.rightRoot), mode: mode)
+    }
+}
+
 enum PairSyncState: Equatable, Sendable {
     case idle
-    case working(SyncJob, cancelling: Bool, progress: WorkProgress = .none)
+    case working(SyncJob, cancelling: Bool, progress: WorkProgress = .none, pair: RunningPair)
     case previewed(PreviewSummary)
     /// Too many deletions for this run; nothing was written.
     case needsApproval(PreviewSummary)
@@ -329,12 +368,12 @@ private actor CoreSyncClient: SyncClient {
     private func state(_ state: SyncJobState) -> PairSyncState {
         switch state {
         case .idle: .idle
-        case .working(let job, let cancelling, let progress):
+        case .working(let job, let cancelling, let progress, let pair):
             .working(self.job(job), cancelling: cancelling, progress: WorkProgress(
                 listed: progress.listed, checked: progress.checked, changes: progress.changes,
                 applied: progress.applied, bytes: progress.bytes, copied: progress.copied,
                 rate: progress.rate, waitingFor: progress.waitingFor
-            ))
+            ), pair: RunningPair(pair))
         case .previewed(let preview): .previewed(summary(preview))
         case .needsApproval(let preview): .needsApproval(summary(preview))
         case .finished(let result): .finished(summary(result))

@@ -46,22 +46,23 @@ struct PairDetailView: View {
     /// fits the narrowest detail; View › Show has the same choices with
     /// ⌘1 to ⌘6.
     private func deskBar(_ sync: PairSyncViewModel) -> some View {
-        HStack(spacing: 12) {
+        let plan = sync.previousSettingsNotice ?? viewModel.planText(for: pair)
+        return HStack(spacing: 12) {
             // No vertical fixedSize in a split-view column: a minimum height
             // that depends on the width makes the column's size limits
             // change on every layout pass, which AppKit ends with a crash.
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 // The mode's direction, here rather than on the sheet's fold.
-                Image(systemName: pair.settings.mode.symbol)
+                Image(systemName: sync.activeMode.symbol)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(FoldPalette.deskInk)
-                    .help(pair.settings.mode.title)
-                    .accessibilityLabel(pair.settings.mode.title)
-                Text(viewModel.planText(for: pair))
+                    .help(sync.activeMode.title)
+                    .accessibilityLabel(sync.activeMode.title)
+                Text(plan)
                     .font(.callout)
                     .foregroundStyle(FoldPalette.deskInk)
                     .lineLimit(2)
-                    .help(viewModel.planText(for: pair))
+                    .help(plan)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             // One stop for VoiceOver: the mode, then its sentence.

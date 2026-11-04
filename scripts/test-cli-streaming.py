@@ -93,6 +93,23 @@ RECORDS[PROGRESS_ID] = pair_record(PROGRESS_ID, "Progress")
 RECORDS[TIMEOUT_ID] = pair_record(TIMEOUT_ID, "Timeout")
 
 
+def with_pair_context(status, pair_id):
+    if status["state"] != "working":
+        return status
+    record = RECORDS[pair_id]
+    configuration = record["configuration"]
+    return {
+        **status,
+        "pair": {
+            "revision": record["revision"],
+            "name": configuration["name"],
+            "left_root": configuration["left_root"],
+            "right_root": configuration["right_root"],
+            "mode": configuration["mode"],
+        },
+    }
+
+
 class Fixture:
     """A minimal agent on a private socket; gated pairs answer Working
     until `release` is set. Tracks overlapping jobs to bound fan-out."""
@@ -219,6 +236,7 @@ class Fixture:
             status = FINISHED
         else:
             status = WORKING
+        status = with_pair_context(status, pair)
         with self.lock:
             if status["state"] == "working":
                 self.running.add(pair)
@@ -336,7 +354,8 @@ def progress_streams(cli, fixture, endpoint):
         if len(finals) != 1 or finals[0].get("state") != "finished" or lines[-1:] != finals:
             raise RuntimeError(f"Expected exactly one final finished status, got {lines}")
         working = [line for line in lines if line.get("state") == "working"]
-        if working != PROGRESS_STAGES[:2]:
+        expected = [with_pair_context(stage, PROGRESS_ID) for stage in PROGRESS_STAGES[:2]]
+        if working != expected:
             raise RuntimeError(f"Expected each distinct Working status once, got {working}")
     finally:
         reap(child)

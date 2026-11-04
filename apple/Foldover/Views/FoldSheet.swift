@@ -221,7 +221,7 @@ struct FoldSheet: View {
         // A run already pressing when the pair is shown: the leaf is down.
         .onAppear {
             guard scene == .pressing else { return }
-            leafSide = FoldLeaf.automatic(pair.settings.mode, lines: plan?.lines ?? [])
+            leafSide = FoldLeaf.automatic(sync.activeMode, lines: plan?.lines ?? [])
             leafDown = true
             landed = true
             swing = 1
@@ -275,7 +275,7 @@ struct FoldSheet: View {
     private var pageWidth: CGFloat { max(0, halfWidth - FoldMetrics.creaseWidth / 2) }
 
     /// The page a message is set on, rather than across the gutter.
-    private var messagePage: FolderSide { FoldLeaf.messagePage(pair.settings.mode, missing: sync.missingSide) }
+    private var messagePage: FolderSide { FoldLeaf.messagePage(sync.activeMode, missing: sync.missingSide) }
 
     /// A person may fold a plan with lines while the pair can sync, the
     /// leaf is not already down or waiting for approval, and no turn
@@ -310,7 +310,7 @@ struct FoldSheet: View {
     }
 
     private func folder(_ side: FolderSide) -> SelectedFolder {
-        side == .a ? pair.settings.left : pair.settings.right
+        sync.activeFolder(side)
     }
 
     /// No shortcut modifier held.
@@ -392,7 +392,7 @@ struct FoldSheet: View {
             Color.clear
         } else {
             // A dog-ear's corner is folded back: the navy shows where it was.
-            let earShown = scene == .plan && progress == 0 && FoldLeaf.sides(pair.settings.mode).contains(side)
+            let earShown = scene == .plan && progress == 0 && FoldLeaf.sides(sync.activeMode).contains(side)
             Paper(facet: PaperFacet(side))
                 .clipShape(CornerCut(side: side, size: earShown ? earSize(side) : 0))
         }
@@ -406,11 +406,11 @@ struct FoldSheet: View {
     private func header(_ progress: Double) -> some View {
         // The mode is said above the paper, not printed on its fold.
         HStack(spacing: 0) {
-            FoldFolderLabel(viewModel: viewModel, folder: pair.settings.left, side: .a)
+            FoldFolderLabel(viewModel: viewModel, folder: sync.activeLeft, side: .a)
                 .opacity(pageInk(.a, progress))
                 .environment(\.colorScheme, ground(.a))
             Color.clear.frame(width: FoldMetrics.creaseWidth)
-            FoldFolderLabel(viewModel: viewModel, folder: pair.settings.right, side: .b)
+            FoldFolderLabel(viewModel: viewModel, folder: sync.activeRight, side: .b)
                 .opacity(pageInk(.b, progress))
                 .environment(\.colorScheme, ground(.b))
         }
@@ -793,7 +793,7 @@ struct FoldSheet: View {
 
     /// The halves a person may fold, each with its dog-ear.
     private func dogEars(scene: FoldScene, progress: Double) -> some View {
-        let sides = FoldLeaf.sides(pair.settings.mode)
+        let sides = FoldLeaf.sides(sync.activeMode)
         return HStack(spacing: 0) {
             if sides.contains(.a) { ear(.a) }
             Spacer(minLength: 0)
@@ -889,7 +889,7 @@ struct FoldSheet: View {
         }
         // A leaf still swinging open folds again from where it is; which
         // half folds is only how the sync looks.
-        if !opening { leafSide = side ?? FoldLeaf.automatic(pair.settings.mode, lines: plan?.lines ?? []) }
+        if !opening { leafSide = side ?? FoldLeaf.automatic(sync.activeMode, lines: plan?.lines ?? []) }
         self.voice = voice
         if let request = sync.foldApproval {
             approval = request
@@ -1026,7 +1026,7 @@ struct FoldSheet: View {
             if !leafDown {
                 // A leaf already up keeps its side rather than jump the crease.
                 if swing == 0, !opening {
-                    leafSide = FoldLeaf.automatic(pair.settings.mode, lines: plan?.lines ?? [])
+                    leafSide = FoldLeaf.automatic(sync.activeMode, lines: plan?.lines ?? [])
                 }
                 voice = .silent
                 fall()
@@ -1073,7 +1073,7 @@ struct FoldSheet: View {
     /// in white: the run's own progress, never a claim about any one line.
     private var pressReadout: some View {
         VStack(spacing: 10) {
-            Text(pair.settings.mode.title)
+            Text(sync.activeMode.title)
                 .font(FoldType.backEyebrow)
                 .textCase(.uppercase)
                 .tracking(FoldType.eyebrowTracking * 1.5)

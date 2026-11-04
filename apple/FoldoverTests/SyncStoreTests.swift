@@ -1,4 +1,5 @@
 import Foundation
+import struct FoldoverCore.RunningPairSnapshot
 import Testing
 @testable import Foldover
 
@@ -479,12 +480,18 @@ private func pair() -> SyncPair {
     ))
 }
 
+private func working(_ job: SyncJob, cancelling: Bool,
+                     progress: WorkProgress = .none,
+                     pair runningPair: RunningPair = RunningPair(pair())) -> PairSyncState {
+    .working(job, cancelling: cancelling, progress: progress, pair: runningPair)
+}
+
 @MainActor
 @Test
 func previewsPollUntilTheJobFinishes() async {
     let summary = preview(archivesInA: 3, needsApproval: false)
-    let client = ScriptedSyncClient([.working(.preview, cancelling: false),
-                                     .working(.preview, cancelling: false), .previewed(summary)])
+    let client = ScriptedSyncClient([working(.preview, cancelling: false),
+                                     working(.preview, cancelling: false), .previewed(summary)])
     let store = SyncStore(client: client, pollInterval: .milliseconds(1))
     let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
     await viewModel.preview()
@@ -526,7 +533,7 @@ func runsNeedingApprovalRetryWithTheReviewedCountsOrKeepThePreview() async throw
     let result = RunSummary(cancelled: false, copied: 1, updated: 0, archived: 60, recovered: 0,
                             conflicts: 0, failures: [], failureCount: 0,
                             archive: "2026-10-18T09-30-00.123Z")
-    let client = ScriptedSyncClient([.needsApproval(summary), .working(.run, cancelling: false),
+    let client = ScriptedSyncClient([.needsApproval(summary), working(.run, cancelling: false),
                                      .finished(result)])
     let store = SyncStore(client: client, pollInterval: .milliseconds(1))
     let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
@@ -560,7 +567,7 @@ func runsNeedingApprovalRetryWithTheReviewedCountsOrKeepThePreview() async throw
 @MainActor
 @Test
 func workingJobsCanBeCancelledAndControlsFollowTheAgent() async {
-    let client = ScriptedSyncClient([.working(.run, cancelling: true), .idle])
+    let client = ScriptedSyncClient([working(.run, cancelling: true), .idle])
     let store = SyncStore(client: client, pollInterval: .milliseconds(1))
     let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
     await viewModel.cancel()
@@ -817,7 +824,7 @@ func finishedRunsRefreshTheHistory() async {
     ]
     let result = RunSummary(cancelled: false, copied: 2, updated: 0, archived: 1, recovered: 0,
                             conflicts: 1, failures: [], failureCount: 0, archive: "run")
-    let client = ScriptedSyncClient([.working(.run, cancelling: false), .finished(result)], history: runs)
+    let client = ScriptedSyncClient([working(.run, cancelling: false), .finished(result)], history: runs)
     let store = SyncStore(client: client, pollInterval: .milliseconds(1))
     let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
     #expect(viewModel.historyRows.isEmpty)
@@ -1024,7 +1031,7 @@ func declinedApprovalsStayDeclinedUntilTheJobOrResultChanges() async {
 func staleCheckAllRepliesCannotOverwriteManuallyStartedJobs() async {
     let summary = preview(archivesInA: 3, needsApproval: false)
     let client = DeferredSyncClient()
-    await client.setPreviewReply(.working(.preview, cancelling: false))
+    await client.setPreviewReply(working(.preview, cancelling: false))
     let store = SyncStore(client: client, pollInterval: .milliseconds(1))
     let pair = pair()
 
@@ -1039,7 +1046,7 @@ func staleCheckAllRepliesCannotOverwriteManuallyStartedJobs() async {
     // The stale reply predates the job: it must not win.
     await client.reply(.idle)
     await check.value
-    #expect(store.state(for: pair.id) == .working(.preview, cancelling: false))
+    #expect(store.state(for: pair.id) == working(.preview, cancelling: false))
 
     // The live poll still owns the pair and lands the real result.
     await client.finishPolling(.previewed(summary))
@@ -1068,7 +1075,7 @@ private func eventually(_ condition: @MainActor () -> Bool,
 func staleCheckAllRepliesStayDroppedWhenTheStateCyclesBack() async {
     let summary = preview(archivesInA: 60, needsApproval: true)
     let client = DeferredSyncClient()
-    await client.setPreviewReply(.working(.preview, cancelling: false))
+    await client.setPreviewReply(working(.preview, cancelling: false))
     let recorder = AlertRecorder()
     let store = SyncStore(client: client, pollInterval: .milliseconds(1)) { alert in
         await recorder.record(alert)
@@ -1103,7 +1110,7 @@ func staleLivePollRepliesCannotRetireANewerJob() async {
     let stale = preview(archivesInA: 3, needsApproval: false)
     let done = preview(archivesInA: 0, needsApproval: false)
     let client = DeferredSyncClient()
-    await client.setPreviewReply(.working(.preview, cancelling: false))
+    await client.setPreviewReply(working(.preview, cancelling: false))
     let store = SyncStore(client: client, pollInterval: .milliseconds(1))
     let pair = pair()
 
@@ -1117,14 +1124,14 @@ func staleLivePollRepliesCannotRetireANewerJob() async {
     #expect(store.state(for: pair.id) == .idle)
     let second = Task { await store.preview(pair.id) }
     #expect(await eventually {
-        store.state(for: pair.id) == .working(.preview, cancelling: false)
+        store.state(for: pair.id) == working(.preview, cancelling: false)
     })
 
     // The stale poll reply must not overwrite the new job's state, and
     // a poller must keep asking until the job really finishes.
     await client.reply(.previewed(stale))
     let keptPolling = await client.waitForStatusCalls(2, timeout: .seconds(3))
-    #expect(store.state(for: pair.id) == .working(.preview, cancelling: false))
+    #expect(store.state(for: pair.id) == working(.preview, cancelling: false))
     #expect(keptPolling)
 
     // Drain every outstanding request so buggy and fixed paths finish.
@@ -1163,10 +1170,10 @@ func declinedApprovalsSurviveStatusRefreshesAndPolls() async {
     #expect(viewModel.approvalRequest == nil)
 
     // Neither does a live poll that meets the same declined result.
-    await client.setStatusReply(.working(.run, cancelling: false))
+    await client.setStatusReply(working(.run, cancelling: false))
     let refreshing = Task { await store.refresh(pair.id) }
     #expect(await eventually {
-        store.state(for: pair.id) == .working(.run, cancelling: false)
+        store.state(for: pair.id) == working(.run, cancelling: false)
     })
     await client.setStatusReply(.needsApproval(summary))
     await refreshing.value
@@ -1190,7 +1197,7 @@ func cancelledPollersYieldOwnershipToNewerJobs() async {
     let stale = preview(archivesInA: 3, needsApproval: false)
     let done = preview(archivesInA: 0, needsApproval: false)
     let client = DeferredSyncClient()
-    await client.setPreviewReply(.working(.preview, cancelling: false))
+    await client.setPreviewReply(working(.preview, cancelling: false))
     let store = SyncStore(client: client, pollInterval: .milliseconds(1))
     let pair = pair()
 
@@ -1202,14 +1209,14 @@ func cancelledPollersYieldOwnershipToNewerJobs() async {
     // cancelled one is still suspended on its status request.
     let second = Task { await store.preview(pair.id) }
     #expect(await eventually {
-        store.state(for: pair.id) == .working(.preview, cancelling: false)
+        store.state(for: pair.id) == working(.preview, cancelling: false)
     })
 
     // The stale reply belongs to the cancelled owner: drop it without
     // clearing the successor's ownership.
     await client.reply(.previewed(stale))
     let keptPolling = await client.waitForStatusCalls(2, timeout: .seconds(3))
-    #expect(store.state(for: pair.id) == .working(.preview, cancelling: false))
+    #expect(store.state(for: pair.id) == working(.preview, cancelling: false))
     #expect(keptPolling)
 
     // Drain every outstanding request so buggy and fixed paths finish.
@@ -1228,7 +1235,7 @@ func cancelledPollersYieldOwnershipToNewerJobs() async {
 func cancellingTheCallerStopsPollingWithoutCancellingTheJob() async {
     let done = preview(archivesInA: 0, needsApproval: false)
     let client = DeferredSyncClient()
-    await client.setPreviewReply(.working(.preview, cancelling: false))
+    await client.setPreviewReply(working(.preview, cancelling: false))
     let store = SyncStore(client: client, pollInterval: .milliseconds(1))
     let pair = pair()
 
@@ -1238,11 +1245,11 @@ func cancellingTheCallerStopsPollingWithoutCancellingTheJob() async {
 
     // The in-flight reply still applies; then polling must stop instead
     // of firing the next status request from a cancelled task.
-    await client.reply(.working(.preview, cancelling: false))
+    await client.reply(working(.preview, cancelling: false))
     let polledAgain = await client.waitForStatusCalls(2, timeout: .seconds(3))
     #expect(!polledAgain)
     #expect(await client.cancelled == false)
-    #expect(store.state(for: pair.id) == .working(.preview, cancelling: false))
+    #expect(store.state(for: pair.id) == working(.preview, cancelling: false))
 
     // A terminal reply ends any poller the buggy path left running.
     await client.finishPolling(.previewed(done))
@@ -1259,7 +1266,7 @@ func cancellingTheCallerStopsPollingWithoutCancellingTheJob() async {
 func staleRefreshRepliesCannotOverwriteManuallyStartedJobs() async {
     let done = preview(archivesInA: 0, needsApproval: false)
     let client = DeferredSyncClient()
-    await client.setPreviewReply(.working(.preview, cancelling: false))
+    await client.setPreviewReply(working(.preview, cancelling: false))
     let store = SyncStore(client: client, pollInterval: .milliseconds(1))
     let pair = pair()
 
@@ -1270,7 +1277,7 @@ func staleRefreshRepliesCannotOverwriteManuallyStartedJobs() async {
     // A manual preview starts and takes over live polling.
     let manual = Task { await store.preview(pair.id) }
     #expect(await eventually {
-        store.state(for: pair.id) == .working(.preview, cancelling: false)
+        store.state(for: pair.id) == working(.preview, cancelling: false)
     })
 
     // The refresh reply predates the job: it must not win, and a poller
@@ -1278,7 +1285,7 @@ func staleRefreshRepliesCannotOverwriteManuallyStartedJobs() async {
     await client.reply(.idle)
     await refreshing.value
     let keptPolling = await client.waitForStatusCalls(2, timeout: .seconds(3))
-    #expect(store.state(for: pair.id) == .working(.preview, cancelling: false))
+    #expect(store.state(for: pair.id) == working(.preview, cancelling: false))
     #expect(keptPolling)
 
     // Drain every outstanding request so buggy and fixed paths finish.
@@ -1295,7 +1302,7 @@ func staleRefreshRepliesCannotOverwriteManuallyStartedJobs() async {
 func staleRefreshErrorsCannotLandOnANewerJob() async {
     let done = preview(archivesInA: 0, needsApproval: false)
     let client = DeferredSyncClient()
-    await client.setPreviewReply(.working(.preview, cancelling: false))
+    await client.setPreviewReply(working(.preview, cancelling: false))
     let store = SyncStore(client: client, pollInterval: .milliseconds(1))
     let pair = pair()
 
@@ -1304,7 +1311,7 @@ func staleRefreshErrorsCannotLandOnANewerJob() async {
 
     let manual = Task { await store.preview(pair.id) }
     #expect(await eventually {
-        store.state(for: pair.id) == .working(.preview, cancelling: false)
+        store.state(for: pair.id) == working(.preview, cancelling: false)
     })
 
     // The parked refresh fails after the job started: neither the error
@@ -1312,7 +1319,7 @@ func staleRefreshErrorsCannotLandOnANewerJob() async {
     await client.replyError(SyncFixtureError.unreachable)
     await refreshing.value
     #expect(store.requestError(for: pair.id) == nil)
-    #expect(store.state(for: pair.id) == .working(.preview, cancelling: false))
+    #expect(store.state(for: pair.id) == working(.preview, cancelling: false))
 
     await client.finishPolling(.previewed(done))
     await manual.value
@@ -1453,9 +1460,9 @@ func startsOwnThePairWhileTheirRequestIsInFlight() async {
     // before the start, it must not publish or retire the start's reply.
     await client.reply(.idle)
     await refreshing.value
-    await client.replyStart(.working(.preview, cancelling: false))
+    await client.replyStart(working(.preview, cancelling: false))
     #expect(await eventually {
-        store.state(for: pair.id) == .working(.preview, cancelling: false)
+        store.state(for: pair.id) == working(.preview, cancelling: false)
     })
 
     // The accepted job polls to its real terminal result.
@@ -1609,9 +1616,9 @@ func dismissingDuringAPendingStartCannotAbandonTheAcceptedRun() async {
     store.declineApproval(pair.id)
     #expect(viewModel.approvalRequest == nil)
 
-    await client.replyStart(.working(.run, cancelling: false))
+    await client.replyStart(working(.run, cancelling: false))
     #expect(await eventually {
-        store.state(for: pair.id) == .working(.run, cancelling: false)
+        store.state(for: pair.id) == working(.run, cancelling: false)
     })
     #expect(await client.waitForStatusCalls(1, timeout: .seconds(3)))
 
@@ -1658,14 +1665,14 @@ func oldPollerRepliesCannotRetireAPendingStart() async {
                               recovered: 0, conflicts: 0, failures: [], failureCount: 0,
                               archive: "run")
     let client = DeferredSyncClient()
-    await client.setPreviewReply(.working(.preview, cancelling: false))
+    await client.setPreviewReply(working(.preview, cancelling: false))
     let store = SyncStore(client: client, pollInterval: .milliseconds(250))
     let pair = pair()
 
     // Job one's poller is in its first sleep when the new start begins.
     let first = Task { await store.preview(pair.id) }
     #expect(await eventually {
-        store.state(for: pair.id) == .working(.preview, cancelling: false)
+        store.state(for: pair.id) == working(.preview, cancelling: false)
     })
 
     await client.holdStartReplies()
@@ -1681,9 +1688,9 @@ func oldPollerRepliesCannotRetireAPendingStart() async {
     }
 
     // The accepted start's reply still wins and owns the live poller.
-    await client.replyStart(.working(.preview, cancelling: false))
+    await client.replyStart(working(.preview, cancelling: false))
     #expect(await eventually {
-        store.state(for: pair.id) == .working(.preview, cancelling: false)
+        store.state(for: pair.id) == working(.preview, cancelling: false)
     })
     #expect(await client.waitForStatusCalls(issuedBeforeReply + 1, timeout: .seconds(3)))
 
@@ -1877,7 +1884,7 @@ func readyChoicesReachTheClientWhileHistoryIsPending() async {
     )
     let resolved = preview(archivesInA: 0, needsApproval: false)
     let client = DeferredSyncClient()
-    await client.setPreviewReply(.working(.preview, cancelling: false))
+    await client.setPreviewReply(working(.preview, cancelling: false))
     await client.holdHistoryReplies()
     await client.holdResolveReplies()
     let store = SyncStore(client: client, pollInterval: .milliseconds(1))
@@ -2055,7 +2062,7 @@ func aSyncThatChangedSomethingCanBeUndoneAndTheUndoExplainsItself() async {
                              notUndone: [RunFailure(path: Data("notes.txt".utf8),
                                                     message: "Changed since the sync; left as it is")],
                              notUndoneCount: 1, archive: "2026-10-18T10-00-00.000Z")
-    let client = ScriptedSyncClient([.finished(result), .working(.undo, cancelling: false), .undone(undone)])
+    let client = ScriptedSyncClient([.finished(result), working(.undo, cancelling: false), .undone(undone)])
     let store = SyncStore(client: client, pollInterval: .milliseconds(1))
     let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
 
@@ -2164,29 +2171,87 @@ func workingJobsShowLiveCountsWithoutCountingAsNewStates() async {
     // The refresh keeps polling while the job works; each reply is held.
     let refresh = Task { await viewModel.refresh() }
     await client.waitForStatusCalls(1)
-    await client.reply(.working(.run, cancelling: false, progress: comparing))
+    await client.reply(working(.run, cancelling: false, progress: comparing))
     await client.waitForStatusCalls(2)
     #expect(viewModel.statusText == "Comparing folders… 50 of 200 items checked")
     #expect(viewModel.progressFraction == 0.25)
 
     // Another Mac is syncing one of the folders; nothing to measure yet.
     let waiting = WorkProgress(listed: 200, checked: 200, changes: 4, waitingFor: "Studio")
-    await client.reply(.working(.run, cancelling: false, progress: waiting))
+    await client.reply(working(.run, cancelling: false, progress: waiting))
     await client.waitForStatusCalls(3)
     #expect(viewModel.statusText == "Waiting for “Studio” to finish syncing these folders…")
     #expect(viewModel.progressFraction == nil)
 
-    await client.reply(.working(.run, cancelling: false, progress: applying))
+    await client.reply(working(.run, cancelling: false, progress: applying))
     await client.waitForStatusCalls(4)
     #expect(viewModel.statusText.hasPrefix("Syncing… 1 of 4 changes · "))
     #expect(viewModel.progressFraction == 0.25)
     // New counts are the same state: no new history, listing or alert.
-    #expect(PairSyncState.working(.run, cancelling: false, progress: comparing)
-        == .working(.run, cancelling: false, progress: applying))
+    #expect(working(.run, cancelling: false, progress: comparing)
+        == working(.run, cancelling: false, progress: applying))
 
     await client.reply(.idle)
     await refresh.value
     #expect(viewModel.progressFraction == nil)
+}
+
+@Test
+func generatedRunningPairKeepsEveryPresentationFieldAndRawRootByte() {
+    let snapshot = RunningPairSnapshot(
+        revision: 12, name: "Claimed settings", leftRoot: Data([0x2f, 0xff]),
+        rightRoot: Data("sftp://nas/archive".utf8), mode: .mirrorRight)
+    let pair = RunningPair(snapshot)
+
+    #expect(pair.revision == 12)
+    #expect(pair.name == "Claimed settings")
+    #expect(pair.left.bytes == Data([0x2f, 0xff]))
+    #expect(pair.right.bytes == Data("sftp://nas/archive".utf8))
+    #expect(pair.mode == .mirrorRight)
+}
+
+@MainActor
+@Test
+func workingPresentationUsesItsClaimedSettingsUntilTheJobFinishes() async {
+    let saved = SyncPair(id: pair().id, revision: 2, settings: PairSettings(
+        name: "Saved settings", left: SelectedFolder(bytes: Data("/new-left".utf8)),
+        right: SelectedFolder(bytes: Data("/new-right".utf8)), mode: .backupLeft))
+    let claimed = RunningPair(
+        revision: 1, name: "Claimed settings",
+        left: SelectedFolder(bytes: Data("/old-left".utf8)),
+        right: SelectedFolder(bytes: Data("sftp://nas/old-right".utf8)), mode: .mirrorRight)
+    let client = DeferredSyncClient()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let viewModel = PairSyncViewModel(
+        pair: saved, store: store, pairs: catalog(), agentConnected: true)
+
+    let refresh = Task { await viewModel.refresh() }
+    await client.waitForStatusCalls(1)
+    await client.reply(working(.run, cancelling: false, pair: claimed))
+    await client.waitForStatusCalls(2)
+
+    #expect(viewModel.activeRevision == 1)
+    #expect(viewModel.activeName == "Claimed settings")
+    #expect(viewModel.activeLeft == claimed.left)
+    #expect(viewModel.activeRight == claimed.right)
+    #expect(viewModel.activeMode == .mirrorRight)
+    #expect(viewModel.activeFolder(.a) == claimed.left)
+    #expect(viewModel.activeFolder(.b) == claimed.right)
+    #expect(viewModel.usesPreviousSettings)
+    #expect(viewModel.previousSettingsNotice
+        == "This sync is finishing with the previous settings. Saved settings apply next run.")
+    #expect(working(.run, cancelling: false, pair: claimed)
+        != working(.run, cancelling: false, pair: RunningPair(saved)))
+
+    await client.reply(.idle)
+    await refresh.value
+    #expect(viewModel.activeRevision == 2)
+    #expect(viewModel.activeName == "Saved settings")
+    #expect(viewModel.activeLeft == saved.settings.left)
+    #expect(viewModel.activeRight == saved.settings.right)
+    #expect(viewModel.activeMode == .backupLeft)
+    #expect(!viewModel.usesPreviousSettings)
+    #expect(viewModel.previousSettingsNotice == nil)
 }
 
 @MainActor
@@ -2477,7 +2542,7 @@ func checkAllSuccessClearsForegroundRefreshError() async {
 @Test
 func checkAllSuccessClearsPollErrorAndPreservesAgentState() async {
     let client = DeferredSyncClient()
-    await client.setPreviewReply(.working(.preview, cancelling: false))
+    await client.setPreviewReply(working(.preview, cancelling: false))
     let store = SyncStore(client: client, pollInterval: .milliseconds(1))
     let pair = pair()
     let previewTask = Task { await store.preview(pair.id) }
@@ -2485,7 +2550,7 @@ func checkAllSuccessClearsPollErrorAndPreservesAgentState() async {
     await client.replyError(SyncFixtureError.unreachable)
     await previewTask.value
     #expect(store.requestError(for: pair.id) != nil)
-    #expect(store.state(for: pair.id) == .working(.preview, cancelling: false))
+    #expect(store.state(for: pair.id) == working(.preview, cancelling: false))
 
     let completed = preview(archivesInA: 0, needsApproval: false)
     await client.finishPolling(.previewed(completed))
