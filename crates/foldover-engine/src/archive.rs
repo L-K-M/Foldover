@@ -7,6 +7,9 @@ use foldover_types::{Durability, PairConfig, Side, SyncPath};
 
 pub use foldover_endpoint::{ArchivedItem, ArchivedRun};
 
+/// Bound path bytes in peer replies and memory held during recovery.
+const RESTORE_PAGE_ITEMS: usize = 1_000;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ArchiveError {
     #[error(transparent)]
@@ -139,19 +142,30 @@ impl PairArchive {
     /// Put back everything `run` archived. One item's failure does not stop
     /// the rest; the report lists it.
     pub fn put_back_all(&self, run: &str) -> Result<PutBackReport, ArchiveError> {
-        // List first: putting items back changes the folder being listed.
-        let (items, _) = self.items(run, None, usize::MAX)?;
         let mut report = PutBackReport::default();
-        for item in items {
-            match self.put_back(run, item.path()) {
-                Ok(placed) if &placed == item.path() => report.restored += 1,
-                Ok(_) => report.beside += 1,
-                Err(error) => report
-                    .failures
-                    .push((item.path().clone(), error.to_string())),
+        let mut after = None;
+        loop {
+            let (items, more) = self.items(run, after.as_ref(), RESTORE_PAGE_ITEMS)?;
+            // Restoring removes items from this listing. Keep the last listed
+            // path even when its restore fails, so every item is tried once.
+            let next = items.last().map(|item| item.path().clone());
+            for item in items {
+                match self.put_back(run, item.path()) {
+                    Ok(placed) if &placed == item.path() => report.restored += 1,
+                    Ok(_) => report.beside += 1,
+                    Err(error) => report
+                        .failures
+                        .push((item.path().clone(), error.to_string())),
+                }
             }
+            if !more {
+                return Ok(report);
+            }
+            after = Some(next.ok_or_else(|| ScanError::Io {
+                path: None,
+                source: std::io::Error::other("Archive listing has more items but no next path"),
+            })?);
         }
-        Ok(report)
     }
 }
 
