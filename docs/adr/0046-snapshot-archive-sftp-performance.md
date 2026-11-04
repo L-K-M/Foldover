@@ -77,8 +77,9 @@ unchanged snapshot and 275 ms for a full rewrite.
 A Mac Studio (M4 Max, 14 cores, 36 GB, macOS 27.0.1), on its internal
 APFS disk, shared with other builds at load averages between 40 and 185.
 Snapshot and endpoint archive rows run the same benchmarks on `ccc4982`
-and `d081589`. The other rows run on `d081589`: before is a linear search
-of the listing, a walk for every page and one SFTP session. SFTP reads go
+and `d081589`. The other rows run on `d081589`, with the old behavior
+restored for Before: polls search the listing linearly, the service walks
+for every page and SFTP reads use one session. SFTP reads go
 to the system's `/usr/libexec/sftp-server` through a relay that adds 5 ms
 per server message, or nothing.
 
