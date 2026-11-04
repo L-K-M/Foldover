@@ -24,7 +24,11 @@ sync plan stay visible without opening help.
   Syncing.
 - **Detail.** The pair's two folders and the sentence that says what a
   sync does, then its status: progress while it works, what the last sync
-  did, and Undo Sync or Review Conflicts when they apply. Below, the table
+  did, and Undo Sync or Review Conflicts when they apply. While a job
+  compares the folders, it counts the items it has checked, since it
+  cannot know the total before it has found them all; once a sync knows
+  its plan, it shows the share done, the data copied, the speed and the
+  time left. Below, the table
   of planned changes. Once a preview lists changes, choose All, Copies,
   Updates, Archives, Conflicts or Moves from the Show pop-up above the
   table (View › Show has the same choices), or type in the toolbar's

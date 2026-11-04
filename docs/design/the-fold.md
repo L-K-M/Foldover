@@ -150,6 +150,31 @@ paper only if it behaves like a printed spread:
 - **A click on a line only selects it.** Marks still stage turns when
   clicked, but a line's middle is now the empty gutter, not a mark.
 
+## What the back reads
+
+The plate on the folded back says which stage the run is in, under a
+figure that never runs backward:
+
+- **Comparing.** A run finds the folders' items as it goes: it lists
+  and checks Folder A, then lists Folder B, then makes its plan. A
+  share of the items found would climb to 100%, fall back as B's
+  listing begins, and start again from 0% once the plan is made. So
+  while comparing, the figure counts the items checked, which only
+  grows, over an open-ended bar and the items found so far.
+- **Syncing.** Once the plan says how much there is to do, the figure
+  is the share done: of the data to copy, or of the changes when
+  nothing is copied, rounded down so it reads 100% only when done. The
+  bar fills, and short lines give the changes made, the data copied,
+  the speed and the time left.
+- **Waiting.** While another Mac syncs the same folders, an hourglass
+  stands in for the figure and there is no bar: nothing moves here.
+- **Stopping.** After Stop the stage says so, the figure holds, and the
+  speed and time left go.
+
+A new stage's figure counts something else, so it replaces the last
+one rather than rolling on from it. While a preview compares, the same
+readout is printed in umber on the page a message keeps to.
+
 ## What I deliberately did not do
 
 - **No claims about lines after a run.** A routine sync plans afresh, so

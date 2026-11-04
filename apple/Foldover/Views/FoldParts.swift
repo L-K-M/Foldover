@@ -1,6 +1,7 @@
 // The sheet's smaller parts: a folder's label on its half, the card a
-// run leaves, the light that passes down the page while comparing, and
-// the motions lines make (printing in, refusing a turn).
+// run leaves, a working job's readout, the light that passes down the
+// page while comparing, and the motions lines make (printing in,
+// refusing a turn).
 
 import AppKit
 import SwiftUI
@@ -167,6 +168,106 @@ struct FoldImprintView: View {
             .font(FoldType.backEyebrow)
             .textCase(.uppercase)
             .tracking(FoldType.eyebrowTracking)
+    }
+}
+
+/// What a readout is printed on.
+enum FoldSurface {
+    /// The paper's face, in umber: a preview comparing.
+    case paper
+    /// The leaf's cerulean back, in white: a run pressing.
+    case back
+}
+
+/// A working job's readout: the stage it is in, a figure and what it
+/// counts, a bar, and a few short lines. The same layout is printed in
+/// white on the folded leaf's back while a run presses, and in umber on
+/// the page while a preview compares. The bar fills only once the job
+/// knows its whole; until then it runs open-ended under a count.
+///
+///        COMPARING                    SYNCING
+///         371,762                       42%
+///      ITEMS CHECKED                  COPIED
+///     ‹ open-ended ›            ━━━━━━━━━━░░░░░░░░░
+///   of 6,810,813 found       1,204 of 5,320 changes
+///        so far             1.2 GB of 40 GB · 85 MB/s
+///                               about 8 min left
+struct FoldReadoutView: View {
+    let readout: FoldReadout
+    let surface: FoldSurface
+    /// The sheet's motion policy: under it, figures change in place.
+    let reduceMotion: Bool
+
+    /// The bar's longest reach, so it reads as a gauge on a wide page.
+    private static let barWidth: CGFloat = 220
+    private static let roll = Animation.smooth(duration: 0.3)
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Text(readout.title)
+                .font(FoldType.backEyebrow)
+                .textCase(.uppercase)
+                .tracking(FoldType.eyebrowTracking * 1.5)
+            figure
+                // A new stage's figure counts something else: it takes
+                // the last one's place rather than rolling on from it.
+                .id(readout.stage)
+            bar
+                .frame(maxWidth: Self.barWidth)
+            if !readout.details.isEmpty {
+                // One text, so on a narrow page the lines wrap together.
+                Text(readout.details.joined(separator: "\n"))
+                    .font(.callout)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .foregroundStyle(ink)
+        .animation(reduceMotion ? nil : Self.roll, value: readout.stage)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(readout.spoken)
+        .accessibilityAddTraits(.updatesFrequently)
+        .accessibilityIdentifier("fold-readout")
+    }
+
+    private var ink: Color { surface == .back ? .white : FoldPalette.umber }
+
+    @ViewBuilder
+    private var figure: some View {
+        if let value = readout.figure {
+            VStack(spacing: 2) {
+                Text(value)
+                    .font(FoldType.figure)
+                    // The digits roll as the count climbs.
+                    .contentTransition(.numericText())
+                    .animation(reduceMotion ? nil : Self.roll, value: value)
+                    // Millions still fit the narrowest page.
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.5)
+                if let caption = readout.caption {
+                    Text(caption)
+                        .font(FoldType.backEyebrow)
+                        .textCase(.uppercase)
+                        .tracking(FoldType.eyebrowTracking)
+                }
+            }
+        } else {
+            // Nothing counts while another Mac holds the folders.
+            Image(systemName: "hourglass")
+                .font(.system(size: 30, weight: .light))
+        }
+    }
+
+    @ViewBuilder
+    private var bar: some View {
+        if let fraction = readout.fraction {
+            ProgressView(value: fraction)
+                .tint(ink)
+        } else if readout.stage != .waiting {
+            // Open-ended: the job has not found everything yet.
+            ProgressView()
+                .progressViewStyle(.linear)
+                .tint(ink)
+        }
     }
 }
 

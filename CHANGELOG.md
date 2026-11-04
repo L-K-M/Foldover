@@ -37,6 +37,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- A sync's progress on the folded sheet names its stage: Comparing,
+  Syncing, Waiting or Stopping. While comparing it counts the items
+  checked, instead of a percentage that fell back when Folder B was
+  listed and restarted at 0% when copying began; the percentage appears
+  once the plan is known, with the changes made, data copied, speed and
+  time left on separate lines. A wait for another Mac shows an hourglass
+  instead of the word "Pressing". Previews count the same way while
+  comparing.
+
 - Home-folder comparisons avoid repeatedly reopening the same ancestors
   while protecting Foldover's state directory.
 - CLI syncs with unresolved conflicts and no failures now exit with

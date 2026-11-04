@@ -16,8 +16,8 @@
 // imprint of what the run reports it did: a routine sync plans afresh,
 // so the previewed lines are a forecast and are never shown as done.
 // This file holds the pure rules: which mark each half carries, what
-// each line is called, which ways a person may turn it, and which half
-// folds.
+// each line is called, which ways a person may turn it, which half
+// folds, and what a working job reads out.
 
 import Foundation
 
@@ -319,6 +319,120 @@ struct FoldImprint: Equatable {
     private static func figures(_ counts: [(UInt64, String)], none: String) -> [Figure] {
         let figures = counts.filter { $0.0 > 0 }.map { Figure(value: "\($0.0)", label: $0.1) }
         return figures.isEmpty ? [Figure(value: "0", label: none)] : figures
+    }
+}
+
+/// What a working job reads out: on the folded leaf's back while a run
+/// presses, and on the page while a preview compares.
+///
+/// A job compares the folders before it knows what it will change, and
+/// it finds their items as it goes: Folder A is listed and checked
+/// before Folder B is listed. A share of the items found so far would
+/// fall back as B's listing begins, and a share that went on to the
+/// plan would start over once the plan is made:
+///
+///   share of items found    0 → 100% (A checked) → 50% (B listed) → 100%
+///   share of bytes copied   0 → 100%
+///
+/// So while comparing the readout counts the items checked, a number
+/// that only grows, under an open-ended bar; a share appears only once
+/// the plan says how much there is to do.
+struct FoldReadout: Equatable {
+    /// What the job is doing.
+    enum Stage: Hashable {
+        /// Listing and checking both folders: the total is not known.
+        case comparing
+        /// Carrying out the plan it made.
+        case syncing
+        /// Another Mac is syncing these folders; nothing moves here.
+        case waiting
+        /// Stop was pressed; the job is winding down.
+        case stopping
+    }
+
+    let stage: Stage
+    /// The large figure: the items checked while comparing, the share
+    /// done while syncing; none while waiting.
+    let figure: String?
+    /// What the figure counts, e.g. "items checked".
+    let caption: String?
+    /// How far the bar is filled; nil while nothing measures the whole
+    /// job, which leaves the bar open-ended.
+    let fraction: Double?
+    /// Short lines under the bar, e.g. "1.2 GB of 40 GB · 85 MB/s".
+    let details: [String]
+
+    init(progress: WorkProgress, cancelling: Bool) {
+        if let holder = progress.waitingFor, !cancelling {
+            stage = .waiting
+            figure = nil
+            caption = nil
+            fraction = nil
+            details = [String(localized: "“\(holder)” is syncing these folders. This sync goes on once it is done.")]
+            return
+        }
+        let measure = progress.changes > 0 ? Self.syncing(progress) : Self.comparing(progress)
+        stage = cancelling ? .stopping : (progress.changes > 0 ? .syncing : .comparing)
+        figure = measure.figure
+        caption = measure.caption
+        fraction = measure.fraction
+        // A stopping job's rate and time left no longer hold.
+        details = cancelling ? [] : measure.details
+    }
+
+    /// The stage's name, set above the figure.
+    var title: String {
+        switch stage {
+        case .comparing: String(localized: "Comparing")
+        case .syncing: String(localized: "Syncing")
+        case .waiting: String(localized: "Waiting")
+        case .stopping: String(localized: "Stopping")
+        }
+    }
+
+    /// The whole readout as one phrase, for VoiceOver.
+    var spoken: String {
+        let count = [figure, caption].compactMap { $0 }.joined(separator: " ")
+        return ([title, count] + details).filter { !$0.isEmpty }.joined(separator: ", ")
+    }
+
+    private typealias Measure = (figure: String, caption: String, fraction: Double?, details: [String])
+
+    /// The items checked so far, of those found so far: both only grow,
+    /// but the second can outrun the first at any time.
+    private static func comparing(_ progress: WorkProgress) -> Measure {
+        let caption = progress.checked == 1
+            ? String(localized: "item checked") : String(localized: "items checked")
+        let found = progress.listed > 0
+            ? [String(localized: "of \(progress.listed.formatted()) found so far")] : []
+        return (progress.checked.formatted(), caption, nil, found)
+    }
+
+    /// The share of the plan done: of its bytes when it copies any, else
+    /// of its changes. Rounded down, so it says 100% only once done.
+    private static func syncing(_ progress: WorkProgress) -> Measure {
+        let byBytes = progress.bytes > 0
+        let total = byBytes ? progress.bytes : progress.changes
+        let done = min(byBytes ? progress.copied : progress.applied, total)
+        let share = Double(done) / Double(total)
+        let percent = (Double(done) * 100 / Double(total)).rounded(.down)
+        let applied = progress.applied.formatted()
+        var details = [progress.changes == 1
+            ? String(localized: "\(applied) of 1 change")
+            : String(localized: "\(applied) of \(progress.changes.formatted()) changes")]
+        if byBytes {
+            let copied = PairSyncViewModel.byteText(progress.copied)
+            var line = String(localized: "\(copied) of \(PairSyncViewModel.byteText(progress.bytes))")
+            // The agent reports no rate until the first copy lands.
+            if progress.rate > 0 { line += " · " + PairSyncViewModel.throughputText(progress.rate) }
+            details.append(line)
+            if progress.rate > 0, progress.bytes > progress.copied {
+                let left = PairSyncViewModel.timeText((progress.bytes - progress.copied) / progress.rate)
+                details.append(String(localized: "about \(left) left"))
+            }
+        }
+        return ((percent / 100).formatted(.percent.precision(.fractionLength(0))),
+                byBytes ? String(localized: "copied") : String(localized: "done"), share, details)
     }
 }
 

@@ -486,17 +486,15 @@ struct FoldSheet: View {
                     }
             } else if scene == .comparing {
                 onPage(messagePage) {
-                    VStack(spacing: 10) {
-                        Text(sync.statusText)
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(FoldPalette.umber)
-                            .multilineTextAlignment(.center)
-                            .accessibilityAddTraits(.updatesFrequently)
-                        if let fraction = sync.progressFraction {
-                            ProgressView(value: fraction)
-                                .tint(FoldPalette.umber)
-                                .frame(maxWidth: 180)
-                                .accessibilityLabel("Progress")
+                    VStack {
+                        if let readout = sync.readout {
+                            FoldReadoutView(readout: readout, surface: .paper, reduceMotion: reduceMotion)
+                        } else {
+                            // A choice on its way to the agent: no job to measure.
+                            Text(sync.statusText)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(FoldPalette.umber)
+                                .multilineTextAlignment(.center)
                         }
                     }
                     .padding(24)
@@ -1070,35 +1068,13 @@ struct FoldSheet: View {
     }
 
     /// What the folded leaf's cerulean back says while the run presses,
-    /// in white: the run's own progress, never a claim about any one line.
+    /// in white: the stage the run is in and its own progress, never a
+    /// claim about any one line.
     private var pressReadout: some View {
-        VStack(spacing: 10) {
-            Text(pair.settings.mode.title)
-                .font(FoldType.backEyebrow)
-                .textCase(.uppercase)
-                .tracking(FoldType.eyebrowTracking * 1.5)
-                .foregroundStyle(.white)
-            Text(sync.progressFraction.map { $0.formatted(.percent.precision(.fractionLength(0))) }
-                 ?? String(localized: "Pressing"))
-                .font(FoldType.figure)
-                .foregroundStyle(.white)
-                .contentTransition(.numericText())
-            Group {
-                if let fraction = sync.progressFraction {
-                    ProgressView(value: fraction)
-                } else {
-                    ProgressView().progressViewStyle(.linear)
-                }
+        VStack(spacing: 14) {
+            if let readout = sync.readout {
+                FoldReadoutView(readout: readout, surface: .back, reduceMotion: reduceMotion)
             }
-            .tint(.white)
-            .frame(maxWidth: 220)
-            .accessibilityLabel("Progress")
-            Text(sync.statusText)
-                .font(.callout)
-                .foregroundStyle(.white)
-                .multilineTextAlignment(.center)
-                .lineLimit(3)
-                .accessibilityAddTraits(.updatesFrequently)
             Button("Stop") { Task { await sync.cancel() } }
                 .disabled(!sync.canCancel)
         }
@@ -1110,6 +1086,9 @@ struct FoldSheet: View {
         // Printed on a flat plate over the folded back: no facet ridge
         // runs through the words.
         .background { Kami(finish: .flat) }
+        // The whole plate as one group, so the tour can measure it.
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("fold-plate")
         .offset(x: leafSide == .a ? halfWidth : 0)
     }
 
