@@ -60,7 +60,8 @@ batches are not transactions, so refresh state before retrying.
 
 Before creation or update, the engine opens both selected roots and compares
 held identities and ancestry. It rejects equal/nested/aliased roots, overlap
-with any other configured pair, and a root that is or sits inside its state
+with any other configured pair (unless both use the folder as a Mirror or
+Backup source, [ADR 0047](0047-shared-one-way-sources.md)), and a root that is or sits inside its state
 directory. A root that *holds* the state directory — the home folder is the
 case that matters — is allowed: the endpoint protects that subtree instead.
 Scans and listings leave it out, path-level reads and writes are refused, an

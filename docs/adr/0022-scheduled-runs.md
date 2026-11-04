@@ -67,7 +67,9 @@ is skipped until its job ends.
 ## Consequences
 
 - An unattended run that stops for approval stays stopped until someone
-  syncs manually; there are no notifications yet.
+  syncs manually; there are no notifications yet. A run that found a
+  folder busy with another run is tried again when the schedule next
+  comes due ([ADR 0047](0047-shared-one-way-sources.md)).
 - Watching uses the configured root paths, resolved once; a folder moved
   while watched is noticed by the next hourly run, which then fails on its
   identity check or path.

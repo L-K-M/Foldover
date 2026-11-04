@@ -129,7 +129,9 @@ during runs.
   - a root inside a cloud-managed folder (iCloud Drive, Desktop & Documents,
     a File Provider domain) gets a warning that another sync engine manages
     it;
-  - roots that overlap another pair's root are blocked;
+  - roots that overlap another pair's root are blocked, unless both pairs
+    only read them as Mirror or Backup sources, so one folder can be backed
+    up to several targets ([ADR 0047](docs/adr/0047-shared-one-way-sources.md));
   - a root inside the agent's state directory is blocked, but a root that
     holds it — such as the home folder — is allowed: the state subtree is
     left out of scans, refused to reads, writes and peers, and its own
@@ -448,11 +450,14 @@ Endpoint-layer rules, not filters:
 
 **Each endpoint root** gets one hidden `.foldover/` folder. Unlike GoodSync's
 `_gsdata_`, it holds no sync database:
-- **`archive/`:** retention-pruned; with several Macs on one share, each
-  prunes only what it archived.
+- **`archive/`:** one folder per run, named by its start time and pair;
+  each pair lists and prunes its own runs, and another pair's only at
+  twice the retention ([ADR 0047](docs/adr/0047-shared-one-way-sources.md)).
 - **`id`:** lets Foldover notice a different disk mounted at the same path.
 - **`lock`:** a lease with holder device, run ID and a heartbeat counter
-  ([ADR 0032](docs/adr/0032-root-leases.md)).
+  ([ADR 0032](docs/adr/0032-root-leases.md)). A Mirror or Backup takes its
+  source's lease only when it writes there
+  ([ADR 0047](docs/adr/0047-shared-one-way-sources.md)).
   - **Reclaim:** a lease is dead when its counter hasn't moved across two
     reads one TTL apart, timed on the reclaimer's own clock. Taking it over
     is an exclusive-create claim file, then the lock swap, so two Macs can't

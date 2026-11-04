@@ -15,7 +15,8 @@ the folder that any Mac can read and write.
 ## Decision
 
 Each run holds a lease on both roots from before its first write until
-it ends. The lease is `.foldover/lock`:
+it ends. A Mirror's or Backup's source is leased only when the run
+writes there ([ADR 0047](0047-shared-one-way-sources.md)). The lease is `.foldover/lock`:
 
 ```text
 foldover-lease 1
