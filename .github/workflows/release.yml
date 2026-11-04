@@ -24,6 +24,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Release notes regressions
+        run: python3 scripts/test-release-notes.py
+
       # The tag, the app's MARKETING_VERSION and the Cargo workspace must agree.
       - name: Check the version
         run: |
