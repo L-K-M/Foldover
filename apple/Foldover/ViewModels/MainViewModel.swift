@@ -590,6 +590,7 @@ final class MainViewModel {
         case .sync: await before.sync()
         case .preview: await before.preview()
         }
+        await syncStore.waitWhileWorking(pair.id)
         let after = sync(for: pair)
         return after.requestError ?? after.statusText
     }
@@ -612,7 +613,10 @@ final class MainViewModel {
                     await group.next()
                     inFlight -= 1
                 }
-                group.addTask { await self.sync(for: pair).sync() }
+                group.addTask {
+                    await self.sync(for: pair).sync()
+                    await self.syncStore.waitWhileWorking(pair.id)
+                }
                 inFlight += 1
             }
         }
