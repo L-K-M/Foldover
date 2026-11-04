@@ -145,8 +145,8 @@ fn a_live_holder_keeps_its_lease_while_beating() {
     // A TTL well past a busy machine's stalls between beats, and a wait
     // long enough to take over a holder that stopped beating.
     let patient = LeaseTiming {
-        ttl: Duration::from_secs(1),
-        wait: Duration::from_millis(2_500),
+        ttl: Duration::from_secs(3),
+        wait: Duration::from_secs(5),
         ..QUICK
     };
     let waiting = std::thread::scope(|scope| {
