@@ -101,6 +101,7 @@ fn step_clippy(root: &Path) -> bool {
         root,
         &[
             "clippy",
+            "--locked",
             "--workspace",
             "--all-targets",
             "--",
@@ -111,7 +112,7 @@ fn step_clippy(root: &Path) -> bool {
 }
 
 fn step_test(root: &Path) -> bool {
-    run(&mut cargo(root, &["test", "--workspace"]))
+    run(&mut cargo(root, &["test", "--locked", "--workspace"]))
 }
 
 fn agent_smoke() -> ExitCode {
@@ -145,7 +146,7 @@ fn bench_check() -> ExitCode {
 }
 
 fn step_doc(root: &Path) -> bool {
-    let mut cmd = cargo(root, &["doc", "--workspace", "--no-deps"]);
+    let mut cmd = cargo(root, &["doc", "--locked", "--workspace", "--no-deps"]);
     cmd.env("RUSTDOCFLAGS", "-D warnings");
     run(&mut cmd)
 }

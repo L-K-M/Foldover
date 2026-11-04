@@ -60,7 +60,7 @@ jobs:
           echo "Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
 
       - name: cargo deny check
-        run: cargo deny check
+        run: cargo deny --locked check
 
       # The notices embed-agent.sh writes into the app, checked early on
       # Linux: fails on a linked crate without license text, a workspace
@@ -147,7 +147,7 @@ jobs:
 
       - name: cargo test (aarch64-apple-darwin)
         # Report every failing crate in one run.
-        run: cargo test --workspace --no-fail-fast --target aarch64-apple-darwin
+        run: cargo test --locked --workspace --no-fail-fast --target aarch64-apple-darwin
 
       - name: Agent and CLI process smoke
         run: cargo xtask agent-smoke
