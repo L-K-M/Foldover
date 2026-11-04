@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A sync with nothing previewed on the sheet folds a whole page again:
+  one started by a schedule, the menu bar or Sync Now, or one under way
+  when the window opens. The sheet no longer shrinks to its folder
+  labels, with the progress in a card at the top of a bare field.
 - Pair edits save during a preview or sync and apply to subsequent runs.
   The current job keeps its original settings and finishes normally.
 - An aborted first sync still requires review on retry. Editing a pair's

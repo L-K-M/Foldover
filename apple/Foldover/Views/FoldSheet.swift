@@ -425,10 +425,14 @@ struct FoldSheet: View {
 
     /// The page's body. The line list keeps one identity while a plan is
     /// shown, re-checked after a choice, or pressed, so its scroll
-    /// position stays put.
+    /// position stays put. A stack, not a group: a run pressing with
+    /// nothing listed shows nothing here, and the page must still fill
+    /// the field, or the paper shrinks to its labels and the leaf's back
+    /// to a card. A scene's message also crossfades with the next one in
+    /// place, rather than sharing the page with it.
     @ViewBuilder
     private func content(scene: FoldScene, entries: [FoldEntry], progress: Double) -> some View {
-        Group {
+        ZStack {
             if scene == .imprint {
                 // Stamped on the page the leaf pressed, mid-page or above
                 // the failures it lists, once the leaf is open: the card is

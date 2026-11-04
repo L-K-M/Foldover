@@ -150,6 +150,16 @@ paper only if it behaves like a printed spread:
 - **A click on a line only selects it.** Marks still stage turns when
   clicked, but a line's middle is now the empty gutter, not a mark.
 
+## When nothing is listed
+
+Most runs start with no preview on the sheet: a schedule, the menu
+bar, Shortcuts, Sync Now before previewing, or a window opened while a
+run is under way. The leaf folds all the same, a blank half carrying
+only its folder's label, and the sheet keeps its height with nothing
+listed: the folded back covers its whole page, and the navy field
+fills the detail behind it. An earlier build let the page shrink to
+its labels, leaving the back a card at the top of a bare field.
+
 ## What the back reads
 
 The plate on the folded back says which stage the run is in, under a
