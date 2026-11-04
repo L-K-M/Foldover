@@ -286,19 +286,21 @@ final class MacToMacStore {
     /// Run mutations in invocation order. The task is deliberately
     /// unstructured: once the agent may have accepted a choice, cancelling
     /// its UI task cannot let a later choice overtake it.
+    /// A mutation must not call another mutating store method: that would
+    /// enqueue the nested mutation behind itself and wait forever.
     private func enqueueMutation(
         _ mutation: @escaping @MainActor @Sendable () async -> Void
     ) async {
         generation += 1
         pendingMutations += 1
         let previous = mutationTail
-        let task = Task {
+        let task = Task { @MainActor [self] in
             await previous?.value
             await mutation()
+            pendingMutations -= 1
         }
         mutationTail = task
         await task.value
-        pendingMutations -= 1
-        if mutationTail == task { mutationTail = nil }
+        if pendingMutations == 0 { mutationTail = nil }
     }
 }

@@ -2,7 +2,10 @@ import Foundation
 import Testing
 @testable import Foldover
 
-private enum MacToMacFixtureError: Error { case unreachable }
+private enum MacToMacFixtureError: Error {
+    case noSuchPairing
+    case unreachable
+}
 
 /// Plays both Macs' agents: Studio is nearby, and pairing with it shows a
 /// code until this Mac confirms it.
@@ -83,8 +86,10 @@ private actor MacToMacFixtureClient: MacToMacClient {
 
     func cancel(device: String) async throws -> MacToMacState {
         cancelCalls += 1
+        guard pending.contains(where: { $0.device == device }) else {
+            throw MacToMacFixtureError.noSuchPairing
+        }
         pending.removeAll { $0.device == device }
-        paired.removeAll { $0.device == device }
         return snapshot()
     }
 
@@ -148,6 +153,16 @@ private actor MacToMacFixtureClient: MacToMacClient {
         heldConfirm?.resume()
         heldConfirm = nil
     }
+}
+
+@MainActor
+private func waitForPendingMutations(_ count: Int, in store: MacToMacStore) async -> Bool {
+    let deadline = ContinuousClock.now + .seconds(3)
+    while store.pendingMutations < count {
+        if ContinuousClock.now >= deadline { return false }
+        await Task.yield()
+    }
+    return true
 }
 
 @MainActor
@@ -216,7 +231,10 @@ func pairingWindowChoicesRunInInvocationOrder() async {
     #expect(await client.waitForHeldOpen())
 
     let close = Task { await store.closePairing() }
-    for _ in 0..<10_000 where store.pendingMutations < 2 { await Task.yield() }
+    #expect(
+        await waitForPendingMutations(2, in: store),
+        "the close choice was never enqueued"
+    )
     #expect(store.pendingMutations == 2)
     #expect(store.mutationPending)
     #expect(await client.closeCalls == 0)
@@ -246,7 +264,10 @@ func pairingDecisionsRunInInvocationOrder() async {
     #expect(await client.waitForHeldConfirm())
 
     let cancel = Task { await store.cancel("studio") }
-    for _ in 0..<10_000 where store.pendingMutations < 2 { await Task.yield() }
+    #expect(
+        await waitForPendingMutations(2, in: store),
+        "the cancel choice was never enqueued"
+    )
     #expect(store.pendingMutations == 2)
     #expect(store.mutationPending)
     #expect(await client.cancelCalls == 0)
@@ -256,7 +277,8 @@ func pairingDecisionsRunInInvocationOrder() async {
     await cancel.value
     #expect(await client.cancelCalls == 1)
     #expect(store.state?.pending.isEmpty == true)
-    #expect(store.state?.paired.isEmpty == true)
+    #expect(store.state?.paired.map(\.device) == ["studio"])
+    #expect(store.error != nil)
     #expect(!store.mutationPending)
 }
 
