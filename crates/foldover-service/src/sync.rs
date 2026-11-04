@@ -647,8 +647,9 @@ impl Jobs {
     }
 
     /// Reserve the pair for `work` while a job runs. Unattended work never
-    /// replaces a result held for a person's decision. An optional preview
-    /// alone does not suspend the pair's schedule.
+    /// replaces a result held for a person's decision. Failed runs retry at
+    /// the next cadence; an optional preview alone does not suspend the pair's
+    /// schedule.
     fn claim(&self, id: PairId, work: Work, cancel: &Arc<AtomicBool>) -> Result<Claim, RpcError> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let blocked = if state.mutating.contains(&id) {
@@ -659,6 +660,9 @@ impl Jobs {
                     Some("This pair already has a preview or sync in progress")
                 }
                 // An undo waits too: an unattended run would redo it unseen.
+                // Failed is deliberately omitted: the attempt owns its
+                // cadence, then the scheduler retries without requiring a
+                // manual sync.
                 Some(SyncStatus::NeedsApproval { .. } | SyncStatus::Undone { .. })
                     if matches!(work, Work::Scheduled) =>
                 {
