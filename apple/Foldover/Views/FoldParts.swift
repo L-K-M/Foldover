@@ -55,7 +55,7 @@ struct FoldFolderLabel: View {
         .accessibilityLabel(Text("\(PairSyncViewModel.folderName(side)): \(text)"))
         .contextMenu {
             if viewModel.localURL(folder) != nil {
-                Button("Show in Finder") { viewModel.reveal(side) }
+                Button("Show in Finder") { viewModel.reveal(folder) }
             }
             Button("Copy Path") {
                 let pasteboard = NSPasteboard.general
