@@ -35,9 +35,9 @@ jobs:
           fi
 
   # Run the full CI qualification suite before anything can publish.
-  # The reusable caller uses its own concurrency group, so the
-  # ci-${{ github.ref }} group in ci.yml never collides with the
-  # release workflow's group.
+  # Inside a workflow_call run, github.workflow is the caller's workflow
+  # name, so ci.yml pins a literal "ci-" prefix and cannot evaluate to this
+  # workflow's group. Release runs are serialized by the group above.
   qualify:
     needs: [source]
     uses: ./.github/workflows/ci.yml
