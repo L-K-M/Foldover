@@ -17,6 +17,7 @@ private actor ArchiveFixtureClient: ArchiveClient {
     private var heldRestore: CheckedContinuation<Void, Never>?
     private var refusesRestore = false
     private var refusesNextPage = false
+    private(set) var revisions: [UInt64] = []
 
     func holdRestore() { holdsRestore = true }
     func refuseRestore() { refusesRestore = true }
@@ -48,7 +49,8 @@ private actor ArchiveFixtureClient: ArchiveClient {
         held = nil
     }
 
-    func runs(_ id: String, side: FolderSide) async throws -> ArchiveRuns {
+    func runs(_ id: String, revision: UInt64, side: FolderSide) async throws -> ArchiveRuns {
+        revisions.append(revision)
         sides.append(side)
         guard side == .b else { return ArchiveRuns(runs: [], more: false) }
         return ArchiveRuns(runs: [ArchiveRun(name: "new", started: Date(timeIntervalSince1970: 2)),
@@ -56,7 +58,8 @@ private actor ArchiveFixtureClient: ArchiveClient {
                            more: true)
     }
 
-    func items(_ id: String, side: FolderSide, run: String, after: Data?) async throws -> ArchivePage {
+    func items(_ id: String, revision: UInt64, side: FolderSide, run: String,
+               after: Data?) async throws -> ArchivePage {
         let rest = stored.filter { path in after.map { $0.lexicographicallyPrecedes(path) } ?? true }
         // Answered as of the request, even when held.
         let page = ArchivePage(items: rest.prefix(2).map { ArchiveItem(path: $0, size: 1) }, more: rest.count > 2)
@@ -70,13 +73,15 @@ private actor ArchiveFixtureClient: ArchiveClient {
         return page
     }
 
-    func putBack(_ id: String, side: FolderSide, run: String, path: Data) async throws -> Data {
+    func putBack(_ id: String, revision: UInt64, side: FolderSide, run: String,
+                 path: Data) async throws -> Data {
         putBacks.append(path)
         stored.removeAll { $0 == path }
         return path + Data(" (restored)".utf8)
     }
 
-    func putBackAll(_ id: String, side: FolderSide, run: String) async throws -> RunRestore {
+    func putBackAll(_ id: String, revision: UInt64, side: FolderSide,
+                    run: String) async throws -> RunRestore {
         restoreRequests += 1
         if holdsRestore {
             holdsRestore = false
@@ -89,8 +94,8 @@ private actor ArchiveFixtureClient: ArchiveClient {
     }
 }
 
-private func docs() -> SyncPair {
-    SyncPair(id: "11111111111111111111111111111111", revision: 1, settings: PairSettings(
+private func docs(revision: UInt64 = 1) -> SyncPair {
+    SyncPair(id: "11111111111111111111111111111111", revision: revision, settings: PairSettings(
         name: "Docs", left: SelectedFolder(bytes: Data("/a".utf8)),
         right: SelectedFolder(bytes: Data("/b".utf8)), mode: .sync
     ))
@@ -420,17 +425,36 @@ func recentRunTitlesKeepTheClockTime() {
 func siblingStoresShareTheClientButNotTheState() async {
     let client = ArchiveFixtureClient()
     let store = ArchiveStore(client: client)
-    await store.open(docs().id, side: .b)
+    await store.open(docs().id, revision: docs().revision, side: .b)
 
     let sibling = store.sibling()
     #expect(sibling.runs.isEmpty)
     #expect(sibling.side == .a)
     #expect(sibling.run == nil)
 
-    await sibling.open(docs().id, side: .b)
+    await sibling.open(docs().id, revision: docs().revision, side: .b)
     #expect(sibling.runs.map(\.name) == ["new", "old"])
     #expect(store.run == "new")
     #expect(await client.sides == [.b, .b])
+}
+
+@MainActor
+@Test
+func archiveReloadsWhenThePairRevisionChanges() async {
+    let client = ArchiveFixtureClient()
+    let store = ArchiveStore(client: client)
+    let first = ArchiveViewModel(pair: docs(revision: 1), store: store, agentConnected: true)
+    await first.show(.b)
+    #expect(first.itemRows.map(\.path) == ["a", "b"])
+
+    // An archive window keeps the same store and pair ID across an edit.
+    // Its new view model must open the new revision rather than reusing the
+    // old rows for a mutation that the agent would resolve against new roots.
+    let edited = ArchiveViewModel(pair: docs(revision: 2), store: store, agentConnected: true)
+    await edited.load()
+
+    #expect(await client.revisions == [1, 2])
+    #expect(edited.itemRows.map(\.path) == ["a", "b"])
 }
 
 private enum TwoRunFixtureError: Error { case refused }
@@ -457,18 +481,20 @@ private actor TwoRunArchiveClient: ArchiveClient {
         held = nil
     }
 
-    func runs(_ id: String, side: FolderSide) async throws -> ArchiveRuns {
+    func runs(_ id: String, revision: UInt64, side: FolderSide) async throws -> ArchiveRuns {
         ArchiveRuns(runs: [ArchiveRun(name: "new", started: Date(timeIntervalSince1970: 2)),
                            ArchiveRun(name: "old", started: Date(timeIntervalSince1970: 1))],
                     more: false)
     }
 
-    func items(_ id: String, side: FolderSide, run: String, after: Data?) async throws -> ArchivePage {
+    func items(_ id: String, revision: UInt64, side: FolderSide, run: String,
+               after: Data?) async throws -> ArchivePage {
         let names = run == "new" ? ["a.txt", "b.txt", "c.txt"] : ["b.txt", "c.txt"]
         return ArchivePage(items: names.map { ArchiveItem(path: Data($0.utf8), size: 1) }, more: false)
     }
 
-    func putBack(_ id: String, side: FolderSide, run: String, path: Data) async throws -> Data {
+    func putBack(_ id: String, revision: UInt64, side: FolderSide, run: String,
+                 path: Data) async throws -> Data {
         let name = String(decoding: path, as: UTF8.self)
         putBacks.append("\(run)/\(name)")
         if holdsNext {
@@ -479,7 +505,8 @@ private actor TwoRunArchiveClient: ArchiveClient {
         return path
     }
 
-    func putBackAll(_ id: String, side: FolderSide, run: String) async throws -> RunRestore {
+    func putBackAll(_ id: String, revision: UInt64, side: FolderSide,
+                    run: String) async throws -> RunRestore {
         restoreRequests += 1
         return RunRestore(restored: 0, beside: 0, failures: 0)
     }

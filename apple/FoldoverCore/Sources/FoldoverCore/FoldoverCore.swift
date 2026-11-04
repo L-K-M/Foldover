@@ -5374,11 +5374,11 @@ public func pairUpdate(id: String, revision: UInt64, configuration: LocalPairDra
 /**
  * A page of a run's items after `after`, the last path of the previous page.
  */
-public func archiveItems(id: String, side: SyncSide, run: String, after: Data?)async throws  -> ArchivedItemPage  {
+public func archiveItems(id: String, revision: UInt64, side: SyncSide, run: String, after: Data?)async throws  -> ArchivedItemPage  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_foldover_ffi_fn_func_archive_items(FfiConverterString.lower(id),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run),FfiConverterOptionData.lower(after)
+                uniffi_foldover_ffi_fn_func_archive_items(FfiConverterString.lower(id),FfiConverterUInt64.lower(revision),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run),FfiConverterOptionData.lower(after)
                 )
             },
             pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
@@ -5392,11 +5392,11 @@ public func archiveItems(id: String, side: SyncSide, run: String, after: Data?)a
  * Put an item back; returns its path, which gains ` (restored)` when the
  * original path is taken.
  */
-public func archivePutBack(id: String, side: SyncSide, run: String, path: Data)async throws  -> Data  {
+public func archivePutBack(id: String, revision: UInt64, side: SyncSide, run: String, path: Data)async throws  -> Data  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_foldover_ffi_fn_func_archive_put_back(FfiConverterString.lower(id),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run),FfiConverterData.lower(path)
+                uniffi_foldover_ffi_fn_func_archive_put_back(FfiConverterString.lower(id),FfiConverterUInt64.lower(revision),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run),FfiConverterData.lower(path)
                 )
             },
             pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
@@ -5409,11 +5409,11 @@ public func archivePutBack(id: String, side: SyncSide, run: String, path: Data)a
 /**
  * Put back everything one run archived on one side.
  */
-public func archivePutBackAll(id: String, side: SyncSide, run: String)async throws  -> ArchiveRestoreSummary  {
+public func archivePutBackAll(id: String, revision: UInt64, side: SyncSide, run: String)async throws  -> ArchiveRestoreSummary  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_foldover_ffi_fn_func_archive_put_back_all(FfiConverterString.lower(id),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run)
+                uniffi_foldover_ffi_fn_func_archive_put_back_all(FfiConverterString.lower(id),FfiConverterUInt64.lower(revision),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run)
                 )
             },
             pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
@@ -5423,11 +5423,11 @@ public func archivePutBackAll(id: String, side: SyncSide, run: String)async thro
             errorHandler: FfiConverterTypeAgentError_lift
         )
 }
-public func archiveRuns(id: String, side: SyncSide)async throws  -> ArchivedRunList  {
+public func archiveRuns(id: String, revision: UInt64, side: SyncSide)async throws  -> ArchivedRunList  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_foldover_ffi_fn_func_archive_runs(FfiConverterString.lower(id),FfiConverterTypeSyncSide_lower(side)
+                uniffi_foldover_ffi_fn_func_archive_runs(FfiConverterString.lower(id),FfiConverterUInt64.lower(revision),FfiConverterTypeSyncSide_lower(side)
                 )
             },
             pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
@@ -5937,16 +5937,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_foldover_ffi_checksum_func_pair_update() != 2038) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_foldover_ffi_checksum_func_archive_items() != 55648) {
+    if (uniffi_foldover_ffi_checksum_func_archive_items() != 34936) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_foldover_ffi_checksum_func_archive_put_back() != 6455) {
+    if (uniffi_foldover_ffi_checksum_func_archive_put_back() != 17827) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_foldover_ffi_checksum_func_archive_put_back_all() != 35866) {
+    if (uniffi_foldover_ffi_checksum_func_archive_put_back_all() != 10555) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_foldover_ffi_checksum_func_archive_runs() != 43046) {
+    if (uniffi_foldover_ffi_checksum_func_archive_runs() != 44682) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_automation_state() != 127) {

@@ -44,17 +44,20 @@ struct RunRestore: Equatable, Sendable {
 }
 
 protocol ArchiveClient: Sendable {
-    func runs(_ id: String, side: FolderSide) async throws -> ArchiveRuns
-    func items(_ id: String, side: FolderSide, run: String, after: Data?) async throws -> ArchivePage
+    func runs(_ id: String, revision: UInt64, side: FolderSide) async throws -> ArchiveRuns
+    func items(_ id: String, revision: UInt64, side: FolderSide, run: String,
+               after: Data?) async throws -> ArchivePage
     /// Returns where the item went.
-    func putBack(_ id: String, side: FolderSide, run: String, path: Data) async throws -> Data
-    func putBackAll(_ id: String, side: FolderSide, run: String) async throws -> RunRestore
+    func putBack(_ id: String, revision: UInt64, side: FolderSide, run: String,
+                 path: Data) async throws -> Data
+    func putBackAll(_ id: String, revision: UInt64, side: FolderSide,
+                    run: String) async throws -> RunRestore
 }
 
 // Keep generated async values inside one actor; only native Sendable records leave it.
 private actor CoreArchiveClient: ArchiveClient {
-    func runs(_ id: String, side: FolderSide) async throws -> ArchiveRuns {
-        let list = try await FoldoverCore.archiveRuns(id: id, side: coreSide(side))
+    func runs(_ id: String, revision: UInt64, side: FolderSide) async throws -> ArchiveRuns {
+        let list = try await FoldoverCore.archiveRuns(id: id, revision: revision, side: coreSide(side))
         return ArchiveRuns(
             runs: list.runs.map {
                 ArchiveRun(name: $0.name, started: Date(timeIntervalSince1970: Double($0.startedMs) / 1000))
@@ -63,17 +66,26 @@ private actor CoreArchiveClient: ArchiveClient {
         )
     }
 
-    func items(_ id: String, side: FolderSide, run: String, after: Data?) async throws -> ArchivePage {
-        let page = try await FoldoverCore.archiveItems(id: id, side: coreSide(side), run: run, after: after)
+    func items(_ id: String, revision: UInt64, side: FolderSide, run: String,
+               after: Data?) async throws -> ArchivePage {
+        let page = try await FoldoverCore.archiveItems(
+            id: id, revision: revision, side: coreSide(side), run: run, after: after
+        )
         return ArchivePage(items: page.items.map { ArchiveItem(path: $0.path, size: $0.size) }, more: page.more)
     }
 
-    func putBack(_ id: String, side: FolderSide, run: String, path: Data) async throws -> Data {
-        try await FoldoverCore.archivePutBack(id: id, side: coreSide(side), run: run, path: path)
+    func putBack(_ id: String, revision: UInt64, side: FolderSide, run: String,
+                 path: Data) async throws -> Data {
+        try await FoldoverCore.archivePutBack(
+            id: id, revision: revision, side: coreSide(side), run: run, path: path
+        )
     }
 
-    func putBackAll(_ id: String, side: FolderSide, run: String) async throws -> RunRestore {
-        let summary = try await FoldoverCore.archivePutBackAll(id: id, side: coreSide(side), run: run)
+    func putBackAll(_ id: String, revision: UInt64, side: FolderSide,
+                    run: String) async throws -> RunRestore {
+        let summary = try await FoldoverCore.archivePutBackAll(
+            id: id, revision: revision, side: coreSide(side), run: run
+        )
         return RunRestore(restored: summary.restored, beside: summary.beside, failures: summary.failureCount)
     }
 
@@ -92,6 +104,7 @@ private actor CoreArchiveClient: ArchiveClient {
 final class ArchiveStore {
     private let client: any ArchiveClient
     private var pairID: String?
+    private var pairRevision: UInt64?
     private(set) var side: FolderSide = .a
     private(set) var runs: [ArchiveRun] = []
     private(set) var hasOlderRuns = false
@@ -136,8 +149,9 @@ final class ArchiveStore {
     func sibling() -> ArchiveStore { ArchiveStore(client: client) }
 
     /// Show `side`'s runs and the newest run's items.
-    func open(_ pairID: String, side: FolderSide) async {
+    func open(_ pairID: String, revision: UInt64, side: FolderSide) async {
         self.pairID = pairID
+        pairRevision = revision
         self.side = side
         listing += 1
         runs = []
@@ -152,8 +166,8 @@ final class ArchiveStore {
         isLoading = true
         defer { isLoading = false }
         do {
-            let list = try await client.runs(pairID, side: side)
-            guard self.pairID == pairID, self.side == side else { return }
+            let list = try await client.runs(pairID, revision: revision, side: side)
+            guard self.pairID == pairID, pairRevision == revision, self.side == side else { return }
             runs = list.runs
             hasOlderRuns = list.more
         } catch {
@@ -234,14 +248,17 @@ final class ArchiveStore {
     /// Put back everything the selected run archived, then list what is left.
     /// Share the item-restore reservation so a run cannot be restored twice.
     func putBackAll() async {
-        guard !isPuttingBack, let pairID, let run else { return }
+        guard !isPuttingBack, let pairID, let pairRevision, let run else { return }
         let side = side
         isPuttingBack = true
         defer { isPuttingBack = false }
         error = nil
         do {
-            let restore = try await client.putBackAll(pairID, side: side, run: run)
-            guard self.pairID == pairID, self.side == side, self.run == run else { return }
+            let restore = try await client.putBackAll(
+                pairID, revision: pairRevision, side: side, run: run
+            )
+            guard self.pairID == pairID, self.pairRevision == pairRevision,
+                  self.side == side, self.run == run else { return }
             await select(run)
             self.restore = restore
         } catch {
@@ -261,7 +278,7 @@ final class ArchiveStore {
     /// as another is chosen, since a later item's path may name another
     /// run's copy, and at the first failure, so its error stays shown.
     func putBack(_ items: [ArchiveItem]) async {
-        guard !isPuttingBack, !items.isEmpty, let pairID, let run else { return }
+        guard !isPuttingBack, !items.isEmpty, let pairID, let pairRevision, let run else { return }
         let side = side
         isPuttingBack = true
         defer { isPuttingBack = false }
@@ -269,10 +286,14 @@ final class ArchiveStore {
         placed = nil
         placedCount = 0
         for item in items {
-            guard self.pairID == pairID, self.side == side, self.run == run else { return }
+            guard self.pairID == pairID, self.pairRevision == pairRevision,
+                  self.side == side, self.run == run else { return }
             do {
-                let path = try await client.putBack(pairID, side: side, run: run, path: item.path)
-                guard self.pairID == pairID, self.side == side, self.run == run else { return }
+                let path = try await client.putBack(
+                    pairID, revision: pairRevision, side: side, run: run, path: item.path
+                )
+                guard self.pairID == pairID, self.pairRevision == pairRevision,
+                      self.side == side, self.run == run else { return }
                 self.items.removeAll { $0 == item }
                 placed = path
                 placedCount += 1
@@ -284,7 +305,7 @@ final class ArchiveStore {
     }
 
     private func loadItems(after: Data?) async {
-        guard let pairID, let run else { return }
+        guard let pairID, let pairRevision, let run else { return }
         let side = side
         let ticket = listing
         loadingListing = ticket
@@ -299,7 +320,9 @@ final class ArchiveStore {
             }
         }
         do {
-            let page = try await client.items(pairID, side: side, run: run, after: after)
+            let page = try await client.items(
+                pairID, revision: pairRevision, side: side, run: run, after: after
+            )
             guard ticket == listing else { return }
             items += page.items
             hasMoreItems = page.more

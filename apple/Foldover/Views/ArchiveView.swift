@@ -75,7 +75,7 @@ struct ArchiveView: View {
         // A selection belongs to the list it was made in.
         .onChange(of: viewModel.side) { selection.removeAll() }
         .onChange(of: viewModel.selectedRun) { selection.removeAll() }
-        .task(id: viewModel.pair.id) {
+        .task(id: viewModel.pair.revision) {
             hasStarted = true
             await viewModel.load()
         }

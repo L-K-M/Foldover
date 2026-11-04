@@ -242,10 +242,12 @@ pub async fn history(location: &SocketLocation, id: PairId) -> Result<History, E
 pub async fn archive_runs(
     location: &SocketLocation,
     id: PairId,
+    revision: u64,
     side: Side,
 ) -> Result<ArchiveRuns, Error> {
     let params = ArchiveKey {
         id: id.to_string(),
+        revision,
         side: side.into(),
     };
     Ok(serde_json::from_value(
@@ -257,12 +259,14 @@ pub async fn archive_runs(
 pub async fn archive_items(
     location: &SocketLocation,
     id: PairId,
+    revision: u64,
     side: Side,
     run: &str,
     after: Option<&[u8]>,
 ) -> Result<ArchiveItems, Error> {
     let params = ArchiveItemQuery {
         id: id.to_string(),
+        revision,
         side: side.into(),
         run: run.to_owned(),
         after: after.map(<[u8]>::to_vec),
@@ -277,12 +281,14 @@ pub async fn archive_items(
 pub async fn put_back(
     location: &SocketLocation,
     id: PairId,
+    revision: u64,
     side: Side,
     run: &str,
     path: &[u8],
 ) -> Result<Vec<u8>, Error> {
     let params = ArchivePutBack {
         id: id.to_string(),
+        revision,
         side: side.into(),
         run: run.to_owned(),
         path: path.to_vec(),
@@ -302,11 +308,13 @@ pub async fn put_back(
 pub async fn put_back_all(
     location: &SocketLocation,
     id: PairId,
+    revision: u64,
     side: Side,
     run: &str,
 ) -> Result<ArchiveRestored, Error> {
     let params = ArchiveRunKey {
         id: id.to_string(),
+        revision,
         side: side.into(),
         run: run.to_owned(),
     };
