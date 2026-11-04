@@ -558,7 +558,7 @@ fn unchanged_sftp_attributes_cannot_hide_a_content_change() {
         first.versions()[&key].content(),
         second.versions()[&key].content()
     );
-    let run = RunScope::new(UNIX_EPOCH, options);
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), options);
     assert!(matches!(
         remote.remove(&key, &first.entries()[&key], &run, &mut proceed),
         Err(ApplyError::DestinationChanged(_))
@@ -689,7 +689,7 @@ fn copies_from_several_threads_use_their_own_sessions() {
     let local = Endpoint::Local(LocalEndpoint::open(local_directory.path()).unwrap());
     let back = Endpoint::Local(LocalEndpoint::open(back_directory.path()).unwrap());
     let options = PairOptions::default();
-    let run = RunScope::new(UNIX_EPOCH, options.clone());
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), options.clone());
     let content = |index: usize| format!("file {index} ").repeat(4_000).into_bytes();
     for index in 0..FILES {
         fs::write(
@@ -757,7 +757,7 @@ fn copies_both_ways_keep_content_and_archive_what_they_replace() {
     let local = Endpoint::Local(LocalEndpoint::open(local_directory.path()).unwrap());
     let options = PairOptions::default();
     let policy = options.metadata();
-    let run = RunScope::new(UNIX_EPOCH, options.clone());
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), options.clone());
 
     fs::create_dir(local_directory.path().join("docs")).unwrap();
     fs::write(local_directory.path().join("docs/a.txt"), b"local data").unwrap();
@@ -895,7 +895,7 @@ fn decomposed_names_are_written_composed_and_found_in_either_spelling() {
     let local = Endpoint::Local(LocalEndpoint::open(local_directory.path()).unwrap());
     let options = PairOptions::default();
     let policy = options.metadata();
-    let run = RunScope::new(UNIX_EPOCH, options.clone());
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), options.clone());
     let observe = |endpoint: &Endpoint| {
         endpoint
             .observe_from(
@@ -966,7 +966,11 @@ fn decomposed_names_are_written_composed_and_found_in_either_spelling() {
     );
     let there = observe(&remote);
     let stored = &there.entries()[&path(composed_file.as_bytes())];
-    let later = RunScope::new(UNIX_EPOCH + Duration::from_secs(1), options.clone());
+    let later = RunScope::new(
+        UNIX_EPOCH + Duration::from_secs(1),
+        crate::test_pair(),
+        options.clone(),
+    );
     remote.remove(&name, stored, &later, &mut proceed).unwrap();
     assert!(names(&remote_directory.path().join("caf\u{e9}")).is_empty());
 
@@ -1002,7 +1006,7 @@ fn identities_removals_and_pruning_follow_the_local_rules() {
     fs::write(directory.path().join("gone"), b"bye").unwrap();
     fs::create_dir(directory.path().join("empty")).unwrap();
     let options = PairOptions::default();
-    let run = RunScope::new(UNIX_EPOCH, options.clone());
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), options.clone());
     let observed = remote
         .observe_from(
             options.metadata(),
@@ -1028,7 +1032,11 @@ fn identities_removals_and_pruning_follow_the_local_rules() {
     assert_eq!(fs::read(directory.path().join("gone")).unwrap(), b"bye");
 
     let pruned = remote
-        .prune_archive(Duration::from_secs(1), SystemTime::now())
+        .prune_archive(
+            Duration::from_secs(1),
+            SystemTime::now(),
+            crate::Pruning::Everyone,
+        )
         .unwrap();
     assert_eq!(pruned, 1);
     assert!(remote.archived_runs().unwrap().is_empty());
@@ -1157,7 +1165,7 @@ fn put_back_finds_an_archived_name_in_either_spelling() {
         return;
     };
     let options = PairOptions::default();
-    let run = RunScope::new(SystemTime::now(), options.clone());
+    let run = RunScope::new(SystemTime::now(), crate::test_pair(), options.clone());
     let (decomposed, composed) = ("cafe\u{301}.txt", "caf\u{e9}.txt");
     fs::write(directory.path().join(decomposed), b"kept").unwrap();
     let observed = remote
@@ -1191,7 +1199,7 @@ fn put_back_remakes_a_missing_folder_inside_the_stored_spelling() {
         return;
     };
     let options = PairOptions::default();
-    let run = RunScope::new(SystemTime::now(), options.clone());
+    let run = RunScope::new(SystemTime::now(), crate::test_pair(), options.clone());
     let decomposed = "cafe\u{301}";
     fs::create_dir_all(directory.path().join(decomposed).join("jobs")).unwrap();
     fs::write(
@@ -1277,7 +1285,7 @@ fn a_move_into_a_folder_with_another_spelling_lands_inside_it() {
         return;
     };
     let options = PairOptions::default();
-    let run = RunScope::new(SystemTime::now(), options.clone());
+    let run = RunScope::new(SystemTime::now(), crate::test_pair(), options.clone());
     let decomposed = "cafe\u{301}";
     fs::create_dir(directory.path().join(decomposed)).unwrap();
     fs::write(directory.path().join("menu.txt"), b"soup").unwrap();
@@ -1419,7 +1427,7 @@ fn full_durability_is_rejected_before_any_write() {
 fn full_durability_is_rejected(remote: &Endpoint, root: &Path) {
     let policy = MetadataPolicy::default();
     let full = PairOptions::new(policy, Durability::Full);
-    let run = RunScope::new(UNIX_EPOCH, full.clone());
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), full.clone());
 
     // The identity write refuses before `.foldover` is created.
     let error = remote.ensure_identity(Durability::Full).unwrap_err();
@@ -1514,7 +1522,7 @@ fn full_durability_is_rejected(remote: &Endpoint, root: &Path) {
 
     // Standard writes all still work on the same server.
     let standard = PairOptions::new(policy, Durability::Standard);
-    let run = RunScope::new(UNIX_EPOCH, standard.clone());
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), standard.clone());
     fs::remove_file(root.join(".foldover-tmp-deadbeef")).unwrap();
     let identity = remote.ensure_identity(Durability::Standard).unwrap();
     assert_eq!(remote.identity().unwrap(), Some(identity));
@@ -1594,7 +1602,7 @@ fn a_cancel_during_a_bandwidth_wait_cancels_the_copy() {
             &mut |_| {},
         )
         .unwrap();
-    let run = RunScope::new(UNIX_EPOCH, options);
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), options);
     let name = path(b"big.bin");
 
     // The first chunk's wait outlasts the cancel.

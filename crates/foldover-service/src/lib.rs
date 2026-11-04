@@ -3431,8 +3431,16 @@ mod tests {
             assert_eq!(service.jobs.status(id), status);
         }
 
+        // A folder another run kept busy needs nobody: the schedule tries
+        // again when it next comes due (ADR 0032).
+        service
+            .jobs
+            .force_busy_failure(id, "Studio is syncing this folder");
+        assert_eq!(run_due_started(&service, at(120)).await, [id]);
+        settled(&service, &key).await;
+
         // Finished runs, cancelled or not, keep the schedule recurring.
-        for (completion, later) in [(Completion::Finished, 120), (Completion::Cancelled, 240)] {
+        for (completion, later) in [(Completion::Finished, 240), (Completion::Cancelled, 360)] {
             service.jobs.force_status(id, sync_finished(completion));
             assert_eq!(
                 run_due_started(&service, at(later)).await,

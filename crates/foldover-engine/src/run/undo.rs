@@ -104,10 +104,12 @@ impl PairRun {
         self.check_roots(identities)?;
 
         let revision = self.pair.revision();
-        let scope = RunScope::new(started, options.clone());
+        let scope = RunScope::new(started, self.pair.id(), options.clone());
         let name = scope.name().to_owned();
-        // An undo writes too: only while it holds both folders' leases.
-        let leases = self.take_leases(identities, &name, control, &NoProgress)?;
+        // An undo writes too, on either side its run wrote, even a source
+        // a person copied a change back into: only while it holds both
+        // folders' leases.
+        let leases = self.take_leases(identities, &name, Leased::Recorded, control, &NoProgress)?;
         let mut control = || leases.check(control);
         let control = &mut control;
         let mut report = UndoReport {

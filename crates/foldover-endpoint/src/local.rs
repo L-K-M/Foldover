@@ -34,7 +34,7 @@ use crate::{ListedEntry, ListedKind, ObserveStep};
 
 pub(crate) use apply::Archiving;
 pub use apply::{ApplyError, Expected, RunScope};
-pub use archive::{ArchivedItem, ArchivedRun, archive_name};
+pub use archive::{ArchivedItem, ArchivedRun, Pruning, archive_name, run_name, run_owner};
 pub use filter::{Filter, InvalidFilter};
 
 const INTERNAL_DIRECTORY: &[u8] = b".foldover";

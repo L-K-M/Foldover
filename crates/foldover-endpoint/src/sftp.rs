@@ -36,7 +36,7 @@ use foldover_types::{
 use crate::lease::{LEASE_LIMIT, LockFile};
 use crate::local::Archiving;
 use crate::local::archive::{
-    ARCHIVE_ROOT, Found, archive_time, archived_page, date_name, sibling_name,
+    ARCHIVE_ROOT, Found, Pruning, archive_time, archived_page, date_name, parse_run, sibling_name,
 };
 use crate::local::filter::{IGNORE_FILE, IGNORE_FILE_LIMIT, parse_ignore_file};
 use crate::local::version::{Observed, Payload, entry_version, metadata_version};
@@ -1175,8 +1175,14 @@ impl SftpEndpoint {
         Ok(metadata_version(content, &observed(&attributes)?, policy))
     }
 
-    /// Permanently delete archived runs older than `retention`.
-    pub fn prune_archive(&self, retention: Duration, now: SystemTime) -> Result<u64, ApplyError> {
+    /// Permanently delete archived runs older than their expiry:
+    /// `retention`, or longer for another pair's runs (`Pruning`).
+    pub fn prune_archive(
+        &self,
+        retention: Duration,
+        now: SystemTime,
+        pruning: Pruning,
+    ) -> Result<u64, ApplyError> {
         let archive = self.remote(ARCHIVE_ROOT);
         let runs = match self.session().read_dir(&archive) {
             Ok(runs) => runs,
@@ -1185,8 +1191,9 @@ impl SftpEndpoint {
         };
         let mut pruned = 0;
         for (name, attributes) in runs {
-            let expired = archive_time(&name).is_some_and(|started| {
-                now.duration_since(started).is_ok_and(|age| age > retention)
+            let expired = parse_run(&name).is_some_and(|(started, owner)| {
+                let expiry = pruning.expiry(owner, retention);
+                now.duration_since(started).is_ok_and(|age| age > expiry)
             });
             if !expired || attributes.kind() != FileKind::Directory {
                 continue;

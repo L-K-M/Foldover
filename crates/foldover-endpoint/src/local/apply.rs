@@ -13,10 +13,10 @@ use std::time::SystemTime;
 
 use foldover_fs::{Displaced, Placement, WriteError};
 use foldover_types::{
-    EntryContent, EntryKind, EntryVersion, InvalidSyncPath, PairOptions, SyncPath,
+    EntryContent, EntryKind, EntryVersion, InvalidSyncPath, PairId, PairOptions, SyncPath,
 };
 
-use super::archive::{ARCHIVE_ROOT, archive_name};
+use super::archive::{ARCHIVE_ROOT, run_name};
 use super::{
     LocalEndpoint, LocalEntry, NodeKind, ObservedEntry, Payload, ScanControl, ScanError,
     entry_version, metadata_version, observed,
@@ -52,9 +52,10 @@ pub struct RunScope {
 }
 
 impl RunScope {
-    /// The archive folder is named after `started`.
-    pub fn new(started: SystemTime, options: PairOptions) -> Self {
-        let name = archive_name(started);
+    /// A run of `pair`; the archive folder is named after `started` and
+    /// the pair, so pairs sharing a folder keep their runs apart.
+    pub fn new(started: SystemTime, pair: PairId, options: PairOptions) -> Self {
+        let name = run_name(started, pair);
         let mut archive = ARCHIVE_ROOT.to_vec();
         archive.push(b'/');
         archive.extend_from_slice(name.as_bytes());

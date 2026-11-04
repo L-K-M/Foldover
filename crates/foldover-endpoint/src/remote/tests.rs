@@ -89,7 +89,7 @@ fn a_copy_whose_source_fails_partway_stops_instead_of_waiting() {
         let root = PeerRoot::new(devices[1], ShareId::from_bytes([7; ShareId::BYTE_LEN]));
         let endpoint = PeerEndpoint::open(a, &root).unwrap();
         let path = SyncPath::try_from(&b"big.bin"[..]).unwrap();
-        let run = RunScope::new(UNIX_EPOCH, PairOptions::default());
+        let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), PairOptions::default());
         let carried = Carried {
             metadata: foldover_fs::ForeignMetadata {
                 permissions: 0o644,
@@ -256,7 +256,7 @@ fn copies_to_and_from_another_mac_run_at_once() {
     let local = Endpoint::Local(crate::LocalEndpoint::open(local_directory.path()).unwrap());
     let back = Endpoint::Local(crate::LocalEndpoint::open(back_directory.path()).unwrap());
     let options = PairOptions::default();
-    let run = RunScope::new(UNIX_EPOCH, options.clone());
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), options.clone());
     let copy_all = |to: &Endpoint, from: &Endpoint| {
         let observed = from
             .observe_from(
@@ -550,7 +550,7 @@ fn a_shared_folder_never_serves_the_agent_state_directory() {
     let Endpoint::Peer(peer) = &other else {
         unreachable!()
     };
-    let run = RunScope::new(UNIX_EPOCH, PairOptions::default());
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), PairOptions::default());
     let inside =
         SyncPath::try_from(b"Library/Application Support/Foldover/pairs.sqlite".as_slice())
             .unwrap();
