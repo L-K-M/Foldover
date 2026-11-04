@@ -2,7 +2,9 @@
 //! such as SFTP servers. Those carry data, mode and modification time
 //! only; the same verification and staging rules apply.
 
-use foldover_fs::{Chunks, ForeignMetadata, NativeMetadata, Placement, Resume, WriteError};
+use foldover_fs::{
+    Chunks, ForeignMetadata, HashError, NativeMetadata, Placement, Resume, WriteError,
+};
 use foldover_types::{Digest, EntryContent, EntryVersion, SyncPath};
 
 use super::{
@@ -133,6 +135,7 @@ impl LocalEndpoint {
     /// kept partial. Its content must come out as `resume.content`;
     /// anything it replaces is archived for the run. A run that keeps no
     /// archive here keeps no partial either.
+    #[allow(clippy::too_many_arguments)] // Mirrors the staged write contract plus run control.
     pub(crate) fn receive_file(
         &self,
         path: &SyncPath,
@@ -140,6 +143,7 @@ impl LocalEndpoint {
         carried: Carried<'_>,
         resume: Resume,
         run: &RunScope,
+        control: &mut impl FnMut() -> ScanControl,
         produce: impl FnOnce(Chunks<'_>) -> std::io::Result<()>,
     ) -> Result<EntryVersion, ApplyError> {
         let options = run.options();
@@ -150,6 +154,7 @@ impl LocalEndpoint {
                 carried.metadata,
                 carried.native,
                 options,
+                control,
                 produce,
             ),
             Archiving::Off => {
@@ -157,7 +162,10 @@ impl LocalEndpoint {
                     .stage_stream(path, carried.metadata, carried.native, options, produce)
             }
         }
-        .map_err(|source| write_error(path, source))?;
+        .map_err(|source| match source {
+            WriteError::Source(HashError::Cancelled) => ScanError::Cancelled.into(),
+            source => write_error(path, source),
+        })?;
         let staged_metadata = staged
             .metadata()
             .map_err(|source| write_error(path, source.into()))?;

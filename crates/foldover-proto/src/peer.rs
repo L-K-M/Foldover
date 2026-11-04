@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::local::{PairDurability, PairPropagation, PairSettings};
 
 /// The peer protocol version; agents of other versions do not pair.
-pub const PEER_PROTOCOL: u32 = 1;
+pub const PEER_PROTOCOL: u32 = 2;
 
 /// Pairing, after both sides derived the six-digit code. Each side sends
 /// its hello, then exactly one decision.

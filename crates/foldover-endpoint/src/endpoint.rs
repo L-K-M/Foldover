@@ -355,7 +355,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.remove(path, current, run, control),
             Self::Sftp(endpoint) => endpoint.remove(path, current, run, control),
-            Self::Peer(endpoint) => endpoint.remove(path, current, run),
+            Self::Peer(endpoint) => endpoint.remove(path, current, run, control),
             #[cfg(feature = "simulation")]
             Self::Memory(endpoint) => endpoint.remove(path, current, run),
         }
@@ -474,7 +474,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.keep_copy(path, expected, from, options, control),
             Self::Sftp(endpoint) => endpoint.keep_copy(path, expected, from, options, control),
-            Self::Peer(endpoint) => endpoint.keep_copy(path, expected, from, options),
+            Self::Peer(endpoint) => endpoint.keep_copy(path, expected, from, options, control),
             #[cfg(feature = "simulation")]
             Self::Memory(_) => Err(ApplyError::Unsupported(path.clone())),
         }
