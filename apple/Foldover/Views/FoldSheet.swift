@@ -425,99 +425,104 @@ struct FoldSheet: View {
 
     /// The page's body. The line list keeps one identity while a plan is
     /// shown, re-checked after a choice, or pressed, so its scroll
-    /// position stays put. A stack, not a group: a run pressing with
-    /// nothing listed shows nothing here, and the page must still fill
-    /// the field, or the paper shrinks to its labels and the leaf's back
-    /// to a card. A scene's message also crossfades with the next one in
-    /// place, rather than sharing the page with it.
-    @ViewBuilder
+    /// position stays put. The stack fills the page even when a run
+    /// pressing with nothing listed shows nothing here; a bare group
+    /// left the paper shrunk to its labels and the leaf's back a card.
+    /// The group inside keeps each scene's animation on its own content,
+    /// so a swap between scenes is not animated: lines a run pressed
+    /// never fade back in as the leaf opens on its imprint.
     private func content(scene: FoldScene, entries: [FoldEntry], progress: Double) -> some View {
         ZStack {
-            if scene == .imprint {
-                // Stamped on the page the leaf pressed, mid-page or above
-                // the failures it lists, once the leaf is open: the card is
-                // on the paper, and a lifted half has none.
-                VStack(spacing: 0) {
-                    if let imprint = sync.imprint, progress == 0 {
-                        onPage(FoldLeaf.landing(leafSide)) {
-                            VStack(spacing: 8) {
-                                // What the run left for a person comes before
-                                // where its archive is, when lines run short.
-                                FoldImprintView(imprint: imprint)
-                                    .layoutPriority(1)
-                                if let note = sync.archiveNote {
-                                    Text(note)
-                                        .font(.caption)
-                                        .foregroundStyle(FoldPalette.umber)
-                                        .multilineTextAlignment(.center)
-                                        .textSelection(.enabled)
+            Group {
+                if scene == .imprint {
+                    // Stamped on the page the leaf pressed, mid-page or above
+                    // the failures it lists, once the leaf is open: the card is
+                    // on the paper, and a lifted half has none.
+                    VStack(spacing: 0) {
+                        if let imprint = sync.imprint, progress == 0 {
+                            onPage(FoldLeaf.landing(leafSide)) {
+                                VStack(spacing: 8) {
+                                    // What the run left for a person comes before
+                                    // where its archive is, when lines run short.
+                                    FoldImprintView(imprint: imprint)
+                                        .layoutPriority(1)
+                                    if let note = sync.archiveNote {
+                                        Text(note)
+                                            .font(.caption)
+                                            .foregroundStyle(FoldPalette.umber)
+                                            .multilineTextAlignment(.center)
+                                            .textSelection(.enabled)
+                                    }
                                 }
+                                .padding(.top, 18)
+                                .padding(.bottom, 10)
+                                .padding(.horizontal, 12)
                             }
-                            .padding(.top, 18)
-                            .padding(.bottom, 10)
-                            .padding(.horizontal, 12)
+                            .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 1.1)),
+                                                    removal: .opacity.combined(with: .offset(y: -10))))
+                            .id(imprint.title)
+                            // Its notes wrap on a narrow page; failures listed
+                            // under it take the room that is left.
+                            .layoutPriority(1)
                         }
-                        .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 1.1)),
-                                                removal: .opacity.combined(with: .offset(y: -10))))
-                        .id(imprint.title)
-                        // Its notes wrap on a narrow page; failures listed
-                        // under it take the room that is left.
-                        .layoutPriority(1)
+                        if !entries.isEmpty { lineList(entries, scene: scene, progress: progress) }
                     }
-                    if !entries.isEmpty { lineList(entries, scene: scene, progress: progress) }
-                }
-                .frame(maxHeight: .infinity, alignment: entries.isEmpty ? .center : .top)
-                // A stamp lands once and stays: no bounce.
-                .animation(reduceMotion ? nil : .spring(duration: 0.22 * timeScale, bounce: 0), value: progress == 0)
-            } else if scene == .lifting {
-                onPage(messagePage) {
-                    VStack(spacing: 10) {
-                        ProgressView().controlSize(.small)
-                        Text(sync.statusText)
-                            .font(.callout)
-                            .foregroundStyle(FoldPalette.umber)
-                            .multilineTextAlignment(.center)
-                    }
-                    .padding(24)
-                    .frame(maxHeight: .infinity)
-                }
-                .opacity(pageInk(messagePage, progress))
-            } else if !entries.isEmpty {
-                lineList(entries, scene: scene, progress: progress)
-                    .opacity(scene == .comparing ? 0.42 : 1)
-                    .overlay {
-                        if scene == .comparing { ComparingSweep(paused: reduceMotion, timeScale: timeScale) }
-                    }
-            } else if scene == .comparing {
-                onPage(messagePage) {
-                    VStack {
-                        if let readout = sync.readout {
-                            FoldReadoutView(readout: readout, surface: .paper, reduceMotion: reduceMotion)
-                        } else {
-                            // A choice on its way to the agent: no job to measure.
+                    .frame(maxHeight: .infinity, alignment: entries.isEmpty ? .center : .top)
+                    // A stamp lands once and stays: no bounce.
+                    .animation(reduceMotion ? nil : .spring(duration: 0.22 * timeScale, bounce: 0), value: progress == 0)
+                } else if scene == .lifting {
+                    onPage(messagePage) {
+                        VStack(spacing: 10) {
+                            ProgressView().controlSize(.small)
                             Text(sync.statusText)
-                                .font(.system(size: 13, weight: .medium))
+                                .font(.callout)
                                 .foregroundStyle(FoldPalette.umber)
                                 .multilineTextAlignment(.center)
                         }
+                        .padding(24)
+                        .frame(maxHeight: .infinity)
                     }
-                    .padding(24)
-                    .frame(maxHeight: .infinity)
-                }
-                .opacity(pageInk(messagePage, progress))
-                .frame(maxHeight: .infinity)
-                // Light may cross the gutter; print may not.
-                .overlay { ComparingSweep(paused: reduceMotion, timeScale: timeScale) }
-            } else if scene != .pressing {
-                // A run attached to mid-press has no lines here; the leaf
-                // covers one half and the navy shows through the other.
-                // A message lifts and fades with its page, as lines do.
-                placeholder
                     .opacity(pageInk(messagePage, progress))
+                } else if !entries.isEmpty {
+                    lineList(entries, scene: scene, progress: progress)
+                        .opacity(scene == .comparing ? 0.42 : 1)
+                        .overlay {
+                            if scene == .comparing { ComparingSweep(paused: reduceMotion, timeScale: timeScale) }
+                        }
+                } else if scene == .comparing {
+                    onPage(messagePage) {
+                        VStack {
+                            if let readout = sync.readout {
+                                FoldReadoutView(readout: readout, surface: .paper, reduceMotion: reduceMotion)
+                            } else {
+                                // A choice on its way to the agent: no job to measure.
+                                Text(sync.statusText)
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(FoldPalette.umber)
+                                    .multilineTextAlignment(.center)
+                            }
+                        }
+                        // As narrow at the sides as the plate, so a count
+                        // has the room there that it has on the leaf.
+                        .padding(.vertical, 24)
+                        .padding(.horizontal, 12)
+                        .frame(maxHeight: .infinity)
+                    }
+                    .opacity(pageInk(messagePage, progress))
+                    .frame(maxHeight: .infinity)
+                    // Light may cross the gutter; print may not.
+                    .overlay { ComparingSweep(paused: reduceMotion, timeScale: timeScale) }
+                } else if scene != .pressing {
+                    // A run attached to mid-press has no lines here; the leaf
+                    // covers one half and the navy shows through the other.
+                    // A message lifts and fades with its page, as lines do.
+                    placeholder
+                        .opacity(pageInk(messagePage, progress))
+                }
             }
+            .animation(reduceMotion ? nil : .spring(duration: 0.45 * timeScale, bounce: 0.15), value: scene)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(reduceMotion ? nil : .spring(duration: 0.45 * timeScale, bounce: 0.15), value: scene)
     }
 
     /// A message on one page: the page that is there when a folder is
@@ -1090,8 +1095,9 @@ struct FoldSheet: View {
         // Printed on a flat plate over the folded back: no facet ridge
         // runs through the words.
         .background { Kami(finish: .flat) }
-        // The whole plate as one group, so the tour can measure it.
+        // The whole plate as one named group, which the tour measures.
         .accessibilityElement(children: .contain)
+        .accessibilityLabel(Text("Sync Progress"))
         .accessibilityIdentifier("fold-plate")
         .offset(x: leafSide == .a ? halfWidth : 0)
     }

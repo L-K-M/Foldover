@@ -371,13 +371,16 @@ struct FoldReadout: Equatable {
             details = [String(localized: "“\(holder)” is syncing these folders. This sync goes on once it is done.")]
             return
         }
-        let measure = progress.changes > 0 ? Self.syncing(progress) : Self.comparing(progress)
+        // A stopping job's counts still hold, and can still move as the
+        // copies under way land; its speed and time left no longer do.
+        var measured = progress
+        if cancelling { measured.rate = 0 }
+        let measure = progress.changes > 0 ? Self.syncing(measured) : Self.comparing(measured)
         stage = cancelling ? .stopping : (progress.changes > 0 ? .syncing : .comparing)
         figure = measure.figure
         caption = measure.caption
         fraction = measure.fraction
-        // A stopping job's rate and time left no longer hold.
-        details = cancelling ? [] : measure.details
+        details = measure.details
     }
 
     /// The stage's name, set above the figure.
@@ -409,7 +412,8 @@ struct FoldReadout: Equatable {
     }
 
     /// The share of the plan done: of its bytes when it copies any, else
-    /// of its changes. Rounded down, so it says 100% only once done.
+    /// of its changes. Rounded down, so it says 100% only once all of it
+    /// is done: all the data copied, or every change made.
     private static func syncing(_ progress: WorkProgress) -> Measure {
         let byBytes = progress.bytes > 0
         let total = byBytes ? progress.bytes : progress.changes

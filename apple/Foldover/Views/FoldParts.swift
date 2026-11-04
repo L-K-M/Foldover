@@ -188,10 +188,10 @@ enum FoldSurface {
 ///        COMPARING                    SYNCING
 ///         371,762                       42%
 ///      ITEMS CHECKED                  COPIED
-///            ◌                 ━━━━━━━━━━░░░░░░░░░
+///            ◌                 ━━━━━━━━░░░░░░░░░░░
 ///   of 6,810,813 found       1,204 of 5,320 changes
-///        so far             1.2 GB of 40 GB · 85 MB/s
-///                               about 8 min left
+///        so far            16.8 GB of 40 GB · 85.0 MB/s
+///                             about 4 min 32 s left
 struct FoldReadoutView: View {
     let readout: FoldReadout
     let surface: FoldSurface
@@ -209,9 +209,10 @@ struct FoldReadoutView: View {
                 .textCase(.uppercase)
                 .tracking(FoldType.eyebrowTracking * 1.5)
             figure
-                // A new stage's figure counts something else: it takes
-                // the last one's place rather than rolling on from it.
-                .id(readout.stage)
+                // Once the plan is known the figure is a share, not a
+                // count: it takes the count's place rather than rolling
+                // on from it. Stop keeps whichever it is.
+                .id(readout.fraction != nil)
             bar
             if !readout.details.isEmpty {
                 // One text, so on a narrow page the lines wrap together,
@@ -242,9 +243,9 @@ struct FoldReadoutView: View {
                     // The digits roll as the count climbs.
                     .contentTransition(.numericText())
                     .animation(reduceMotion ? nil : Self.roll, value: value)
-                    // Millions still fit the narrowest page.
+                    // Hundreds of millions still fit the narrowest page.
                     .lineLimit(1)
-                    .minimumScaleFactor(0.5)
+                    .minimumScaleFactor(0.4)
                 if let caption = readout.caption {
                     Text(caption)
                         .font(FoldType.backEyebrow)

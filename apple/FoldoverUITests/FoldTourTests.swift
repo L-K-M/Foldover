@@ -51,10 +51,12 @@ final class FoldTourTests: XCTestCase {
 
     /// Sync Now before any preview folds a blank half; its back reads
     /// the run comparing, then syncing, and the leaf opens on the imprint.
+    /// In slow motion the leaf lands about 3 s into the run's 8 s of
+    /// comparing, so the first check has room to see it.
     @MainActor
     func testSyncBeforeAnyPreviewCoversThePage() {
         continueAfterFailure = true
-        let tour = Tour(self, appearance: .light, slowFold: 4)
+        let tour = Tour(self, appearance: .light, slowFold: Self.slowMotion)
         let app = tour.app
         tour.launch()
         defer { app.terminate() }
@@ -79,11 +81,15 @@ final class FoldTourTests: XCTestCase {
         let readout = plate.descendants(matching: .any)["fold-readout"].firstMatch
         guard readout.waitForExistence(timeout: timeout) else { return XCTFail("Missing: the leaf's readout") }
         let deadline = Date(timeIntervalSinceNow: timeout)
-        while !readout.label.hasPrefix(stage), Date() < deadline { tour.pause(0.25) }
-        XCTAssertTrue(readout.label.hasPrefix(stage), "The leaf should read \(stage): \(readout.label)")
+        var label = readout.label
+        while !label.hasPrefix(stage), Date() < deadline {
+            tour.pause(0.25)
+            label = readout.label
+        }
+        XCTAssertTrue(label.hasPrefix(stage), "The leaf should read \(stage): \(label)")
         let window = app.windows.firstMatch.frame
         XCTAssertGreaterThan(plate.frame.height, window.height * 0.6,
-                             "The plate should cover its page: \(plate.frame) in \(window)")
+                             "The plate should cover its page while \(stage): \(plate.frame) in \(window)")
     }
 
     @MainActor

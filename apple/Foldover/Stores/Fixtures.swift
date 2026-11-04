@@ -364,8 +364,9 @@ actor FixtureSyncClient: SyncClient {
                                                  progress: WorkProgress(listed: 6_810_813, checked: 371_762))
         }
         if scenario == .syncingWaiting {
+            // The engine waits after comparing, before it plans.
             states[Fixtures.photosID] = .working(.run, cancelling: false, progress: WorkProgress(
-                listed: 48_211, checked: 48_211, changes: 12, waitingFor: "Mac Studio"))
+                listed: 48_211, checked: 48_211, waitingFor: "Mac Studio"))
         }
         if scenario == .failedRun {
             states[Fixtures.photosID] = .finished(RunSummary(

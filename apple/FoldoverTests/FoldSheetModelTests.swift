@@ -134,10 +134,11 @@ struct FoldSheetModelTests {
                                                     .init(value: "2", label: "archived")])
     }
 
-    /// The engine lists and checks Folder A, then lists Folder B, then
-    /// carries out the plan. Comparing counts the items checked, which
-    /// only grows, though the items found jump as B's listing begins;
-    /// a share appears only once the plan says how much there is.
+    /// The engine lists and checks Folder A, then lists and checks Folder
+    /// B, then makes and carries out its plan. Comparing counts the items
+    /// checked, which only grows, though the items found jump as B's
+    /// listing begins; a share appears only once the plan says how much
+    /// there is.
     @Test func theReadoutNeverRunsBackward() {
         let comparing: [(listed: UInt64, checked: UInt64)] = [(0, 0), (1_000, 0), (1_000, 1_000),
                                                              (2_400, 1_000), (2_400, 2_400)]
@@ -166,8 +167,8 @@ struct FoldSheetModelTests {
         #expect(copying.spoken.hasPrefix("Syncing, \(copying.figure ?? "") copied, 1 of 4 changes, "))
     }
 
-    /// The share is rounded down, so it says 100% only once done, and
-    /// counts changes when the plan copies no data.
+    /// The share is rounded down, so it says 100% only once all of it is
+    /// done, and counts changes when the plan copies no data.
     @Test func theReadoutsShareIsRoundedDown() {
         func figure(_ progress: WorkProgress) -> String? {
             FoldReadout(progress: progress, cancelling: false).figure
@@ -186,10 +187,12 @@ struct FoldSheetModelTests {
     }
 
     /// Waiting on another Mac shows no figure and no bar, since nothing
-    /// moves; a stopping job keeps its figure and drops its rate.
+    /// moves; a stopping job keeps its figure and its counts, and drops
+    /// its speed and time left.
     @Test func theReadoutWaitsAndStops() {
-        let waiting = FoldReadout(progress: WorkProgress(listed: 200, checked: 200, changes: 4,
-                                                         waitingFor: "Studio"), cancelling: false)
+        // The engine waits for another Mac after comparing, before it plans.
+        let held = WorkProgress(listed: 200, checked: 200, waitingFor: "Studio")
+        let waiting = FoldReadout(progress: held, cancelling: false)
         #expect(waiting.stage == .waiting)
         #expect(waiting.figure == nil)
         #expect(waiting.caption == nil)
@@ -197,14 +200,22 @@ struct FoldSheetModelTests {
         #expect(waiting.details == ["“Studio” is syncing these folders. This sync goes on once it is done."])
         #expect(waiting.spoken == "Waiting, “Studio” is syncing these folders. This sync goes on once it is done.")
 
-        let progress = WorkProgress(listed: 200, checked: 200, changes: 4, applied: 2, bytes: 400, copied: 200,
-                                    rate: 100, waitingFor: "Studio")
-        let stopping = FoldReadout(progress: progress, cancelling: true)
+        // Stopped while waiting: the count it reached, still with no share.
+        let stoppedWaiting = FoldReadout(progress: held, cancelling: true)
+        #expect(stoppedWaiting.stage == .stopping)
+        #expect(stoppedWaiting.figure == UInt64(200).formatted())
+        #expect(stoppedWaiting.fraction == nil)
+        #expect(stoppedWaiting.details == ["of \(UInt64(200).formatted()) found so far"])
+
+        let copying = WorkProgress(listed: 200, checked: 200, changes: 4, applied: 2, bytes: 400, copied: 200,
+                                   rate: 100)
+        let stopping = FoldReadout(progress: copying, cancelling: true)
         #expect(stopping.stage == .stopping)
         #expect(stopping.title == "Stopping")
         #expect(stopping.figure == 0.5.formatted(.percent.precision(.fractionLength(0))))
         #expect(stopping.fraction == 0.5)
-        #expect(stopping.details.isEmpty)
+        let data = "\(PairSyncViewModel.byteText(200)) of \(PairSyncViewModel.byteText(400))"
+        #expect(stopping.details == ["2 of 4 changes", data])
     }
 
     /// The page that changes carries the mark, in its outer margin; a
