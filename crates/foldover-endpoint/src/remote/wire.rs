@@ -318,7 +318,9 @@ mod tests {
             (ignoring, Propagation::Ignore),
         ] {
             let run = RunScope::new(UNIX_EPOCH, sent);
+            let name = run.name().to_owned();
             let named = run_from(run_wire(&run)).unwrap();
+            assert_eq!(named.name(), name);
             assert_eq!(named.options().metadata().quarantine(), kept);
         }
     }

@@ -48,7 +48,7 @@ pub struct JournalEntry {
 }
 
 /// A run's writes, named by its archive folder, e.g.
-/// `2026-10-18T09-30-00.123Z`.
+/// `2026-10-18T09-30-00.123Z-0123456789abcdef0123456789abcdef`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Journal {
     pub run: String,

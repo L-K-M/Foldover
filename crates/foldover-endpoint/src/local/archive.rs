@@ -1,7 +1,8 @@
 //! Each root keeps replaced and removed entries in
-//! `.foldover/archive/<run>/<path>`. `<run>` is the run's UTC start time,
-//! e.g. `2026-10-18T09-30-00.123Z`, so retention can delete whole runs by
-//! age without reading their contents.
+//! `.foldover/archive/<run>/<path>`. `<run>` starts with the run's UTC start
+//! time and ends with a random ID, e.g.
+//! `2026-10-18T09-30-00.123Z-0123456789abcdef0123456789abcdef`, so retention
+//! can delete whole runs by age without reading their contents.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -64,12 +65,14 @@ const SECONDS_PER_DAY: u64 = 86_400;
 const SECONDS_PER_HOUR: u64 = 3_600;
 const SECONDS_PER_MINUTE: u64 = 60;
 const MILLIS_PER_SECOND: u64 = 1_000;
+const ARCHIVE_TIMESTAMP_LEN: usize = 24;
+const ARCHIVE_ID_LEN: usize = 32;
+const UNIQUE_ARCHIVE_NAME_LEN: usize = ARCHIVE_TIMESTAMP_LEN + 1 + ARCHIVE_ID_LEN;
 /// Days from 0000-03-01 to 1970-01-01 in the proleptic Gregorian calendar.
 const EPOCH_DAY_OFFSET: u64 = 719_468;
 const DAYS_PER_ERA: u64 = 146_097;
 
-/// A sortable, Finder-safe run name. Runs of one pair never share a
-/// millisecond, because they are serialized.
+/// A sortable, Finder-safe UTC timestamp used by archive names.
 pub fn archive_name(at: SystemTime) -> String {
     let since = at.duration_since(UNIX_EPOCH).unwrap_or_default();
     let seconds = since.as_secs();
@@ -84,9 +87,26 @@ pub fn archive_name(at: SystemTime) -> String {
     )
 }
 
+/// A globally unique run name whose prefix remains sortable and readable.
+pub(crate) fn unique_archive_name(at: SystemTime) -> String {
+    format!("{}-{}", archive_name(at), uuid::Uuid::new_v4().simple())
+}
+
 /// The start time a run name encodes; `None` for any other name.
 pub(crate) fn archive_time(name: &[u8]) -> Option<SystemTime> {
-    let text = std::str::from_utf8(name).ok()?;
+    let timestamp = match name.len() {
+        ARCHIVE_TIMESTAMP_LEN => name,
+        UNIQUE_ARCHIVE_NAME_LEN
+            if name[ARCHIVE_TIMESTAMP_LEN] == b'-'
+                && name[ARCHIVE_TIMESTAMP_LEN + 1..]
+                    .iter()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)) =>
+        {
+            &name[..ARCHIVE_TIMESTAMP_LEN]
+        }
+        _ => return None,
+    };
+    let text = std::str::from_utf8(timestamp).ok()?;
     let number = |range: std::ops::Range<usize>| -> Option<u64> {
         let digits = text.get(range)?;
         digits
@@ -101,7 +121,7 @@ pub(crate) fn archive_time(name: &[u8]) -> Option<SystemTime> {
         + number(17..19)?;
     let time = UNIX_EPOCH + Duration::from_millis(seconds * MILLIS_PER_SECOND + number(20..23)?);
     // Only canonical names count, so nothing else in the archive is deleted.
-    (archive_name(time) == text).then_some(time)
+    (archive_name(time).as_bytes() == timestamp).then_some(time)
 }
 
 /// Howard Hinnant's days-to-civil conversion, from days since 1970-01-01.
@@ -285,7 +305,12 @@ impl LocalEndpoint {
                 runs.push(ArchivedRun { name, started });
             }
         }
-        runs.sort_by_key(|run| std::cmp::Reverse(run.started));
+        runs.sort_by(|left, right| {
+            right
+                .started
+                .cmp(&left.started)
+                .then_with(|| right.name.cmp(&left.name))
+        });
         Ok(runs)
     }
 
@@ -774,6 +799,8 @@ mod tests {
             assert_eq!(archive_name(at(millis)), name);
             assert_eq!(archive_time(name.as_bytes()), Some(at(millis)));
         }
+        let unique = "2026-10-18T09-30-00.123Z-0123456789abcdef0123456789abcdef";
+        assert_eq!(archive_time(unique.as_bytes()), Some(at(1_792_315_800_123)));
         for name in [
             "recovered",
             "2026-02-30T00-00-00.000Z",
@@ -782,6 +809,10 @@ mod tests {
             "2026-10-18T09:30:00.123Z",
             "+026-10-18T09-30-00.123Z",
             "2026-10-18T09-30-00.123Z-copy",
+            "2026-10-18T09-30-00.123Z-0123456789abcdef0123456789abcde",
+            "2026-10-18T09-30-00.123Z-0123456789abcdef0123456789abcdef0",
+            "2026-10-18T09-30-00.123Z-0123456789abcdef0123456789abcdeg",
+            "2026-10-18T09-30-00.123Z-0123456789ABCDEF0123456789ABCDEF",
         ] {
             assert_eq!(archive_time(name.as_bytes()), None, "{name}");
         }
@@ -825,8 +856,12 @@ mod tests {
         let root = directory.path();
         let older = archive_name(at(1_000));
         let newer = archive_name(at(2_000));
+        let tied_first = format!("{newer}-00000000000000000000000000000001");
+        let tied_second = format!("{newer}-00000000000000000000000000000002");
         fs::create_dir_all(root.join(".foldover/archive").join(&older).join("docs")).unwrap();
         fs::create_dir_all(root.join(".foldover/archive").join(&newer)).unwrap();
+        fs::create_dir_all(root.join(".foldover/archive").join(&tied_first)).unwrap();
+        fs::create_dir_all(root.join(".foldover/archive").join(&tied_second)).unwrap();
         fs::create_dir_all(root.join(".foldover/archive/not a run")).unwrap();
         let run = root.join(".foldover/archive").join(&older);
         fs::write(run.join("docs/b"), b"bb").unwrap();
@@ -837,7 +872,7 @@ mod tests {
         let runs = endpoint.archived_runs().unwrap();
         assert_eq!(
             runs.iter().map(ArchivedRun::name).collect::<Vec<_>>(),
-            [&newer, &older]
+            [&tied_second, &tied_first, &newer, &older]
         );
         let (items, more) = endpoint.archived_items(&older, None, 2).unwrap();
         assert_eq!(

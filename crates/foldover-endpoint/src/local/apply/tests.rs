@@ -54,6 +54,20 @@ fn names(directory: &Path) -> Vec<String> {
 }
 
 #[test]
+fn run_scopes_started_together_have_distinct_canonical_names() {
+    let first = RunScope::new(std::time::UNIX_EPOCH, OPTIONS);
+    let second = RunScope::new(std::time::UNIX_EPOCH, OPTIONS);
+
+    assert_ne!(first.name(), second.name());
+    for run in [&first, &second] {
+        assert_eq!(
+            crate::local::archive::archive_time(run.name().as_bytes()),
+            Some(std::time::UNIX_EPOCH)
+        );
+    }
+}
+
+#[test]
 fn creates_parents_then_files_and_returns_the_stored_version() {
     let pair = pair();
     fs::create_dir(pair.left_directory.path().join("a")).unwrap();
@@ -114,7 +128,13 @@ fn replacements_archive_the_previous_version() {
     let target = pair.right_directory.path();
     assert_eq!(fs::read(target.join("file")).unwrap(), b"new");
     assert_eq!(
-        fs::read(target.join(".foldover/archive/1970-01-01T00-00-00.000Z/file")).unwrap(),
+        fs::read(
+            target
+                .join(".foldover/archive")
+                .join(pair.run.name())
+                .join("file")
+        )
+        .unwrap(),
         b"old"
     );
     assert_eq!(names(target), [".foldover", "file"]);
@@ -227,7 +247,13 @@ fn removals_archive_files_and_remove_only_empty_folders() {
         Err(ApplyError::NotEmpty(_))
     ));
     assert_eq!(
-        fs::read(target.join(".foldover/archive/1970-01-01T00-00-00.000Z/folder/file")).unwrap(),
+        fs::read(
+            target
+                .join(".foldover/archive")
+                .join(pair.run.name())
+                .join("folder/file")
+        )
+        .unwrap(),
         b"data"
     );
 
@@ -253,7 +279,10 @@ fn leftover_temporaries_are_reported_and_archived_not_deleted() {
     pair.right.recover_leftover(&leftover, &pair.run).unwrap();
     assert_eq!(
         fs::read(
-            target.join(".foldover/archive/1970-01-01T00-00-00.000Z/folder/.foldover-tmp-0123")
+            target
+                .join(".foldover/archive")
+                .join(pair.run.name())
+                .join("folder/.foldover-tmp-0123")
         )
         .unwrap(),
         b"displaced"

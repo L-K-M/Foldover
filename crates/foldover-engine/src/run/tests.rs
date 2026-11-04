@@ -1017,7 +1017,9 @@ fn edits_replace_and_archive_and_deletions_propagate_to_the_archive() {
         fs::read(
             pair.right
                 .path()
-                .join(".foldover/archive/1970-01-01T00-00-00.000Z/edit")
+                .join(".foldover/archive")
+                .join(report.archive())
+                .join("edit")
         )
         .unwrap(),
         b"v1"
@@ -1027,13 +1029,51 @@ fn edits_replace_and_archive_and_deletions_propagate_to_the_archive() {
         fs::read(
             pair.left
                 .path()
-                .join(".foldover/archive/1970-01-01T00-00-00.000Z/delete")
+                .join(".foldover/archive")
+                .join(report.archive())
+                .join("delete")
         )
         .unwrap(),
         b"d"
     );
     assert!(!pair.base.contains_key(&path(b"delete")));
     assert!(pair.prepare().preview().items().is_empty());
+}
+
+#[test]
+fn runs_started_together_keep_separate_archives() {
+    let mut pair = fixture(SyncMode::Sync);
+    fs::write(pair.left.path().join("file"), b"v1").unwrap();
+    pair.sync();
+
+    fs::write(pair.left.path().join("file"), b"v2").unwrap();
+    let first = pair.sync();
+    fs::write(pair.left.path().join("file"), b"v3").unwrap();
+    let second = pair.sync();
+
+    assert_ne!(first.archive(), second.archive());
+    assert_eq!(
+        fs::read(
+            pair.right
+                .path()
+                .join(".foldover/archive")
+                .join(first.archive())
+                .join("file")
+        )
+        .unwrap(),
+        b"v1"
+    );
+    assert_eq!(
+        fs::read(
+            pair.right
+                .path()
+                .join(".foldover/archive")
+                .join(second.archive())
+                .join("file")
+        )
+        .unwrap(),
+        b"v2"
+    );
 }
 
 #[test]
@@ -1274,7 +1314,9 @@ fn mirror_archives_target_extras_and_backup_keeps_them() {
         mirror
             .right
             .path()
-            .join(".foldover/archive/1970-01-01T00-00-00.000Z/extra")
+            .join(".foldover/archive")
+            .join(report.archive())
+            .join("extra")
             .exists()
     );
 
@@ -1359,7 +1401,9 @@ fn failed_folders_skip_their_contents_and_later_runs_recover_leftovers() {
         fs::read(
             pair.right
                 .path()
-                .join(".foldover/archive/1970-01-01T00-00-00.000Z/.foldover-tmp-left")
+                .join(".foldover/archive")
+                .join(report.archive())
+                .join(".foldover-tmp-left")
         )
         .unwrap(),
         b"displaced"
@@ -1419,7 +1463,9 @@ fn completed_runs_name_their_archive_and_prune_expired_runs() {
     else {
         panic!("expected a run");
     };
-    assert_eq!(report.archive(), foldover_endpoint::archive_name(started));
+    let archive_prefix = format!("{}-", foldover_endpoint::archive_name(started));
+    assert!(report.archive().starts_with(&archive_prefix));
+    assert_eq!(report.archive().len(), archive_prefix.len() + 32);
     assert_eq!(report.pruned(), 1);
     assert!(
         !archive
@@ -1504,7 +1550,8 @@ fn resolved_conflicts_keep_the_chosen_side_until_either_side_changes() {
     let archive = pair
         .left
         .path()
-        .join(".foldover/archive/1970-01-01T00-00-00.000Z");
+        .join(".foldover/archive")
+        .join(report.archive());
     assert_eq!(fs::read(archive.join("file")).unwrap(), b"left");
     assert!(!pair.right.path().join("gone").exists());
 
@@ -1566,7 +1613,9 @@ fn a_folder_choice_settles_the_whole_folder() {
                 let archive = pair
                     .left
                     .path()
-                    .join(".foldover/archive/1970-01-01T00-00-00.000Z/photos");
+                    .join(".foldover/archive")
+                    .join(report.archive())
+                    .join("photos");
                 assert_eq!(fs::read(archive.join("a.jpg")).unwrap(), b"edited");
                 assert_eq!(fs::read(archive.join("b.jpg")).unwrap(), b"b");
             }
@@ -3037,7 +3086,7 @@ fn keeping_the_target_side_copies_a_change_the_other_way() {
     assert_eq!(fs::read(left.join("deleted")).unwrap(), b"d");
     // B's version wins in A; A's edit is in A's archive.
     assert_eq!(fs::read(left.join("edited")).unwrap(), b"v1");
-    let archive = left.join(".foldover/archive/1970-01-01T00-00-00.000Z");
+    let archive = left.join(".foldover/archive").join(report.archive());
     assert_eq!(fs::read(archive.join("edited")).unwrap(), b"version 2");
     assert_eq!(fs::read(right.join("edited")).unwrap(), b"v1");
     assert!(pair.prepare().preview().items().is_empty());
