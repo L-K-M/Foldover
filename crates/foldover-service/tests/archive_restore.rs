@@ -22,6 +22,7 @@ const RUN: &str = "archived-run";
 const PATH_DEPTH: usize = 330;
 const FAILED_INDICES: [usize; 4] = [0, PAGE_ITEMS - 1, 2 * PAGE_ITEMS - 1, ITEM_COUNT - 1];
 const RESTORE_TIMEOUT: Duration = Duration::from_secs(60);
+const REPEATED_PAGES: usize = 3;
 
 /// Long valid relative paths make the full listing larger than a peer frame
 /// without creating thousands of filesystem entries for a transport test.
@@ -29,8 +30,21 @@ fn path(index: usize) -> Vec<u8> {
     format!("{index:04}/{}file", "folder/".repeat(PATH_DEPTH)).into_bytes()
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum PageShape {
+    #[default]
+    Ordered,
+    Repeated,
+    Unsorted,
+    Duplicate,
+    EmptyWithMore,
+    BeforeCursor,
+    OverLimit,
+}
+
 #[derive(Default)]
 struct ArchiveState {
+    shape: PageShape,
     remaining: BTreeSet<Vec<u8>>,
     requested: Vec<(Option<Vec<u8>>, u64)>,
     attempted: Vec<Vec<u8>>,
@@ -55,24 +69,7 @@ impl PeerHost for ArchivedMac {
             },
             FolderOp::ArchivedItems { run, after, limit } => {
                 assert_eq!(run, RUN);
-                let mut state = self.0.lock().unwrap();
-                state.requested.push((after.clone(), limit));
-                let mut rest = state
-                    .remaining
-                    .iter()
-                    .filter(|path| after.as_ref().is_none_or(|after| *path > after));
-                let items = rest
-                    .by_ref()
-                    .take(usize::try_from(limit).unwrap_or(usize::MAX))
-                    .map(|path| WireItem {
-                        path: path.clone(),
-                        size: 1,
-                    })
-                    .collect();
-                PeerReply::Items {
-                    items,
-                    more: rest.next().is_some(),
-                }
+                self.0.lock().unwrap().page(after, limit)
             }
             FolderOp::PutBack {
                 run, path: item, ..
@@ -108,24 +105,61 @@ impl PeerHost for ArchivedMac {
     }
 }
 
-#[tokio::test]
-async fn restores_a_peer_archive_larger_than_one_message_in_bounded_pages() {
-    let items: BTreeSet<_> = (0..ITEM_COUNT).map(path).collect();
-    let unpaged = PeerReply::Items {
-        items: items
-            .iter()
-            .map(|path| WireItem {
-                path: path.clone(),
-                size: 1,
-            })
-            .collect(),
-        more: false,
-    };
-    assert!(serde_json::to_vec(&unpaged).unwrap().len() > PEER_MESSAGE_BYTES);
-    let host = Arc::new(ArchivedMac(Mutex::new(ArchiveState {
-        remaining: items,
-        ..ArchiveState::default()
-    })));
+impl ArchiveState {
+    fn page(&mut self, after: Option<Vec<u8>>, limit: u64) -> PeerReply {
+        self.requested.push((after.clone(), limit));
+        if self.shape == PageShape::Ordered {
+            let mut rest = self
+                .remaining
+                .iter()
+                .filter(|path| after.as_ref().is_none_or(|after| *path > after));
+            let items = rest
+                .by_ref()
+                .take(usize::try_from(limit).unwrap_or(usize::MAX))
+                .map(|path| WireItem {
+                    path: path.clone(),
+                    size: 1,
+                })
+                .collect();
+            return PeerReply::Items {
+                items,
+                more: rest.next().is_some(),
+            };
+        }
+
+        // Bound the bad peer so a failing regression cannot hang its runtime.
+        let (indices, more) = match self.shape {
+            PageShape::Repeated if self.requested.len() <= REPEATED_PAGES => (vec![0], true),
+            PageShape::Repeated => (vec![], false),
+            PageShape::Unsorted => (vec![1, 0], false),
+            PageShape::Duplicate => (vec![0, 0], false),
+            PageShape::EmptyWithMore => (vec![], true),
+            PageShape::BeforeCursor => (vec![0], false),
+            PageShape::OverLimit => (vec![0, 1], false),
+            PageShape::Ordered => unreachable!(),
+        };
+        PeerReply::Items {
+            items: indices
+                .into_iter()
+                .map(|index| WireItem {
+                    path: path(index),
+                    size: 1,
+                })
+                .collect(),
+            more,
+        }
+    }
+}
+
+struct PeerFixture {
+    pair: PairConfig,
+    reach: Reach,
+    _client: Arc<PeerLink>,
+    _server: Arc<PeerLink>,
+    _local: tempfile::TempDir,
+}
+
+fn peer_fixture(host: Arc<ArchivedMac>) -> PeerFixture {
     let identities = [
         PeerIdentity::generate().unwrap(),
         PeerIdentity::generate().unwrap(),
@@ -169,6 +203,36 @@ async fn restores_a_peer_archive_larger_than_one_message_in_bounded_pages() {
         PairConfig::from_stored(PairId::from_bytes([1; PairId::BYTE_LEN]).unwrap(), 1, draft)
             .unwrap();
     let reach = Reach::through(&a);
+    PeerFixture {
+        pair,
+        reach,
+        _client: a,
+        _server: b,
+        _local: temporary,
+    }
+}
+
+#[tokio::test]
+async fn restores_a_peer_archive_larger_than_one_message_in_bounded_pages() {
+    let items: BTreeSet<_> = (0..ITEM_COUNT).map(path).collect();
+    let unpaged = PeerReply::Items {
+        items: items
+            .iter()
+            .map(|path| WireItem {
+                path: path.clone(),
+                size: 1,
+            })
+            .collect(),
+        more: false,
+    };
+    assert!(serde_json::to_vec(&unpaged).unwrap().len() > PEER_MESSAGE_BYTES);
+    let host = Arc::new(ArchivedMac(Mutex::new(ArchiveState {
+        remaining: items,
+        ..ArchiveState::default()
+    })));
+    let fixture = peer_fixture(host.clone());
+    let pair = fixture.pair.clone();
+    let reach = fixture.reach.clone();
     let restored = tokio::task::spawn_blocking(move || {
         PairArchive::open(&pair, Side::Left, &reach)
             .unwrap()
@@ -204,4 +268,88 @@ async fn restores_a_peer_archive_larger_than_one_message_in_bounded_pages() {
             (Some(path(2 * PAGE_ITEMS - 1)), PAGE_ITEMS as u64)
         ]
     );
+}
+
+#[tokio::test]
+async fn a_repeated_peer_page_is_rejected_before_restoring_any_item_twice() {
+    let host = Arc::new(ArchivedMac(Mutex::new(ArchiveState {
+        shape: PageShape::Repeated,
+        remaining: [path(0)].into_iter().collect(),
+        ..ArchiveState::default()
+    })));
+    let fixture = peer_fixture(host.clone());
+    let pair = fixture.pair.clone();
+    let reach = fixture.reach.clone();
+    let restoring = tokio::task::spawn_blocking(move || {
+        PairArchive::open(&pair, Side::Left, &reach)
+            .unwrap()
+            .put_back_all(RUN)
+    });
+    let result = tokio::time::timeout(RESTORE_TIMEOUT, restoring)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.is_err(), "a peer ignored the page cursor");
+    let state = host.0.lock().unwrap();
+    assert_eq!(state.requested.len(), 2);
+    assert_eq!(state.attempted, [path(0)]);
+}
+
+#[tokio::test]
+async fn malformed_peer_pages_never_reach_archive_consumers() {
+    for shape in [
+        PageShape::Unsorted,
+        PageShape::Duplicate,
+        PageShape::EmptyWithMore,
+        PageShape::BeforeCursor,
+        PageShape::OverLimit,
+    ] {
+        let host = Arc::new(ArchivedMac(Mutex::new(ArchiveState {
+            shape,
+            ..ArchiveState::default()
+        })));
+        let fixture = peer_fixture(host);
+        let pair = fixture.pair.clone();
+        let reach = fixture.reach.clone();
+        let reading = tokio::task::spawn_blocking(move || {
+            let after = (shape == PageShape::BeforeCursor)
+                .then(|| foldover_types::SyncPath::try_from(path(1)).unwrap());
+            let limit = if shape == PageShape::OverLimit {
+                1
+            } else {
+                PAGE_ITEMS
+            };
+            PairArchive::open(&pair, Side::Left, &reach)
+                .unwrap()
+                .items(RUN, after.as_ref(), limit)
+        });
+        let result = tokio::time::timeout(RESTORE_TIMEOUT, reading)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_err(), "accepted malformed page: {shape:?}");
+    }
+}
+
+#[tokio::test]
+async fn zero_limit_peer_queries_can_report_that_items_exist() {
+    let host = Arc::new(ArchivedMac(Mutex::new(ArchiveState {
+        remaining: [path(0)].into_iter().collect(),
+        ..ArchiveState::default()
+    })));
+    let fixture = peer_fixture(host);
+    let pair = fixture.pair.clone();
+    let reach = fixture.reach.clone();
+    let reading = tokio::task::spawn_blocking(move || {
+        PairArchive::open(&pair, Side::Left, &reach)
+            .unwrap()
+            .items(RUN, None, 0)
+    });
+    let (items, more) = tokio::time::timeout(RESTORE_TIMEOUT, reading)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(items.is_empty());
+    assert!(more);
 }

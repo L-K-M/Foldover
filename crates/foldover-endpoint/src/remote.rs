@@ -499,8 +499,8 @@ impl PeerEndpoint {
             after: after.map(|after| after.as_bytes().to_vec()),
             limit: u64::try_from(limit).unwrap_or(u64::MAX),
         })? {
-            PeerReply::Items { items, more } => Ok((
-                items
+            PeerReply::Items { items, more } => {
+                let items = items
                     .into_iter()
                     .map(|item| {
                         Ok(ArchivedItem::new(
@@ -508,9 +508,22 @@ impl PeerEndpoint {
                             item.size,
                         ))
                     })
-                    .collect::<Result<_, ScanError>>()?,
-                more,
-            )),
+                    .collect::<Result<Vec<_>, ScanError>>()?;
+                // A peer must honor the same page contract as local listings;
+                // repeated or empty non-final pages would keep recovery looping.
+                let wrong_count = items.len() > limit || (limit > 0 && more && items.is_empty());
+                let unordered = items
+                    .windows(2)
+                    .any(|pair| pair[0].path() >= pair[1].path());
+                let stale = after
+                    .is_some_and(|after| items.first().is_some_and(|item| item.path() <= after));
+                if wrong_count || unordered || stale {
+                    return Err(ScanError::Peer(
+                        "The other Mac returned an invalid archive page".into(),
+                    ));
+                }
+                Ok((items, more))
+            }
             _ => Err(unexpected()),
         }
     }
