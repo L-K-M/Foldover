@@ -820,6 +820,7 @@ impl MemoryEndpoint {
         let expired: Vec<Vec<u8>> = folder
             .entries
             .values()
+            .filter(|stored| matches!(&stored.node, Node::Directory { .. }))
             .filter_map(|stored| {
                 let rest = stored.path.strip_prefix(prefix.as_slice())?;
                 (!rest.contains(&b'/')).then_some(stored.path.clone())
