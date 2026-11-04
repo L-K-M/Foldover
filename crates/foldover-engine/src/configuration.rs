@@ -646,7 +646,7 @@ impl Engine {
                     }
                     let existing = match root(owner, owner_side) {
                         local @ PairRoot::Local(_) => match Endpoint::open(local, &self.reach) {
-                            Ok(endpoint) => Existing::Local(endpoint),
+                            Ok(endpoint) => Existing::Local(Box::new(endpoint)),
                             Err(_) if offline == Offline::Skip => continue,
                             Err(source) => {
                                 return Err(Error::CatalogUnavailable {
@@ -700,7 +700,7 @@ pub(crate) enum Offline {
 
 /// A configured pair's folder, opened when it is local.
 enum Existing<'a> {
-    Local(Endpoint),
+    Local(Box<Endpoint>),
     Sftp(&'a SftpRoot),
     Peer(&'a PeerRoot),
 }

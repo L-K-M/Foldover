@@ -611,6 +611,38 @@ func anOverlappingFolderNamesThePairAndBlocksSaving() async {
     #expect(await editor.save() == false)
 }
 
+/// Like the engine, finds Folder A shared with "Photos" unless both pairs
+/// read it: here, unless this pair backs up from Folder A.
+private actor SharedSourceClient: PairClient {
+    func page(after: String?) async throws -> PairCatalogPage { PairCatalogPage(pairs: [], next: nil) }
+    func create(_ settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
+    func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
+    func remove(_ pair: SyncPair) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] {
+        settings.mode == .backupLeft ? [] : [PairReadinessWarning(side: .a, kind: .overlap(pairName: "Photos"))]
+    }
+    func servers() async throws -> [NearbyServer] { [] }
+    func browse(_ locator: String) async throws -> ServerListing { throw PairFixtureError.changedElsewhere }
+}
+
+/// Review: Save comes back once a mode change lets the folders share.
+@MainActor
+@Test
+func anOverlapClearsWhenTheModeLetsTheFolderBeShared() async {
+    let editor = PairEditorViewModel(store: PairStore(client: SharedSourceClient()))
+    editor.name = "Second backup"
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/a")]), side: .left)
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/b")]), side: .right)
+    await editor.awaitReadinessCheck()
+    #expect(editor.overlapWarning != nil)
+    #expect(!editor.canSave)
+
+    editor.mode = .backupLeft
+    await editor.awaitReadinessCheck()
+    #expect(editor.overlapWarning == nil)
+    #expect(editor.canSave)
+}
+
 @MainActor
 @Test
 func editingAPairSendsItsIDToTheCheck() async {
