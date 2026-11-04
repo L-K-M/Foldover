@@ -2049,6 +2049,7 @@ mod tests {
         assert_eq!(tagged[&file].content(), first[&file].content());
         assert_ne!(tagged[&file].metadata(), first[&file].metadata());
 
+        // Toggle a bit so this changes metadata under every process umask.
         let mode = fs::metadata(&file_path).unwrap().permissions().mode() & 0o7777;
         fs::set_permissions(&file_path, fs::Permissions::from_mode(mode ^ 0o100)).unwrap();
         let mode_changed = observe();
