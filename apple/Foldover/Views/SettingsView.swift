@@ -52,6 +52,7 @@ struct SettingsView: View {
                         set: { run in Task { await automation.setLowPower(run ? .run : .pause) } }
                     )
                 )
+                .disabled(automation.mutationPending)
                 if let error = automation.error {
                     ErrorNote(message: error)
                 }

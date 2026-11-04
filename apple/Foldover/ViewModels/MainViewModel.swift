@@ -192,6 +192,8 @@ final class MainViewModel {
         return false
     }
 
+    var automationMutationPending: Bool { automation.mutationPending }
+
     /// Shown while automatic syncs are paused.
     var pauseText: String? {
         guard case .paused(let until) = automation.state else { return nil }

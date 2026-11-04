@@ -78,6 +78,12 @@ private actor CoreAutomationClient: AutomationClient {
 final class AutomationStore {
     private let client: any AutomationClient
     private var generation = 0
+    @ObservationIgnored private var mutationTail: Task<Bool, Never>?
+    private var mutationSequence = 0
+    private var lowPowerSequence = 0
+    private var confirmedLowPower: LowPowerSyncs = .pause
+    private var desiredLowPower: LowPowerSyncs?
+    private(set) var pendingMutations = 0
     private(set) var state: AutomationState = .running
     private(set) var lowPower: LowPowerSyncs = .pause
     /// Why an automatic sync would wait now, if one would.
@@ -88,11 +94,14 @@ final class AutomationStore {
         self.client = client
     }
 
-    /// A status read is informational: it keeps the last state on
-    /// failure and never touches `error`, so a failed pause or resume
-    /// stays reported until the next request answers. A reply only
-    /// applies when no pause or resume overlapped the read.
+    var mutationPending: Bool { pendingMutations > 0 }
+
+    /// A status read is informational: it keeps the last state on failure
+    /// and never touches `error`, so a failed mutation stays reported until
+    /// the next request answers. A reply applies only when no mutation
+    /// overlapped the read.
     func refresh() async {
+        guard !mutationPending else { return }
         generation += 1
         let request = generation
         guard let current = try? await client.state(), generation == request else { return }
@@ -107,37 +116,54 @@ final class AutomationStore {
         await perform { try await $0.resume() }
     }
 
-    /// Shows the choice at once, so the toggle does not bounce while the
-    /// agent saves it; a failed save puts the previous choice back unless
-    /// a newer choice replaced it meanwhile.
+    /// Shows the newest choice at once while requests reach the agent in
+    /// invocation order. An older reply cannot make the toggle bounce; if
+    /// the newest save fails, the last server-confirmed choice returns.
     func setLowPower(_ syncs: LowPowerSyncs) async {
-        let previous = lowPower
+        lowPowerSequence += 1
+        let request = lowPowerSequence
+        desiredLowPower = syncs
         lowPower = syncs
-        let saved = await perform { try await $0.setLowPower(syncs) }
-        if !saved, lowPower == syncs { lowPower = previous }
+        _ = await perform { try await $0.setLowPower(syncs) }
+        guard lowPowerSequence == request else { return }
+        desiredLowPower = nil
+        lowPower = confirmedLowPower
     }
 
     private func apply(_ status: AutomationStatus) {
         state = status.state
-        lowPower = status.lowPower
+        confirmedLowPower = status.lowPower
+        lowPower = desiredLowPower ?? confirmedLowPower
         heldBy = status.heldBy
     }
 
-    /// Whether this request succeeded; `error` is shared by requests
-    /// that overlap, so it cannot tell.
+    /// Run mutations in invocation order. The task is deliberately
+    /// unstructured: once the agent may have accepted a choice, cancelling
+    /// its caller cannot let a later choice overtake it.
     @discardableResult
-    private func perform(_ request: @Sendable (any AutomationClient) async throws -> AutomationStatus) async -> Bool {
+    private func perform(
+        _ request: @escaping @Sendable (any AutomationClient) async throws -> AutomationStatus
+    ) async -> Bool {
         generation += 1
-        // Completing an action invalidates reads issued while it was
-        // on the wire, so they cannot overwrite this reply.
-        defer { generation += 1 }
-        error = nil
-        do {
-            apply(try await request(client))
-            return true
-        } catch {
-            self.error = PairStore.message(for: error)
-            return false
+        pendingMutations += 1
+        mutationSequence += 1
+        let sequence = mutationSequence
+        let previous = mutationTail
+        let task = Task { @MainActor [self] in
+            _ = await previous?.value
+            error = nil
+            do {
+                apply(try await request(client))
+                return true
+            } catch {
+                self.error = PairStore.message(for: error)
+                return false
+            }
         }
+        mutationTail = task
+        let succeeded = await task.value
+        pendingMutations -= 1
+        if mutationSequence == sequence { mutationTail = nil }
+        return succeeded
     }
 }
