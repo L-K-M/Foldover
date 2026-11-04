@@ -182,13 +182,13 @@ enum FoldSurface {
 /// A working job's readout: the stage it is in, a figure and what it
 /// counts, a bar, and a few short lines. The same layout is printed in
 /// white on the folded leaf's back while a run presses, and in umber on
-/// the page while a preview compares. The bar fills only once the job
-/// knows its whole; until then it runs open-ended under a count.
+/// the page while a preview compares. The bar appears only once the job
+/// knows its whole; until then a spinner turns under the count.
 ///
 ///        COMPARING                    SYNCING
 ///         371,762                       42%
 ///      ITEMS CHECKED                  COPIED
-///     ‹ open-ended ›            ━━━━━━━━━━░░░░░░░░░
+///            ◌                 ━━━━━━━━━━░░░░░░░░░
 ///   of 6,810,813 found       1,204 of 5,320 changes
 ///        so far             1.2 GB of 40 GB · 85 MB/s
 ///                               about 8 min left
@@ -213,12 +213,14 @@ struct FoldReadoutView: View {
                 // the last one's place rather than rolling on from it.
                 .id(readout.stage)
             bar
-                .frame(maxWidth: Self.barWidth)
             if !readout.details.isEmpty {
-                // One text, so on a narrow page the lines wrap together.
+                // One text, so on a narrow page the lines wrap together,
+                // and whole: a short page grows the readout rather than
+                // cut its lines.
                 Text(readout.details.joined(separator: "\n"))
                     .font(.callout)
                     .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .foregroundStyle(ink)
@@ -262,11 +264,13 @@ struct FoldReadoutView: View {
         if let fraction = readout.fraction {
             ProgressView(value: fraction)
                 .tint(ink)
+                .frame(maxWidth: Self.barWidth)
         } else if readout.stage != .waiting {
-            // Open-ended: the job has not found everything yet.
+            // The job cannot say yet how much there is: a spinner, which
+            // no one reads as a share. An open-ended bar would be read as
+            // one, since Reduce Motion holds its moving segment still.
             ProgressView()
-                .progressViewStyle(.linear)
-                .tint(ink)
+                .controlSize(.small)
         }
     }
 }

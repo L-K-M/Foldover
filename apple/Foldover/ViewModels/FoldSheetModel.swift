@@ -335,8 +335,8 @@ struct FoldImprint: Equatable {
 ///   share of bytes copied   0 → 100%
 ///
 /// So while comparing the readout counts the items checked, a number
-/// that only grows, under an open-ended bar; a share appears only once
-/// the plan says how much there is to do.
+/// that only grows, over a spinner rather than a bar; a share appears
+/// only once the plan says how much there is to do.
 struct FoldReadout: Equatable {
     /// What the job is doing.
     enum Stage: Hashable {
@@ -357,7 +357,7 @@ struct FoldReadout: Equatable {
     /// What the figure counts, e.g. "items checked".
     let caption: String?
     /// How far the bar is filled; nil while nothing measures the whole
-    /// job, which leaves the bar open-ended.
+    /// job, when a spinner stands in for the bar.
     let fraction: Double?
     /// Short lines under the bar, e.g. "1.2 GB of 40 GB · 85 MB/s".
     let details: [String]

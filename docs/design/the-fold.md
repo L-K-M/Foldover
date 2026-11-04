@@ -170,7 +170,9 @@ figure that never runs backward:
   share of the items found would climb to 100%, fall back as B's
   listing begins, and start again from 0% once the plan is made. So
   while comparing, the figure counts the items checked, which only
-  grows, over an open-ended bar and the items found so far.
+  grows, over a spinner and the items found so far. A bar with no end
+  would not do: Reduce Motion holds its moving segment still, and a
+  still segment reads as a share.
 - **Syncing.** Once the plan says how much there is to do, the figure
   is the share done: of the data to copy, or of the changes when
   nothing is copied, rounded down so it reads 100% only when done. The
