@@ -27,7 +27,8 @@ use crate::lease::LockFile;
 use crate::link::Answer;
 use crate::local::Carried;
 use crate::{
-    Expected, Filter, LocalEndpoint, LocalEntry, ObserveStep, ObservedEntry, RootWatcher, RunScope,
+    Expected, Filter, LocalEndpoint, LocalEntry, ObserveStep, ObservedEntry, Pruning, RootWatcher,
+    RunScope,
 };
 
 /// How often a scan reports progress, which is also how soon it notices
@@ -207,7 +208,11 @@ pub fn serve_folder(
         }
         // This Mac's clock decides what is old here.
         FolderOp::PruneArchive { retention_seconds } => endpoint
-            .prune_archive(shared_retention(retention_seconds), SystemTime::now())
+            .prune_archive(
+                shared_retention(retention_seconds),
+                SystemTime::now(),
+                Pruning::Everyone,
+            )
             .map(|count| PeerReply::Pruned { count })
             .map_err(|error| wire::apply_failure(&error)),
         FolderOp::ArchivedRuns => endpoint

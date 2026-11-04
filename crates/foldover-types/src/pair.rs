@@ -135,6 +135,29 @@ impl PairDraft {
             _ => None,
         }
     }
+
+    /// How the pair uses its `side` folder.
+    pub fn role(&self, side: Side) -> FolderRole {
+        match self.mode {
+            SyncMode::Sync => FolderRole::TwoWay,
+            SyncMode::Mirror { source } | SyncMode::Backup { source } if source == side => {
+                FolderRole::Source
+            }
+            SyncMode::Mirror { .. } | SyncMode::Backup { .. } => FolderRole::Target,
+        }
+    }
+}
+
+/// How a pair uses one of its folders.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FolderRole {
+    /// A Mirror's or Backup's source. Runs read it, and write it only
+    /// when a person copies a previewed change the other way.
+    Source,
+    /// A Mirror's or Backup's target.
+    Target,
+    /// Either folder of a two-way Sync.
+    TwoWay,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -234,6 +257,29 @@ mod tests {
                 draft(mode).with_options(source_only.clone()).unrecorded(),
                 None
             );
+        }
+    }
+
+    #[test]
+    fn only_a_one_way_pair_has_a_source() {
+        let draft = |mode| {
+            PairDraft::new(
+                "Pair".into(),
+                LocalRoot::from_bytes(b"/a".to_vec()).unwrap(),
+                LocalRoot::from_bytes(b"/b".to_vec()).unwrap(),
+                mode,
+            )
+            .unwrap()
+        };
+        for side in [Side::Left, Side::Right] {
+            assert_eq!(draft(SyncMode::Sync).role(side), FolderRole::TwoWay);
+            for mode in [
+                SyncMode::Mirror { source: side },
+                SyncMode::Backup { source: side },
+            ] {
+                assert_eq!(draft(mode).role(side), FolderRole::Source);
+                assert_eq!(draft(mode).role(side.other()), FolderRole::Target);
+            }
         }
     }
 

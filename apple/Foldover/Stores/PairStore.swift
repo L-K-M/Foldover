@@ -124,8 +124,8 @@ struct PairCatalogPage: Sendable {
 }
 
 /// What will not work as a person might expect with a picked folder
-/// (PLAN.md §3.6). The agent saves regardless; the editor blocks saving
-/// only over refused records.
+/// (PLAN.md §3.6). The editor blocks saving over refused records and
+/// folder overlaps; saving itself would refuse an overlap.
 struct PairReadinessWarning: Equatable, Sendable {
     enum Kind: Equatable, Sendable {
         /// Another sync engine manages this folder; `provider` names it.
@@ -137,6 +137,10 @@ struct PairReadinessWarning: Equatable, Sendable {
         /// This folder cannot hold Foldover's `.foldover` records, so it
         /// can only be a Backup target that keeps none.
         case recordsUnsupported
+        /// This folder is, holds or sits inside a folder of the pair
+        /// `pairName`; only Mirror and Backup sources may share one, so
+        /// saving would refuse it.
+        case overlap(pairName: String)
     }
 
     let side: FolderSide
@@ -175,7 +179,9 @@ protocol PairClient: Sendable {
     func create(_ settings: PairSettings) async throws -> SyncPair
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair
     func remove(_ pair: SyncPair) async throws -> SyncPair
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning]
+    /// `editing` is the pair the settings would replace, or nil for a
+    /// new pair; its own folders never count as overlaps.
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning]
     /// Waits about two seconds while the agent browses the network.
     func servers() async throws -> [NearbyServer]
     /// Connecting to the server can take a few seconds.
@@ -203,8 +209,8 @@ private actor CorePairClient: PairClient {
         self.pair(try await FoldoverCore.pairRemove(id: pair.id, revision: pair.revision))
     }
 
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] {
-        try await FoldoverCore.checkPair(configuration: configuration(settings)).map(warning)
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] {
+        try await FoldoverCore.checkPair(configuration: configuration(settings), editing: editing).map(warning)
     }
 
     func servers() async throws -> [NearbyServer] {
@@ -231,6 +237,7 @@ private actor CorePairClient: PairClient {
         case .metadataUnsupported: .metadataUnsupported
         case .namesDiffer: .namesDiffer
         case .recordsUnsupported: .recordsUnsupported
+        case .overlap: .overlap(pairName: warning.pairName ?? "")
         }
         return PairReadinessWarning(side: side, kind: kind)
     }
@@ -443,9 +450,10 @@ final class PairStore {
     }
 
     /// What will not work as a person might expect with `settings`' folders
-    /// (PLAN.md §3.6); warnings never block saving.
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] {
-        try await client.check(settings)
+    /// (PLAN.md §3.6); `editing` is the pair the settings would replace.
+    /// Only an overlap names something saving would refuse.
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] {
+        try await client.check(settings, editing: editing)
     }
 
     /// SMB file servers seen on the local network (PLAN.md §3.8); waits

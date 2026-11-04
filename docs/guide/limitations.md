@@ -48,7 +48,7 @@ What you need to know before trusting a pair with your data.
 ## Readiness warnings
 
 While you edit a pair, Foldover warns about sides that will not work as
-you might expect. Only the last one below blocks saving
+you might expect. Only the last two below block saving
 ([ADR 0037](../adr/0037-readiness-warnings.md)):
 
 - A folder another sync engine manages: iCloud Drive, Desktop &
@@ -63,17 +63,29 @@ you might expect. Only the last one below blocks saving
   replaced files are deleted, not archived, Undo is unavailable, and
   another Mac backing up to it is not noticed
   ([ADR 0040](../adr/0040-backup-targets-without-records.md)).
+- A folder that is, holds or sits inside a folder another pair uses.
+  Pairs share folders only as the source of a Mirror or Backup, so you
+  can back up one folder to several targets, or a folder and one inside
+  it separately; a folder any pair writes stays its own
+  ([ADR 0047](../adr/0047-shared-one-way-sources.md)).
 
 ## Several Macs on one folder
 
 - **One sync at a time.** Every run holds a lease, the file
-  `.foldover/lock` inside each folder, from before its first write until
-  it ends, so two Macs never write the same folder at once. Undo takes
-  the same leases ([ADR 0032](../adr/0032-root-leases.md)).
+  `.foldover/lock` inside each folder it writes, from before its first
+  write until it ends, so two Macs never write the same folder at once.
+  Undo takes the same leases ([ADR 0032](../adr/0032-root-leases.md)).
+- **Sources are read freely.** A Mirror or Backup leases its source only
+  when it writes there: when you copy a change back into it, or to
+  recover what an interrupted write left. Backups of one folder, or of a
+  folder another Mac syncs, run at the same time
+  ([ADR 0047](../adr/0047-shared-one-way-sources.md)).
 - **Waiting, then takeover.** A run that finds another Mac's live lease
   waits with "Waiting for <Mac> to finish syncing these folders…" and
   fails with "<Mac> is syncing this folder" after 150 seconds;
-  scheduled runs retry on their cadence. A Mac that crashed or slept
+  scheduled runs try again when they next come due, and you are
+  notified once
+  ([ADR 0047](../adr/0047-shared-one-way-sources.md)). A Mac that crashed or slept
   mid-sync holds its folders for up to two minutes; the next run waits
   that out and takes over ([ADR 0032](../adr/0032-root-leases.md)).
 - After a takeover the old holder may still write for up to one beat,
@@ -156,6 +168,13 @@ you might expect. Only the last one below blocks saving
   `.foldover/archive/<run>/` inside each folder for 30 days, then are
   deleted permanently. That pruning is the only path that deletes data
   ([ADR 0020](../adr/0020-run-execution.md)).
+- **Each pair sees its own runs.** A run's folder is named after its
+  start time and its pair. Pairs sharing a folder, on this Mac or
+  others, each list theirs; another pair's runs there go after 60 days.
+  Paired Macs need this version on both; a Mac with an older Foldover
+  syncing the same share or server folder neither lists nor prunes the
+  new runs until it is updated
+  ([ADR 0047](../adr/0047-shared-one-way-sources.md)).
 - **Put Back never replaces.** A restored item goes beside an occupied
   path as `name (restored).ext`, then `(restored 2)`; the next sync
   copies it to the other folder like any new entry

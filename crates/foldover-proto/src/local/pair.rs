@@ -455,6 +455,16 @@ pub struct PairUpdate {
     pub configuration: PairInput,
 }
 
+/// `pair.check`'s request: the folders and settings a person picked, and
+/// the pair they edit, whose own folders never overlap them.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PairCheck {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub configuration: PairInput,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairPage {
@@ -463,7 +473,8 @@ pub struct PairPage {
 }
 
 /// `pair.check`'s answer: what will not work as a person might expect
-/// with the folders they picked (PLAN.md §3.6). Never blocks saving.
+/// with the folders they picked (PLAN.md §3.6). Only `overlap` names
+/// something saving would refuse.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairWarnings {
@@ -482,6 +493,11 @@ pub enum PairWarning {
     /// This side cannot hold Foldover's `.foldover` records, so it can
     /// only be a Backup target that keeps none.
     RecordsUnsupported { side: PairSide },
+    /// This side's folder is, holds or sits inside a folder of the pair
+    /// named `pairName`, and only Mirror and Backup sources may share
+    /// one; saving would refuse it.
+    #[serde(rename_all = "camelCase")]
+    Overlap { side: PairSide, pair_name: String },
 }
 
 #[cfg(test)]
@@ -547,6 +563,13 @@ mod tests {
                 PairWarning::NamesDiffer {
                     side: PairSide::Left,
                 },
+                PairWarning::RecordsUnsupported {
+                    side: PairSide::Right,
+                },
+                PairWarning::Overlap {
+                    side: PairSide::Left,
+                    pair_name: "Photos".into(),
+                },
             ],
         };
         let json = serde_json::to_value(&warnings).unwrap();
@@ -556,6 +579,8 @@ mod tests {
                 {"kind":"cloudManaged","side":"left","provider":"iCloud Drive"},
                 {"kind":"metadataUnsupported","side":"right"},
                 {"kind":"namesDiffer","side":"left"},
+                {"kind":"recordsUnsupported","side":"right"},
+                {"kind":"overlap","side":"left","pairName":"Photos"},
             ]})
         );
         assert_eq!(

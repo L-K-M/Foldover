@@ -90,10 +90,40 @@ impl Reviewed {
 
 struct Job {
     status: SyncStatus,
+    /// What a failed `status` leaves the schedule to do.
+    after: AfterFailure,
     cancel: Arc<AtomicBool>,
     reviewed: Option<Reviewed>,
     /// The working job's counters; status requests read them live.
     progress: Arc<Progress>,
+}
+
+/// What a failed job leaves the pair's schedule to do.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum AfterFailure {
+    /// Wait until a person syncs the pair (ADR 0022).
+    #[default]
+    Review,
+    /// Run again when the schedule next comes due: another run kept a
+    /// folder's lease, which needs no person (ADR 0032).
+    Retry,
+}
+
+/// A job's result, as `spawn` publishes it.
+struct Done {
+    status: SyncStatus,
+    reviewed: Option<Reviewed>,
+    after: AfterFailure,
+}
+
+impl From<(SyncStatus, Option<Reviewed>)> for Done {
+    fn from((status, reviewed): (SyncStatus, Option<Reviewed>)) -> Self {
+        Self {
+            status,
+            reviewed,
+            after: AfterFailure::Review,
+        }
+    }
 }
 
 /// How far a job has got, written by its run and read by status requests.
@@ -467,6 +497,7 @@ impl Jobs {
                     id,
                     Job {
                         status: waiting,
+                        after: AfterFailure::Review,
                         cancel: Arc::new(AtomicBool::new(false)),
                         reviewed: None,
                         progress: Arc::default(),
@@ -521,16 +552,16 @@ impl Jobs {
             let started = SystemTime::now();
             #[cfg(test)]
             jobs.wait_job_gate();
-            let (status, reviewed) = match activation {
+            let done = match activation {
                 Ok(()) => perform(&engine, id, work, &cancel, held, skips, &progress),
-                Err(message) => (SyncStatus::Failed { message }, None),
+                Err(message) => (SyncStatus::Failed { message }, None).into(),
             };
-            crate::history::record(&engine, id, work, started, &status);
+            crate::history::record(&engine, id, work, started, &done.status);
             // A skip lasts one executed run.
-            if matches!(status, SyncStatus::Finished { .. }) {
+            if matches!(done.status, SyncStatus::Finished { .. }) {
                 jobs.spend_skips(id);
             }
-            (status, reviewed)
+            done
         });
         Ok(acknowledged)
     }
@@ -546,8 +577,29 @@ impl Jobs {
         let acknowledged = self
             .claim(id, work, &Arc::new(AtomicBool::new(false)))?
             .acknowledged;
-        self.spawn(id, None, run);
+        self.spawn(id, None, move || run().into());
         Ok(acknowledged)
+    }
+
+    /// Record a failure because another run kept a folder's lease, as a
+    /// run's would be, for scheduler tests.
+    #[cfg(test)]
+    pub(crate) fn force_busy_failure(&self, id: PairId, message: &str) {
+        self.force_status(
+            id,
+            SyncStatus::Failed {
+                message: message.into(),
+            },
+        );
+        if let Some(job) = self
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .jobs
+            .get_mut(&id)
+        {
+            job.after = AfterFailure::Retry;
+        }
     }
 
     /// Overwrite the pair's recorded status, for job state machine tests.
@@ -561,6 +613,7 @@ impl Jobs {
                 id,
                 Job {
                     status,
+                    after: AfterFailure::Review,
                     cancel: Arc::new(AtomicBool::new(false)),
                     reviewed: None,
                     progress: Arc::default(),
@@ -654,16 +707,19 @@ impl Jobs {
         let blocked = if state.mutating.contains(&id) {
             Some("The pair's configuration is changing")
         } else {
-            match state.jobs.get(&id).map(|job| &job.status) {
-                Some(SyncStatus::Working { .. }) => {
+            match state.jobs.get(&id).map(|job| (&job.status, job.after)) {
+                Some((SyncStatus::Working { .. }, _)) => {
                     Some("This pair already has a preview or sync in progress")
                 }
+                // A folder another run was using is simply tried again.
+                Some((SyncStatus::Failed { .. }, AfterFailure::Retry)) => None,
                 // An undo waits too: an unattended run would redo it unseen.
-                Some(
+                Some((
                     SyncStatus::NeedsApproval { .. }
                     | SyncStatus::Undone { .. }
                     | SyncStatus::Failed { .. },
-                ) if matches!(work, Work::Scheduled) => {
+                    _,
+                )) if matches!(work, Work::Scheduled) => {
                     Some("The pair is waiting for review; sync it manually")
                 }
                 _ => None,
@@ -687,6 +743,7 @@ impl Jobs {
                 id,
                 Job {
                     status: acknowledged.clone(),
+                    after: AfterFailure::Review,
                     cancel: Arc::clone(cancel),
                     reviewed: None,
                     progress: Arc::clone(&progress),
@@ -720,20 +777,23 @@ impl Jobs {
         self: &Arc<Self>,
         id: PairId,
         engine: Option<Arc<Mutex<Engine>>>,
-        run: impl FnOnce() -> (SyncStatus, Option<Reviewed>) + Send + 'static,
+        run: impl FnOnce() -> Done + Send + 'static,
     ) {
         let jobs = Arc::clone(self);
         tokio::task::spawn_blocking(move || {
             let crashed = || {
-                (
+                Done::from((
                     SyncStatus::Failed {
                         message: "The job crashed; see the agent log".into(),
                     },
                     None,
-                )
+                ))
             };
-            let (mut status, mut reviewed) =
-                catch_unwind(AssertUnwindSafe(run)).unwrap_or_else(|_| crashed());
+            let Done {
+                mut status,
+                mut reviewed,
+                mut after,
+            } = catch_unwind(AssertUnwindSafe(run)).unwrap_or_else(|_| crashed());
             // Before the result shows, for a client that lists once it does:
             // a walk during the job may have kept what the job then changed.
             jobs.read_ahead.forget(id);
@@ -751,11 +811,13 @@ impl Jobs {
             if let Err(message) = activation {
                 status = SyncStatus::Failed { message };
                 reviewed = None;
+                after = AfterFailure::Review;
             }
             let mut state = jobs.state.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(job) = state.jobs.get_mut(&id) {
                 job.status = status;
                 job.reviewed = reviewed;
+                job.after = after;
             }
         });
     }
@@ -787,8 +849,8 @@ fn perform(
     held: Option<Reviewed>,
     skips: BTreeMap<SyncPath, Skip>,
     progress: &Progress,
-) -> (SyncStatus, Option<Reviewed>) {
-    let failed = |message: String| (SyncStatus::Failed { message }, None);
+) -> Done {
+    let failed = |message: String| Done::from((SyncStatus::Failed { message }, None));
     let stored = match engine.lock() {
         Ok(engine) => engine.run_inputs(id).and_then(|inputs| {
             let pair = inputs.configuration().clone();
@@ -832,7 +894,7 @@ fn perform(
     let run = match PairRun::prepare(inputs, &mut control, progress) {
         Ok(run) => run,
         // Nothing was written yet.
-        Err(RunError::Cancelled) => return (SyncStatus::Idle, None),
+        Err(RunError::Cancelled) => return (SyncStatus::Idle, None).into(),
         Err(error) => return failed(error.to_string()),
     };
     // Informational, like the snapshots below.
@@ -870,7 +932,8 @@ fn perform(
                         result: undone(&report),
                     },
                     None,
-                ),
+                )
+                    .into(),
                 Err(error) => failed(error.to_string()),
             };
         }
@@ -879,7 +942,7 @@ fn perform(
             let status = SyncStatus::Previewed {
                 preview: preview(&planned),
             };
-            return (status, Some(Reviewed::from(&planned)));
+            return (status, Some(Reviewed::from(&planned))).into();
         }
         Work::Run(approval, token) => {
             let planned = run.preview();
@@ -897,7 +960,8 @@ fn perform(
                         preview: preview(&planned),
                     },
                     Some(Reviewed::from(&planned)),
-                );
+                )
+                    .into();
             }
             (
                 approval,
@@ -933,13 +997,20 @@ fn perform(
                 },
                 None,
             )
+                .into()
         }
         Ok(RunOutcome::NeedsApproval(planned)) => (
             SyncStatus::NeedsApproval {
                 preview: preview(&planned),
             },
             Some(Reviewed::from(&planned)),
-        ),
+        )
+            .into(),
+        // Another run kept a folder: the schedule simply tries again.
+        Err(error) if error.folder_busy() => Done {
+            after: AfterFailure::Retry,
+            ..failed(error.to_string())
+        },
         Err(error) => failed(error.to_string()),
     }
 }
@@ -1103,6 +1174,7 @@ mod tests {
                     cancelling: false,
                     progress: SyncProgress::default(),
                 },
+                after: AfterFailure::Review,
                 cancel,
                 reviewed: None,
                 progress: Arc::default(),

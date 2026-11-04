@@ -1,9 +1,11 @@
 //! Browsing one side's archive and putting items back (ADR 0025). Each
 //! side keeps what runs displaced or removed under
-//! `.foldover/archive/<run>/<original path>` for 30 days.
+//! `.foldover/archive/<run>/<original path>` for 30 days. A pair sees its
+//! own runs and those from before runs named their pair, never another
+//! pair's in a folder they share (ADR 0047).
 
-use foldover_endpoint::{ApplyError, Endpoint, Reach, ScanError};
-use foldover_types::{Durability, PairConfig, Side, SyncPath};
+use foldover_endpoint::{ApplyError, ArchivedRun as Run, Endpoint, Reach, ScanError};
+use foldover_types::{Durability, PairConfig, PairId, Side, SyncPath};
 
 pub use foldover_endpoint::{ArchivedItem, ArchivedRun};
 
@@ -78,6 +80,7 @@ enum Kept {
 /// callers browse without holding the engine.
 pub struct PairArchive {
     endpoint: Endpoint,
+    pair: PairId,
     durability: Durability,
     kept: Kept,
 }
@@ -95,17 +98,34 @@ impl PairArchive {
         };
         Ok(Self {
             endpoint,
+            pair: pair.id(),
             durability: pair.draft().options().durability(),
             kept,
         })
     }
 
-    /// Archived runs, newest first.
+    /// The pair's archived runs, newest first.
     pub fn runs(&self) -> Result<Vec<ArchivedRun>, ArchiveError> {
         if self.kept == Kept::Nothing {
             return Ok(Vec::new());
         }
-        Ok(self.endpoint.archived_runs()?)
+        let mut runs = self.endpoint.archived_runs()?;
+        runs.retain(|run| self.owns(run));
+        Ok(runs)
+    }
+
+    /// Whether `run` is this pair's to browse: its own, or from before
+    /// runs named their pair.
+    fn owns(&self, run: &Run) -> bool {
+        run.owner().is_none_or(|owner| owner == self.pair)
+    }
+
+    /// Another pair's run is not in this pair's archive.
+    fn check_run(&self, run: &str) -> Result<(), ArchiveError> {
+        match foldover_endpoint::run_owner(run) {
+            Some(owner) if owner != self.pair => Err(ScanError::UnknownArchiveRun.into()),
+            _ => Ok(()),
+        }
     }
 
     /// A page of `run`'s items in path order after `after`, and whether
@@ -119,6 +139,7 @@ impl PairArchive {
         if self.kept == Kept::Nothing {
             return Ok((Vec::new(), false));
         }
+        self.check_run(run)?;
         Ok(self.endpoint.archived_items(run, after, limit)?)
     }
 
@@ -128,6 +149,7 @@ impl PairArchive {
         if self.kept == Kept::Nothing {
             return Err(ApplyError::NotArchived(path.clone()).into());
         }
+        self.check_run(run)?;
         // A rename has no flush over SFTP, so a full-durability pair is
         // refused rather than silently downgraded.
         if self.durability == Durability::Full && matches!(self.endpoint, Endpoint::Sftp(_)) {
@@ -249,6 +271,53 @@ mod tests {
         );
     }
 
+    /// Pairs sharing a folder each browse their own runs, and runs from
+    /// before runs named their pair; never another pair's.
+    #[test]
+    fn a_pair_browses_its_own_runs_in_a_shared_folder() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let target = directory.path().join("target");
+        fs::create_dir_all(&target).unwrap();
+        let root =
+            |path: &Path| LocalRoot::from_bytes(path.as_os_str().as_bytes().to_vec()).unwrap();
+        let backup = SyncMode::Backup { source: Side::Left };
+        let draft = PairDraft::new("Pair".into(), root(&source), root(&target), backup).unwrap();
+        let [ours, theirs] =
+            [1, 2].map(|byte| PairId::from_bytes([byte; PairId::BYTE_LEN]).unwrap());
+        let pair = PairConfig::from_stored(ours, 1, draft).unwrap();
+        let at = |seconds| std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+        let [own, other, legacy] = [
+            foldover_endpoint::run_name(at(3), ours),
+            foldover_endpoint::run_name(at(2), theirs),
+            archive_name(at(1)),
+        ];
+        for run in [&own, &other, &legacy] {
+            let folder = source.join(".foldover/archive").join(run);
+            fs::create_dir_all(&folder).unwrap();
+            fs::write(folder.join("note"), b"kept").unwrap();
+        }
+
+        let archive = PairArchive::open(&pair, Side::Left, &Reach::default()).unwrap();
+        let runs: Vec<_> = archive
+            .runs()
+            .unwrap()
+            .iter()
+            .map(|run| run.name().to_owned())
+            .collect();
+        assert_eq!(runs, [own, legacy]);
+        let note = SyncPath::try_from(b"note".as_slice()).unwrap();
+        assert_eq!(
+            archive.items(&other, None, 10).unwrap_err().kind(),
+            ArchiveErrorKind::NotFound
+        );
+        assert_eq!(
+            archive.put_back(&other, &note).unwrap_err().kind(),
+            ArchiveErrorKind::NotFound
+        );
+        assert!(!source.join("note").exists());
+    }
+
     /// Putting an item back renames on the server; a pair asking for
     /// full durability is refused before the rename is attempted.
     #[test]
@@ -283,6 +352,7 @@ mod tests {
 
         let archive = PairArchive {
             endpoint: Endpoint::Sftp(endpoint),
+            pair: PairId::from_bytes([1; PairId::BYTE_LEN]).unwrap(),
             durability: Durability::Full,
             kept: Kept::Archive,
         };
@@ -303,6 +373,7 @@ mod tests {
         // Standard puts it back on the same server.
         let archive = PairArchive {
             endpoint: archive.endpoint,
+            pair: archive.pair,
             durability: Durability::Standard,
             kept: Kept::Archive,
         };

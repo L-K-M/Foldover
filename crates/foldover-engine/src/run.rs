@@ -28,8 +28,8 @@ use std::time::{Duration, SystemTime};
 
 use foldover_endpoint::{
     ApplyError, Endpoint, EndpointPair, Expected, Filter, HeldLease, InvalidFilter, LeaseError,
-    LeaseHolder, LeaseTiming, Observation, ObserveStep, ObservedEntry, PairRootError, Reach,
-    RunScope, ScanError, access_denied,
+    LeaseHolder, LeaseTiming, Observation, ObserveStep, ObservedEntry, PairRootError, Pruning,
+    Reach, RunScope, ScanError, access_denied,
 };
 use foldover_host::RunAwake;
 use foldover_state::{
@@ -37,9 +37,9 @@ use foldover_state::{
 };
 use foldover_types::{
     BaselineEntry, ChangeKind, ConflictKind, Durability, EndpointId, EntryContent, EntryDecision,
-    EntryKind, EntryVersion, NameMatching, PairConfig, PairId, PairOptions, Propagation,
-    RemovalProtection, Resolution, ReviewPolicy, ReviewToken, ScanControl, Side, Skip, SyncPath,
-    UnicodeMatching,
+    EntryKind, EntryVersion, FolderRole, NameMatching, PairConfig, PairId, PairOptions,
+    Propagation, RemovalProtection, Resolution, ReviewPolicy, ReviewToken, ScanControl, Side, Skip,
+    SyncPath, UnicodeMatching,
 };
 use unicode_normalization::UnicodeNormalization;
 
@@ -155,6 +155,15 @@ pub enum RunError {
     Lease(#[from] LeaseError),
 }
 
+impl RunError {
+    /// Whether the run wrote nothing because another run, of another
+    /// pair or Mac, kept one of its folders' leases past the wait
+    /// (ADR 0032): trying again later is all it needs.
+    pub fn folder_busy(&self) -> bool {
+        matches!(self, Self::Lease(LeaseError::Busy { .. }))
+    }
+}
+
 /// This agent among others leasing the same folders; one per process.
 fn agent_instance() -> &'static str {
     static INSTANCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -211,7 +220,19 @@ impl RunProgress for NoProgress {
     fn waiting(&self, _: Option<&str>) {}
 }
 
-/// A run's leases on both folders, renewed as it checks for cancellation.
+/// Which of a pair's folders a job leases (PLAN.md §4, ADR 0032).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Leased {
+    /// Every folder that keeps records: an undo may write either.
+    Recorded,
+    /// The folders a run writes. A Mirror's or Backup's source is read,
+    /// so pairs sharing it never wait for each other (ADR 0047); it is
+    /// leased only when a person's choice copies a change back into it,
+    /// or to recover what an interrupted write left there.
+    Written,
+}
+
+/// A run's leases on its folders, renewed as it checks for cancellation.
 struct HeldLeases<'a> {
     leases: Vec<HeldLease<'a>>,
     /// The first renewal that failed, e.g. after another Mac took over;
@@ -1118,7 +1139,7 @@ impl PairRun {
             }
         };
 
-        let scope = RunScope::new(started, options.clone());
+        let scope = RunScope::new(started, self.pair.id(), options.clone());
         let name = scope.name().to_owned();
         // A folder without records keeps no archive: what the run replaces
         // there is deleted.
@@ -1129,7 +1150,7 @@ impl PairRun {
         let scopes = [scope_on(Side::Left), scope_on(Side::Right)];
         // PLAN.md §4: a run writes a folder only while it holds the
         // folder's lease, so two Macs never write one at once.
-        let leases = self.take_leases(identities, &name, control, progress)?;
+        let leases = self.take_leases(identities, &name, Leased::Written, control, progress)?;
         // A stop the run's thread hears reaches the copy workers too.
         let stop = AtomicBool::new(false);
         let mut control = || {
@@ -1165,7 +1186,12 @@ impl PairRun {
             Ok::<_, RunError>(())
         };
 
+        // A source the run does not write is not leased, and there the
+        // temporaries may be another pair's or Mac's live writes.
         for side in [Side::Left, Side::Right] {
+            if !self.writes(side) {
+                continue;
+            }
             let observation = self.observation(side);
             for leftover in observation.leftovers() {
                 match self
@@ -1266,11 +1292,15 @@ impl PairRun {
         // Keep retention bounded even when a path fails every run.
         if executor.report.completion == Completion::Finished {
             for side in [Side::Left, Side::Right] {
-                if unrecorded == Some(side) {
+                if unrecorded == Some(side) || !self.writes(side) {
                     continue;
                 }
                 let endpoint = self.endpoints.endpoint(side);
-                match endpoint.prune_archive(ARCHIVE_RETENTION, started) {
+                match endpoint.prune_archive(
+                    ARCHIVE_RETENTION,
+                    started,
+                    Pruning::Pair(self.pair.id()),
+                ) {
                     Ok(pruned) => executor.report.pruned += pruned,
                     Err(error) => executor.fail_message(
                         &SyncPath::try_from(b".foldover/archive".as_slice())
@@ -1283,12 +1313,14 @@ impl PairRun {
         Ok(RunOutcome::Ran(executor.report))
     }
 
-    /// Both roots' leases for the run named `run`, taken in identity order
-    /// so two Macs syncing the same two folders cannot each hold one.
+    /// The `leased` folders' leases for the run named `run`, taken in
+    /// identity order so two Macs syncing the same two folders cannot each
+    /// hold one.
     fn take_leases(
         &self,
         identities: [EndpointId; 2],
         run: &str,
+        leased: Leased,
         control: &mut impl FnMut() -> ScanControl,
         progress: &dyn RunProgress,
     ) -> Result<HeldLeases<'_>, RunError> {
@@ -1305,9 +1337,7 @@ impl PairRun {
         };
         let mut leases = Vec::new();
         for (_, side) in sides {
-            // A folder without records holds no lease: another Mac could
-            // write it meanwhile (PLAN.md §3.6).
-            if self.pair.draft().unrecorded() == Some(side) {
+            if !self.leases(side, leased) {
                 continue;
             }
             let endpoint = self.endpoints.endpoint(side);
@@ -1416,6 +1446,37 @@ impl PairRun {
             Side::Right => &self.right,
         }
     }
+
+    /// Whether a job that leases `leased` holds `side`'s lease.
+    fn leases(&self, side: Side, leased: Leased) -> bool {
+        // A folder without records holds no lease: another Mac could
+        // write it meanwhile (PLAN.md §3.6).
+        if self.pair.draft().unrecorded() == Some(side) {
+            return false;
+        }
+        match leased {
+            Leased::Recorded => true,
+            Leased::Written => self.writes(side),
+        }
+    }
+
+    /// Whether the run writes `side`'s folder: always a target or a
+    /// two-way folder; a Mirror's or Backup's source only when a person's
+    /// choice copies a change back into it, or to recover what an
+    /// interrupted write left there.
+    fn writes(&self, side: Side) -> bool {
+        match self.pair.draft().role(side) {
+            FolderRole::Target | FolderRole::TwoWay => true,
+            FolderRole::Source => {
+                !self.observation(side).leftovers().is_empty()
+                    || self
+                        .plan
+                        .rows()
+                        .iter()
+                        .any(|row| writes_into(row.decision(), side))
+            }
+        }
+    }
 }
 
 /// A failed read of one side, with guidance when access was refused.
@@ -1509,6 +1570,26 @@ fn writes(decision: &CandidateDecision) -> bool {
                 | EntryDecision::Move { .. }
         )
     )
+}
+
+/// Whether `decision` writes `side`'s folder.
+fn writes_into(decision: &CandidateDecision, side: Side) -> bool {
+    match decision {
+        CandidateDecision::Entry(EntryDecision::Propagate { from, .. }) => from.other() == side,
+        CandidateDecision::Entry(
+            EntryDecision::Archive { on }
+            | EntryDecision::Move { on }
+            | EntryDecision::MovedAway { on },
+        ) => *on == side,
+        CandidateDecision::Entry(
+            EntryDecision::Unchanged
+            | EntryDecision::RecordBase
+            | EntryDecision::ForgetBase
+            | EntryDecision::KeepTarget
+            | EntryDecision::Conflict(_),
+        )
+        | CandidateDecision::BlockedByAncestor(_) => false,
+    }
 }
 
 fn is_archive(decision: &CandidateDecision) -> bool {

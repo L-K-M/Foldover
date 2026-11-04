@@ -12,6 +12,7 @@ fn path(text: &str) -> SyncPath {
 fn run() -> RunScope {
     RunScope::new(
         UNIX_EPOCH + Duration::from_secs(EPOCH_SECONDS),
+        crate::test_pair(),
         PairOptions::default(),
     )
 }

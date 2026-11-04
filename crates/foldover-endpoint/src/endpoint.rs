@@ -22,7 +22,7 @@ use crate::remote::PeerEndpoint;
 use crate::sftp::SftpEndpoint;
 use crate::{
     ApplyError, ArchivedItem, ArchivedRun, Expected, Filter, LocalEndpoint, Observation,
-    ObservedEntry, RootRelation, RunScope, ScanError,
+    ObservedEntry, Pruning, RootRelation, RunScope, ScanError,
 };
 
 /// Copies another Mac's folder takes at once.
@@ -413,13 +413,20 @@ impl Endpoint {
         }
     }
 
-    pub fn prune_archive(&self, retention: Duration, now: SystemTime) -> Result<u64, ApplyError> {
+    /// Delete archived runs past their expiry (`Pruning`). Another Mac's
+    /// folder is pruned by that Mac, for everyone, by its own clock.
+    pub fn prune_archive(
+        &self,
+        retention: Duration,
+        now: SystemTime,
+        pruning: Pruning,
+    ) -> Result<u64, ApplyError> {
         match self {
-            Self::Local(endpoint) => endpoint.prune_archive(retention, now),
-            Self::Sftp(endpoint) => endpoint.prune_archive(retention, now),
+            Self::Local(endpoint) => endpoint.prune_archive(retention, now, pruning),
+            Self::Sftp(endpoint) => endpoint.prune_archive(retention, now, pruning),
             Self::Peer(endpoint) => endpoint.prune_archive(retention, now),
             #[cfg(feature = "simulation")]
-            Self::Memory(endpoint) => endpoint.prune_archive(retention, now),
+            Self::Memory(endpoint) => endpoint.prune_archive(retention, now, pruning),
         }
     }
 

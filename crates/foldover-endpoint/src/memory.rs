@@ -36,7 +36,7 @@ use foldover_types::{
 use unicode_normalization::UnicodeNormalization;
 
 use crate::lease::LockFile;
-use crate::local::archive::{ARCHIVE_ROOT, archive_time};
+use crate::local::archive::{ARCHIVE_ROOT, Pruning, parse_run};
 use crate::local::filter::{IGNORE_FILE, parse_ignore_file};
 use crate::local::version::{Observed, Payload, entry_version, metadata_version};
 use crate::local::{Archiving, Fingerprint, TEMPORARY_PREFIX, protected, temporary};
@@ -813,6 +813,7 @@ impl MemoryEndpoint {
         &self,
         retention: Duration,
         now: SystemTime,
+        pruning: Pruning,
     ) -> Result<u64, ApplyError> {
         let mut folder = self.folder();
         let mut prefix = ARCHIVE_ROOT.to_vec();
@@ -825,9 +826,10 @@ impl MemoryEndpoint {
                 (!rest.contains(&b'/')).then_some(stored.path.clone())
             })
             .filter(|run| {
-                archive_time(split(run).1)
-                    .and_then(|started| now.duration_since(started).ok())
-                    .is_some_and(|age| age > retention)
+                parse_run(split(run).1).is_some_and(|(started, owner)| {
+                    let expiry = pruning.expiry(owner, retention);
+                    now.duration_since(started).is_ok_and(|age| age > expiry)
+                })
             })
             .collect();
         for run in &expired {

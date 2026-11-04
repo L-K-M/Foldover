@@ -25,9 +25,9 @@ use foldover_proto::local::{
 use foldover_proto::local::{
     AgentCapability, DAEMON_RESUME, DAEMON_STATUS, DaemonStatus, Hello, INTERNAL_ERROR,
     INVALID_PARAMS, METHOD_NOT_FOUND, PAIR_CHECK, PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_NOT_FOUND,
-    PAIR_PAGE_SIZE, PAIR_UPDATE, PROTOCOL_VERSION, PairInput, PairKey, PairList, PairPage,
-    PairRecord, PairUpdate, PairWarning, PairWarnings, ROOT_OVERLAP, ROOT_UNAVAILABLE, Request,
-    RpcError, SAFE_MODE, SESSION_HELLO, STALE_REVISION, VERSION_MISMATCH,
+    PAIR_PAGE_SIZE, PAIR_UPDATE, PROTOCOL_VERSION, PairCheck, PairInput, PairKey, PairList,
+    PairPage, PairRecord, PairUpdate, PairWarning, PairWarnings, ROOT_OVERLAP, ROOT_UNAVAILABLE,
+    Request, RpcError, SAFE_MODE, SESSION_HELLO, STALE_REVISION, VERSION_MISMATCH,
 };
 use foldover_proto::local::{
     ConflictKeep, SYNC_CANCEL, SYNC_ITEMS, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS,
@@ -331,8 +331,12 @@ enum Command {
     Get(PairId),
     Create(PairDraft),
     /// Readiness warnings for a draft that has not been saved (PLAN.md
-    /// §3.6); touches disks like creation but mutates nothing.
-    Check(PairDraft),
+    /// §3.6); touches disks like creation but mutates nothing. `editing`
+    /// is the pair the draft would replace.
+    Check {
+        configuration: PairDraft,
+        editing: Option<PairId>,
+    },
     Update {
         id: PairId,
         revision: u64,
@@ -368,8 +372,15 @@ impl Command {
                 Ok(Self::Create(params.try_into().map_err(invalid)?))
             }
             PAIR_CHECK => {
-                let params: PairInput = parameters(request)?;
-                Ok(Self::Check(params.try_into().map_err(invalid)?))
+                let params: PairCheck = parameters(request)?;
+                Ok(Self::Check {
+                    configuration: params.configuration.try_into().map_err(invalid)?,
+                    editing: params
+                        .id
+                        .map(|id| id.parse())
+                        .transpose()
+                        .map_err(invalid)?,
+                })
             }
             PAIR_UPDATE => {
                 let params: PairUpdate = parameters(request)?;
@@ -394,7 +405,7 @@ impl Command {
     fn mutation_target(&self) -> Option<PairId> {
         match self {
             Self::Update { id, .. } | Self::Remove { id, .. } => Some(*id),
-            Self::List(_) | Self::Get(_) | Self::Create(_) | Self::Check(_) => None,
+            Self::List(_) | Self::Get(_) | Self::Create(_) | Self::Check { .. } => None,
         }
     }
 
@@ -419,8 +430,13 @@ impl Command {
             Self::Create(draft) => encode(PairRecord::from(
                 &engine.create_pair(&draft).map_err(engine_error)?,
             )),
-            Self::Check(draft) => {
-                let warnings = engine.check_pair(&draft).map_err(engine_error)?;
+            Self::Check {
+                configuration,
+                editing,
+            } => {
+                let warnings = engine
+                    .check_pair(&configuration, editing)
+                    .map_err(engine_error)?;
                 encode(PairWarnings {
                     warnings: warnings.into_iter().map(readiness_warning).collect(),
                 })
@@ -461,6 +477,10 @@ fn readiness_warning(warning: foldover_engine::ReadinessWarning) -> PairWarning 
         Warning::RecordsUnsupported { side } => {
             PairWarning::RecordsUnsupported { side: side.into() }
         }
+        Warning::Overlap { side, name, .. } => PairWarning::Overlap {
+            side: side.into(),
+            pair_name: name,
+        },
     }
 }
 
@@ -725,8 +745,9 @@ mod tests {
     async fn pair_check_warns_without_saving_and_never_blocks() {
         let (directory, service) = fixture();
         let input = input(directory.path(), "Photos");
+        let check = |configuration: &Value| json!({ "configuration": configuration });
         let checked = service
-            .handle(Request::call(1, PAIR_CHECK, Some(input.clone())))
+            .handle(Request::call(1, PAIR_CHECK, Some(check(&input))))
             .await
             .unwrap();
         // Ordinary local folders warn about nothing on CI's filesystems.
@@ -735,7 +756,7 @@ mod tests {
         let mut missing = input.clone();
         missing["left_root"] = json!(directory.path().join("missing").as_os_str().as_bytes());
         let checked = service
-            .handle(Request::call(2, PAIR_CHECK, Some(missing)))
+            .handle(Request::call(2, PAIR_CHECK, Some(check(&missing))))
             .await
             .unwrap();
         assert_eq!(checked, json!({"warnings":[]}));
@@ -746,16 +767,40 @@ mod tests {
             .unwrap();
         assert_eq!(page["pairs"], json!([]));
         // It validates like creation.
-        let mut unknown_field = input;
+        let mut unknown_field = input.clone();
         unknown_field["run_now"] = json!(true);
         assert_eq!(
             service
-                .handle(Request::call(4, PAIR_CHECK, Some(unknown_field)))
+                .handle(Request::call(4, PAIR_CHECK, Some(check(&unknown_field))))
                 .await
                 .unwrap_err()
                 .code(),
             INVALID_PARAMS
         );
+
+        // Folders another pair writes are named, so the editor can say
+        // which pair before saving refuses them; the edited pair is not.
+        let saved = service
+            .handle(Request::call(5, PAIR_CREATE, Some(input.clone())))
+            .await
+            .unwrap();
+        let checked = service
+            .handle(Request::call(6, PAIR_CHECK, Some(check(&input))))
+            .await
+            .unwrap();
+        assert_eq!(
+            checked,
+            json!({"warnings":[
+                {"kind":"overlap","side":"left","pairName":"Photos"},
+                {"kind":"overlap","side":"right","pairName":"Photos"},
+            ]})
+        );
+        let editing = json!({ "id": saved["id"], "configuration": input });
+        let checked = service
+            .handle(Request::call(7, PAIR_CHECK, Some(editing)))
+            .await
+            .unwrap();
+        assert_eq!(checked, json!({"warnings":[]}));
     }
 
     #[tokio::test]
@@ -3386,8 +3431,16 @@ mod tests {
             assert_eq!(service.jobs.status(id), status);
         }
 
+        // A folder another run kept busy needs nobody: the schedule tries
+        // again when it next comes due (ADR 0032).
+        service
+            .jobs
+            .force_busy_failure(id, "Studio is syncing this folder");
+        assert_eq!(run_due_started(&service, at(120)).await, [id]);
+        settled(&service, &key).await;
+
         // Finished runs, cancelled or not, keep the schedule recurring.
-        for (completion, later) in [(Completion::Finished, 120), (Completion::Cancelled, 240)] {
+        for (completion, later) in [(Completion::Finished, 240), (Completion::Cancelled, 360)] {
             service.jobs.force_status(id, sync_finished(completion));
             assert_eq!(
                 run_due_started(&service, at(later)).await,

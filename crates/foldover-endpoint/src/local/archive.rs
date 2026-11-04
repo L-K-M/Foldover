@@ -1,12 +1,16 @@
 //! Each root keeps replaced and removed entries in
-//! `.foldover/archive/<run>/<path>`. `<run>` is the run's UTC start time,
-//! e.g. `2026-10-18T09-30-00.123Z`, so retention can delete whole runs by
-//! age without reading their contents.
+//! `.foldover/archive/<run>/<path>`. `<run>` is the run's UTC start time
+//! and the pair that ran it, e.g.
+//! `2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef`, so
+//! retention can delete whole runs by age without reading their contents,
+//! and pairs that share a folder, on one Mac or several, each list and
+//! prune their own runs (ADR 0047). Runs from before the pair was named
+//! carry the time alone and belong to every pair.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use foldover_fs::{DirectoryScope, NodeKind, WriteError};
-use foldover_types::{Durability, SyncPath};
+use foldover_types::{Durability, PairId, SyncPath};
 
 use super::{ApplyError, LocalEndpoint, ScanError, child_path, protected};
 
@@ -22,11 +26,19 @@ const NAME_MAX: usize = 255;
 pub struct ArchivedRun {
     name: String,
     started: SystemTime,
+    owner: Option<PairId>,
 }
 
 impl ArchivedRun {
+    /// The run named `name`, which another Mac may have read; the pair
+    /// comes from the name.
     pub(crate) fn new(name: String, started: SystemTime) -> Self {
-        Self { name, started }
+        let owner = parse_run(name.as_bytes()).and_then(|(_, owner)| owner);
+        Self {
+            name,
+            started,
+            owner,
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -35,6 +47,41 @@ impl ArchivedRun {
 
     pub fn started(&self) -> SystemTime {
         self.started
+    }
+
+    /// The pair that ran it; `None` for a run from before runs were
+    /// named after their pair.
+    pub fn owner(&self) -> Option<PairId> {
+        self.owner
+    }
+}
+
+/// Whose expired runs a prune removes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Pruning {
+    /// A run of this pair prunes by its own clock. Its runs, and runs not
+    /// named after a pair, go at the retention. Other pairs' runs go only
+    /// at `OTHER_PAIRS_RETENTION_FACTOR` times it: a Mac whose clock runs
+    /// ahead cannot take another pair's runs early, and the runs of a pair
+    /// that no longer exists still go.
+    Pair(PairId),
+    /// Every run goes at the retention: the Mac sharing a folder prunes it
+    /// by its own clock for every Mac that writes it.
+    Everyone,
+}
+
+/// How many retentions another pair's run is kept by a pair's prune.
+const OTHER_PAIRS_RETENTION_FACTOR: u32 = 2;
+
+impl Pruning {
+    /// How old a run of `owner` must be before this prune removes it.
+    pub(crate) fn expiry(self, owner: Option<PairId>, retention: Duration) -> Duration {
+        match (self, owner) {
+            (Self::Pair(pair), Some(owner)) if owner != pair => {
+                retention.saturating_mul(OTHER_PAIRS_RETENTION_FACTOR)
+            }
+            _ => retention,
+        }
     }
 }
 
@@ -60,6 +107,8 @@ impl ArchivedItem {
 }
 
 pub(crate) const ARCHIVE_ROOT: &[u8] = b".foldover/archive";
+/// Between a run's start time and its pair in the run's folder name.
+const OWNER_SEPARATOR: u8 = b'_';
 const SECONDS_PER_DAY: u64 = 86_400;
 const SECONDS_PER_HOUR: u64 = 3_600;
 const SECONDS_PER_MINUTE: u64 = 60;
@@ -68,8 +117,9 @@ const MILLIS_PER_SECOND: u64 = 1_000;
 const EPOCH_DAY_OFFSET: u64 = 719_468;
 const DAYS_PER_ERA: u64 = 146_097;
 
-/// A sortable, Finder-safe run name. Runs of one pair never share a
-/// millisecond, because they are serialized.
+/// A sortable, Finder-safe name of the time alone, as runs had before
+/// they were named after their pair; `run_name` adds the pair. Runs of
+/// one pair never share a millisecond, because they are serialized.
 pub fn archive_name(at: SystemTime) -> String {
     let since = at.duration_since(UNIX_EPOCH).unwrap_or_default();
     let seconds = since.as_secs();
@@ -84,8 +134,40 @@ pub fn archive_name(at: SystemTime) -> String {
     )
 }
 
+/// The folder name of a run of `pair` that started at `at`: its start
+/// time, then the pair, e.g.
+/// `2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef`. The time
+/// comes first, so names still sort by it.
+pub fn run_name(at: SystemTime, pair: PairId) -> String {
+    format!("{}{}{pair}", archive_name(at), char::from(OWNER_SEPARATOR))
+}
+
+/// The pair a run name carries; `None` for a name of the time alone, or
+/// one that names no run.
+pub fn run_owner(name: &str) -> Option<PairId> {
+    parse_run(name.as_bytes()).and_then(|(_, owner)| owner)
+}
+
 /// The start time a run name encodes; `None` for any other name.
 pub(crate) fn archive_time(name: &[u8]) -> Option<SystemTime> {
+    parse_run(name).map(|(started, _)| started)
+}
+
+/// The start time and pair a run name encodes, the pair `None` for a
+/// name of the time alone; `None` for any other name.
+pub(crate) fn parse_run(name: &[u8]) -> Option<(SystemTime, Option<PairId>)> {
+    let (time, owner) = match name.iter().position(|&byte| byte == OWNER_SEPARATOR) {
+        None => (name, None),
+        Some(separator) => {
+            let owner = std::str::from_utf8(&name[separator + 1..]).ok()?;
+            (&name[..separator], Some(owner.parse().ok()?))
+        }
+    };
+    Some((start_time(time)?, owner))
+}
+
+/// The start time a name of the time alone encodes.
+fn start_time(name: &[u8]) -> Option<SystemTime> {
     let text = std::str::from_utf8(name).ok()?;
     let number = |range: std::ops::Range<usize>| -> Option<u64> {
         let digits = text.get(range)?;
@@ -278,11 +360,15 @@ impl LocalEndpoint {
             if entry.metadata().kind() != NodeKind::Directory {
                 continue;
             }
-            let Some(started) = archive_time(entry.name()) else {
+            let Some((started, owner)) = parse_run(entry.name()) else {
                 continue;
             };
             if let Ok(name) = String::from_utf8(entry.name().to_vec()) {
-                runs.push(ArchivedRun { name, started });
+                runs.push(ArchivedRun {
+                    name,
+                    started,
+                    owner,
+                });
             }
         }
         runs.sort_by_key(|run| std::cmp::Reverse(run.started));
@@ -358,10 +444,16 @@ impl LocalEndpoint {
         Err(ApplyError::Occupied(path.clone()))
     }
 
-    /// Permanently delete archived runs that started more than `retention`
-    /// before `now`. Other folders in the archive are kept. Returns the
-    /// number of runs removed.
-    pub fn prune_archive(&self, retention: Duration, now: SystemTime) -> Result<u64, ApplyError> {
+    /// Permanently delete archived runs that started more than their
+    /// expiry before `now`: `retention`, or longer for another pair's
+    /// runs (`Pruning`). Other folders in the archive are kept. Returns
+    /// the number of runs removed.
+    pub fn prune_archive(
+        &self,
+        retention: Duration,
+        now: SystemTime,
+        pruning: Pruning,
+    ) -> Result<u64, ApplyError> {
         let archive = SyncPath::try_from(ARCHIVE_ROOT).expect("the archive path is valid");
         // Data kept from broken-off copies follows the same retention.
         self.root
@@ -375,10 +467,11 @@ impl LocalEndpoint {
         let mut expired = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|source| io_error(&archive, source))?;
-            let Some(started) = archive_time(entry.name()) else {
+            let Some((started, owner)) = parse_run(entry.name()) else {
                 continue;
             };
-            if now.duration_since(started).is_ok_and(|age| age > retention) {
+            let expiry = pruning.expiry(owner, retention);
+            if now.duration_since(started).is_ok_and(|age| age > expiry) {
                 let mut path = archive.as_bytes().to_vec();
                 path.push(b'/');
                 path.extend_from_slice(entry.name());
@@ -788,6 +881,37 @@ mod tests {
     }
 
     #[test]
+    fn run_names_carry_their_pair_after_the_time() {
+        let pair: PairId = "0123456789abcdef0123456789abcdef".parse().unwrap();
+        let name = run_name(at(1_792_315_800_123), pair);
+        assert_eq!(
+            name,
+            "2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(
+            parse_run(name.as_bytes()),
+            Some((at(1_792_315_800_123), Some(pair)))
+        );
+        assert_eq!(
+            parse_run(b"2026-10-18T09-30-00.123Z"),
+            Some((at(1_792_315_800_123), None))
+        );
+        assert_eq!(ArchivedRun::new(name.clone(), at(0)).owner(), Some(pair));
+        assert!(run_folder(&name).is_some());
+        for name in [
+            "2026-10-18T09-30-00.123Z_",
+            "2026-10-18T09-30-00.123Z_0123456789ABCDEF0123456789ABCDEF",
+            "2026-10-18T09-30-00.123Z_0123456789abcdef",
+            "2026-10-18T09-30-00.123Z_00000000000000000000000000000000",
+            "2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_x",
+            "2026-10-18T09-30-00.123_0123456789abcdef0123456789abcdef",
+        ] {
+            assert_eq!(parse_run(name.as_bytes()), None, "{name}");
+            assert!(run_folder(name).is_none(), "{name}");
+        }
+    }
+
+    #[test]
     fn pruning_deletes_only_expired_runs() {
         let directory = tempfile::tempdir().unwrap();
         let archive = directory.path().join(".foldover/archive");
@@ -802,7 +926,12 @@ mod tests {
         let endpoint = LocalEndpoint::open(directory.path()).unwrap();
 
         let retention = Duration::from_secs(30 * 86_400);
-        assert_eq!(endpoint.prune_archive(retention, now).unwrap(), 1);
+        assert_eq!(
+            endpoint
+                .prune_archive(retention, now, Pruning::Everyone)
+                .unwrap(),
+            1
+        );
         let mut left: Vec<_> = fs::read_dir(&archive)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
@@ -812,11 +941,66 @@ mod tests {
             left,
             [archive_name(at(71 * day)), "kept by the user".into()]
         );
-        assert_eq!(endpoint.prune_archive(retention, now).unwrap(), 0);
+        assert_eq!(
+            endpoint
+                .prune_archive(retention, now, Pruning::Everyone)
+                .unwrap(),
+            0
+        );
 
         let empty = tempfile::tempdir().unwrap();
         let endpoint = LocalEndpoint::open(empty.path()).unwrap();
-        assert_eq!(endpoint.prune_archive(retention, now).unwrap(), 0);
+        assert_eq!(
+            endpoint
+                .prune_archive(retention, now, Pruning::Everyone)
+                .unwrap(),
+            0
+        );
+    }
+
+    /// Pairs sharing a folder each prune their own runs at the retention;
+    /// another pair's only at twice it, and untagged runs at it.
+    #[test]
+    fn a_pair_prunes_its_own_runs_and_others_only_much_later() {
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join(".foldover/archive");
+        let day = 86_400_000;
+        let now = at(100 * day);
+        let ours: PairId = "0123456789abcdef0123456789abcdef".parse().unwrap();
+        let theirs: PairId = "fedcba9876543210fedcba9876543210".parse().unwrap();
+        let names = [
+            run_name(at(100 * day - 31 * day), ours),
+            run_name(at(100 * day - 31 * day), theirs),
+            run_name(at(100 * day - 61 * day), theirs),
+            archive_name(at(100 * day - 31 * day)),
+            run_name(at(100 * day - 29 * day), ours),
+        ];
+        for name in &names {
+            fs::create_dir_all(archive.join(name)).unwrap();
+        }
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        let retention = Duration::from_secs(30 * 86_400);
+        assert_eq!(
+            endpoint
+                .prune_archive(retention, now, Pruning::Pair(ours))
+                .unwrap(),
+            3
+        );
+        let mut left: Vec<_> = fs::read_dir(&archive)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        let mut kept = vec![names[1].clone(), names[4].clone()];
+        kept.sort();
+        assert_eq!(left, kept);
+        // The Mac sharing the folder prunes everyone's by the retention.
+        assert_eq!(
+            endpoint
+                .prune_archive(retention, now, Pruning::Everyone)
+                .unwrap(),
+            1
+        );
     }
 
     #[test]

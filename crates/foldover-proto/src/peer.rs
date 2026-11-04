@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::local::{PairDurability, PairPropagation, PairSettings};
 
 /// The peer protocol version; agents of other versions do not pair.
-pub const PEER_PROTOCOL: u32 = 1;
+/// 2: archive run names carry their pair (ADR 0047), which an agent of
+/// version 1 accepts for writes but can neither list, restore nor prune.
+pub const PEER_PROTOCOL: u32 = 2;
 
 /// Pairing, after both sides derived the six-digit code. Each side sends
 /// its hello, then exactly one decision.

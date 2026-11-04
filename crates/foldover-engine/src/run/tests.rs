@@ -221,6 +221,16 @@ fn sftp_server() -> Option<std::path::PathBuf> {
         .find(|path| path.exists())
 }
 
+/// The pair the fixture's runs belong to.
+fn fixture_pair() -> PairId {
+    PairId::from_bytes([1; 16]).unwrap()
+}
+
+/// The archive folder of a fixture run started at the epoch.
+fn epoch_run() -> String {
+    foldover_endpoint::run_name(std::time::UNIX_EPOCH, fixture_pair())
+}
+
 fn fixture(mode: SyncMode) -> Fixture {
     Fixture {
         left: tempfile::tempdir().unwrap(),
@@ -361,9 +371,7 @@ impl Fixture {
             .with_review_policy(self.review_policy)
             .with_removal_protection(self.removal_protection),
         );
-        let pair =
-            PairConfig::from_stored(PairId::from_bytes([1; 16]).unwrap(), self.revision, draft)
-                .unwrap();
+        let pair = PairConfig::from_stored(fixture_pair(), self.revision, draft).unwrap();
         RunInputs::new(
             pair,
             self.base.clone(),
@@ -1017,7 +1025,7 @@ fn edits_replace_and_archive_and_deletions_propagate_to_the_archive() {
         fs::read(
             pair.right
                 .path()
-                .join(".foldover/archive/1970-01-01T00-00-00.000Z/edit")
+                .join(format!(".foldover/archive/{}/edit", epoch_run()))
         )
         .unwrap(),
         b"v1"
@@ -1027,7 +1035,7 @@ fn edits_replace_and_archive_and_deletions_propagate_to_the_archive() {
         fs::read(
             pair.left
                 .path()
-                .join(".foldover/archive/1970-01-01T00-00-00.000Z/delete")
+                .join(format!(".foldover/archive/{}/delete", epoch_run()))
         )
         .unwrap(),
         b"d"
@@ -1274,7 +1282,7 @@ fn mirror_archives_target_extras_and_backup_keeps_them() {
         mirror
             .right
             .path()
-            .join(".foldover/archive/1970-01-01T00-00-00.000Z/extra")
+            .join(format!(".foldover/archive/{}/extra", epoch_run()))
             .exists()
     );
 
@@ -1356,11 +1364,10 @@ fn failed_folders_skip_their_contents_and_later_runs_recover_leftovers() {
     let report = pair.sync();
     assert_eq!((report.copied(), report.recovered()), (2, 1));
     assert_eq!(
-        fs::read(
-            pair.right
-                .path()
-                .join(".foldover/archive/1970-01-01T00-00-00.000Z/.foldover-tmp-left")
-        )
+        fs::read(pair.right.path().join(format!(
+            ".foldover/archive/{}/.foldover-tmp-left",
+            epoch_run()
+        )))
         .unwrap(),
         b"displaced"
     );
@@ -1419,7 +1426,10 @@ fn completed_runs_name_their_archive_and_prune_expired_runs() {
     else {
         panic!("expected a run");
     };
-    assert_eq!(report.archive(), foldover_endpoint::archive_name(started));
+    assert_eq!(
+        report.archive(),
+        foldover_endpoint::run_name(started, fixture_pair())
+    );
     assert_eq!(report.pruned(), 1);
     assert!(
         !archive
@@ -1504,7 +1514,7 @@ fn resolved_conflicts_keep_the_chosen_side_until_either_side_changes() {
     let archive = pair
         .left
         .path()
-        .join(".foldover/archive/1970-01-01T00-00-00.000Z");
+        .join(format!(".foldover/archive/{}", epoch_run()));
     assert_eq!(fs::read(archive.join("file")).unwrap(), b"left");
     assert!(!pair.right.path().join("gone").exists());
 
@@ -1566,7 +1576,7 @@ fn a_folder_choice_settles_the_whole_folder() {
                 let archive = pair
                     .left
                     .path()
-                    .join(".foldover/archive/1970-01-01T00-00-00.000Z/photos");
+                    .join(format!(".foldover/archive/{}/photos", epoch_run()));
                 assert_eq!(fs::read(archive.join("a.jpg")).unwrap(), b"edited");
                 assert_eq!(fs::read(archive.join("b.jpg")).unwrap(), b"b");
             }
@@ -2514,6 +2524,135 @@ fn a_folder_another_mac_is_syncing_waits_until_its_lease_is_free_or_dead() {
     assert!(!lock.exists());
 }
 
+/// Only a lease another run kept is worth trying again later; a run
+/// that lost its lease or was stopped needs a person.
+#[test]
+fn only_a_busy_folder_is_retried_unattended() {
+    let busy = RunError::Lease(LeaseError::Busy {
+        label: "Studio".into(),
+    });
+    assert!(busy.folder_busy());
+    for error in [
+        RunError::Lease(LeaseError::Lost),
+        RunError::Lease(LeaseError::Cancelled),
+        RunError::Cancelled,
+    ] {
+        assert!(!error.folder_busy(), "{error:?}");
+    }
+}
+
+/// A live lease another run holds on `folder`.
+fn hold_lease(folder: &std::path::Path) -> std::path::PathBuf {
+    let lock = folder.join(".foldover/lock");
+    fs::create_dir_all(folder.join(".foldover")).unwrap();
+    fs::write(
+        &lock,
+        "foldover-lease 1\nholder other/run\nlabel Studio\nbeat 1\n",
+    )
+    .unwrap();
+    lock
+}
+
+/// ADR 0047: a Backup only reads its source, so it takes no lease there
+/// and never waits for another pair or Mac using the same folder. The
+/// other run's lease and temporaries stay as they are.
+#[test]
+fn a_backup_reads_its_source_without_waiting_for_its_lease() {
+    for mode in [
+        SyncMode::Backup { source: Side::Left },
+        SyncMode::Mirror { source: Side::Left },
+    ] {
+        let mut pair = fixture(mode);
+        pair.leases = TEST_LEASES;
+        let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+        fs::write(left.join("file"), b"v1").unwrap();
+        let lock = hold_lease(&left);
+        let report = pair.ran(Approval::default(), at(1));
+        assert_eq!(report.copied(), 1);
+        assert_eq!(fs::read(right.join("file")).unwrap(), b"v1");
+        // The other run still holds the source; this one released the
+        // target it wrote.
+        assert!(lock.exists());
+        assert!(!right.join(".foldover/lock").exists());
+
+        // A two-way pair writes both folders, so it waits for the lease.
+        let mut two_way = fixture(SyncMode::Sync);
+        two_way.leases = TEST_LEASES;
+        fs::write(two_way.left.path().join("file"), b"v1").unwrap();
+        hold_lease(two_way.left.path());
+        let prepared = two_way.prepare();
+        let mut store = two_way.store();
+        let busy = prepared.execute(
+            Approval::default(),
+            RunContext::Interactive,
+            at(1),
+            &mut |planned, commit| store.apply(planned, commit),
+            &mut proceed,
+            &NoProgress,
+        );
+        assert!(
+            matches!(&busy, Err(RunError::Lease(LeaseError::Busy { .. }))),
+            "{busy:?}"
+        );
+    }
+}
+
+/// A person's choice to copy a change back into a Backup's source, or a
+/// temporary an interrupted write left there, makes the run write the
+/// source: then it takes the source's lease like any writer.
+#[test]
+fn a_backup_leases_its_source_when_it_writes_there() {
+    let busy = |pair: &mut Fixture| {
+        let prepared = pair.prepare();
+        let mut store = pair.store();
+        prepared.execute(
+            Approval::default(),
+            RunContext::Interactive,
+            at(2),
+            &mut |planned, commit| store.apply(planned, commit),
+            &mut proceed,
+            &NoProgress,
+        )
+    };
+
+    let mut pair = fixture(SyncMode::Backup { source: Side::Left });
+    pair.leases = TEST_LEASES;
+    let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+    fs::write(left.join("file"), b"v1").unwrap();
+    pair.sync();
+    fs::write(right.join("file"), b"edited on the target").unwrap();
+    fs::write(left.join("file"), b"v2").unwrap();
+    pair.keep(Side::Right, b"file");
+    let lock = hold_lease(&left);
+    let refused = busy(&mut pair);
+    assert!(
+        matches!(&refused, Err(RunError::Lease(LeaseError::Busy { .. }))),
+        "{refused:?}"
+    );
+    assert_eq!(fs::read(left.join("file")).unwrap(), b"v2");
+    fs::remove_file(&lock).unwrap();
+    pair.ran(Approval::default(), at(3));
+    assert_eq!(
+        fs::read(left.join("file")).unwrap(),
+        b"edited on the target"
+    );
+
+    let mut pair = fixture(SyncMode::Backup { source: Side::Left });
+    pair.leases = TEST_LEASES;
+    let left = pair.left.path().to_owned();
+    fs::write(left.join(".foldover-tmp-left"), b"interrupted").unwrap();
+    let lock = hold_lease(&left);
+    assert!(matches!(
+        busy(&mut pair),
+        Err(RunError::Lease(LeaseError::Busy { .. }))
+    ));
+    assert!(left.join(".foldover-tmp-left").exists());
+    fs::remove_file(&lock).unwrap();
+    let report = pair.ran(Approval::default(), at(3));
+    assert_eq!(report.recovered(), 1);
+    assert!(!left.join(".foldover-tmp-left").exists());
+}
+
 /// Runs `hours` after the first, so each gets its own archive folder.
 fn at(hours: u32) -> std::time::SystemTime {
     STARTED + HOUR * hours
@@ -3037,7 +3176,7 @@ fn keeping_the_target_side_copies_a_change_the_other_way() {
     assert_eq!(fs::read(left.join("deleted")).unwrap(), b"d");
     // B's version wins in A; A's edit is in A's archive.
     assert_eq!(fs::read(left.join("edited")).unwrap(), b"v1");
-    let archive = left.join(".foldover/archive/1970-01-01T00-00-00.000Z");
+    let archive = left.join(format!(".foldover/archive/{}", epoch_run()));
     assert_eq!(fs::read(archive.join("edited")).unwrap(), b"version 2");
     assert_eq!(fs::read(right.join("edited")).unwrap(), b"v1");
     assert!(pair.prepare().preview().items().is_empty());

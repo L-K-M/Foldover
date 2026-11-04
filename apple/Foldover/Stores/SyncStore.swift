@@ -483,6 +483,10 @@ final class SyncStore {
     }
     private var requestErrors: [String: RequestFailure] = [:]
     private var failureSequence = 0
+    /// The failure each pair last showed, until it does something else.
+    /// A schedule retrying a folder another run keeps busy fails the same
+    /// way each time; it alerts once, not on every attempt (ADR 0047).
+    private var shownFailures: [String: String] = [:]
     private(set) var histories: [String: [RunRecord]] = [:]
     private(set) var listings: [String: ChangeListing] = [:]
     /// The text narrowing each pair's listed changes; view state held
@@ -551,10 +555,27 @@ final class SyncStore {
         knownStates.insert(pair.id)
         set(pair.id, state)
         if previous != state { await refreshHistory(pair.id) }
-        guard let previous, previous != state, let alert = Self.alert(for: pair, state: state) else {
+        let repeated = noteFailure(pair.id, state)
+        guard let previous, previous != state, !repeated,
+              let alert = Self.alert(for: pair, state: state) else {
             return
         }
         await self.alert(alert)
+    }
+
+    /// Remember the pair's failure, and whether `state` repeats the one it
+    /// last showed. Work in between, such as a retry, keeps it.
+    private func noteFailure(_ id: String, _ state: PairSyncState) -> Bool {
+        switch state {
+        case .failed(let message):
+            defer { shownFailures[id] = message }
+            return shownFailures[id] == message
+        case .working:
+            return false
+        default:
+            shownFailures[id] = nil
+            return false
+        }
     }
 
     nonisolated static func alert(for pair: SyncPair, state: PairSyncState) -> SyncAlert? {

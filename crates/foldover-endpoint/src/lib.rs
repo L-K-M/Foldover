@@ -32,8 +32,8 @@ pub use watch::{RootWatcher, changed_since_event, event_history, event_now};
 #[cfg(unix)]
 pub use local::{
     ApplyError, ArchivedItem, ArchivedRun, Expected, Filter, InvalidFilter, LocalEndpoint,
-    LocalEntry, Observation, ObservedEntry, RunScope, ScanControl, ScanError, ScanIssue, ScanStats,
-    archive_name,
+    LocalEntry, Observation, ObservedEntry, Pruning, RunScope, ScanControl, ScanError, ScanIssue,
+    ScanStats, archive_name, run_name, run_owner,
 };
 
 #[cfg(unix)]
@@ -73,3 +73,10 @@ pub use pair::{EndpointPair, PairRootError, access_denied};
 
 #[cfg(unix)]
 pub use sftp::SftpEndpoint;
+
+/// The pair tests' runs belong to.
+#[cfg(test)]
+pub(crate) fn test_pair() -> foldover_types::PairId {
+    foldover_types::PairId::from_bytes([0x5a; foldover_types::PairId::BYTE_LEN])
+        .expect("a test pair is not zero")
+}

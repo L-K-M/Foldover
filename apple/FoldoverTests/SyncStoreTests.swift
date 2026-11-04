@@ -460,7 +460,7 @@ private actor CatalogClient: PairClient {
         return SyncPair(id: pair.id, revision: pair.revision + 1, settings: settings)
     }
     func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { [] }
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { [] }
     func servers() async throws -> [NearbyServer] { [] }
     func browse(_ locator: String) async throws -> ServerListing {
         ServerListing(locator: locator, parent: nil, folders: [])
@@ -661,6 +661,27 @@ func automaticOutcomesThatNeedAPersonBecomeAlertsOnlyOnChange() async {
     // Previews never alert.
     await store.checkAll([pair()])
     #expect(await recorder.alerts.count == 1)
+}
+
+/// A schedule retrying a folder another Mac keeps busy fails the same way
+/// each time; that alerts once, and again only after something else.
+@MainActor
+@Test
+func aRepeatedFailureAlertsOnce() async {
+    let busy = PairSyncState.failed("Studio is syncing this folder")
+    let finished = RunSummary(cancelled: false, copied: 1, updated: 0, archived: 0, recovered: 0,
+                              conflicts: 0, failures: [], failureCount: 0, archive: "run")
+    let client = ScriptedSyncClient([.idle, busy, .working(.run, cancelling: false), busy,
+                                     .finished(finished), busy])
+    let recorder = AlertRecorder()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1)) { alert in
+        await recorder.record(alert)
+    }
+    for _ in 0..<4 { await store.checkAll([pair()]) }
+    #expect(await recorder.alerts.count == 1)
+    await store.checkAll([pair()])
+    await store.checkAll([pair()])
+    #expect(await recorder.alerts.count == 2)
 }
 
 /// Every status read blocks until released, so a test can see how many pairs

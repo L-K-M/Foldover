@@ -44,10 +44,13 @@ final class PairEditorViewModel: Identifiable {
     private(set) var savedPairID: String?
     /// What the agent says will not work as expected with the picked
     /// folders (PLAN.md §3.6); these never block saving, unlike
-    /// `recordsWarning`.
+    /// `recordsWarning` and `overlapWarning`.
     private(set) var readinessWarnings: [String] = []
     /// Folders that cannot hold Foldover's `.foldover` records.
     private(set) var recordsRefused: Set<FolderSide> = []
+    /// Folders another pair already claims: the overlapping side and the
+    /// other pair's name, from the latest check.
+    private(set) var folderOverlaps: [(side: FolderSide, pairName: String)] = []
     /// SMB servers found on the local network (PLAN.md §3.8); empty
     /// until the browse answers.
     private(set) var nearbyServers: [NearbyServer] = []
@@ -85,7 +88,7 @@ final class PairEditorViewModel: Identifiable {
     }
 
     var title: String { editing == nil ? String(localized: "New Pair") : String(localized: "Edit Pair") }
-    var canSave: Bool { !isSaving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && left != nil && right != nil && durabilityWarning == nil && canaryWarning == nil && dailyWarning == nil && recordsWarning == nil }
+    var canSave: Bool { !isSaving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && left != nil && right != nil && durabilityWarning == nil && canaryWarning == nil && dailyWarning == nil && recordsWarning == nil && overlapWarning == nil }
 
     private var backupTarget: FolderSide? { Self.backupTarget(mode) }
 
@@ -148,6 +151,19 @@ final class PairEditorViewModel: Identifiable {
             return String(localized: "\(name) can't hold Foldover's .foldover folder. To back up to it, turn on “Keep nothing in \(name)”.")
         }
         return String(localized: "\(name) can't hold Foldover's .foldover folder, so it can only be a Backup's target. Choose a Backup to \(name), then keep nothing in it.")
+    }
+
+    /// A folder another pair already uses can be shared only as a
+    /// Mirror's or Backup's source; saving refuses anything else, so the
+    /// editor blocks it (PLAN.md §3.6). One sentence per overlapping
+    /// side, then the rule.
+    var overlapWarning: String? {
+        guard !folderOverlaps.isEmpty else { return nil }
+        var sentences = folderOverlaps.map { overlap in
+            String(localized: "\(PairSyncViewModel.folderName(overlap.side)) overlaps a folder of “\(overlap.pairName)”.")
+        }
+        sentences.append(String(localized: "Pairs can share a folder only as the source of a Mirror or Backup."))
+        return sentences.joined(separator: " ")
     }
 
     /// Exclusion rules as editable text, one per line. The text is kept as
@@ -778,12 +794,18 @@ final class PairEditorViewModel: Identifiable {
         guard let left, let right else {
             readinessWarnings = []
             recordsRefused = []
+            folderOverlaps = []
             return
         }
         let settings = PairSettings(name: name, left: left, right: right, mode: mode, options: options)
-        guard let warnings = try? await store.check(settings), generation == checkGeneration else { return }
-        // Refused records get their own, blocking warning.
+        guard let warnings = try? await store.check(settings, editing: editing?.id),
+              generation == checkGeneration else { return }
+        // Refused records and overlaps get their own, blocking warnings.
         recordsRefused = Set(warnings.filter { $0.kind == .recordsUnsupported }.map(\.side))
+        folderOverlaps = warnings.compactMap { warning in
+            guard case .overlap(let pairName) = warning.kind else { return nil }
+            return (side: warning.side, pairName: pairName)
+        }
         readinessWarnings = warnings.compactMap(text)
     }
 
@@ -812,13 +834,17 @@ final class PairEditorViewModel: Identifiable {
         case .recordsUnsupported:
             // Shown as `recordsWarning` instead.
             return nil
+        case .overlap:
+            // Shown as `overlapWarning` instead.
+            return nil
         }
     }
 
     func save() async -> Bool {
         guard !isSaving else { return false }
-        // A folder that refuses records must be known before saving, or a
-        // pair that can never sync slips through while the check runs.
+        // Refused records and overlaps must be known before saving, or a
+        // pair that can never sync or gets refused slips through while
+        // the check runs.
         isSaving = true
         await checkTask?.value
         isSaving = false
