@@ -49,9 +49,13 @@ A performance audit found four costs that grow with a pair's size:
 
 ## Measurements
 
-Local Linux host with heavy, varying unrelated load, synthetic data,
-release builds. SFTP latency is simulated at 5 ms per server message. No
-Mac, NAS or real WAN was measured.
+Synthetic data and release builds throughout. No NAS or real WAN was
+measured.
+
+### Linux host
+
+Local Linux host with heavy, varying unrelated load. SFTP latency is
+simulated at 5 ms per server message.
 
 | What | Before | After |
 |---|---|---|
@@ -67,6 +71,31 @@ Two values are two runs. A third round of the full rewrite hit a host stall
 on both old and new code and is left out. A GitHub runner's medians, which
 the budgets allow for: 37 ms for the endpoint's archive pages, 45 ms for an
 unchanged snapshot and 275 ms for a full rewrite.
+
+### Mac
+
+A Mac Studio (M4 Max, 14 cores, 36 GB, macOS 27.0.1), on its internal
+APFS disk, shared with other builds at load averages between 40 and 185.
+Snapshot and endpoint archive rows run the same benchmarks on `ccc4982`
+and `d081589`. The other rows run on `d081589`: before is a linear search
+of the listing, a walk for every page and one SFTP session. SFTP reads go
+to the system's `/usr/libexec/sftp-server` through a relay that adds 5 ms
+per server message, or nothing.
+
+| What | Before | After |
+|---|---|---|
+| Unchanged snapshot, 100,000 rows | 470 ms, 629 ms | 42 ms, 103 ms |
+| Every row of a snapshot changed, 100,000 rows | 701 ms, 653 ms | 544 ms, 549 ms |
+| Poll lookups, 20,000 directories | 674 ms, 535 ms | 1.91 ms, 1.91 ms |
+| Archive pages at the endpoint, 5,000 items in 50 folders | 2.12 s, 1.59 s | 107 ms, 75 ms |
+| Archive pages through the service, 5,000 items in one folder | 644 ms | 175 ms |
+| 300 × 1 KiB SFTP files, 5 ms per message | 66.6 s, 66.1 s | 16.9 s, 16.4 s |
+| 32 × 4 MiB SFTP files, 5 ms per message | 29.3 s, 30.0 s | 7.8 s, 7.4 s |
+| 300 × 1 KiB SFTP files, no added latency | 166 ms, 271 ms | 90 ms, 54 ms |
+| 32 × 4 MiB SFTP files, no added latency | 503 ms, 763 ms | 106 ms, 60 ms |
+
+Two values are two runs. Service pages are the median of 15 walks over
+the run: 514 ms to 1.55 s before, 64 to 306 ms after.
 
 ## Consequences
 
