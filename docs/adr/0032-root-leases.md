@@ -53,9 +53,10 @@ take:   create lock exclusively ──ok──▶ held
   lease too, so one left by a Mac that died mid-takeover is removed by
   the same rule.
 - **Fencing:** each beat creates `lock.claim` exclusively with its next
-  record, re-reads the exact lock, promotes the claim and verifies the
-  promoted bytes. A competing claim or changed lock loses the lease. The
-  run cancels at its next checkpoint, commits what it did, and fails with
+  record, re-reads the exact lock, atomically promotes the claim over the
+  live lock and verifies the promoted bytes. Promotion never removes the
+  lock first. A competing claim or changed lock loses the lease. The run
+  cancels at its next checkpoint, commits what it did, and fails with
   "Another Mac took over this folder".
 - **Ordering:** a run takes its two leases in root-identity order, so two
   Macs syncing the same two folders cannot each hold one and wait on the
@@ -63,13 +64,16 @@ take:   create lock exclusively ──ok──▶ held
 - **Release:** dropping a lease advances through the same claim protocol,
   then removes the promoted lock. A competing claim leaves the lock alone;
   a crash between promotion and removal leaves an ordinary live lease for
-  TTL recovery, never a free lock beside a stale claim.
-- **Transport:** local roots use exclusive create and rename-replace on
-  the held directory handle. SFTP renames a staged file into place, which
-  OpenSSH refuses over an existing one, over a second session opened for
-  leases: a transfer holds the main session while it calls back into the
-  run, so a beat on it would wait for the transfer, or deadlock. A shared
-  folder forwards each step to the Mac that shares it
+  TTL recovery (delaying a waiting takeover by up to one TTL), never a free
+  lock beside a stale claim.
+- **Transport:** local roots use exclusive create and atomic rename-replace
+  on the held directory handle. SFTP creation renames a staged file with
+  ordinary version 3 rename, which OpenSSH refuses over an existing name;
+  promotion uses `posix-rename@openssh.com` to atomically replace the live
+  lock, without a remove-then-rename gap. Both use a second session opened
+  for leases: a transfer holds the main session while it calls back into
+  the run, so a beat on it would wait for the transfer, or deadlock. A
+  shared folder forwards each step to the Mac that shares it
   (`FolderOp::Lease`), so the file operations run there.
 - A lock in any other format, such as one a newer version wrote, is
   honoured as live until it stays unchanged for a TTL.
