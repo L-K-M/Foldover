@@ -460,7 +460,7 @@ private actor CatalogClient: PairClient {
         return SyncPair(id: pair.id, revision: pair.revision + 1, settings: settings)
     }
     func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { [] }
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { [] }
     func servers() async throws -> [NearbyServer] { [] }
     func browse(_ locator: String) async throws -> ServerListing {
         ServerListing(locator: locator, parent: nil, folders: [])

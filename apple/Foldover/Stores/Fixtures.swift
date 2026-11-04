@@ -302,7 +302,7 @@ actor FixturePairClient: PairClient {
         return pair
     }
 
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { [] }
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { [] }
 
     func servers() async throws -> [NearbyServer] {
         [NearbyServer(name: "MyNAS", host: "mynas.local", port: 445)]
