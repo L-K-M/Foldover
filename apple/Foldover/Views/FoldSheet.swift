@@ -330,7 +330,11 @@ struct FoldSheet: View {
         coveredVolume = nil
         guard let folder, viewModel.localURL(folder) != nil else { return }
         while !Task.isCancelled {
-            coveredVolume = await viewModel.volume(of: folder)
+            let reading = await viewModel.volume(of: folder)
+            // A read that stalled can land after the run, or another fold,
+            // has moved on to another folder: it is not this one's disk.
+            guard !Task.isCancelled else { return }
+            coveredVolume = reading
             try? await Task.sleep(for: Self.volumeInterval)
         }
     }

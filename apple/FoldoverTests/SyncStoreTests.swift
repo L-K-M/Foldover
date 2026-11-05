@@ -2192,6 +2192,8 @@ func workingJobsShowLiveCountsWithoutCountingAsNewStates() async {
     #expect(viewModel.readout?.stage == .comparing)
     #expect(viewModel.readout?.figure == UInt64(50).formatted())
     #expect(viewModel.readout?.fraction == nil)
+    // No plan yet: nothing is known to be on its way to the disk.
+    #expect(viewModel.bytesLeft == nil)
 
     // Another Mac is syncing one of the folders; nothing to measure yet.
     let waiting = WorkProgress(listed: 200, checked: 200, changes: 4, waitingFor: "Studio")
@@ -2200,12 +2202,27 @@ func workingJobsShowLiveCountsWithoutCountingAsNewStates() async {
     #expect(viewModel.statusText == "Waiting for “Studio” to finish syncing these folders…")
     #expect(viewModel.readout?.stage == .waiting)
     #expect(viewModel.readout?.fraction == nil)
+    #expect(viewModel.bytesLeft == nil)
 
     await client.reply(.working(.run, cancelling: false, progress: applying))
     await client.waitForStatusCalls(4)
     #expect(viewModel.statusText.hasPrefix("Syncing… 1 of 4 changes · "))
     #expect(viewModel.readout?.stage == .syncing)
     #expect(viewModel.readout?.fraction == 0.25)
+    #expect(viewModel.bytesLeft == 3_000_000)
+
+    // Copies can outrun the plan's sizes as files grow: nothing is left,
+    // not an underflow.
+    let overrun = WorkProgress(listed: 200, checked: 200, changes: 4, applied: 4,
+                               bytes: 4_000_000, copied: 4_200_000)
+    await client.reply(.working(.run, cancelling: false, progress: overrun))
+    await client.waitForStatusCalls(5)
+    #expect(viewModel.bytesLeft == 0)
+
+    // A stopping run copies nothing more.
+    await client.reply(.working(.run, cancelling: true, progress: applying))
+    await client.waitForStatusCalls(6)
+    #expect(viewModel.bytesLeft == nil)
     // New counts are the same state: no new history, listing or alert.
     #expect(PairSyncState.working(.run, cancelling: false, progress: comparing)
         == .working(.run, cancelling: false, progress: applying))
