@@ -430,8 +430,8 @@ struct FoldReadout: Equatable {
             // The agent reports no rate until the first copy lands.
             if progress.rate > 0 { line += " · " + PairSyncViewModel.throughputText(progress.rate) }
             details.append(line)
-            if progress.rate > 0, progress.bytes > progress.copied {
-                let left = PairSyncViewModel.timeText((progress.bytes - progress.copied) / progress.rate)
+            if let seconds = PairSyncViewModel.secondsLeft(progress) {
+                let left = PairSyncViewModel.timeText(seconds)
                 details.append(String(localized: "about \(left) left"))
             }
         }

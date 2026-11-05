@@ -2231,12 +2231,33 @@ func throughputAndDurationTextUseHumanUnits() {
     #expect(PairSyncViewModel.applying(
         WorkProgress(changes: 4, applied: 1, bytes: 301_000_000, copied: 1_000_000, rate: 2_500_000)
     ).hasSuffix(" · 2.5 MB/s · about 2 min left"))
+    // Under a second's worth of data left still reads a second, not 0 s.
+    #expect(PairSyncViewModel.applying(
+        WorkProgress(changes: 4, applied: 3, bytes: 301_000_000, copied: 300_000_001, rate: 2_500_000)
+    ).hasSuffix(" · 2.5 MB/s · about 1 s left"))
     #expect(PairSyncViewModel.applying(WorkProgress(changes: 4, applied: 1)) == "Syncing… 1 of 4 changes")
 
     let copied = WorkProgress(changes: 1, applied: 1, bytes: 42, copied: 42, rate: 42)
     #expect(!PairSyncViewModel.applying(copied).contains("left"))
     let waiting = WorkProgress(changes: 1, bytes: 42, rate: 42, waitingFor: "Studio")
     #expect(!PairSyncViewModel.applying(waiting).contains("/s"))
+}
+
+@Test
+func timeLeftCountsAPartSecondAsAWholeOne() {
+    func seconds(_ bytes: UInt64, copied: UInt64 = 0, rate: UInt64) -> UInt64? {
+        PairSyncViewModel.secondsLeft(WorkProgress(bytes: bytes, copied: copied, rate: rate))
+    }
+    #expect(seconds(1, rate: 2_500_000) == 1)
+    #expect(seconds(2_500_000, rate: 2_500_000) == 1)
+    #expect(seconds(2_500_001, rate: 2_500_000) == 2)
+    // Extremes where `(remaining + rate - 1) / rate` would overflow.
+    #expect(seconds(UInt64.max, rate: 1) == UInt64.max)
+    #expect(seconds(UInt64.max, rate: 2) == UInt64.max / 2 + 1)
+    #expect(seconds(UInt64.max, rate: UInt64.max) == 1)
+    // No rate before the first copy lands, and nothing left once all is copied.
+    #expect(seconds(42, rate: 0) == nil)
+    #expect(seconds(42, copied: 42, rate: 42) == nil)
 }
 
 @Test
