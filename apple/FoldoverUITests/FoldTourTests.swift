@@ -33,8 +33,9 @@ final class FoldTourTests: XCTestCase {
     /// A window opened on a run already under way, as after a schedule
     /// or the menu bar started it: nothing was previewed, so nothing is
     /// listed. The leaf still lies over a whole page, its back reading
-    /// out the run's stage, and the bare half beside it names the folder
-    /// under the leaf: a two-way sync's server, which has no disk to read.
+    /// out the run's stage. Each folder stays named on its own side: a
+    /// two-way sync's Folder A on the bare desk, under two arrows passing,
+    /// and its server, which has no disk to read, on the leaf.
     @MainActor
     func testARunOpenedMidwayCoversThePage() {
         continueAfterFailure = true
@@ -44,16 +45,18 @@ final class FoldTourTests: XCTestCase {
                 tour.launch()
                 tour.click(tour.app.outlines.firstMatch.staticTexts["Photos"].firstMatch, "Photos in the sidebar")
                 checkPlate(tour, reads: stage)
-                checkFolders(tour, leaf: "Folder A: ", covered: "Folder B: sftp://mynas.local/~/Photos")
+                checkFolders(tour, desk: "Folder A: ", leaf: "Folder B: sftp://mynas.local/~/Photos",
+                             direction: "Sync both ways")
                 tour.snap("fold-midway-\(stage.lowercased())")
                 tour.app.terminate()
             }
         }
     }
 
-    /// A backup to a disk opened mid-run: the leaf's back names the folder
-    /// it is copied from, and the bare half the folder it is copied to,
-    /// with that disk's free space and what is still to copy there.
+    /// A backup to a disk opened mid-run reads left to right: the folder
+    /// it is copied from on the bare desk, an arrow toward the leaf, and
+    /// on the leaf the folder it is copied to, with that disk's free space
+    /// and what is still to copy there.
     @MainActor
     func testABackupOpenedMidwayNamesBothFoldersAndTheDisk() {
         continueAfterFailure = true
@@ -62,36 +65,34 @@ final class FoldTourTests: XCTestCase {
             tour.launch()
             tour.click(tour.app.outlines.firstMatch.staticTexts["Projects"].firstMatch, "Projects in the sidebar")
             checkPlate(tour, reads: "Syncing")
-            let covered = checkFolders(tour, leaf: "From Folder A: ", covered: "To Folder B: ")
-            let disk = covered.descendants(matching: .any)
-                .matching(NSPredicate(format: "label == %@", "Backup SSD, 812.4 GB free of 2 TB, 23.2 GB still to copy"))
-                .firstMatch
-            XCTAssertTrue(disk.waitForExistence(timeout: 10), "The bare half should read out the backup disk")
+            checkFolders(tour, desk: "From Folder A: ", leaf: "To Folder B: ", direction: "Back up A to B")
+            let plate = tour.app.windows.descendants(matching: .any)["fold-plate"].firstMatch
+            let disk = plate.descendants(matching: .any)["fold-disk"].firstMatch
+            XCTAssertTrue(disk.waitForExistence(timeout: 10), "The leaf should read out the backup disk")
+            XCTAssertEqual(disk.label, "Backup SSD, 812.4 GB free of 2 TB, 23.2 GB still to copy")
             tour.snap("fold-midway-backup")
             tour.app.terminate()
         }
     }
 
-    /// The leaf's plate names its own folder, and the bare half the folder
-    /// under the leaf, on its own page: clear of the plate and the gutter.
-    /// Returns the bare half's note for further checks.
+    /// Each folder is named on its own side while the leaf lies folded:
+    /// the bare desk names the folder that lifted off, with the arrow for
+    /// which way the data goes, and the leaf's plate the folder it lies
+    /// on. The desk's words keep to its page, clear of the plate.
     @MainActor
-    @discardableResult
-    private func checkFolders(_ tour: Tour, leaf: String, covered: String) -> XCUIElement {
+    private func checkFolders(_ tour: Tour, desk: String, leaf: String, direction: String) {
         let window = tour.app.windows.firstMatch
         let plate = window.descendants(matching: .any)["fold-plate"].firstMatch
-        let note = window.descendants(matching: .any)["fold-covered"].firstMatch
-        guard note.waitForExistence(timeout: 5) else {
-            XCTFail("Missing: the folder under the leaf")
-            return note
-        }
-        let named = plate.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", leaf))
-        XCTAssertTrue(named.firstMatch.exists, "The leaf should name its folder, \(leaf)")
-        let under = note.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", covered))
-        XCTAssertTrue(under.firstMatch.exists, "The bare half should name the folder under the leaf, \(covered)")
+        let note = window.descendants(matching: .any)["fold-desk"].firstMatch
+        guard note.waitForExistence(timeout: 5) else { return XCTFail("Missing: the bare desk's note") }
+        let lifted = note.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", desk))
+        XCTAssertTrue(lifted.firstMatch.exists, "The bare desk should name the folder that lifted off, \(desk)")
+        let arrow = note.descendants(matching: .any)["fold-direction"].firstMatch
+        XCTAssertEqual(arrow.exists ? arrow.label : nil, direction, "The desk's arrow should say the sync's kind")
+        let under = plate.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", leaf))
+        XCTAssertTrue(under.firstMatch.exists, "The leaf should name the folder it lies on, \(leaf)")
         XCTAssertLessThanOrEqual(note.frame.maxX, plate.frame.minX + 1,
-                                 "The bare half's words should stay off the plate: \(note.frame), \(plate.frame)")
-        return note
+                                 "The bare desk's words should stay off the plate: \(note.frame), \(plate.frame)")
     }
 
     /// Sync Now before any preview folds a blank half; its back reads

@@ -475,9 +475,9 @@ enum FoldLeaf {
     }
 }
 
-/// Which way a folder's data goes in a run, for naming it while the
-/// leaf lies folded: the leaf's back names the folder whose page it is,
-/// and the bare half beside it the folder under the leaf.
+/// Which way a folder's data goes in a run, for naming it on its own
+/// side while the leaf lies folded: the bare desk names the folder whose
+/// page lifted off, and the leaf's back the folder whose page it lies on.
 enum FoldRole: Equatable {
     /// A one-way mode's source.
     case source
@@ -507,7 +507,29 @@ enum FoldRole: Equatable {
     }
 }
 
-/// The disk under the folded leaf, as the bare half beside it reads it:
+/// Which way a run's data goes, as the arrow on the desk where the leaf
+/// lifted off draws it.
+enum FoldDirection: Equatable {
+    /// A Mirror makes the folder `toward` match the other.
+    case mirror(toward: FolderSide)
+    /// A Backup copies to the folder `toward`, which keeps what the other
+    /// deletes.
+    case backup(toward: FolderSide)
+    /// A two-way Sync carries changes both ways.
+    case both
+
+    init(_ mode: PairMode) {
+        switch mode {
+        case .sync: self = .both
+        case .mirrorLeft: self = .mirror(toward: .b)
+        case .mirrorRight: self = .mirror(toward: .a)
+        case .backupLeft: self = .backup(toward: .b)
+        case .backupRight: self = .backup(toward: .a)
+        }
+    }
+}
+
+/// The disk under the folded leaf, as the leaf's back reads it:
 /// how full it is and, while a one-way run copies to it, how much more
 /// is on its way.
 ///

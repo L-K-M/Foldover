@@ -372,6 +372,17 @@ struct FoldSheetModelTests {
         #expect(FoldRole.either.eyebrow(.b) == "Folder B")
     }
 
+    /// The desk's arrow points the way a one-way mode's data goes and
+    /// says whether the other folder keeps what this one deletes; a
+    /// two-way sync goes both ways.
+    @Test func theDesksArrowFollowsTheMode() {
+        #expect(FoldDirection(.backupLeft) == .backup(toward: .b))
+        #expect(FoldDirection(.backupRight) == .backup(toward: .a))
+        #expect(FoldDirection(.mirrorLeft) == .mirror(toward: .b))
+        #expect(FoldDirection(.mirrorRight) == .mirror(toward: .a))
+        #expect(FoldDirection(.sync) == .both)
+    }
+
     /// The disk under the leaf: its free space, what the run still copies
     /// there, and a warning only when that is more than is free.
     @Test func theDiskUnderTheLeafSaysWhatIsFreeAndWhatIsComing() {
