@@ -251,6 +251,11 @@ impl PeerEndpoint {
                 Incoming::Reply(PeerReply::Failed { error }) => {
                     return Err(wire::scan_error(error));
                 }
+                // As `reply` does: the other Mac says why, e.g. it paused
+                // syncing or stopped sharing the folder since it opened.
+                Incoming::Reply(PeerReply::Refused { reason }) => {
+                    return Err(ScanError::MacUnreachable(reason));
+                }
                 Incoming::Reply(_) => return Err(unexpected()),
             }
         }
