@@ -11,6 +11,7 @@ use cap_std::fs::{Dir, Metadata, MetadataExt, ReadDir};
 use foldover_types::SyncPath;
 use nix::fcntl::AtFlags;
 use nix::sys::stat::{FileStat, SFlag, fstat, fstatat};
+use rustix::fs::{Mode, OFlags};
 
 use crate::{FilesystemFeatures, prevent_materialization};
 
@@ -638,7 +639,8 @@ impl Root {
     /// first missing name is in no folder, so this root cannot be inside
     /// it. A link on the way whose target is missing is followed, since
     /// the folder would be where it points. Should `path` be back, the
-    /// real relation is returned.
+    /// real relation is returned. A folder compared that cannot be read
+    /// is an error, so callers fail closed (ADR 0048).
     pub fn relation_to_missing(&self, path: &Path) -> io::Result<RootRelation> {
         let mut path = path.to_path_buf();
         // As many links as the kernel follows in one lookup.
@@ -676,6 +678,16 @@ impl Root {
                 }
                 Err(error) => return Err(error),
             };
+            // ADR 0048: a folder that cannot be read is not compared. macOS
+            // opens folders for reading, but cap-std holds them by `O_PATH`
+            // on Linux, which also opens one that only allows search.
+            // Reopening it to read refuses the same folders on both.
+            rustix::fs::openat(
+                &existing.directory,
+                c".",
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )?;
             let relation = self.relation_to(&existing)?;
             if depth == 0 {
                 return Ok(Missing::Found(relation));
@@ -1264,6 +1276,32 @@ mod tests {
         assert_eq!(
             open(&missing).relation_to_missing(&missing).unwrap(),
             RootRelation::Same
+        );
+    }
+
+    /// ADR 0048: a missing folder whose nearest existing ancestor cannot be
+    /// read is not compared, so callers fail closed, on Linux as on macOS.
+    #[test]
+    fn a_missing_folder_behind_an_unreadable_ancestor_is_not_compared() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let base = temporary.path().canonicalize().unwrap();
+        let locked = base.join("locked");
+        fs::create_dir(&locked).unwrap();
+        let root = Root::open(&base).unwrap();
+        let missing = locked.join("disk/photos");
+        // Searchable, so the folder is missing, but not readable.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o100)).unwrap();
+        let compared = root.relation_to_missing(&missing);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            compared.unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            root.relation_to_missing(&missing).unwrap(),
+            RootRelation::Contains
         );
     }
 
