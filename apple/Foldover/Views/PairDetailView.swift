@@ -21,6 +21,8 @@ struct PairDetailView: View {
                     .environment(\.colorScheme, .dark)
                 FoldSheet(viewModel: viewModel, sync: sync, pair: pair, rows: sync.rows, focus: focus)
             }
+            // The field is the whole detail, whatever lies on it.
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             // The field starts under the toolbar, whose title is drawn for
             // the window's own appearance.
             .background { Desk() }

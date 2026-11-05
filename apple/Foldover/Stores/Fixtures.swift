@@ -218,9 +218,13 @@ enum FixtureScenario: String {
     case manyPairs = "many-pairs"
     /// The catalog cannot load.
     case pairsFail = "pairs-fail"
-    /// A background sync keeps running after the main window closes.
+    /// A background sync keeps running after the main window closes,
+    /// still comparing a large folder: the window opens on it mid-run,
+    /// with nothing previewed on the sheet.
     case syncing
     case syncingReduced = "syncing-reduced"
+    /// A sync waits while another Mac syncs the same folders.
+    case syncingWaiting = "syncing-waiting"
     case failedRun = "failed-run"
     case foldApproval = "fold-approval"
 
@@ -237,7 +241,8 @@ enum FixtureScenario: String {
             return AgentReport(version: "0.1.0", safeModeStops: 3)
         case .agentFailed:
             throw FixtureError.agentUnavailable
-        case .noPairs, .manyPairs, .pairsFail, .syncing, .syncingReduced, .failedRun, .foldApproval:
+        case .noPairs, .manyPairs, .pairsFail, .syncing, .syncingReduced, .syncingWaiting, .failedRun,
+             .foldApproval:
             return AgentReport(version: "0.1.0")
         }
     }
@@ -355,7 +360,13 @@ actor FixtureSyncClient: SyncClient {
     init(pairs: FixturePairClient, scenario: FixtureScenario? = nil) {
         self.pairs = pairs
         if scenario == .syncing || scenario == .syncingReduced {
-            states[Fixtures.photosID] = .working(.run, cancelling: false)
+            states[Fixtures.photosID] = .working(.run, cancelling: false,
+                                                 progress: WorkProgress(listed: 6_810_813, checked: 371_762))
+        }
+        if scenario == .syncingWaiting {
+            // The engine waits after comparing, before it plans.
+            states[Fixtures.photosID] = .working(.run, cancelling: false, progress: WorkProgress(
+                listed: 48_211, checked: 48_211, waitingFor: "Mac Studio"))
         }
         if scenario == .failedRun {
             states[Fixtures.photosID] = .finished(RunSummary(
@@ -412,10 +423,18 @@ actor FixtureSyncClient: SyncClient {
         case .preview:
             return WorkProgress(listed: 48_211, checked: 48_211 * done / steps)
         case .run:
+            // A run compares before it knows its plan, as the engine's do:
+            // its first third counts items checked, then the plan applies.
+            let comparing = max(1, steps / 3)
+            guard done >= comparing else {
+                return WorkProgress(listed: 48_211, checked: 48_211 * done / comparing)
+            }
             let total = UInt64(Fixtures.changes(for: id).count)
-            return WorkProgress(listed: 48_211, checked: 48_211, changes: total, applied: total * done / steps,
-                                bytes: 120_600_000, copied: 120_600_000 * done / steps,
-                                rate: done == 0 ? 0 : 26_000_000)
+            let applied = done - comparing
+            let span = max(1, steps - comparing)
+            return WorkProgress(listed: 48_211, checked: 48_211, changes: total, applied: total * applied / span,
+                                bytes: 120_600_000, copied: 120_600_000 * applied / span,
+                                rate: applied == 0 ? 0 : 26_000_000)
         }
     }
 

@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A sync with nothing previewed on the sheet now folds a whole page:
+  one started by a schedule, the menu bar or Sync Now, or one under way
+  when the window opens. The sheet no longer shrinks to its folder
+  labels, with the progress in a card at the top of a bare field.
 - Comparing a folder on another Mac ends on its full count of items. The
   count no longer stops at that Mac's last progress update, or at zero
   when its scan finishes before the first one.
@@ -41,6 +45,16 @@ All notable changes to this project are documented here. The format follows
   are skipped in both folders, preserving existing copies.
 
 ### Changed
+
+- A sync's progress on the folded sheet names its stage: Comparing,
+  Syncing, Waiting or Stopping. While comparing it counts the items
+  checked, instead of a percentage that fell back when Folder B was
+  listed and restarted at 0% when copying began; the percentage appears
+  once the plan is known, with the changes made, data copied, speed and
+  time left on separate lines; a spinner, not a bar, shows the count is
+  still climbing. A wait for another Mac shows an hourglass instead of
+  the word "Pressing". A preview with nothing listed on the sheet counts
+  the same way while comparing.
 
 - Home-folder comparisons avoid repeatedly reopening the same ancestors
   while protecting Foldover's state directory.

@@ -361,19 +361,11 @@ struct PairSyncViewModel {
         }
     }
 
-    /// How far a running job is, from 0 to 1, once there is something to
-    /// measure: bytes when the plan copies any, else changes; while
-    /// comparing, entries checked of those found so far.
-    var progressFraction: Double? {
-        guard case .working(_, _, let progress) = state, progress.waitingFor == nil else { return nil }
-        if progress.bytes > 0 {
-            return Double(progress.copied) / Double(progress.bytes)
-        }
-        if progress.changes > 0 {
-            return Double(progress.applied) / Double(progress.changes)
-        }
-        guard progress.listed > 0 else { return nil }
-        return Double(progress.checked) / Double(progress.listed)
+    /// What the working job reads out: the items it has checked while it
+    /// compares, then the share of its plan done; nil when no job works.
+    var readout: FoldReadout? {
+        guard case .working(_, let cancelling, let progress) = state else { return nil }
+        return FoldReadout(progress: progress, cancelling: cancelling)
     }
 
     static func comparing(_ progress: WorkProgress) -> String {
@@ -399,7 +391,7 @@ struct PairSyncViewModel {
     }
 
     /// Promote rounded unit boundaries instead of showing "1000 kB/s".
-    static func throughputText(_ bytesPerSecond: UInt64) -> String {
+    nonisolated static func throughputText(_ bytesPerSecond: UInt64) -> String {
         let kilobyte = 1_000.0
         let megabyte = kilobyte * kilobyte
         let gigabyte = megabyte * kilobyte
@@ -418,7 +410,7 @@ struct PairSyncViewModel {
         return String(format: "%.0f B/s", locale: locale, rate)
     }
 
-    static func timeText(_ seconds: UInt64) -> String {
+    nonisolated static func timeText(_ seconds: UInt64) -> String {
         let secondsPerMinute: UInt64 = 60
         let secondsPerHour = 60 * secondsPerMinute
         if seconds >= secondsPerHour {
@@ -946,7 +938,7 @@ struct PairSyncViewModel {
         }
     }
 
-    static func byteText(_ bytes: UInt64) -> String {
+    nonisolated static func byteText(_ bytes: UInt64) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(clamping: bytes), countStyle: .file)
     }
 

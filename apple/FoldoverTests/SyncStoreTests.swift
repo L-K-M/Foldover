@@ -2188,26 +2188,31 @@ func workingJobsShowLiveCountsWithoutCountingAsNewStates() async {
     await client.reply(.working(.run, cancelling: false, progress: comparing))
     await client.waitForStatusCalls(2)
     #expect(viewModel.statusText == "Comparing folders… 50 of 200 items checked")
-    #expect(viewModel.progressFraction == 0.25)
+    // While comparing, the total is unknown: a count, no share.
+    #expect(viewModel.readout?.stage == .comparing)
+    #expect(viewModel.readout?.figure == UInt64(50).formatted())
+    #expect(viewModel.readout?.fraction == nil)
 
     // Another Mac is syncing one of the folders; nothing to measure yet.
     let waiting = WorkProgress(listed: 200, checked: 200, changes: 4, waitingFor: "Studio")
     await client.reply(.working(.run, cancelling: false, progress: waiting))
     await client.waitForStatusCalls(3)
     #expect(viewModel.statusText == "Waiting for “Studio” to finish syncing these folders…")
-    #expect(viewModel.progressFraction == nil)
+    #expect(viewModel.readout?.stage == .waiting)
+    #expect(viewModel.readout?.fraction == nil)
 
     await client.reply(.working(.run, cancelling: false, progress: applying))
     await client.waitForStatusCalls(4)
     #expect(viewModel.statusText.hasPrefix("Syncing… 1 of 4 changes · "))
-    #expect(viewModel.progressFraction == 0.25)
+    #expect(viewModel.readout?.stage == .syncing)
+    #expect(viewModel.readout?.fraction == 0.25)
     // New counts are the same state: no new history, listing or alert.
     #expect(PairSyncState.working(.run, cancelling: false, progress: comparing)
         == .working(.run, cancelling: false, progress: applying))
 
     await client.reply(.idle)
     await refresh.value
-    #expect(viewModel.progressFraction == nil)
+    #expect(viewModel.readout == nil)
 }
 
 @MainActor

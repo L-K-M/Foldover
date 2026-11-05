@@ -1,7 +1,8 @@
 // The fold's rules: which mark each half of a line carries and which
 // page's margin is marked, what a line is called, which ways a person
 // may turn it, how lines group under folders, which half folds, which
-// page a message keeps to, and how print gives way as the leaf turns.
+// page a message keeps to, how print gives way as the leaf turns, and
+// what a working job reads out.
 
 import Foundation
 import Testing
@@ -131,6 +132,90 @@ struct FoldSheetModelTests {
                                notUndoneCount: 0, archive: "undo")
         #expect(FoldImprint(undo: undo).figures == [.init(value: "1", label: "put back"),
                                                     .init(value: "2", label: "archived")])
+    }
+
+    /// The engine lists and checks Folder A, then lists and checks Folder
+    /// B, then makes and carries out its plan. Comparing counts the items
+    /// checked, which only grows, though the items found jump as B's
+    /// listing begins; a share appears only once the plan says how much
+    /// there is.
+    @Test func theReadoutNeverRunsBackward() {
+        let comparing: [(listed: UInt64, checked: UInt64)] = [(0, 0), (1_000, 0), (1_000, 1_000),
+                                                             (2_400, 1_000), (2_400, 2_400)]
+        for (listed, checked) in comparing {
+            let readout = FoldReadout(progress: WorkProgress(listed: listed, checked: checked), cancelling: false)
+            #expect(readout.stage == .comparing)
+            #expect(readout.title == "Comparing")
+            #expect(readout.figure == checked.formatted())
+            #expect(readout.caption == "items checked")
+            #expect(readout.fraction == nil)
+            #expect(readout.details == (listed > 0 ? ["of \(listed.formatted()) found so far"] : []))
+        }
+        let one = FoldReadout(progress: WorkProgress(listed: 3, checked: 1), cancelling: false)
+        #expect(one.caption == "item checked")
+
+        let copying = FoldReadout(progress: WorkProgress(listed: 2_400, checked: 2_400, changes: 4, applied: 1,
+                                                         bytes: 4_000_000, copied: 1_000_000, rate: 2_500_000),
+                                  cancelling: false)
+        #expect(copying.stage == .syncing)
+        #expect(copying.title == "Syncing")
+        #expect(copying.figure == 0.25.formatted(.percent.precision(.fractionLength(0))))
+        #expect(copying.caption == "copied")
+        #expect(copying.fraction == 0.25)
+        let bytes = "\(PairSyncViewModel.byteText(1_000_000)) of \(PairSyncViewModel.byteText(4_000_000))"
+        #expect(copying.details == ["1 of 4 changes", bytes + " · 2.5 MB/s", "about 1 s left"])
+        #expect(copying.spoken.hasPrefix("Syncing, \(copying.figure ?? "") copied, 1 of 4 changes, "))
+    }
+
+    /// The share is rounded down, so it says 100% only once all of it is
+    /// done, and counts changes when the plan copies no data.
+    @Test func theReadoutsShareIsRoundedDown() {
+        func figure(_ progress: WorkProgress) -> String? {
+            FoldReadout(progress: progress, cancelling: false).figure
+        }
+        func percent(_ value: Double) -> String { value.formatted(.percent.precision(.fractionLength(0))) }
+        #expect(figure(WorkProgress(changes: 2, bytes: 1_000, copied: 999)) == percent(0.99))
+        #expect(figure(WorkProgress(changes: 2, bytes: 100, copied: 29)) == percent(0.29))
+        #expect(figure(WorkProgress(changes: 2, bytes: 100, copied: 100)) == percent(1))
+
+        let archives = FoldReadout(progress: WorkProgress(changes: 3, applied: 1), cancelling: false)
+        #expect(archives.figure == percent(0.33))
+        #expect(archives.caption == "done")
+        #expect(archives.fraction == 1.0 / 3)
+        #expect(archives.details == ["1 of 3 changes"])
+        #expect(FoldReadout(progress: WorkProgress(changes: 1), cancelling: false).details == ["0 of 1 change"])
+    }
+
+    /// Waiting on another Mac shows no figure and no bar, since nothing
+    /// moves; a stopping job keeps its figure and its counts, and drops
+    /// its speed and time left.
+    @Test func theReadoutWaitsAndStops() {
+        // The engine waits for another Mac after comparing, before it plans.
+        let held = WorkProgress(listed: 200, checked: 200, waitingFor: "Studio")
+        let waiting = FoldReadout(progress: held, cancelling: false)
+        #expect(waiting.stage == .waiting)
+        #expect(waiting.figure == nil)
+        #expect(waiting.caption == nil)
+        #expect(waiting.fraction == nil)
+        #expect(waiting.details == ["“Studio” is syncing these folders. This sync goes on once it is done."])
+        #expect(waiting.spoken == "Waiting, “Studio” is syncing these folders. This sync goes on once it is done.")
+
+        // Stopped while waiting: the count it reached, still with no share.
+        let stoppedWaiting = FoldReadout(progress: held, cancelling: true)
+        #expect(stoppedWaiting.stage == .stopping)
+        #expect(stoppedWaiting.figure == UInt64(200).formatted())
+        #expect(stoppedWaiting.fraction == nil)
+        #expect(stoppedWaiting.details == ["of \(UInt64(200).formatted()) found so far"])
+
+        let copying = WorkProgress(listed: 200, checked: 200, changes: 4, applied: 2, bytes: 400, copied: 200,
+                                   rate: 100)
+        let stopping = FoldReadout(progress: copying, cancelling: true)
+        #expect(stopping.stage == .stopping)
+        #expect(stopping.title == "Stopping")
+        #expect(stopping.figure == 0.5.formatted(.percent.precision(.fractionLength(0))))
+        #expect(stopping.fraction == 0.5)
+        let data = "\(PairSyncViewModel.byteText(200)) of \(PairSyncViewModel.byteText(400))"
+        #expect(stopping.details == ["2 of 4 changes", data])
     }
 
     /// The page that changes carries the mark, in its outer margin; a

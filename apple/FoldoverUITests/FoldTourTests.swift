@@ -1,7 +1,8 @@
 // The fold in motion, in slow motion: a line turned with the keyboard,
 // the leaf let go short of upright and falling back, the leaf folded
 // past upright, pressing, opening on the run's imprint, and the imprint
-// lifted by Undo. Each stretch of motion keeps a run of frames.
+// lifted by Undo. Each stretch of motion keeps a run of frames. Runs
+// with nothing previewed on the sheet fold a whole page too.
 
 import XCTest
 
@@ -27,6 +28,71 @@ final class FoldTourTests: XCTestCase {
         tour.key(.upArrow)
         XCTAssertTrue(app.windows.staticTexts["Permission denied."].firstMatch.waitForExistence(timeout: 5),
                       "Keyboard selection must work on completed failures")
+    }
+
+    /// A window opened on a run already under way, as after a schedule
+    /// or the menu bar started it: nothing was previewed, so nothing is
+    /// listed. The leaf still lies over a whole page, its back reading
+    /// out the run's stage.
+    @MainActor
+    func testARunOpenedMidwayCoversThePage() {
+        continueAfterFailure = true
+        for appearance in [TourAppearance.light, .dark] {
+            for (scenario, stage) in [("syncing", "Comparing"), ("syncing-waiting", "Waiting")] {
+                let tour = Tour(self, appearance: appearance, scenario: scenario)
+                tour.launch()
+                tour.click(tour.app.outlines.firstMatch.staticTexts["Photos"].firstMatch, "Photos in the sidebar")
+                checkPlate(tour, reads: stage)
+                tour.snap("fold-midway-\(stage.lowercased())")
+                tour.app.terminate()
+            }
+        }
+    }
+
+    /// Sync Now before any preview folds a blank half; its back reads
+    /// the run comparing, then syncing, and the leaf opens on the imprint.
+    /// In slow motion the leaf lands about 3 s into the run's 8 s of
+    /// comparing, so the first check has room to see it.
+    @MainActor
+    func testSyncBeforeAnyPreviewCoversThePage() {
+        continueAfterFailure = true
+        let tour = Tour(self, appearance: .light, slowFold: Self.slowMotion)
+        let app = tour.app
+        tour.launch()
+        defer { app.terminate() }
+        tour.click(app.outlines.firstMatch.staticTexts["Photos"].firstMatch, "Photos in the sidebar")
+        tour.key("s", .command)
+        checkPlate(tour, reads: "Comparing")
+        tour.snap("fold-unpreviewed-comparing")
+        checkPlate(tour, reads: "Syncing", timeout: 20)
+        // The count dissolves into the share as the stage changes.
+        tour.pause(1)
+        tour.snap("fold-unpreviewed-syncing")
+        XCTAssertTrue(app.buttons["Undo Sync"].waitForExistence(timeout: 60), "The run should end on its imprint")
+        // In slow motion the peel takes about 3.4 s and the stamp 1.8 s.
+        tour.pause(6)
+        tour.snap("fold-unpreviewed-imprint")
+    }
+
+    /// The plate on the folded leaf's back covers its page and reads out
+    /// `stage`. With nothing listed, the sheet once shrank to its folder
+    /// labels, leaving the plate a card at the top of a bare field.
+    @MainActor
+    private func checkPlate(_ tour: Tour, reads stage: String, timeout: TimeInterval = 10) {
+        let app = tour.app
+        let plate = app.windows.descendants(matching: .any)["fold-plate"].firstMatch
+        let readout = plate.descendants(matching: .any)["fold-readout"].firstMatch
+        guard readout.waitForExistence(timeout: timeout) else { return XCTFail("Missing: the leaf's readout") }
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        var label = readout.label
+        while !label.hasPrefix(stage), Date() < deadline {
+            tour.pause(0.25)
+            label = readout.label
+        }
+        XCTAssertTrue(label.hasPrefix(stage), "The leaf should read \(stage): \(label)")
+        let window = app.windows.firstMatch.frame
+        XCTAssertGreaterThan(plate.frame.height, window.height * 0.6,
+                             "The plate should cover its page while \(stage): \(plate.frame) in \(window)")
     }
 
     @MainActor
