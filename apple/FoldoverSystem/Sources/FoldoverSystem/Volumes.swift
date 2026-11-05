@@ -52,9 +52,12 @@ public enum VolumeReader {
     /// The free space to show. The figure for important use counts
     /// purgeable space too, so it is the larger where a volume weighs it;
     /// a volume that does not, such as a second APFS volume or a share,
-    /// reports it as 0 or not at all, and the plain figure stands.
+    /// reports it as 0 or not at all, and the plain figure stands. With
+    /// neither, the free space is unknown, not zero.
     static func available(important: Int64?, plain: Int?) -> UInt64? {
-        guard important != nil || plain != nil else { return nil }
-        return max(UInt64(clamping: important ?? 0), UInt64(clamping: plain ?? 0))
+        let weighed = important.flatMap { $0 > 0 ? UInt64($0) : nil }
+        let reported = plain.map { UInt64(clamping: $0) }
+        guard weighed != nil || reported != nil else { return nil }
+        return max(weighed ?? 0, reported ?? 0)
     }
 }

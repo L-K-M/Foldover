@@ -62,8 +62,7 @@ final class FoldTourTests: XCTestCase {
             tour.launch()
             tour.click(tour.app.outlines.firstMatch.staticTexts["Projects"].firstMatch, "Projects in the sidebar")
             checkPlate(tour, reads: "Syncing")
-            checkFolders(tour, leaf: "From Folder A: ", covered: "To Folder B: ")
-            let covered = tour.app.windows.descendants(matching: .any)["fold-covered"].firstMatch
+            let covered = checkFolders(tour, leaf: "From Folder A: ", covered: "To Folder B: ")
             let disk = covered.descendants(matching: .any)
                 .matching(NSPredicate(format: "label == %@", "Backup SSD, 812.4 GB free of 2 TB, 23.2 GB still to copy"))
                 .firstMatch
@@ -75,18 +74,24 @@ final class FoldTourTests: XCTestCase {
 
     /// The leaf's plate names its own folder, and the bare half the folder
     /// under the leaf, on its own page: clear of the plate and the gutter.
+    /// Returns the bare half's note for further checks.
     @MainActor
-    private func checkFolders(_ tour: Tour, leaf: String, covered: String) {
+    @discardableResult
+    private func checkFolders(_ tour: Tour, leaf: String, covered: String) -> XCUIElement {
         let window = tour.app.windows.firstMatch
         let plate = window.descendants(matching: .any)["fold-plate"].firstMatch
         let note = window.descendants(matching: .any)["fold-covered"].firstMatch
-        guard note.waitForExistence(timeout: 5) else { return XCTFail("Missing: the folder under the leaf") }
+        guard note.waitForExistence(timeout: 5) else {
+            XCTFail("Missing: the folder under the leaf")
+            return note
+        }
         let named = plate.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", leaf))
         XCTAssertTrue(named.firstMatch.exists, "The leaf should name its folder, \(leaf)")
         let under = note.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", covered))
         XCTAssertTrue(under.firstMatch.exists, "The bare half should name the folder under the leaf, \(covered)")
         XCTAssertLessThanOrEqual(note.frame.maxX, plate.frame.minX + 1,
                                  "The bare half's words should stay off the plate: \(note.frame), \(plate.frame)")
+        return note
     }
 
     /// Sync Now before any preview folds a blank half; its back reads
