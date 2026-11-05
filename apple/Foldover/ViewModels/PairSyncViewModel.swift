@@ -383,11 +383,23 @@ struct PairSyncViewModel {
         // would decay and its ETA balloon — hide both during the stall.
         if progress.rate > 0, progress.waitingFor == nil {
             text += " · " + throughputText(progress.rate)
-            if progress.bytes > progress.copied {
-                text += " · " + String(localized: "about \(timeText((progress.bytes - progress.copied) / progress.rate)) left")
+            if let seconds = secondsLeft(progress) {
+                text += " · " + String(localized: "about \(timeText(seconds)) left")
             }
         }
         return text
+    }
+
+    /// The seconds the data still to copy takes at the speed so far,
+    /// rounded up, so the time left never reads "0 s" while bytes remain.
+    /// Nil before the first copy lands, when the agent reports no rate,
+    /// and once all the data is copied.
+    nonisolated static func secondsLeft(_ progress: WorkProgress) -> UInt64? {
+        guard progress.rate > 0, progress.bytes > progress.copied else { return nil }
+        let remaining = progress.bytes - progress.copied
+        // A part second counts as one; `(remaining + rate - 1) / rate`
+        // would round up too, but can overflow.
+        return remaining / progress.rate + (remaining % progress.rate == 0 ? 0 : 1)
     }
 
     /// Promote rounded unit boundaries instead of showing "1000 kB/s".

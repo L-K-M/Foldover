@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A sync's time left counts a part second as a whole one, so the folded
+  sheet and the status text no longer say "about 0 s left" while data is
+  still copying.
 - A sync with nothing previewed on the sheet now folds a whole page:
   one started by a schedule, the menu bar or Sync Now, or one under way
   when the window opens. The sheet no longer shrinks to its folder

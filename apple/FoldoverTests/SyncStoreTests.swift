@@ -2244,6 +2244,23 @@ func throughputAndDurationTextUseHumanUnits() {
 }
 
 @Test
+func timeLeftCountsAPartSecondAsAWholeOne() {
+    func seconds(_ bytes: UInt64, copied: UInt64 = 0, rate: UInt64) -> UInt64? {
+        PairSyncViewModel.secondsLeft(WorkProgress(bytes: bytes, copied: copied, rate: rate))
+    }
+    #expect(seconds(1, rate: 2_500_000) == 1)
+    #expect(seconds(2_500_000, rate: 2_500_000) == 1)
+    #expect(seconds(2_500_001, rate: 2_500_000) == 2)
+    // Extremes where `(remaining + rate - 1) / rate` would overflow.
+    #expect(seconds(UInt64.max, rate: 1) == UInt64.max)
+    #expect(seconds(UInt64.max, rate: 2) == UInt64.max / 2 + 1)
+    #expect(seconds(UInt64.max, rate: UInt64.max) == 1)
+    // No rate before the first copy lands, and nothing left once all is copied.
+    #expect(seconds(42, rate: 0) == nil)
+    #expect(seconds(42, copied: 42, rate: 42) == nil)
+}
+
+@Test
 func quickLookShowsTheFileAChangeWouldCopyOnlyWhereItIsOnThisMac() {
     let local = PairSettings(name: "Docs", left: SelectedFolder(bytes: Data("/Users/a/Docs".utf8)),
                              right: SelectedFolder(bytes: Data("sftp://nas/docs".utf8)),
