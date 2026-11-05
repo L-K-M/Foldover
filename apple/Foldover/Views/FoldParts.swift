@@ -190,6 +190,9 @@ struct FoldDeskNote: View {
 
     private var direction: some View {
         VStack(spacing: 14) {
+            // The mode alone sets the arrow: in a one-way mode only the
+            // source folds, so the desk is always the source's half and
+            // the arrow always points across to the leaf.
             FoldArrow(direction: FoldDirection(mode))
             Text(mode.title)
                 .font(FoldType.backEyebrow)
@@ -393,7 +396,7 @@ private struct DiskBar: View {
             ZStack(alignment: .leading) {
                 Capsule().fill(.white.opacity(0.22))
                 Capsule()
-                    .fill(.white.opacity(0.5))
+                    .fill(.white.opacity(0.6))
                     .frame(width: width * min(1, stored + arriving))
                 Capsule()
                     .fill(.white.opacity(0.92))
