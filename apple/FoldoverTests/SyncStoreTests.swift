@@ -2231,6 +2231,10 @@ func throughputAndDurationTextUseHumanUnits() {
     #expect(PairSyncViewModel.applying(
         WorkProgress(changes: 4, applied: 1, bytes: 301_000_000, copied: 1_000_000, rate: 2_500_000)
     ).hasSuffix(" · 2.5 MB/s · about 2 min left"))
+    // Under a second's worth of data left still reads a second, not 0 s.
+    #expect(PairSyncViewModel.applying(
+        WorkProgress(changes: 4, applied: 3, bytes: 301_000_000, copied: 300_000_001, rate: 2_500_000)
+    ).hasSuffix(" · 2.5 MB/s · about 1 s left"))
     #expect(PairSyncViewModel.applying(WorkProgress(changes: 4, applied: 1)) == "Syncing… 1 of 4 changes")
 
     let copied = WorkProgress(changes: 1, applied: 1, bytes: 42, copied: 42, rate: 42)

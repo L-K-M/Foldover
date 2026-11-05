@@ -163,7 +163,8 @@ struct FoldSheetModelTests {
         #expect(copying.caption == "copied")
         #expect(copying.fraction == 0.25)
         let bytes = "\(PairSyncViewModel.byteText(1_000_000)) of \(PairSyncViewModel.byteText(4_000_000))"
-        #expect(copying.details == ["1 of 4 changes", bytes + " · 2.5 MB/s", "about 1 s left"])
+        // 3 MB left at 2.5 MB/s takes 1.2 s, rounded up.
+        #expect(copying.details == ["1 of 4 changes", bytes + " · 2.5 MB/s", "about 2 s left"])
         #expect(copying.spoken.hasPrefix("Syncing, \(copying.figure ?? "") copied, 1 of 4 changes, "))
     }
 
@@ -184,6 +185,19 @@ struct FoldSheetModelTests {
         #expect(archives.fraction == 1.0 / 3)
         #expect(archives.details == ["1 of 3 changes"])
         #expect(FoldReadout(progress: WorkProgress(changes: 1), cancelling: false).details == ["0 of 1 change"])
+    }
+
+    /// The time left is rounded up, so it never says 0 s while data is
+    /// still copying: a part second counts as a whole one.
+    @Test func theReadoutsTimeLeftIsRoundedUp() {
+        func timeLeft(copied: UInt64) -> String? {
+            let progress = WorkProgress(changes: 4, applied: 3, bytes: 5_000_000, copied: copied, rate: 2_500_000)
+            return FoldReadout(progress: progress, cancelling: false).details.first { $0.hasSuffix(" left") }
+        }
+        #expect(timeLeft(copied: 4_999_999) == "about 1 s left")
+        #expect(timeLeft(copied: 2_500_000) == "about 1 s left")
+        #expect(timeLeft(copied: 2_499_999) == "about 2 s left")
+        #expect(timeLeft(copied: 5_000_000) == nil)
     }
 
     /// Waiting on another Mac shows no figure and no bar, since nothing
