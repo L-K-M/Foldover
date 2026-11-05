@@ -390,7 +390,7 @@ struct FoldSheet: View {
         }
         .overlay(alignment: .topLeading) {
             if scene == .pressing, landed {
-                coveredNote
+                deskNote
                     .transition(.opacity)
             }
         }
@@ -1109,21 +1109,38 @@ struct FoldSheet: View {
     }
 
     /// What the folded leaf's cerulean back says while the run presses,
-    /// in white: whose page it is, then the stage the run is in and its
-    /// own progress, never a claim about any one line.
+    /// in white: the folder whose page it lies on, so each folder stays
+    /// named on its own side; the stage the run is in and its own
+    /// progress, never a claim about any one line; and that folder's disk.
     private var pressReadout: some View {
+        let side = FoldLeaf.landing(leafSide)
+        let role = FoldRole(side, in: pair.settings.mode)
+        // A two-way sync's copies go both ways: none is known to be coming.
+        let disk = coveredVolume.map { FoldDisk(volume: $0, toCopy: role == .destination ? sync.bytesLeft : nil) }
+        func name(_ detail: FoldRunFolder.Detail) -> some View {
+            FoldRunFolder(viewModel: viewModel, folder: folder(side), side: side, role: role, detail: detail)
+                .padding(.top, FoldRunFolder.top)
+        }
         // The folder's name hangs from the top, level with the desk's; the
-        // readout keeps the middle of the rest, and the whole page when a
-        // short window has no room for the name.
-        ViewThatFits(in: .vertical) {
+        // readout keeps the middle of the rest. A short window drops the
+        // disk first, then where the folder is, then its name.
+        return ViewThatFits(in: .vertical) {
             VStack(spacing: FoldRunFolder.gap) {
-                FoldRunFolder(viewModel: viewModel, folder: folder(leafSide), side: leafSide,
-                              role: FoldRole(leafSide, in: pair.settings.mode))
-                    .padding(.top, FoldRunFolder.top)
-                pressProgress
+                name(.full)
+                pressProgress(disk: disk)
                     .frame(maxHeight: .infinity)
             }
-            pressProgress
+            VStack(spacing: FoldRunFolder.gap) {
+                name(.full)
+                pressProgress(disk: nil)
+                    .frame(maxHeight: .infinity)
+            }
+            VStack(spacing: FoldRunFolder.gap) {
+                name(.nameOnly)
+                pressProgress(disk: nil)
+                    .frame(maxHeight: .infinity)
+            }
+            pressProgress(disk: nil)
         }
         // Controls drawn for a dark ground, legible on the cerulean.
         .environment(\.colorScheme, .dark)
@@ -1140,10 +1157,14 @@ struct FoldSheet: View {
         .offset(x: leafSide == .a ? halfWidth : 0)
     }
 
-    private var pressProgress: some View {
+    private func pressProgress(disk: FoldDisk?) -> some View {
         VStack(spacing: 14) {
             if let readout = sync.readout {
                 FoldReadoutView(readout: readout, surface: .back, reduceMotion: reduceMotion)
+            }
+            if let disk {
+                FoldDiskView(disk: disk)
+                    .padding(.top, 8)
             }
             Button("Stop") { Task { await sync.cancel() } }
                 .disabled(!sync.canCancel)
@@ -1151,14 +1172,11 @@ struct FoldSheet: View {
     }
 
     /// What the desk says where the leaf lifted off, while it lies folded:
-    /// the folder under the leaf and its disk. It keeps to that page's
-    /// width, clear of the gutter.
-    private var coveredNote: some View {
-        let side = FoldLeaf.landing(leafSide)
-        let role = FoldRole(side, in: pair.settings.mode)
-        // A two-way sync's copies go both ways: none is known to be coming.
-        let disk = coveredVolume.map { FoldDisk(volume: $0, toCopy: role == .destination ? sync.bytesLeft : nil) }
-        return FoldCoveredView(viewModel: viewModel, folder: folder(side), side: side, role: role, disk: disk)
+    /// the folder that was there, and an arrow toward the leaf for which
+    /// way the data goes. It keeps to that page's width, clear of the
+    /// gutter.
+    private var deskNote: some View {
+        FoldDeskNote(viewModel: viewModel, folder: folder(leafSide), side: leafSide, mode: pair.settings.mode)
             .environment(\.colorScheme, .dark)
             .frame(width: pageWidth)
             .frame(maxHeight: .infinity)

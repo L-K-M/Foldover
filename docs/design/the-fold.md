@@ -160,31 +160,38 @@ listed: the folded back covers its whole page, and the navy field
 fills the detail behind it. An earlier build let the page shrink to
 its labels, leaving the back a card at the top of a bare field.
 
-## Both folders stay named
+## Both folders stay named, each on its side
 
 While the leaf lies folded, neither page label can be read: one is
 printed on the face that turned down, the other is under the leaf. An
 earlier build named neither for the whole run and left the half the
 leaf lifted off as bare navy, half the detail with nothing on it. Now
-each folder is named in the middle of a half, in white, at the same
-height on both:
+each folder is named in white at the head of its own half, at the same
+height on both, so the spread still reads the way it did open: A on
+the left, B on the right, and a one-way run from its source to its
+destination.
 
-- **The back names its own folder**, the page it is, over the
-  readout: "From Folder A" in a one-way mode, "Folder A" in a two-way
-  sync, then the folder's name and where it is.
-- **The bare half names the folder under the leaf**: "To Folder B",
-  or "Folder B" in a two-way sync. A local folder's disk follows, level
-  with the readout: its name, a bar of what it holds, its free space,
-  and in a one-way mode the data the run has yet to copy there, in the
-  leaf's cerulean. The words say when more is left to copy than is
-  free. A server or another Mac shows its name alone: there is no disk
-  here to read.
+- **The bare desk names the folder that lifted off**: "From Folder A"
+  in a one-way mode, "Folder A" in a two-way sync, then the folder's
+  name and where it is. Under it, level with the readout, an arrow
+  points across to the leaf, folded like the icon's: an ivory tail and
+  a cerulean head in two facets, lit from the top left. A Backup's
+  arrow meets a paper edge, since its destination keeps what the
+  source deletes; a Mirror's flies on; a two-way Sync's are two arrows
+  passing. The mode's name is set under it.
+- **The back names the folder it lies on**: "To Folder B", or "Folder
+  B" in a two-way sync, over the readout. Under the readout, a local
+  folder's disk: its name, a bar of what it holds and, in a one-way
+  mode, of the data the run has yet to copy there, its free space, and
+  a warning when more is left to copy than is free. A server or another
+  Mac shows its name alone: there is no disk here to read.
 
-Neither name sits at a page's head, where it would read as that page's
-own label in the wrong place. Free space is read off the main thread
-every few seconds, one read per folder at a time, since a network
-share's file system calls can stall while its server is silent. A
-short window drops the disk first, then the names, before the readout.
+The arrow keeps to the desk's page; nothing crosses the gutter but the
+crease. Free space is read off the main thread every few seconds, one
+read per folder at a time, since a network share's file system calls
+can stall while its server is silent. On a short window the back
+drops the disk first, then where its folder is, then its name, before
+the readout; the desk drops its arrow before its name.
 
 ## What the back reads
 

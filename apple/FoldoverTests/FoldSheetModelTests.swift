@@ -357,9 +357,10 @@ struct FoldSheetModelTests {
         #expect(FoldMotion.commits(swing: 0.5))
     }
 
-    /// While the leaf lies folded, its back names the folder whose page it
-    /// is and the bare half the folder under it, each with the way its
-    /// data goes; a two-way sync's folders both send and receive.
+    /// While the leaf lies folded, each folder is named on its own side
+    /// with the way its data goes: the bare desk names the folder that
+    /// lifted off, the leaf's back the folder it lies on. A two-way sync's
+    /// folders both send and receive.
     @Test func aFoldedRunNamesWhichWayEachFolderGoes() {
         #expect(FoldRole(.a, in: .backupLeft) == .source)
         #expect(FoldRole(.b, in: .backupLeft) == .destination)
@@ -370,6 +371,17 @@ struct FoldSheetModelTests {
         #expect(FoldRole.source.eyebrow(.a) == "From Folder A")
         #expect(FoldRole.destination.eyebrow(.b) == "To Folder B")
         #expect(FoldRole.either.eyebrow(.b) == "Folder B")
+    }
+
+    /// The desk's arrow points the way a one-way mode's data goes and
+    /// says whether the other folder keeps what this one deletes; a
+    /// two-way sync goes both ways.
+    @Test func theDesksArrowFollowsTheMode() {
+        #expect(FoldDirection(.backupLeft) == .backup(toward: .b))
+        #expect(FoldDirection(.backupRight) == .backup(toward: .a))
+        #expect(FoldDirection(.mirrorLeft) == .mirror(toward: .b))
+        #expect(FoldDirection(.mirrorRight) == .mirror(toward: .a))
+        #expect(FoldDirection(.sync) == .both)
     }
 
     /// The disk under the leaf: its free space, what the run still copies

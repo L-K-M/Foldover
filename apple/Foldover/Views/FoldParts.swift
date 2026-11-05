@@ -94,21 +94,29 @@ private struct FoldFolderMenu: View {
     }
 }
 
-/// A folder named in the middle of a half while the leaf lies folded,
-/// in white: on the leaf's back, the folder whose page it is; on the
-/// bare desk beside it, the folder under the leaf. The page labels are
-/// out of sight then, one folded face down and one covered, and a
-/// label at a page's head would read as that page's. The eyebrow says
-/// which way the folder's data goes.
+/// A folder named at the head of its own half while the leaf lies
+/// folded, in white, so each folder stays on its side of the sheet: on
+/// the bare desk, the folder whose page lifted off; on the leaf's back,
+/// the folder whose page it lies on. The page labels are out of sight
+/// then, one folded face down and one covered. The eyebrow says which
+/// way the folder's data goes.
 ///
-///        FROM FOLDER A
-///        ⌂ lmathis
-///           /Users
+///        FROM FOLDER A          TO FOLDER B
+///        ⌂ lmathis              ⌸ Foldover
+///           /Users         /Volumes/Backup SSD
 struct FoldRunFolder: View {
+    /// How much of the folder is set.
+    enum Detail {
+        case full
+        /// Without where it is, for a half too short for the line.
+        case nameOnly
+    }
+
     let viewModel: MainViewModel
     let folder: SelectedFolder
     let side: FolderSide
     let role: FoldRole
+    var detail = Detail.full
 
     /// How far under the top of its half the name hangs, the same on the
     /// leaf and the desk, so the two names read as one line across.
@@ -129,7 +137,7 @@ struct FoldRunFolder: View {
                 .font(.system(size: 15, weight: .semibold))
                 .lineLimit(1)
                 .truncationMode(.middle)
-            if !parts.location.isEmpty {
+            if detail == .full, !parts.location.isEmpty {
                 // Where it is gives way first, keeping its nearest folders.
                 Text(parts.location)
                     .font(FoldType.meta)
@@ -147,88 +155,237 @@ struct FoldRunFolder: View {
 }
 
 /// The bare desk where the leaf lifted off, while it lies folded over
-/// the other half: the folder under the leaf, and the disk it is on.
-/// Without this the desk lay empty for the whole run, and neither
-/// folder was named anywhere on the sheet.
-struct FoldCoveredView: View {
+/// the other half: the folder that was there, and an arrow toward the
+/// leaf saying which way the run's data goes and how. Without it the
+/// desk lay empty for the whole run.
+struct FoldDeskNote: View {
     let viewModel: MainViewModel
     let folder: SelectedFolder
     let side: FolderSide
-    let role: FoldRole
-    /// The folder's disk; nil for a server or another Mac, or until it
-    /// has been read.
-    let disk: FoldDisk?
+    let mode: PairMode
 
     var body: some View {
-        // The name hangs where the leaf's does; the disk sits level with
+        // The name hangs where the leaf's does; the arrow sits level with
         // the leaf's readout, and gives way when a short window has no
         // room for it.
         ViewThatFits(in: .vertical) {
             VStack(spacing: FoldRunFolder.gap) {
                 name
-                if let disk {
-                    FoldDiskView(disk: disk)
-                        .frame(maxHeight: .infinity)
-                }
+                direction
+                    .frame(maxHeight: .infinity)
             }
             name
         }
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(Text("Folder Under the Fold"))
-        .accessibilityIdentifier("fold-covered")
+        .accessibilityLabel(Text("Where the Leaf Lifted Off"))
+        .accessibilityIdentifier("fold-desk")
     }
 
     private var name: some View {
-        FoldRunFolder(viewModel: viewModel, folder: folder, side: side, role: role)
+        FoldRunFolder(viewModel: viewModel, folder: folder, side: side, role: FoldRole(side, in: mode))
             .padding(.top, FoldRunFolder.top)
+    }
+
+    private var direction: some View {
+        VStack(spacing: 14) {
+            // The mode alone sets the arrow: in a one-way mode only the
+            // source folds, so the desk is always the source's half and
+            // the arrow always points across to the leaf.
+            FoldArrow(direction: FoldDirection(mode))
+            Text(mode.title)
+                .font(FoldType.backEyebrow)
+                .textCase(.uppercase)
+                .tracking(FoldType.eyebrowTracking * 1.5)
+                .foregroundStyle(FoldPalette.deskInk)
+                .multilineTextAlignment(.center)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(mode.title))
+        .accessibilityIdentifier("fold-direction")
+    }
+}
+
+/// Which way a run's data goes, folded like the app icon's arrow: an
+/// ivory tail and a cerulean head in two facets, lit from the top left
+/// and casting a soft shadow down and to the right. A Backup's arrow
+/// meets a paper edge, since the folder it reaches keeps what the other
+/// deletes; a Mirror's flies on; a two-way Sync's are two arrows passing.
+///
+///   Mirror ═◣▶      Backup ═◣▶▕      Sync  ═◣▶
+///                                         ◀◢═
+private struct FoldArrow: View {
+    let direction: FoldDirection
+
+    private static let size = CGSize(width: 92, height: 54)
+    /// Each of a two-way Sync's arrows, and how far they pass each other.
+    private static let passingScale: CGFloat = 0.72
+    private static let passing: CGFloat = 12
+    private static let edgeWidth: CGFloat = 5
+    private static let edgeGap: CGFloat = 5
+
+    var body: some View {
+        mark
+            // Lit from the top left whichever way it points.
+            .shadow(color: FoldPalette.castShadow.opacity(0.45), radius: 3, x: 1.5, y: 3)
+            // The icon's own ivory and cerulean in either appearance: on
+            // the dark field the paper is still the paper.
+            .environment(\.colorScheme, .light)
+            .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private var mark: some View {
+        switch direction {
+        case .mirror(let toward):
+            Dart(size: Self.size)
+                .scaleEffect(x: toward == .b ? 1 : -1)
+        case .backup(let toward):
+            // Only the dart turns round: the edge stays lit on its left.
+            HStack(spacing: Self.edgeGap) {
+                if toward == .a { edge }
+                Dart(size: Self.size)
+                    .scaleEffect(x: toward == .b ? 1 : -1)
+                if toward == .b { edge }
+            }
+        case .both:
+            let small = CGSize(width: Self.size.width * Self.passingScale,
+                               height: Self.size.height * Self.passingScale)
+            VStack(spacing: 4) {
+                Dart(size: small)
+                    .offset(x: Self.passing)
+                Dart(size: small)
+                    .scaleEffect(x: -1)
+                    .offset(x: -Self.passing)
+            }
+        }
+    }
+
+    private var edge: some View {
+        PaperEdge()
+            .frame(width: Self.edgeWidth, height: Self.size.height)
+    }
+
+    /// One arrow, pointing right: the tail's two folds under the head's
+    /// two facets, the crease down the middle of each.
+    private struct Dart: View {
+        let size: CGSize
+
+        var body: some View {
+            ZStack {
+                DartPart(part: .tailUpper).fill(FoldPalette.paper)
+                DartPart(part: .tailLower).fill(FoldPalette.paperShade)
+                DartPart(part: .tailLower).fill(FoldPalette.foldShadow.opacity(0.14))
+                DartPart(part: .tailCrease).stroke(.white.opacity(0.8), lineWidth: 0.75)
+                DartPart(part: .headUpper).fill(FoldPalette.kamiLit)
+                // The facet facing the light is as bright as the icon's.
+                DartPart(part: .headUpper).fill(.white.opacity(0.14))
+                DartPart(part: .headLower).fill(FoldPalette.kamiShade)
+                DartPart(part: .headCrease).stroke(FoldPalette.kamiRidge.opacity(0.8), lineWidth: 1)
+            }
+            .frame(width: size.width, height: size.height)
+        }
+    }
+
+    /// The paper edge a Backup's arrow meets: lit along its left side.
+    private struct PaperEdge: View {
+        var body: some View {
+            RoundedRectangle(cornerRadius: 1)
+                .fill(FoldPalette.paperShade)
+                .overlay(alignment: .leading) { Color.white.frame(width: 1) }
+                .clipShape(RoundedRectangle(cornerRadius: 1))
+        }
+    }
+
+    /// The arrow's pieces, in a box it fills, pointing right:
+    ///
+    ///                 ◢ top
+    ///   ┌───────────╱  ╲
+    ///   ╲ notch   back ───▶ tip
+    ///   ╱───────────╲  ╱
+    ///                 ◥ bottom
+    private struct DartPart: Shape {
+        enum Part { case tailUpper, tailLower, tailCrease, headUpper, headLower, headCrease }
+        let part: Part
+
+        func path(in rect: CGRect) -> Path {
+            func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+                CGPoint(x: rect.minX + x * rect.width, y: rect.minY + y * rect.height)
+            }
+            // The tail runs under the head, so no seam shows between them.
+            let tailTop: CGFloat = 0.24, tailBottom: CGFloat = 0.76, tailEnd: CGFloat = 0.66
+            let notch = point(0.17, 0.5), tailMiddle = point(tailEnd, 0.5)
+            let top = point(0.56, 0), tip = point(1, 0.5), bottom = point(0.56, 1), back = point(0.47, 0.5)
+            var path = Path()
+            switch part {
+            case .tailUpper:
+                path.addLines([point(0, tailTop), point(tailEnd, tailTop), tailMiddle, notch])
+                path.closeSubpath()
+            case .tailLower:
+                path.addLines([notch, tailMiddle, point(tailEnd, tailBottom), point(0, tailBottom)])
+                path.closeSubpath()
+            case .tailCrease:
+                path.move(to: notch)
+                path.addLine(to: tailMiddle)
+            case .headUpper:
+                path.addLines([top, tip, back])
+                path.closeSubpath()
+            case .headLower:
+                path.addLines([back, tip, bottom])
+                path.closeSubpath()
+            case .headCrease:
+                path.move(to: back)
+                path.addLine(to: tip)
+            }
+            return path
+        }
     }
 }
 
 /// A disk's name, a bar of what it holds and what a run still copies
-/// there, and both in words, set on the navy desk.
-private struct FoldDiskView: View {
+/// there, and both in words, in white on the leaf's back under the
+/// readout of the run that copies there.
+struct FoldDiskView: View {
     let disk: FoldDisk
 
-    /// As long as the readout's bar on the leaf beside it.
+    /// As long as the readout's bar above it.
     private static let barWidth: CGFloat = 220
     private static let barHeight: CGFloat = 6
 
     var body: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: 5) {
             Text(disk.name)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white)
+                .font(FoldType.backEyebrow)
+                .textCase(.uppercase)
+                .tracking(FoldType.eyebrowTracking * 1.5)
                 .lineLimit(1)
                 .truncationMode(.middle)
             DiskBar(stored: disk.stored, arriving: disk.arriving)
                 .frame(maxWidth: Self.barWidth)
                 .frame(height: Self.barHeight)
                 .padding(.vertical, 2)
-            Text(disk.free)
+            Text([disk.free, disk.toCopy].compactMap { $0 }.joined(separator: " · "))
                 .font(.callout)
-            if let toCopy = disk.toCopy {
-                Text(toCopy)
-                    .font(.callout)
-            }
             if disk.mayNotFit {
-                Text(FoldDisk.mayNotFitText)
+                Label(FoldDisk.mayNotFitText, systemImage: "exclamationmark.triangle.fill")
                     .font(.callout)
-                    .foregroundStyle(FoldPalette.pin)
+                    .symbolRenderingMode(.multicolor)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .foregroundStyle(FoldPalette.deskInk)
+        .foregroundStyle(.white)
         .multilineTextAlignment(.center)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(disk.spoken)
         .accessibilityAddTraits(.updatesFrequently)
+        .accessibilityIdentifier("fold-disk")
     }
 }
 
-/// A disk's capacity as a bar: what it holds in white, what the run
-/// still copies there in the leaf's cerulean, and its free space bare.
+/// A disk's capacity as a bar in shades of white on the cerulean: what it
+/// holds brightest, what the run still copies there fainter, and its free
+/// space bare.
 private struct DiskBar: View {
     let stored: Double
     let arriving: Double
@@ -237,12 +394,12 @@ private struct DiskBar: View {
         GeometryReader { proxy in
             let width = proxy.size.width
             ZStack(alignment: .leading) {
-                Capsule().fill(.white.opacity(0.2))
+                Capsule().fill(.white.opacity(0.22))
                 Capsule()
-                    .fill(FoldPalette.kamiRidge)
+                    .fill(.white.opacity(0.6))
                     .frame(width: width * min(1, stored + arriving))
                 Capsule()
-                    .fill(.white.opacity(0.85))
+                    .fill(.white.opacity(0.92))
                     .frame(width: width * min(1, stored))
             }
         }
