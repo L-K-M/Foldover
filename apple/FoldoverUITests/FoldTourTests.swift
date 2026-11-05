@@ -75,12 +75,35 @@ final class FoldTourTests: XCTestCase {
         }
     }
 
+    /// The same backup made from B to A folds from the right: the bare
+    /// desk on the right names Folder B with its arrow pointing left, and
+    /// the leaf on the left names Folder A and its disk.
+    @MainActor
+    func testABackupFromBToAReadsRightToLeft() {
+        continueAfterFailure = true
+        let tour = Tour(self, appearance: .light, scenario: "syncing-backup-right")
+        tour.launch()
+        defer { tour.app.terminate() }
+        tour.click(tour.app.outlines.firstMatch.staticTexts["Projects"].firstMatch, "Projects in the sidebar")
+        checkPlate(tour, reads: "Syncing")
+        checkFolders(tour, desk: "From Folder B: ", leaf: "To Folder A: ", direction: "Back up B to A",
+                     deskSide: .right)
+        let plate = tour.app.windows.descendants(matching: .any)["fold-plate"].firstMatch
+        XCTAssertTrue(plate.descendants(matching: .any)["fold-disk"].firstMatch.waitForExistence(timeout: 10),
+                      "The leaf should read out the disk it lies on")
+        tour.snap("fold-midway-backup-right")
+    }
+
+    /// Which half the bare desk is: the half the leaf lifted off.
+    private enum DeskSide { case left, right }
+
     /// Each folder is named on its own side while the leaf lies folded:
     /// the bare desk names the folder that lifted off, with the arrow for
     /// which way the data goes, and the leaf's plate the folder it lies
     /// on. The desk's words keep to its page, clear of the plate.
     @MainActor
-    private func checkFolders(_ tour: Tour, desk: String, leaf: String, direction: String) {
+    private func checkFolders(_ tour: Tour, desk: String, leaf: String, direction: String,
+                              deskSide: DeskSide = .left) {
         let window = tour.app.windows.firstMatch
         let plate = window.descendants(matching: .any)["fold-plate"].firstMatch
         let note = window.descendants(matching: .any)["fold-desk"].firstMatch
@@ -91,8 +114,14 @@ final class FoldTourTests: XCTestCase {
         XCTAssertEqual(arrow.exists ? arrow.label : nil, direction, "The desk's arrow should say the sync's kind")
         let under = plate.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", leaf))
         XCTAssertTrue(under.firstMatch.exists, "The leaf should name the folder it lies on, \(leaf)")
-        XCTAssertLessThanOrEqual(note.frame.maxX, plate.frame.minX + 1,
-                                 "The bare desk's words should stay off the plate: \(note.frame), \(plate.frame)")
+        switch deskSide {
+        case .left:
+            XCTAssertLessThanOrEqual(note.frame.maxX, plate.frame.minX + 1,
+                                     "The bare desk's words should stay off the plate: \(note.frame), \(plate.frame)")
+        case .right:
+            XCTAssertGreaterThanOrEqual(note.frame.minX, plate.frame.maxX - 1,
+                                        "The bare desk's words should stay off the plate: \(note.frame), \(plate.frame)")
+        }
     }
 
     /// Sync Now before any preview folds a blank half; its back reads

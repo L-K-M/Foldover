@@ -533,10 +533,9 @@ enum FoldDirection: Equatable {
 /// how full it is and, while a one-way run copies to it, how much more
 /// is on its way.
 ///
-///    Backup SSD
-///    ████████████▒▒▒▒░░░░░░░░░░   stored · still to copy · free
-///    812.4 GB free of 2 TB
-///    23.2 GB still to copy
+///                  BACKUP SSD
+///          ████████████▒▒▒▒░░░░░░░░░░    stored · still to copy · free
+///    812.4 GB free of 2 TB · 23.2 GB still to copy
 ///
 /// Free space is what macOS reports now; what is left to copy is the
 /// plan's data not yet copied. Archived versions stay on the disk, so a

@@ -87,7 +87,7 @@ enum Fixtures {
             : FolderVolume(name: "Macintosh HD", totalBytes: 994_700_000_000, availableBytes: 412_300_000_000)
     }
 
-    static func pairs() -> [SyncPair] {
+    static func pairs(_ scenario: FixtureScenario? = nil) -> [SyncPair] {
         var photos = PairOptions.defaults
         photos.schedule = .daily(minutes: 18 * 60, days: Set(SyncDay.allCases))
         photos.filters = ["*.tmp", ".cache/"]
@@ -101,9 +101,14 @@ enum Fixtures {
             SyncPair(id: photosID, revision: 1, settings: PairSettings(
                 name: "Photos", left: local("Photos"), right: remote("sftp://mynas.local/~/Photos"),
                 mode: .sync, options: photos)),
-            SyncPair(id: projectsID, revision: 1, settings: PairSettings(
-                name: "Projects", left: local("Projects"), right: local("Backup SSD/Projects"),
-                mode: .backupLeft, options: projects)),
+            // Backed up the other way round, from B to A, in its own scenario.
+            scenario == .syncingBackupRight
+                ? SyncPair(id: projectsID, revision: 1, settings: PairSettings(
+                    name: "Projects", left: local("Backup SSD/Projects"), right: local("Projects"),
+                    mode: .backupRight, options: projects))
+                : SyncPair(id: projectsID, revision: 1, settings: PairSettings(
+                    name: "Projects", left: local("Projects"), right: local("Backup SSD/Projects"),
+                    mode: .backupLeft, options: projects)),
             SyncPair(id: documentsID, revision: 1, settings: PairSettings(
                 name: "Documents", left: local("Documents"), right: remote("peer://studio/share-1"),
                 mode: .sync, options: documents)),
@@ -236,6 +241,9 @@ enum FixtureScenario: String {
     /// A one-way backup to a local disk, copying its plan: the window
     /// opens on it mid-run, with nothing previewed on the sheet.
     case syncingBackup = "syncing-backup"
+    /// The same backup made the other way round, from B to A: the leaf
+    /// folds from the right.
+    case syncingBackupRight = "syncing-backup-right"
     case failedRun = "failed-run"
     case foldApproval = "fold-approval"
 
@@ -253,7 +261,7 @@ enum FixtureScenario: String {
         case .agentFailed:
             throw FixtureError.agentUnavailable
         case .noPairs, .manyPairs, .pairsFail, .syncing, .syncingReduced, .syncingWaiting, .syncingBackup,
-             .failedRun, .foldApproval:
+             .syncingBackupRight, .failedRun, .foldApproval:
             return AgentReport(version: "0.1.0")
         }
     }
@@ -281,7 +289,7 @@ actor FixturePairClient: PairClient {
 
     init(scenario: FixtureScenario? = nil) {
         self.scenario = scenario
-        pairs = scenario == .noPairs ? [] : Fixtures.pairs()
+        pairs = scenario == .noPairs ? [] : Fixtures.pairs(scenario)
         if scenario == .manyPairs {
             pairs += (1...40).map { index in
                 SyncPair(id: "tour-menu-\(index)", revision: 1, settings: PairSettings(
@@ -379,7 +387,7 @@ actor FixtureSyncClient: SyncClient {
             states[Fixtures.photosID] = .working(.run, cancelling: false, progress: WorkProgress(
                 listed: 48_211, checked: 48_211, waitingFor: "Mac Studio"))
         }
-        if scenario == .syncingBackup {
+        if scenario == .syncingBackup || scenario == .syncingBackupRight {
             states[Fixtures.projectsID] = .working(.run, cancelling: false, progress: WorkProgress(
                 listed: 2_400, checked: 2_400, changes: 5_320, applied: 1_204,
                 bytes: 40_000_000_000, copied: 16_800_000_000, rate: 85_000_000))

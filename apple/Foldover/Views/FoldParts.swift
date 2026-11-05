@@ -239,12 +239,13 @@ private struct FoldArrow: View {
             Dart(size: Self.size)
                 .scaleEffect(x: toward == .b ? 1 : -1)
         case .backup(let toward):
+            // Only the dart turns round: the edge stays lit on its left.
             HStack(spacing: Self.edgeGap) {
+                if toward == .a { edge }
                 Dart(size: Self.size)
-                PaperEdge()
-                    .frame(width: Self.edgeWidth, height: Self.size.height)
+                    .scaleEffect(x: toward == .b ? 1 : -1)
+                if toward == .b { edge }
             }
-            .scaleEffect(x: toward == .b ? 1 : -1)
         case .both:
             let small = CGSize(width: Self.size.width * Self.passingScale,
                                height: Self.size.height * Self.passingScale)
@@ -256,6 +257,11 @@ private struct FoldArrow: View {
                     .offset(x: -Self.passing)
             }
         }
+    }
+
+    private var edge: some View {
+        PaperEdge()
+            .frame(width: Self.edgeWidth, height: Self.size.height)
     }
 
     /// One arrow, pointing right: the tail's two folds under the head's

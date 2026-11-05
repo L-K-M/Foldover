@@ -357,9 +357,10 @@ struct FoldSheetModelTests {
         #expect(FoldMotion.commits(swing: 0.5))
     }
 
-    /// While the leaf lies folded, its back names the folder whose page it
-    /// is and the bare half the folder under it, each with the way its
-    /// data goes; a two-way sync's folders both send and receive.
+    /// While the leaf lies folded, each folder is named on its own side
+    /// with the way its data goes: the bare desk names the folder that
+    /// lifted off, the leaf's back the folder it lies on. A two-way sync's
+    /// folders both send and receive.
     @Test func aFoldedRunNamesWhichWayEachFolderGoes() {
         #expect(FoldRole(.a, in: .backupLeft) == .source)
         #expect(FoldRole(.b, in: .backupLeft) == .destination)
