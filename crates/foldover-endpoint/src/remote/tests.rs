@@ -641,6 +641,20 @@ fn a_peers_counter_cannot_make_the_asking_side_iterate() {
     assert_eq!(adopted, u64::MAX);
 }
 
+/// Once a scan's counter stood for nearly `MAX_STEPS_PER_SCAN` steps,
+/// further reports, each within one report's cap, add only the rest:
+/// however many reports the other Mac sends, a scan's work stays bounded.
+#[test]
+fn a_scans_counter_stops_adding_steps_at_the_scan_bound() {
+    let mut adopted = MAX_STEPS_PER_SCAN - MAX_STEPS_PER_REPORT / 2;
+    let mut steps = 0;
+    for _ in 0..3 {
+        let now = adopted + MAX_STEPS_PER_REPORT;
+        report_steps(&mut adopted, now, ObserveStep::Listed, &mut |_| steps += 1);
+    }
+    assert_eq!(steps, MAX_STEPS_PER_REPORT / 2);
+}
+
 /// A scan counter far past the folder's size, as a buggy or hostile
 /// Mac might claim: more than one report's cap of steps.
 const HUGE_COUNT: u64 = MAX_STEPS_PER_REPORT + 5;
