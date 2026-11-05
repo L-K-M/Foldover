@@ -1129,3 +1129,57 @@ func optionalHomeExclusionsRequireAnExplicitChoice(preset: PairStore.HomeExclusi
         #expect(editor.options.filters.filter { $0 == rule }.count == 1)
     }
 }
+
+/// Volume reads that wait until the test lets each one finish, as a
+/// stalled network share's would.
+private actor HeldVolumeReads {
+    private(set) var count = 0
+    private var held: CheckedContinuation<Void, Never>?
+    private var started: CheckedContinuation<Void, Never>?
+
+    func read() async -> FolderVolume? {
+        count += 1
+        started?.resume()
+        started = nil
+        await withCheckedContinuation { held = $0 }
+        return FolderVolume(name: "Share", totalBytes: 100, availableBytes: 40)
+    }
+
+    func waitForRead(_ number: Int) async {
+        if count >= number { return }
+        await withCheckedContinuation { started = $0 }
+    }
+
+    func finish() {
+        held?.resume()
+        held = nil
+    }
+}
+
+/// A folder's disk is read one read at a time: while a read is out, as
+/// on a stalled share, asking again gets the reading from before and
+/// starts no other. A server or another Mac has no disk here to read.
+@MainActor
+@Test
+func aFolderHasOneVolumeReadOutAtATime() async {
+    let reads = HeldVolumeReads()
+    let store = PairStore(client: PairFixtureClient(catalog: []), volume: { _ in await reads.read() })
+    #expect(await store.volume(of: SelectedFolder(bytes: Data("sftp://nas.local/Photos".utf8))) == nil)
+    #expect(await store.volume(of: SelectedFolder(bytes: Data("peer://studio/share-1".utf8))) == nil)
+    #expect(await reads.count == 0)
+
+    let share = SelectedFolder(bytes: Data("/Volumes/Share/Photos".utf8))
+    let first = Task { await store.volume(of: share) }
+    await reads.waitForRead(1)
+    #expect(await store.volume(of: share) == nil, "Nothing has been read yet")
+    #expect(await reads.count == 1)
+    await reads.finish()
+    #expect(await first.value?.name == "Share")
+
+    let second = Task { await store.volume(of: share) }
+    await reads.waitForRead(2)
+    #expect(await store.volume(of: share)?.name == "Share", "The last reading stands in")
+    #expect(await reads.count == 2)
+    await reads.finish()
+    #expect(await second.value?.availableBytes == 40)
+}

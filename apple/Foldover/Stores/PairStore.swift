@@ -16,6 +16,21 @@ struct SelectedFolder: Equatable, Sendable {
     let bytes: Data
 }
 
+/// The disk or share a local folder is on, and how full it is.
+struct FolderVolume: Equatable, Sendable {
+    /// The name Finder shows, e.g. "Backup SSD".
+    let name: String
+    let totalBytes: UInt64
+    let availableBytes: UInt64
+
+    /// Read off the main thread; nil when macOS cannot say.
+    static func read(_ url: URL) async -> FolderVolume? {
+        await VolumeReader.read(url).map {
+            FolderVolume(name: $0.name, totalBytes: $0.totalBytes, availableBytes: $0.availableBytes)
+        }
+    }
+}
+
 /// When the agent syncs without being asked, after the first manual sync.
 enum SyncSchedule: Hashable, Sendable {
     case manual
@@ -407,6 +422,12 @@ private enum PairStoreError: LocalizedError {
 final class PairStore {
     private let client: any PairClient
     private let revealInFinder: @MainActor ([URL]) -> Void
+    private let readVolume: @Sendable (URL) async -> FolderVolume?
+    /// Each local folder's last volume reading, and the folders whose
+    /// read is still out: one read per folder, so a stalled share never
+    /// gathers more.
+    @ObservationIgnored private var volumes: [Data: FolderVolume] = [:]
+    @ObservationIgnored private var volumeReads: Set<Data> = []
     private var generation = 0
     private(set) var pairs: [SyncPair] = []
     private(set) var isLoading = false
@@ -415,15 +436,30 @@ final class PairStore {
     private(set) var loadError: String?
 
     init(client: any PairClient = CorePairClient(),
-         reveal: @escaping @MainActor ([URL]) -> Void = { FinderReveal.reveal($0) }) {
+         reveal: @escaping @MainActor ([URL]) -> Void = { FinderReveal.reveal($0) },
+         volume: @escaping @Sendable (URL) async -> FolderVolume? = { await FolderVolume.read($0) }) {
         self.client = client
         revealInFinder = reveal
+        readVolume = volume
     }
 
     /// Select `urls` in Finder windows.
     func reveal(_ urls: [URL]) {
         guard !urls.isEmpty else { return }
         revealInFinder(urls)
+    }
+
+    /// The disk or share `folder` is on, and how full it is; nil for
+    /// SFTP and other-Mac folders, and when macOS cannot say. While the
+    /// folder's last read is still out, as on a stalled share, its
+    /// reading from before stands in.
+    func volume(of folder: SelectedFolder) async -> FolderVolume? {
+        guard let url = Self.localURL(folder) else { return nil }
+        guard volumeReads.insert(folder.bytes).inserted else { return volumes[folder.bytes] }
+        let reading = await readVolume(url)
+        volumeReads.remove(folder.bytes)
+        volumes[folder.bytes] = reading
+        return reading
     }
 
     func refresh() async {

@@ -425,6 +425,9 @@ final class MainViewModel {
     /// A local folder's URL; nil for SFTP and other-Mac folders.
     func localURL(_ folder: SelectedFolder) -> URL? { PairStore.localURL(folder) }
 
+    /// The disk or share a local folder is on, and how full it is.
+    func volume(of folder: SelectedFolder) async -> FolderVolume? { await pairStore.volume(of: folder) }
+
     /// Show the selected pair's folder on `side` in Finder.
     func reveal(_ side: FolderSide) {
         guard let url = selectedFolderURL(side) else { return }

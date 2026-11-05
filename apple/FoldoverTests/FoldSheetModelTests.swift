@@ -356,4 +356,47 @@ struct FoldSheetModelTests {
         #expect(!FoldMotion.commits(swing: 0.49))
         #expect(FoldMotion.commits(swing: 0.5))
     }
+
+    /// While the leaf lies folded, its back names the folder whose page it
+    /// is and the bare half the folder under it, each with the way its
+    /// data goes; a two-way sync's folders both send and receive.
+    @Test func aFoldedRunNamesWhichWayEachFolderGoes() {
+        #expect(FoldRole(.a, in: .backupLeft) == .source)
+        #expect(FoldRole(.b, in: .backupLeft) == .destination)
+        #expect(FoldRole(.b, in: .mirrorRight) == .source)
+        #expect(FoldRole(.a, in: .mirrorRight) == .destination)
+        #expect(FoldRole(.a, in: .sync) == .either)
+        #expect(FoldRole(.b, in: .sync) == .either)
+        #expect(FoldRole.source.eyebrow(.a) == "From Folder A")
+        #expect(FoldRole.destination.eyebrow(.b) == "To Folder B")
+        #expect(FoldRole.either.eyebrow(.b) == "Folder B")
+    }
+
+    /// The disk under the leaf: its free space, what the run still copies
+    /// there, and a warning only when that is more than is free.
+    @Test func theDiskUnderTheLeafSaysWhatIsFreeAndWhatIsComing() {
+        let disk = FolderVolume(name: "Backup SSD", totalBytes: 2_000_000_000_000, availableBytes: 800_000_000_000)
+        let comparing = FoldDisk(volume: disk, toCopy: nil)
+        #expect(comparing.name == "Backup SSD")
+        #expect(comparing.free == "800 GB free of 2 TB")
+        #expect(comparing.toCopy == nil)
+        #expect(comparing.stored == 0.6)
+        #expect(comparing.arriving == 0)
+        #expect(!comparing.mayNotFit)
+        #expect(comparing.spoken == "Backup SSD, 800 GB free of 2 TB")
+
+        let copying = FoldDisk(volume: disk, toCopy: 200_000_000_000)
+        #expect(copying.toCopy == "200 GB still to copy")
+        #expect(copying.arriving == 0.1)
+        #expect(!copying.mayNotFit)
+
+        // Nothing left to copy reads as nothing coming, not "Zero KB".
+        #expect(FoldDisk(volume: disk, toCopy: 0).toCopy == nil)
+
+        // The bar stops at the free space; the words say the rest.
+        let tooMuch = FoldDisk(volume: disk, toCopy: 1_000_000_000_000)
+        #expect(tooMuch.arriving == 0.4)
+        #expect(tooMuch.mayNotFit)
+        #expect(tooMuch.spoken.hasSuffix(FoldDisk.mayNotFitText))
+    }
 }

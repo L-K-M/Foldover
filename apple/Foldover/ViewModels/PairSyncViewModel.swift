@@ -368,6 +368,14 @@ struct PairSyncViewModel {
         return FoldReadout(progress: progress, cancelling: cancelling)
     }
 
+    /// The plan's data a sync under way has yet to copy; nil while it
+    /// compares, waits for another Mac or stops, when no copying counts.
+    var bytesLeft: UInt64? {
+        guard case .working(.run, cancelling: false, let progress) = state,
+              progress.changes > 0, progress.waitingFor == nil else { return nil }
+        return progress.bytes - min(progress.copied, progress.bytes)
+    }
+
     static func comparing(_ progress: WorkProgress) -> String {
         guard progress.listed > 0 else { return String(localized: "Comparing folders…") }
         return String(localized: "Comparing folders… \(progress.checked) of \(progress.listed) items checked")

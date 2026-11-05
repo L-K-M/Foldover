@@ -475,6 +475,89 @@ enum FoldLeaf {
     }
 }
 
+/// Which way a folder's data goes in a run, for naming it while the
+/// leaf lies folded: the leaf's back names the folder whose page it is,
+/// and the bare half beside it the folder under the leaf.
+enum FoldRole: Equatable {
+    /// A one-way mode's source.
+    case source
+    /// A one-way mode's destination.
+    case destination
+    /// Either folder of a two-way sync, which both send and receive.
+    case either
+
+    init(_ side: FolderSide, in mode: PairMode) {
+        let sources = FoldLeaf.sides(mode)
+        if sources.count > 1 {
+            self = .either
+        } else {
+            self = sources.contains(side) ? .source : .destination
+        }
+    }
+
+    /// The small capitals over the folder's name: "From Folder A".
+    @MainActor
+    func eyebrow(_ side: FolderSide) -> String {
+        let folder = PairSyncViewModel.folderName(side)
+        return switch self {
+        case .source: String(localized: "From \(folder)")
+        case .destination: String(localized: "To \(folder)")
+        case .either: folder
+        }
+    }
+}
+
+/// The disk under the folded leaf, as the bare half beside it reads it:
+/// how full it is and, while a one-way run copies to it, how much more
+/// is on its way.
+///
+///    Backup SSD
+///    ████████████▒▒▒▒░░░░░░░░░░   stored · still to copy · free
+///    812.4 GB free of 2 TB
+///    23.2 GB still to copy
+///
+/// Free space is what macOS reports now; what is left to copy is the
+/// plan's data not yet copied. Archived versions stay on the disk, so a
+/// sync frees nothing as it goes.
+struct FoldDisk: Equatable {
+    let name: String
+    /// The shares of the bar, 0…1: what the disk holds, and what the run
+    /// still copies there, as far as the free space reaches.
+    let stored: Double
+    let arriving: Double
+    /// "812.4 GB free of 2 TB".
+    let free: String
+    /// "23.2 GB still to copy"; nil while nothing is known to be coming.
+    let toCopy: String?
+    /// More is left to copy than is free.
+    let mayNotFit: Bool
+
+    /// `toCopy` is the data the run still copies to this disk; nil when
+    /// that is not known, as while comparing, stopping, or in a two-way
+    /// sync whose copies go both ways.
+    init(volume: FolderVolume, toCopy: UInt64?) {
+        name = volume.name
+        let total = Double(max(volume.totalBytes, 1))
+        let available = min(volume.availableBytes, volume.totalBytes)
+        stored = Double(volume.totalBytes - available) / total
+        let coming = toCopy ?? 0
+        arriving = Double(min(coming, available)) / total
+        free = String(localized: "\(PairSyncViewModel.byteText(available)) free of \(PairSyncViewModel.byteText(volume.totalBytes))")
+        self.toCopy = coming > 0 ? String(localized: "\(PairSyncViewModel.byteText(coming)) still to copy") : nil
+        mayNotFit = coming > available
+    }
+
+    /// The warning under the figures when the rest may not fit.
+    static var mayNotFitText: String {
+        String(localized: "There may not be enough space for the rest of this sync.")
+    }
+
+    /// The whole reading as one phrase, for VoiceOver.
+    var spoken: String {
+        ([name, free, toCopy] + [mayNotFit ? Self.mayNotFitText : nil]).compactMap { $0 }.joined(separator: ", ")
+    }
+}
+
 /// How the sheet moves: the leaf's swing while a person folds it, and
 /// the springs it settles with.
 enum FoldMotion {

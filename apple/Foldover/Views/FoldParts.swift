@@ -54,16 +54,7 @@ struct FoldFolderLabel: View {
         .help(text)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text("\(PairSyncViewModel.folderName(side)): \(text)"))
-        .contextMenu {
-            if viewModel.localURL(folder) != nil {
-                Button("Show in Finder") { viewModel.reveal(side) }
-            }
-            Button("Copy Path") {
-                let pasteboard = NSPasteboard.general
-                pasteboard.clearContents()
-                pasteboard.setString(PairEditorViewModel.pathText(folder), forType: .string)
-            }
-        }
+        .contextMenu { FoldFolderMenu(viewModel: viewModel, folder: folder, side: side) }
     }
 
     /// A folder's text as its name and where it is: "Photos" on
@@ -81,6 +72,181 @@ struct FoldFolderLabel: View {
         guard !location.hasSuffix(":/") else { return (String(path), "") }
         if let scheme = location.range(of: "://") { location = location[scheme.upperBound...] }
         return (String(path[path.index(after: slash)...]), location.isEmpty ? "/" : String(location))
+    }
+}
+
+/// What a folder's name offers when Control-clicked: show it in Finder,
+/// or copy its path.
+private struct FoldFolderMenu: View {
+    let viewModel: MainViewModel
+    let folder: SelectedFolder
+    let side: FolderSide
+
+    var body: some View {
+        if viewModel.localURL(folder) != nil {
+            Button("Show in Finder") { viewModel.reveal(side) }
+        }
+        Button("Copy Path") {
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(PairEditorViewModel.pathText(folder), forType: .string)
+        }
+    }
+}
+
+/// A folder named in the middle of a half while the leaf lies folded,
+/// in white: on the leaf's back, the folder whose page it is; on the
+/// bare desk beside it, the folder under the leaf. The page labels are
+/// out of sight then, one folded face down and one covered, and a
+/// label at a page's head would read as that page's. The eyebrow says
+/// which way the folder's data goes.
+///
+///        FROM FOLDER A
+///        ⌂ lmathis
+///           /Users
+struct FoldRunFolder: View {
+    let viewModel: MainViewModel
+    let folder: SelectedFolder
+    let side: FolderSide
+    let role: FoldRole
+
+    /// How far under the top of its half the name hangs, the same on the
+    /// leaf and the desk, so the two names read as one line across.
+    static let top: CGFloat = 24
+    /// The least room between the name and what is set under it.
+    static let gap: CGFloat = 18
+
+    var body: some View {
+        let text = viewModel.folderText(folder)
+        let parts = FoldFolderLabel.parts(text)
+        VStack(spacing: 3) {
+            Text(role.eyebrow(side))
+                .font(FoldType.backEyebrow)
+                .textCase(.uppercase)
+                .tracking(FoldType.eyebrowTracking * 1.5)
+                .opacity(0.75)
+            Label(parts.name, systemImage: viewModel.folderSymbol(folder))
+                .font(.system(size: 15, weight: .semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if !parts.location.isEmpty {
+                // Where it is gives way first, keeping its nearest folders.
+                Text(parts.location)
+                    .font(FoldType.meta)
+                    .opacity(0.75)
+                    .lineLimit(1)
+                    .truncationMode(.head)
+            }
+        }
+        .foregroundStyle(.white)
+        .help(text)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("\(role.eyebrow(side)): \(text)"))
+        .contextMenu { FoldFolderMenu(viewModel: viewModel, folder: folder, side: side) }
+    }
+}
+
+/// The bare desk where the leaf lifted off, while it lies folded over
+/// the other half: the folder under the leaf, and the disk it is on.
+/// Without this the desk lay empty for the whole run, and neither
+/// folder was named anywhere on the sheet.
+struct FoldCoveredView: View {
+    let viewModel: MainViewModel
+    let folder: SelectedFolder
+    let side: FolderSide
+    let role: FoldRole
+    /// The folder's disk; nil for a server or another Mac, or until it
+    /// has been read.
+    let disk: FoldDisk?
+
+    var body: some View {
+        // The name hangs where the leaf's does; the disk sits level with
+        // the leaf's readout, and gives way when a short window has no
+        // room for it.
+        ViewThatFits(in: .vertical) {
+            VStack(spacing: FoldRunFolder.gap) {
+                name
+                if let disk {
+                    FoldDiskView(disk: disk)
+                        .frame(maxHeight: .infinity)
+                }
+            }
+            name
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(Text("Folder Under the Fold"))
+        .accessibilityIdentifier("fold-covered")
+    }
+
+    private var name: some View {
+        FoldRunFolder(viewModel: viewModel, folder: folder, side: side, role: role)
+            .padding(.top, FoldRunFolder.top)
+    }
+}
+
+/// A disk's name, a bar of what it holds and what a run still copies
+/// there, and both in words, set on the navy desk.
+private struct FoldDiskView: View {
+    let disk: FoldDisk
+
+    /// As long as the readout's bar on the leaf beside it.
+    private static let barWidth: CGFloat = 220
+    private static let barHeight: CGFloat = 6
+
+    var body: some View {
+        VStack(spacing: 6) {
+            Text(disk.name)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            DiskBar(stored: disk.stored, arriving: disk.arriving)
+                .frame(maxWidth: Self.barWidth)
+                .frame(height: Self.barHeight)
+                .padding(.vertical, 2)
+            Text(disk.free)
+                .font(.callout)
+            if let toCopy = disk.toCopy {
+                Text(toCopy)
+                    .font(.callout)
+            }
+            if disk.mayNotFit {
+                Text(FoldDisk.mayNotFitText)
+                    .font(.callout)
+                    .foregroundStyle(FoldPalette.pin)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .foregroundStyle(FoldPalette.deskInk)
+        .multilineTextAlignment(.center)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(disk.spoken)
+        .accessibilityAddTraits(.updatesFrequently)
+    }
+}
+
+/// A disk's capacity as a bar: what it holds in white, what the run
+/// still copies there in the leaf's cerulean, and its free space bare.
+private struct DiskBar: View {
+    let stored: Double
+    let arriving: Double
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = proxy.size.width
+            ZStack(alignment: .leading) {
+                Capsule().fill(.white.opacity(0.2))
+                Capsule()
+                    .fill(FoldPalette.kamiRidge)
+                    .frame(width: width * min(1, stored + arriving))
+                Capsule()
+                    .fill(.white.opacity(0.85))
+                    .frame(width: width * min(1, stored))
+            }
+        }
+        .accessibilityHidden(true)
     }
 }
 
