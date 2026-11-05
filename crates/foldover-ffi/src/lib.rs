@@ -548,6 +548,9 @@ pub enum ReadinessWarningKind {
     /// `pair_name`; only Mirror and Backup sources may share one, so
     /// saving would refuse it.
     Overlap,
+    /// A folder of the pair named `pair_name` is there but cannot be read,
+    /// so this folder cannot be checked against it; saving would refuse.
+    Unverified,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
@@ -556,7 +559,7 @@ pub struct ReadinessWarning {
     pub kind: ReadinessWarningKind,
     /// The other sync engine's name, for `CloudManaged` only.
     pub provider: Option<String>,
-    /// The other pair's name, for `Overlap` only.
+    /// The other pair's name, for `Overlap` and `Unverified` only.
     pub pair_name: Option<String>,
 }
 
@@ -598,13 +601,20 @@ impl From<foldover_client::PairWarning> for ReadinessWarning {
                 provider: None,
                 pair_name: Some(pair_name),
             },
+            Warning::Unverified { side, pair_name } => Self {
+                side: sync_side(side),
+                kind: ReadinessWarningKind::Unverified,
+                provider: None,
+                pair_name: Some(pair_name),
+            },
         }
     }
 }
 
 /// What will not work as a person might expect with `configuration`'s
 /// folders (PLAN.md §3.6); `editing` is the pair the draft would
-/// replace. Only an overlap names something saving would refuse.
+/// replace. Only an overlap, or a folder that cannot be checked, names
+/// something saving would refuse.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn check_pair(
     configuration: LocalPairDraft,
@@ -775,6 +785,18 @@ mod tests {
                 ReadinessWarning {
                     side: SyncSide::Left,
                     kind: ReadinessWarningKind::Overlap,
+                    provider: None,
+                    pair_name: Some("Photos".into()),
+                },
+            ),
+            (
+                PairWarning::Unverified {
+                    side: PairSide::Right,
+                    pair_name: "Photos".into(),
+                },
+                ReadinessWarning {
+                    side: SyncSide::Right,
+                    kind: ReadinessWarningKind::Unverified,
                     provider: None,
                     pair_name: Some("Photos".into()),
                 },

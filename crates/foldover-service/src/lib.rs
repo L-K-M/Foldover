@@ -481,6 +481,10 @@ fn readiness_warning(warning: foldover_engine::ReadinessWarning) -> PairWarning 
             side: side.into(),
             pair_name: name,
         },
+        Warning::Unverified { side, name, .. } => PairWarning::Unverified {
+            side: side.into(),
+            pair_name: name,
+        },
     }
 }
 

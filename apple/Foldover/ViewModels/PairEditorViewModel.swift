@@ -44,13 +44,16 @@ final class PairEditorViewModel: Identifiable {
     private(set) var savedPairID: String?
     /// What the agent says will not work as expected with the picked
     /// folders (PLAN.md §3.6); these never block saving, unlike
-    /// `recordsWarning` and `overlapWarning`.
+    /// `recordsWarning`, `overlapWarning` and `uncheckedWarning`.
     private(set) var readinessWarnings: [String] = []
     /// Folders that cannot hold Foldover's `.foldover` records.
     private(set) var recordsRefused: Set<FolderSide> = []
     /// Folders another pair already claims: the overlapping side and the
     /// other pair's name, from the latest check.
     private(set) var folderOverlaps: [(side: FolderSide, pairName: String)] = []
+    /// Pairs with a folder that is there but cannot be read, so the picked
+    /// folders cannot be checked against it, from the latest check.
+    private(set) var uncheckedPairs: [String] = []
     /// SMB servers found on the local network (PLAN.md §3.8); empty
     /// until the browse answers.
     private(set) var nearbyServers: [NearbyServer] = []
@@ -88,7 +91,7 @@ final class PairEditorViewModel: Identifiable {
     }
 
     var title: String { editing == nil ? String(localized: "New Pair") : String(localized: "Edit Pair") }
-    var canSave: Bool { !isSaving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && left != nil && right != nil && durabilityWarning == nil && canaryWarning == nil && dailyWarning == nil && recordsWarning == nil && overlapWarning == nil }
+    var canSave: Bool { !isSaving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && left != nil && right != nil && durabilityWarning == nil && canaryWarning == nil && dailyWarning == nil && recordsWarning == nil && overlapWarning == nil && uncheckedWarning == nil }
 
     private var backupTarget: FolderSide? { Self.backupTarget(mode) }
 
@@ -151,6 +154,18 @@ final class PairEditorViewModel: Identifiable {
             return String(localized: "\(name) can't hold Foldover's .foldover folder. To back up to it, turn on “Keep nothing in \(name)”.")
         }
         return String(localized: "\(name) can't hold Foldover's .foldover folder, so it can only be a Backup's target. Choose a Backup to \(name), then keep nothing in it.")
+    }
+
+    /// Saving refuses while another pair's folder cannot be read: whether
+    /// the picked folders overlap it is unknown (ADR 0048). One sentence
+    /// per pair, then what to do.
+    var uncheckedWarning: String? {
+        guard !uncheckedPairs.isEmpty else { return nil }
+        var sentences = uncheckedPairs.map { pairName in
+            String(localized: "A folder of “\(pairName)” can't be read, so these folders can't be checked against it.")
+        }
+        sentences.append(String(localized: "Connect it, or give Foldover access to it, to save."))
+        return sentences.joined(separator: " ")
     }
 
     /// A folder another pair already uses can be shared only as a
@@ -795,17 +810,27 @@ final class PairEditorViewModel: Identifiable {
             readinessWarnings = []
             recordsRefused = []
             folderOverlaps = []
+            uncheckedPairs = []
             return
         }
         let settings = PairSettings(name: name, left: left, right: right, mode: mode, options: options)
         guard let warnings = try? await store.check(settings, editing: editing?.id),
               generation == checkGeneration else { return }
-        // Refused records and overlaps get their own, blocking warnings.
+        // Refused records, overlaps and folders that cannot be checked
+        // get their own, blocking warnings.
         recordsRefused = Set(warnings.filter { $0.kind == .recordsUnsupported }.map(\.side))
         folderOverlaps = warnings.compactMap { warning in
             guard case .overlap(let pairName) = warning.kind else { return nil }
             return (side: warning.side, pairName: pairName)
         }
+        // One sentence per pair: both sides usually wait on the same one.
+        var unchecked: [String] = []
+        for warning in warnings {
+            if case .unverified(let pairName) = warning.kind, !unchecked.contains(pairName) {
+                unchecked.append(pairName)
+            }
+        }
+        uncheckedPairs = unchecked
         readinessWarnings = warnings.compactMap(text)
     }
 
@@ -836,6 +861,9 @@ final class PairEditorViewModel: Identifiable {
             return nil
         case .overlap:
             // Shown as `overlapWarning` instead.
+            return nil
+        case .unverified:
+            // Shown as `uncheckedWarning` instead.
             return nil
         }
     }

@@ -73,8 +73,11 @@ from catalog comparison. The current revision
 is checked before filesystem probes, then checked again by the storage driver.
 
 Catalog checks page through existing pairs and fail closed if any existing
-root cannot be verified. This deliberately requires reconnecting offline roots
-before catalog changes. It prevents guessing about physical aliases until
+root cannot be verified. Since [ADR 0048](0048-missing-folders-in-catalog-checks.md)
+a missing folder, such as one on a disk not mounted, is compared by where it
+would be and by its identity file; only one that is there but cannot be read
+still blocks. As first written, this deliberately required reconnecting offline roots
+before catalog changes. It prevented guessing about physical aliases until
 persistent volume and endpoint identities are implemented.
 
 These are selection-time checks. They do not establish mount continuity,

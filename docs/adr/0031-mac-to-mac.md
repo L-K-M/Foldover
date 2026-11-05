@@ -102,7 +102,7 @@ Mac's local endpoint at the share root:
 | `ignoreRules` | `rules` from its `.foldoverignore` |
 | `nameMatching` | `names`: how its volume compares case and Unicode |
 | `space` | `space`: bytes free |
-| `observe` (`scan`: metadata policy, rules, size limit, cutoff) | `progress` every 200 ms while scanning; then entries as binary data frames (path, version, fingerprint); then `observed`: leftovers, oversized and old paths |
+| `observe` (`scan`: metadata policy, rules, size limit, cutoff) | `progress` every 200 ms while scanning and once with its final counts; then entries as binary data frames (path, version, fingerprint); then `observed`: leftovers, oversized and old paths |
 | `read` (`path`, `entry`, `run`) | `reading`: metadata and a link's target, once `path` is proven to hold `entry`; a file's data frames and their end; then `done` |
 | `metadata` (`path`, `entry`, `run`) | `reading` alone, for a metadata update |
 | `receive` (`path`, `entry`: kind, expected current entry, metadata, run) | Data frames and their end follow a file's request; `received`: the version stored, after staging and verifying the content against the plan |

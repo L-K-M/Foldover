@@ -12,17 +12,22 @@ All notable changes to this project are documented here. The format follows
   one started by a schedule, the menu bar or Sync Now, or one under way
   when the window opens. The sheet no longer shrinks to its folder
   labels, with the progress in a card at the top of a bare field.
+- Comparing a folder on another Mac ends on its full count of items. The
+  count no longer stops at that Mac's last progress update, or at zero
+  when its scan finishes before the first one.
 - Pair edits save during a preview or sync and apply to subsequent runs.
   The current job keeps its original settings and finishes normally.
 - An aborted first sync still requires review on retry. Editing a pair's
   folders re-subscribes its change watchers. Peer scan counters cannot
-  claim unbounded work in one progress report.
+  claim unbounded work in a scan, however many reports they send.
 - Put Back All reserves the archive through its reload and shows recovery
   activity. Periodic health probes keep pair commands enabled.
 - Unicode spelling preparation counts aliases once, and preview rows are
   cached across renders and searches.
 - Remote requests, including archive listings, get longer client timeouts.
   Read timeouts invite retry; saves retain the uncertain-commit warning.
+- A comparison another Mac refuses, for example because it paused syncing,
+  says why instead of reporting that the Mac answered out of order.
 - The menu-bar pair list scrolls while commands remain reachable. Its
   error captions are bounded and selectable, and busy pairs offer Stop.
 

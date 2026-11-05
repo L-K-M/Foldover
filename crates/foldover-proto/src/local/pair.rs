@@ -473,8 +473,8 @@ pub struct PairPage {
 }
 
 /// `pair.check`'s answer: what will not work as a person might expect
-/// with the folders they picked (PLAN.md §3.6). Only `overlap` names
-/// something saving would refuse.
+/// with the folders they picked (PLAN.md §3.6). Only `overlap` and
+/// `unverified` name something saving would refuse.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairWarnings {
@@ -498,6 +498,10 @@ pub enum PairWarning {
     /// one; saving would refuse it.
     #[serde(rename_all = "camelCase")]
     Overlap { side: PairSide, pair_name: String },
+    /// A folder of the pair named `pairName` is there but cannot be read,
+    /// so this side cannot be checked against it; saving would refuse.
+    #[serde(rename_all = "camelCase")]
+    Unverified { side: PairSide, pair_name: String },
 }
 
 #[cfg(test)]
@@ -570,6 +574,10 @@ mod tests {
                     side: PairSide::Left,
                     pair_name: "Photos".into(),
                 },
+                PairWarning::Unverified {
+                    side: PairSide::Right,
+                    pair_name: "Photos".into(),
+                },
             ],
         };
         let json = serde_json::to_value(&warnings).unwrap();
@@ -581,6 +589,7 @@ mod tests {
                 {"kind":"namesDiffer","side":"left"},
                 {"kind":"recordsUnsupported","side":"right"},
                 {"kind":"overlap","side":"left","pairName":"Photos"},
+                {"kind":"unverified","side":"right","pairName":"Photos"},
             ]})
         );
         assert_eq!(
