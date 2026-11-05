@@ -79,6 +79,14 @@ enum Fixtures {
         SelectedFolder(bytes: Data(locator.utf8))
     }
 
+    /// The disks the tour's local folders are on, the same on every Mac:
+    /// the backup disk for its folders, this Mac's own disk for the rest.
+    static func volume(_ url: URL) async -> FolderVolume? {
+        url.path(percentEncoded: false).contains("/Backup SSD/")
+            ? FolderVolume(name: "Backup SSD", totalBytes: 2_000_000_000_000, availableBytes: 812_400_000_000)
+            : FolderVolume(name: "Macintosh HD", totalBytes: 994_700_000_000, availableBytes: 412_300_000_000)
+    }
+
     static func pairs() -> [SyncPair] {
         var photos = PairOptions.defaults
         photos.schedule = .daily(minutes: 18 * 60, days: Set(SyncDay.allCases))
@@ -225,6 +233,9 @@ enum FixtureScenario: String {
     case syncingReduced = "syncing-reduced"
     /// A sync waits while another Mac syncs the same folders.
     case syncingWaiting = "syncing-waiting"
+    /// A one-way backup to a local disk, copying its plan: the window
+    /// opens on it mid-run, with nothing previewed on the sheet.
+    case syncingBackup = "syncing-backup"
     case failedRun = "failed-run"
     case foldApproval = "fold-approval"
 
@@ -241,8 +252,8 @@ enum FixtureScenario: String {
             return AgentReport(version: "0.1.0", safeModeStops: 3)
         case .agentFailed:
             throw FixtureError.agentUnavailable
-        case .noPairs, .manyPairs, .pairsFail, .syncing, .syncingReduced, .syncingWaiting, .failedRun,
-             .foldApproval:
+        case .noPairs, .manyPairs, .pairsFail, .syncing, .syncingReduced, .syncingWaiting, .syncingBackup,
+             .failedRun, .foldApproval:
             return AgentReport(version: "0.1.0")
         }
     }
@@ -367,6 +378,11 @@ actor FixtureSyncClient: SyncClient {
             // The engine waits after comparing, before it plans.
             states[Fixtures.photosID] = .working(.run, cancelling: false, progress: WorkProgress(
                 listed: 48_211, checked: 48_211, waitingFor: "Mac Studio"))
+        }
+        if scenario == .syncingBackup {
+            states[Fixtures.projectsID] = .working(.run, cancelling: false, progress: WorkProgress(
+                listed: 2_400, checked: 2_400, changes: 5_320, applied: 1_204,
+                bytes: 40_000_000_000, copied: 16_800_000_000, rate: 85_000_000))
         }
         if scenario == .failedRun {
             states[Fixtures.photosID] = .finished(RunSummary(

@@ -33,7 +33,8 @@ final class FoldTourTests: XCTestCase {
     /// A window opened on a run already under way, as after a schedule
     /// or the menu bar started it: nothing was previewed, so nothing is
     /// listed. The leaf still lies over a whole page, its back reading
-    /// out the run's stage.
+    /// out the run's stage, and the bare half beside it names the folder
+    /// under the leaf: a two-way sync's server, which has no disk to read.
     @MainActor
     func testARunOpenedMidwayCoversThePage() {
         continueAfterFailure = true
@@ -43,10 +44,49 @@ final class FoldTourTests: XCTestCase {
                 tour.launch()
                 tour.click(tour.app.outlines.firstMatch.staticTexts["Photos"].firstMatch, "Photos in the sidebar")
                 checkPlate(tour, reads: stage)
+                checkFolders(tour, leaf: "Folder A: ", covered: "Folder B: sftp://mynas.local/~/Photos")
                 tour.snap("fold-midway-\(stage.lowercased())")
                 tour.app.terminate()
             }
         }
+    }
+
+    /// A backup to a disk opened mid-run: the leaf's back names the folder
+    /// it is copied from, and the bare half the folder it is copied to,
+    /// with that disk's free space and what is still to copy there.
+    @MainActor
+    func testABackupOpenedMidwayNamesBothFoldersAndTheDisk() {
+        continueAfterFailure = true
+        for appearance in [TourAppearance.light, .dark] {
+            let tour = Tour(self, appearance: appearance, scenario: "syncing-backup")
+            tour.launch()
+            tour.click(tour.app.outlines.firstMatch.staticTexts["Projects"].firstMatch, "Projects in the sidebar")
+            checkPlate(tour, reads: "Syncing")
+            checkFolders(tour, leaf: "From Folder A: ", covered: "To Folder B: ")
+            let covered = tour.app.windows.descendants(matching: .any)["fold-covered"].firstMatch
+            let disk = covered.descendants(matching: .any)
+                .matching(NSPredicate(format: "label == %@", "Backup SSD, 812.4 GB free of 2 TB, 23.2 GB still to copy"))
+                .firstMatch
+            XCTAssertTrue(disk.waitForExistence(timeout: 10), "The bare half should read out the backup disk")
+            tour.snap("fold-midway-backup")
+            tour.app.terminate()
+        }
+    }
+
+    /// The leaf's plate names its own folder, and the bare half the folder
+    /// under the leaf, on its own page: clear of the plate and the gutter.
+    @MainActor
+    private func checkFolders(_ tour: Tour, leaf: String, covered: String) {
+        let window = tour.app.windows.firstMatch
+        let plate = window.descendants(matching: .any)["fold-plate"].firstMatch
+        let note = window.descendants(matching: .any)["fold-covered"].firstMatch
+        guard note.waitForExistence(timeout: 5) else { return XCTFail("Missing: the folder under the leaf") }
+        let named = plate.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", leaf))
+        XCTAssertTrue(named.firstMatch.exists, "The leaf should name its folder, \(leaf)")
+        let under = note.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", covered))
+        XCTAssertTrue(under.firstMatch.exists, "The bare half should name the folder under the leaf, \(covered)")
+        XCTAssertLessThanOrEqual(note.frame.maxX, plate.frame.minX + 1,
+                                 "The bare half's words should stay off the plate: \(note.frame), \(plate.frame)")
     }
 
     /// Sync Now before any preview folds a blank half; its back reads

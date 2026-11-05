@@ -97,6 +97,8 @@ struct FoldSheet: View {
     /// A fresh plan printing onto a blank sheet, by its token: its first
     /// lines spread in one after another.
     @State private var printing: String?
+    /// The disk under the folded leaf, read now and then while it lies there.
+    @State private var coveredVolume: FolderVolume?
 
     private static let headerHeight: CGFloat = 50
     private static let earSpring = Animation.spring(duration: 0.22, bounce: 0.3)
@@ -108,6 +110,9 @@ struct FoldSheet: View {
     private static let printedLines = 30
     /// Keys held with these are someone else's shortcut.
     private static let shortcutModifiers: EventModifiers = [.command, .option, .control, .shift]
+    /// How often the disk under the folded leaf is read again: its free
+    /// space shrinks as the run copies.
+    private static let volumeInterval = Duration.seconds(5)
 
     /// How the leaf comes back open.
     private enum Opening {
@@ -209,6 +214,7 @@ struct FoldSheet: View {
             if let turn = staged, turn.lineID != id { staged = nil }
         }
         .onChange(of: scene) { old, new in sceneChanged(from: old, to: new) }
+        .task(id: coveredFolder(scene)) { await watchVolume(coveredFolder(scene)) }
         // A gesture the system cancels never reaches onEnded.
         .onChange(of: pointerDown) { _, down in
             guard !down else { return }
@@ -313,6 +319,22 @@ struct FoldSheet: View {
         side == .a ? pair.settings.left : pair.settings.right
     }
 
+    /// The folder under the leaf while a run presses.
+    private func coveredFolder(_ scene: FoldScene) -> SelectedFolder? {
+        scene == .pressing ? folder(FoldLeaf.landing(leafSide)) : nil
+    }
+
+    /// Read `folder`'s disk now and then while the leaf covers it; a
+    /// server or another Mac has none to read.
+    private func watchVolume(_ folder: SelectedFolder?) async {
+        coveredVolume = nil
+        guard let folder, viewModel.localURL(folder) != nil else { return }
+        while !Task.isCancelled {
+            coveredVolume = await viewModel.volume(of: folder)
+            try? await Task.sleep(for: Self.volumeInterval)
+        }
+    }
+
     /// No shortcut modifier held.
     private func plain(_ press: KeyPress) -> Bool {
         press.modifiers.isDisjoint(with: Self.shortcutModifiers)
@@ -359,6 +381,12 @@ struct FoldSheet: View {
         .overlay(alignment: .topLeading) {
             if scene == .pressing, landed {
                 pressReadout
+                    .transition(.opacity)
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            if scene == .pressing, landed {
+                coveredNote
                     .transition(.opacity)
             }
         }
@@ -1077,15 +1105,21 @@ struct FoldSheet: View {
     }
 
     /// What the folded leaf's cerulean back says while the run presses,
-    /// in white: the stage the run is in and its own progress, never a
-    /// claim about any one line.
+    /// in white: whose page it is, then the stage the run is in and its
+    /// own progress, never a claim about any one line.
     private var pressReadout: some View {
-        VStack(spacing: 14) {
-            if let readout = sync.readout {
-                FoldReadoutView(readout: readout, surface: .back, reduceMotion: reduceMotion)
+        // The folder's name hangs from the top, level with the desk's; the
+        // readout keeps the middle of the rest, and the whole page when a
+        // short window has no room for the name.
+        ViewThatFits(in: .vertical) {
+            VStack(spacing: FoldRunFolder.gap) {
+                FoldRunFolder(viewModel: viewModel, folder: folder(leafSide), side: leafSide,
+                              role: FoldRole(leafSide, in: pair.settings.mode))
+                    .padding(.top, FoldRunFolder.top)
+                pressProgress
+                    .frame(maxHeight: .infinity)
             }
-            Button("Stop") { Task { await sync.cancel() } }
-                .disabled(!sync.canCancel)
+            pressProgress
         }
         // Controls drawn for a dark ground, legible on the cerulean.
         .environment(\.colorScheme, .dark)
@@ -1100,6 +1134,31 @@ struct FoldSheet: View {
         .accessibilityLabel(Text("Sync Progress"))
         .accessibilityIdentifier("fold-plate")
         .offset(x: leafSide == .a ? halfWidth : 0)
+    }
+
+    private var pressProgress: some View {
+        VStack(spacing: 14) {
+            if let readout = sync.readout {
+                FoldReadoutView(readout: readout, surface: .back, reduceMotion: reduceMotion)
+            }
+            Button("Stop") { Task { await sync.cancel() } }
+                .disabled(!sync.canCancel)
+        }
+    }
+
+    /// What the desk says where the leaf lifted off, while it lies folded:
+    /// the folder under the leaf and its disk. It keeps to that page's
+    /// width, clear of the gutter.
+    private var coveredNote: some View {
+        let side = FoldLeaf.landing(leafSide)
+        let role = FoldRole(side, in: pair.settings.mode)
+        // A two-way sync's copies go both ways: none is known to be coming.
+        let disk = coveredVolume.map { FoldDisk(volume: $0, toCopy: role == .destination ? sync.bytesLeft : nil) }
+        return FoldCoveredView(viewModel: viewModel, folder: folder(side), side: side, role: role, disk: disk)
+            .environment(\.colorScheme, .dark)
+            .frame(width: pageWidth)
+            .frame(maxHeight: .infinity)
+            .offset(x: leafSide == .a ? 0 : halfWidth + FoldMetrics.creaseWidth / 2)
     }
 
     // MARK: Desk

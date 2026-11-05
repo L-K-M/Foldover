@@ -81,7 +81,7 @@ struct FoldoverApp: App {
             agent: AgentStore(statusRequest: { try await scenario?.agentReport() ?? AgentReport(version: "0.1.0") },
                               leaveSafeModeRequest: { AgentReport(version: "0.1.0") },
                               alert: { _, _ in }, system: FixtureAgentLoginItem()),
-            pairs: PairStore(client: pairs),
+            pairs: PairStore(client: pairs, volume: Fixtures.volume),
             sync: SyncStore(client: FixtureSyncClient(pairs: pairs, scenario: scenario), alert: { _ in }),
             archive: ArchiveStore(client: FixtureArchiveClient()),
             automation: automation, macToMac: macToMac)
