@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Comparing a folder on another Mac ends on its full count of items. The
+  count no longer stops at that Mac's last progress update, or at zero
+  when its scan finishes before the first one.
 - Pair edits save during a preview or sync and apply to subsequent runs.
   The current job keeps its original settings and finishes normally.
 - An aborted first sync still requires review on retry. Editing a pair's

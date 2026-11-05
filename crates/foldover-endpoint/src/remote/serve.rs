@@ -358,6 +358,18 @@ fn observe(
         Err(error) => return failed(answer, wire::scan_failure(&error)),
     };
 
+    // Reports go out at most every PROGRESS_INTERVAL, so the last one can
+    // be up to an interval behind, and a shorter scan sent none. The final
+    // counts end the asking Mac's count on every entry. Like any report's,
+    // they grew by at most an interval's steps, which the asking Mac's
+    // per-report cap allows.
+    if answer
+        .reply(&PeerReply::Progress { listed, checked })
+        .is_err()
+    {
+        return;
+    }
+
     for path in observation.unstable_directories() {
         if answer
             .reply(&PeerReply::UnstableDirectory {
