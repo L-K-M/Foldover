@@ -383,8 +383,8 @@ impl SftpEndpoint {
             .map_err(io_error)
     }
 
-    /// Write `file` unless it exists; whether it was written. A plain SFTP
-    /// rename refuses an existing target, which makes the create exclusive.
+    /// Write `file` unless it exists; whether it was written. The final path
+    /// is opened exclusively, independent of the server's rename semantics.
     pub(crate) fn create_lock_file(
         &self,
         file: LockFile,
@@ -392,28 +392,39 @@ impl SftpEndpoint {
     ) -> Result<bool, ApplyError> {
         let remote = self.remote(file.path());
         self.on_lease_session(|session| {
-            let temporary = self.stage_lock(session, file, content)?;
-            let Err(error) = self.renamed_on(session, &temporary, &remote) else {
-                return Ok(true);
+            self.make_directories_on(session, INTERNAL_DIRECTORY, PRIVATE_DIRECTORY)?;
+            let handle = match session.create_new(&remote, PRIVATE_FILE) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    if !Self::answered(&error) {
+                        self.forget_parent(&remote);
+                    }
+                    return match read_small_on(session, &remote, LEASE_LIMIT) {
+                        Ok(Some(_)) => {
+                            self.note_added(&remote);
+                            Ok(false)
+                        }
+                        Ok(None) => Err(error),
+                        Err(read_error) => Err(read_error),
+                    };
+                }
             };
-            let _ = self.removed_file_on(session, &temporary);
-            match read_small_on(session, &remote, LEASE_LIMIT)? {
-                Some(_) => Ok(false),
-                None => Err(error),
+            self.note_added(&remote);
+            let written = session.write_chunks(&handle, |sink| sink(content));
+            let closed = session.close(handle);
+            match written.and(closed) {
+                Ok(()) => match read_small_on(session, &remote, LEASE_LIMIT) {
+                    Ok(Some(written)) if written == content => Ok(true),
+                    // A reclaimer may have replaced an incomplete file while
+                    // this write was delayed. Never claim its record as ours.
+                    Ok(_) => Ok(false),
+                    Err(error) => Err(error),
+                },
+                // A conditional remove is unavailable. Leave a partial or
+                // uncertain record for TTL recovery: deleting by name could
+                // remove a successor that reclaimed it while this call hung.
+                Err(error) => Err(error),
             }
-        })
-        .map_err(|source| write_error(&lock_path(file), source))
-    }
-
-    pub(crate) fn replace_lock_file(
-        &self,
-        file: LockFile,
-        content: &[u8],
-    ) -> Result<(), ApplyError> {
-        let remote = self.remote(file.path());
-        self.on_lease_session(|session| {
-            let temporary = self.stage_lock(session, file, content)?;
-            self.rename_replacing_on(session, &temporary, &remote)
         })
         .map_err(|source| write_error(&lock_path(file), source))
     }
@@ -435,30 +446,6 @@ impl SftpEndpoint {
         );
         self.on_lease_session(|session| self.rename_replacing_on(session, &claim, &lock))
             .map_err(|source| write_error(&lock_path(LockFile::Lock), source))
-    }
-
-    /// `content` in a fresh temporary beside `file`, over `session`.
-    fn stage_lock(
-        &self,
-        session: &mut Session,
-        file: LockFile,
-        content: &[u8],
-    ) -> io::Result<Vec<u8>> {
-        self.make_directories_on(session, INTERNAL_DIRECTORY, PRIVATE_DIRECTORY)?;
-        let temporary = self.beside(file.path());
-        match write_new(session, temporary.clone(), PRIVATE_FILE, |sink| {
-            sink(content)
-        }) {
-            Ok(written) => {
-                self.note_added(&written);
-                Ok(written)
-            }
-            // A failed write may have left a partial file behind.
-            Err(error) => {
-                self.forget_parent(&temporary);
-                Err(error)
-            }
-        }
     }
 
     pub fn ignore_rules(&self) -> Result<Vec<String>, ScanError> {
@@ -1238,7 +1225,7 @@ impl SftpEndpoint {
             .into_iter()
             .filter_map(|(name, attributes)| {
                 // Only directories are runs; a file or link carrying a
-                // run's timestamp name is unrelated content.
+                // run's canonical name is unrelated content.
                 if attributes.kind() != FileKind::Directory {
                     return None;
                 }
@@ -1246,7 +1233,12 @@ impl SftpEndpoint {
                 Some(ArchivedRun::new(String::from_utf8(name).ok()?, started))
             })
             .collect();
-        runs.sort_by_key(|run| std::cmp::Reverse(run.started()));
+        runs.sort_by(|left, right| {
+            right
+                .started()
+                .cmp(&left.started())
+                .then_with(|| right.name().cmp(left.name()))
+        });
         Ok(runs)
     }
 

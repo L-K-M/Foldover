@@ -12,6 +12,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use foldover_fs::Resume;
+use foldover_net::peer::MAX_MESSAGE;
 use foldover_proto::local::PairDurability;
 use foldover_proto::peer::{
     FolderError, FolderErrorKind, FolderOp, Incoming, IncomingKind, LeaseAction, LeaseFile,
@@ -27,8 +28,8 @@ use crate::lease::LockFile;
 use crate::link::Answer;
 use crate::local::Carried;
 use crate::{
-    Expected, Filter, LocalEndpoint, LocalEntry, ObserveStep, ObservedEntry, Pruning, RootWatcher,
-    RunScope,
+    ArchivedItem, Expected, Filter, LocalEndpoint, LocalEntry, ObserveStep, ObservedEntry, Pruning,
+    RootWatcher, RunScope,
 };
 
 /// How often a scan reports progress, which is also how soon it notices
@@ -42,6 +43,9 @@ const WATCH_TICK: Duration = Duration::from_millis(250);
 const CHANGE_QUIET: Duration = Duration::from_millis(500);
 /// Longest label a kept copy's name may carry.
 const MAX_LABEL_BYTES: usize = 64;
+/// The link prepends one discriminator byte to serialized JSON.
+const REPLY_TAG_BYTES: usize = std::mem::size_of::<u8>();
+const ITEM_SEPARATOR_BYTES: usize = b",".len();
 /// PLAN.md §4: archives keep 30 days.
 const MIN_SHARED_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
@@ -237,17 +241,8 @@ pub fn serve_folder(
                         after.as_ref(),
                         usize::try_from(limit).unwrap_or(usize::MAX),
                     )
-                    .map(|(items, more)| PeerReply::Items {
-                        items: items
-                            .iter()
-                            .map(|item| WireItem {
-                                path: item.path().as_bytes().to_vec(),
-                                size: item.size(),
-                            })
-                            .collect(),
-                        more,
-                    })
-                    .map_err(|error| wire::scan_failure(&error)),
+                    .map_err(|error| wire::scan_failure(&error))
+                    .and_then(archived_reply),
             }
         }
         FolderOp::PutBack {
@@ -286,6 +281,50 @@ pub fn serve_folder(
         }
         Err(error) => failed(answer, error),
     }
+}
+
+/// Keep the longest prefix that fits one framed reply. Paths have no
+/// fixed length limit, so an item-count bound alone does not fit every page.
+fn archived_reply(page: (Vec<ArchivedItem>, bool)) -> Result<PeerReply, FolderError> {
+    let (items, mut more) = page;
+    let too_large = || FolderError {
+        kind: FolderErrorKind::Invalid,
+        path: None,
+        message: "An archived path is too large for a peer reply".into(),
+    };
+    // `false` is longer than `true`, leaving room when truncation sets more.
+    let envelope = PeerReply::Items {
+        items: Vec::new(),
+        more: false,
+    };
+    let mut bytes = serde_json::to_vec(&envelope)
+        .map_err(|_| too_large())?
+        .len()
+        + REPLY_TAG_BYTES;
+    let mut kept = Vec::new();
+    for item in items {
+        let item = WireItem {
+            path: item.path().as_bytes().to_vec(),
+            size: item.size(),
+        };
+        let item_bytes = serde_json::to_vec(&item).map_err(|_| too_large())?.len();
+        let separator = if kept.is_empty() {
+            0
+        } else {
+            ITEM_SEPARATOR_BYTES
+        };
+        let needed = item_bytes.saturating_add(separator);
+        if needed > MAX_MESSAGE.saturating_sub(bytes) {
+            if kept.is_empty() {
+                return Err(too_large());
+            }
+            more = true;
+            break;
+        }
+        bytes += needed;
+        kept.push(item);
+    }
+    Ok(PeerReply::Items { items: kept, more })
 }
 
 /// Scan, reporting progress; then send the entries in batches and the
@@ -738,6 +777,78 @@ mod tests {
         assert!(RunScope::named("2026-10-20T10-00-00.000Z", options.clone()).is_some());
         for name in ["", ".", "..", "a/b", "../x"] {
             assert!(RunScope::named(name, options.clone()).is_none(), "{name}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod archive_reply_tests {
+    use super::*;
+
+    fn item(index: usize) -> ArchivedItem {
+        let path = format!("{}{:04}", "folder/".repeat(650), index);
+        ArchivedItem::new(SyncPath::try_from(path.as_bytes()).unwrap(), index as u64)
+    }
+
+    #[test]
+    fn long_archive_paths_page_within_the_framed_reply_limit() {
+        let all: Vec<_> = (0..1_000).map(item).collect();
+        let full = PeerReply::Items {
+            items: all
+                .iter()
+                .map(|item| WireItem {
+                    path: item.path().as_bytes().to_vec(),
+                    size: item.size(),
+                })
+                .collect(),
+            more: false,
+        };
+        assert!(serde_json::to_vec(&full).unwrap().len() > MAX_MESSAGE);
+
+        let reply = archived_reply((all.clone(), false)).unwrap();
+        assert!(serde_json::to_vec(&reply).unwrap().len() + REPLY_TAG_BYTES <= MAX_MESSAGE);
+        let PeerReply::Items { items, more } = reply else {
+            panic!("not an item page")
+        };
+        assert!(more);
+        assert!(!items.is_empty());
+        assert!(items.len() < all.len());
+        let end = items.len();
+        for (actual, expected) in items.iter().zip(&all) {
+            assert_eq!(actual.path, expected.path().as_bytes());
+        }
+
+        let reply = archived_reply((all[end..].to_vec(), false)).unwrap();
+        assert!(serde_json::to_vec(&reply).unwrap().len() + REPLY_TAG_BYTES <= MAX_MESSAGE);
+        let PeerReply::Items { items, more } = reply else {
+            panic!("not an item page")
+        };
+        assert!(!more);
+        assert_eq!(items.len(), all.len() - end);
+        assert_eq!(items[0].path, all[end].path().as_bytes());
+    }
+
+    #[test]
+    fn a_single_unrepresentable_archived_path_returns_an_error() {
+        let path = SyncPath::try_from(vec![b'x'; MAX_MESSAGE / 4]).unwrap();
+        let Err(error) = archived_reply((vec![ArchivedItem::new(path, 1)], false)) else {
+            panic!("an unrepresentable path must return an explicit error");
+        };
+        assert_eq!(error.kind, FolderErrorKind::Invalid);
+        assert!(error.path.is_none());
+    }
+
+    #[test]
+    fn archive_reply_preserves_more_and_empty_pages() {
+        for more in [false, true] {
+            let reply = archived_reply((vec![], more)).unwrap();
+            assert_eq!(
+                reply,
+                PeerReply::Items {
+                    items: vec![],
+                    more
+                }
+            );
         }
     }
 }

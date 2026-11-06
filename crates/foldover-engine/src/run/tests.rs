@@ -226,11 +226,6 @@ fn fixture_pair() -> PairId {
     PairId::from_bytes([1; 16]).unwrap()
 }
 
-/// The archive folder of a fixture run started at the epoch.
-fn epoch_run() -> String {
-    foldover_endpoint::run_name(std::time::UNIX_EPOCH, fixture_pair())
-}
-
 fn fixture(mode: SyncMode) -> Fixture {
     Fixture {
         left: tempfile::tempdir().unwrap(),
@@ -1025,7 +1020,9 @@ fn edits_replace_and_archive_and_deletions_propagate_to_the_archive() {
         fs::read(
             pair.right
                 .path()
-                .join(format!(".foldover/archive/{}/edit", epoch_run()))
+                .join(".foldover/archive")
+                .join(report.archive())
+                .join("edit")
         )
         .unwrap(),
         b"v1"
@@ -1035,13 +1032,51 @@ fn edits_replace_and_archive_and_deletions_propagate_to_the_archive() {
         fs::read(
             pair.left
                 .path()
-                .join(format!(".foldover/archive/{}/delete", epoch_run()))
+                .join(".foldover/archive")
+                .join(report.archive())
+                .join("delete")
         )
         .unwrap(),
         b"d"
     );
     assert!(!pair.base.contains_key(&path(b"delete")));
     assert!(pair.prepare().preview().items().is_empty());
+}
+
+#[test]
+fn runs_started_together_keep_separate_archives() {
+    let mut pair = fixture(SyncMode::Sync);
+    fs::write(pair.left.path().join("file"), b"v1").unwrap();
+    pair.sync();
+
+    fs::write(pair.left.path().join("file"), b"v2").unwrap();
+    let first = pair.sync();
+    fs::write(pair.left.path().join("file"), b"v3").unwrap();
+    let second = pair.sync();
+
+    assert_ne!(first.archive(), second.archive());
+    assert_eq!(
+        fs::read(
+            pair.right
+                .path()
+                .join(".foldover/archive")
+                .join(first.archive())
+                .join("file")
+        )
+        .unwrap(),
+        b"v1"
+    );
+    assert_eq!(
+        fs::read(
+            pair.right
+                .path()
+                .join(".foldover/archive")
+                .join(second.archive())
+                .join("file")
+        )
+        .unwrap(),
+        b"v2"
+    );
 }
 
 #[test]
@@ -1282,7 +1317,9 @@ fn mirror_archives_target_extras_and_backup_keeps_them() {
         mirror
             .right
             .path()
-            .join(format!(".foldover/archive/{}/extra", epoch_run()))
+            .join(".foldover/archive")
+            .join(report.archive())
+            .join("extra")
             .exists()
     );
 
@@ -1364,10 +1401,13 @@ fn failed_folders_skip_their_contents_and_later_runs_recover_leftovers() {
     let report = pair.sync();
     assert_eq!((report.copied(), report.recovered()), (2, 1));
     assert_eq!(
-        fs::read(pair.right.path().join(format!(
-            ".foldover/archive/{}/.foldover-tmp-left",
-            epoch_run()
-        )))
+        fs::read(
+            pair.right
+                .path()
+                .join(".foldover/archive")
+                .join(report.archive())
+                .join(".foldover-tmp-left")
+        )
         .unwrap(),
         b"displaced"
     );
@@ -1426,10 +1466,9 @@ fn completed_runs_name_their_archive_and_prune_expired_runs() {
     else {
         panic!("expected a run");
     };
-    assert_eq!(
-        report.archive(),
-        foldover_endpoint::run_name(started, fixture_pair())
-    );
+    let archive_prefix = format!("{}_", foldover_endpoint::run_name(started, fixture_pair()));
+    assert!(report.archive().starts_with(&archive_prefix));
+    assert_eq!(report.archive().len(), archive_prefix.len() + 32);
     assert_eq!(report.pruned(), 1);
     assert!(
         !archive
@@ -1514,7 +1553,8 @@ fn resolved_conflicts_keep_the_chosen_side_until_either_side_changes() {
     let archive = pair
         .left
         .path()
-        .join(format!(".foldover/archive/{}", epoch_run()));
+        .join(".foldover/archive")
+        .join(report.archive());
     assert_eq!(fs::read(archive.join("file")).unwrap(), b"left");
     assert!(!pair.right.path().join("gone").exists());
 
@@ -1576,7 +1616,9 @@ fn a_folder_choice_settles_the_whole_folder() {
                 let archive = pair
                     .left
                     .path()
-                    .join(format!(".foldover/archive/{}/photos", epoch_run()));
+                    .join(".foldover/archive")
+                    .join(report.archive())
+                    .join("photos");
                 assert_eq!(fs::read(archive.join("a.jpg")).unwrap(), b"edited");
                 assert_eq!(fs::read(archive.join("b.jpg")).unwrap(), b"b");
             }
@@ -2477,10 +2519,11 @@ fn a_root_whose_identity_changes_mid_run_stops_at_the_next_batch() {
 
 const HOUR: std::time::Duration = std::time::Duration::from_secs(3_600);
 
-/// Leases that give up on a busy folder at once and count a still one as
-/// dead quickly.
+/// Give up on a busy folder at once, but leave claim promotion enough
+/// time for ordinary local and SFTP I/O stalls on shared CI hosts. These
+/// run fixtures do not test TTL expiry; lease-specific tests do that.
 const TEST_LEASES: LeaseTiming = LeaseTiming {
-    ttl: std::time::Duration::from_millis(200),
+    ttl: std::time::Duration::from_secs(3),
     beat: std::time::Duration::from_millis(50),
     poll: std::time::Duration::from_millis(20),
     wait: std::time::Duration::ZERO,
@@ -3176,7 +3219,7 @@ fn keeping_the_target_side_copies_a_change_the_other_way() {
     assert_eq!(fs::read(left.join("deleted")).unwrap(), b"d");
     // B's version wins in A; A's edit is in A's archive.
     assert_eq!(fs::read(left.join("edited")).unwrap(), b"v1");
-    let archive = left.join(format!(".foldover/archive/{}", epoch_run()));
+    let archive = left.join(".foldover/archive").join(report.archive());
     assert_eq!(fs::read(archive.join("edited")).unwrap(), b"version 2");
     assert_eq!(fs::read(right.join("edited")).unwrap(), b"v1");
     assert!(pair.prepare().preview().items().is_empty());

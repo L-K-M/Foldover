@@ -99,9 +99,70 @@ while True:
 child.wait()
 "#;
 
-/// An endpoint whose server speaks SFTP v3 but not the fsync extension,
-/// or `None` without `python3` and an `sftp-server`.
-fn without_fsync(directory: &Path) -> Option<SftpEndpoint> {
+/// A proxy for a server whose ordinary v3 rename replaces its target.
+/// It rewrites `SSH_FXP_RENAME` to OpenSSH's atomic replacing extension.
+const REPLACING_RENAME_PROXY: &str = r#"
+import struct, subprocess, sys, threading, time
+
+child = subprocess.Popen(
+    sys.argv[1:], stdin=subprocess.PIPE, stdout=subprocess.PIPE
+)
+closing = set()
+closing_lock = threading.Lock()
+
+
+def packet(stream):
+    head = stream.read(4)
+    if len(head) < 4:
+        return None
+    (length,) = struct.unpack(">I", head)
+    body = stream.read(length)
+    if len(body) < length:
+        return None
+    return body
+
+
+def requests():
+    while True:
+        body = packet(sys.stdin.buffer)
+        if body is None:
+            break
+        if body[0] == 18:  # SSH_FXP_RENAME
+            extension = b"posix-rename@openssh.com"
+            original = body
+            body = bytes([200]) + body[1:5]
+            body += struct.pack(">I", len(extension)) + extension
+            body += original[5:]
+        elif body[0] == 4:  # SSH_FXP_CLOSE
+            with closing_lock:
+                closing.add(struct.unpack(">I", body[1:5])[0])
+        child.stdin.write(struct.pack(">I", len(body)) + body)
+        child.stdin.flush()
+    child.stdin.close()
+
+
+threading.Thread(target=requests, daemon=True).start()
+
+while True:
+    body = packet(child.stdout)
+    if body is None:
+        break
+    if body[0] == 101:  # SSH_FXP_STATUS
+        request = struct.unpack(">I", body[1:5])[0]
+        with closing_lock:
+            delayed = request in closing
+            closing.discard(request)
+        if delayed:
+            # Let tests replace a just-written path before its creator sees
+            # CLOSE complete and verifies the final bytes.
+            time.sleep(0.5)
+    sys.stdout.buffer.write(struct.pack(">I", len(body)) + body)
+    sys.stdout.buffer.flush()
+
+child.wait()
+"#;
+
+fn proxy(directory: &Path, script: &str, description: &str) -> Option<SftpEndpoint> {
     let python = std::process::Command::new("python3")
         .arg("--version")
         .status()
@@ -109,18 +170,28 @@ fn without_fsync(directory: &Path) -> Option<SftpEndpoint> {
         .filter(|status| status.success())
         .map(|_| PathBuf::from("python3"));
     let (Some(python), Some(server)) = (python, server()) else {
-        eprintln!("python3 or sftp-server missing; no-fsync fixture skipped");
+        eprintln!("python3 or sftp-server missing; {description} fixture skipped");
         return None;
     };
     let arguments = [
         OsStr::new("-c"),
-        OsStr::new(NO_FSYNC_PROXY),
+        OsStr::new(script),
         server.as_os_str(),
         OsStr::new("-d"),
         OsStr::new("/"),
     ];
     let root = directory.as_os_str().as_encoded_bytes();
     Some(SftpEndpoint::spawn(&python, &arguments, root).unwrap())
+}
+
+/// An endpoint whose server speaks SFTP v3 but not the fsync extension,
+/// or `None` without `python3` and an `sftp-server`.
+fn without_fsync(directory: &Path) -> Option<SftpEndpoint> {
+    proxy(directory, NO_FSYNC_PROXY, "no-fsync")
+}
+
+fn replacing_rename(directory: &Path) -> Option<SftpEndpoint> {
+    proxy(directory, REPLACING_RENAME_PROXY, "replacing-rename")
 }
 
 fn proceed() -> ScanControl {
@@ -172,9 +243,16 @@ fn archived_runs_are_only_directories_named_like_runs() {
     };
     let archive = directory.path().join(".foldover/archive");
     let run = crate::local::archive::archive_name(UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+    let pair: foldover_types::PairId = "0123456789abcdef0123456789abcdef".parse().unwrap();
+    let tied =
+        crate::local::archive::run_name(UNIX_EPOCH + Duration::from_secs(1_700_000_000), pair);
+    let tied_first = format!("{tied}_00000000000000000000000000000001");
+    let tied_second = format!("{tied}_00000000000000000000000000000002");
     let file = crate::local::archive::archive_name(UNIX_EPOCH + Duration::from_secs(1_700_000_001));
     let link = crate::local::archive::archive_name(UNIX_EPOCH + Duration::from_secs(1_700_000_002));
     fs::create_dir_all(archive.join(&run)).unwrap();
+    fs::create_dir_all(archive.join(&tied_first)).unwrap();
+    fs::create_dir_all(archive.join(&tied_second)).unwrap();
     fs::write(archive.join(&file), b"not a run").unwrap();
     std::os::unix::fs::symlink(&run, archive.join(&link)).unwrap();
     fs::create_dir(archive.join("kept by the user")).unwrap();
@@ -185,7 +263,7 @@ fn archived_runs_are_only_directories_named_like_runs() {
         .iter()
         .map(|run| run.name().to_owned())
         .collect();
-    assert_eq!(runs, [run]);
+    assert_eq!(runs, [tied_second, tied_first, run]);
 }
 
 /// Review: each entry was listed and checked back to back, so the
@@ -1562,7 +1640,6 @@ fn lock_files_are_created_exclusively_and_replaced_by_a_promoted_claim() {
         Some(&b"first"[..])
     );
 
-    remote.replace_lock_file(LockFile::Lock, b"beat").unwrap();
     assert!(remote.create_lock_file(LockFile::Claim, b"claim").unwrap());
     remote.promote_claim().unwrap();
     assert_eq!(
@@ -1575,6 +1652,67 @@ fn lock_files_are_created_exclusively_and_replaced_by_a_promoted_claim() {
     remote.remove_lock_file(LockFile::Lock).unwrap();
     let left = fs::read_dir(directory.path().join(".foldover")).unwrap();
     assert_eq!(left.count(), 0, "temporary files were left behind");
+}
+
+/// Lease creation uses SFTP's exclusive open rather than relying on an
+/// ordinary rename refusing replacement, which is not universal.
+#[test]
+fn exclusive_lock_creation_does_not_depend_on_rename_refusing_replacement() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = replacing_rename(directory.path()) else {
+        return;
+    };
+
+    // Prove the fixture's ordinary rename really does replace its target.
+    let source = directory.path().join("rename-source");
+    let target = directory.path().join("rename-target");
+    fs::write(&source, b"replacement").unwrap();
+    fs::write(&target, b"old").unwrap();
+    remote
+        .renamed(
+            &remote.remote(b"rename-source"),
+            &remote.remote(b"rename-target"),
+        )
+        .unwrap();
+    assert!(!source.exists());
+    assert_eq!(fs::read(target).unwrap(), b"replacement");
+
+    assert!(remote.create_lock_file(LockFile::Lock, b"first").unwrap());
+    assert!(!remote.create_lock_file(LockFile::Lock, b"second").unwrap());
+    assert_eq!(
+        remote.read_lock_file(LockFile::Lock).unwrap().as_deref(),
+        Some(&b"first"[..])
+    );
+}
+
+/// A creator delayed after writing must not claim a successor's replacement
+/// as its own lock when its CLOSE reply finally arrives.
+#[test]
+fn exclusive_lock_creation_verifies_the_final_record() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = replacing_rename(directory.path()) else {
+        return;
+    };
+    let lock = directory.path().join(".foldover/lock");
+    let replacement = directory.path().join("successor-lock");
+
+    let created = std::thread::scope(|scope| {
+        let creator = scope.spawn(|| remote.create_lock_file(LockFile::Lock, b"first"));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while fs::read(&lock).ok().as_deref() != Some(&b"first"[..]) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "lock was never written"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        fs::write(&replacement, b"successor").unwrap();
+        fs::rename(&replacement, &lock).unwrap();
+        creator.join().unwrap().unwrap()
+    });
+
+    assert!(!created);
+    assert_eq!(fs::read(lock).unwrap(), b"successor");
 }
 
 /// Review of bandwidth: a cancel that came while a streamed copy waited

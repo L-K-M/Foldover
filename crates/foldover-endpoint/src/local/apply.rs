@@ -16,7 +16,7 @@ use foldover_types::{
     EntryContent, EntryKind, EntryVersion, InvalidSyncPath, PairId, PairOptions, SyncPath,
 };
 
-use super::archive::{ARCHIVE_ROOT, run_name};
+use super::archive::{ARCHIVE_ROOT, unique_run_name};
 use super::{
     LocalEndpoint, LocalEntry, NodeKind, ObservedEntry, Payload, ScanControl, ScanError,
     entry_version, metadata_version, observed,
@@ -52,10 +52,11 @@ pub struct RunScope {
 }
 
 impl RunScope {
-    /// A run of `pair`; the archive folder is named after `started` and
-    /// the pair, so pairs sharing a folder keep their runs apart.
+    /// A run of `pair`; the archive folder is named after `started`,
+    /// the pair and a fresh unique ID, so pairs sharing a folder keep
+    /// their runs apart and runs sharing a millisecond stay distinct.
     pub fn new(started: SystemTime, pair: PairId, options: PairOptions) -> Self {
-        let name = run_name(started, pair);
+        let name = unique_run_name(started, pair);
         let mut archive = ARCHIVE_ROOT.to_vec();
         archive.push(b'/');
         archive.extend_from_slice(name.as_bytes());
