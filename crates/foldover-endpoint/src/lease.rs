@@ -188,18 +188,34 @@ impl<'a> HeldLease<'a> {
         let (mut announced, mut released) = (false, false);
         loop {
             let ours = Record::of(&holder, 0);
-            if endpoint.create_lock_file(LockFile::Lock, &ours.bytes())? {
+            // A claim can outlive its lock, including one left by an older
+            // release. Do not grant a lease its first beat cannot renew.
+            let pending_claim = endpoint.read_lock_file(LockFile::Claim)?;
+            if pending_claim.is_none()
+                && endpoint.create_lock_file(LockFile::Lock, &ours.bytes())?
+            {
                 return Ok(Self::held(endpoint, holder, timing));
             }
             match endpoint.read_lock_file(LockFile::Lock)? {
                 // Released meanwhile: try again at once. A lock that keeps
                 // vanishing as this run creates its own waits below like a
                 // busy one, so it cannot spin past the deadline.
-                None if !released => {
+                None if !released && pending_claim.is_none() => {
+                    claim = None;
                     released = true;
                     continue;
                 }
-                None => released = false,
+                None => {
+                    lock = None;
+                    released = false;
+                    match pending_claim {
+                        Some(bytes) if Seen::dead(&mut claim, &bytes, timing.ttl) => {
+                            endpoint.remove_lock_file(LockFile::Claim)?;
+                        }
+                        None => claim = None,
+                        Some(_) => {}
+                    }
+                }
                 Some(bytes) => {
                     released = false;
                     if Record::parse(&bytes).is_some_and(|record| record.holder == holder.id) {
@@ -222,7 +238,7 @@ impl<'a> HeldLease<'a> {
                     }
                 }
             }
-            let label = Seen::label(lock.as_ref());
+            let label = Seen::label(lock.as_ref().or(claim.as_ref()));
             if Instant::now() >= deadline {
                 return Err(LeaseError::Busy {
                     label: label.to_owned(),
