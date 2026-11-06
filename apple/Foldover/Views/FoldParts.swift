@@ -343,30 +343,36 @@ private struct FoldArrow: View {
     }
 }
 
-/// A disk's name, a bar of what it holds and what a run still copies
-/// there, and both in words, in white on the leaf's back under the
-/// readout of the run that copies there.
+/// A disk's name and free space beside a small capacity donut, in white
+/// on the leaf's back under the readout of the run that copies there.
 struct FoldDiskView: View {
     let disk: FoldDisk
 
-    /// As long as the readout's bar above it.
-    private static let barWidth: CGFloat = 220
-    private static let barHeight: CGFloat = 6
+    private static let donutSize: CGFloat = 40
 
     var body: some View {
         VStack(spacing: 5) {
-            Text(disk.name)
-                .font(FoldType.backEyebrow)
-                .textCase(.uppercase)
-                .tracking(FoldType.eyebrowTracking * 1.5)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            DiskBar(stored: disk.stored, arriving: disk.arriving)
-                .frame(maxWidth: Self.barWidth)
-                .frame(height: Self.barHeight)
-                .padding(.vertical, 2)
-            Text([disk.free, disk.toCopy].compactMap { $0 }.joined(separator: " · "))
-                .font(.callout)
+            HStack(spacing: 10) {
+                DiskDonut(stored: disk.stored, arriving: disk.arriving)
+                    .frame(width: Self.donutSize, height: Self.donutSize)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(disk.name)
+                        .font(FoldType.backEyebrow)
+                        .textCase(.uppercase)
+                        .tracking(FoldType.eyebrowTracking * 1.5)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(disk.free)
+                        .font(.callout)
+                    if let toCopy = disk.toCopy {
+                        Text(toCopy)
+                            .font(.callout)
+                            .opacity(0.75)
+                    }
+                }
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+            }
             if disk.mayNotFit {
                 Label(FoldDisk.mayNotFitText, systemImage: "exclamationmark.triangle.fill")
                     .font(.callout)
@@ -383,26 +389,28 @@ struct FoldDiskView: View {
     }
 }
 
-/// A disk's capacity as a bar in shades of white on the cerulean: what it
-/// holds brightest, what the run still copies there fainter, and its free
-/// space bare.
-private struct DiskBar: View {
+/// Capacity, not progress: a closed ring in shades of white, with stored
+/// data brightest, incoming copies fainter, and free space dimmest. Butt
+/// caps keep the segments proportional even for an empty or full disk.
+private struct DiskDonut: View {
     let stored: Double
     let arriving: Double
 
+    private static let lineWidth: CGFloat = 6
+
     var body: some View {
-        GeometryReader { proxy in
-            let width = proxy.size.width
-            ZStack(alignment: .leading) {
-                Capsule().fill(.white.opacity(0.22))
-                Capsule()
-                    .fill(.white.opacity(0.6))
-                    .frame(width: width * min(1, stored + arriving))
-                Capsule()
-                    .fill(.white.opacity(0.92))
-                    .frame(width: width * min(1, stored))
-            }
+        let stored = min(1, self.stored)
+        let filled = min(1, stored + arriving)
+        ZStack {
+            Circle().trim(from: filled, to: 1)
+                .stroke(.white.opacity(0.22), lineWidth: Self.lineWidth)
+            Circle().trim(from: stored, to: filled)
+                .stroke(.white.opacity(0.6), lineWidth: Self.lineWidth)
+            Circle().trim(from: 0, to: stored)
+                .stroke(.white.opacity(0.92), lineWidth: Self.lineWidth)
         }
+        .padding(Self.lineWidth / 2)
+        .rotationEffect(.degrees(-90))
         .accessibilityHidden(true)
     }
 }
