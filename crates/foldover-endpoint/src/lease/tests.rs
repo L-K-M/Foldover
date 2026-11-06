@@ -185,6 +185,40 @@ fn a_claim_left_by_a_reclaimer_that_died_is_cleared_in_turn() {
 }
 
 #[test]
+fn an_orphaned_claim_is_recovered_before_a_free_lease_is_granted() {
+    let (directory, _, endpoint) = folder();
+    let claim = directory.path().join(".foldover/lock.claim");
+    fs::create_dir_all(claim.parent().unwrap()).unwrap();
+    fs::write(&claim, Record::of(&holder("dead/run", "Mini"), 0).bytes()).unwrap();
+
+    let held = take(&endpoint, holder("new/run", "Studio"), QUICK, &mut proceed).unwrap();
+    held.renew()
+        .expect("a granted lease must not be fenced by an orphaned claim");
+    drop(held);
+    assert!(!claim.exists());
+    assert!(!directory.path().join(".foldover/lock").exists());
+}
+
+#[test]
+fn a_free_lock_with_a_live_claim_is_busy_and_keeps_both_paths_untouched() {
+    let (directory, _, endpoint) = folder();
+    let claim = directory.path().join(".foldover/lock.claim");
+    let record = Record::of(&holder("other/run", "Mini"), 0).bytes();
+    fs::create_dir_all(claim.parent().unwrap()).unwrap();
+    fs::write(&claim, &record).unwrap();
+
+    let result = take(
+        &endpoint,
+        holder("new/run", "Studio"),
+        NO_WAIT,
+        &mut proceed,
+    );
+    assert!(matches!(result, Err(LeaseError::Busy { label }) if label == "Mini"));
+    assert_eq!(fs::read(claim).unwrap(), record);
+    assert!(!directory.path().join(".foldover/lock").exists());
+}
+
+#[test]
 fn a_dead_lock_and_claim_recover_within_one_wait() {
     let (directory, a, b) = folder();
     // Like STANDARD, this allows one TTL but not two. Starting the
