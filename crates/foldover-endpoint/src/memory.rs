@@ -821,6 +821,7 @@ impl MemoryEndpoint {
         let expired: Vec<Vec<u8>> = folder
             .entries
             .values()
+            .filter(|stored| matches!(&stored.node, Node::Directory { .. }))
             .filter_map(|stored| {
                 let rest = stored.path.strip_prefix(prefix.as_slice())?;
                 (!rest.contains(&b'/')).then_some(stored.path.clone())
@@ -863,16 +864,6 @@ impl MemoryEndpoint {
             .private_file(file.path(), content.to_vec())
             .map_err(|source| write(file.path(), source))?;
         Ok(true)
-    }
-
-    pub(crate) fn replace_lock_file(
-        &self,
-        file: LockFile,
-        content: &[u8],
-    ) -> Result<(), ApplyError> {
-        self.folder()
-            .private_file(file.path(), content.to_vec())
-            .map_err(|source| write(file.path(), source))
     }
 
     pub(crate) fn remove_lock_file(&self, file: LockFile) -> Result<(), ApplyError> {

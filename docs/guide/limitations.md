@@ -98,9 +98,7 @@ you might expect. Only the last three below block saving
 - After a takeover the old holder may still write for up to one beat,
   15 seconds, before it stops; staged writes and archived replacements
   keep that window recoverable ([ADR 0032](../adr/0032-root-leases.md)).
-- A run on an SFTP folder opens a second SSH connection for its leases,
-  and an SFTP server whose rename replaces an existing file breaks the
-  exclusive create: two Macs could both take a free lease
+- A run on an SFTP folder opens a second SSH connection for its leases
   ([ADR 0032](../adr/0032-root-leases.md)).
 
 ## Moves

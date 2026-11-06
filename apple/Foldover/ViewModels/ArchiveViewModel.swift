@@ -84,6 +84,9 @@ struct ArchiveViewModel {
             return String(localized: "\(PairSyncViewModel.folderName(store.side)) has nothing archived.")
         }
         if store.run != nil, store.items.isEmpty {
+            if store.hasMoreItems {
+                return String(localized: "More archived items are available. Choose Show More to load them.")
+            }
             return String(localized: "Nothing from this sync is left in the archive.")
         }
         return nil
@@ -93,7 +96,7 @@ struct ArchiveViewModel {
         store.hasOlderRuns ? String(localized: "Older syncs are not listed.") : nil
     }
 
-    var canPutBackAll: Bool { canPutBack && !store.items.isEmpty }
+    var canPutBackAll: Bool { canPutBack && (!store.items.isEmpty || store.hasMoreItems) }
 
     var putBackAllQuestion: String {
         String(localized: "Put back everything this sync archived in \(PairSyncViewModel.folderName(store.side))? Nothing is replaced: items whose place is taken go beside it with \"(restored)\" in their name.")
@@ -127,8 +130,10 @@ struct ArchiveViewModel {
         return String(localized: "Put back \(store.placedCount) items. The next sync copies them to the other folder.")
     }
 
-    func load() async { await store.open(pair.id, side: store.side) }
-    func show(_ side: FolderSide) async { await store.open(pair.id, side: side) }
+    func load() async { await store.open(pair.id, revision: pair.revision, side: store.side) }
+    func show(_ side: FolderSide) async {
+        await store.open(pair.id, revision: pair.revision, side: side)
+    }
     func select(_ run: String) async { await store.select(run) }
     func loadMore() async { await store.loadMore() }
 

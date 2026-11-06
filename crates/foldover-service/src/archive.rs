@@ -31,7 +31,7 @@ pub(crate) async fn handle(
     match request.method() {
         ARCHIVE_RUNS => {
             let params: ArchiveKey = parameters(request)?;
-            let archive = open(engine, &params.id, params.side.into()).await?;
+            let archive = open(engine, &params.id, params.revision, params.side.into()).await?;
             let mut runs = blocking(move || archive.runs()).await?;
             let more = runs.len() > ARCHIVE_RUN_LIMIT;
             runs.truncate(ARCHIVE_RUN_LIMIT);
@@ -50,7 +50,7 @@ pub(crate) async fn handle(
             let params: ArchiveItemQuery = parameters(request)?;
             let after = params.after.map(sync_path).transpose()?;
             let side = params.side.into();
-            let (pair, reach) = configuration(engine, &params.id).await?;
+            let (pair, reach) = configuration(engine, &params.id, params.revision).await?;
             let key = RunKey {
                 id: pair.id(),
                 revision: pair.revision(),
@@ -88,7 +88,7 @@ pub(crate) async fn handle(
             // acquisition; the guard blocks job claims and other
             // mutations across the whole read-and-restore.
             let _mutation = jobs.mutation(pair_id(&params.id)?)?;
-            let archive = open(engine, &params.id, params.side.into()).await?;
+            let archive = open(engine, &params.id, params.revision, params.side.into()).await?;
             #[cfg(test)]
             let jobs = Arc::clone(jobs);
             let report = blocking(move || {
@@ -117,7 +117,7 @@ pub(crate) async fn handle(
             let path = sync_path(params.path)?;
             // Same reservation as the run-all variant above.
             let _mutation = jobs.mutation(pair_id(&params.id)?)?;
-            let archive = open(engine, &params.id, params.side.into()).await?;
+            let archive = open(engine, &params.id, params.revision, params.side.into()).await?;
             #[cfg(test)]
             let jobs = Arc::clone(jobs);
             let placed = blocking(move || {
@@ -133,22 +133,32 @@ pub(crate) async fn handle(
     }
 }
 
-async fn open(engine: &Arc<Mutex<Engine>>, id: &str, side: Side) -> Result<PairArchive, RpcError> {
-    let (pair, reach) = configuration(engine, id).await?;
+async fn open(
+    engine: &Arc<Mutex<Engine>>,
+    id: &str,
+    revision: u64,
+    side: Side,
+) -> Result<PairArchive, RpcError> {
+    let (pair, reach) = configuration(engine, id, revision).await?;
     opened(pair, side, reach).await
 }
 
 async fn configuration(
     engine: &Arc<Mutex<Engine>>,
     id: &str,
+    revision: u64,
 ) -> Result<(PairConfig, Reach), RpcError> {
     let id = pair_id(id)?;
+    let revision = crate::expected_revision(revision)?;
     let engine = Arc::clone(engine);
     tokio::task::spawn_blocking(move || {
         let engine = engine
             .lock()
             .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?;
         let pair = engine.active_pair(id).map_err(crate::engine_error)?;
+        if pair.revision() != revision {
+            return Err(crate::engine_error(foldover_engine::Error::StaleRevision));
+        }
         Ok::<_, RpcError>((pair, engine.reach()))
     })
     .await

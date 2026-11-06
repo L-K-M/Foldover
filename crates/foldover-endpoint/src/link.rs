@@ -24,7 +24,7 @@ use foldover_net::peer::{
     PeerSendStream, TrustStore, read_message, write_message,
 };
 use foldover_proto::peer::{PEER_PROTOCOL, PairingMessage, PeerCall, PeerReply, PeerRequest};
-use foldover_types::DeviceId;
+use foldover_types::{DeviceId, ScanControl};
 use tokio::runtime::Handle;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
@@ -34,6 +34,9 @@ pub use stream::{Answer, Exchange, Incoming};
 
 /// How long a broken watch waits before asking again.
 const WATCH_RETRY: Duration = Duration::from_secs(30);
+/// A quiet watch is healthy only while the answering Mac's minute
+/// heartbeat arrives within this bound.
+const WATCH_INACTIVITY: Duration = Duration::from_secs(90);
 
 /// How long a person has to confirm a code once both Macs show it.
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -66,6 +69,10 @@ pub enum LinkError {
     Unreachable,
     #[error("This Mac stopped talking to other Macs")]
     Closed,
+    #[error("The peer operation was cancelled")]
+    Cancelled,
+    #[error("That Mac stopped answering")]
+    TimedOut,
 }
 
 /// Whether this Mac announces itself to other Macs on the local network.
@@ -440,6 +447,28 @@ impl PeerLink {
     /// caller to read the replies; never call it from the runtime's own
     /// workers.
     pub fn ask(&self, device: DeviceId, call: PeerCall) -> Result<Exchange, LinkError> {
+        self.ask_unless(device, call, &mut proceed)
+    }
+
+    /// Open a streamed request while `control` still permits the work.
+    /// The opening future owns a fresh stream, so cancellation may safely
+    /// drop it before an `Exchange` exists.
+    pub fn ask_unless(
+        &self,
+        device: DeviceId,
+        call: PeerCall,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<Exchange, LinkError> {
+        self.ask_with_inactivity(device, call, stream::STREAM_INACTIVITY, control)
+    }
+
+    fn ask_with_inactivity(
+        &self,
+        device: DeviceId,
+        call: PeerCall,
+        inactivity: Duration,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<Exchange, LinkError> {
         if !self.is_paired(device) {
             return Err(LinkError::NotPaired);
         }
@@ -447,13 +476,29 @@ impl PeerLink {
             protocol: PEER_PROTOCOL,
             call,
         };
-        let (send, recv) = self.runtime.block_on(self.open(device, &request))?;
-        Ok(Exchange::new(
+        let closing = self.closing.subscribe();
+        let (send, recv) =
+            stream::until_unless(&self.runtime, Some(&closing), inactivity, control, async {
+                self.open(device, &request).await
+            })?;
+        Ok(Exchange::with_inactivity(
             self.runtime.clone(),
             send,
             recv,
-            self.closing.subscribe(),
+            closing,
+            inactivity,
         ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ask_unless_with_inactivity(
+        &self,
+        device: DeviceId,
+        call: PeerCall,
+        inactivity: Duration,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<Exchange, LinkError> {
+        self.ask_with_inactivity(device, call, inactivity, control)
     }
 
     /// Keep `call`, a request answered with reports, open to `device`:
@@ -465,6 +510,17 @@ impl PeerLink {
         call: PeerCall,
         report: impl Fn(Watched) + Send + Sync + 'static,
     ) -> WatchHandle {
+        self.watch_with_timing(device, call, report, WATCH_INACTIVITY, WATCH_RETRY)
+    }
+
+    fn watch_with_timing(
+        self: &Arc<Self>,
+        device: DeviceId,
+        call: PeerCall,
+        report: impl Fn(Watched) + Send + Sync + 'static,
+        inactivity: Duration,
+        retry: Duration,
+    ) -> WatchHandle {
         let link = Arc::downgrade(self);
         let request = PeerRequest {
             protocol: PEER_PROTOCOL,
@@ -475,11 +531,14 @@ impl PeerLink {
                 let Some(asking) = link.upgrade() else {
                     return;
                 };
-                let opened = asking.open(device, &request).await;
+                let opened = tokio::time::timeout(inactivity, asking.open(device, &request))
+                    .await
+                    .map_err(|_| LinkError::TimedOut)
+                    .and_then(std::convert::identity);
                 drop(asking);
                 if let Ok((mut send, mut recv)) = opened {
                     let _ = send.finish();
-                    while let Ok(bytes) = stream::receive_json(&mut recv).await {
+                    while let Ok(bytes) = stream::receive_json_until(&mut recv, inactivity).await {
                         match serde_json::from_slice(&bytes) {
                             Ok(reply) => report(Watched::Reply(reply)),
                             Err(_) => break,
@@ -487,7 +546,7 @@ impl PeerLink {
                     }
                 }
                 report(Watched::Lost);
-                tokio::time::sleep(WATCH_RETRY).await;
+                tokio::time::sleep(retry).await;
             }
         }))
     }
@@ -764,7 +823,7 @@ async fn answer_one(
     mut send: PeerSendStream,
     mut recv: PeerRecvStream,
 ) {
-    let Ok(bytes) = stream::receive_json(&mut recv).await else {
+    let Ok(bytes) = stream::receive_json_until(&mut recv, stream::STREAM_INACTIVITY).await else {
         return;
     };
     let request = match serde_json::from_slice::<PeerRequest>(&bytes) {
@@ -795,9 +854,13 @@ async fn answer_one(
         answer.into_send()
     })
     .await;
-    if let Ok(mut send) = answered {
+    if let Ok(Some(mut send)) = answered {
         let _ = tokio::time::timeout(DELIVERY_TIMEOUT, send.finish_delivered()).await;
     }
+}
+
+fn proceed() -> ScanControl {
+    ScanControl::Continue
 }
 
 async fn send_message(

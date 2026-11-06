@@ -1249,11 +1249,12 @@ async fn archive(
     side: Side,
     command: ArchiveCommand,
 ) -> Result<ExitCode, foldover_client::Error> {
+    let pair = foldover_client::pair(location, id).await?;
+    let revision = pair.revision();
     if matches!(
         &command,
         ArchiveCommand::PutBack { .. } | ArchiveCommand::PutBackAll(_)
     ) {
-        let pair = foldover_client::pair(location, id).await?;
         let root = match side {
             Side::Left => pair.draft().left(),
             Side::Right => pair.draft().right(),
@@ -1262,7 +1263,7 @@ async fn archive(
     }
     match command {
         ArchiveCommand::Runs => {
-            let runs = foldover_client::archive_runs(location, id, side).await?;
+            let runs = foldover_client::archive_runs(location, id, revision, side).await?;
             for run in &runs.runs {
                 println!("{}", serde_json::to_string(run)?);
             }
@@ -1273,9 +1274,15 @@ async fn archive(
         ArchiveCommand::Items(run) => {
             let mut after = None;
             loop {
-                let page =
-                    foldover_client::archive_items(location, id, side, &run, after.as_deref())
-                        .await?;
+                let page = foldover_client::archive_items(
+                    location,
+                    id,
+                    revision,
+                    side,
+                    &run,
+                    after.as_deref(),
+                )
+                .await?;
                 for item in &page.items {
                     println!("{}", serde_json::to_string(item)?);
                 }
@@ -1286,11 +1293,13 @@ async fn archive(
             }
         }
         ArchiveCommand::PutBack { run, path } => {
-            let placed = foldover_client::put_back(location, id, side, &run, &path).await?;
+            let placed =
+                foldover_client::put_back(location, id, revision, side, &run, &path).await?;
             println!("{}", serde_json::json!({ "path": placed }));
         }
         ArchiveCommand::PutBackAll(run) => {
-            let restored = foldover_client::put_back_all(location, id, side, &run).await?;
+            let restored =
+                foldover_client::put_back_all(location, id, revision, side, &run).await?;
             println!("{}", serde_json::to_string(&restored)?);
             if restored.failure_count > 0 {
                 eprintln!(
@@ -1420,6 +1429,13 @@ mod tests {
             job: foldover_client::SyncJob::Run,
             cancelling: false,
             progress: foldover_client::SyncProgress::default(),
+            pair: foldover_client::SyncPairContext {
+                revision: 1,
+                name: "Test pair".into(),
+                left_root: b"/left".to_vec(),
+                right_root: b"/right".to_vec(),
+                mode: foldover_client::PairMode::Sync,
+            },
         }
     }
 
