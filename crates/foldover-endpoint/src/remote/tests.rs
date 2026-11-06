@@ -231,7 +231,7 @@ fn stopping_a_peer_receive_waiting_for_its_final_reply_returns_cancelled() {
     let (done_tx, done) = mpsc::channel();
     let worker = std::thread::spawn(move || {
         let path = SyncPath::try_from(b"file.bin".as_slice()).unwrap();
-        let run = RunScope::new(UNIX_EPOCH, PairOptions::default());
+        let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), PairOptions::default());
         let carried = Carried {
             metadata: foldover_fs::ForeignMetadata {
                 permissions: 0o644,
@@ -291,7 +291,7 @@ fn stopping_a_peer_receive_while_its_producer_is_still_working_returns_cancelled
     let (done_tx, done) = mpsc::channel();
     let worker = std::thread::spawn(move || {
         let path = SyncPath::try_from(b"file.bin".as_slice()).unwrap();
-        let run = RunScope::new(UNIX_EPOCH, PairOptions::default());
+        let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), PairOptions::default());
         let carried = Carried {
             metadata: foldover_fs::ForeignMetadata {
                 permissions: 0o644,
@@ -360,7 +360,7 @@ fn a_peer_receive_keeps_a_transport_failure_sticky_for_its_producer() {
     let (done_tx, done) = mpsc::channel();
     let worker = std::thread::spawn(move || {
         let path = SyncPath::try_from(b"file.bin".as_slice()).unwrap();
-        let run = RunScope::new(UNIX_EPOCH, PairOptions::default());
+        let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), PairOptions::default());
         let carried = Carried {
             metadata: foldover_fs::ForeignMetadata {
                 permissions: 0o644,

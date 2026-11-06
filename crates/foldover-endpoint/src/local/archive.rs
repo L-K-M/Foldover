@@ -966,6 +966,31 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_before_pruning_keeps_expired_archives() {
+        let directory = tempfile::tempdir().unwrap();
+        let archived = directory
+            .path()
+            .join(".foldover/archive")
+            .join(archive_name(at(0)))
+            .join("kept");
+        fs::create_dir_all(archived.parent().unwrap()).unwrap();
+        fs::write(&archived, b"keep me").unwrap();
+        let endpoint = crate::Endpoint::Local(LocalEndpoint::open(directory.path()).unwrap());
+
+        let result = endpoint.prune_archive(
+            Duration::from_secs(1),
+            at(2_000),
+            Pruning::Everyone,
+            &mut || crate::ScanControl::Cancel,
+        );
+        assert!(matches!(
+            result,
+            Err(ApplyError::Scan(ScanError::Cancelled))
+        ));
+        assert_eq!(fs::read(archived).unwrap(), b"keep me");
+    }
+
+    #[test]
     fn pruning_deletes_only_expired_runs() {
         let directory = tempfile::tempdir().unwrap();
         let archive = directory.path().join(".foldover/archive");

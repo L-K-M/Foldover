@@ -188,8 +188,10 @@ fn a_two_step_replace_cut_short_leaves_the_old_archived_and_the_new_aside() {
     assert!(observed.entries().is_empty());
     assert_eq!(observed.leftovers().len(), 1);
     assert_eq!(right.archived_files(), [b"old".to_vec()]);
-    to.recover_leftover(&observed.leftovers()[0], &run())
-        .unwrap();
+    to.recover_leftover(&observed.leftovers()[0], &run(), &mut || {
+        ScanControl::Continue
+    })
+    .unwrap();
     let mut archived = right.archived_files();
     archived.sort();
     assert_eq!(archived, [b"new".to_vec(), b"old".to_vec()]);

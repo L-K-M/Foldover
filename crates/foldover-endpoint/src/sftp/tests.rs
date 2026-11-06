@@ -444,6 +444,143 @@ fn cancelling_stops_an_observation_on_several_sessions() {
     assert_eq!(observed.unwrap().entries().len(), FILES);
 }
 
+#[test]
+fn cancelling_a_mutation_stops_while_every_session_is_busy() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
+    let directory = tempfile::tempdir().unwrap();
+    let Some(mut remote) = sftp(directory.path()) else {
+        return;
+    };
+    let file = directory.path().join("victim");
+    fs::write(&file, b"keep me").unwrap();
+    let options = PairOptions::default();
+    let observed = remote
+        .observe_from(
+            options.metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+        )
+        .unwrap();
+    let name = path(b"victim");
+    let current = observed.entries()[&name].clone();
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), options);
+
+    let (attempted, reconnecting) = mpsc::channel();
+    remote.connect = Some(Box::new(move || {
+        let _ = attempted.send(());
+        Err(io::Error::new(
+            io::ErrorKind::NotConnected,
+            "server unavailable",
+        ))
+    }));
+    let held = remote.session();
+    let stopped = Arc::new(AtomicBool::new(false));
+
+    let result = std::thread::scope(|scope| {
+        let stopping = Arc::clone(&stopped);
+        let (finished, answer) = mpsc::sync_channel(1);
+        let (endpoint, victim, expected, scope_run) = (&remote, &name, &current, &run);
+        let worker = scope.spawn(move || {
+            let result = endpoint.remove(victim, expected, scope_run, &mut || {
+                if stopping.load(Ordering::SeqCst) {
+                    ScanControl::Cancel
+                } else {
+                    ScanControl::Continue
+                }
+            });
+            let _ = finished.send(result);
+        });
+
+        reconnecting
+            .recv_timeout(Duration::from_secs(3))
+            .expect("the mutation never waited for a session");
+        stopped.store(true, Ordering::SeqCst);
+        let result = answer.recv_timeout(Duration::from_secs(3));
+        drop(held);
+        if result.is_err() {
+            let _ = answer.recv_timeout(Duration::from_secs(3));
+        }
+        worker.join().unwrap();
+        result.expect("cancellation did not interrupt the session wait")
+    });
+
+    assert!(
+        matches!(result, Err(ApplyError::Scan(ScanError::Cancelled))),
+        "{result:?}"
+    );
+    assert_eq!(fs::read(file).unwrap(), b"keep me");
+}
+
+#[test]
+fn cancelling_archive_pruning_stops_while_every_session_is_busy() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, mpsc};
+
+    let directory = tempfile::tempdir().unwrap();
+    let archive = directory
+        .path()
+        .join(".foldover/archive/1970-01-01T00-00-00.000Z");
+    fs::create_dir_all(&archive).unwrap();
+    fs::write(archive.join("kept"), b"keep me").unwrap();
+    let Some(mut remote) = sftp(directory.path()) else {
+        return;
+    };
+
+    let (attempted, reconnecting) = mpsc::channel();
+    remote.connect = Some(Box::new(move || {
+        let _ = attempted.send(());
+        Err(io::Error::new(
+            io::ErrorKind::NotConnected,
+            "server unavailable",
+        ))
+    }));
+    let held = remote.session();
+    let stopped = Arc::new(AtomicBool::new(false));
+
+    let result = std::thread::scope(|scope| {
+        let stopping = Arc::clone(&stopped);
+        let (finished, answer) = mpsc::sync_channel(1);
+        let endpoint = &remote;
+        let worker = scope.spawn(move || {
+            let result = endpoint.prune_archive(
+                Duration::from_secs(1),
+                UNIX_EPOCH + Duration::from_secs(2),
+                crate::Pruning::Everyone,
+                &mut || {
+                    if stopping.load(Ordering::SeqCst) {
+                        ScanControl::Cancel
+                    } else {
+                        ScanControl::Continue
+                    }
+                },
+            );
+            let _ = finished.send(result);
+        });
+
+        reconnecting
+            .recv_timeout(Duration::from_secs(3))
+            .expect("archive pruning never waited for a session");
+        stopped.store(true, Ordering::SeqCst);
+        let result = answer.recv_timeout(Duration::from_secs(3));
+        drop(held);
+        if result.is_err() {
+            let _ = answer.recv_timeout(Duration::from_secs(3));
+        }
+        worker.join().unwrap();
+        result.expect("cancellation did not interrupt archive pruning")
+    });
+
+    assert!(
+        matches!(result, Err(ApplyError::Scan(ScanError::Cancelled))),
+        "{result:?}"
+    );
+    assert_eq!(fs::read(archive.join("kept")).unwrap(), b"keep me");
+}
+
 /// Storing a snapshot writes only what differs, so an entry read again and
 /// found the same must keep its exact stored observation.
 #[test]
@@ -1114,6 +1251,7 @@ fn identities_removals_and_pruning_follow_the_local_rules() {
             Duration::from_secs(1),
             SystemTime::now(),
             crate::Pruning::Everyone,
+            &mut proceed,
         )
         .unwrap();
     assert_eq!(pruned, 1);
@@ -1585,7 +1723,7 @@ fn full_durability_is_rejected(remote: &Endpoint, root: &Path) {
     let leftover = path(b".foldover-tmp-deadbeef");
     fs::write(root.join(".foldover-tmp-deadbeef"), b"half").unwrap();
     assert!(matches!(
-        remote.recover_leftover(&leftover, &run),
+        remote.recover_leftover(&leftover, &run, &mut proceed),
         Err(ApplyError::DurabilityUnsupported(_))
     ));
 
