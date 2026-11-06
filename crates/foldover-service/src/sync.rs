@@ -223,6 +223,7 @@ struct ClaimReservation {
     jobs: Arc<Jobs>,
     id: PairId,
     work: Work,
+    cancel: Arc<AtomicBool>,
     active: bool,
 }
 
@@ -241,7 +242,8 @@ struct State {
     /// Pairs whose configuration is being replaced refuse new job claims.
     mutating: HashSet<PairId>,
     /// Pairs between a successful claim check and Working publication.
-    claiming: HashSet<PairId>,
+    /// Own cancellation here until the published job can receive it.
+    claiming: HashMap<PairId, Arc<AtomicBool>>,
 }
 
 #[derive(Default)]
@@ -492,7 +494,7 @@ impl Jobs {
     /// stay resolvable.
     pub(crate) fn wait_for(&self, id: PairId, side: Side) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if state.mutating.contains(&id) || state.claiming.contains(&id) {
+        if state.mutating.contains(&id) || state.claiming.contains_key(&id) {
             return;
         }
         let waiting = SyncStatus::Waiting { side: side.into() };
@@ -524,7 +526,9 @@ impl Jobs {
 
     pub(crate) fn cancel(&self, id: PairId) {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(job) = state.jobs.get(&id) {
+        if let Some(cancel) = state.claiming.get(&id) {
+            cancel.store(true, Ordering::Relaxed);
+        } else if let Some(job) = state.jobs.get(&id) {
             job.cancel.store(true, Ordering::Relaxed);
         }
     }
@@ -537,7 +541,7 @@ impl Jobs {
         work: Work,
     ) -> Result<SyncStatus, RpcError> {
         let reservation = self.reserve_claim(id, work)?;
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = Arc::clone(&reservation.cancel);
         // Activation and claiming use the same engine-lock boundary as
         // configuration writes. A later edit is staged and cannot change
         // the active settings before this job's worker reads its inputs.
@@ -551,7 +555,7 @@ impl Jobs {
         drop(engine_guard);
         // Publish only after activation and capture. A status poll therefore
         // sees either the old terminal state or this exact active context.
-        let claim = reservation.publish(&cancel, SyncPairContext::from(&pair));
+        let claim = reservation.publish(SyncPairContext::from(&pair));
         let Claim {
             held,
             skips,
@@ -588,9 +592,7 @@ impl Jobs {
         run: impl FnOnce() -> (SyncStatus, Option<Reviewed>) + Send + 'static,
     ) -> Result<SyncStatus, RpcError> {
         let reservation = self.reserve_claim(id, work)?;
-        let acknowledged = reservation
-            .publish(&Arc::new(AtomicBool::new(false)), pair)
-            .acknowledged;
+        let acknowledged = reservation.publish(pair).acknowledged;
         self.spawn(id, None, move || run().into());
         Ok(acknowledged)
     }
@@ -695,7 +697,7 @@ impl Jobs {
     fn reserve(self: &Arc<Self>, id: PairId, scope: MutationScope) -> Result<Mutation, RpcError> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.mutating.contains(&id)
-            || state.claiming.contains(&id)
+            || state.claiming.contains_key(&id)
             || matches!(scope, MutationScope::Idle)
                 && matches!(
                     state.jobs.get(&id).map(|job| &job.status),
@@ -725,7 +727,7 @@ impl Jobs {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let blocked = if state.mutating.contains(&id) {
             Some("The pair's configuration is changing")
-        } else if state.claiming.contains(&id) {
+        } else if state.claiming.contains_key(&id) {
             Some("This pair already has a preview or sync starting")
         } else {
             match state.jobs.get(&id).map(|job| (&job.status, job.after)) {
@@ -749,28 +751,27 @@ impl Jobs {
         if let Some(message) = blocked {
             return Err(RpcError::new(SYNC_BUSY, message));
         }
-        state.claiming.insert(id);
+        let cancel = Arc::new(AtomicBool::new(false));
+        state.claiming.insert(id, Arc::clone(&cancel));
         Ok(ClaimReservation {
             jobs: Arc::clone(self),
             id,
             work,
+            cancel,
             active: true,
         })
     }
 
-    fn publish_claim(
-        &self,
-        id: PairId,
-        work: Work,
-        cancel: &Arc<AtomicBool>,
-        pair: SyncPairContext,
-    ) -> Claim {
+    fn publish_claim(&self, id: PairId, work: Work, pair: SyncPairContext) -> Claim {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        assert!(state.claiming.remove(&id), "claim reservation must be held");
+        let cancel = state
+            .claiming
+            .remove(&id)
+            .expect("claim reservation must be held");
         let progress = Arc::new(Progress::default());
         let acknowledged = SyncStatus::Working {
             job: work.job(),
-            cancelling: false,
+            cancelling: cancel.load(Ordering::Relaxed),
             progress: SyncProgress::default(),
             pair,
         };
@@ -784,7 +785,7 @@ impl Jobs {
                 Job {
                     status: acknowledged.clone(),
                     after: AfterFailure::Review,
-                    cancel: Arc::clone(cancel),
+                    cancel,
                     reviewed: None,
                     progress: Arc::clone(&progress),
                 },
@@ -864,8 +865,8 @@ impl Jobs {
 }
 
 impl ClaimReservation {
-    fn publish(mut self, cancel: &Arc<AtomicBool>, pair: SyncPairContext) -> Claim {
-        let claim = self.jobs.publish_claim(self.id, self.work, cancel, pair);
+    fn publish(mut self, pair: SyncPairContext) -> Claim {
+        let claim = self.jobs.publish_claim(self.id, self.work, pair);
         self.active = false;
         claim
     }
@@ -1267,6 +1268,46 @@ mod tests {
                 pair: test_pair(),
             }
         );
+    }
+
+    #[test]
+    fn stopping_a_claim_reaches_the_published_job() {
+        let jobs = Arc::new(Jobs::default());
+        let id: PairId = "01010101010101010101010101010101".parse().unwrap();
+        let reservation = jobs.reserve_claim(id, Work::Preview).unwrap();
+        let cancel = Arc::clone(&reservation.cancel);
+
+        jobs.cancel(id);
+        let claim = reservation.publish(test_pair());
+        assert!(cancel.load(Ordering::Relaxed));
+        assert!(matches!(
+            claim.acknowledged,
+            SyncStatus::Working {
+                cancelling: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn abandoning_a_stopped_claim_does_not_cancel_its_replacement() {
+        let jobs = Arc::new(Jobs::default());
+        let id: PairId = "01010101010101010101010101010101".parse().unwrap();
+        let reservation = jobs.reserve_claim(id, Work::Preview).unwrap();
+        jobs.cancel(id);
+        drop(reservation);
+
+        let replacement = jobs.reserve_claim(id, Work::Preview).unwrap();
+        let cancel = Arc::clone(&replacement.cancel);
+        let claim = replacement.publish(test_pair());
+        assert!(!cancel.load(Ordering::Relaxed));
+        assert!(matches!(
+            claim.acknowledged,
+            SyncStatus::Working {
+                cancelling: false,
+                ..
+            }
+        ));
     }
 
     #[test]
