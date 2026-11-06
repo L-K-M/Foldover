@@ -7,6 +7,9 @@ use tokio::sync::mpsc;
 use super::*;
 
 const WAIT: Duration = Duration::from_secs(10);
+// Preserve a generous gap between heartbeat cadence and expiry on busy CI.
+const HEARTBEAT_INACTIVITY: Duration = Duration::from_secs(2);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(60);
 
 /// Whether a link's store takes the devices it is asked to record.
 #[derive(Clone, Copy)]
@@ -316,9 +319,10 @@ impl PeerHost for HeartbeatsThenDone {
     }
 
     fn serve(&self, _: DeviceId, _: PeerCall, answer: &mut Answer) {
-        for _ in 0..6 {
-            std::thread::sleep(Duration::from_millis(75));
+        let started = std::time::Instant::now();
+        while started.elapsed() < HEARTBEAT_INACTIVITY + Duration::from_millis(500) {
             answer.heartbeat().unwrap();
+            std::thread::sleep(HEARTBEAT_INTERVAL);
         }
         answer.reply(&PeerReply::Done).unwrap();
     }
@@ -340,8 +344,14 @@ impl PeerHost for ReadsPastHeartbeats {
     }
 }
 
-/// Emits several transport heartbeats, then deliberately goes quiet.
-struct WatchHeartbeatsThenSilence(std::sync::Mutex<std::sync::mpsc::Sender<usize>>);
+/// Emits heartbeats until the test requests silence, then keeps the
+/// stream open until the test has observed inactivity rather than closure.
+struct WatchHeartbeatsThenSilence {
+    beats: std::sync::Mutex<std::sync::mpsc::Sender<Result<usize, LinkError>>>,
+    quiet: AtomicBool,
+    quiet_started: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
+    released: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
 
 impl PeerHost for WatchHeartbeatsThenSilence {
     fn paired(&self, _: DeviceId, _: String) -> Result<(), NotRecorded> {
@@ -349,13 +359,20 @@ impl PeerHost for WatchHeartbeatsThenSilence {
     }
 
     fn serve(&self, _: DeviceId, _: PeerCall, answer: &mut Answer) {
-        for index in 0..4 {
-            std::thread::sleep(Duration::from_millis(60));
-            answer.heartbeat().unwrap();
-            let _ = self.0.lock().unwrap().send(index);
+        let mut index = 0;
+        while !self.quiet.load(Ordering::Relaxed) {
+            let heartbeat = answer.heartbeat();
+            let failed = heartbeat.is_err();
+            let _ = self.beats.lock().unwrap().send(heartbeat.map(|()| index));
+            if failed {
+                return;
+            }
+            index += 1;
+            std::thread::sleep(HEARTBEAT_INTERVAL);
         }
-        // Keep the answer and stream alive without another frame.
-        std::thread::sleep(Duration::from_secs(1));
+        let _ = self.quiet_started.lock().unwrap().send(());
+        // Dropping the sender also releases this wait if an assertion fails.
+        let _ = self.released.lock().unwrap().recv_timeout(WAIT);
     }
 }
 
@@ -509,7 +526,7 @@ fn transport_heartbeats_reset_the_frame_inactivity_deadline() {
         .ask_unless_with_inactivity(
             answerer.device(),
             PeerCall::Shares,
-            Duration::from_millis(300),
+            HEARTBEAT_INACTIVITY,
             &mut || ScanControl::Continue,
         )
         .unwrap();
@@ -549,29 +566,42 @@ fn an_answer_reads_data_and_end_past_client_heartbeats() {
 #[test]
 fn a_watch_stays_live_on_heartbeats_then_reports_silence_as_lost() {
     let (beat_tx, beats) = std::sync::mpsc::channel();
-    let (runtime, asker, answerer) = trusted_links(Arc::new(WatchHeartbeatsThenSilence(
-        std::sync::Mutex::new(beat_tx),
-    )));
+    let (quiet_tx, quiet_started) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let host = Arc::new(WatchHeartbeatsThenSilence {
+        beats: std::sync::Mutex::new(beat_tx),
+        quiet: AtomicBool::new(false),
+        quiet_started: std::sync::Mutex::new(quiet_tx),
+        released: std::sync::Mutex::new(released),
+    });
+    let (runtime, asker, answerer) = trusted_links(host.clone());
     let (report_tx, reports) = std::sync::mpsc::channel();
+    // A busy runner can stall longer than the old 200 ms test budget.
+    // Production keeps its 120 s budget; this still tests expiry promptly.
+    let inactivity = HEARTBEAT_INACTIVITY;
     let handle = asker.watch_with_timing(
         answerer.device(),
         PeerCall::Shares,
         move |report| {
             let _ = report_tx.send(report);
         },
-        Duration::from_millis(200),
+        inactivity,
         Duration::from_secs(10),
     );
 
-    for index in 0..4 {
-        assert_eq!(beats.recv_timeout(WAIT), Ok(index));
+    beats.recv_timeout(WAIT).unwrap().unwrap();
+    let started = std::time::Instant::now();
+    // Keep receiving beyond an entire inactivity period. Ignoring heartbeat
+    // frames would lose the watch before the peer is told to go quiet.
+    while started.elapsed() < inactivity + Duration::from_millis(500) {
+        beats.recv_timeout(WAIT).unwrap().unwrap();
     }
-    assert!(reports.recv_timeout(Duration::from_millis(75)).is_err());
-    assert_eq!(
-        reports.recv_timeout(Duration::from_millis(500)),
-        Ok(Watched::Lost)
-    );
+    assert!(reports.try_recv().is_err());
+    host.quiet.store(true, Ordering::Relaxed);
+    quiet_started.recv_timeout(WAIT).unwrap();
+    assert_eq!(reports.recv_timeout(WAIT), Ok(Watched::Lost));
     drop(handle);
+    drop(release);
     drop(answerer);
     drop(asker);
     drop(runtime);
