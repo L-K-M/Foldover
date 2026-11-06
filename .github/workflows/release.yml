@@ -14,7 +14,38 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Reject tags that are not on main: a tag pushed to a feature branch
+  # must not become a public download.
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Tag must be an ancestor of main
+        run: |
+          git fetch origin main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::Release tags must point to a commit on main"
+            echo "Tag:  $(git rev-parse HEAD)"
+            echo "Main: $(git rev-parse origin/main)"
+            exit 1
+          fi
+
+  # Run the full CI qualification suite before anything can publish.
+  # Inside a workflow_call run, github.workflow is the caller's workflow
+  # name, so ci.yml pins a literal "ci-" prefix and cannot evaluate to this
+  # workflow's group. Release runs are serialized by the group above.
+  qualify:
+    needs: [source]
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   publish:
+    needs: [qualify]
     runs-on: xcode-27
     timeout-minutes: 60
     permissions:
