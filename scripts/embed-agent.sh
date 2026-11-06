@@ -17,7 +17,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 MACOSX_DEPLOYMENT_TARGET=27.0 cargo build --manifest-path "$ROOT/Cargo.toml" \
   --locked --release --target "$TARGET" -p foldoverd -p foldover-cli
-TARGET_DIR="$(cargo metadata --manifest-path "$ROOT/Cargo.toml" --no-deps --format-version 1 \
+TARGET_DIR="$(cargo metadata --locked --manifest-path "$ROOT/Cargo.toml" --no-deps --format-version 1 \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
 
 HELPERS="$APP/Contents/Library/LaunchServices"

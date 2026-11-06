@@ -1,6 +1,6 @@
 //! `cargo xtask check-layers` — the PLAN.md §4.4 layering check.
 //!
-//! Reads `cargo metadata --format-version 1 --no-deps` (toolchain
+//! Reads `cargo metadata --locked --format-version 1 --no-deps` (toolchain
 //! output, never Rust source) and checks every workspace member's
 //! first-party edges against `layers.toml`:
 //!
@@ -348,14 +348,14 @@ struct Dependency {
     path: Option<String>,
 }
 
-/// Runs `cargo metadata --no-deps` in `root` and returns every
+/// Runs `cargo metadata --locked --no-deps` in `root` and returns every
 /// workspace member's edges. With `--no-deps`, `packages` lists the
 /// members themselves; the `workspace_members` filter is belt and
 /// braces.
 fn collect(root: &Path) -> Result<Vec<CrateDeps>, ToolError> {
     let out = run(
         &cargo(),
-        &["metadata", "--format-version", "1", "--no-deps"],
+        &["metadata", "--locked", "--format-version", "1", "--no-deps"],
         root,
         None,
     )?;

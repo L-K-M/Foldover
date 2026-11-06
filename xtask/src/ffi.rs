@@ -199,7 +199,7 @@ fn typecheck_swift(root: &Path) -> Vec<String> {
 fn generate_bindings(root: &Path, out: &Path) -> Result<(), ToolError> {
     let library = build_library(
         root,
-        &["build", "-p", "foldover-ffi"],
+        &["build", "--locked", "-p", "foldover-ffi"],
         None,
         FFI_CRATE,
         LibraryKind::Cdylib,
@@ -211,6 +211,7 @@ fn generate_bindings(root: &Path, out: &Path) -> Result<(), ToolError> {
         &cargo(),
         &[
             "run",
+            "--locked",
             "-p",
             "foldover-bindgen",
             "--",
@@ -420,6 +421,7 @@ fn build_xcframework(root: &Path) -> Result<(), ToolError> {
         root,
         &[
             "build",
+            "--locked",
             "-p",
             "foldover-ffi",
             "--release",
