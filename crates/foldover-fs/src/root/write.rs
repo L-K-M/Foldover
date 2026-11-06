@@ -741,9 +741,18 @@ enum Parents {
 
 /// Open the directory at `path` below `parent`, one no-follow step per
 /// component. Depth costs iterations, not simultaneous descriptors.
-fn open_below(parent: &Dir, path: &Path) -> io::Result<Dir> {
+/// Reopening deep paths can itself be slow on a NAS, so each step is a
+/// checkpoint rather than one uninterruptible traversal between deletions.
+fn open_below(
+    parent: &Dir,
+    path: &Path,
+    control: &mut impl FnMut() -> ScanControl,
+) -> Result<Dir, WriteError> {
     let mut directory = parent.try_clone()?;
     for component in path.components() {
+        if control() == ScanControl::Cancel {
+            return Err(WriteError::Source(HashError::Cancelled));
+        }
         directory = directory.open_dir_nofollow(component.as_os_str())?;
     }
     Ok(directory)
@@ -766,7 +775,7 @@ fn remove_directory_tree(
     let mut directories: Vec<PathBuf> = vec![name.to_path_buf()];
     let mut next = 0;
     while next < directories.len() {
-        let directory = open_below(parent, &directories[next])?;
+        let directory = open_below(parent, &directories[next], control)?;
         let mut children = Vec::new();
         for entry in directory.entries()? {
             if control() == ScanControl::Cancel {
@@ -793,7 +802,7 @@ fn remove_directory_tree(
             return Err(WriteError::Source(HashError::Cancelled));
         }
         let ancestors = path.parent().unwrap_or_else(|| Path::new(""));
-        let directory = open_below(parent, ancestors)?;
+        let directory = open_below(parent, ancestors, control)?;
         let leaf = Path::new(path.file_name().expect("a collected path has a name"));
         rustix::fs::unlinkat(&directory, leaf, AtFlags::REMOVEDIR)?;
     }

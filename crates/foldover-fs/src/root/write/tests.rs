@@ -18,6 +18,40 @@ const NOTHING: PairOptions = PairOptions::new(
 );
 const STANDARD: Durability = Durability::Standard;
 
+#[test]
+fn reopening_prune_ancestors_reports_progress_and_can_stop() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::create_dir_all(directory.path().join("a/b/c")).unwrap();
+    let root = Root::open(directory.path()).unwrap();
+    let mut checkpoints = 0;
+    let opened = open_below(&root.directory, Path::new("a/b/c"), &mut || {
+        checkpoints += 1;
+        ScanControl::Continue
+    })
+    .unwrap();
+    drop(opened);
+    assert_eq!(
+        checkpoints, 3,
+        "each component must report traversal progress"
+    );
+
+    let mut checkpoints = 0;
+    let cancelled = open_below(&root.directory, Path::new("a/b/c"), &mut || {
+        checkpoints += 1;
+        if checkpoints == 2 {
+            ScanControl::Cancel
+        } else {
+            ScanControl::Continue
+        }
+    });
+    assert!(matches!(
+        cancelled,
+        Err(WriteError::Source(HashError::Cancelled))
+    ));
+    assert_eq!(checkpoints, 2);
+    assert!(directory.path().join("a/b/c").is_dir());
+}
+
 #[cfg(target_os = "linux")]
 const ATTRIBUTE: &str = "user.ch.lkmc.foldover.test";
 #[cfg(not(target_os = "linux"))]
