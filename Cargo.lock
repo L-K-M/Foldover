@@ -612,14 +612,14 @@ dependencies = [
 
 [[package]]
 name = "foldover-bindgen"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "uniffi",
 ]
 
 [[package]]
 name = "foldover-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "foldover-client",
  "foldover-proto",
@@ -629,7 +629,7 @@ dependencies = [
 
 [[package]]
 name = "foldover-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "foldover-ipc",
  "foldover-proto",
@@ -639,7 +639,7 @@ dependencies = [
 
 [[package]]
 name = "foldover-db"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "linux-raw-sys",
@@ -652,7 +652,7 @@ dependencies = [
 
 [[package]]
 name = "foldover-endpoint"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -677,7 +677,7 @@ dependencies = [
 
 [[package]]
 name = "foldover-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -695,7 +695,7 @@ dependencies = [
 
 [[package]]
 name = "foldover-ffi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "foldover-client",
  "thiserror",
@@ -704,7 +704,7 @@ dependencies = [
 
 [[package]]
 name = "foldover-fs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "cap-fs-ext",
@@ -724,14 +724,14 @@ dependencies = [
 
 [[package]]
 name = "foldover-host"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "foldover-os",
 ]
 
 [[package]]
 name = "foldover-ipc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "foldover-net",
  "foldover-proto",
@@ -743,7 +743,7 @@ dependencies = [
 
 [[package]]
 name = "foldover-net"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "core-foundation",
  "mdns-sd",
@@ -763,7 +763,7 @@ dependencies = [
 
 [[package]]
 name = "foldover-os"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "block2",
  "core-foundation",
@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "foldover-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "foldover-types",
  "proptest",
@@ -791,7 +791,7 @@ dependencies = [
 
 [[package]]
 name = "foldover-service"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "foldover-engine",
@@ -806,14 +806,14 @@ dependencies = [
 
 [[package]]
 name = "foldover-sim"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "foldover-endpoint",
 ]
 
 [[package]]
 name = "foldover-state"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "foldover-db",
@@ -824,14 +824,14 @@ dependencies = [
 
 [[package]]
 name = "foldover-types"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "foldover-watch"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "notify",
  "tempfile",
@@ -839,7 +839,7 @@ dependencies = [
 
 [[package]]
 name = "foldoverd"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "foldover-ipc",
  "foldover-service",
@@ -1679,9 +1679,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.1.5"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags",
  "errno",
@@ -2080,9 +2080,9 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokio"
-version = "1.53.3"
+version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
 dependencies = [
  "bytes",
  "libc",
@@ -2351,9 +2351,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "uuid"
-version = "1.28.0"
+version = "1.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cc1186384beb7dd8eedea376413fd654937285ea6c9cfbb928dc3043ea4b606"
+checksum = "4a0e2d11620c50695fe12bbbfde96b3477fe606e7284c22d505c12ce51214514"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
@@ -2702,7 +2702,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",

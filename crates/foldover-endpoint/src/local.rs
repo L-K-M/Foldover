@@ -2012,8 +2012,9 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
+        let file_path = root.join("folder/file");
         fs::create_dir(root.join("folder")).unwrap();
-        fs::write(root.join("folder/file"), b"data").unwrap();
+        fs::write(&file_path, b"data").unwrap();
         symlink("folder/file", root.join("link")).unwrap();
         fs::create_dir(root.join(".foldover")).unwrap();
         fs::write(root.join(".foldover/private"), b"private").unwrap();
@@ -2042,7 +2043,7 @@ mod tests {
         ));
         assert_eq!(observe(), first);
 
-        let handle = fs::File::open(root.join("folder/file")).unwrap();
+        let handle = fs::File::open(&file_path).unwrap();
         rustix::fs::fsetxattr(
             &handle,
             TEST_ATTRIBUTE,
@@ -2054,16 +2055,18 @@ mod tests {
         assert_eq!(tagged[&file].content(), first[&file].content());
         assert_ne!(tagged[&file].metadata(), first[&file].metadata());
 
-        fs::set_permissions(root.join("folder/file"), fs::Permissions::from_mode(0o600)).unwrap();
-        let restricted = observe();
-        assert_eq!(restricted[&file].content(), first[&file].content());
-        assert_ne!(restricted[&file].metadata(), tagged[&file].metadata());
+        // Toggle a bit so this changes metadata under every process umask.
+        let mode = fs::metadata(&file_path).unwrap().permissions().mode() & 0o7777;
+        fs::set_permissions(&file_path, fs::Permissions::from_mode(mode ^ 0o100)).unwrap();
+        let mode_changed = observe();
+        assert_eq!(mode_changed[&file].content(), first[&file].content());
+        assert_ne!(mode_changed[&file].metadata(), tagged[&file].metadata());
 
         // A new child moves the directory mtime, which versions ignore.
         fs::write(root.join("folder/other"), b"").unwrap();
         assert_eq!(observe()[&folder], first[&folder]);
 
-        fs::write(root.join("folder/file"), b"edited").unwrap();
+        fs::write(&file_path, b"edited").unwrap();
         assert_ne!(observe()[&file].content(), first[&file].content());
 
         let elsewhere = tempfile::tempdir().unwrap();

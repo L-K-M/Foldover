@@ -93,6 +93,17 @@ private final class NoStableYetStub: FeedStub {
     }
 }
 
+/// A valid stable release with an unavailable pre-release feed.
+private final class NoFeedStub: FeedStub {
+    override func startLoading() {
+        if request.url!.absoluteString.hasSuffix("releases.atom") {
+            client?.urlProtocol(self, didFailWithError: URLError(.cannotConnectToHost))
+        } else {
+            super.startLoading()
+        }
+    }
+}
+
 private func stubbedChecker(
     _ stub: URLProtocol.Type = FeedStub.self
 ) -> UpdateChecker {
@@ -217,6 +228,16 @@ func theFeedAnswerStandsWhenLatestHasNoStableYet() async throws {
     let release = try await UpdateStore
         .feedFetcher(forInstalled: "1.0.0-beta.1", checker: stubbedChecker(NoStableYetStub.self))()
     #expect(release.version == "9.9.9-beta.1")
+}
+
+/// A pre-release check still has a useful answer when only the feed fails.
+@Test
+func theStableAnswerStandsWhenTheFeedFails() async throws {
+    let release = try await UpdateStore
+        .feedFetcher(forInstalled: "1.0.0-beta.1", checker: stubbedChecker(NoFeedStub.self))()
+    #expect(release.version == "1.0.0")
+    #expect(release.downloadURL.absoluteString
+        == "https://github.com/L-K-M/Foldover/releases/tag/v1.0.0")
 }
 
 @MainActor

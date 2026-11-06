@@ -2,7 +2,10 @@ import Foundation
 import Testing
 @testable import Foldover
 
-private enum MacToMacFixtureError: Error { case unreachable }
+private enum MacToMacFixtureError: Error {
+    case noSuchPairing
+    case unreachable
+}
 
 /// Plays both Macs' agents: Studio is nearby, and pairing with it shows a
 /// code until this Mac confirms it.
@@ -14,9 +17,22 @@ private actor MacToMacFixtureClient: MacToMacClient {
     private var paired: [PairedDevice] = []
     private var failure: Error?
     private var shared: [FolderShare] = []
+    private var holdsOpen = false
+    private var heldOpen: CheckedContinuation<Void, Never>?
+    private var holdsConfirm = false
+    private var heldConfirm: CheckedContinuation<Void, Never>?
     private(set) var starts = 0
+    private(set) var closeCalls = 0
+    private(set) var cancelCalls = 0
+    private(set) var stateReads = 0
+    private(set) var shareReads = 0
 
     func state() async throws -> MacToMacState {
+        stateReads += 1
+        return snapshot()
+    }
+
+    private func snapshot() -> MacToMacState {
         MacToMacState(
             isOn: on, name: "Laptop", pairingOpen: open, pending: pending, paired: paired,
             nearby: on ? [NearbyDevice(device: "studio", name: "Studio", openForPairing: studioOpen,
@@ -29,18 +45,24 @@ private actor MacToMacFixtureClient: MacToMacClient {
         if let failure { throw failure }
         starts += 1
         on = true
-        return try await state()
+        return snapshot()
     }
 
     func openPairing() async throws -> MacToMacState {
         on = true
         open = true
-        return try await state()
+        let answer = snapshot()
+        if holdsOpen {
+            holdsOpen = false
+            await withCheckedContinuation { heldOpen = $0 }
+        }
+        return answer
     }
 
     func closePairing() async throws -> MacToMacState {
+        closeCalls += 1
         open = false
-        return try await state()
+        return snapshot()
     }
 
     func pair(device: String) async throws -> PendingCode {
@@ -54,20 +76,32 @@ private actor MacToMacFixtureClient: MacToMacClient {
         pending.removeAll { $0.device == device }
         paired.append(PairedDevice(device: device, name: "Studio", paired: Date(timeIntervalSince1970: 0)))
         studioOpen = false
-        return try await state()
+        let answer = snapshot()
+        if holdsConfirm {
+            holdsConfirm = false
+            await withCheckedContinuation { heldConfirm = $0 }
+        }
+        return answer
     }
 
     func cancel(device: String) async throws -> MacToMacState {
+        cancelCalls += 1
+        guard pending.contains(where: { $0.device == device }) else {
+            throw MacToMacFixtureError.noSuchPairing
+        }
         pending.removeAll { $0.device == device }
-        return try await state()
+        return snapshot()
     }
 
     func forget(device: String) async throws -> MacToMacState {
         paired.removeAll { $0.device == device }
-        return try await state()
+        return snapshot()
     }
 
-    func shares() async throws -> [FolderShare] { shared }
+    func shares() async throws -> [FolderShare] {
+        shareReads += 1
+        return shared
+    }
 
     func share(path: Data, name: String, device: String) async throws -> FolderShare {
         if let failure { throw failure }
@@ -87,6 +121,48 @@ private actor MacToMacFixtureClient: MacToMacClient {
     }
 
     func rejectRequests() { failure = MacToMacFixtureError.unreachable }
+
+    func holdOpenPairing() { holdsOpen = true }
+
+    func waitForHeldOpen() async -> Bool {
+        let deadline = ContinuousClock.now + .seconds(3)
+        while heldOpen == nil {
+            if ContinuousClock.now >= deadline { return false }
+            await Task.yield()
+        }
+        return true
+    }
+
+    func releaseOpenPairing() {
+        heldOpen?.resume()
+        heldOpen = nil
+    }
+
+    func holdConfirm() { holdsConfirm = true }
+
+    func waitForHeldConfirm() async -> Bool {
+        let deadline = ContinuousClock.now + .seconds(3)
+        while heldConfirm == nil {
+            if ContinuousClock.now >= deadline { return false }
+            await Task.yield()
+        }
+        return true
+    }
+
+    func releaseConfirm() {
+        heldConfirm?.resume()
+        heldConfirm = nil
+    }
+}
+
+@MainActor
+private func waitForPendingMutations(_ count: Int, in store: MacToMacStore) async -> Bool {
+    let deadline = ContinuousClock.now + .seconds(3)
+    while store.pendingMutations < count {
+        if ContinuousClock.now >= deadline { return false }
+        await Task.yield()
+    }
+    return true
 }
 
 @MainActor
@@ -143,6 +219,67 @@ func pairingWindowsOpenAndCloseFromTheToggle() async {
     #expect(viewModel.pairingNote.contains("next few minutes"))
     await viewModel.setPairing(.closed)
     #expect(!viewModel.pairingOpen)
+}
+
+@MainActor
+@Test
+func pairingWindowChoicesRunInInvocationOrder() async {
+    let client = MacToMacFixtureClient()
+    let store = MacToMacStore(client: client)
+    await client.holdOpenPairing()
+    let open = Task { await store.openPairing() }
+    #expect(await client.waitForHeldOpen())
+
+    let close = Task { await store.closePairing() }
+    #expect(
+        await waitForPendingMutations(2, in: store),
+        "the close choice was never enqueued"
+    )
+    #expect(store.pendingMutations == 2)
+    #expect(store.mutationPending)
+    #expect(await client.closeCalls == 0)
+
+    let stateReads = await client.stateReads
+    let shareReads = await client.shareReads
+    await store.refresh()
+    #expect(await client.stateReads == stateReads)
+    #expect(await client.shareReads == shareReads)
+
+    await client.releaseOpenPairing()
+    await open.value
+    await close.value
+    #expect(await client.closeCalls == 1)
+    #expect(store.state?.pairingOpen == false)
+    #expect(!store.mutationPending)
+}
+
+@MainActor
+@Test
+func pairingDecisionsRunInInvocationOrder() async {
+    let client = MacToMacFixtureClient()
+    let store = MacToMacStore(client: client)
+    await store.pair("studio")
+    await client.holdConfirm()
+    let confirm = Task { await store.confirm("studio") }
+    #expect(await client.waitForHeldConfirm())
+
+    let cancel = Task { await store.cancel("studio") }
+    #expect(
+        await waitForPendingMutations(2, in: store),
+        "the cancel choice was never enqueued"
+    )
+    #expect(store.pendingMutations == 2)
+    #expect(store.mutationPending)
+    #expect(await client.cancelCalls == 0)
+
+    await client.releaseConfirm()
+    await confirm.value
+    await cancel.value
+    #expect(await client.cancelCalls == 1)
+    #expect(store.state?.pending.isEmpty == true)
+    #expect(store.state?.paired.map(\.device) == ["studio"])
+    #expect(store.error != nil)
+    #expect(!store.mutationPending)
 }
 
 @MainActor

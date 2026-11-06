@@ -383,8 +383,8 @@ impl SftpEndpoint {
             .map_err(io_error)
     }
 
-    /// Write `file` unless it exists; whether it was written. A plain SFTP
-    /// rename refuses an existing target, which makes the create exclusive.
+    /// Write `file` unless it exists; whether it was written. The final path
+    /// is opened exclusively, independent of the server's rename semantics.
     pub(crate) fn create_lock_file(
         &self,
         file: LockFile,
@@ -392,28 +392,39 @@ impl SftpEndpoint {
     ) -> Result<bool, ApplyError> {
         let remote = self.remote(file.path());
         self.on_lease_session(|session| {
-            let temporary = self.stage_lock(session, file, content)?;
-            let Err(error) = self.renamed_on(session, &temporary, &remote) else {
-                return Ok(true);
+            self.make_directories_on(session, INTERNAL_DIRECTORY, PRIVATE_DIRECTORY)?;
+            let handle = match session.create_new(&remote, PRIVATE_FILE) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    if !Self::answered(&error) {
+                        self.forget_parent(&remote);
+                    }
+                    return match read_small_on(session, &remote, LEASE_LIMIT) {
+                        Ok(Some(_)) => {
+                            self.note_added(&remote);
+                            Ok(false)
+                        }
+                        Ok(None) => Err(error),
+                        Err(read_error) => Err(read_error),
+                    };
+                }
             };
-            let _ = self.removed_file_on(session, &temporary);
-            match read_small_on(session, &remote, LEASE_LIMIT)? {
-                Some(_) => Ok(false),
-                None => Err(error),
+            self.note_added(&remote);
+            let written = session.write_chunks(&handle, |sink| sink(content));
+            let closed = session.close(handle);
+            match written.and(closed) {
+                Ok(()) => match read_small_on(session, &remote, LEASE_LIMIT) {
+                    Ok(Some(written)) if written == content => Ok(true),
+                    // A reclaimer may have replaced an incomplete file while
+                    // this write was delayed. Never claim its record as ours.
+                    Ok(_) => Ok(false),
+                    Err(error) => Err(error),
+                },
+                // A conditional remove is unavailable. Leave a partial or
+                // uncertain record for TTL recovery: deleting by name could
+                // remove a successor that reclaimed it while this call hung.
+                Err(error) => Err(error),
             }
-        })
-        .map_err(|source| write_error(&lock_path(file), source))
-    }
-
-    pub(crate) fn replace_lock_file(
-        &self,
-        file: LockFile,
-        content: &[u8],
-    ) -> Result<(), ApplyError> {
-        let remote = self.remote(file.path());
-        self.on_lease_session(|session| {
-            let temporary = self.stage_lock(session, file, content)?;
-            self.rename_replacing_on(session, &temporary, &remote)
         })
         .map_err(|source| write_error(&lock_path(file), source))
     }
@@ -435,30 +446,6 @@ impl SftpEndpoint {
         );
         self.on_lease_session(|session| self.rename_replacing_on(session, &claim, &lock))
             .map_err(|source| write_error(&lock_path(LockFile::Lock), source))
-    }
-
-    /// `content` in a fresh temporary beside `file`, over `session`.
-    fn stage_lock(
-        &self,
-        session: &mut Session,
-        file: LockFile,
-        content: &[u8],
-    ) -> io::Result<Vec<u8>> {
-        self.make_directories_on(session, INTERNAL_DIRECTORY, PRIVATE_DIRECTORY)?;
-        let temporary = self.beside(file.path());
-        match write_new(session, temporary.clone(), PRIVATE_FILE, |sink| {
-            sink(content)
-        }) {
-            Ok(written) => {
-                self.note_added(&written);
-                Ok(written)
-            }
-            // A failed write may have left a partial file behind.
-            Err(error) => {
-                self.forget_parent(&temporary);
-                Err(error)
-            }
-        }
     }
 
     pub fn ignore_rules(&self) -> Result<Vec<String>, ScanError> {
@@ -680,15 +667,36 @@ impl SftpEndpoint {
     ) -> Result<EntryVersion, ScanError> {
         let observed = observed(attributes)?;
         match attributes.kind() {
+            // These versions need no server request, so directory-heavy
+            // scans should not spend a pooled session on them.
+            FileKind::Directory => Ok(entry_version(Payload::Directory, &observed, policy)),
+            FileKind::Other => Err(ScanError::UnsupportedEntry(path.clone())),
+            FileKind::File | FileKind::Symlink => {
+                let mut session = self.session_unless_cancelled(control)?;
+                self.version_on(&mut session, path, attributes, policy, control)
+            }
+        }
+    }
+
+    fn version_on(
+        &self,
+        session: &mut Session,
+        path: &SyncPath,
+        attributes: &Attributes,
+        policy: MetadataPolicy,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<EntryVersion, ScanError> {
+        let observed = observed(attributes)?;
+        match attributes.kind() {
             FileKind::File => {
-                let digest = self.read_file(path, attributes, control, &mut |_| Ok(()))?;
+                let digest =
+                    self.read_range_on(session, path, attributes, 0, control, &mut |_| Ok(()))?;
                 Ok(entry_version(Payload::File(digest), &observed, policy))
             }
             FileKind::Directory => Ok(entry_version(Payload::Directory, &observed, policy)),
             FileKind::Symlink => {
-                let mut session = self.session_unless_cancelled(control)?;
                 let target = self
-                    .on_stored_with(&mut session, path.as_bytes(), |session, remote| {
+                    .on_stored_with(session, path.as_bytes(), |session, remote| {
                         session.read_link(remote)
                     })
                     .map_err(|source| at(Some(path), source))?;
@@ -700,6 +708,7 @@ impl SftpEndpoint {
 
     /// Push a file's data to `sink` and return its digest. The file must
     /// keep `expected`'s stat throughout.
+    #[cfg(test)]
     pub(crate) fn read_file(
         &self,
         path: &SyncPath,
@@ -735,8 +744,20 @@ impl SftpEndpoint {
     ) -> Result<Digest, ScanError> {
         // The handle is valid only on the session that opened it.
         let mut session = self.session_unless_cancelled(control)?;
+        self.read_range_on(&mut session, path, expected, from, control, sink)
+    }
+
+    fn read_range_on(
+        &self,
+        session: &mut Session,
+        path: &SyncPath,
+        expected: &Attributes,
+        from: u64,
+        control: &mut impl FnMut() -> ScanControl,
+        sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    ) -> Result<Digest, ScanError> {
         let (handle, remote) = self
-            .on_stored_with(&mut session, path.as_bytes(), |session, remote| {
+            .on_stored_with(session, path.as_bytes(), |session, remote| {
                 session
                     .open_read(remote)
                     .map(|handle| (handle, remote.to_vec()))
@@ -787,56 +808,68 @@ impl SftpEndpoint {
         Ok(self.lookup(path)?.map(|(_, attributes)| attributes))
     }
 
-    /// Prove `path` still holds `expected` and return its attributes.
-    pub(crate) fn verified(
+    fn attributes_on(
         &self,
+        session: &mut Session,
         path: &SyncPath,
-        expected: &ObservedEntry,
-        policy: MetadataPolicy,
-        control: &mut impl FnMut() -> ScanControl,
-    ) -> Result<Attributes, ApplyError> {
-        self.verified_at(path, expected, policy, control)
-            .map(|(_, attributes)| attributes)
+    ) -> Result<Option<Attributes>, ScanError> {
+        Ok(self
+            .lookup_on(session, path)?
+            .map(|(_, attributes)| attributes))
     }
 
-    /// `verified`, with where the entry is stored.
-    fn verified_at(
+    /// Prove `path` still holds `expected`, returning where it is stored
+    /// and its attributes without borrowing another session.
+    fn verified_at_on(
         &self,
+        session: &mut Session,
         path: &SyncPath,
         expected: &ObservedEntry,
         policy: MetadataPolicy,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<(Vec<u8>, Attributes), ApplyError> {
         let changed = || ApplyError::DestinationChanged(path.clone());
-        let (stored, attributes) = self.lookup(path)?.ok_or_else(changed)?;
-        if self.version(path, &attributes, policy, control)? != expected.version {
+        let (stored, attributes) = self.lookup_on(session, path)?.ok_or_else(changed)?;
+        if self.version_on(session, path, &attributes, policy, control)? != expected.version {
             return Err(changed());
         }
         Ok((stored, attributes))
     }
 
-    pub(crate) fn read_link(&self, path: &SyncPath) -> Result<Vec<u8>, ScanError> {
-        self.on_stored(path.as_bytes(), |remote| self.session().read_link(remote))
-            .map_err(|source| at(Some(path), source))
+    pub(crate) fn read_link(
+        &self,
+        path: &SyncPath,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<Vec<u8>, ScanError> {
+        let mut session = self.session_unless_cancelled(control)?;
+        self.read_link_on(&mut session, path)
+    }
+
+    fn read_link_on(&self, session: &mut Session, path: &SyncPath) -> Result<Vec<u8>, ScanError> {
+        self.on_stored_with(session, path.as_bytes(), |session, remote| {
+            session.read_link(remote)
+        })
+        .map_err(|source| at(Some(path), source))
     }
 
     /// The version stored at `path` now, reading data only for links and
     /// directories; files take `content` from the copy just made.
-    pub(crate) fn placed_version(
+    fn placed_version_on(
         &self,
+        session: &mut Session,
         path: &SyncPath,
         content: Option<Digest>,
         policy: MetadataPolicy,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<EntryVersion, ApplyError> {
         let attributes = self
-            .attributes(path)?
+            .attributes_on(session, path)?
             .ok_or_else(|| ApplyError::DestinationChanged(path.clone()))?;
         Ok(match (attributes.kind(), content) {
             (FileKind::File, Some(digest)) => {
                 entry_version(Payload::File(digest), &observed(&attributes)?, policy)
             }
-            _ => self.version(path, &attributes, policy, control)?,
+            _ => self.version_on(session, path, &attributes, policy, control)?,
         })
     }
 
@@ -844,6 +877,17 @@ impl SftpEndpoint {
     /// root) and return the temporary's server path.
     pub(crate) fn upload(
         &self,
+        path: &[u8],
+        permissions: u32,
+        durability: Durability,
+        produce: impl FnOnce(foldover_net::sftp::Chunks<'_>) -> io::Result<()>,
+    ) -> io::Result<Vec<u8>> {
+        self.upload_on(&mut self.session(), path, permissions, durability, produce)
+    }
+
+    fn upload_on(
+        &self,
+        session: &mut Session,
         path: &[u8],
         permissions: u32,
         durability: Durability,
@@ -857,9 +901,8 @@ impl SftpEndpoint {
                 "SFTP cannot guarantee full durability",
             ));
         }
-        let temporary = self.beside(path);
-        let mut session = self.session();
-        match write_new(&mut session, temporary.clone(), permissions, produce) {
+        let temporary = self.beside_on(session, path);
+        match write_new(session, temporary.clone(), permissions, produce) {
             // A written temporary joined its parent's listing.
             Ok(written) => {
                 self.note_added(&written);
@@ -875,32 +918,33 @@ impl SftpEndpoint {
 
     /// The version a staged file will have, from its attributes and the
     /// digest of the data written.
-    pub(crate) fn staged_version(
+    fn staged_version_on(
         &self,
+        session: &mut Session,
         remote: &[u8],
         digest: Digest,
         policy: MetadataPolicy,
     ) -> io::Result<EntryVersion> {
-        let attributes = self.session().lstat(remote)?;
+        let attributes = session.lstat(remote)?;
         let observed =
             observed(&attributes).map_err(|error| io::Error::other(error.to_string()))?;
         Ok(entry_version(Payload::File(digest), &observed, policy))
     }
 
     /// Remove an unplaced temporary; a leftover only costs space.
-    pub(crate) fn discard(&self, remote: &[u8]) {
-        let _ = self.removed_file(remote);
+    fn discard_on(&self, session: &mut Session, remote: &[u8]) {
+        let _ = self.removed_file_on(session, remote);
     }
 
     /// Give a staged or existing entry the synced part of `metadata`.
-    pub(crate) fn set_metadata(
+    fn set_metadata_on(
         &self,
+        session: &mut Session,
         remote: &[u8],
         kind: EntryKind,
         metadata: crate::ForeignMetadata,
         policy: MetadataPolicy,
     ) -> io::Result<()> {
-        let mut session = self.session();
         let current = session.lstat(remote)?;
         let mode = current.permissions.unwrap_or(0) & PERMISSION_BITS;
         let wanted = match policy.permissions() {
@@ -934,16 +978,21 @@ impl SftpEndpoint {
     }
 
     /// Create a folder at `path` with `permissions`, named composed.
-    pub(crate) fn make_directory(&self, path: &SyncPath, permissions: u32) -> io::Result<()> {
-        let remote = self.fresh(path.as_bytes());
-        let made = self.session().make_directory(&remote, permissions);
+    fn make_directory_on(
+        &self,
+        session: &mut Session,
+        path: &SyncPath,
+        permissions: u32,
+    ) -> io::Result<()> {
+        let remote = self.fresh_on(session, path.as_bytes());
+        let made = session.make_directory(&remote, permissions);
         match &made {
             Ok(()) => self.note_added(&remote),
             Err(error) => {
                 // SFTP reports an existing folder as a generic failure,
                 // so a refusal is only definitive once lstat says the
                 // folder really is absent.
-                match self.session().lstat(&remote) {
+                match session.lstat(&remote) {
                     // It is there after all; its spelling belongs in
                     // the view now.
                     Ok(existing) if existing.kind() == FileKind::Directory => {
@@ -959,9 +1008,14 @@ impl SftpEndpoint {
     }
 
     /// Create a link beside `path` and return its server path.
-    pub(crate) fn stage_link(&self, path: &[u8], target: &[u8]) -> io::Result<Vec<u8>> {
-        let temporary = self.beside(path);
-        let made = self.session().symlink(target, &temporary);
+    fn stage_link_on(
+        &self,
+        session: &mut Session,
+        path: &[u8],
+        target: &[u8],
+    ) -> io::Result<Vec<u8>> {
+        let temporary = self.beside_on(session, path);
+        let made = session.symlink(target, &temporary);
         match &made {
             Ok(()) => self.note_added(&temporary),
             // A lost response may mean the link exists after all; a
@@ -977,8 +1031,9 @@ impl SftpEndpoint {
     /// names the entry composed beside the temporary; a replacement first
     /// sets the current entry aside and takes its spelling, as its folder
     /// lists it.
-    pub(crate) fn place(
+    fn place_on(
         &self,
+        session: &mut Session,
         temporary: &[u8],
         path: &SyncPath,
         replacing: Option<&Attributes>,
@@ -986,16 +1041,16 @@ impl SftpEndpoint {
     ) -> Result<(), ApplyError> {
         let target = match replacing {
             Some(expected) => {
-                let current = self.lookup(path)?;
+                let current = self.lookup_on(session, path)?;
                 let Some((stored, _)) =
                     current.filter(|(_, current)| stat_key(current) == stat_key(expected))
                 else {
-                    let _ = self.removed_file(temporary);
+                    let _ = self.removed_file_on(session, temporary);
                     return Err(ApplyError::DestinationChanged(path.clone()));
                 };
-                let target = self.listed(&stored);
-                if let Err(error) = self.set_aside(&stored, path, run) {
-                    let _ = self.removed_file(temporary);
+                let target = self.listed_on(session, &stored);
+                if let Err(error) = self.set_aside_on(session, &stored, path, run) {
+                    let _ = self.removed_file_on(session, temporary);
                     return Err(error);
                 }
                 target
@@ -1009,10 +1064,10 @@ impl SftpEndpoint {
                 [folder, b"/".as_slice(), &spelling::compose(name)].concat()
             }
         };
-        let placed = self.renamed(temporary, &target);
+        let placed = self.renamed_on(session, temporary, &target);
         if let Err(source) = placed {
-            let _ = self.removed_file(temporary);
-            return Err(match self.attributes(path) {
+            let _ = self.removed_file_on(session, temporary);
+            return Err(match self.attributes_on(session, path) {
                 Ok(Some(_)) => ApplyError::DestinationChanged(path.clone()),
                 _ => write_error(path, source),
             });
@@ -1025,18 +1080,24 @@ impl SftpEndpoint {
     /// files and links come here: `remove` takes folders when empty, and
     /// `place` never replaces a folder, since a file meeting one is a type
     /// conflict.
-    fn set_aside(&self, stored: &[u8], path: &SyncPath, run: &RunScope) -> Result<(), ApplyError> {
+    fn set_aside_on(
+        &self,
+        session: &mut Session,
+        stored: &[u8],
+        path: &SyncPath,
+        run: &RunScope,
+    ) -> Result<(), ApplyError> {
         if run.archiving() == Archiving::Off {
             return self
-                .removed_file(stored)
+                .removed_file_on(session, stored)
                 .map_err(|source| write_error(path, source));
         }
         let archived = run.archive_path(path)?;
         if let Some(parent) = archived.parent() {
-            self.make_directories(parent.as_bytes(), PRIVATE_DIRECTORY)
+            self.make_directories_on(session, parent.as_bytes(), PRIVATE_DIRECTORY)
                 .map_err(|source| write_error(path, source))?;
         }
-        self.renamed(stored, &self.remote(archived.as_bytes()))
+        self.renamed_on(session, stored, &self.remote(archived.as_bytes()))
             .map_err(|source| write_error(path, source))
     }
 
@@ -1052,8 +1113,15 @@ impl SftpEndpoint {
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<(), ApplyError> {
         check_durability(run.options().durability(), from)?;
+        let mut session = self.session_unless_cancelled(control)?;
         let (stored, attributes) = self
-            .verified_at(from, current, run.options().metadata(), control)
+            .verified_at_on(
+                &mut session,
+                from,
+                current,
+                run.options().metadata(),
+                control,
+            )
             .map_err(|error| match error {
                 ApplyError::Scan(ScanError::Changed(_)) => {
                     ApplyError::DestinationChanged(from.clone())
@@ -1066,25 +1134,26 @@ impl SftpEndpoint {
         // Missing folders come composed, inside those that remain in the
         // spelling they have.
         if let Some(parent) = to.parent()
-            && self.attributes(&parent)?.is_none()
+            && self.attributes_on(&mut session, &parent)?.is_none()
         {
-            let folders = self.creatable(parent.as_bytes());
-            self.make_directories(&folders, DEFAULT_DIRECTORY)
+            let folders = self.creatable_on(&mut session, parent.as_bytes());
+            self.make_directories_on(&mut session, &folders, DEFAULT_DIRECTORY)
                 .map_err(|source| write_error(to, source))?;
         }
         // Making folders took round trips: the entry must still be the one
         // verified, or the move would take a replacement.
         let still = self
-            .lookup(from)?
+            .lookup_on(&mut session, from)?
             .is_some_and(|(_, now)| stat_key(&now) == stat_key(&attributes));
         if !still {
             return Err(ApplyError::DestinationChanged(from.clone()));
         }
-        // Found before the session is held: finding it may use it.
-        let target = self.fresh(to.as_bytes());
-        let moved = self.renamed(&stored, &target);
+        // Resolve the target spelling on the same session that verified
+        // the source, so the move never waits for another pooled guard.
+        let target = self.fresh_on(&mut session, to.as_bytes());
+        let moved = self.renamed_on(&mut session, &stored, &target);
         if let Err(source) = moved {
-            return Err(match self.attributes(to) {
+            return Err(match self.attributes_on(&mut session, to) {
                 Ok(Some(_)) => ApplyError::DestinationChanged(to.clone()),
                 _ => write_error(from, source),
             });
@@ -1102,8 +1171,15 @@ impl SftpEndpoint {
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<(), ApplyError> {
         check_durability(run.options().durability(), path)?;
+        let mut session = self.session_unless_cancelled(control)?;
         let (remote, attributes) = self
-            .verified_at(path, current, run.options().metadata(), control)
+            .verified_at_on(
+                &mut session,
+                path,
+                current,
+                run.options().metadata(),
+                control,
+            )
             .map_err(|error| match error {
                 ApplyError::Scan(ScanError::Changed(_)) => {
                     ApplyError::DestinationChanged(path.clone())
@@ -1111,9 +1187,8 @@ impl SftpEndpoint {
                 error => error,
             })?;
         if attributes.kind() != FileKind::Directory {
-            return self.set_aside(&remote, path, run);
+            return self.set_aside_on(&mut session, &remote, path, run);
         }
-        let mut session = self.session();
         match session.remove_directory(&remote) {
             Ok(()) => {
                 self.note_gone(&remote);
@@ -1134,21 +1209,33 @@ impl SftpEndpoint {
 
     /// Archive a temporary an interrupted write left behind, or delete it
     /// where the run keeps no archive.
-    pub fn recover_leftover(&self, leftover: &SyncPath, run: &RunScope) -> Result<(), ApplyError> {
+    pub fn recover_leftover(
+        &self,
+        leftover: &SyncPath,
+        run: &RunScope,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), ApplyError> {
         check_durability(run.options().durability(), leftover)?;
-        self.set_aside(&self.remote(leftover.as_bytes()), leftover, run)
+        let mut session = self.session_unless_cancelled(control)?;
+        self.set_aside_on(
+            &mut session,
+            &self.remote(leftover.as_bytes()),
+            leftover,
+            run,
+        )
     }
 
     /// Give `path` new synced metadata; the content stays.
-    pub(crate) fn update_metadata(
+    fn update_metadata_on(
         &self,
+        session: &mut Session,
         path: &SyncPath,
         kind: EntryKind,
         metadata: crate::ForeignMetadata,
         policy: MetadataPolicy,
     ) -> Result<(), ApplyError> {
-        self.on_stored(path.as_bytes(), |remote| {
-            self.set_metadata(remote, kind, metadata, policy)
+        self.on_stored_with(session, path.as_bytes(), |session, remote| {
+            self.set_metadata_on(session, remote, kind, metadata, policy)
         })
         .map_err(|source| write_error(path, source))
     }
@@ -1163,14 +1250,15 @@ impl SftpEndpoint {
 
     /// The version of an entry whose content is unchanged, from its
     /// current attributes.
-    pub(crate) fn metadata_version(
+    fn metadata_version_on(
         &self,
+        session: &mut Session,
         path: &SyncPath,
         content: foldover_types::EntryContent,
         policy: MetadataPolicy,
     ) -> Result<EntryVersion, ApplyError> {
         let attributes = self
-            .attributes(path)?
+            .attributes_on(session, path)?
             .ok_or_else(|| ApplyError::DestinationChanged(path.clone()))?;
         Ok(metadata_version(content, &observed(&attributes)?, policy))
     }
@@ -1182,9 +1270,14 @@ impl SftpEndpoint {
         retention: Duration,
         now: SystemTime,
         pruning: Pruning,
+        control: &mut impl FnMut() -> ScanControl,
     ) -> Result<u64, ApplyError> {
+        if control() == ScanControl::Cancel {
+            return Err(ScanError::Cancelled.into());
+        }
+        let mut session = self.session_unless_cancelled(control)?;
         let archive = self.remote(ARCHIVE_ROOT);
-        let runs = match self.session().read_dir(&archive) {
+        let runs = match session.read_dir(&archive) {
             Ok(runs) => runs,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
             Err(error) => return Err(io_error(error).into()),
@@ -1198,25 +1291,42 @@ impl SftpEndpoint {
             if !expired || attributes.kind() != FileKind::Directory {
                 continue;
             }
-            self.remove_tree(&[archive.as_slice(), b"/", &name].concat())
-                .map_err(|source| ApplyError::Scan(io_error(source)))?;
+            self.remove_tree_on(
+                &mut session,
+                &[archive.as_slice(), b"/", &name].concat(),
+                control,
+            )?;
             pruned += 1;
         }
         Ok(pruned)
     }
 
-    fn remove_tree(&self, remote: &[u8]) -> io::Result<()> {
+    fn remove_tree_on(
+        &self,
+        session: &mut Session,
+        remote: &[u8],
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), ScanError> {
         let removed = (|| {
-            let entries = self.session().read_dir(remote)?;
+            if control() == ScanControl::Cancel {
+                return Err(ScanError::Cancelled);
+            }
+            let entries = session.read_dir(remote).map_err(io_error)?;
             for (name, attributes) in entries {
                 let child = [remote, b"/", &name].concat();
                 if attributes.kind() == FileKind::Directory {
-                    self.remove_tree(&child)?;
+                    self.remove_tree_on(session, &child, control)?;
                 } else {
-                    self.session().remove_file(&child)?;
+                    if control() == ScanControl::Cancel {
+                        return Err(ScanError::Cancelled);
+                    }
+                    session.remove_file(&child).map_err(io_error)?;
                 }
             }
-            self.session().remove_directory(remote)
+            if control() == ScanControl::Cancel {
+                return Err(ScanError::Cancelled);
+            }
+            session.remove_directory(remote).map_err(io_error)
         })();
         match &removed {
             // A partial removal dropped every view it could have
@@ -1238,7 +1348,7 @@ impl SftpEndpoint {
             .into_iter()
             .filter_map(|(name, attributes)| {
                 // Only directories are runs; a file or link carrying a
-                // run's timestamp name is unrelated content.
+                // run's canonical name is unrelated content.
                 if attributes.kind() != FileKind::Directory {
                     return None;
                 }
@@ -1246,7 +1356,12 @@ impl SftpEndpoint {
                 Some(ArchivedRun::new(String::from_utf8(name).ok()?, started))
             })
             .collect();
-        runs.sort_by_key(|run| std::cmp::Reverse(run.started()));
+        runs.sort_by(|left, right| {
+            right
+                .started()
+                .cmp(&left.started())
+                .then_with(|| right.name().cmp(left.name()))
+        });
         Ok(runs)
     }
 
@@ -1329,16 +1444,19 @@ impl SftpEndpoint {
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<SyncPath, ApplyError> {
         check_durability(options.durability(), path)?;
+        let mut session = self.session_unless_cancelled(control)?;
         let changed = || ApplyError::SourceChanged(path.clone());
-        let attributes = self.attributes(path)?.ok_or_else(changed)?;
-        if self.version(path, &attributes, options.metadata(), control)? != expected {
+        let (_, attributes) = self.lookup_on(&mut session, path)?.ok_or_else(changed)?;
+        if self.version_on(&mut session, path, &attributes, options.metadata(), control)?
+            != expected
+        {
             return Err(changed());
         }
         let label = format!("from {from}, {}", date_name(modified(&attributes)));
         let mut free = None;
         for attempt in 1..=PUT_BACK_ATTEMPTS {
             let candidate = sibling_name(path, &label, attempt)?;
-            if self.attributes(&candidate)?.is_none() {
+            if self.attributes_on(&mut session, &candidate)?.is_none() {
                 free = Some(candidate);
                 break;
             }
@@ -1349,21 +1467,29 @@ impl SftpEndpoint {
                 // SFTP has no server-side copy, but the session can move
                 // bounded chunks read-to-write: staging this way never
                 // holds the whole file, however large it is.
-                self.stage_copy(path, expected, &attributes, &copy, options, control)?
+                self.stage_copy_on(
+                    &mut session,
+                    path,
+                    expected,
+                    &attributes,
+                    &copy,
+                    options,
+                    control,
+                )?
             }
             FileKind::Symlink => {
-                let target = self.read_link(path)?;
-                self.stage_link(copy.as_bytes(), &target)
+                let target = self.read_link_on(&mut session, path)?;
+                self.stage_link_on(&mut session, copy.as_bytes(), &target)
                     .map_err(|source| write_error(&copy, source))?
             }
             FileKind::Directory | FileKind::Other => {
                 return Err(ApplyError::Unsupported(path.clone()));
             }
         };
-        let target = self.fresh(copy.as_bytes());
-        let placed = self.renamed(&temporary, &target);
+        let target = self.fresh_on(&mut session, copy.as_bytes());
+        let placed = self.renamed_on(&mut session, &temporary, &target);
         if let Err(source) = placed {
-            let _ = self.removed_file(&temporary);
+            let _ = self.removed_file_on(&mut session, &temporary);
             return Err(write_error(&copy, source));
         }
         Ok(copy)
@@ -1375,8 +1501,10 @@ impl SftpEndpoint {
     /// the observer hashes each chunk and can cancel. The temporary is
     /// removed and every handle closed on any failure, and the source is
     /// re-stat'ed before the staged file is allowed to be published.
-    fn stage_copy(
+    #[allow(clippy::too_many_arguments)]
+    fn stage_copy_on(
         &self,
+        session: &mut Session,
         path: &SyncPath,
         expected: EntryVersion,
         attributes: &Attributes,
@@ -1391,14 +1519,13 @@ impl SftpEndpoint {
             .size
             .ok_or_else(|| ApplyError::Unsupported(path.clone()))?;
         let (source_remote, _) = self
-            .lookup(path)?
+            .lookup_on(session, path)?
             .ok_or_else(|| ApplyError::SourceChanged(path.clone()))?;
-        let temporary = self.beside(copy.as_bytes());
+        let temporary = self.beside_on(session, copy.as_bytes());
         let permissions = attributes.permissions.unwrap_or(DEFAULT_FILE) & PERMISSION_BITS;
         let mut hasher = blake3::Hasher::new();
         let mut cancelled = false;
         let copied = {
-            let mut session = self.session();
             let source = match session.open_read(&source_remote) {
                 Ok(handle) => handle,
                 Err(error) => return Err(at(Some(path), error).into()),
@@ -1433,7 +1560,7 @@ impl SftpEndpoint {
         };
         let (bytes, after) = match copied {
             Err(source) => {
-                self.discard(&temporary);
+                self.discard_on(session, &temporary);
                 return Err(if cancelled {
                     ScanError::Cancelled.into()
                 } else {
@@ -1443,28 +1570,29 @@ impl SftpEndpoint {
             Ok(pair) => pair,
         };
         if bytes != size || stat_key(&after) != stat_key(attributes) {
-            self.discard(&temporary);
+            self.discard_on(session, &temporary);
             return Err(ApplyError::SourceChanged(path.clone()));
         }
         let digest = Digest::from_bytes(*hasher.finalize().as_bytes());
         let stored = self
-            .staged_version(&temporary, digest, options.metadata())
+            .staged_version_on(session, &temporary, digest, options.metadata())
             .map_err(|source| {
-                self.discard(&temporary);
+                self.discard_on(session, &temporary);
                 write_error(copy, source)
             })?;
         if stored.content() != expected.content() {
-            self.discard(&temporary);
+            self.discard_on(session, &temporary);
             return Err(ApplyError::SourceChanged(path.clone()));
         }
-        self.set_metadata(
+        self.set_metadata_on(
+            session,
             &temporary,
             EntryKind::File,
             Self::foreign_metadata(attributes),
             options.metadata(),
         )
         .map_err(|source| {
-            self.discard(&temporary);
+            self.discard_on(session, &temporary);
             write_error(copy, source)
         })?;
         Ok(temporary)

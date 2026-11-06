@@ -83,7 +83,7 @@ struct MainView: View {
                         .frame(width: Self.inspectorWidth)
                 }
             }
-            .navigationTitle(viewModel.selectedPair?.settings.name ?? viewModel.title)
+            .navigationTitle(viewModel.selectedPairName ?? viewModel.title)
             .navigationSubtitle(viewModel.selectedSync?.shortStatus ?? "")
         }
         .searchable(text: searchText, placement: .toolbar, prompt: "Filter Changes")
