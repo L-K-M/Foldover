@@ -18,6 +18,40 @@ const NOTHING: PairOptions = PairOptions::new(
 );
 const STANDARD: Durability = Durability::Standard;
 
+#[test]
+fn reopening_prune_ancestors_reports_progress_and_can_stop() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::create_dir_all(directory.path().join("a/b/c")).unwrap();
+    let root = Root::open(directory.path()).unwrap();
+    let mut checkpoints = 0;
+    let opened = open_below(&root.directory, Path::new("a/b/c"), &mut || {
+        checkpoints += 1;
+        ScanControl::Continue
+    })
+    .unwrap();
+    drop(opened);
+    assert_eq!(
+        checkpoints, 3,
+        "each component must report traversal progress"
+    );
+
+    let mut checkpoints = 0;
+    let cancelled = open_below(&root.directory, Path::new("a/b/c"), &mut || {
+        checkpoints += 1;
+        if checkpoints == 2 {
+            ScanControl::Cancel
+        } else {
+            ScanControl::Continue
+        }
+    });
+    assert!(matches!(
+        cancelled,
+        Err(WriteError::Source(HashError::Cancelled))
+    ));
+    assert_eq!(checkpoints, 2);
+    assert!(directory.path().join("a/b/c").is_dir());
+}
+
 #[cfg(target_os = "linux")]
 const ATTRIBUTE: &str = "user.ch.lkmc.foldover.test";
 #[cfg(not(target_os = "linux"))]
@@ -762,12 +796,63 @@ fn trees_are_removed_without_following_links() {
     symlink(outside.path(), target.join("old/a/link")).unwrap();
     fs::write(target.join("other"), b"y").unwrap();
 
-    roots.target.remove_tree(&path(b"old")).unwrap();
+    roots
+        .target
+        .remove_tree(&path(b"old"), &mut || ScanControl::Continue)
+        .unwrap();
     assert_eq!(names(target), [b"other".to_vec()]);
     assert_eq!(fs::read(outside.path().join("keep")).unwrap(), b"keep");
-    roots.target.remove_tree(&path(b"other")).unwrap();
-    assert!(names(target).is_empty());
-    assert!(roots.target.remove_tree(&path(b"missing")).is_err());
+    assert!(matches!(
+        roots
+            .target
+            .remove_tree(&path(b"other"), &mut || ScanControl::Continue),
+        Err(WriteError::UnsupportedEntry)
+    ));
+    assert_eq!(fs::read(target.join("other")).unwrap(), b"y");
+    symlink(outside.path(), target.join("other-link")).unwrap();
+    assert!(matches!(
+        roots
+            .target
+            .remove_tree(&path(b"other-link"), &mut || ScanControl::Continue),
+        Err(WriteError::UnsupportedEntry)
+    ));
+    assert_eq!(
+        fs::read_link(target.join("other-link")).unwrap(),
+        outside.path()
+    );
+    assert!(
+        roots
+            .target
+            .remove_tree(&path(b"missing"), &mut || ScanControl::Continue)
+            .is_err()
+    );
+}
+
+/// A stop between entries ends a tree removal cooperatively: what is
+/// deleted stays deleted, and the rest survives.
+#[test]
+fn removing_a_tree_stops_at_a_checkpoint() {
+    let roots = roots();
+    let target = roots.target_directory.path();
+    fs::create_dir_all(target.join("old/a/b")).unwrap();
+    let file = target.join("old/a/b/file");
+    fs::write(&file, b"x").unwrap();
+
+    // Cancel once the first entry is gone: the removal stops at the
+    // next checkpoint rather than ploughing on.
+    let cancelled = roots.target.remove_tree(&path(b"old"), &mut || {
+        if file.exists() {
+            ScanControl::Continue
+        } else {
+            ScanControl::Cancel
+        }
+    });
+    assert!(matches!(
+        cancelled,
+        Err(WriteError::Source(HashError::Cancelled))
+    ));
+    assert!(!file.exists());
+    assert!(target.join("old").exists());
 }
 
 #[test]
@@ -784,7 +869,10 @@ fn deep_trees_are_removed_without_hitting_a_descriptor_cap() {
     fs::write(outside.path().join("keep"), b"keep").unwrap();
     symlink(outside.path(), target.join("old/d/link")).unwrap();
 
-    roots.target.remove_tree(&path(b"old")).unwrap();
+    roots
+        .target
+        .remove_tree(&path(b"old"), &mut || ScanControl::Continue)
+        .unwrap();
     assert!(names(target).is_empty());
     assert_eq!(fs::read(outside.path().join("keep")).unwrap(), b"keep");
 }

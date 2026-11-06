@@ -1,9 +1,12 @@
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use foldover_net::peer::Identity;
-use foldover_proto::peer::{FolderOp, IncomingKind, PeerCall, PeerReply, VolumeKind};
+use foldover_proto::peer::{
+    FolderOp, IncomingKind, NameCase, NameUnicode, PeerCall, PeerReply, VolumeKind,
+};
 use foldover_types::{DeviceId, Digest, LocalRoot, PairOptions, PeerRoot, ShareId, SyncPath};
 
 use super::*;
@@ -17,6 +20,493 @@ struct Sharing {
     root: LocalRoot,
     cache: FolderCache,
     state: Option<std::path::PathBuf>,
+}
+
+/// Answers setup calls, then leaves an observation waiting on its stream.
+struct StallingObservation(std::sync::Mutex<mpsc::Sender<()>>);
+
+impl PeerHost for StallingObservation {
+    fn paired(&self, _: DeviceId, _: String) -> Result<(), NotRecorded> {
+        Ok(())
+    }
+
+    fn serve(&self, _: DeviceId, call: PeerCall, answer: &mut Answer) {
+        let PeerCall::Folder { op, .. } = call else {
+            return;
+        };
+        match *op {
+            FolderOp::Probe => {
+                let _ = answer.reply(&PeerReply::Done);
+            }
+            FolderOp::NameMatching => {
+                let _ = answer.reply(&PeerReply::Names {
+                    case: NameCase::Exact,
+                    unicode: NameUnicode::Exact,
+                });
+            }
+            FolderOp::Observe { .. } => {
+                let _ = self.0.lock().unwrap().send(());
+                let _ = answer.next_data();
+            }
+            _ => {
+                let _ = answer.reply(&PeerReply::Refused {
+                    reason: "Not served by this fixture".into(),
+                });
+            }
+        }
+    }
+}
+
+/// Reads a complete incoming file, then withholds its final `Received` reply.
+struct StallingReceive(std::sync::Mutex<mpsc::Sender<()>>);
+
+impl PeerHost for StallingReceive {
+    fn paired(&self, _: DeviceId, _: String) -> Result<(), NotRecorded> {
+        Ok(())
+    }
+
+    fn serve(&self, _: DeviceId, call: PeerCall, answer: &mut Answer) {
+        let PeerCall::Folder { op, .. } = call else {
+            return;
+        };
+        match *op {
+            FolderOp::Probe => {
+                let _ = answer.reply(&PeerReply::Done);
+            }
+            FolderOp::NameMatching => {
+                let _ = answer.reply(&PeerReply::Names {
+                    case: NameCase::Exact,
+                    unicode: NameUnicode::Exact,
+                });
+            }
+            FolderOp::Receive { .. } => {
+                while matches!(answer.next_data(), Ok(Some(_))) {}
+                let _ = self.0.lock().unwrap().send(());
+                // Keep the accepted stream open without sending its final reply.
+                let _ = answer.next_data();
+            }
+            _ => {
+                let _ = answer.reply(&PeerReply::Refused {
+                    reason: "Not served by this fixture".into(),
+                });
+            }
+        }
+    }
+}
+
+/// Starts waiting for file data immediately, while the producer is still
+/// checking control and sending transport heartbeats.
+struct WaitingForReceiveData(std::sync::Mutex<mpsc::Sender<()>>);
+
+impl PeerHost for WaitingForReceiveData {
+    fn paired(&self, _: DeviceId, _: String) -> Result<(), NotRecorded> {
+        Ok(())
+    }
+
+    fn serve(&self, _: DeviceId, call: PeerCall, answer: &mut Answer) {
+        let PeerCall::Folder { op, .. } = call else {
+            return;
+        };
+        match *op {
+            FolderOp::Probe => {
+                let _ = answer.reply(&PeerReply::Done);
+            }
+            FolderOp::NameMatching => {
+                let _ = answer.reply(&PeerReply::Names {
+                    case: NameCase::Exact,
+                    unicode: NameUnicode::Exact,
+                });
+            }
+            FolderOp::Receive { .. } => {
+                let _ = self.0.lock().unwrap().send(());
+                let _ = answer.next_data();
+            }
+            _ => {
+                let _ = answer.reply(&PeerReply::Refused {
+                    reason: "Not served by this fixture".into(),
+                });
+            }
+        }
+    }
+}
+
+/// An already-trusted peer endpoint answered by `host`, with its runtime
+/// and answering link kept alive by the returned values.
+fn peer_endpoint(
+    host: Arc<dyn PeerHost>,
+) -> (tokio::runtime::Runtime, PeerEndpoint, Arc<PeerLink>) {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let identities = [Identity::generate().unwrap(), Identity::generate().unwrap()];
+    let devices = identities
+        .each_ref()
+        .map(|identity| DeviceId::from_bytes(*identity.id().as_bytes()));
+    let [a_identity, b_identity] = identities;
+    let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let (a, b) = runtime.block_on(async {
+        let b = PeerLink::start(
+            b_identity,
+            "Studio".into(),
+            loopback,
+            Presence::Unlisted,
+            [devices[0]],
+            host,
+        )
+        .unwrap();
+        let a = PeerLink::start(
+            a_identity,
+            "Laptop".into(),
+            loopback,
+            Presence::Unlisted,
+            [devices[1]],
+            Arc::new(Sharing {
+                root: LocalRoot::from_bytes(b"/".to_vec()).unwrap(),
+                cache: FolderCache::default(),
+                state: None,
+            }),
+        )
+        .unwrap();
+        a.reach(devices[1], b.address().unwrap());
+        (a, b)
+    });
+    let root = PeerRoot::new(devices[1], ShareId::from_bytes([7; ShareId::BYTE_LEN]));
+    let endpoint = PeerEndpoint::open(a, &root).unwrap();
+    (runtime, endpoint, b)
+}
+
+/// Answers setup calls, then leaves a prune request waiting on its stream.
+struct StallingPrune(std::sync::Mutex<mpsc::Sender<()>>);
+
+impl PeerHost for StallingPrune {
+    fn paired(&self, _: DeviceId, _: String) -> Result<(), NotRecorded> {
+        Ok(())
+    }
+
+    fn serve(&self, _: DeviceId, call: PeerCall, answer: &mut Answer) {
+        let PeerCall::Folder { op, .. } = call else {
+            return;
+        };
+        match *op {
+            FolderOp::Probe => {
+                let _ = answer.reply(&PeerReply::Done);
+            }
+            FolderOp::NameMatching => {
+                let _ = answer.reply(&PeerReply::Names {
+                    case: NameCase::Exact,
+                    unicode: NameUnicode::Exact,
+                });
+            }
+            FolderOp::PruneArchive { .. } => {
+                let _ = self.0.lock().unwrap().send(());
+                // Keep the accepted stream open without sending its reply.
+                let _ = answer.next_data();
+            }
+            _ => {
+                let _ = answer.reply(&PeerReply::Refused {
+                    reason: "Not served by this fixture".into(),
+                });
+            }
+        }
+    }
+}
+
+/// A paired endpoint whose prune request is accepted but never answered:
+/// Stop while the serving Mac still prunes is `Cancelled`, as for reads
+/// and observations, and a finished prune reports what it removed.
+#[test]
+fn a_peer_prune_answers_progress_and_stopping_its_wait_cancels() {
+    let (started_tx, started) = mpsc::channel();
+    let (_runtime, endpoint, b) =
+        peer_endpoint(Arc::new(StallingPrune(std::sync::Mutex::new(started_tx))));
+    let stopped = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stopped);
+    let (done_tx, done) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let result =
+            endpoint.prune_archive(Duration::from_secs(30 * 86_400), UNIX_EPOCH, &mut || {
+                if worker_stop.load(Ordering::Relaxed) {
+                    ScanControl::Cancel
+                } else {
+                    ScanControl::Continue
+                }
+            });
+        let _ = done_tx.send(result);
+    });
+
+    started.recv_timeout(Duration::from_secs(10)).unwrap();
+    stopped.store(true, Ordering::Relaxed);
+    let result = done.recv_timeout(Duration::from_secs(2));
+    if result.is_err() {
+        // Let the pre-fix blocked reply wait finish before failing the test.
+        drop(b);
+        let _ = done.recv_timeout(Duration::from_secs(10));
+        worker.join().unwrap();
+        panic!("Stop did not interrupt the peer prune");
+    }
+    assert!(matches!(
+        result,
+        Ok(Err(crate::ApplyError::Scan(ScanError::Cancelled)))
+    ));
+    worker.join().unwrap();
+
+    // A real shared folder proves the prune itself: the expired run goes
+    // and the too-young one stays, by the serving Mac's clock.
+    let shared = tempfile::tempdir().unwrap();
+    let archive = shared.path().join(".foldover/archive");
+    let day = Duration::from_secs(86_400);
+    let now = SystemTime::now();
+    let old = archive.join(crate::archive_name(now - 40 * day));
+    std::fs::create_dir_all(old.join("kept")).unwrap();
+    std::fs::write(old.join("kept/data"), b"old").unwrap();
+    let recent = archive.join(crate::archive_name(now - 20 * day));
+    std::fs::create_dir_all(&recent).unwrap();
+    let (_runtime, endpoint, _link) = peer_endpoint(Arc::new(Sharing {
+        root: LocalRoot::from_bytes(shared.path().as_os_str().as_encoded_bytes().to_vec()).unwrap(),
+        cache: FolderCache::default(),
+        state: None,
+    }));
+    let endpoint = Endpoint::Peer(endpoint);
+
+    let pruned = endpoint.prune_archive(30 * day, now, crate::Pruning::Everyone, &mut || {
+        ScanControl::Continue
+    });
+    assert_eq!(pruned.ok(), Some(1));
+    assert!(!old.exists());
+    assert!(recent.exists());
+}
+
+/// A paired endpoint whose observation request is accepted but never answered.
+#[test]
+fn stopping_a_stalled_peer_observation_returns_cancelled() {
+    let (started_tx, started) = mpsc::channel();
+    let (_runtime, endpoint, b) = peer_endpoint(Arc::new(StallingObservation(
+        std::sync::Mutex::new(started_tx),
+    )));
+    let endpoint = Endpoint::Peer(endpoint);
+    let stopped = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stopped);
+    let (done_tx, done) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let options = PairOptions::default();
+        let result = endpoint.observe_from(
+            options.metadata(),
+            &crate::Filter::none(),
+            &std::collections::BTreeMap::new(),
+            &mut || {
+                if worker_stop.load(Ordering::Relaxed) {
+                    ScanControl::Cancel
+                } else {
+                    ScanControl::Continue
+                }
+            },
+            &mut |_| {},
+        );
+        let _ = done_tx.send(result);
+    });
+
+    started.recv_timeout(Duration::from_secs(10)).unwrap();
+    stopped.store(true, Ordering::Relaxed);
+    let result = done.recv_timeout(Duration::from_secs(2));
+    if result.is_err() {
+        // Let the pre-fix blocked frame read finish before failing the test.
+        drop(b);
+        let _ = done.recv_timeout(Duration::from_secs(10));
+        worker.join().unwrap();
+        panic!("Stop did not interrupt the peer observation");
+    }
+    assert!(matches!(result, Ok(Err(ScanError::Cancelled))));
+    worker.join().unwrap();
+}
+
+/// Stop while the destination withholds its final acknowledgement is still
+/// cancellation, not a source write/change failure.
+#[test]
+fn stopping_a_peer_receive_waiting_for_its_final_reply_returns_cancelled() {
+    let (started_tx, started) = mpsc::channel();
+    let (_runtime, endpoint, b) =
+        peer_endpoint(Arc::new(StallingReceive(std::sync::Mutex::new(started_tx))));
+    let stopped = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stopped);
+    let (done_tx, done) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let path = SyncPath::try_from(b"file.bin".as_slice()).unwrap();
+        let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), PairOptions::default());
+        let carried = Carried {
+            metadata: foldover_fs::ForeignMetadata {
+                permissions: 0o644,
+                modified: UNIX_EPOCH,
+            },
+            native: None,
+        };
+        let content = Digest::from_bytes([3; Digest::BYTE_LEN]);
+        let mut control = || {
+            if worker_stop.load(Ordering::Relaxed) {
+                ScanControl::Cancel
+            } else {
+                ScanControl::Continue
+            }
+        };
+        let result = endpoint.receive(
+            &path,
+            Expected::Absent,
+            IncomingKind::File {
+                content: content.as_bytes().to_vec(),
+                from: 0,
+            },
+            carried,
+            &run,
+            &mut control,
+            |sink, _| sink(b"complete file"),
+        );
+        let _ = done_tx.send(result);
+    });
+
+    started.recv_timeout(Duration::from_secs(10)).unwrap();
+    stopped.store(true, Ordering::Relaxed);
+    let result = done.recv_timeout(Duration::from_secs(2));
+    if result.is_err() {
+        drop(b);
+        let _ = done.recv_timeout(Duration::from_secs(10));
+        worker.join().unwrap();
+        panic!("Stop did not interrupt the final peer reply");
+    }
+    assert!(matches!(
+        result,
+        Ok(Err(crate::ApplyError::Scan(ScanError::Cancelled)))
+    ));
+    worker.join().unwrap();
+}
+
+/// A slow producer checks Stop before it has data. Its transport heartbeat
+/// path must retain cancellation rather than misreport a source write failure.
+#[test]
+fn stopping_a_peer_receive_while_its_producer_is_still_working_returns_cancelled() {
+    let (started_tx, started) = mpsc::channel();
+    let (_runtime, endpoint, b) = peer_endpoint(Arc::new(WaitingForReceiveData(
+        std::sync::Mutex::new(started_tx),
+    )));
+    let stopped = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stopped);
+    let (done_tx, done) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let path = SyncPath::try_from(b"file.bin".as_slice()).unwrap();
+        let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), PairOptions::default());
+        let carried = Carried {
+            metadata: foldover_fs::ForeignMetadata {
+                permissions: 0o644,
+                modified: UNIX_EPOCH,
+            },
+            native: None,
+        };
+        let content = Digest::from_bytes([3; Digest::BYTE_LEN]);
+        let mut control = || {
+            if worker_stop.load(Ordering::Relaxed) {
+                ScanControl::Cancel
+            } else {
+                ScanControl::Continue
+            }
+        };
+        let result = endpoint.receive(
+            &path,
+            Expected::Absent,
+            IncomingKind::File {
+                content: content.as_bytes().to_vec(),
+                from: 0,
+            },
+            carried,
+            &run,
+            &mut control,
+            |_, checkpoint| loop {
+                if checkpoint() == ScanControl::Cancel {
+                    return Err(io::Error::other("cancelled"));
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            },
+        );
+        let _ = done_tx.send(result);
+    });
+
+    started.recv_timeout(Duration::from_secs(10)).unwrap();
+    // Cross the heartbeat interval before stopping the source producer.
+    std::thread::sleep(Duration::from_millis(250));
+    stopped.store(true, Ordering::Relaxed);
+    let result = done.recv_timeout(Duration::from_secs(2));
+    if result.is_err() {
+        drop(b);
+        let _ = done.recv_timeout(Duration::from_secs(10));
+        worker.join().unwrap();
+        panic!("Stop did not interrupt the peer source producer");
+    }
+    assert!(matches!(
+        result,
+        Ok(Err(crate::ApplyError::Scan(ScanError::Cancelled)))
+    ));
+    worker.join().unwrap();
+}
+
+/// A producer that ignores a transport-induced Stop must keep seeing Stop,
+/// and its later source error must not replace the original link failure.
+#[test]
+fn a_peer_receive_keeps_a_transport_failure_sticky_for_its_producer() {
+    let (server_started_tx, server_started) = mpsc::channel();
+    let (_runtime, endpoint, answerer) = peer_endpoint(Arc::new(WaitingForReceiveData(
+        std::sync::Mutex::new(server_started_tx),
+    )));
+    let client_link = Arc::clone(&endpoint.link);
+    let server_device = answerer.device();
+    let (producer_started_tx, producer_started) = mpsc::channel();
+    let (release_tx, release) = mpsc::channel();
+    let (done_tx, done) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let path = SyncPath::try_from(b"file.bin".as_slice()).unwrap();
+        let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), PairOptions::default());
+        let carried = Carried {
+            metadata: foldover_fs::ForeignMetadata {
+                permissions: 0o644,
+                modified: UNIX_EPOCH,
+            },
+            native: None,
+        };
+        let content = Digest::from_bytes([3; Digest::BYTE_LEN]);
+        let result = endpoint.receive(
+            &path,
+            Expected::Absent,
+            IncomingKind::File {
+                content: content.as_bytes().to_vec(),
+                from: 0,
+            },
+            carried,
+            &run,
+            &mut || ScanControl::Continue,
+            |_, checkpoint| {
+                producer_started_tx.send(()).unwrap();
+                release.recv_timeout(Duration::from_secs(10)).unwrap();
+                assert_eq!(checkpoint(), ScanControl::Cancel);
+                assert_eq!(checkpoint(), ScanControl::Cancel);
+                Err(io::Error::other("producer stopped after the link failed"))
+            },
+        );
+        let _ = done_tx.send(result);
+    });
+
+    server_started
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap();
+    producer_started
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap();
+    std::thread::sleep(STREAM_HEARTBEAT_INTERVAL + Duration::from_millis(50));
+    client_link.revoke(server_device);
+    release_tx.send(()).unwrap();
+
+    let result = done.recv_timeout(Duration::from_secs(2));
+    assert!(matches!(
+        result,
+        Ok(Err(crate::ApplyError::Scan(ScanError::MacUnreachable(_))))
+    ));
+    worker.join().unwrap();
 }
 
 impl PeerHost for Sharing {
@@ -107,7 +597,8 @@ fn a_copy_whose_source_fails_partway_stops_instead_of_waiting() {
             },
             carried,
             &run,
-            |sink| {
+            &mut || ScanControl::Continue,
+            |sink, _| {
                 sink(&[1; 64 * 1024])?;
                 Err(io::Error::other("the source changed"))
             },
@@ -639,7 +1130,10 @@ fn a_shared_folder_never_serves_the_agent_state_directory() {
     // serves, not what sits on disk.)
     let unprotected = Endpoint::Local(crate::LocalEndpoint::open(shared.path()).unwrap());
     let planned = observe(&unprotected).unwrap().entries()[&inside].clone();
-    assert!(peer.read(&inside, &planned, &run, 0).is_err());
+    assert!(
+        peer.read(&inside, &planned, &run, 0, &mut || ScanControl::Continue,)
+            .is_err()
+    );
 
     // Case-insensitive volumes (default APFS) resolve this spelling to
     // the same file; the guard compares directory identity, not bytes. On
@@ -650,7 +1144,10 @@ fn a_shared_folder_never_serves_the_agent_state_directory() {
         let cased =
             SyncPath::try_from(b"library/Application Support/Foldover/pairs.sqlite".as_slice())
                 .unwrap();
-        assert!(peer.read(&cased, &planned, &run, 0).is_err());
+        assert!(
+            peer.read(&cased, &planned, &run, 0, &mut || ScanControl::Continue,)
+                .is_err()
+        );
     }
 
     // A write inside the state directory is refused there as well. The
@@ -677,7 +1174,8 @@ fn a_shared_folder_never_serves_the_agent_state_directory() {
             },
             carried,
             &run,
-            |sink| sink(b"tampered"),
+            &mut || ScanControl::Continue,
+            |sink, _| sink(b"tampered"),
         )
         .is_err()
     );

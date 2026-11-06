@@ -20,12 +20,6 @@ struct Pair {
     run: RunScope,
 }
 
-/// Where the tests' run archives `path`.
-fn archived(path: &str) -> String {
-    let run = crate::local::archive::run_name(std::time::UNIX_EPOCH, crate::test_pair());
-    format!(".foldover/archive/{run}/{path}")
-}
-
 fn pair() -> Pair {
     let left_directory = tempfile::tempdir().unwrap();
     let right_directory = tempfile::tempdir().unwrap();
@@ -57,6 +51,20 @@ fn names(directory: &Path) -> Vec<String> {
         .collect();
     names.sort();
     names
+}
+
+#[test]
+fn run_scopes_started_together_have_distinct_canonical_names() {
+    let first = RunScope::new(std::time::UNIX_EPOCH, crate::test_pair(), OPTIONS);
+    let second = RunScope::new(std::time::UNIX_EPOCH, crate::test_pair(), OPTIONS);
+
+    assert_ne!(first.name(), second.name());
+    for run in [&first, &second] {
+        assert_eq!(
+            crate::local::archive::parse_run(run.name().as_bytes()),
+            Some((std::time::UNIX_EPOCH, Some(crate::test_pair())))
+        );
+    }
 }
 
 #[test]
@@ -119,7 +127,16 @@ fn replacements_archive_the_previous_version() {
         .unwrap();
     let target = pair.right_directory.path();
     assert_eq!(fs::read(target.join("file")).unwrap(), b"new");
-    assert_eq!(fs::read(target.join(archived("file"))).unwrap(), b"old");
+    assert_eq!(
+        fs::read(
+            target
+                .join(".foldover/archive")
+                .join(pair.run.name())
+                .join("file")
+        )
+        .unwrap(),
+        b"old"
+    );
     assert_eq!(names(target), [".foldover", "file"]);
 }
 
@@ -230,7 +247,13 @@ fn removals_archive_files_and_remove_only_empty_folders() {
         Err(ApplyError::NotEmpty(_))
     ));
     assert_eq!(
-        fs::read(target.join(archived("folder/file"))).unwrap(),
+        fs::read(
+            target
+                .join(".foldover/archive")
+                .join(pair.run.name())
+                .join("folder/file")
+        )
+        .unwrap(),
         b"data"
     );
 
@@ -255,7 +278,13 @@ fn leftover_temporaries_are_reported_and_archived_not_deleted() {
 
     pair.right.recover_leftover(&leftover, &pair.run).unwrap();
     assert_eq!(
-        fs::read(target.join(archived("folder/.foldover-tmp-0123"))).unwrap(),
+        fs::read(
+            target
+                .join(".foldover/archive")
+                .join(pair.run.name())
+                .join("folder/.foldover-tmp-0123")
+        )
+        .unwrap(),
         b"displaced"
     );
     assert!(observe(&pair.right).leftovers().is_empty());
