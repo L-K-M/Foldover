@@ -166,6 +166,7 @@ struct MenuBarView: View {
         if let pause = viewModel.pauseText {
             note(pause)
             Button { Task { await viewModel.resume() } } label: { rowLabel("Resume Automatic Syncs") }
+                .disabled(viewModel.automationMutationPending)
         } else {
             if let hold = viewModel.holdText {
                 note(hold)
@@ -177,6 +178,7 @@ struct MenuBarView: View {
             }
             .menuStyle(.button)
             .fixedSize()
+            .disabled(viewModel.automationMutationPending)
         }
     }
 
