@@ -243,9 +243,16 @@ fn archived_runs_are_only_directories_named_like_runs() {
     };
     let archive = directory.path().join(".foldover/archive");
     let run = crate::local::archive::archive_name(UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+    let pair: foldover_types::PairId = "0123456789abcdef0123456789abcdef".parse().unwrap();
+    let tied =
+        crate::local::archive::run_name(UNIX_EPOCH + Duration::from_secs(1_700_000_000), pair);
+    let tied_first = format!("{tied}_00000000000000000000000000000001");
+    let tied_second = format!("{tied}_00000000000000000000000000000002");
     let file = crate::local::archive::archive_name(UNIX_EPOCH + Duration::from_secs(1_700_000_001));
     let link = crate::local::archive::archive_name(UNIX_EPOCH + Duration::from_secs(1_700_000_002));
     fs::create_dir_all(archive.join(&run)).unwrap();
+    fs::create_dir_all(archive.join(&tied_first)).unwrap();
+    fs::create_dir_all(archive.join(&tied_second)).unwrap();
     fs::write(archive.join(&file), b"not a run").unwrap();
     std::os::unix::fs::symlink(&run, archive.join(&link)).unwrap();
     fs::create_dir(archive.join("kept by the user")).unwrap();
@@ -256,7 +263,7 @@ fn archived_runs_are_only_directories_named_like_runs() {
         .iter()
         .map(|run| run.name().to_owned())
         .collect();
-    assert_eq!(runs, [run]);
+    assert_eq!(runs, [tied_second, tied_first, run]);
 }
 
 /// Review: each entry was listed and checked back to back, so the

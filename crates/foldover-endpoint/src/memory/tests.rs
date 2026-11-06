@@ -57,6 +57,64 @@ fn names(folder: &MemoryEndpoint) -> Vec<String> {
 }
 
 #[test]
+fn archive_pruning_removes_only_timestamped_directories() {
+    use crate::local::archive::archive_name;
+
+    let folder = MemoryEndpoint::new(Quirks::default());
+    let day = Duration::from_secs(86_400);
+    let now = UNIX_EPOCH + day * 100;
+    let run = archive_name(UNIX_EPOCH + day * 69);
+    let timestamp_file = archive_name(UNIX_EPOCH + day * 68);
+    let timestamp_link = archive_name(UNIX_EPOCH + day * 67);
+    folder
+        .put_file(
+            format!(".foldover/archive/{run}/file").as_bytes(),
+            b"archived",
+        )
+        .unwrap();
+    folder
+        .put_file(
+            format!(".foldover/archive/{timestamp_file}").as_bytes(),
+            b"not a run",
+        )
+        .unwrap();
+    folder
+        .put_link(
+            format!(".foldover/archive/{timestamp_link}").as_bytes(),
+            b"kept by the user",
+        )
+        .unwrap();
+
+    assert_eq!(
+        folder
+            .prune_archive(day * 30, now, Pruning::Everyone)
+            .unwrap(),
+        1
+    );
+    let state = folder.folder();
+    assert!(
+        state
+            .get(format!(".foldover/archive/{run}").as_bytes())
+            .is_none()
+    );
+    assert!(
+        state
+            .get(format!(".foldover/archive/{run}/file").as_bytes())
+            .is_none()
+    );
+    assert!(
+        state
+            .get(format!(".foldover/archive/{timestamp_file}").as_bytes())
+            .is_some()
+    );
+    assert!(
+        state
+            .get(format!(".foldover/archive/{timestamp_link}").as_bytes())
+            .is_some()
+    );
+}
+
+#[test]
 fn a_case_insensitive_folder_keeps_one_file_under_its_first_name() {
     let folder = MemoryEndpoint::new(Quirks {
         names: NameMatching::new(CaseMatching::Insensitive, UnicodeMatching::Exact),

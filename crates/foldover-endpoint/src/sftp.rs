@@ -1225,7 +1225,7 @@ impl SftpEndpoint {
             .into_iter()
             .filter_map(|(name, attributes)| {
                 // Only directories are runs; a file or link carrying a
-                // run's timestamp name is unrelated content.
+                // run's canonical name is unrelated content.
                 if attributes.kind() != FileKind::Directory {
                     return None;
                 }
@@ -1233,7 +1233,12 @@ impl SftpEndpoint {
                 Some(ArchivedRun::new(String::from_utf8(name).ok()?, started))
             })
             .collect();
-        runs.sort_by_key(|run| std::cmp::Reverse(run.started()));
+        runs.sort_by(|left, right| {
+            right
+                .started()
+                .cmp(&left.started())
+                .then_with(|| right.name().cmp(left.name()))
+        });
         Ok(runs)
     }
 

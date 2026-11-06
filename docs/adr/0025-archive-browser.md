@@ -11,8 +11,8 @@ an item back, or everything a run archived. Requests go through the agent
 clients never touch `.foldover`.
 
 ```text
-.foldover/archive/2026-10-18T09-30-00.000Z_<pair id>/docs/report.txt
-                  └ run (start time, UTC, pair) ─┘└ original path ┘
+.foldover/archive/2026-10-18T09-30-00.000Z_<pair id>_<run id>/docs/report.txt
+                  └ run (start time, UTC, pair, unique ID) ─┘└ original path ┘
 ```
 
 A pair lists its own runs and those from before runs named their pair
