@@ -62,10 +62,15 @@ execute: deletion gate ─▶ archive leftovers
   A commit fails if the pair's revision changed, which stops the run.
 
 **Retention.** Archives live in `.foldover/archive/<run>/` on each side,
-where `<run>` is the run's UTC start time and, since
-[ADR 0047](0047-shared-one-way-sources.md), its pair
-(`2026-10-18T09-30-00.123Z_<pair id>`). After a run completes without
-cancellation, run folders older than 30 days are deleted permanently
+where `<run>` is the run's UTC start time, since
+[ADR 0047](0047-shared-one-way-sources.md) its pair, and a unique run ID
+(`2026-10-18T09-30-00.123Z_<pair id>_<32 hex>`). The ID keeps runs distinct
+even when their clocks report the same millisecond — a restart or a clock
+rollback can otherwise make two runs share one archive and journal
+identity; the timestamp prefix keeps names readable and sortable. Run
+folders of the time alone, and of the time and pair, remain readable.
+After a run completes without cancellation,
+run folders older than 30 days are deleted permanently
 (owner decision, PLAN.md §10); another pair's only after 60. Only
 canonical run names count, so other folders in the archive are kept. Deletion never follows links; a pruning failure is
 reported, not fatal. Per-path failures do not suspend retention: affected

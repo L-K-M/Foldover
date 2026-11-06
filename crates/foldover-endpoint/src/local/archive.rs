@@ -1,11 +1,13 @@
 //! Each root keeps replaced and removed entries in
-//! `.foldover/archive/<run>/<path>`. `<run>` is the run's UTC start time
-//! and the pair that ran it, e.g.
-//! `2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef`, so
-//! retention can delete whole runs by age without reading their contents,
-//! and pairs that share a folder, on one Mac or several, each list and
-//! prune their own runs (ADR 0047). Runs from before the pair was named
-//! carry the time alone and belong to every pair.
+//! `.foldover/archive/<run>/<path>`. `<run>` is the run's UTC start time,
+//! the pair that ran it and a unique run ID, e.g.
+//! `2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_0123456789abcdef0123456789abcdef`,
+//! so retention can delete whole runs by age without reading their
+//! contents, and pairs that share a folder, on one Mac or several, each
+//! list and prune their own runs (ADR 0047). The ID keeps runs that share
+//! a start millisecond distinct. Runs named before the ID carry only the
+//! time and pair, and runs from before the pair was named carry the time
+//! alone and belong to every pair.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -113,13 +115,15 @@ const SECONDS_PER_DAY: u64 = 86_400;
 const SECONDS_PER_HOUR: u64 = 3_600;
 const SECONDS_PER_MINUTE: u64 = 60;
 const MILLIS_PER_SECOND: u64 = 1_000;
+/// The length of a run's unique ID as it appears in its folder name:
+/// a UUIDv4 in simple form.
+const RUN_ID_LEN: usize = 32;
 /// Days from 0000-03-01 to 1970-01-01 in the proleptic Gregorian calendar.
 const EPOCH_DAY_OFFSET: u64 = 719_468;
 const DAYS_PER_ERA: u64 = 146_097;
 
 /// A sortable, Finder-safe name of the time alone, as runs had before
-/// they were named after their pair; `run_name` adds the pair. Runs of
-/// one pair never share a millisecond, because they are serialized.
+/// they were named after their pair; `run_name` adds the pair.
 pub fn archive_name(at: SystemTime) -> String {
     let since = at.duration_since(UNIX_EPOCH).unwrap_or_default();
     let seconds = since.as_secs();
@@ -154,12 +158,28 @@ pub(crate) fn archive_time(name: &[u8]) -> Option<SystemTime> {
 }
 
 /// The start time and pair a run name encodes, the pair `None` for a
-/// name of the time alone; `None` for any other name.
+/// name of the time alone; `None` for any other name. A run's unique ID
+/// may follow its pair: another `_`, then `RUN_ID_LEN` lowercase hex
+/// digits.
 pub(crate) fn parse_run(name: &[u8]) -> Option<(SystemTime, Option<PairId>)> {
     let (time, owner) = match name.iter().position(|&byte| byte == OWNER_SEPARATOR) {
         None => (name, None),
         Some(separator) => {
-            let owner = std::str::from_utf8(&name[separator + 1..]).ok()?;
+            let owner = &name[separator + 1..];
+            let owner = match owner.iter().position(|&byte| byte == OWNER_SEPARATOR) {
+                None => owner,
+                Some(id)
+                        if owner[id + 1..].len() == RUN_ID_LEN
+                            && owner[id + 1..]
+                                .iter()
+                                .all(|byte| byte.is_ascii_digit()
+                                    || (b'a'..=b'f').contains(byte)) =>
+                {
+                    &owner[..id]
+                }
+                Some(_) => return None,
+            };
+            let owner = std::str::from_utf8(owner).ok()?;
             (&name[..separator], Some(owner.parse().ok()?))
         }
     };
@@ -371,7 +391,12 @@ impl LocalEndpoint {
                 });
             }
         }
-        runs.sort_by_key(|run| std::cmp::Reverse(run.started));
+        runs.sort_by(|left, right| {
+            right
+                .started
+                .cmp(&left.started)
+                .then_with(|| right.name.cmp(&left.name))
+        });
         Ok(runs)
     }
 
@@ -879,6 +904,9 @@ mod tests {
             "2026-10-18T09:30:00.123Z",
             "+026-10-18T09-30-00.123Z",
             "2026-10-18T09-30-00.123Z-copy",
+            // The format a run had between unique IDs and named pairs is
+            // obsolete: a `-` never starts the owner part of a name.
+            "2026-10-18T09-30-00.123Z-0123456789abcdef0123456789abcdef",
         ] {
             assert_eq!(archive_time(name.as_bytes()), None, "{name}");
         }
@@ -902,6 +930,16 @@ mod tests {
         );
         assert_eq!(ArchivedRun::new(name.clone(), at(0)).owner(), Some(pair));
         assert!(run_folder(&name).is_some());
+
+        // A unique run ID may follow the pair; the owner is recovered.
+        let unique =
+            "2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_ffffffffffffffffffffffffffffffff";
+        assert_eq!(
+            parse_run(unique.as_bytes()),
+            Some((at(1_792_315_800_123), Some(pair)))
+        );
+        assert_eq!(archive_time(unique.as_bytes()), Some(at(1_792_315_800_123)));
+        assert!(run_folder(unique).is_some());
         for name in [
             "2026-10-18T09-30-00.123Z_",
             "2026-10-18T09-30-00.123Z_0123456789ABCDEF0123456789ABCDEF",
@@ -909,6 +947,12 @@ mod tests {
             "2026-10-18T09-30-00.123Z_00000000000000000000000000000000",
             "2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_x",
             "2026-10-18T09-30-00.123_0123456789abcdef0123456789abcdef",
+            "2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_",
+            "2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_fffffffffffffffffffffffffffffff",
+            "2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_fffffffffffffffffffffffffffffffff",
+            "2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_fffffffffffffffffffffffffffffffg",
+            "2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+            "2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_ffffffffffffffffffffffffffffffff_x",
         ] {
             assert_eq!(parse_run(name.as_bytes()), None, "{name}");
             assert!(run_folder(name).is_none(), "{name}");
@@ -1027,8 +1071,15 @@ mod tests {
         let root = directory.path();
         let older = archive_name(at(1_000));
         let newer = archive_name(at(2_000));
+        let owned: PairId = "0123456789abcdef0123456789abcdef".parse().unwrap();
+        let tied_first =
+            format!("{}_00000000000000000000000000000001", run_name(at(2_000), owned));
+        let tied_second =
+            format!("{}_00000000000000000000000000000002", run_name(at(2_000), owned));
         fs::create_dir_all(root.join(".foldover/archive").join(&older).join("docs")).unwrap();
         fs::create_dir_all(root.join(".foldover/archive").join(&newer)).unwrap();
+        fs::create_dir_all(root.join(".foldover/archive").join(&tied_first)).unwrap();
+        fs::create_dir_all(root.join(".foldover/archive").join(&tied_second)).unwrap();
         fs::create_dir_all(root.join(".foldover/archive/not a run")).unwrap();
         let run = root.join(".foldover/archive").join(&older);
         fs::write(run.join("docs/b"), b"bb").unwrap();
@@ -1039,7 +1090,7 @@ mod tests {
         let runs = endpoint.archived_runs().unwrap();
         assert_eq!(
             runs.iter().map(ArchivedRun::name).collect::<Vec<_>>(),
-            [&newer, &older]
+            [&tied_second, &tied_first, &newer, &older]
         );
         let (items, more) = endpoint.archived_items(&older, None, 2).unwrap();
         assert_eq!(
