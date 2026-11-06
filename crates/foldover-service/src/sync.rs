@@ -26,7 +26,8 @@ use foldover_proto::local::RpcError;
 use foldover_proto::local::{
     INTERNAL_ERROR, INVALID_PARAMS, PREVIEW_REQUIRED, ROOT_UNAVAILABLE, SYNC_BUSY, SYNC_ITEM_LIMIT,
     SyncAction, SyncConflict, SyncCounts, SyncDeletions, SyncFailure, SyncItem, SyncItemKind,
-    SyncItemPage, SyncJob, SyncPreview, SyncProgress, SyncResult, SyncStatus, UndoResult,
+    SyncItemPage, SyncJob, SyncPairContext, SyncPreview, SyncProgress, SyncResult, SyncStatus,
+    UndoResult,
 };
 use foldover_types::{
     ChangeKind, ConflictKind, EntryVersion, PairId, Resolution, ReviewToken, ScanControl, Side,
@@ -216,6 +217,15 @@ struct Claim {
     acknowledged: SyncStatus,
 }
 
+/// Keeps configuration edits and other starts out while a job activates a
+/// deferred pair update and captures the exact active presentation.
+struct ClaimReservation {
+    jobs: Arc<Jobs>,
+    id: PairId,
+    work: Work,
+    active: bool,
+}
+
 #[derive(Clone, Copy)]
 enum MutationScope {
     Idle,
@@ -230,6 +240,8 @@ struct State {
     skips: HashMap<PairId, BTreeMap<SyncPath, Skip>>,
     /// Pairs whose configuration is being replaced refuse new job claims.
     mutating: HashSet<PairId>,
+    /// Pairs between a successful claim check and Working publication.
+    claiming: HashSet<PairId>,
 }
 
 #[derive(Default)]
@@ -260,10 +272,13 @@ impl Jobs {
             return SyncStatus::Idle;
         };
         match &job.status {
-            SyncStatus::Working { job: work, .. } => SyncStatus::Working {
+            SyncStatus::Working {
+                job: work, pair, ..
+            } => SyncStatus::Working {
                 job: *work,
                 cancelling: job.cancel.load(Ordering::Relaxed),
                 progress: job.progress.wire(),
+                pair: pair.clone(),
             },
             status => status.clone(),
         }
@@ -477,7 +492,7 @@ impl Jobs {
     /// stay resolvable.
     pub(crate) fn wait_for(&self, id: PairId, side: Side) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if state.mutating.contains(&id) {
+        if state.mutating.contains(&id) || state.claiming.contains(&id) {
             return;
         }
         let waiting = SyncStatus::Waiting { side: side.into() };
@@ -521,25 +536,22 @@ impl Jobs {
         id: PairId,
         work: Work,
     ) -> Result<SyncStatus, RpcError> {
+        let reservation = self.reserve_claim(id, work)?;
         let cancel = Arc::new(AtomicBool::new(false));
         // Activation and claiming use the same engine-lock boundary as
         // configuration writes. A later edit is staged and cannot change
         // the active settings before this job's worker reads its inputs.
-        let (claim, activation) = match engine.lock() {
-            Ok(mut engine) => {
-                let claim = self.claim(id, work, &cancel)?;
-                (
-                    claim,
-                    engine
-                        .activate_pair_update(id)
-                        .map_err(|error| error.to_string()),
-                )
-            }
-            Err(_) => (
-                self.claim(id, work, &cancel)?,
-                Err("The sync engine failed".into()),
-            ),
-        };
+        let mut engine_guard = engine
+            .lock()
+            .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?;
+        let activation = engine_guard
+            .activate_pair_update(id)
+            .map_err(|error| error.to_string());
+        let pair = engine_guard.active_pair(id).map_err(crate::engine_error)?;
+        drop(engine_guard);
+        // Publish only after activation and capture. A status poll therefore
+        // sees either the old terminal state or this exact active context.
+        let claim = reservation.publish(&cancel, SyncPairContext::from(&pair));
         let Claim {
             held,
             skips,
@@ -572,10 +584,12 @@ impl Jobs {
         self: &Arc<Self>,
         id: PairId,
         work: Work,
+        pair: SyncPairContext,
         run: impl FnOnce() -> (SyncStatus, Option<Reviewed>) + Send + 'static,
     ) -> Result<SyncStatus, RpcError> {
-        let acknowledged = self
-            .claim(id, work, &Arc::new(AtomicBool::new(false)))?
+        let reservation = self.reserve_claim(id, work)?;
+        let acknowledged = reservation
+            .publish(&Arc::new(AtomicBool::new(false)), pair)
             .acknowledged;
         self.spawn(id, None, move || run().into());
         Ok(acknowledged)
@@ -666,8 +680,8 @@ impl Jobs {
 
     /// Reserve the pair for an operation that requires no running job.
     /// New claims are refused until the returned guard
-    /// drops; the reservation is made under the same lock as `claim`, so a
-    /// job cannot start between the busy check and the write that follows.
+    /// drops; the reservation is made under the same lock as job claims, so
+    /// a job cannot start between the busy check and the write that follows.
     pub(crate) fn mutation(self: &Arc<Self>, id: PairId) -> Result<Mutation, RpcError> {
         self.reserve(id, MutationScope::Idle)
     }
@@ -681,6 +695,7 @@ impl Jobs {
     fn reserve(self: &Arc<Self>, id: PairId, scope: MutationScope) -> Result<Mutation, RpcError> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.mutating.contains(&id)
+            || state.claiming.contains(&id)
             || matches!(scope, MutationScope::Idle)
                 && matches!(
                     state.jobs.get(&id).map(|job| &job.status),
@@ -702,10 +717,16 @@ impl Jobs {
     /// Reserve the pair for `work` while a job runs. Unattended work never
     /// replaces a stopped result waiting for a person (ADR 0022). An
     /// optional preview alone does not suspend the pair's schedule.
-    fn claim(&self, id: PairId, work: Work, cancel: &Arc<AtomicBool>) -> Result<Claim, RpcError> {
+    fn reserve_claim(
+        self: &Arc<Self>,
+        id: PairId,
+        work: Work,
+    ) -> Result<ClaimReservation, RpcError> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let blocked = if state.mutating.contains(&id) {
             Some("The pair's configuration is changing")
+        } else if state.claiming.contains(&id) {
+            Some("This pair already has a preview or sync starting")
         } else {
             match state.jobs.get(&id).map(|job| (&job.status, job.after)) {
                 Some((SyncStatus::Working { .. }, _)) => {
@@ -728,11 +749,30 @@ impl Jobs {
         if let Some(message) = blocked {
             return Err(RpcError::new(SYNC_BUSY, message));
         }
+        state.claiming.insert(id);
+        Ok(ClaimReservation {
+            jobs: Arc::clone(self),
+            id,
+            work,
+            active: true,
+        })
+    }
+
+    fn publish_claim(
+        &self,
+        id: PairId,
+        work: Work,
+        cancel: &Arc<AtomicBool>,
+        pair: SyncPairContext,
+    ) -> Claim {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(state.claiming.remove(&id), "claim reservation must be held");
         let progress = Arc::new(Progress::default());
         let acknowledged = SyncStatus::Working {
             job: work.job(),
             cancelling: false,
             progress: SyncProgress::default(),
+            pair,
         };
         // The replaced job's held review is spent by this attempt: it moves
         // to the caller so a run can prove its plan is unchanged, and the
@@ -754,12 +794,12 @@ impl Jobs {
         drop(state);
         // The job may archive or prune; the listing must not outlive that.
         self.read_ahead.forget(id);
-        Ok(Claim {
+        Claim {
             held,
             skips,
             progress,
             acknowledged,
-        })
+        }
     }
 
     fn spend_skips(&self, id: PairId) {
@@ -820,6 +860,27 @@ impl Jobs {
                 job.after = after;
             }
         });
+    }
+}
+
+impl ClaimReservation {
+    fn publish(mut self, cancel: &Arc<AtomicBool>, pair: SyncPairContext) -> Claim {
+        let claim = self.jobs.publish_claim(self.id, self.work, cancel, pair);
+        self.active = false;
+        claim
+    }
+}
+
+impl Drop for ClaimReservation {
+    fn drop(&mut self) {
+        if self.active {
+            self.jobs
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .claiming
+                .remove(&self.id);
+        }
     }
 }
 
@@ -1154,8 +1215,19 @@ fn undone(report: &UndoReport) -> UndoResult {
 #[cfg(test)]
 mod tests {
     use foldover_engine::StateLocation;
+    use foldover_proto::local::PairMode;
 
     use super::*;
+
+    fn test_pair() -> SyncPairContext {
+        SyncPairContext {
+            revision: 1,
+            name: "Test pair".into(),
+            left_root: b"/left".to_vec(),
+            right_root: b"/right".to_vec(),
+            mode: PairMode::Sync,
+        }
+    }
 
     #[tokio::test]
     async fn a_pair_runs_one_job_at_a_time_and_cancellation_is_reported() {
@@ -1173,6 +1245,7 @@ mod tests {
                     job: SyncJob::Run,
                     cancelling: false,
                     progress: SyncProgress::default(),
+                    pair: test_pair(),
                 },
                 after: AfterFailure::Review,
                 cancel,
@@ -1191,6 +1264,7 @@ mod tests {
                 job: SyncJob::Run,
                 cancelling: true,
                 progress: SyncProgress::default(),
+                pair: test_pair(),
             }
         );
     }
@@ -1234,20 +1308,22 @@ mod tests {
         let (_directory, engine, jobs) = fixture();
         let id: PairId = "01010101010101010101010101010101".parse().unwrap();
 
-        jobs.start_with(id, Work::Preview, || panic!("injected failure"))
-            .unwrap();
+        jobs.start_with(id, Work::Preview, test_pair(), || {
+            panic!("injected failure")
+        })
+        .unwrap();
         let status = settled(&jobs, id).await;
         assert!(
             matches!(status, SyncStatus::Failed { .. }),
             "a crash must end Failed, not Working: {status:?}"
         );
 
-        // The panic never touched the engine lock, so the next job runs.
-        jobs.start(&engine, id, Work::Preview).unwrap();
-        let SyncStatus::Failed { message } = settled(&jobs, id).await else {
-            panic!("The follow-up job must reach a terminal state")
-        };
-        assert_ne!(message, "The sync engine failed");
+        // The panic never touched the engine lock, so a later start still
+        // reaches the engine and reports the missing test pair immediately.
+        assert_eq!(
+            jobs.start(&engine, id, Work::Preview).unwrap_err().code(),
+            foldover_proto::local::PAIR_NOT_FOUND
+        );
     }
 
     #[tokio::test]
@@ -1256,7 +1332,7 @@ mod tests {
         let id: PairId = "01010101010101010101010101010101".parse().unwrap();
 
         let poisoned = Arc::clone(&engine);
-        jobs.start_with(id, Work::Preview, move || {
+        jobs.start_with(id, Work::Preview, test_pair(), move || {
             let _guard = poisoned.lock().unwrap();
             panic!("injected failure")
         })
@@ -1266,12 +1342,9 @@ mod tests {
 
         // The writable engine may be inconsistent, so its poisoned lock is
         // kept: later jobs fail explicitly rather than reuse it or hang.
-        jobs.start(&engine, id, Work::Preview).unwrap();
         assert_eq!(
-            settled(&jobs, id).await,
-            SyncStatus::Failed {
-                message: "The sync engine failed".into()
-            }
+            jobs.start(&engine, id, Work::Preview).unwrap_err().code(),
+            INTERNAL_ERROR
         );
     }
 }
