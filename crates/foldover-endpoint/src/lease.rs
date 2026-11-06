@@ -205,6 +205,16 @@ impl<'a> HeldLease<'a> {
                     if Record::parse(&bytes).is_some_and(|record| record.holder == holder.id) {
                         return Ok(Self::held(endpoint, holder, timing));
                     }
+                    // Observe both records together. A crash during a beat
+                    // can leave both behind; starting the claim's TTL only
+                    // after the lock's would exceed STANDARD's total wait on
+                    // every attempt and make that folder unrecoverable.
+                    match endpoint.read_lock_file(LockFile::Claim)? {
+                        Some(bytes) => {
+                            Seen::dead(&mut claim, &bytes, timing.ttl);
+                        }
+                        None => claim = None,
+                    }
                     if Seen::dead(&mut lock, &bytes, timing.ttl)
                         && Self::take_over(endpoint, &holder, &bytes, &mut claim, timing.ttl)?
                     {

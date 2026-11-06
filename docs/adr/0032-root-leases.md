@@ -52,7 +52,9 @@ take:   create lock exclusively ──ok──▶ held
 - **Takeover:** the exclusive claim file makes reclaiming a race with one
   winner; the move and re-read settle any remaining tie. A claim is a
   lease too, so one left by a Mac that died mid-takeover is removed by
-  the same rule.
+  the same rule. Its observation clock starts alongside the lock's, so a
+  crash leaving both records recovers within the ordinary wait rather
+  than requiring two consecutive TTLs on every attempt.
 - **Fencing:** each beat creates `lock.claim` exclusively with its next
   record, re-reads the exact lock, atomically promotes the claim over the
   live lock and verifies the promoted bytes. Promotion never removes the

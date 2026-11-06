@@ -151,6 +151,8 @@ final class MacToMacStore {
     private let client: any MacToMacClient
     private let pollInterval: Duration
     private var generation = 0
+    @ObservationIgnored private var mutationTail: Task<Void, Never>?
+    private(set) var pendingMutations = 0
     private(set) var state: MacToMacState?
     /// Folders this Mac shares; they need no network.
     private(set) var shares: [FolderShare] = []
@@ -158,6 +160,8 @@ final class MacToMacStore {
     /// `peer://` roots.
     private(set) var offeredNames: [String: String] = [:]
     private(set) var error: String?
+
+    var mutationPending: Bool { pendingMutations > 0 }
 
     init(client: any MacToMacClient = CoreMacToMacClient(), pollInterval: Duration = .seconds(1)) {
         self.client = client
@@ -169,6 +173,7 @@ final class MacToMacStore {
     /// the next one answers. A reply only applies when no action
     /// overlapped the read.
     func refresh() async {
+        guard !mutationPending else { return }
         generation += 1
         let request = generation
         async let current = try? client.state()
@@ -252,27 +257,50 @@ final class MacToMacStore {
         }
     }
 
-    private func performShares(_ request: @Sendable (any MacToMacClient) async throws -> [FolderShare]) async {
-        generation += 1
-        defer { generation += 1 }
-        error = nil
-        do {
-            shares = try await request(client)
-        } catch {
-            self.error = PairStore.message(for: error)
+    private func performShares(
+        _ request: @escaping @Sendable (any MacToMacClient) async throws -> [FolderShare]
+    ) async {
+        await enqueueMutation { [self] in
+            error = nil
+            do {
+                shares = try await request(client)
+            } catch {
+                self.error = PairStore.message(for: error)
+            }
         }
     }
 
-    private func perform(_ request: @Sendable (any MacToMacClient) async throws -> MacToMacState) async {
-        generation += 1
-        // Completing an action invalidates reads issued while it was on
-        // the wire, so they cannot overwrite this reply.
-        defer { generation += 1 }
-        error = nil
-        do {
-            state = try await request(client)
-        } catch {
-            self.error = PairStore.message(for: error)
+    private func perform(
+        _ request: @escaping @Sendable (any MacToMacClient) async throws -> MacToMacState
+    ) async {
+        await enqueueMutation { [self] in
+            error = nil
+            do {
+                state = try await request(client)
+            } catch {
+                self.error = PairStore.message(for: error)
+            }
         }
+    }
+
+    /// Run mutations in invocation order. The task is deliberately
+    /// unstructured: once the agent may have accepted a choice, cancelling
+    /// its UI task cannot let a later choice overtake it.
+    /// A mutation must not call another mutating store method: that would
+    /// enqueue the nested mutation behind itself and wait forever.
+    private func enqueueMutation(
+        _ mutation: @escaping @MainActor @Sendable () async -> Void
+    ) async {
+        generation += 1
+        pendingMutations += 1
+        let previous = mutationTail
+        let task = Task { @MainActor [self] in
+            await previous?.value
+            await mutation()
+            pendingMutations -= 1
+        }
+        mutationTail = task
+        await task.value
+        if pendingMutations == 0 { mutationTail = nil }
     }
 }

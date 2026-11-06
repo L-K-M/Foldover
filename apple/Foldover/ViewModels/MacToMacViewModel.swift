@@ -105,6 +105,7 @@ struct MacToMacViewModel {
     }
 
     var error: String? { store.error }
+    var mutationPending: Bool { store.mutationPending }
 
     var sharingNote: String {
         String(localized: "A paired Mac can sync only the folders you share with it here. It sees each by its name, not where it is on this Mac.")
