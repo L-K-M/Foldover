@@ -3,7 +3,7 @@
 > [!IMPORTANT]
 > LLM disclosure: This codebase was written with substantial help from large language models: AI coding agents working from the [`AGENTS.md`](AGENTS.md) brief in this repo.
 
-**Source version:** v<!-- version -->0.1.0<!-- /version --> · [Releases](https://github.com/L-K-M/Foldover/releases)
+**Source version:** v<!-- version -->0.2.0<!-- /version --> · [Releases](https://github.com/L-K-M/Foldover/releases)
 
 [![CI](https://github.com/L-K-M/Foldover/actions/workflows/ci.yml/badge.svg)](https://github.com/L-K-M/Foldover/actions/workflows/ci.yml)
 
