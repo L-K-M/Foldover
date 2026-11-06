@@ -65,7 +65,7 @@ execute: deletion gate ─▶ archive leftovers
 where `<run>` is the run's UTC start time, since
 [ADR 0047](0047-shared-one-way-sources.md) its pair, and a unique run ID
 (`2026-10-18T09-30-00.123Z_<pair id>_<32 hex>`). The ID keeps runs distinct
-even when their clocks report the same millisecond — a restart or a clock
+even when their clocks report the same millisecond. A restart or clock
 rollback can otherwise make two runs share one archive and journal
 identity; the timestamp prefix keeps names readable and sortable. Run
 folders of the time alone, and of the time and pair, remain readable.

@@ -138,8 +138,8 @@ pub fn archive_name(at: SystemTime) -> String {
     )
 }
 
-/// The folder name of a run of `pair` that started at `at`: its start
-/// time, then the pair, e.g.
+/// The pair-scoped prefix of a run name, also the complete legacy name
+/// from before runs carried a unique ID, e.g.
 /// `2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef`. The time
 /// comes first, so names still sort by it.
 pub fn run_name(at: SystemTime, pair: PairId) -> String {

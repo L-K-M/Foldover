@@ -74,11 +74,11 @@ unique run ID:
                   └ start time ─────────┘ └ pair ─────────────────────────┘ └ run ID ────────────────────────────┘
 ```
 
-The time comes first, so names still sort by it, and the run journal's
-newest run is still the greatest name. The ID keeps two runs that share
-a start millisecond — a restart, or a clock rollback — from sharing an
-archive or a journal. A run folder's name is also the lease holder's run
-name, so two pairs never share a holder. Names of the time alone, or of
+The time comes first, so names still sort by it; equal-time names use
+the full name as a deterministic tie-break, not a chronological order.
+The ID keeps runs sharing a start millisecond, including after a restart
+or clock rollback, from sharing an archive or journal. A run folder's
+name is also the lease holder's run name, so two pairs never share a holder. Names of the time alone, or of
 the time and pair, written before the ID, remain readable; names of the
 time alone belong to every pair.
 
