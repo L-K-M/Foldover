@@ -1188,18 +1188,23 @@ impl PairRun {
 
         // A source the run does not write is not leased, and there the
         // temporaries may be another pair's or Mac's live writes.
-        for side in [Side::Left, Side::Right] {
+        let mut recovery_cancelled = false;
+        'leftovers: for side in [Side::Left, Side::Right] {
             if !self.writes(side) {
                 continue;
             }
             let observation = self.observation(side);
             for leftover in observation.leftovers() {
-                match self
-                    .endpoints
-                    .endpoint(side)
-                    .recover_leftover(leftover, executor.scope(side))
-                {
+                match self.endpoints.endpoint(side).recover_leftover(
+                    leftover,
+                    executor.scope(side),
+                    control,
+                ) {
                     Ok(()) => executor.report.recovered += 1,
+                    Err(ApplyError::Scan(ScanError::Cancelled)) => {
+                        recovery_cancelled = true;
+                        break 'leftovers;
+                    }
                     Err(error) => executor.fail(leftover, &error),
                 }
             }
@@ -1217,9 +1222,9 @@ impl PairRun {
         let writer = executor.writer();
         let stopped = thread::scope(|threads| {
             let mut copies = Copies::start(threads, writer, self.workers(), &stop);
-            let mut stopped = false;
+            let mut stopped = recovery_cancelled;
             for (index, row) in forward.chain(reverse).enumerate() {
-                if control() == ScanControl::Cancel {
+                if stopped || control() == ScanControl::Cancel {
                     stopped = true;
                     break;
                 }
@@ -1295,13 +1300,22 @@ impl PairRun {
                 if unrecorded == Some(side) || !self.writes(side) {
                     continue;
                 }
+                // Retention is post-sync maintenance: the base and a first
+                // run's identities are already committed. A stop skips the
+                // remaining pruning without turning that completed sync into
+                // a cancelled run or reporting cancellation as a failure.
+                if control() == ScanControl::Cancel {
+                    break;
+                }
                 let endpoint = self.endpoints.endpoint(side);
                 match endpoint.prune_archive(
                     ARCHIVE_RETENTION,
                     started,
                     Pruning::Pair(self.pair.id()),
+                    control,
                 ) {
                     Ok(pruned) => executor.report.pruned += pruned,
+                    Err(ApplyError::Scan(ScanError::Cancelled)) => break,
                     Err(error) => executor.fail_message(
                         &SyncPath::try_from(b".foldover/archive".as_slice())
                             .expect("the archive path is valid"),

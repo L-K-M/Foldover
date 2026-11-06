@@ -45,6 +45,11 @@ struct ArchiveWindow: View {
 
 /// A pair's archive: its runs on the left, what the chosen run archived
 /// on the right, and Put Back in the toolbar.
+private struct ArchiveContextID: Equatable {
+    let pairID: String
+    let revision: UInt64
+}
+
 struct ArchiveView: View {
     let viewModel: ArchiveViewModel
     @State private var selection: Set<ArchiveItemRow.ID> = []
@@ -75,8 +80,10 @@ struct ArchiveView: View {
         // A selection belongs to the list it was made in.
         .onChange(of: viewModel.side) { selection.removeAll() }
         .onChange(of: viewModel.selectedRun) { selection.removeAll() }
-        .task(id: viewModel.pair.id) {
+        .task(id: ArchiveContextID(pairID: viewModel.pair.id,
+                                   revision: viewModel.pair.revision)) {
             hasStarted = true
+            selection.removeAll()
             await viewModel.load()
         }
     }

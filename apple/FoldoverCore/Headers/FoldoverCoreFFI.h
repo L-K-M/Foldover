@@ -294,22 +294,22 @@ uint64_t uniffi_foldover_ffi_fn_func_pair_update(RustBuffer id, uint64_t revisio
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_ARCHIVE_ITEMS
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_ARCHIVE_ITEMS
-uint64_t uniffi_foldover_ffi_fn_func_archive_items(RustBuffer id, RustBuffer side, RustBuffer run, RustBuffer after
+uint64_t uniffi_foldover_ffi_fn_func_archive_items(RustBuffer id, uint64_t revision, RustBuffer side, RustBuffer run, RustBuffer after
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_ARCHIVE_PUT_BACK
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_ARCHIVE_PUT_BACK
-uint64_t uniffi_foldover_ffi_fn_func_archive_put_back(RustBuffer id, RustBuffer side, RustBuffer run, RustBuffer path
+uint64_t uniffi_foldover_ffi_fn_func_archive_put_back(RustBuffer id, uint64_t revision, RustBuffer side, RustBuffer run, RustBuffer path
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_ARCHIVE_PUT_BACK_ALL
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_ARCHIVE_PUT_BACK_ALL
-uint64_t uniffi_foldover_ffi_fn_func_archive_put_back_all(RustBuffer id, RustBuffer side, RustBuffer run
+uint64_t uniffi_foldover_ffi_fn_func_archive_put_back_all(RustBuffer id, uint64_t revision, RustBuffer side, RustBuffer run
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_ARCHIVE_RUNS
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_ARCHIVE_RUNS
-uint64_t uniffi_foldover_ffi_fn_func_archive_runs(RustBuffer id, RustBuffer side
+uint64_t uniffi_foldover_ffi_fn_func_archive_runs(RustBuffer id, uint64_t revision, RustBuffer side
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_AUTOMATION_STATE

@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import Foldover
 
-private enum AutomationFixtureError: Error { case unreachable }
+private enum AutomationFixtureError: Error, Sendable { case unreachable }
 
 /// Remembers the last pause like the agent does.
 private actor AutomationFixtureClient: AutomationClient {
@@ -118,7 +118,7 @@ private actor DeferredAutomationClient: AutomationClient {
     private var actionsHeld = false
     private var standingRead: AutomationStatus?
     private var pendingReads: [CheckedContinuation<AutomationStatus, Never>?] = []
-    private var pendingActions: [CheckedContinuation<AutomationStatus, Never>?] = []
+    private var pendingActions: [CheckedContinuation<Result<AutomationStatus, AutomationFixtureError>, Never>?] = []
 
     func state() async throws -> AutomationStatus {
         if let standingRead { return standingRead }
@@ -136,31 +136,33 @@ private actor DeferredAutomationClient: AutomationClient {
     }
 
     func pause(minutes: UInt32?) async throws -> AutomationStatus {
-        await act(AutomationStatus(
+        try await act(AutomationStatus(
             state: .paused(until: minutes.map { Date(timeIntervalSince1970: Double($0) * 60) })))
     }
 
     func resume() async throws -> AutomationStatus {
-        await act(AutomationStatus(state: .running))
+        try await act(AutomationStatus(state: .running))
     }
 
     func setLowPower(_ syncs: LowPowerSyncs) async throws -> AutomationStatus {
-        await act(AutomationStatus(state: .running, lowPower: syncs))
+        try await act(AutomationStatus(state: .running, lowPower: syncs))
     }
 
-    private func act(_ reply: AutomationStatus) async -> AutomationStatus {
+    private func act(_ reply: AutomationStatus) async throws -> AutomationStatus {
         guard actionsHeld else { return reply }
-        return await withTaskCancellationHandler {
+        let result = await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 pendingActions.append(continuation)
                 parkedActions += 1
                 if Task.isCancelled {
-                    answer(&pendingActions, at: pendingActions.count - 1, AutomationStatus(state: .running))
+                    answerAction(at: pendingActions.count - 1,
+                                 .success(AutomationStatus(state: .running)))
                 }
             }
         } onCancel: {
             Task { await self.finishActions(AutomationStatus(state: .running)) }
         }
+        return try result.get()
     }
 
     /// Park further action requests until `answerAction`/`finishActions`.
@@ -176,7 +178,13 @@ private actor DeferredAutomationClient: AutomationClient {
     /// Answers the oldest queued action request, if one is parked.
     func answerAction(_ state: AutomationStatus) {
         if let index = pendingActions.firstIndex(where: { $0 != nil }) {
-            answer(&pendingActions, at: index, state)
+            answerAction(at: index, .success(state))
+        }
+    }
+
+    func failAction() {
+        if let index = pendingActions.firstIndex(where: { $0 != nil }) {
+            answerAction(at: index, .failure(.unreachable))
         }
     }
 
@@ -192,8 +200,18 @@ private actor DeferredAutomationClient: AutomationClient {
     func finishActions(_ state: AutomationStatus) {
         actionsHeld = false
         while let index = pendingActions.firstIndex(where: { $0 != nil }) {
-            answer(&pendingActions, at: index, state)
+            answerAction(at: index, .success(state))
         }
+    }
+
+    private func answerAction(
+        at index: Int,
+        _ result: Result<AutomationStatus, AutomationFixtureError>
+    ) {
+        guard pendingActions.indices.contains(index), let continuation = pendingActions[index]
+        else { return }
+        pendingActions[index] = nil
+        continuation.resume(returning: result)
     }
 
     private func answer(_ queue: inout [CheckedContinuation<AutomationStatus, Never>?],
@@ -232,6 +250,20 @@ private extension AutomationStore {
         case .resume: await resume()
         }
     }
+}
+
+@MainActor
+private func waitForPendingMutations(
+    _ count: Int,
+    in store: AutomationStore,
+    timeout: Duration = .seconds(3)
+) async -> Bool {
+    let deadline = ContinuousClock.now + timeout
+    while store.pendingMutations < count {
+        if ContinuousClock.now >= deadline { return false }
+        await Task.yield()
+    }
+    return true
 }
 
 // Regression: refresh() applies its answer whenever it lands, so a
@@ -284,6 +316,92 @@ private func aStatusReadDeliveredAfterAnActionCannotOverwriteItsReply(
     }
     await client.finishActions(AutomationStatus(state: .running))
     #expect(store.state == accepted.state)
+}
+
+// Pause and Resume express one ordered choice. A delayed Pause reply must
+// not arrive after Resume and restore the older policy; status polling also
+// stays out of the way until the queue settles.
+@MainActor
+@Test
+func pauseAndResumeRunInInvocationOrder() async {
+    let client = DeferredAutomationClient()
+    let store = AutomationStore(client: client)
+    await client.holdActions()
+
+    let pause = Task { await store.pause(minutes: nil) }
+    #expect(await client.waitForParkedActions(1))
+    let resume = Task { await store.resume() }
+    #expect(await waitForPendingMutations(2, in: store))
+    #expect(store.mutationPending)
+    #expect(!(await client.waitForParkedActions(2, timeout: .milliseconds(50))))
+
+    let refresh = Task { await store.refresh() }
+    #expect(!(await client.waitForParkedReads(1, timeout: .milliseconds(50))))
+
+    await client.answerAction(AutomationStatus(state: .paused(until: nil)))
+    #expect(await client.waitForParkedActions(2))
+    await client.answerAction(AutomationStatus(state: .running))
+    await client.finishActions(AutomationStatus(state: .running))
+    await client.finishReads(AutomationStatus(state: .running))
+    await pause.value
+    await resume.value
+    await refresh.value
+
+    #expect(store.state == .running)
+    #expect(!store.mutationPending)
+}
+
+// An older Low Power reply must not make the toggle bounce while a newer
+// choice waits behind it.
+@MainActor
+@Test
+func rapidLowPowerChoicesStayOrderedAndOptimistic() async {
+    let client = DeferredAutomationClient()
+    let store = AutomationStore(client: client)
+    await client.holdActions()
+
+    let run = Task { await store.setLowPower(.run) }
+    #expect(await client.waitForParkedActions(1))
+    let pause = Task { await store.setLowPower(.pause) }
+    #expect(await waitForPendingMutations(2, in: store))
+    #expect(store.lowPower == .pause)
+    #expect(!(await client.waitForParkedActions(2, timeout: .milliseconds(50))))
+
+    await client.answerAction(AutomationStatus(state: .running, lowPower: .run))
+    #expect(await client.waitForParkedActions(2))
+    #expect(store.lowPower == .pause)
+    await client.answerAction(AutomationStatus(state: .running, lowPower: .pause))
+    await client.finishActions(AutomationStatus(state: .running, lowPower: .pause))
+    await run.value
+    await pause.value
+
+    #expect(store.lowPower == .pause)
+    #expect(!store.mutationPending)
+}
+
+// Rollback uses the last server-confirmed choice, not the optimistic choice
+// that happened to be visible when a newer request was enqueued.
+@MainActor
+@Test
+func failedQueuedLowPowerChoicesRestoreTheConfirmedChoice() async {
+    let client = DeferredAutomationClient()
+    let store = AutomationStore(client: client)
+    await client.holdActions()
+
+    let run = Task { await store.setLowPower(.run) }
+    #expect(await client.waitForParkedActions(1))
+    let pause = Task { await store.setLowPower(.pause) }
+    #expect(await waitForPendingMutations(2, in: store))
+    await client.failAction()
+    #expect(await client.waitForParkedActions(2))
+    await client.failAction()
+    await client.finishActions(AutomationStatus(state: .running, lowPower: .pause))
+    await run.value
+    await pause.value
+
+    #expect(store.lowPower == .pause)
+    #expect(store.error != nil)
+    #expect(!store.mutationPending)
 }
 
 /// The environment policy (PLAN.md §3.5): the Low Power Mode choice and

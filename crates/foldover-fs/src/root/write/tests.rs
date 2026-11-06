@@ -18,6 +18,40 @@ const NOTHING: PairOptions = PairOptions::new(
 );
 const STANDARD: Durability = Durability::Standard;
 
+#[test]
+fn reopening_prune_ancestors_reports_progress_and_can_stop() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::create_dir_all(directory.path().join("a/b/c")).unwrap();
+    let root = Root::open(directory.path()).unwrap();
+    let mut checkpoints = 0;
+    let opened = open_below(&root.directory, Path::new("a/b/c"), &mut || {
+        checkpoints += 1;
+        ScanControl::Continue
+    })
+    .unwrap();
+    drop(opened);
+    assert_eq!(
+        checkpoints, 3,
+        "each component must report traversal progress"
+    );
+
+    let mut checkpoints = 0;
+    let cancelled = open_below(&root.directory, Path::new("a/b/c"), &mut || {
+        checkpoints += 1;
+        if checkpoints == 2 {
+            ScanControl::Cancel
+        } else {
+            ScanControl::Continue
+        }
+    });
+    assert!(matches!(
+        cancelled,
+        Err(WriteError::Source(HashError::Cancelled))
+    ));
+    assert_eq!(checkpoints, 2);
+    assert!(directory.path().join("a/b/c").is_dir());
+}
+
 #[cfg(target_os = "linux")]
 const ATTRIBUTE: &str = "user.ch.lkmc.foldover.test";
 #[cfg(not(target_os = "linux"))]
@@ -423,6 +457,78 @@ fn metadata_copies_replace_stale_attributes_and_require_fresh_observations() {
     ));
 }
 
+/// An attribute with an empty value is still an attribute: it copies,
+/// replaces what the target held, and travels to another Mac.
+#[test]
+fn empty_attributes_copy_replace_and_travel() {
+    let roots = roots();
+    let source = roots._source_directory.path().join("file");
+    let target = roots.target_directory.path().join("file");
+    fs::write(&source, b"data").unwrap();
+    rustix::fs::fsetxattr(
+        fs::File::open(&source).unwrap(),
+        ATTRIBUTE,
+        b"",
+        rustix::fs::XattrFlags::empty(),
+    )
+    .unwrap();
+    let file = path(b"file");
+    let source_observed = roots.source.metadata(&file).unwrap();
+
+    let staged = roots
+        .target
+        .stage_file(&file, &roots.source, &source_observed, &ALL, &mut proceed)
+        .unwrap();
+    let copied = staged.extended_metadata(&mut proceed).unwrap();
+    let empty = copied
+        .attributes()
+        .iter()
+        .find(|attribute| attribute.name() == ATTRIBUTE.as_bytes())
+        .unwrap();
+    assert_eq!(empty.size(), 0);
+    assert_eq!(empty.digest().as_bytes(), blake3::hash(b"").as_bytes());
+    roots
+        .target
+        .place(staged.into_staged(), &file, Placement::Create, STANDARD)
+        .unwrap();
+    let read = roots
+        .target
+        .native_metadata(
+            &file,
+            &roots.target.metadata(&file).unwrap(),
+            ALL.metadata(),
+        )
+        .unwrap();
+    assert!(
+        read.attributes
+            .contains(&(ATTRIBUTE.as_bytes().to_vec(), vec![]))
+    );
+
+    // A later value on the target is replaced by the empty one.
+    let handle = fs::File::open(&target).unwrap();
+    rustix::fs::fsetxattr(
+        &handle,
+        ATTRIBUTE,
+        b"stale",
+        rustix::fs::XattrFlags::empty(),
+    )
+    .unwrap();
+    let target_observed = roots.target.metadata(&file).unwrap();
+    roots
+        .target
+        .update_metadata(
+            &file,
+            &target_observed,
+            &roots.source,
+            &source_observed,
+            &ALL,
+        )
+        .unwrap();
+    let mut value = [0; 16];
+    let size = rustix::fs::fgetxattr(&handle, ATTRIBUTE, &mut value).unwrap();
+    assert_eq!(&value[..size], b"");
+}
+
 #[test]
 fn changed_sources_are_not_staged() {
     let roots = roots();
@@ -762,12 +868,63 @@ fn trees_are_removed_without_following_links() {
     symlink(outside.path(), target.join("old/a/link")).unwrap();
     fs::write(target.join("other"), b"y").unwrap();
 
-    roots.target.remove_tree(&path(b"old")).unwrap();
+    roots
+        .target
+        .remove_tree(&path(b"old"), &mut || ScanControl::Continue)
+        .unwrap();
     assert_eq!(names(target), [b"other".to_vec()]);
     assert_eq!(fs::read(outside.path().join("keep")).unwrap(), b"keep");
-    roots.target.remove_tree(&path(b"other")).unwrap();
-    assert!(names(target).is_empty());
-    assert!(roots.target.remove_tree(&path(b"missing")).is_err());
+    assert!(matches!(
+        roots
+            .target
+            .remove_tree(&path(b"other"), &mut || ScanControl::Continue),
+        Err(WriteError::UnsupportedEntry)
+    ));
+    assert_eq!(fs::read(target.join("other")).unwrap(), b"y");
+    symlink(outside.path(), target.join("other-link")).unwrap();
+    assert!(matches!(
+        roots
+            .target
+            .remove_tree(&path(b"other-link"), &mut || ScanControl::Continue),
+        Err(WriteError::UnsupportedEntry)
+    ));
+    assert_eq!(
+        fs::read_link(target.join("other-link")).unwrap(),
+        outside.path()
+    );
+    assert!(
+        roots
+            .target
+            .remove_tree(&path(b"missing"), &mut || ScanControl::Continue)
+            .is_err()
+    );
+}
+
+/// A stop between entries ends a tree removal cooperatively: what is
+/// deleted stays deleted, and the rest survives.
+#[test]
+fn removing_a_tree_stops_at_a_checkpoint() {
+    let roots = roots();
+    let target = roots.target_directory.path();
+    fs::create_dir_all(target.join("old/a/b")).unwrap();
+    let file = target.join("old/a/b/file");
+    fs::write(&file, b"x").unwrap();
+
+    // Cancel once the first entry is gone: the removal stops at the
+    // next checkpoint rather than ploughing on.
+    let cancelled = roots.target.remove_tree(&path(b"old"), &mut || {
+        if file.exists() {
+            ScanControl::Continue
+        } else {
+            ScanControl::Cancel
+        }
+    });
+    assert!(matches!(
+        cancelled,
+        Err(WriteError::Source(HashError::Cancelled))
+    ));
+    assert!(!file.exists());
+    assert!(target.join("old").exists());
 }
 
 #[test]
@@ -784,7 +941,10 @@ fn deep_trees_are_removed_without_hitting_a_descriptor_cap() {
     fs::write(outside.path().join("keep"), b"keep").unwrap();
     symlink(outside.path(), target.join("old/d/link")).unwrap();
 
-    roots.target.remove_tree(&path(b"old")).unwrap();
+    roots
+        .target
+        .remove_tree(&path(b"old"), &mut || ScanControl::Continue)
+        .unwrap();
     assert!(names(target).is_empty());
     assert_eq!(fs::read(outside.path().join("keep")).unwrap(), b"keep");
 }

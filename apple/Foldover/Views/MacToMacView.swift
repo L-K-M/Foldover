@@ -13,6 +13,14 @@ struct MacToMacView: View {
 
     var body: some View {
         Form {
+            if viewModel.mutationPending {
+                Section {
+                    HStack {
+                        ProgressView()
+                        Text("Updating Mac-to-Mac…")
+                    }
+                }
+            }
             if !viewModel.isOn {
                 Section {
                     Button("Turn On Mac-to-Mac") { Task { await viewModel.turnOn() } }
@@ -125,6 +133,7 @@ struct MacToMacView: View {
         } message: { _ in
             Text("That Mac can no longer connect to this one until you pair them again.")
         }
+        .disabled(viewModel.mutationPending)
     }
 }
 
