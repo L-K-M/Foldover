@@ -66,17 +66,21 @@ records is unchanged: no lease, leftovers deleted.
 | Source, written or with leftovers | yes | yes | yes |
 | Backup target keeping nothing | no | deleted | no |
 
-**Archive runs.** A run's folder is its UTC start time and its pair:
+**Archive runs.** A run's folder is its UTC start time, its pair and a
+unique run ID:
 
 ```text
-.foldover/archive/2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef/docs/report.txt
-                  └ start time ─────────┘ └ pair ─────────────────────────┘
+.foldover/archive/2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_0123456789abcdef0123456789abcdef/docs/report.txt
+                  └ start time ─────────┘ └ pair ─────────────────────────┘ └ run ID ────────────────────────────┘
 ```
 
 The time comes first, so names still sort by it, and the run journal's
-newest run is still the greatest name. A run folder's name is also the
-lease holder's run name, so two pairs never share a holder. Names of the
-time alone, written before this change, belong to every pair.
+newest run is still the greatest name. The ID keeps two runs that share
+a start millisecond — a restart, or a clock rollback — from sharing an
+archive or a journal. A run folder's name is also the lease holder's run
+name, so two pairs never share a holder. Names of the time alone, or of
+the time and pair, written before the ID, remain readable; names of the
+time alone belong to every pair.
 
 - **Listing.** A pair's archive shows its own runs and those without a
   pair, never another pair's; asking for another pair's run by name
@@ -87,9 +91,11 @@ time alone, written before this change, belong to every pair.
   the runs of a pair that no longer exists still go.
 - **Another Mac's folder.** The Mac sharing a folder prunes all of it by
   its own clock, as before ([ADR 0031](0031-mac-to-mac.md)). Requests
-  still carry run names as strings, but peer protocol 2 refuses a Mac
-  of version 1: it would take writes into the new run folders, then fail
-  to list them, put them back or undo from them.
+  still carry run names as strings, but peer protocol 3 refuses a Mac
+  of version 2: it cannot parse the run ID in the new folder names, so
+  it would take writes into them, then fail to list them, put them back
+  or undo from them. Version 2 refuses version 1 the same way over the
+  pair in the name.
 
 **Busy folders.** A run that gives up on a folder another run keeps
 leased (`RunError::folder_busy`) still fails with "<Mac> is syncing
@@ -119,4 +125,5 @@ again for the same message while retries keep failing.
 - A Mac with an older Foldover syncing the same share or server folder
   neither lists nor prunes the new run folders there until it is
   updated; they are not its runs.
-- Every new run folder name is 33 bytes longer.
+- Every new run folder name is 66 bytes longer than the original
+  time-only names: 33 for the pair, 33 for the run ID.

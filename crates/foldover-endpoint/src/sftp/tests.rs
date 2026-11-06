@@ -244,7 +244,8 @@ fn archived_runs_are_only_directories_named_like_runs() {
     let archive = directory.path().join(".foldover/archive");
     let run = crate::local::archive::archive_name(UNIX_EPOCH + Duration::from_secs(1_700_000_000));
     let pair: foldover_types::PairId = "0123456789abcdef0123456789abcdef".parse().unwrap();
-    let tied = crate::local::archive::run_name(UNIX_EPOCH + Duration::from_secs(1_700_000_000), pair);
+    let tied =
+        crate::local::archive::run_name(UNIX_EPOCH + Duration::from_secs(1_700_000_000), pair);
     let tied_first = format!("{tied}_00000000000000000000000000000001");
     let tied_second = format!("{tied}_00000000000000000000000000000002");
     let file = crate::local::archive::archive_name(UNIX_EPOCH + Duration::from_secs(1_700_000_001));

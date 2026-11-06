@@ -146,6 +146,14 @@ pub fn run_name(at: SystemTime, pair: PairId) -> String {
     format!("{}{}{pair}", archive_name(at), char::from(OWNER_SEPARATOR))
 }
 
+/// The folder name a new run of `pair` is given: `run_name` plus a
+/// UUIDv4, e.g.
+/// `2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_0123456789abcdef0123456789abcdef`,
+/// so runs sharing a millisecond still get their own archive and journal.
+pub(crate) fn unique_run_name(at: SystemTime, pair: PairId) -> String {
+    format!("{}_{}", run_name(at, pair), uuid::Uuid::new_v4().simple())
+}
+
 /// The pair a run name carries; `None` for a name of the time alone, or
 /// one that names no run.
 pub fn run_owner(name: &str) -> Option<PairId> {
@@ -169,11 +177,10 @@ pub(crate) fn parse_run(name: &[u8]) -> Option<(SystemTime, Option<PairId>)> {
             let owner = match owner.iter().position(|&byte| byte == OWNER_SEPARATOR) {
                 None => owner,
                 Some(id)
-                        if owner[id + 1..].len() == RUN_ID_LEN
-                            && owner[id + 1..]
-                                .iter()
-                                .all(|byte| byte.is_ascii_digit()
-                                    || (b'a'..=b'f').contains(byte)) =>
+                    if owner[id + 1..].len() == RUN_ID_LEN
+                        && owner[id + 1..]
+                            .iter()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)) =>
                 {
                     &owner[..id]
                 }
@@ -932,8 +939,7 @@ mod tests {
         assert!(run_folder(&name).is_some());
 
         // A unique run ID may follow the pair; the owner is recovered.
-        let unique =
-            "2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_ffffffffffffffffffffffffffffffff";
+        let unique = "2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_ffffffffffffffffffffffffffffffff";
         assert_eq!(
             parse_run(unique.as_bytes()),
             Some((at(1_792_315_800_123), Some(pair)))
@@ -1072,10 +1078,14 @@ mod tests {
         let older = archive_name(at(1_000));
         let newer = archive_name(at(2_000));
         let owned: PairId = "0123456789abcdef0123456789abcdef".parse().unwrap();
-        let tied_first =
-            format!("{}_00000000000000000000000000000001", run_name(at(2_000), owned));
-        let tied_second =
-            format!("{}_00000000000000000000000000000002", run_name(at(2_000), owned));
+        let tied_first = format!(
+            "{}_00000000000000000000000000000001",
+            run_name(at(2_000), owned)
+        );
+        let tied_second = format!(
+            "{}_00000000000000000000000000000002",
+            run_name(at(2_000), owned)
+        );
         fs::create_dir_all(root.join(".foldover/archive").join(&older).join("docs")).unwrap();
         fs::create_dir_all(root.join(".foldover/archive").join(&newer)).unwrap();
         fs::create_dir_all(root.join(".foldover/archive").join(&tied_first)).unwrap();
