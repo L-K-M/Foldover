@@ -1990,6 +1990,75 @@ public func FfiConverterTypeRunHistoryEntry_lower(_ value: RunHistoryEntry) -> R
 
 
 /**
+ * The compact pair presentation captured when a working job starts.
+ */
+public struct RunningPairSnapshot: Equatable, Hashable {
+    public var revision: UInt64
+    public var name: String
+    public var leftRoot: Data
+    public var rightRoot: Data
+    public var mode: PairMode
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(revision: UInt64, name: String, leftRoot: Data, rightRoot: Data, mode: PairMode) {
+        self.revision = revision
+        self.name = name
+        self.leftRoot = leftRoot
+        self.rightRoot = rightRoot
+        self.mode = mode
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension RunningPairSnapshot: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRunningPairSnapshot: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RunningPairSnapshot {
+        return
+            try RunningPairSnapshot(
+                revision: FfiConverterUInt64.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                leftRoot: FfiConverterData.read(from: &buf), 
+                rightRoot: FfiConverterData.read(from: &buf), 
+                mode: FfiConverterTypePairMode.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RunningPairSnapshot, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.revision, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterData.write(value.leftRoot, into: &buf)
+        FfiConverterData.write(value.rightRoot, into: &buf)
+        FfiConverterTypePairMode.write(value.mode, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRunningPairSnapshot_lift(_ buf: RustBuffer) throws -> RunningPairSnapshot {
+    return try FfiConverterTypeRunningPairSnapshot.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRunningPairSnapshot_lower(_ value: RunningPairSnapshot) -> RustBuffer {
+    return FfiConverterTypeRunningPairSnapshot.lower(value)
+}
+
+
+/**
  * One folder on an SFTP server, as a pair side can name it.
  */
 public struct ServerFolder: Equatable, Hashable {
@@ -4340,7 +4409,7 @@ public func FfiConverterTypeSyncJobKind_lower(_ value: SyncJobKind) -> RustBuffe
 public enum SyncJobState: Equatable, Hashable {
     
     case idle
-    case working(job: SyncJobKind, cancelling: Bool, progress: SyncWorkProgress
+    case working(job: SyncJobKind, cancelling: Bool, progress: SyncWorkProgress, pair: RunningPairSnapshot
     )
     case previewed(preview: SyncPreviewSummary
     )
@@ -4386,7 +4455,7 @@ public struct FfiConverterTypeSyncJobState: FfiConverterRustBuffer {
         
         case 1: return .idle
         
-        case 2: return .working(job: try FfiConverterTypeSyncJobKind.read(from: &buf), cancelling: try FfiConverterBool.read(from: &buf), progress: try FfiConverterTypeSyncWorkProgress.read(from: &buf)
+        case 2: return .working(job: try FfiConverterTypeSyncJobKind.read(from: &buf), cancelling: try FfiConverterBool.read(from: &buf), progress: try FfiConverterTypeSyncWorkProgress.read(from: &buf), pair: try FfiConverterTypeRunningPairSnapshot.read(from: &buf)
         )
         
         case 3: return .previewed(preview: try FfiConverterTypeSyncPreviewSummary.read(from: &buf)
@@ -4419,11 +4488,12 @@ public struct FfiConverterTypeSyncJobState: FfiConverterRustBuffer {
             writeInt(&buf, Int32(1))
         
         
-        case let .working(job,cancelling,progress):
+        case let .working(job,cancelling,progress,pair):
             writeInt(&buf, Int32(2))
             FfiConverterTypeSyncJobKind.write(job, into: &buf)
             FfiConverterBool.write(cancelling, into: &buf)
             FfiConverterTypeSyncWorkProgress.write(progress, into: &buf)
+            FfiConverterTypeRunningPairSnapshot.write(pair, into: &buf)
             
         
         case let .previewed(preview):
@@ -5409,11 +5479,11 @@ public func pairUpdate(id: String, revision: UInt64, configuration: LocalPairDra
 /**
  * A page of a run's items after `after`, the last path of the previous page.
  */
-public func archiveItems(id: String, side: SyncSide, run: String, after: Data?)async throws  -> ArchivedItemPage  {
+public func archiveItems(id: String, revision: UInt64, side: SyncSide, run: String, after: Data?)async throws  -> ArchivedItemPage  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_foldover_ffi_fn_func_archive_items(FfiConverterString.lower(id),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run),FfiConverterOptionData.lower(after)
+                uniffi_foldover_ffi_fn_func_archive_items(FfiConverterString.lower(id),FfiConverterUInt64.lower(revision),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run),FfiConverterOptionData.lower(after)
                 )
             },
             pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
@@ -5427,11 +5497,11 @@ public func archiveItems(id: String, side: SyncSide, run: String, after: Data?)a
  * Put an item back; returns its path, which gains ` (restored)` when the
  * original path is taken.
  */
-public func archivePutBack(id: String, side: SyncSide, run: String, path: Data)async throws  -> Data  {
+public func archivePutBack(id: String, revision: UInt64, side: SyncSide, run: String, path: Data)async throws  -> Data  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_foldover_ffi_fn_func_archive_put_back(FfiConverterString.lower(id),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run),FfiConverterData.lower(path)
+                uniffi_foldover_ffi_fn_func_archive_put_back(FfiConverterString.lower(id),FfiConverterUInt64.lower(revision),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run),FfiConverterData.lower(path)
                 )
             },
             pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
@@ -5444,11 +5514,11 @@ public func archivePutBack(id: String, side: SyncSide, run: String, path: Data)a
 /**
  * Put back everything one run archived on one side.
  */
-public func archivePutBackAll(id: String, side: SyncSide, run: String)async throws  -> ArchiveRestoreSummary  {
+public func archivePutBackAll(id: String, revision: UInt64, side: SyncSide, run: String)async throws  -> ArchiveRestoreSummary  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_foldover_ffi_fn_func_archive_put_back_all(FfiConverterString.lower(id),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run)
+                uniffi_foldover_ffi_fn_func_archive_put_back_all(FfiConverterString.lower(id),FfiConverterUInt64.lower(revision),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run)
                 )
             },
             pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
@@ -5458,11 +5528,11 @@ public func archivePutBackAll(id: String, side: SyncSide, run: String)async thro
             errorHandler: FfiConverterTypeAgentError_lift
         )
 }
-public func archiveRuns(id: String, side: SyncSide)async throws  -> ArchivedRunList  {
+public func archiveRuns(id: String, revision: UInt64, side: SyncSide)async throws  -> ArchivedRunList  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_foldover_ffi_fn_func_archive_runs(FfiConverterString.lower(id),FfiConverterTypeSyncSide_lower(side)
+                uniffi_foldover_ffi_fn_func_archive_runs(FfiConverterString.lower(id),FfiConverterUInt64.lower(revision),FfiConverterTypeSyncSide_lower(side)
                 )
             },
             pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
@@ -5972,16 +6042,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_foldover_ffi_checksum_func_pair_update() != 2038) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_foldover_ffi_checksum_func_archive_items() != 55648) {
+    if (uniffi_foldover_ffi_checksum_func_archive_items() != 34936) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_foldover_ffi_checksum_func_archive_put_back() != 6455) {
+    if (uniffi_foldover_ffi_checksum_func_archive_put_back() != 17827) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_foldover_ffi_checksum_func_archive_put_back_all() != 35866) {
+    if (uniffi_foldover_ffi_checksum_func_archive_put_back_all() != 10555) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_foldover_ffi_checksum_func_archive_runs() != 43046) {
+    if (uniffi_foldover_ffi_checksum_func_archive_runs() != 44682) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_automation_state() != 127) {

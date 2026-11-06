@@ -91,9 +91,11 @@ tells each Mac only what is shared with it.
 | `shares` | The folders the answering Mac shares with the asking one: `id`, `name` |
 | `folder` (`share`, `op`) | One operation on a folder shared with the asking Mac, refused for any other |
 
-A request's stream carries tagged frames: a JSON message, a data chunk,
-or the end of the data. Folder operations, each answered by the sharing
-Mac's local endpoint at the share root:
+A request's stream carries tagged frames: `1` is a JSON message, `2` a
+data chunk, `3` the end of the data, and an empty `4` is a transport
+heartbeat. Heartbeats are not folder replies and are consumed by the
+link. Folder operations, each answered by the sharing Mac's local
+endpoint at the share root:
 
 | `op` | Reply |
 |---|---|
@@ -111,9 +113,10 @@ Mac's local endpoint at the share root:
 | `watch` | `watching` once the folder is watched and every minute after; `changed` after each burst of changes (500 ms quiet); until the asking Mac drops the request |
 
 For pairs that run when files change, the asking Mac keeps one `watch`
-open per folder on another Mac, beside its local notifications. A broken
-watch is asked again after 30 seconds, and its next `watching` counts as
-a change, since changes in between are unknown. While Mac-to-Mac is off
+open per folder on another Mac, beside its local notifications. A watch
+that receives no `watching` or `changed` frame for 90 seconds is broken;
+it is asked again after 30 seconds, and its next `watching` counts as a
+change, since changes in between are unknown. While Mac-to-Mac is off
 the folder counts as unwatchable: the scheduler retries every tick and
 the hourly verification run covers it, as for an unmounted disk. The
 sharing Mac's heartbeat lets it notice an asker that left while nothing
@@ -122,11 +125,15 @@ changed.
 Failures come back as `failed` with a kind (missing, access denied,
 cancelled, changed, invalid, other), so the asking Mac waits for a
 missing folder as it waits for an unmounted disk. The sharing Mac keeps
-each folder's last observation in memory and rereads only changed
-files. The asking Mac cancels a scan by dropping the request; the next
-progress report then fails and the scan stops; a dropped copy stops
-its data the same way. Pair roots `peer://<device>/<share>` need schema
-v18.
+each folder's last observation in memory and rereads only changed files.
+Blocking frame reads and writes check the run's Stop control every 200
+ms, outside the link's Tokio runtime. Cancelling retires both halves of
+the stream, so a partially read frame is never resumed or reused. A
+complete frame must arrive within two minutes; transport heartbeats and
+scan progress reset that deadline while healthy long local work runs.
+The sharing side sends those heartbeats from the same checkpoints that
+observe Stop. The peer request protocol is version 4; pair roots
+`peer://<device>/<share>` need schema v18.
 
 Writes run on the sharing Mac through its local endpoint, so the same
 staging, verification, archive and durability rules hold there, and

@@ -298,10 +298,21 @@ impl Endpoint {
         }
     }
 
-    pub fn recover_leftover(&self, leftover: &SyncPath, run: &RunScope) -> Result<(), ApplyError> {
+    pub fn recover_leftover(
+        &self,
+        leftover: &SyncPath,
+        run: &RunScope,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), ApplyError> {
+        // Recovery is the run's first mutation. An already-requested stop
+        // must leave every temporary for the next run, including on endpoint
+        // kinds whose recovery primitive does not otherwise take control.
+        if control() == ScanControl::Cancel {
+            return Err(ScanError::Cancelled.into());
+        }
         match self {
             Self::Local(endpoint) => endpoint.recover_leftover(leftover, run),
-            Self::Sftp(endpoint) => endpoint.recover_leftover(leftover, run),
+            Self::Sftp(endpoint) => endpoint.recover_leftover(leftover, run, control),
             Self::Peer(endpoint) => endpoint.recover_leftover(leftover, run),
             #[cfg(feature = "simulation")]
             Self::Memory(endpoint) => endpoint.recover_leftover(leftover, run),
@@ -355,7 +366,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.remove(path, current, run, control),
             Self::Sftp(endpoint) => endpoint.remove(path, current, run, control),
-            Self::Peer(endpoint) => endpoint.remove(path, current, run),
+            Self::Peer(endpoint) => endpoint.remove(path, current, run, control),
             #[cfg(feature = "simulation")]
             Self::Memory(endpoint) => endpoint.remove(path, current, run),
         }
@@ -420,11 +431,15 @@ impl Endpoint {
         retention: Duration,
         now: SystemTime,
         pruning: Pruning,
+        control: &mut impl FnMut() -> ScanControl,
     ) -> Result<u64, ApplyError> {
+        if control() == ScanControl::Cancel {
+            return Err(ScanError::Cancelled.into());
+        }
         match self {
-            Self::Local(endpoint) => endpoint.prune_archive(retention, now, pruning),
-            Self::Sftp(endpoint) => endpoint.prune_archive(retention, now, pruning),
-            Self::Peer(endpoint) => endpoint.prune_archive(retention, now),
+            Self::Local(endpoint) => endpoint.prune_archive(retention, now, pruning, control),
+            Self::Sftp(endpoint) => endpoint.prune_archive(retention, now, pruning, control),
+            Self::Peer(endpoint) => endpoint.prune_archive(retention, now, control),
             #[cfg(feature = "simulation")]
             Self::Memory(endpoint) => endpoint.prune_archive(retention, now, pruning),
         }
@@ -481,7 +496,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.keep_copy(path, expected, from, options, control),
             Self::Sftp(endpoint) => endpoint.keep_copy(path, expected, from, options, control),
-            Self::Peer(endpoint) => endpoint.keep_copy(path, expected, from, options),
+            Self::Peer(endpoint) => endpoint.keep_copy(path, expected, from, options, control),
             #[cfg(feature = "simulation")]
             Self::Memory(_) => Err(ApplyError::Unsupported(path.clone())),
         }
@@ -509,20 +524,6 @@ impl Endpoint {
             Self::Peer(endpoint) => endpoint.create_lock_file(file, content),
             #[cfg(feature = "simulation")]
             Self::Memory(endpoint) => endpoint.create_lock_file(file, content),
-        }
-    }
-
-    pub(crate) fn replace_lock_file(
-        &self,
-        file: LockFile,
-        content: &[u8],
-    ) -> Result<(), ApplyError> {
-        match self {
-            Self::Local(endpoint) => endpoint.replace_lock_file(file, content),
-            Self::Sftp(endpoint) => endpoint.replace_lock_file(file, content),
-            Self::Peer(endpoint) => endpoint.replace_lock_file(file, content),
-            #[cfg(feature = "simulation")]
-            Self::Memory(endpoint) => endpoint.replace_lock_file(file, content),
         }
     }
 

@@ -17,6 +17,7 @@ private actor ArchiveFixtureClient: ArchiveClient {
     private var heldRestore: CheckedContinuation<Void, Never>?
     private var refusesRestore = false
     private var refusesNextPage = false
+    private(set) var revisions: [UInt64] = []
 
     func holdRestore() { holdsRestore = true }
     func refuseRestore() { refusesRestore = true }
@@ -48,7 +49,8 @@ private actor ArchiveFixtureClient: ArchiveClient {
         held = nil
     }
 
-    func runs(_ id: String, side: FolderSide) async throws -> ArchiveRuns {
+    func runs(_ id: String, revision: UInt64, side: FolderSide) async throws -> ArchiveRuns {
+        revisions.append(revision)
         sides.append(side)
         guard side == .b else { return ArchiveRuns(runs: [], more: false) }
         return ArchiveRuns(runs: [ArchiveRun(name: "new", started: Date(timeIntervalSince1970: 2)),
@@ -56,7 +58,8 @@ private actor ArchiveFixtureClient: ArchiveClient {
                            more: true)
     }
 
-    func items(_ id: String, side: FolderSide, run: String, after: Data?) async throws -> ArchivePage {
+    func items(_ id: String, revision: UInt64, side: FolderSide, run: String,
+               after: Data?) async throws -> ArchivePage {
         let rest = stored.filter { path in after.map { $0.lexicographicallyPrecedes(path) } ?? true }
         // Answered as of the request, even when held.
         let page = ArchivePage(items: rest.prefix(2).map { ArchiveItem(path: $0, size: 1) }, more: rest.count > 2)
@@ -70,13 +73,15 @@ private actor ArchiveFixtureClient: ArchiveClient {
         return page
     }
 
-    func putBack(_ id: String, side: FolderSide, run: String, path: Data) async throws -> Data {
+    func putBack(_ id: String, revision: UInt64, side: FolderSide, run: String,
+                 path: Data) async throws -> Data {
         putBacks.append(path)
         stored.removeAll { $0 == path }
         return path + Data(" (restored)".utf8)
     }
 
-    func putBackAll(_ id: String, side: FolderSide, run: String) async throws -> RunRestore {
+    func putBackAll(_ id: String, revision: UInt64, side: FolderSide,
+                    run: String) async throws -> RunRestore {
         restoreRequests += 1
         if holdsRestore {
             holdsRestore = false
@@ -89,8 +94,8 @@ private actor ArchiveFixtureClient: ArchiveClient {
     }
 }
 
-private func docs() -> SyncPair {
-    SyncPair(id: "11111111111111111111111111111111", revision: 1, settings: PairSettings(
+private func docs(revision: UInt64 = 1) -> SyncPair {
+    SyncPair(id: "11111111111111111111111111111111", revision: revision, settings: PairSettings(
         name: "Docs", left: SelectedFolder(bytes: Data("/a".utf8)),
         right: SelectedFolder(bytes: Data("/b".utf8)), mode: .sync
     ))
@@ -420,17 +425,36 @@ func recentRunTitlesKeepTheClockTime() {
 func siblingStoresShareTheClientButNotTheState() async {
     let client = ArchiveFixtureClient()
     let store = ArchiveStore(client: client)
-    await store.open(docs().id, side: .b)
+    await store.open(docs().id, revision: docs().revision, side: .b)
 
     let sibling = store.sibling()
     #expect(sibling.runs.isEmpty)
     #expect(sibling.side == .a)
     #expect(sibling.run == nil)
 
-    await sibling.open(docs().id, side: .b)
+    await sibling.open(docs().id, revision: docs().revision, side: .b)
     #expect(sibling.runs.map(\.name) == ["new", "old"])
     #expect(store.run == "new")
     #expect(await client.sides == [.b, .b])
+}
+
+@MainActor
+@Test
+func archiveReloadsWhenThePairRevisionChanges() async {
+    let client = ArchiveFixtureClient()
+    let store = ArchiveStore(client: client)
+    let first = ArchiveViewModel(pair: docs(revision: 1), store: store, agentConnected: true)
+    await first.show(.b)
+    #expect(first.itemRows.map(\.path) == ["a", "b"])
+
+    // An archive window keeps the same store and pair ID across an edit.
+    // Its new view model must open the new revision rather than reusing the
+    // old rows for a mutation that the agent would resolve against new roots.
+    let edited = ArchiveViewModel(pair: docs(revision: 2), store: store, agentConnected: true)
+    await edited.load()
+
+    #expect(await client.revisions == [1, 2])
+    #expect(edited.itemRows.map(\.path) == ["a", "b"])
 }
 
 private enum TwoRunFixtureError: Error { case refused }
@@ -457,18 +481,20 @@ private actor TwoRunArchiveClient: ArchiveClient {
         held = nil
     }
 
-    func runs(_ id: String, side: FolderSide) async throws -> ArchiveRuns {
+    func runs(_ id: String, revision: UInt64, side: FolderSide) async throws -> ArchiveRuns {
         ArchiveRuns(runs: [ArchiveRun(name: "new", started: Date(timeIntervalSince1970: 2)),
                            ArchiveRun(name: "old", started: Date(timeIntervalSince1970: 1))],
                     more: false)
     }
 
-    func items(_ id: String, side: FolderSide, run: String, after: Data?) async throws -> ArchivePage {
+    func items(_ id: String, revision: UInt64, side: FolderSide, run: String,
+               after: Data?) async throws -> ArchivePage {
         let names = run == "new" ? ["a.txt", "b.txt", "c.txt"] : ["b.txt", "c.txt"]
         return ArchivePage(items: names.map { ArchiveItem(path: Data($0.utf8), size: 1) }, more: false)
     }
 
-    func putBack(_ id: String, side: FolderSide, run: String, path: Data) async throws -> Data {
+    func putBack(_ id: String, revision: UInt64, side: FolderSide, run: String,
+                 path: Data) async throws -> Data {
         let name = String(decoding: path, as: UTF8.self)
         putBacks.append("\(run)/\(name)")
         if holdsNext {
@@ -479,7 +505,8 @@ private actor TwoRunArchiveClient: ArchiveClient {
         return path
     }
 
-    func putBackAll(_ id: String, side: FolderSide, run: String) async throws -> RunRestore {
+    func putBackAll(_ id: String, revision: UInt64, side: FolderSide,
+                    run: String) async throws -> RunRestore {
         restoreRequests += 1
         return RunRestore(restored: 0, beside: 0, failures: 0)
     }
@@ -529,4 +556,276 @@ func aPutBackBatchStopsAtTheFirstFailure() async {
     // One item went back before the failure.
     #expect(viewModel.statusText == viewModel.placedText)
     #expect(viewModel.canPutBack)
+}
+
+/// Hold one response at a known suspension point, including failed replies.
+private actor SuspendedArchiveClient: ArchiveClient {
+    enum Call: CaseIterable, Sendable {
+        case runs, items, putBack, putBackAll
+    }
+
+    private var serial = 0
+    private var runSerial = 0
+    private var queued: [(Call, Int)] = []
+    private var held: [Int: CheckedContinuation<Void, Never>] = [:]
+    private var failures: Set<Int> = []
+    /// The pair revision each put-back carried, in request order.
+    private(set) var putBackRevisions: [UInt64] = []
+
+    func holdNext(_ call: Call) -> Int {
+        serial += 1
+        queued.append((call, serial))
+        return serial
+    }
+
+    func waitForHeld(_ ticket: Int) async -> Bool {
+        let deadline = ContinuousClock.now + .seconds(3)
+        while held[ticket] == nil {
+            if ContinuousClock.now >= deadline { return false }
+            await Task.yield()
+        }
+        return true
+    }
+
+    func refuse(_ ticket: Int) { failures.insert(ticket) }
+
+    func release(_ ticket: Int) {
+        held.removeValue(forKey: ticket)?.resume()
+    }
+
+    private func suspend(_ call: Call) async throws {
+        guard let index = queued.firstIndex(where: { $0.0 == call }) else { return }
+        let ticket = queued.remove(at: index).1
+        await withCheckedContinuation { held[ticket] = $0 }
+        if failures.remove(ticket) != nil { throw TwoRunFixtureError.refused }
+    }
+
+    func runs(_ id: String, revision: UInt64, side: FolderSide) async throws -> ArchiveRuns {
+        runSerial += 1
+        let run = ArchiveRun(name: "run-\(runSerial)", started: Date(timeIntervalSince1970: Double(runSerial)))
+        try await suspend(.runs)
+        return ArchiveRuns(runs: [run], more: false)
+    }
+
+    func items(_ id: String, revision: UInt64, side: FolderSide, run: String,
+               after: Data?) async throws -> ArchivePage {
+        try await suspend(.items)
+        return ArchivePage(items: [ArchiveItem(path: Data("\(run)/a".utf8), size: 1)], more: false)
+    }
+
+    func putBack(_ id: String, revision: UInt64, side: FolderSide, run: String,
+                 path: Data) async throws -> Data {
+        try await suspend(.putBack)
+        putBackRevisions.append(revision)
+        return path
+    }
+
+    func putBackAll(_ id: String, revision: UInt64, side: FolderSide,
+                    run: String) async throws -> RunRestore {
+        try await suspend(.putBackAll)
+        return RunRestore(restored: 1, beside: 0, failures: 0)
+    }
+}
+
+@MainActor
+@Test
+func obsoleteRunListsStayDiscardedAfterReturningToTheSameSide() async throws {
+    let client = SuspendedArchiveClient()
+    let store = ArchiveStore(client: client)
+    let ticket = await client.holdNext(.runs)
+    let obsolete = Task { await store.open(docs().id, revision: docs().revision, side: .b) }
+    try #require(await client.waitForHeld(ticket))
+
+    await store.open(docs().id, revision: docs().revision, side: .a)
+    await store.open(docs().id, revision: docs().revision, side: .b)
+    let current = store.runs
+    let currentItems = store.items
+    await client.release(ticket)
+    await obsolete.value
+
+    #expect(store.runs == current)
+    #expect(store.items == currentItems)
+}
+
+@MainActor
+@Test
+func anObsoleteOpenCannotFinishANewerLoad() async throws {
+    let client = SuspendedArchiveClient()
+    let store = ArchiveStore(client: client)
+    let first = await client.holdNext(.runs)
+    let obsolete = Task { await store.open(docs().id, revision: docs().revision, side: .a) }
+    try #require(await client.waitForHeld(first))
+    let second = await client.holdNext(.runs)
+    let current = Task { await store.open(docs().id, revision: docs().revision, side: .b) }
+    try #require(await client.waitForHeld(second))
+
+    await client.release(first)
+    await obsolete.value
+    #expect(store.isLoading)
+
+    await client.release(second)
+    await current.value
+    #expect(!store.isLoading)
+}
+
+@MainActor
+@Test
+func anObsoletePageCannotFinishANewerRunListLoad() async throws {
+    let client = SuspendedArchiveClient()
+    let store = ArchiveStore(client: client)
+    await store.open(docs().id, revision: docs().revision, side: .b)
+    let first = await client.holdNext(.items)
+    let obsolete = Task { await store.select("old") }
+    try #require(await client.waitForHeld(first))
+    let second = await client.holdNext(.runs)
+    let current = Task { await store.open(docs().id, revision: docs().revision, side: .a) }
+    try #require(await client.waitForHeld(second))
+
+    await client.release(first)
+    await obsolete.value
+    #expect(store.isLoading)
+
+    await client.release(second)
+    await current.value
+    #expect(!store.isLoading)
+}
+
+@MainActor
+@Test(arguments: SuspendedArchiveClient.Call.allCases)
+private func obsoleteFailuresStayOutOfTheCurrentArchive(_ call: SuspendedArchiveClient.Call) async throws {
+    let client = SuspendedArchiveClient()
+    let store = ArchiveStore(client: client)
+    await store.open(docs().id, revision: docs().revision, side: .b)
+    let item = try #require(store.items.first)
+    let ticket = await client.holdNext(call)
+    await client.refuse(ticket)
+    let obsolete = Task {
+        switch call {
+        case .runs: await store.open(docs().id, revision: docs().revision, side: .a)
+        case .items: await store.select("old")
+        case .putBack: await store.putBack(item)
+        case .putBackAll: await store.putBackAll()
+        }
+    }
+    try #require(await client.waitForHeld(ticket))
+    await store.open(docs().id, revision: docs().revision, side: .b)
+    let currentItems = store.items
+
+    await client.release(ticket)
+    await obsolete.value
+    #expect(store.error == nil)
+    #expect(store.items == currentItems)
+    #expect(!store.isPuttingBack)
+}
+
+@MainActor
+@Test
+func aWholeRunRestoreDoesNotPublishFeedbackAfterLeavingItsReload() async throws {
+    let client = SuspendedArchiveClient()
+    let store = ArchiveStore(client: client)
+    await store.open(docs().id, revision: docs().revision, side: .b)
+    let ticket = await client.holdNext(.items)
+    let restoring = Task { await store.putBackAll() }
+    try #require(await client.waitForHeld(ticket))
+
+    await store.open(docs().id, revision: docs().revision, side: .a)
+    await client.release(ticket)
+    await restoring.value
+    #expect(store.restore == nil)
+    #expect(!store.isPuttingBack)
+}
+
+@MainActor
+@Test
+func aPutBackBatchStopsAfterLeavingAndReturningToItsRun() async {
+    let client = TwoRunArchiveClient()
+    let store = ArchiveStore(client: client)
+    await store.open(docs().id, revision: docs().revision, side: .b)
+    let rows = store.items
+    await client.holdNextPutBack()
+    let putting = Task { await store.putBack(rows) }
+    await client.waitForHeldPutBack()
+
+    await store.select("old")
+    await store.select("new")
+    await client.releasePutBack()
+    await putting.value
+    #expect(await client.putBacks == ["new/a.txt"])
+    #expect(store.items.map(\.path) == rows.map(\.path))
+    #expect(store.placed == nil)
+}
+
+@MainActor
+@Test
+func restoringTheLoadedPageKeepsLaterArchivePagesReachable() async {
+    let store = ArchiveStore(client: ArchiveFixtureClient())
+    let viewModel = ArchiveViewModel(pair: docs(), store: store, agentConnected: true)
+    await viewModel.show(.b)
+    await viewModel.putBack(viewModel.itemRows)
+
+    #expect(viewModel.emptyText != "Nothing from this sync is left in the archive.")
+    #expect(viewModel.canLoadMore)
+    #expect(viewModel.canPutBackAll)
+    await viewModel.loadMore()
+    #expect(viewModel.itemRows.map(\.path) == ["c"])
+    #expect(!viewModel.canLoadMore)
+}
+
+@MainActor
+@Test
+func searchingAfterRestoringTheLoadedPageFindsLaterItems() async {
+    let store = ArchiveStore(client: ArchiveFixtureClient())
+    let viewModel = ArchiveViewModel(pair: docs(), store: store, agentConnected: true)
+    await viewModel.show(.b)
+    await viewModel.putBack(viewModel.itemRows)
+
+    viewModel.searchText = "c"
+    await viewModel.search()
+    #expect(viewModel.itemRows.map(\.path) == ["c"])
+    #expect(!viewModel.canKeepSearching)
+}
+
+@MainActor
+@Test
+func anObsoleteSearchDoesNotWalkTheReplacementListing() async {
+    let client = ArchiveFixtureClient()
+    let store = ArchiveStore(client: client)
+    let viewModel = ArchiveViewModel(pair: docs(), store: store, agentConnected: true)
+    await viewModel.show(.b)
+    await client.holdNextPage()
+    viewModel.searchText = "missing"
+    let searching = Task { await viewModel.search() }
+    await client.waitForHeldPage()
+
+    await viewModel.show(.b)
+    viewModel.searchText = "c"
+    await client.releasePage()
+    await searching.value
+    #expect(await client.pageRequests == 1)
+    #expect(viewModel.itemRows.isEmpty)
+    #expect(viewModel.canKeepSearching)
+    #expect(!viewModel.isSearching)
+}
+
+// A run list loaded before the pair was edited must not land in the
+// reloaded archive, and what the archive does next must carry the new
+// revision: both the visit and the mutation belong to their generation.
+@MainActor
+@Test
+func anObsoleteRevisionsReplyCannotLandInTheReloadedArchive() async throws {
+    let client = SuspendedArchiveClient()
+    let store = ArchiveStore(client: client)
+    let ticket = await client.holdNext(.runs)
+    let obsolete = Task { await store.open(docs().id, revision: 1, side: .b) }
+    try #require(await client.waitForHeld(ticket))
+
+    await store.open(docs().id, revision: 2, side: .b)
+    let current = store.runs
+    await client.release(ticket)
+    await obsolete.value
+
+    #expect(store.runs == current)
+    let item = try #require(store.items.first)
+    await store.putBack(item)
+    #expect(await client.putBackRevisions == [2])
 }

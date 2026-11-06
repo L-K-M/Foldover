@@ -153,6 +153,61 @@ async fn an_edit_during_preview_invalidates_every_old_choice() {
 }
 
 #[tokio::test]
+async fn working_status_keeps_the_claimed_pair_presentation_until_the_next_job() {
+    let (directory, service) = fixture();
+    let original = configuration(directory.path(), "Original");
+    let original_presentation = json!({
+        "revision": 1,
+        "name": original["name"],
+        "left_root": original["left_root"],
+        "right_root": original["right_root"],
+        "mode": original["mode"],
+    });
+    let pair = call(&service, PAIR_CREATE, original).await;
+    let key = json!({"id": pair["id"]});
+    let release = hold_preview(&service, &key).await;
+
+    let mut replacement = configuration(directory.path(), "Replacement");
+    replacement["mode"] = json!({"kind": "mirror", "source": "right"});
+    let replacement_presentation = json!({
+        "revision": 2,
+        "name": replacement["name"],
+        "left_root": replacement["left_root"],
+        "right_root": replacement["right_root"],
+        "mode": replacement["mode"],
+    });
+    let saved = call(
+        &service,
+        PAIR_UPDATE,
+        json!({
+            "id": pair["id"], "revision": 1, "configuration": replacement,
+        }),
+    )
+    .await;
+    assert_eq!(saved["revision"], 2);
+
+    let still_working = call(&service, SYNC_STATUS, key.clone()).await;
+    assert_eq!(still_working["state"], "working");
+    assert_eq!(still_working["pair"], original_presentation);
+
+    let cancelling = call(&service, SYNC_CANCEL, key.clone()).await;
+    assert_eq!(cancelling["state"], "working");
+    assert_eq!(cancelling["cancelling"], true);
+    assert_eq!(cancelling["pair"], original_presentation);
+
+    release.send(()).unwrap();
+    let first = settled(&service, &key).await;
+    assert_eq!(first["state"], "idle", "{first}");
+
+    let second = call(&service, SYNC_PREVIEW, key.clone()).await;
+    assert_eq!(second["state"], "working");
+    assert_eq!(second["pair"], replacement_presentation);
+    let second = settled(&service, &key).await;
+    assert_eq!(second["state"], "previewed", "{second}");
+    assert_eq!(second["preview"]["pair_revision"], 2);
+}
+
+#[tokio::test]
 async fn archive_browsing_keeps_active_roots_until_the_worker_finishes() {
     let (directory, service) = fixture();
     let settings = configuration(directory.path(), "Archived");
@@ -172,7 +227,9 @@ async fn archive_browsing_keeps_active_roots_until_the_worker_finishes() {
     let archived = run_reviewed(&service, &key, &preview).await;
     assert_eq!(archived["state"], "finished", "{archived}");
     assert_eq!(archived["result"]["archived"], 1);
-    let side = json!({"id": pair["id"], "side": "right"});
+    let side = json!({
+        "id": pair["id"], "revision": pair["revision"], "side": "right",
+    });
     let before = call(&service, ARCHIVE_RUNS, side.clone()).await;
     assert_eq!(before["runs"].as_array().unwrap().len(), 1);
     let run = before["runs"][0]["name"].clone();
@@ -197,7 +254,8 @@ async fn archive_browsing_keeps_active_roots_until_the_worker_finishes() {
         &service,
         ARCHIVE_ITEMS,
         json!({
-            "id": pair["id"], "side": "right", "run": run, "after": null,
+            "id": pair["id"], "revision": pair["revision"],
+            "side": "right", "run": run, "after": null,
         }),
     )
     .await;
@@ -206,7 +264,17 @@ async fn archive_browsing_keeps_active_roots_until_the_worker_finishes() {
     release.send(()).unwrap();
     let finished = settled(&service, &key).await;
     assert_eq!(finished["state"], "previewed", "{finished}");
-    let after = call(&service, ARCHIVE_RUNS, side).await;
+    let stale = service
+        .handle(Request::call(1, ARCHIVE_RUNS, Some(side)))
+        .await
+        .unwrap_err();
+    assert_eq!(stale.code(), foldover_proto::local::STALE_REVISION);
+    let after = call(
+        &service,
+        ARCHIVE_RUNS,
+        json!({"id": saved["id"], "revision": saved["revision"], "side": "right"}),
+    )
+    .await;
     assert_eq!(
         after["runs"],
         json!([]),

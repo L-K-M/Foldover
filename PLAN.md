@@ -450,7 +450,8 @@ Endpoint-layer rules, not filters:
 
 **Each endpoint root** gets one hidden `.foldover/` folder. Unlike GoodSync's
 `_gsdata_`, it holds no sync database:
-- **`archive/`:** one folder per run, named by its start time and pair;
+- **`archive/`:** one folder per run, named by its start time, pair and a
+  unique run ID;
   each pair lists and prunes its own runs, and another pair's only at
   twice the retention ([ADR 0047](docs/adr/0047-shared-one-way-sources.md)).
 - **`id`:** lets Foldover notice a different disk mounted at the same path.

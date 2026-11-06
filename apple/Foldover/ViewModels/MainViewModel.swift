@@ -192,6 +192,8 @@ final class MainViewModel {
         return false
     }
 
+    var automationMutationPending: Bool { automation.mutationPending }
+
     /// Shown while automatic syncs are paused.
     var pauseText: String? {
         guard case .paused(let until) = automation.state else { return nil }
@@ -330,11 +332,14 @@ final class MainViewModel {
     var pairRows: [PairRow] {
         pairs.map { pair in
             let pairSync = sync(for: pair)
-            return PairRow(id: pair.id, name: pair.settings.name, status: pairSync.shortStatus,
-                           symbol: pair.settings.mode.symbol, modeTitle: pair.settings.mode.title,
+            return PairRow(id: pair.id, name: pairSync.activeName, status: pairSync.shortStatus,
+                           symbol: pairSync.activeMode.symbol, modeTitle: pairSync.activeMode.title,
                            activity: pairSync.activity, conflicts: pairSync.conflictCount,
                            canSync: pairSync.canSync, canCancel: pairSync.canCancel,
                            lastSuccess: pairSync.lastSuccess)
+        }.sorted {
+            let order = $0.name.localizedStandardCompare($1.name)
+            return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
         }
     }
 
@@ -387,6 +392,7 @@ final class MainViewModel {
     var pairsLoaded: Bool { pairStore.hasLoaded }
 
     var selectedSync: PairSyncViewModel? { selectedPair.map { sync(for: $0) } }
+    var selectedPairName: String? { selectedSync?.activeName }
 
     /// The change row selected in the main window's table, remembered
     /// per pair so switching pairs keeps each one's selection. It follows
@@ -430,16 +436,22 @@ final class MainViewModel {
 
     /// Show the selected pair's folder on `side` in Finder.
     func reveal(_ side: FolderSide) {
-        guard let url = selectedFolderURL(side) else { return }
+        guard let folder = selectedSync?.activeFolder(side) else { return }
+        reveal(folder)
+    }
+
+    /// Show exactly the folder a view displays, without resolving it again
+    /// through settings that may already be saved for the next run.
+    func reveal(_ folder: SelectedFolder) {
+        guard let url = localURL(folder) else { return }
         pairStore.reveal([url])
     }
 
-    func canReveal(_ side: FolderSide) -> Bool { selectedFolderURL(side) != nil }
-
-    private func selectedFolderURL(_ side: FolderSide) -> URL? {
-        guard let settings = selectedPair?.settings else { return nil }
-        return localURL(side == .a ? settings.left : settings.right)
+    func canReveal(_ side: FolderSide) -> Bool {
+        selectedSync.map { canReveal($0.activeFolder(side)) } ?? false
     }
+
+    func canReveal(_ folder: SelectedFolder) -> Bool { localURL(folder) != nil }
 
     /// What the pair does, in the editor's words.
     func planText(for pair: SyncPair) -> String {
@@ -593,6 +605,7 @@ final class MainViewModel {
         case .sync: await before.sync()
         case .preview: await before.preview()
         }
+        await syncStore.waitWhileWorking(pair.id)
         let after = sync(for: pair)
         return after.requestError ?? after.statusText
     }
@@ -615,7 +628,10 @@ final class MainViewModel {
                     await group.next()
                     inFlight -= 1
                 }
-                group.addTask { await self.sync(for: pair).sync() }
+                group.addTask {
+                    await self.sync(for: pair).sync()
+                    await self.syncStore.waitWhileWorking(pair.id)
+                }
                 inFlight += 1
             }
         }
