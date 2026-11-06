@@ -431,6 +431,48 @@ private actor DeferredSyncClient: SyncClient {
     }
 }
 
+/// Records whether an async workflow returned while a test deliberately
+/// keeps its agent job working.
+private actor CompletionProbe<Value: Sendable> {
+    private var value: Value?
+
+    func finish(with value: Value) { self.value = value }
+    func result() -> Value? { value }
+
+    func finishes(within timeout: Duration) async -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        while value == nil {
+            if ContinuousClock.now >= deadline { return false }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        return true
+    }
+}
+
+/// Let a refresh replace the job starter as poll owner, then answer the
+/// starter's older request. The returned refresh remains parked on the
+/// successor poll until the test supplies a terminal result.
+@MainActor
+private func takeOverPolling(_ store: SyncStore, client: DeferredSyncClient,
+                             job: SyncJob) async -> Task<Void, Never> {
+    await client.waitForStatusCalls(1)
+    let refresh = Task { await store.refresh(pair().id) }
+    await client.waitForStatusCalls(2)
+    await client.replyLatest(.working(job, cancelling: false))
+    await client.waitForStatusCalls(3)
+    await client.reply(.working(job, cancelling: false))
+    return refresh
+}
+
+@MainActor
+private func loadedMainViewModel(sync store: SyncStore) async -> MainViewModel {
+    let agent = AgentStore(statusRequest: { AgentReport(version: "1.0") })
+    let pairs = catalog()
+    await agent.refresh()
+    await pairs.refresh()
+    return MainViewModel(appInfo: AppInfoStore(), agent: agent, pairs: pairs, sync: store)
+}
+
 private func preview(archivesInA: UInt64, needsApproval: Bool,
                      reviewToken: String = reviewTokenA,
                      pairRevision: UInt64 = 1) -> PreviewSummary {
@@ -1079,6 +1121,93 @@ private func eventually(_ condition: @MainActor () -> Bool,
         try? await Task.sleep(for: .milliseconds(1))
     }
     return true
+}
+
+// A detail refresh can take ownership of a Shortcut's live poll. The
+// Shortcut still describes the terminal result rather than returning the
+// intermediate working state when its original poller notices the takeover.
+@MainActor
+@Test
+func shortcutsWaitForJobsWhosePollerWasTakenOver() async {
+    let client = DeferredSyncClient()
+    await client.holdStartReplies()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let viewModel = await loadedMainViewModel(sync: store)
+    let completion = CompletionProbe<String>()
+
+    let shortcut = Task {
+        let result = await viewModel.perform(.preview, onPairWithID: pair().id)
+        await completion.finish(with: result)
+    }
+    #expect(await client.waitForStartCalls(.preview, 1, timeout: .seconds(3)))
+    await client.replyStart(.working(.preview, cancelling: false))
+    let refresh = await takeOverPolling(store, client: client, job: .preview)
+
+    #expect(!(await completion.finishes(within: .milliseconds(50))))
+    let summary = preview(archivesInA: 0, needsApproval: false)
+    await client.finishPolling(.previewed(summary))
+    await refresh.value
+    await shortcut.value
+
+    #expect(await completion.result()?.contains("to copy") == true)
+}
+
+// A Sync All task-group slot belongs to the agent job, not merely to the
+// poller that started it. A refresh takeover cannot release the slot early.
+@MainActor
+@Test
+func syncAllWaitsForJobsWhosePollerWasTakenOver() async {
+    let client = DeferredSyncClient()
+    await client.holdStartReplies()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let viewModel = await loadedMainViewModel(sync: store)
+    let completion = CompletionProbe<Void>()
+
+    let all = Task {
+        await viewModel.syncAll()
+        await completion.finish(with: ())
+    }
+    #expect(await client.waitForStartCalls(.run, 1, timeout: .seconds(3)))
+    await client.replyStart(.working(.run, cancelling: false))
+    let refresh = await takeOverPolling(store, client: client, job: .run)
+
+    #expect(!(await completion.finishes(within: .milliseconds(50))))
+    let result = RunSummary(cancelled: false, copied: 1, updated: 0, archived: 0,
+                            recovered: 0, conflicts: 0, failures: [], failureCount: 0,
+                            archive: "run")
+    await client.finishPolling(.finished(result))
+    await refresh.value
+    await all.value
+
+    #expect(await completion.finishes(within: .seconds(1)))
+}
+
+// Review Conflicts consumes the preview's review token. If a refresh owns
+// its poller, wait for that preview before asking for the conflict page.
+@MainActor
+@Test
+func conflictReviewWaitsForAPreviewWhosePollerWasTakenOver() async {
+    let client = DeferredSyncClient()
+    await client.holdStartReplies()
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(),
+                                      agentConnected: true)
+    let completion = CompletionProbe<Void>()
+
+    let review = Task {
+        await viewModel.reviewConflicts()
+        await completion.finish(with: ())
+    }
+    #expect(await client.waitForStartCalls(.preview, 1, timeout: .seconds(3)))
+    await client.replyStart(.working(.preview, cancelling: false))
+    let refresh = await takeOverPolling(store, client: client, job: .preview)
+
+    #expect(!(await completion.finishes(within: .milliseconds(50))))
+    await client.finishPolling(.previewed(preview(archivesInA: 0, needsApproval: false)))
+    await refresh.value
+    await review.value
+
+    #expect(viewModel.changeFilter == .conflicts)
 }
 
 // The stale-reply guard counts writes, not state values: a pair can
