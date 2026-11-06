@@ -185,6 +185,27 @@ fn a_claim_left_by_a_reclaimer_that_died_is_cleared_in_turn() {
 }
 
 #[test]
+fn a_dead_lock_and_claim_recover_within_one_wait() {
+    let (directory, a, b) = folder();
+    // Like STANDARD, this allows one TTL but not two. Starting the
+    // claim's clock only after the lock dies would make every retry time out.
+    let timing = LeaseTiming {
+        ttl: Duration::from_secs(2),
+        wait: Duration::from_secs(3),
+        ..QUICK
+    };
+    let _dead = take(&a, holder("a/run", "Laptop"), timing, &mut proceed).unwrap();
+    fs::write(
+        directory.path().join(".foldover/lock.claim"),
+        Record::of(&holder("c/run", "Mini"), 0).bytes(),
+    )
+    .unwrap();
+
+    let _taken = take(&b, holder("b/run", "Studio"), timing, &mut proceed)
+        .expect("a dead lock and claim must recover before the wait expires");
+}
+
+#[test]
 fn a_lock_another_version_wrote_is_honoured_until_it_goes_still() {
     let (directory, a, _) = folder();
     fs::create_dir_all(directory.path().join(".foldover")).unwrap();

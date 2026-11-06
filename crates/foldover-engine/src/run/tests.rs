@@ -2477,10 +2477,11 @@ fn a_root_whose_identity_changes_mid_run_stops_at_the_next_batch() {
 
 const HOUR: std::time::Duration = std::time::Duration::from_secs(3_600);
 
-/// Leases that give up on a busy folder at once and count a still one as
-/// dead quickly.
+/// Give up on a busy folder at once, but leave claim promotion enough
+/// time for ordinary local and SFTP I/O stalls on shared CI hosts. These
+/// run fixtures do not test TTL expiry; lease-specific tests do that.
 const TEST_LEASES: LeaseTiming = LeaseTiming {
-    ttl: std::time::Duration::from_millis(200),
+    ttl: std::time::Duration::from_secs(3),
     beat: std::time::Duration::from_millis(50),
     poll: std::time::Duration::from_millis(20),
     wait: std::time::Duration::ZERO,
