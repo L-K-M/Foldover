@@ -11,10 +11,10 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use foldover_fs::{DirectoryScope, NodeKind, WriteError};
+use foldover_fs::{DirectoryScope, HashError, NodeKind, WriteError};
 use foldover_types::{Durability, PairId, SyncPath};
 
-use super::{ApplyError, LocalEndpoint, ScanError, child_path, protected};
+use super::{ApplyError, LocalEndpoint, ScanControl, ScanError, child_path, protected};
 
 /// Names tried for one put-back: the original, then `(restored)`,
 /// `(restored 2)` and so on.
@@ -479,18 +479,23 @@ impl LocalEndpoint {
     /// Permanently delete archived runs that started more than their
     /// expiry before `now`: `retention`, or longer for another pair's
     /// runs (`Pruning`). Other folders in the archive are kept. Returns
-    /// the number of runs removed.
+    /// the number of runs removed. `control` is asked as deletion
+    /// proceeds, so a long prune reports progress and can stop.
     pub fn prune_archive(
         &self,
         retention: Duration,
         now: SystemTime,
         pruning: Pruning,
+        control: &mut impl FnMut() -> ScanControl,
     ) -> Result<u64, ApplyError> {
+        if control() == ScanControl::Cancel {
+            return Err(ScanError::Cancelled.into());
+        }
         let archive = SyncPath::try_from(ARCHIVE_ROOT).expect("the archive path is valid");
         // Data kept from broken-off copies follows the same retention.
         self.root
-            .prune_partials(retention, now)
-            .map_err(|source| io_error(&archive, source))?;
+            .prune_partials(retention, now, control)
+            .map_err(|source| prune_failure(&archive, source))?;
         let entries = match self.root.entries(DirectoryScope::At(&archive)) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -498,6 +503,9 @@ impl LocalEndpoint {
         };
         let mut expired = Vec::new();
         for entry in entries {
+            if control() == ScanControl::Cancel {
+                return Err(ScanError::Cancelled.into());
+            }
             let entry = entry.map_err(|source| io_error(&archive, source))?;
             if entry.metadata().kind() != NodeKind::Directory {
                 continue;
@@ -515,11 +523,8 @@ impl LocalEndpoint {
         }
         for path in &expired {
             self.root
-                .remove_tree(path)
-                .map_err(|source| ApplyError::Write {
-                    path: path.clone(),
-                    source,
-                })?;
+                .remove_tree(path, control)
+                .map_err(|source| prune_failure(path, source))?;
         }
         Ok(expired.len() as u64)
     }
@@ -588,6 +593,19 @@ fn io_error(path: &SyncPath, source: std::io::Error) -> ApplyError {
         path: Some(path.clone()),
         source,
     })
+}
+
+/// A deletion `control` stopped is the scan's `Cancelled`: an
+/// interrupted prune reports a stop, never a failed write.
+fn prune_failure(path: &SyncPath, source: WriteError) -> ApplyError {
+    match source {
+        WriteError::Source(HashError::Cancelled) => ScanError::Cancelled.into(),
+        WriteError::Io(source) => io_error(path, source),
+        source => ApplyError::Write {
+            path: path.clone(),
+            source,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -990,6 +1008,64 @@ mod tests {
         assert_eq!(fs::read(archived).unwrap(), b"keep me");
     }
 
+    /// Control is asked as deletion proceeds: each removed entry is a
+    /// checkpoint the answer side turns into a heartbeat, and a stop ends
+    /// the prune cooperatively as `Cancelled`, never as a failed write.
+    #[test]
+    fn pruning_reports_progress_and_stops_at_a_checkpoint() {
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join(".foldover/archive");
+        for name in [archive_name(at(1_000)), archive_name(at(2_000))] {
+            let run = archive.join(&name);
+            fs::create_dir_all(run.join("folder")).unwrap();
+            fs::write(run.join("folder/file"), b"data").unwrap();
+        }
+        let endpoint = crate::Endpoint::Local(LocalEndpoint::open(directory.path()).unwrap());
+
+        // Two runs of a folder holding a file: six entries deleted, so
+        // control sees at least six checkpoints of real progress.
+        let calls = std::cell::Cell::new(0);
+        let pruned = endpoint.prune_archive(
+            Duration::from_secs(1),
+            at(60_000),
+            Pruning::Everyone,
+            &mut || {
+                calls.set(calls.get() + 1);
+                crate::ScanControl::Continue
+            },
+        );
+        assert_eq!(pruned.unwrap(), 2);
+        assert!(calls.get() >= 6, "checkpoints: {}", calls.get());
+
+        // Cancel once the file inside the run's folder is gone: the stop
+        // reaches the prune at the next checkpoint.
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join(".foldover/archive");
+        let old = archive.join(archive_name(at(1_000)));
+        fs::create_dir_all(old.join("folder")).unwrap();
+        let file = old.join("folder/file");
+        fs::write(&file, b"data").unwrap();
+        let endpoint = crate::Endpoint::Local(LocalEndpoint::open(directory.path()).unwrap());
+        let stopped = endpoint.prune_archive(
+            Duration::from_secs(1),
+            at(60_000),
+            Pruning::Everyone,
+            &mut || {
+                if file.exists() {
+                    crate::ScanControl::Continue
+                } else {
+                    crate::ScanControl::Cancel
+                }
+            },
+        );
+        assert!(matches!(
+            stopped,
+            Err(ApplyError::Scan(ScanError::Cancelled))
+        ));
+        assert!(!file.exists());
+        assert!(old.exists());
+    }
+
     #[test]
     fn pruning_deletes_only_expired_runs() {
         let directory = tempfile::tempdir().unwrap();
@@ -1011,7 +1087,9 @@ mod tests {
         let retention = Duration::from_secs(30 * 86_400);
         assert_eq!(
             endpoint
-                .prune_archive(retention, now, Pruning::Everyone)
+                .prune_archive(retention, now, Pruning::Everyone, &mut || {
+                    crate::ScanControl::Continue
+                })
                 .unwrap(),
             1
         );
@@ -1036,7 +1114,9 @@ mod tests {
         );
         assert_eq!(
             endpoint
-                .prune_archive(retention, now, Pruning::Everyone)
+                .prune_archive(retention, now, Pruning::Everyone, &mut || {
+                    crate::ScanControl::Continue
+                })
                 .unwrap(),
             0
         );
@@ -1045,7 +1125,9 @@ mod tests {
         let endpoint = LocalEndpoint::open(empty.path()).unwrap();
         assert_eq!(
             endpoint
-                .prune_archive(retention, now, Pruning::Everyone)
+                .prune_archive(retention, now, Pruning::Everyone, &mut || {
+                    crate::ScanControl::Continue
+                })
                 .unwrap(),
             0
         );
@@ -1075,7 +1157,9 @@ mod tests {
         let retention = Duration::from_secs(30 * 86_400);
         assert_eq!(
             endpoint
-                .prune_archive(retention, now, Pruning::Pair(ours))
+                .prune_archive(retention, now, Pruning::Pair(ours), &mut || {
+                    crate::ScanControl::Continue
+                })
                 .unwrap(),
             3
         );
@@ -1090,7 +1174,9 @@ mod tests {
         // The Mac sharing the folder prunes everyone's by the retention.
         assert_eq!(
             endpoint
-                .prune_archive(retention, now, Pruning::Everyone)
+                .prune_archive(retention, now, Pruning::Everyone, &mut || {
+                    crate::ScanControl::Continue
+                })
                 .unwrap(),
             1
         );

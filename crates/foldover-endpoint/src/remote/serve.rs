@@ -253,14 +253,22 @@ pub fn serve_folder(
             })
         }
         // This Mac's clock decides what is old here.
-        FolderOp::PruneArchive { retention_seconds } => endpoint
-            .prune_archive(
-                shared_retention(retention_seconds),
-                SystemTime::now(),
-                Pruning::Everyone,
-            )
-            .map(|count| PeerReply::Pruned { count })
-            .map_err(|error| wire::apply_failure(&error)),
+        FolderOp::PruneArchive { retention_seconds } => {
+            // A large archive prunes longer than a caller waits without
+            // word: each deleted entry is a checkpoint that proves the
+            // work and notices a Stop.
+            let controlled = AnswerControl::new(answer);
+            let mut checkpoint = || controlled.checkpoint();
+            endpoint
+                .prune_archive(
+                    shared_retention(retention_seconds),
+                    SystemTime::now(),
+                    Pruning::Everyone,
+                    &mut checkpoint,
+                )
+                .map(|count| PeerReply::Pruned { count })
+                .map_err(|error| wire::apply_failure(&error))
+        }
         FolderOp::ArchivedRuns => endpoint
             .archived_runs()
             .map(|runs| PeerReply::Runs {

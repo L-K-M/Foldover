@@ -762,24 +762,63 @@ fn trees_are_removed_without_following_links() {
     symlink(outside.path(), target.join("old/a/link")).unwrap();
     fs::write(target.join("other"), b"y").unwrap();
 
-    roots.target.remove_tree(&path(b"old")).unwrap();
+    roots
+        .target
+        .remove_tree(&path(b"old"), &mut || ScanControl::Continue)
+        .unwrap();
     assert_eq!(names(target), [b"other".to_vec()]);
     assert_eq!(fs::read(outside.path().join("keep")).unwrap(), b"keep");
     assert!(matches!(
-        roots.target.remove_tree(&path(b"other")),
+        roots
+            .target
+            .remove_tree(&path(b"other"), &mut || ScanControl::Continue),
         Err(WriteError::UnsupportedEntry)
     ));
     assert_eq!(fs::read(target.join("other")).unwrap(), b"y");
     symlink(outside.path(), target.join("other-link")).unwrap();
     assert!(matches!(
-        roots.target.remove_tree(&path(b"other-link")),
+        roots
+            .target
+            .remove_tree(&path(b"other-link"), &mut || ScanControl::Continue),
         Err(WriteError::UnsupportedEntry)
     ));
     assert_eq!(
         fs::read_link(target.join("other-link")).unwrap(),
         outside.path()
     );
-    assert!(roots.target.remove_tree(&path(b"missing")).is_err());
+    assert!(
+        roots
+            .target
+            .remove_tree(&path(b"missing"), &mut || ScanControl::Continue)
+            .is_err()
+    );
+}
+
+/// A stop between entries ends a tree removal cooperatively: what is
+/// deleted stays deleted, and the rest survives.
+#[test]
+fn removing_a_tree_stops_at_a_checkpoint() {
+    let roots = roots();
+    let target = roots.target_directory.path();
+    fs::create_dir_all(target.join("old/a/b")).unwrap();
+    let file = target.join("old/a/b/file");
+    fs::write(&file, b"x").unwrap();
+
+    // Cancel once the first entry is gone: the removal stops at the
+    // next checkpoint rather than ploughing on.
+    let cancelled = roots.target.remove_tree(&path(b"old"), &mut || {
+        if file.exists() {
+            ScanControl::Continue
+        } else {
+            ScanControl::Cancel
+        }
+    });
+    assert!(matches!(
+        cancelled,
+        Err(WriteError::Source(HashError::Cancelled))
+    ));
+    assert!(!file.exists());
+    assert!(target.join("old").exists());
 }
 
 #[test]
@@ -796,7 +835,10 @@ fn deep_trees_are_removed_without_hitting_a_descriptor_cap() {
     fs::write(outside.path().join("keep"), b"keep").unwrap();
     symlink(outside.path(), target.join("old/d/link")).unwrap();
 
-    roots.target.remove_tree(&path(b"old")).unwrap();
+    roots
+        .target
+        .remove_tree(&path(b"old"), &mut || ScanControl::Continue)
+        .unwrap();
     assert!(names(target).is_empty());
     assert_eq!(fs::read(outside.path().join("keep")).unwrap(), b"keep");
 }

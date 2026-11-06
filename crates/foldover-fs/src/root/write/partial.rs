@@ -173,14 +173,24 @@ impl Root {
     }
 
     /// Remove partials nothing wrote to for `retention`; how many.
-    pub fn prune_partials(&self, retention: Duration, now: SystemTime) -> io::Result<u64> {
+    /// `control` is asked between entries, so a long removal both
+    /// reports progress and stops where it is.
+    pub fn prune_partials(
+        &self,
+        retention: Duration,
+        now: SystemTime,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<u64, WriteError> {
         let directory = match self.partial_directory() {
             Ok(directory) => directory,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         };
         let mut pruned = 0;
         for entry in directory.entries()? {
+            if control() == ScanControl::Cancel {
+                return Err(WriteError::Source(HashError::Cancelled));
+            }
             let name = PathBuf::from(entry?.file_name());
             let Ok(metadata) = EntryMetadata::at(&directory, &name) else {
                 continue;
@@ -479,11 +489,42 @@ mod tests {
         assert!(stage(&root, &data, fresh, Some(17 * MIB)).is_err());
         let retention = Duration::from_secs(7 * 24 * 3600);
         assert_eq!(
-            root.prune_partials(retention, SystemTime::now()).unwrap(),
+            root.prune_partials(retention, SystemTime::now(), &mut || {
+                ScanControl::Continue
+            })
+            .unwrap(),
             0
         );
         let later = SystemTime::now() + retention + Duration::from_secs(60);
-        assert_eq!(root.prune_partials(retention, later).unwrap(), 1);
+        assert_eq!(
+            root.prune_partials(retention, later, &mut || ScanControl::Continue)
+                .unwrap(),
+            1
+        );
         assert_eq!(root.partial_length(&digest).unwrap(), 0);
+    }
+
+    /// A stop between entries ends the removal cooperatively, keeping
+    /// the partials not yet reached.
+    #[test]
+    fn pruning_partials_stops_at_a_checkpoint() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = Root::open(directory.path()).unwrap();
+        let (data, digest) = content(17 * MIB);
+        let fresh = Resume {
+            content: digest,
+            from: 0,
+        };
+        assert!(stage(&root, &data, fresh, Some(17 * MIB)).is_err());
+        let later = SystemTime::now() + Duration::from_secs(7 * 24 * 3600 + 60);
+
+        let cancelled = root.prune_partials(Duration::from_secs(7 * 24 * 3600), later, &mut || {
+            ScanControl::Cancel
+        });
+        assert!(matches!(
+            cancelled,
+            Err(WriteError::Source(HashError::Cancelled))
+        ));
+        assert_eq!(root.partial_length(&digest).unwrap(), 17 * MIB as u64);
     }
 }

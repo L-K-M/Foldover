@@ -546,11 +546,15 @@ impl Root {
     }
 
     /// Permanently delete the directory at `path` and everything below it,
-    /// never following links. A file or link at `path` is refused. Only
-    /// archive retention may call this.
-    pub fn remove_tree(&self, path: &SyncPath) -> Result<(), WriteError> {
+    /// never following links, checking `control` as it goes. A file or
+    /// link at `path` is refused. Only archive retention may call this.
+    pub fn remove_tree(
+        &self,
+        path: &SyncPath,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), WriteError> {
         let (parent, name) = self.parent_of(path)?;
-        remove_directory_tree(&parent, &name)
+        remove_directory_tree(&parent, &name, control)
     }
 
     /// Move the file or link at `from`, which must still match `expected`,
@@ -749,8 +753,13 @@ fn open_below(parent: &Dir, path: &Path) -> io::Result<Dir> {
 /// directory's root-relative path is collected breadth-first — one allocation
 /// per directory, reopened component by component — then removed deepest
 /// first, so nesting depth is bounded by memory rather than descriptors or a
-/// fixed cap.
-fn remove_directory_tree(parent: &Dir, name: &Path) -> Result<(), WriteError> {
+/// fixed cap. `control` is asked between entries, so a long removal both
+/// reports progress and stops where it is.
+fn remove_directory_tree(
+    parent: &Dir,
+    name: &Path,
+    control: &mut impl FnMut() -> ScanControl,
+) -> Result<(), WriteError> {
     if EntryMetadata::at(parent, name)?.kind() != NodeKind::Directory {
         return Err(WriteError::UnsupportedEntry);
     }
@@ -760,6 +769,9 @@ fn remove_directory_tree(parent: &Dir, name: &Path) -> Result<(), WriteError> {
         let directory = open_below(parent, &directories[next])?;
         let mut children = Vec::new();
         for entry in directory.entries()? {
+            if control() == ScanControl::Cancel {
+                return Err(WriteError::Source(HashError::Cancelled));
+            }
             let child = PathBuf::from(entry?.file_name());
             if EntryMetadata::at(&directory, &child)?.kind() == NodeKind::Directory {
                 children.push(child);
@@ -777,6 +789,9 @@ fn remove_directory_tree(parent: &Dir, name: &Path) -> Result<(), WriteError> {
     // Every directory follows its parent in `directories`, so reversed order
     // leaves each parent empty when it is removed.
     for path in directories.iter().rev() {
+        if control() == ScanControl::Cancel {
+            return Err(WriteError::Source(HashError::Cancelled));
+        }
         let ancestors = path.parent().unwrap_or_else(|| Path::new(""));
         let directory = open_below(parent, ancestors)?;
         let leaf = Path::new(path.file_name().expect("a collected path has a name"));

@@ -552,11 +552,20 @@ impl PeerEndpoint {
     }
 
     /// Prune the other Mac's archive; its own clock decides what is old,
-    /// so `now` is not sent.
-    pub fn prune_archive(&self, retention: Duration, _now: SystemTime) -> Result<u64, ApplyError> {
-        match self.reply(FolderOp::PruneArchive {
-            retention_seconds: retention.as_secs(),
-        })? {
+    /// so `now` is not sent. `control` ends the wait, and the prune stops
+    /// at the other Mac's next heartbeat.
+    pub fn prune_archive(
+        &self,
+        retention: Duration,
+        _now: SystemTime,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<u64, ApplyError> {
+        match self.reply_unless(
+            FolderOp::PruneArchive {
+                retention_seconds: retention.as_secs(),
+            },
+            control,
+        )? {
             PeerReply::Pruned { count } => Ok(count),
             _ => Err(unexpected().into()),
         }

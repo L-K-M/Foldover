@@ -1,7 +1,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use foldover_net::peer::Identity;
 use foldover_proto::peer::{
@@ -174,6 +174,107 @@ fn peer_endpoint(
     let root = PeerRoot::new(devices[1], ShareId::from_bytes([7; ShareId::BYTE_LEN]));
     let endpoint = PeerEndpoint::open(a, &root).unwrap();
     (runtime, endpoint, b)
+}
+
+/// Answers setup calls, then leaves a prune request waiting on its stream.
+struct StallingPrune(std::sync::Mutex<mpsc::Sender<()>>);
+
+impl PeerHost for StallingPrune {
+    fn paired(&self, _: DeviceId, _: String) -> Result<(), NotRecorded> {
+        Ok(())
+    }
+
+    fn serve(&self, _: DeviceId, call: PeerCall, answer: &mut Answer) {
+        let PeerCall::Folder { op, .. } = call else {
+            return;
+        };
+        match *op {
+            FolderOp::Probe => {
+                let _ = answer.reply(&PeerReply::Done);
+            }
+            FolderOp::NameMatching => {
+                let _ = answer.reply(&PeerReply::Names {
+                    case: NameCase::Exact,
+                    unicode: NameUnicode::Exact,
+                });
+            }
+            FolderOp::PruneArchive { .. } => {
+                let _ = self.0.lock().unwrap().send(());
+                // Keep the accepted stream open without sending its reply.
+                let _ = answer.next_data();
+            }
+            _ => {
+                let _ = answer.reply(&PeerReply::Refused {
+                    reason: "Not served by this fixture".into(),
+                });
+            }
+        }
+    }
+}
+
+/// A paired endpoint whose prune request is accepted but never answered:
+/// Stop while the serving Mac still prunes is `Cancelled`, as for reads
+/// and observations, and a finished prune reports what it removed.
+#[test]
+fn a_peer_prune_answers_progress_and_stopping_its_wait_cancels() {
+    let (started_tx, started) = mpsc::channel();
+    let (_runtime, endpoint, b) =
+        peer_endpoint(Arc::new(StallingPrune(std::sync::Mutex::new(started_tx))));
+    let stopped = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stopped);
+    let (done_tx, done) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let result =
+            endpoint.prune_archive(Duration::from_secs(30 * 86_400), UNIX_EPOCH, &mut || {
+                if worker_stop.load(Ordering::Relaxed) {
+                    ScanControl::Cancel
+                } else {
+                    ScanControl::Continue
+                }
+            });
+        let _ = done_tx.send(result);
+    });
+
+    started.recv_timeout(Duration::from_secs(10)).unwrap();
+    stopped.store(true, Ordering::Relaxed);
+    let result = done.recv_timeout(Duration::from_secs(2));
+    if result.is_err() {
+        // Let the pre-fix blocked reply wait finish before failing the test.
+        drop(b);
+        let _ = done.recv_timeout(Duration::from_secs(10));
+        worker.join().unwrap();
+        panic!("Stop did not interrupt the peer prune");
+    }
+    assert!(matches!(
+        result,
+        Ok(Err(crate::ApplyError::Scan(ScanError::Cancelled)))
+    ));
+    worker.join().unwrap();
+
+    // A real shared folder proves the prune itself: the expired run goes
+    // and the too-young one stays, by the serving Mac's clock.
+    let shared = tempfile::tempdir().unwrap();
+    let archive = shared.path().join(".foldover/archive");
+    let day = Duration::from_secs(86_400);
+    let now = SystemTime::now();
+    let old = archive.join(crate::archive_name(now - 40 * day));
+    std::fs::create_dir_all(old.join("kept")).unwrap();
+    std::fs::write(old.join("kept/data"), b"old").unwrap();
+    let recent = archive.join(crate::archive_name(now - 20 * day));
+    std::fs::create_dir_all(&recent).unwrap();
+    let (_runtime, endpoint, _link) = peer_endpoint(Arc::new(Sharing {
+        root: LocalRoot::from_bytes(shared.path().as_os_str().as_encoded_bytes().to_vec()).unwrap(),
+        cache: FolderCache::default(),
+        state: None,
+    }));
+    let endpoint = Endpoint::Peer(endpoint);
+
+    let pruned = endpoint.prune_archive(30 * day, now, crate::Pruning::Everyone, &mut || {
+        ScanControl::Continue
+    });
+    assert_eq!(pruned.ok(), Some(1));
+    assert!(!old.exists());
+    assert!(recent.exists());
 }
 
 /// A paired endpoint whose observation request is accepted but never answered.

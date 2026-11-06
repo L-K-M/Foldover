@@ -437,9 +437,9 @@ impl Endpoint {
             return Err(ScanError::Cancelled.into());
         }
         match self {
-            Self::Local(endpoint) => endpoint.prune_archive(retention, now, pruning),
+            Self::Local(endpoint) => endpoint.prune_archive(retention, now, pruning, control),
             Self::Sftp(endpoint) => endpoint.prune_archive(retention, now, pruning, control),
-            Self::Peer(endpoint) => endpoint.prune_archive(retention, now),
+            Self::Peer(endpoint) => endpoint.prune_archive(retention, now, control),
             #[cfg(feature = "simulation")]
             Self::Memory(endpoint) => endpoint.prune_archive(retention, now, pruning),
         }
