@@ -123,6 +123,8 @@ final class ArchiveStore {
     private var loadingListing: Int?
     /// A page is being fetched for the current listing.
     private var fetchingPage = false
+    /// The last returned path survives removal of restored rows.
+    private var nextPageAfter: Data?
     /// Pages one search loads before it stops and leaves Keep Searching to
     /// finish, so a name that is not there costs a bounded walk.
     private static let searchPages = 50
@@ -139,24 +141,26 @@ final class ArchiveStore {
     func open(_ pairID: String, side: FolderSide) async {
         self.pairID = pairID
         self.side = side
-        listing += 1
+        resetListing()
         runs = []
         hasOlderRuns = false
         run = nil
-        items = []
-        hasMoreItems = false
-        searchText = ""
-        error = nil
-        placed = nil
-        placedCount = 0
+        let ticket = listing
+        loadingListing = ticket
         isLoading = true
-        defer { isLoading = false }
+        defer {
+            if loadingListing == ticket {
+                loadingListing = nil
+                isLoading = false
+            }
+        }
         do {
             let list = try await client.runs(pairID, side: side)
-            guard self.pairID == pairID, self.side == side else { return }
+            guard ticket == listing else { return }
             runs = list.runs
             hasOlderRuns = list.more
         } catch {
+            guard ticket == listing else { return }
             self.error = PairStore.message(for: error)
             return
         }
@@ -165,13 +169,7 @@ final class ArchiveStore {
 
     func select(_ run: String) async {
         self.run = run
-        listing += 1
-        items = []
-        hasMoreItems = false
-        searchText = ""
-        placed = nil
-        placedCount = 0
-        restore = nil
+        resetListing()
         await loadItems(after: nil)
     }
 
@@ -196,30 +194,29 @@ final class ArchiveStore {
     /// changes under a walk is walked again, so the empty state always stands
     /// for the newest text.
     func search() async {
-        while !Task.isCancelled {
-            guard !isSearching else { return }
-            isSearching = true
+        guard !isSearching else { return }
+        let ticket = listing
+        isSearching = true
+        defer {
+            if ticket == listing { isSearching = false }
+        }
+
+        while !Task.isCancelled, ticket == listing {
             let walked = searchText
             for _ in 0..<Self.searchPages
                 where !searchText.trimmingCharacters(in: .whitespaces).isEmpty
                     && matching.isEmpty {
-                // A page is already loading for this listing; wait for it and
-                // re-check rather than giving up on the whole query and
-                // reporting a match-free run that was never searched.
-                while fetchingPage, !Task.isCancelled {
+                // Wait only for this listing; a navigation starts its own walk.
+                while fetchingPage, !Task.isCancelled, ticket == listing {
                     try? await Task.sleep(for: .milliseconds(10))
                 }
-                guard !Task.isCancelled, hasMoreItems, let last = items.last else { break }
-                await loadItems(after: last.path)
-                // A failed page ends the walk; asking again repeats the
-                // same request while its error sits on screen.
-                guard error == nil else { break }
+                guard !Task.isCancelled, ticket == listing, hasMoreItems else { break }
+                await loadItems(after: nextPageAfter)
+                // A failed page ends the walk and leaves its error available.
+                guard ticket == listing, error == nil else { break }
             }
-            isSearching = false
-            // A keystroke that landed mid-walk was turned away by the guard;
-            // walk again so the newest text is the one the empty state stands
-            // for. A walk that found something, or whose text did not change,
-            // is done.
+            guard ticket == listing else { return }
+            // A keystroke during the walk must still get its own search.
             if !matching.isEmpty || searchText == walked { return }
         }
     }
@@ -236,22 +233,27 @@ final class ArchiveStore {
     func putBackAll() async {
         guard !isPuttingBack, let pairID, let run else { return }
         let side = side
+        let ticket = listing
         isPuttingBack = true
         defer { isPuttingBack = false }
         error = nil
         do {
             let restore = try await client.putBackAll(pairID, side: side, run: run)
-            guard self.pairID == pairID, self.side == side, self.run == run else { return }
-            await select(run)
+            guard ticket == listing else { return }
+            resetListing()
+            let reload = listing
+            await loadItems(after: nil)
+            guard reload == listing else { return }
             self.restore = restore
         } catch {
+            guard ticket == listing else { return }
             self.error = PairStore.message(for: error)
         }
     }
 
     func loadMore() async {
-        guard hasMoreItems, !fetchingPage, let last = items.last else { return }
-        await loadItems(after: last.path)
+        guard hasMoreItems, !fetchingPage else { return }
+        await loadItems(after: nextPageAfter)
     }
 
     func putBack(_ item: ArchiveItem) async { await putBack([item]) }
@@ -263,24 +265,43 @@ final class ArchiveStore {
     func putBack(_ items: [ArchiveItem]) async {
         guard !isPuttingBack, !items.isEmpty, let pairID, let run else { return }
         let side = side
+        let ticket = listing
         isPuttingBack = true
         defer { isPuttingBack = false }
         error = nil
         placed = nil
         placedCount = 0
         for item in items {
-            guard self.pairID == pairID, self.side == side, self.run == run else { return }
+            guard ticket == listing else { return }
             do {
                 let path = try await client.putBack(pairID, side: side, run: run, path: item.path)
-                guard self.pairID == pairID, self.side == side, self.run == run else { return }
+                guard ticket == listing else { return }
                 self.items.removeAll { $0 == item }
                 placed = path
                 placedCount += 1
             } catch {
+                guard ticket == listing else { return }
                 self.error = PairStore.message(for: error)
                 return
             }
         }
+    }
+
+    /// Invalidate every prior visit, including leaving and returning to one run.
+    private func resetListing() {
+        listing += 1
+        loadingListing = nil
+        fetchingPage = false
+        isLoading = false
+        isSearching = false
+        items = []
+        hasMoreItems = false
+        nextPageAfter = nil
+        searchText = ""
+        error = nil
+        placed = nil
+        placedCount = 0
+        restore = nil
     }
 
     private func loadItems(after: Data?) async {
@@ -302,8 +323,10 @@ final class ArchiveStore {
             let page = try await client.items(pairID, side: side, run: run, after: after)
             guard ticket == listing else { return }
             items += page.items
+            nextPageAfter = page.items.last?.path ?? after
             hasMoreItems = page.more
         } catch {
+            guard ticket == listing else { return }
             self.error = PairStore.message(for: error)
         }
     }

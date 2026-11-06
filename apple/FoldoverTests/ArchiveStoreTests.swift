@@ -530,3 +530,246 @@ func aPutBackBatchStopsAtTheFirstFailure() async {
     #expect(viewModel.statusText == viewModel.placedText)
     #expect(viewModel.canPutBack)
 }
+
+/// Hold one response at a known suspension point, including failed replies.
+private actor SuspendedArchiveClient: ArchiveClient {
+    enum Call: CaseIterable, Sendable {
+        case runs, items, putBack, putBackAll
+    }
+
+    private var serial = 0
+    private var runSerial = 0
+    private var queued: [(Call, Int)] = []
+    private var held: [Int: CheckedContinuation<Void, Never>] = [:]
+    private var failures: Set<Int> = []
+
+    func holdNext(_ call: Call) -> Int {
+        serial += 1
+        queued.append((call, serial))
+        return serial
+    }
+
+    func waitForHeld(_ ticket: Int) async -> Bool {
+        let deadline = ContinuousClock.now + .seconds(3)
+        while held[ticket] == nil {
+            if ContinuousClock.now >= deadline { return false }
+            await Task.yield()
+        }
+        return true
+    }
+
+    func refuse(_ ticket: Int) { failures.insert(ticket) }
+
+    func release(_ ticket: Int) {
+        held.removeValue(forKey: ticket)?.resume()
+    }
+
+    private func suspend(_ call: Call) async throws {
+        guard let index = queued.firstIndex(where: { $0.0 == call }) else { return }
+        let ticket = queued.remove(at: index).1
+        await withCheckedContinuation { held[ticket] = $0 }
+        if failures.remove(ticket) != nil { throw TwoRunFixtureError.refused }
+    }
+
+    func runs(_ id: String, side: FolderSide) async throws -> ArchiveRuns {
+        runSerial += 1
+        let run = ArchiveRun(name: "run-\(runSerial)", started: Date(timeIntervalSince1970: Double(runSerial)))
+        try await suspend(.runs)
+        return ArchiveRuns(runs: [run], more: false)
+    }
+
+    func items(_ id: String, side: FolderSide, run: String, after: Data?) async throws -> ArchivePage {
+        try await suspend(.items)
+        return ArchivePage(items: [ArchiveItem(path: Data("\(run)/a".utf8), size: 1)], more: false)
+    }
+
+    func putBack(_ id: String, side: FolderSide, run: String, path: Data) async throws -> Data {
+        try await suspend(.putBack)
+        return path
+    }
+
+    func putBackAll(_ id: String, side: FolderSide, run: String) async throws -> RunRestore {
+        try await suspend(.putBackAll)
+        return RunRestore(restored: 1, beside: 0, failures: 0)
+    }
+}
+
+@MainActor
+@Test
+func obsoleteRunListsStayDiscardedAfterReturningToTheSameSide() async throws {
+    let client = SuspendedArchiveClient()
+    let store = ArchiveStore(client: client)
+    let ticket = await client.holdNext(.runs)
+    let obsolete = Task { await store.open(docs().id, side: .b) }
+    try #require(await client.waitForHeld(ticket))
+
+    await store.open(docs().id, side: .a)
+    await store.open(docs().id, side: .b)
+    let current = store.runs
+    let currentItems = store.items
+    await client.release(ticket)
+    await obsolete.value
+
+    #expect(store.runs == current)
+    #expect(store.items == currentItems)
+}
+
+@MainActor
+@Test
+func anObsoleteOpenCannotFinishANewerLoad() async throws {
+    let client = SuspendedArchiveClient()
+    let store = ArchiveStore(client: client)
+    let first = await client.holdNext(.runs)
+    let obsolete = Task { await store.open(docs().id, side: .a) }
+    try #require(await client.waitForHeld(first))
+    let second = await client.holdNext(.runs)
+    let current = Task { await store.open(docs().id, side: .b) }
+    try #require(await client.waitForHeld(second))
+
+    await client.release(first)
+    await obsolete.value
+    #expect(store.isLoading)
+
+    await client.release(second)
+    await current.value
+    #expect(!store.isLoading)
+}
+
+@MainActor
+@Test
+func anObsoletePageCannotFinishANewerRunListLoad() async throws {
+    let client = SuspendedArchiveClient()
+    let store = ArchiveStore(client: client)
+    await store.open(docs().id, side: .b)
+    let first = await client.holdNext(.items)
+    let obsolete = Task { await store.select("old") }
+    try #require(await client.waitForHeld(first))
+    let second = await client.holdNext(.runs)
+    let current = Task { await store.open(docs().id, side: .a) }
+    try #require(await client.waitForHeld(second))
+
+    await client.release(first)
+    await obsolete.value
+    #expect(store.isLoading)
+
+    await client.release(second)
+    await current.value
+    #expect(!store.isLoading)
+}
+
+@MainActor
+@Test(arguments: SuspendedArchiveClient.Call.allCases)
+private func obsoleteFailuresStayOutOfTheCurrentArchive(_ call: SuspendedArchiveClient.Call) async throws {
+    let client = SuspendedArchiveClient()
+    let store = ArchiveStore(client: client)
+    await store.open(docs().id, side: .b)
+    let item = try #require(store.items.first)
+    let ticket = await client.holdNext(call)
+    await client.refuse(ticket)
+    let obsolete = Task {
+        switch call {
+        case .runs: await store.open(docs().id, side: .a)
+        case .items: await store.select("old")
+        case .putBack: await store.putBack(item)
+        case .putBackAll: await store.putBackAll()
+        }
+    }
+    try #require(await client.waitForHeld(ticket))
+    await store.open(docs().id, side: .b)
+    let currentItems = store.items
+
+    await client.release(ticket)
+    await obsolete.value
+    #expect(store.error == nil)
+    #expect(store.items == currentItems)
+    #expect(!store.isPuttingBack)
+}
+
+@MainActor
+@Test
+func aWholeRunRestoreDoesNotPublishFeedbackAfterLeavingItsReload() async throws {
+    let client = SuspendedArchiveClient()
+    let store = ArchiveStore(client: client)
+    await store.open(docs().id, side: .b)
+    let ticket = await client.holdNext(.items)
+    let restoring = Task { await store.putBackAll() }
+    try #require(await client.waitForHeld(ticket))
+
+    await store.open(docs().id, side: .a)
+    await client.release(ticket)
+    await restoring.value
+    #expect(store.restore == nil)
+    #expect(!store.isPuttingBack)
+}
+
+@MainActor
+@Test
+func aPutBackBatchStopsAfterLeavingAndReturningToItsRun() async {
+    let client = TwoRunArchiveClient()
+    let store = ArchiveStore(client: client)
+    await store.open(docs().id, side: .b)
+    let rows = store.items
+    await client.holdNextPutBack()
+    let putting = Task { await store.putBack(rows) }
+    await client.waitForHeldPutBack()
+
+    await store.select("old")
+    await store.select("new")
+    await client.releasePutBack()
+    await putting.value
+    #expect(await client.putBacks == ["new/a.txt"])
+    #expect(store.items.map(\.path) == rows.map(\.path))
+    #expect(store.placed == nil)
+}
+
+@MainActor
+@Test
+func restoringTheLoadedPageKeepsLaterArchivePagesReachable() async {
+    let store = ArchiveStore(client: ArchiveFixtureClient())
+    let viewModel = ArchiveViewModel(pair: docs(), store: store, agentConnected: true)
+    await viewModel.show(.b)
+    await viewModel.putBack(viewModel.itemRows)
+
+    #expect(viewModel.emptyText != "Nothing from this sync is left in the archive.")
+    #expect(viewModel.canLoadMore)
+    #expect(viewModel.canPutBackAll)
+    await viewModel.loadMore()
+    #expect(viewModel.itemRows.map(\.path) == ["c"])
+    #expect(!viewModel.canLoadMore)
+}
+
+@MainActor
+@Test
+func searchingAfterRestoringTheLoadedPageFindsLaterItems() async {
+    let store = ArchiveStore(client: ArchiveFixtureClient())
+    let viewModel = ArchiveViewModel(pair: docs(), store: store, agentConnected: true)
+    await viewModel.show(.b)
+    await viewModel.putBack(viewModel.itemRows)
+
+    viewModel.searchText = "c"
+    await viewModel.search()
+    #expect(viewModel.itemRows.map(\.path) == ["c"])
+    #expect(!viewModel.canKeepSearching)
+}
+
+@MainActor
+@Test
+func anObsoleteSearchDoesNotWalkTheReplacementListing() async {
+    let client = ArchiveFixtureClient()
+    let store = ArchiveStore(client: client)
+    let viewModel = ArchiveViewModel(pair: docs(), store: store, agentConnected: true)
+    await viewModel.show(.b)
+    await client.holdNextPage()
+    viewModel.searchText = "missing"
+    let searching = Task { await viewModel.search() }
+    await client.waitForHeldPage()
+
+    await viewModel.show(.b)
+    viewModel.searchText = "c"
+    await client.releasePage()
+    await searching.value
+    #expect(await client.pageRequests == 1)
+    #expect(viewModel.itemRows.isEmpty)
+    #expect(viewModel.canKeepSearching)
+    #expect(!viewModel.isSearching)
+}
