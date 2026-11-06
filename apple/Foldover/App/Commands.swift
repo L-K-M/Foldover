@@ -232,12 +232,14 @@ private struct AutomaticSyncItems: View {
     var body: some View {
         if viewModel.isPaused {
             Button("Resume Automatic Syncs") { Task { await viewModel.resume() } }
+                .disabled(viewModel.automationMutationPending)
         } else {
             Menu("Pause Automatic Syncs") {
                 ForEach(PauseLength.allCases, id: \.self) { length in
                     Button(MainViewModel.title(length)) { Task { await viewModel.pause(length) } }
                 }
             }
+            .disabled(viewModel.automationMutationPending)
         }
     }
 }

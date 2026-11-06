@@ -647,6 +647,7 @@ struct PairSyncViewModel {
     /// (the completion card's Review).
     func reviewConflicts() async {
         await store.preview(pair.id)
+        await store.waitWhileWorking(pair.id)
         await store.showChanges(pair.id, filter: .conflicts)
     }
 
