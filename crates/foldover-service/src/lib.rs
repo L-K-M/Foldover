@@ -1181,16 +1181,21 @@ mod tests {
         started
     }
 
-    /// `run_due_started` with the local wall clock injected.
+    /// Start a batch with the local wall clock injected.
     async fn run_due_started_at(
         service: &Service,
         at: std::time::Instant,
         local: Option<LocalDateTime>,
     ) -> Vec<PairId> {
-        let mut started = service.run_due_at(at, Environment::now(), local);
+        let started = service.run_due_at(at, Environment::now(), local);
+        // The worker records real wall-clock time, not the injected future.
+        // Once it starts, another synthetic tick could start it twice if
+        // the first job already finished while this helper awaited probes.
+        if !started.is_empty() {
+            return started;
+        }
         probes_idle(service).await;
-        started.extend(service.run_due_at(at, Environment::now(), local));
-        started
+        service.run_due_at(at, Environment::now(), local)
     }
 
     /// `run_due_started` with the environment injected.
