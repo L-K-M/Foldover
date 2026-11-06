@@ -545,12 +545,12 @@ impl Root {
         Ok(())
     }
 
-    /// Permanently delete `path` and everything below it, never following
-    /// links. Only archive retention may call this.
+    /// Permanently delete the directory at `path` and everything below it,
+    /// never following links. A file or link at `path` is refused. Only
+    /// archive retention may call this.
     pub fn remove_tree(&self, path: &SyncPath) -> Result<(), WriteError> {
         let (parent, name) = self.parent_of(path)?;
-        remove_entry(&parent, &name)?;
-        Ok(())
+        remove_directory_tree(&parent, &name)
     }
 
     /// Move the file or link at `from`, which must still match `expected`,
@@ -750,10 +750,9 @@ fn open_below(parent: &Dir, path: &Path) -> io::Result<Dir> {
 /// per directory, reopened component by component — then removed deepest
 /// first, so nesting depth is bounded by memory rather than descriptors or a
 /// fixed cap.
-fn remove_entry(parent: &Dir, name: &Path) -> io::Result<()> {
+fn remove_directory_tree(parent: &Dir, name: &Path) -> Result<(), WriteError> {
     if EntryMetadata::at(parent, name)?.kind() != NodeKind::Directory {
-        rustix::fs::unlinkat(parent, name, AtFlags::empty())?;
-        return Ok(());
+        return Err(WriteError::UnsupportedEntry);
     }
     let mut directories: Vec<PathBuf> = vec![name.to_path_buf()];
     let mut next = 0;

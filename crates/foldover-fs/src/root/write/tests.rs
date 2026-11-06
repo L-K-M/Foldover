@@ -765,8 +765,20 @@ fn trees_are_removed_without_following_links() {
     roots.target.remove_tree(&path(b"old")).unwrap();
     assert_eq!(names(target), [b"other".to_vec()]);
     assert_eq!(fs::read(outside.path().join("keep")).unwrap(), b"keep");
-    roots.target.remove_tree(&path(b"other")).unwrap();
-    assert!(names(target).is_empty());
+    assert!(matches!(
+        roots.target.remove_tree(&path(b"other")),
+        Err(WriteError::UnsupportedEntry)
+    ));
+    assert_eq!(fs::read(target.join("other")).unwrap(), b"y");
+    symlink(outside.path(), target.join("other-link")).unwrap();
+    assert!(matches!(
+        roots.target.remove_tree(&path(b"other-link")),
+        Err(WriteError::UnsupportedEntry)
+    ));
+    assert_eq!(
+        fs::read_link(target.join("other-link")).unwrap(),
+        outside.path()
+    );
     assert!(roots.target.remove_tree(&path(b"missing")).is_err());
 }
 

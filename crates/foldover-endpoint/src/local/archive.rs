@@ -467,6 +467,9 @@ impl LocalEndpoint {
         let mut expired = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|source| io_error(&archive, source))?;
+            if entry.metadata().kind() != NodeKind::Directory {
+                continue;
+            }
             let Some((started, owner)) = parse_run(entry.name()) else {
                 continue;
             };
@@ -560,6 +563,7 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
     use std::fs;
+    use std::os::unix::fs::symlink;
 
     use proptest::prelude::*;
 
@@ -922,6 +926,10 @@ mod tests {
             fs::create_dir_all(run.join("folder")).unwrap();
             fs::write(run.join("folder/file"), name).unwrap();
         }
+        let timestamp_file = archive.join(archive_name(at(68 * day)));
+        let timestamp_link = archive.join(archive_name(at(67 * day)));
+        fs::write(&timestamp_file, b"not a run").unwrap();
+        symlink("kept by the user", &timestamp_link).unwrap();
         fs::create_dir_all(archive.join("kept by the user")).unwrap();
         let endpoint = LocalEndpoint::open(directory.path()).unwrap();
 
@@ -939,7 +947,17 @@ mod tests {
         left.sort();
         assert_eq!(
             left,
-            [archive_name(at(71 * day)), "kept by the user".into()]
+            [
+                archive_name(at(67 * day)),
+                archive_name(at(68 * day)),
+                archive_name(at(71 * day)),
+                "kept by the user".into(),
+            ]
+        );
+        assert_eq!(fs::read(timestamp_file).unwrap(), b"not a run");
+        assert_eq!(
+            fs::read_link(timestamp_link).unwrap(),
+            std::path::Path::new("kept by the user")
         );
         assert_eq!(
             endpoint
