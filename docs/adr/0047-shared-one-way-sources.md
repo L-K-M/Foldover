@@ -91,11 +91,12 @@ time alone belong to every pair.
   the runs of a pair that no longer exists still go.
 - **Another Mac's folder.** The Mac sharing a folder prunes all of it by
   its own clock, as before ([ADR 0031](0031-mac-to-mac.md)). Requests
-  still carry run names as strings, but peer protocol 3 refuses a Mac
-  of version 2: it cannot parse the run ID in the new folder names, so
-  it would take writes into them, then fail to list them, put them back
-  or undo from them. Version 2 refuses version 1 the same way over the
-  pair in the name.
+  still carry run names as strings. Peer protocol 3 introduced the run ID;
+  version 2 cannot parse it, so it would take writes into the new folders
+  but fail to list them, put them back or undo from them. Version 2 added
+  the pair in the name. The current protocol is 4, which also requires
+  transport heartbeats ([ADR 0031](0031-mac-to-mac.md)); older versions
+  are refused before serving a folder.
 
 **Busy folders.** A run that gives up on a folder another run keeps
 leased (`RunError::folder_busy`) still fails with "<Mac> is syncing

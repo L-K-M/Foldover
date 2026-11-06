@@ -10,13 +10,13 @@
 //! then starts over.
 
 use std::fs::File;
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use cap_std::fs::Dir;
-use foldover_types::{Digest, PairOptions, SyncPath};
+use foldover_types::{Digest, PairOptions, ScanControl, SyncPath};
 use rustix::fs::{AtFlags, Mode, OFlags};
 use rustix::io::Errno;
 
@@ -24,7 +24,7 @@ use super::{
     Chunks, ForeignMetadata, NativeMetadata, Parents, StagedFile, WriteError,
     create_temporary_file, flush, metadata, temporary_name,
 };
-use crate::root::{EntryMetadata, NodeKind, Root};
+use crate::root::{EntryMetadata, HashError, NodeKind, Root};
 
 const PARTIAL_DIRECTORY: &[u8] = b".foldover/partial";
 /// A transfer that broke off with less than this written starts over.
@@ -58,6 +58,7 @@ impl Root {
     /// Stage a file for `path` as `stage_stream` does, continuing from the
     /// bytes `resume` takes from a kept partial. If `produce` fails after
     /// enough data, what was written is kept for the next attempt.
+    #[allow(clippy::too_many_arguments)] // Mirrors stage_stream plus resume and cancellation.
     pub fn stage_resumable(
         &self,
         path: &SyncPath,
@@ -65,6 +66,7 @@ impl Root {
         metadata: ForeignMetadata,
         native: Option<&NativeMetadata>,
         options: &PairOptions,
+        control: &mut impl FnMut() -> ScanControl,
         produce: impl FnOnce(Chunks<'_>) -> io::Result<()>,
     ) -> Result<StagedFile, WriteError> {
         let Resume { content, from } = resume;
@@ -80,9 +82,26 @@ impl Root {
         let mut hasher = blake3::Hasher::new();
         if from > 0 {
             file.seek(SeekFrom::Start(0))?;
-            let kept = io::copy(&mut io::Read::take(&file, from), &mut hasher)?;
-            if kept != from {
-                return Err(WriteError::Changed);
+            let mut kept = 0;
+            let mut buffer = [0; 64 * 1024];
+            while kept < from {
+                if control() == ScanControl::Cancel {
+                    if self
+                        .keep_partial(&staged.parent, &staged.name, content)
+                        .is_ok()
+                    {
+                        staged.placed = true;
+                    }
+                    return Err(WriteError::Source(HashError::Cancelled));
+                }
+                let remaining = usize::try_from(from - kept).unwrap_or(usize::MAX);
+                let requested = remaining.min(buffer.len());
+                let read = file.read(&mut buffer[..requested])?;
+                if read == 0 {
+                    return Err(WriteError::Changed);
+                }
+                hasher.update(&buffer[..read]);
+                kept += read as u64;
             }
             file.seek(SeekFrom::Start(from))?;
         }
@@ -281,15 +300,23 @@ mod tests {
         fail_after: Option<usize>,
     ) -> Result<StagedFile, WriteError> {
         let path = SyncPath::try_from(&b"big.bin"[..]).unwrap();
-        root.stage_resumable(&path, resume, FOREIGN, None, &OPTIONS, |sink| {
-            for chunk in data.chunks(MIB) {
-                sink(chunk)?;
-            }
-            match fail_after {
-                Some(_) => Err(io::Error::other("the connection dropped")),
-                None => Ok(()),
-            }
-        })
+        root.stage_resumable(
+            &path,
+            resume,
+            FOREIGN,
+            None,
+            &OPTIONS,
+            &mut || ScanControl::Continue,
+            |sink| {
+                for chunk in data.chunks(MIB) {
+                    sink(chunk)?;
+                }
+                match fail_after {
+                    Some(_) => Err(io::Error::other("the connection dropped")),
+                    None => Ok(()),
+                }
+            },
+        )
     }
 
     fn visible(directory: &std::path::Path) -> Vec<String> {
@@ -334,6 +361,39 @@ mod tests {
         .unwrap();
         assert_eq!(fs::read(directory.path().join("big.bin")).unwrap(), data);
         assert_eq!(root.partial_length(&digest).unwrap(), 0);
+    }
+
+    #[test]
+    fn hashing_a_kept_prefix_can_stop_without_losing_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = Root::open(directory.path()).unwrap();
+        let (data, digest) = content(20 * MIB);
+        let fresh = Resume {
+            content: digest,
+            from: 0,
+        };
+        assert!(stage(&root, &data[..18 * MIB], fresh, Some(18 * MIB)).is_err());
+        let from = root.partial_length(&digest).unwrap();
+        let path = SyncPath::try_from(&b"big.bin"[..]).unwrap();
+
+        let cancelled = root.stage_resumable(
+            &path,
+            Resume {
+                content: digest,
+                from,
+            },
+            FOREIGN,
+            None,
+            &OPTIONS,
+            &mut || ScanControl::Cancel,
+            |_| panic!("a cancelled prefix must not request more data"),
+        );
+
+        assert!(matches!(
+            cancelled,
+            Err(WriteError::Source(HashError::Cancelled))
+        ));
+        assert_eq!(root.partial_length(&digest).unwrap(), from);
     }
 
     /// A whole copy that could not be placed is kept, ready to resume

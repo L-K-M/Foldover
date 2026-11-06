@@ -11,11 +11,11 @@
 //! workers. Copies stream data and carry mode and modification time, as
 //! with SFTP; the receiving Mac stages and verifies them.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use foldover_fs::{ForeignMetadata, NativeMetadata, WriteError};
 use foldover_proto::local::{PairDurability, PairPropagation};
@@ -47,6 +47,9 @@ pub use serve::{FolderCache, serve_folder};
 /// iterate over its numbers. No real scan lists this many entries
 /// between two reports.
 const MAX_STEPS_PER_REPORT: u64 = 1_000_000;
+/// How often a source that has not produced data proves it is still alive
+/// to a peer destination waiting for the next chunk.
+const STREAM_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(200);
 
 /// The most scan steps all of one scan's reports together can stand for,
 /// per counter, however many reports the other Mac sends: a hundred times
@@ -198,14 +201,14 @@ impl PeerEndpoint {
                 && policy.quarantine() == Propagation::Ignore)
                 .then_some(PairPropagation::Ignore),
         };
-        let mut exchange = self.ask(FolderOp::Observe { scan })?;
+        let mut exchange = self.ask_unless(FolderOp::Observe { scan }, control)?;
         let mut observation = Observation::default();
         let (mut listed, mut checked) = (0, 0);
         loop {
             if control() == ScanControl::Cancel {
                 return Err(ScanError::Cancelled);
             }
-            match exchange.next().map_err(unreachable)? {
+            match exchange.next_unless(control).map_err(unreachable)? {
                 Incoming::Reply(PeerReply::Progress {
                     listed: now_listed,
                     checked: now_checked,
@@ -307,14 +310,19 @@ impl PeerEndpoint {
         planned: &ObservedEntry,
         run: &RunScope,
         from: u64,
+        control: &mut impl FnMut() -> ScanControl,
     ) -> Result<PeerSource, ApplyError> {
-        let mut exchange = self.ask(FolderOp::Read {
-            path: path.as_bytes().to_vec(),
-            entry: wire::entry_bytes(planned),
-            run: wire::run_wire(run),
-            from,
-        })?;
-        let (metadata, native, target) = reading(exchange.reply().map_err(unreachable)?)?;
+        let mut exchange = self.ask_unless(
+            FolderOp::Read {
+                path: path.as_bytes().to_vec(),
+                entry: wire::entry_bytes(planned),
+                run: wire::run_wire(run),
+                from,
+            },
+            control,
+        )?;
+        let reply = exchange.reply_unless(control).map_err(unreachable)?;
+        let (metadata, native, target) = reading(reply)?;
         Ok(PeerSource {
             exchange: RefCell::new(Some(exchange)),
             metadata,
@@ -329,28 +337,40 @@ impl PeerEndpoint {
         path: &SyncPath,
         planned: &ObservedEntry,
         run: &RunScope,
+        control: &mut impl FnMut() -> ScanControl,
     ) -> Result<(ForeignMetadata, Option<NativeMetadata>), ApplyError> {
-        let reply = self.reply(FolderOp::Metadata {
-            path: path.as_bytes().to_vec(),
-            entry: wire::entry_bytes(planned),
-            run: wire::run_wire(run),
-        });
+        let reply = self.reply_unless(
+            FolderOp::Metadata {
+                path: path.as_bytes().to_vec(),
+                entry: wire::entry_bytes(planned),
+                run: wire::run_wire(run),
+            },
+            control,
+        );
         let (metadata, native, _) = reading(reply_or_source_changed(reply, path)?)?;
         Ok((metadata, native))
     }
 
     /// How much of the file with `content` a broken-off copy to this
     /// folder kept.
-    pub(crate) fn partial_length(&self, content: &Digest) -> Result<u64, ApplyError> {
-        match self.reply(FolderOp::Partial {
-            content: content.as_bytes().to_vec(),
-        })? {
+    pub(crate) fn partial_length(
+        &self,
+        content: &Digest,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<u64, ApplyError> {
+        match self.reply_unless(
+            FolderOp::Partial {
+                content: content.as_bytes().to_vec(),
+            },
+            control,
+        )? {
             PeerReply::Partial { length } => Ok(length),
             _ => Err(unexpected().into()),
         }
     }
 
     /// Make `path` hold an entry of `kind`; `send` pushes a file's data.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn receive(
         &self,
         path: &SyncPath,
@@ -358,7 +378,11 @@ impl PeerEndpoint {
         kind: IncomingKind,
         carried: Carried<'_>,
         run: &RunScope,
-        send: impl FnOnce(&mut dyn FnMut(&[u8]) -> io::Result<()>) -> io::Result<()>,
+        control: &mut impl FnMut() -> ScanControl,
+        send: impl FnOnce(
+            &mut dyn FnMut(&[u8]) -> io::Result<()>,
+            &mut dyn FnMut() -> ScanControl,
+        ) -> io::Result<()>,
     ) -> Result<EntryVersion, ApplyError> {
         archived(run, path)?;
         let file = matches!(kind, IncomingKind::File { .. });
@@ -366,26 +390,69 @@ impl PeerEndpoint {
             Expected::Absent => None,
             Expected::Present(current) => Some(wire::entry_bytes(current)),
         };
-        let mut exchange = self.ask(FolderOp::Receive {
-            path: path.as_bytes().to_vec(),
-            entry: foldover_proto::peer::Incoming {
-                kind,
-                current,
-                metadata: wire::metadata_wire(carried.metadata, carried.native),
-                run: wire::run_wire(run),
+        let exchange = self.ask_unless(
+            FolderOp::Receive {
+                path: path.as_bytes().to_vec(),
+                entry: foldover_proto::peer::Incoming {
+                    kind,
+                    current,
+                    metadata: wire::metadata_wire(carried.metadata, carried.native),
+                    run: wire::run_wire(run),
+                },
             },
-        })?;
+            control,
+        )?;
+        let exchange = RefCell::new(exchange);
+        let control = RefCell::new(control);
         // The other Mac may refuse before reading the data, e.g. for a
         // changed destination; its reply says why better than a broken
         // stream.
-        let stream_broke = std::cell::Cell::new(false);
-        let broke = |error| {
-            stream_broke.set(true);
-            io::Error::other(error)
+        let stream_failure = RefCell::new(None);
+        let broke = |error: LinkError| {
+            let message = error.to_string();
+            stream_failure.borrow_mut().get_or_insert(error);
+            io::Error::other(message)
         };
         let sent = if file {
-            send(&mut |chunk| exchange.send_data(chunk).map_err(broke))
-                .and_then(|()| exchange.end_data().map_err(broke))
+            let mut destination_control = || (*control.borrow_mut())();
+            let mut sink = |chunk: &[u8]| {
+                exchange
+                    .borrow_mut()
+                    .send_data_unless(chunk, &mut destination_control)
+                    .map_err(broke)
+            };
+            let heartbeat = Cell::new(Instant::now());
+            let mut source_control = || {
+                if stream_failure.borrow().is_some() {
+                    return ScanControl::Cancel;
+                }
+                let state = (*control.borrow_mut())();
+                if state == ScanControl::Cancel {
+                    stream_failure
+                        .borrow_mut()
+                        .get_or_insert(LinkError::Cancelled);
+                    return state;
+                }
+                if heartbeat.get().elapsed() < STREAM_HEARTBEAT_INTERVAL {
+                    return state;
+                }
+                heartbeat.set(Instant::now());
+                let mut checkpoint = || (*control.borrow_mut())();
+                match exchange.borrow_mut().heartbeat_unless(&mut checkpoint) {
+                    Ok(()) => ScanControl::Continue,
+                    Err(error) => {
+                        stream_failure.borrow_mut().get_or_insert(error);
+                        ScanControl::Cancel
+                    }
+                }
+            };
+            send(&mut sink, &mut source_control).and_then(|()| {
+                let mut checkpoint = || (*control.borrow_mut())();
+                exchange
+                    .borrow_mut()
+                    .end_data_unless(&mut checkpoint)
+                    .map_err(broke)
+            })
         } else {
             Ok(())
         };
@@ -393,16 +460,27 @@ impl PeerEndpoint {
         // the rest and will not reply. Dropping the request resets its
         // stream, so it gives up too.
         let sent = match sent {
-            Err(source) if !stream_broke.get() => {
+            Err(source) if stream_failure.borrow().is_none() => {
                 drop(exchange);
                 return Err(ApplyError::Write {
                     path: path.clone(),
                     source: WriteError::Io(source),
                 });
             }
+            Err(_) => {
+                let error = stream_failure
+                    .borrow_mut()
+                    .take()
+                    .expect("a failed stream records its link error");
+                return Err(unreachable(error).into());
+            }
             sent => sent,
         };
-        match (exchange.reply(), sent) {
+        let reply = {
+            let mut checkpoint = || (*control.borrow_mut())();
+            exchange.borrow_mut().reply_unless(&mut checkpoint)
+        };
+        match (reply, sent) {
             (Ok(PeerReply::Received { version }), Ok(())) => {
                 wire::version_from(&version).ok_or_else(|| unexpected().into())
             }
@@ -425,13 +503,17 @@ impl PeerEndpoint {
         current: &ObservedEntry,
         carried: Carried<'_>,
         run: &RunScope,
+        control: &mut impl FnMut() -> ScanControl,
     ) -> Result<EntryVersion, ApplyError> {
-        let reply = self.reply(FolderOp::ReceiveMetadata {
-            path: path.as_bytes().to_vec(),
-            current: wire::entry_bytes(current),
-            metadata: wire::metadata_wire(carried.metadata, carried.native),
-            run: wire::run_wire(run),
-        });
+        let reply = self.reply_unless(
+            FolderOp::ReceiveMetadata {
+                path: path.as_bytes().to_vec(),
+                current: wire::entry_bytes(current),
+                metadata: wire::metadata_wire(carried.metadata, carried.native),
+                run: wire::run_wire(run),
+            },
+            control,
+        );
         match reply_or_destination_changed(reply, path)? {
             PeerReply::Received { version } => {
                 wire::version_from(&version).ok_or_else(|| unexpected().into())
@@ -446,13 +528,17 @@ impl PeerEndpoint {
         path: &SyncPath,
         current: &ObservedEntry,
         run: &RunScope,
+        control: &mut impl FnMut() -> ScanControl,
     ) -> Result<(), ApplyError> {
         archived(run, path)?;
-        let reply = self.reply(FolderOp::Remove {
-            path: path.as_bytes().to_vec(),
-            current: wire::entry_bytes(current),
-            run: wire::run_wire(run),
-        });
+        let reply = self.reply_unless(
+            FolderOp::Remove {
+                path: path.as_bytes().to_vec(),
+                current: wire::entry_bytes(current),
+                run: wire::run_wire(run),
+            },
+            control,
+        );
         done(reply_or_destination_changed(reply, path)?)
     }
 
@@ -551,13 +637,17 @@ impl PeerEndpoint {
         expected: EntryVersion,
         from: &str,
         options: &PairOptions,
+        control: &mut impl FnMut() -> ScanControl,
     ) -> Result<SyncPath, ApplyError> {
-        let reply = self.reply(FolderOp::KeepCopy {
-            path: path.as_bytes().to_vec(),
-            version: wire::version_bytes(expected),
-            from: from.to_owned(),
-            options: options.into(),
-        });
+        let reply = self.reply_unless(
+            FolderOp::KeepCopy {
+                path: path.as_bytes().to_vec(),
+                version: wire::version_bytes(expected),
+                from: from.to_owned(),
+                options: options.into(),
+            },
+            control,
+        );
         placed(reply_or_source_changed(reply, path)?)
     }
 
@@ -569,9 +659,39 @@ impl PeerEndpoint {
         self.link.ask(self.root.device(), call).map_err(unreachable)
     }
 
+    fn ask_unless(
+        &self,
+        op: FolderOp,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<Exchange, ScanError> {
+        let call = PeerCall::Folder {
+            share: self.root.share().to_string(),
+            op: Box::new(op),
+        };
+        self.link
+            .ask_unless(self.root.device(), call, control)
+            .map_err(unreachable)
+    }
+
     /// The single reply to `op`, with failures as this Mac's errors.
     fn reply(&self, op: FolderOp) -> Result<PeerReply, ScanError> {
         match self.ask(op)?.reply().map_err(unreachable)? {
+            PeerReply::Failed { error } => Err(wire::scan_error(error)),
+            PeerReply::Refused { reason } => Err(ScanError::MacUnreachable(reason)),
+            reply => Ok(reply),
+        }
+    }
+
+    fn reply_unless(
+        &self,
+        op: FolderOp,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<PeerReply, ScanError> {
+        match self
+            .ask_unless(op, control)?
+            .reply_unless(control)
+            .map_err(unreachable)?
+        {
             PeerReply::Failed { error } => Err(wire::scan_error(error)),
             PeerReply::Refused { reason } => Err(ScanError::MacUnreachable(reason)),
             reply => Ok(reply),
@@ -621,7 +741,7 @@ impl PeerSource {
             if control() == ScanControl::Cancel {
                 return Err(ScanError::Cancelled.into());
             }
-            match exchange.next().map_err(unreachable)? {
+            match exchange.next_unless(control).map_err(unreachable)? {
                 Incoming::Data(chunk) => sink(&chunk).map_err(|source| ApplyError::Write {
                     path: path.clone(),
                     source: WriteError::Io(source),
@@ -630,7 +750,7 @@ impl PeerSource {
                 Incoming::Reply(_) => return Err(unexpected().into()),
             }
         }
-        match exchange.reply().map_err(unreachable)? {
+        match exchange.reply_unless(control).map_err(unreachable)? {
             PeerReply::Done => Ok(()),
             PeerReply::Failed { error } => Err(wire::apply_error(error, ApplyError::SourceChanged)),
             _ => Err(unexpected().into()),
@@ -707,7 +827,10 @@ fn pair_durability(durability: Durability) -> PairDurability {
 }
 
 fn unreachable(error: LinkError) -> ScanError {
-    ScanError::MacUnreachable(error.to_string())
+    match error {
+        LinkError::Cancelled => ScanError::Cancelled,
+        error => ScanError::MacUnreachable(error.to_string()),
+    }
 }
 
 fn unexpected() -> ScanError {

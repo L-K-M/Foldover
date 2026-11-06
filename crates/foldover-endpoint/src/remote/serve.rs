@@ -2,7 +2,7 @@
 //! The caller has checked that the share is granted to that Mac; this
 //! opens the folder with the local endpoint and does what was asked.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
@@ -48,6 +48,42 @@ const REPLY_TAG_BYTES: usize = std::mem::size_of::<u8>();
 const ITEM_SEPARATOR_BYTES: usize = b",".len();
 /// PLAN.md §4: archives keep 30 days.
 const MIN_SHARED_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// Periodically proves a long local operation is still alive. Failure means
+/// the asking Mac dropped or retired the request, so the operation stops at
+/// its next checkpoint.
+struct AnswerControl<'a> {
+    answer: RefCell<&'a mut Answer>,
+    heartbeat: Cell<Instant>,
+    gone: Cell<bool>,
+}
+
+impl<'a> AnswerControl<'a> {
+    fn new(answer: &'a mut Answer) -> Self {
+        Self {
+            answer: RefCell::new(answer),
+            heartbeat: Cell::new(Instant::now()),
+            gone: Cell::new(false),
+        }
+    }
+
+    fn checkpoint(&self) -> ScanControl {
+        if self.gone.get() {
+            return ScanControl::Cancel;
+        }
+        if self.heartbeat.get().elapsed() < PROGRESS_INTERVAL {
+            return ScanControl::Continue;
+        }
+        self.heartbeat.set(Instant::now());
+        match self.answer.borrow_mut().heartbeat() {
+            Ok(()) => ScanControl::Continue,
+            Err(_) => {
+                self.gone.set(true);
+                ScanControl::Cancel
+            }
+        }
+    }
+}
 
 /// The latest observation of each shared folder under each metadata
 /// policy, so an unchanged file is not read again on the next scan.
@@ -170,8 +206,10 @@ pub fn serve_folder(
         FolderOp::Metadata { path, entry, run } => {
             decoded(&path, Some(&entry), run).and_then(|(path, entry, run)| {
                 let entry = entry.ok_or_else(malformed)?;
+                let controlled = AnswerControl::new(answer);
+                let mut checkpoint = || controlled.checkpoint();
                 let source = endpoint
-                    .source_entry(&path, &entry, &run, &mut proceed)
+                    .source_entry(&path, &entry, &run, &mut checkpoint)
                     .map_err(|error| wire::apply_failure(&error))?;
                 reading(&endpoint, &source, &run)
             })
@@ -188,16 +226,20 @@ pub fn serve_folder(
                 metadata,
                 native: native.as_ref(),
             };
+            let controlled = AnswerControl::new(answer);
+            let mut checkpoint = || controlled.checkpoint();
             endpoint
-                .receive_metadata(&path, &current, carried, &run, &mut proceed)
+                .receive_metadata(&path, &current, carried, &run, &mut checkpoint)
                 .map(received)
                 .map_err(|error| wire::apply_failure(&error))
         }),
         FolderOp::Remove { path, current, run } => {
             decoded(&path, Some(&current), run).and_then(|(path, current, run)| {
                 let current = current.ok_or_else(malformed)?;
+                let controlled = AnswerControl::new(answer);
+                let mut checkpoint = || controlled.checkpoint();
                 endpoint
-                    .remove(&path, &current, &run, &mut proceed)
+                    .remove(&path, &current, &run, &mut checkpoint)
                     .map(|()| PeerReply::Done)
                     .map_err(|error| wire::apply_failure(&error))
             })
@@ -267,10 +309,14 @@ pub fn serve_folder(
             let options = PairOptions::try_from(options).ok();
             match (path, version, options) {
                 // The label becomes part of a file name here.
-                (Some(path), Some(version), Some(options)) if plain_label(&from) => endpoint
-                    .keep_copy(&path, version, &from, &options, &mut proceed)
-                    .map(placed)
-                    .map_err(|error| wire::apply_failure(&error)),
+                (Some(path), Some(version), Some(options)) if plain_label(&from) => {
+                    let controlled = AnswerControl::new(answer);
+                    let mut checkpoint = || controlled.checkpoint();
+                    endpoint
+                        .keep_copy(&path, version, &from, &options, &mut checkpoint)
+                        .map(placed)
+                        .map_err(|error| wire::apply_failure(&error))
+                }
                 _ => Err(malformed()),
             }
         }
@@ -360,38 +406,44 @@ fn observe(
     .with_quarantine(scan.quarantine.map_or(Propagation::Sync, Into::into));
     let previous = cache.take(root, policy);
 
-    // The asking Mac gives up by dropping the request; the next progress
-    // report then fails and the scan stops.
+    // The asking Mac gives up by dropping the request. Report from the
+    // control checkpoint rather than from completed entries, so hashing one
+    // large file still proves the scan is alive and notices Stop.
+    let answer = RefCell::new(answer);
     let gone = Cell::new(false);
-    let (mut listed, mut checked) = (0, 0);
-    let mut reported = Instant::now();
+    let listed = Cell::new(0);
+    let checked = Cell::new(0);
+    let reported = Cell::new(Instant::now());
     let observed = endpoint.observe_reporting(
         policy,
         &filter,
         &previous,
         &mut || {
             if gone.get() {
-                ScanControl::Cancel
-            } else {
-                ScanControl::Continue
+                return ScanControl::Cancel;
             }
-        },
-        &mut |step| {
-            match step {
-                ObserveStep::Listed => listed += 1,
-                ObserveStep::Checked => checked += 1,
-            }
-            if reported.elapsed() >= PROGRESS_INTERVAL {
-                reported = Instant::now();
+            if reported.get().elapsed() >= PROGRESS_INTERVAL {
+                reported.set(Instant::now());
                 if answer
-                    .reply(&PeerReply::Progress { listed, checked })
+                    .borrow_mut()
+                    .reply(&PeerReply::Progress {
+                        listed: listed.get(),
+                        checked: checked.get(),
+                    })
                     .is_err()
                 {
                     gone.set(true);
+                    return ScanControl::Cancel;
                 }
             }
+            ScanControl::Continue
+        },
+        &mut |step| match step {
+            ObserveStep::Listed => listed.set(listed.get() + 1),
+            ObserveStep::Checked => checked.set(checked.get() + 1),
         },
     );
+    let answer = answer.into_inner();
     let observation = match observed {
         Ok(observation) => observation,
         Err(error) => return failed(answer, wire::scan_failure(&error)),
@@ -403,7 +455,10 @@ fn observe(
     // they grew by at most an interval's steps, which the asking Mac's
     // per-report cap allows.
     if answer
-        .reply(&PeerReply::Progress { listed, checked })
+        .reply(&PeerReply::Progress {
+            listed: listed.get(),
+            checked: checked.get(),
+        })
         .is_err()
     {
         return;
@@ -548,35 +603,46 @@ fn read(
     from: u64,
     answer: &mut Answer,
 ) {
+    let controlled = AnswerControl::new(answer);
+    let mut checkpoint = || controlled.checkpoint();
     let source = decoded(path, Some(entry), run).and_then(|(path, entry, run)| {
         let entry = entry.ok_or_else(malformed)?;
         let source = endpoint
-            .source_entry(&path, &entry, &run, &mut proceed)
+            .source_entry(&path, &entry, &run, &mut checkpoint)
             .map_err(|error| wire::apply_failure(&error))?;
         let reading = reading(endpoint, &source, &run)?;
         Ok((source, reading))
     });
     let (source, reading) = match source {
         Ok(source) => source,
-        Err(error) => return failed(answer, error),
+        Err(error) => {
+            return failed(&mut controlled.answer.borrow_mut(), error);
+        }
     };
-    if answer.reply(&reading).is_err() {
+    if controlled.answer.borrow_mut().reply(&reading).is_err() {
         return;
     }
     let mut sent = Ok(());
     if source.metadata().kind() == foldover_fs::NodeKind::File {
-        sent = endpoint.read_entry_from(&source, from, &mut proceed, &mut |chunk| {
-            answer.send_data(chunk).map_err(std::io::Error::other)
+        sent = endpoint.read_entry_from(&source, from, &mut checkpoint, &mut |chunk| {
+            controlled
+                .answer
+                .borrow_mut()
+                .send_data(chunk)
+                .map_err(std::io::Error::other)
         });
     }
-    if answer.end_data().is_err() {
+    if controlled.answer.borrow_mut().end_data().is_err() {
         return;
     }
     match sent {
         Ok(()) => {
-            let _ = answer.reply(&PeerReply::Done);
+            let _ = controlled.answer.borrow_mut().reply(&PeerReply::Done);
         }
-        Err(error) => failed(answer, wire::apply_failure(&error)),
+        Err(error) => failed(
+            &mut controlled.answer.borrow_mut(),
+            wire::apply_failure(&error),
+        ),
     }
 }
 
@@ -587,6 +653,8 @@ fn receive(
     entry: Incoming,
     answer: &mut Answer,
 ) -> Result<PeerReply, FolderError> {
+    let controlled = AnswerControl::new(answer);
+    let mut checkpoint = || controlled.checkpoint();
     let (path, current, run) = decoded(path, entry.current.as_deref(), entry.run)?;
     let (metadata, native) = wire::metadata_from(entry.metadata);
     let carried = Carried {
@@ -598,7 +666,7 @@ fn receive(
         None => Expected::Absent,
     };
     let destination = endpoint
-        .receiving(&path, current, &run, &mut proceed)
+        .receiving(&path, current, &run, &mut checkpoint)
         .map_err(|error| wire::apply_failure(&error))?;
     let version = match entry.kind {
         IncomingKind::File { content, from } => {
@@ -608,19 +676,32 @@ fn receive(
                 content: Digest::from_bytes(content),
                 from,
             };
-            endpoint.receive_file(&path, destination.as_ref(), carried, resume, &run, |sink| {
-                while let Some(chunk) = answer.next_data().map_err(std::io::Error::other)? {
-                    sink(&chunk)?;
-                }
-                Ok(())
-            })
+            endpoint.receive_file(
+                &path,
+                destination.as_ref(),
+                carried,
+                resume,
+                &run,
+                &mut checkpoint,
+                |sink| {
+                    while let Some(chunk) = controlled
+                        .answer
+                        .borrow_mut()
+                        .next_data()
+                        .map_err(std::io::Error::other)?
+                    {
+                        sink(&chunk)?;
+                    }
+                    Ok(())
+                },
+            )
         }
         IncomingKind::Folder if destination.is_some() => {
             Err(crate::ApplyError::Unsupported(path.clone()))
         }
-        IncomingKind::Folder => endpoint.receive_directory(&path, carried, &run, &mut proceed),
+        IncomingKind::Folder => endpoint.receive_directory(&path, carried, &run, &mut checkpoint),
         IncomingKind::Link { target } => {
-            endpoint.receive_link(&path, destination.as_ref(), &target, &run, &mut proceed)
+            endpoint.receive_link(&path, destination.as_ref(), &target, &run, &mut checkpoint)
         }
     };
     version
@@ -694,12 +775,6 @@ fn durability_from(durability: PairDurability) -> Durability {
         PairDurability::Standard => Durability::Standard,
         PairDurability::Full => Durability::Full,
     }
-}
-
-/// The other Mac gives up by dropping its request, which ends any data in
-/// flight; the operations themselves need no other stop.
-fn proceed() -> ScanControl {
-    ScanControl::Continue
 }
 
 fn malformed() -> FolderError {
