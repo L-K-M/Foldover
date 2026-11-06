@@ -130,8 +130,10 @@ struct ArchiveViewModel {
         return String(localized: "Put back \(store.placedCount) items. The next sync copies them to the other folder.")
     }
 
-    func load() async { await store.open(pair.id, side: store.side) }
-    func show(_ side: FolderSide) async { await store.open(pair.id, side: side) }
+    func load() async { await store.open(pair.id, revision: pair.revision, side: store.side) }
+    func show(_ side: FolderSide) async {
+        await store.open(pair.id, revision: pair.revision, side: side)
+    }
     func select(_ run: String) async { await store.select(run) }
     func loadMore() async { await store.loadMore() }
 

@@ -172,7 +172,9 @@ async fn archive_browsing_keeps_active_roots_until_the_worker_finishes() {
     let archived = run_reviewed(&service, &key, &preview).await;
     assert_eq!(archived["state"], "finished", "{archived}");
     assert_eq!(archived["result"]["archived"], 1);
-    let side = json!({"id": pair["id"], "side": "right"});
+    let side = json!({
+        "id": pair["id"], "revision": pair["revision"], "side": "right",
+    });
     let before = call(&service, ARCHIVE_RUNS, side.clone()).await;
     assert_eq!(before["runs"].as_array().unwrap().len(), 1);
     let run = before["runs"][0]["name"].clone();
@@ -197,7 +199,8 @@ async fn archive_browsing_keeps_active_roots_until_the_worker_finishes() {
         &service,
         ARCHIVE_ITEMS,
         json!({
-            "id": pair["id"], "side": "right", "run": run, "after": null,
+            "id": pair["id"], "revision": pair["revision"],
+            "side": "right", "run": run, "after": null,
         }),
     )
     .await;
@@ -206,7 +209,17 @@ async fn archive_browsing_keeps_active_roots_until_the_worker_finishes() {
     release.send(()).unwrap();
     let finished = settled(&service, &key).await;
     assert_eq!(finished["state"], "previewed", "{finished}");
-    let after = call(&service, ARCHIVE_RUNS, side).await;
+    let stale = service
+        .handle(Request::call(1, ARCHIVE_RUNS, Some(side)))
+        .await
+        .unwrap_err();
+    assert_eq!(stale.code(), foldover_proto::local::STALE_REVISION);
+    let after = call(
+        &service,
+        ARCHIVE_RUNS,
+        json!({"id": saved["id"], "revision": saved["revision"], "side": "right"}),
+    )
+    .await;
     assert_eq!(
         after["runs"],
         json!([]),

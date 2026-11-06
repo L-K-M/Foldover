@@ -34,9 +34,13 @@ pub struct ArchivedItemPage {
 }
 
 #[uniffi::export(async_runtime = "tokio")]
-pub async fn archive_runs(id: String, side: SyncSide) -> Result<ArchivedRunList, AgentError> {
+pub async fn archive_runs(
+    id: String,
+    revision: u64,
+    side: SyncSide,
+) -> Result<ArchivedRunList, AgentError> {
     let id = id.parse().map_err(invalid_configuration)?;
-    let runs = foldover_client::archive_runs(&SocketLocation::Default, id, side.into())
+    let runs = foldover_client::archive_runs(&SocketLocation::Default, id, revision, side.into())
         .await
         .map_err(AgentError::read)?;
     Ok(runs.into())
@@ -46,6 +50,7 @@ pub async fn archive_runs(id: String, side: SyncSide) -> Result<ArchivedRunList,
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn archive_items(
     id: String,
+    revision: u64,
     side: SyncSide,
     run: String,
     after: Option<Vec<u8>>,
@@ -54,6 +59,7 @@ pub async fn archive_items(
     let items = foldover_client::archive_items(
         &SocketLocation::Default,
         id,
+        revision,
         side.into(),
         &run,
         after.as_deref(),
@@ -68,14 +74,22 @@ pub async fn archive_items(
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn archive_put_back(
     id: String,
+    revision: u64,
     side: SyncSide,
     run: String,
     path: Vec<u8>,
 ) -> Result<Vec<u8>, AgentError> {
     let id = id.parse().map_err(invalid_configuration)?;
-    foldover_client::put_back(&SocketLocation::Default, id, side.into(), &run, &path)
-        .await
-        .map_err(AgentError::from)
+    foldover_client::put_back(
+        &SocketLocation::Default,
+        id,
+        revision,
+        side.into(),
+        &run,
+        &path,
+    )
+    .await
+    .map_err(AgentError::from)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
@@ -92,13 +106,15 @@ pub struct ArchiveRestoreSummary {
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn archive_put_back_all(
     id: String,
+    revision: u64,
     side: SyncSide,
     run: String,
 ) -> Result<ArchiveRestoreSummary, AgentError> {
     let id = id.parse().map_err(invalid_configuration)?;
-    let restored = foldover_client::put_back_all(&SocketLocation::Default, id, side.into(), &run)
-        .await
-        .map_err(AgentError::from)?;
+    let restored =
+        foldover_client::put_back_all(&SocketLocation::Default, id, revision, side.into(), &run)
+            .await
+            .map_err(AgentError::from)?;
     Ok(restored.into())
 }
 

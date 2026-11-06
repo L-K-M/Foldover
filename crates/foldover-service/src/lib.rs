@@ -488,7 +488,7 @@ fn readiness_warning(warning: foldover_engine::ReadinessWarning) -> PairWarning 
     }
 }
 
-fn expected_revision(revision: u64) -> Result<u64, RpcError> {
+pub(crate) fn expected_revision(revision: u64) -> Result<u64, RpcError> {
     if revision == 0 || revision > i64::MAX as u64 {
         return Err(RpcError::new(
             INVALID_PARAMS,
@@ -1842,21 +1842,37 @@ mod tests {
             .unwrap();
         assert_eq!(settled(&service, &key).await["result"]["archived"], 1);
 
-        let side = json!({"id": created["id"], "side": "right"});
+        let side = json!({
+            "id": created["id"],
+            "revision": created["revision"],
+            "side": "right"
+        });
         let runs = service
             .handle(Request::call(4, ARCHIVE_RUNS, Some(side)))
             .await
             .unwrap();
         assert_eq!(runs["more"], false);
         let name = runs["runs"][0]["name"].clone();
-        let query = json!({"id": created["id"], "side": "right", "run": name, "after": null});
+        let query = json!({
+            "id": created["id"],
+            "revision": created["revision"],
+            "side": "right",
+            "run": name,
+            "after": null
+        });
         let items = service
             .handle(Request::call(5, ARCHIVE_ITEMS, Some(query)))
             .await
             .unwrap();
         assert_eq!(items["items"], json!([{"path": b"file", "size": 4}]));
 
-        let put_back = json!({"id": created["id"], "side": "right", "run": name, "path": b"file"});
+        let put_back = json!({
+            "id": created["id"],
+            "revision": created["revision"],
+            "side": "right",
+            "run": name,
+            "path": b"file"
+        });
         let placed = service
             .handle(Request::call(6, ARCHIVE_PUT_BACK, Some(put_back.clone())))
             .await
@@ -1902,7 +1918,7 @@ mod tests {
         for index in 0..count {
             fs::write(run.join(archived_name(index)), b"data").unwrap();
         }
-        (directory, service, created["id"].clone(), run)
+        (directory, service, created, run)
     }
 
     fn archived_name(index: usize) -> String {
@@ -1912,11 +1928,17 @@ mod tests {
     /// The page after item `after`, as item names, and whether more follow.
     async fn archive_page(
         service: &Service,
-        id: &Value,
+        pair: &Value,
         after: Option<usize>,
     ) -> (Vec<String>, bool) {
         let after = after.map(|index| archived_name(index).into_bytes());
-        let query = json!({"id": id, "side": "right", "run": ARCHIVED_RUN, "after": after});
+        let query = json!({
+            "id": pair["id"],
+            "revision": pair["revision"],
+            "side": "right",
+            "run": ARCHIVED_RUN,
+            "after": after
+        });
         let page = service
             .handle(Request::call(5, ARCHIVE_ITEMS, Some(query)))
             .await
@@ -1936,12 +1958,12 @@ mod tests {
     #[tokio::test]
     async fn an_archived_run_pages_whole_across_read_aheads() {
         const ITEMS: usize = 1_050;
-        let (_directory, service, id, _run) = archived_pair(ITEMS).await;
+        let (_directory, service, pair, _run) = archived_pair(ITEMS).await;
 
         let mut listed = Vec::new();
         loop {
             let after = listed.len().checked_sub(1);
-            let (names, more) = archive_page(&service, &id, after).await;
+            let (names, more) = archive_page(&service, &pair, after).await;
             listed.extend(names.iter().cloned());
             if !more {
                 assert_eq!(
@@ -1958,35 +1980,40 @@ mod tests {
 
     #[tokio::test]
     async fn pages_reuse_what_the_first_read_and_the_first_page_reads_again() {
-        let (_directory, service, id, run) = archived_pair(250).await;
-        archive_page(&service, &id, None).await;
+        let (_directory, service, pair, run) = archived_pair(250).await;
+        archive_page(&service, &pair, None).await;
 
         // Only a page answered from memory can still name this item.
         fs::remove_file(run.join(archived_name(150))).unwrap();
-        let (names, _) = archive_page(&service, &id, Some(99)).await;
+        let (names, _) = archive_page(&service, &pair, Some(99)).await;
         assert!(names.contains(&archived_name(150)));
 
         // Opening the run shows what it holds now.
-        archive_page(&service, &id, None).await;
-        let (names, _) = archive_page(&service, &id, Some(99)).await;
+        archive_page(&service, &pair, None).await;
+        let (names, _) = archive_page(&service, &pair, Some(99)).await;
         assert!(!names.contains(&archived_name(150)));
     }
 
     #[tokio::test]
     async fn putting_back_forgets_what_was_read() {
-        let (directory, service, id, _run) = archived_pair(250).await;
-        archive_page(&service, &id, None).await;
+        let (directory, service, pair, _run) = archived_pair(250).await;
+        archive_page(&service, &pair, None).await;
 
         let name = archived_name(150);
-        let put_back =
-            json!({"id": id, "side": "right", "run": ARCHIVED_RUN, "path": name.as_bytes()});
+        let put_back = json!({
+            "id": pair["id"],
+            "revision": pair["revision"],
+            "side": "right",
+            "run": ARCHIVED_RUN,
+            "path": name.as_bytes()
+        });
         service
             .handle(Request::call(6, ARCHIVE_PUT_BACK, Some(put_back)))
             .await
             .unwrap();
         assert!(directory.path().join("Docs-right").join(&name).exists());
 
-        let (names, _) = archive_page(&service, &id, Some(99)).await;
+        let (names, _) = archive_page(&service, &pair, Some(99)).await;
         assert!(!names.contains(&name));
     }
 
@@ -1994,12 +2021,12 @@ mod tests {
     /// dropped, and so is what a listing keeps while it runs.
     #[tokio::test]
     async fn a_job_forgets_what_was_read_when_it_starts_and_when_it_ends() {
-        let (_directory, service, id, run) = archived_pair(250).await;
-        archive_page(&service, &id, None).await;
+        let (_directory, service, pair, run) = archived_pair(250).await;
+        archive_page(&service, &pair, None).await;
         fs::remove_file(run.join(archived_name(150))).unwrap();
 
         let (reached, release) = service.jobs.gate_job();
-        let key = json!({"id": id});
+        let key = json!({"id": pair["id"]});
         service
             .handle(Request::call(3, SYNC_PREVIEW, Some(key.clone())))
             .await
@@ -2012,17 +2039,17 @@ mod tests {
         .await
         .unwrap();
 
-        let (names, _) = archive_page(&service, &id, Some(99)).await;
+        let (names, _) = archive_page(&service, &pair, Some(99)).await;
         assert!(!names.contains(&archived_name(150)));
 
         // What that page kept stops answering once the job ends.
         fs::remove_file(run.join(archived_name(160))).unwrap();
-        let (names, _) = archive_page(&service, &id, Some(99)).await;
+        let (names, _) = archive_page(&service, &pair, Some(99)).await;
         assert!(names.contains(&archived_name(160)));
 
         release.send(()).unwrap();
         settled(&service, &key).await;
-        let (names, _) = archive_page(&service, &id, Some(99)).await;
+        let (names, _) = archive_page(&service, &pair, Some(99)).await;
         assert!(!names.contains(&archived_name(160)));
     }
 
@@ -4455,7 +4482,11 @@ mod tests {
             .handle(Request::call(
                 4,
                 ARCHIVE_RUNS,
-                Some(json!({"id": created["id"], "side": "right"})),
+                Some(json!({
+                    "id": created["id"],
+                    "revision": created["revision"],
+                    "side": "right"
+                })),
             ))
             .await
             .unwrap();
@@ -4474,8 +4505,13 @@ mod tests {
             .await
             .unwrap();
         let run_name = archived_run(directory.path(), &service, &created, "Docs").await;
-        let put_back =
-            json!({"id": created["id"], "side": "right", "run": run_name, "path": b"file"});
+        let put_back = json!({
+            "id": created["id"],
+            "revision": created["revision"],
+            "side": "right",
+            "run": run_name,
+            "path": b"file"
+        });
 
         let (reached, release) = service.jobs.gate_mutation();
         let restoring = service.clone();
@@ -4558,16 +4594,60 @@ mod tests {
             .handle(Request::call(
                 6,
                 ARCHIVE_PUT_BACK,
-                Some(
-                    json!({"id": created["id"], "side": "right", "run": run_name, "path": b"file"}),
-                ),
+                Some(json!({
+                    "id": created["id"],
+                    "revision": created["revision"],
+                    "side": "right",
+                    "run": run_name,
+                    "path": b"file"
+                })),
             ))
             .await;
         release.send(()).unwrap();
-        update.await.unwrap().unwrap();
+        let updated = update.await.unwrap().unwrap();
         assert_eq!(
             put_back.unwrap_err().code(),
             foldover_proto::local::SYNC_BUSY
+        );
+
+        // The archive window listed the old configuration. Once that edit
+        // lands, recovery must not silently follow the pair to its new roots.
+        let stale = service
+            .handle(Request::call(
+                7,
+                ARCHIVE_PUT_BACK,
+                Some(json!({
+                    "id": created["id"],
+                    "revision": created["revision"],
+                    "side": "right",
+                    "run": run_name,
+                    "path": b"file"
+                })),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(stale.code(), foldover_proto::local::STALE_REVISION);
+        assert!(!directory.path().join("Docs-right/file").exists());
+
+        // Refreshing the pair revision makes the same deliberate recovery
+        // valid again.
+        service
+            .handle(Request::call(
+                8,
+                ARCHIVE_PUT_BACK,
+                Some(json!({
+                    "id": updated["id"],
+                    "revision": updated["revision"],
+                    "side": "right",
+                    "run": run_name,
+                    "path": b"file"
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read(directory.path().join("Docs-right/file")).unwrap(),
+            b"data"
         );
     }
 
