@@ -97,6 +97,9 @@ jobs:
       - name: build.sh --install against a fake macOS toolchain
         run: bash scripts/test-build-install.sh
 
+      - name: Release notes regressions
+        run: python3 scripts/test-release-notes.py
+
       - name: Signed agent launch labels
         run: python3 scripts/test-agent-plist.py
 
