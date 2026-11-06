@@ -512,20 +512,6 @@ impl Endpoint {
         }
     }
 
-    pub(crate) fn replace_lock_file(
-        &self,
-        file: LockFile,
-        content: &[u8],
-    ) -> Result<(), ApplyError> {
-        match self {
-            Self::Local(endpoint) => endpoint.replace_lock_file(file, content),
-            Self::Sftp(endpoint) => endpoint.replace_lock_file(file, content),
-            Self::Peer(endpoint) => endpoint.replace_lock_file(file, content),
-            #[cfg(feature = "simulation")]
-            Self::Memory(endpoint) => endpoint.replace_lock_file(file, content),
-        }
-    }
-
     pub(crate) fn remove_lock_file(&self, file: LockFile) -> Result<(), ApplyError> {
         match self {
             Self::Local(endpoint) => endpoint.remove_lock_file(file),

@@ -865,16 +865,6 @@ impl MemoryEndpoint {
         Ok(true)
     }
 
-    pub(crate) fn replace_lock_file(
-        &self,
-        file: LockFile,
-        content: &[u8],
-    ) -> Result<(), ApplyError> {
-        self.folder()
-            .private_file(file.path(), content.to_vec())
-            .map_err(|source| write(file.path(), source))
-    }
-
     pub(crate) fn remove_lock_file(&self, file: LockFile) -> Result<(), ApplyError> {
         let mut folder = self.folder();
         folder.step().map_err(|source| write(file.path(), source))?;

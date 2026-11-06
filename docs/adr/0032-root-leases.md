@@ -53,21 +53,28 @@ take:   create lock exclusively ──ok──▶ held
   winner; the move and re-read settle any remaining tie. A claim is a
   lease too, so one left by a Mac that died mid-takeover is removed by
   the same rule.
-- **Fencing:** each beat first re-reads the lock. A run that finds
-  another holder cancels at its next checkpoint, commits what it did,
-  and fails with "Another Mac took over this folder".
+- **Fencing:** each beat creates `lock.claim` exclusively with its next
+  record, re-reads the exact lock, atomically promotes the claim over the
+  live lock and verifies the promoted bytes. Promotion never removes the
+  lock first. A competing claim or changed lock loses the lease. The run
+  cancels at its next checkpoint, commits what it did, and fails with
+  "Another Mac took over this folder".
 - **Ordering:** a run takes its two leases in root-identity order, so two
   Macs syncing the same two folders cannot each hold one and wait on the
   other. Undo takes the same leases.
-- **Release:** dropping a lease removes the lock only if it still names
-  this run.
-- **Transport:** local roots use exclusive create and rename-replace on
-  the held directory handle. SFTP opens the final lock or claim with
-  `OPEN_CREATE|OPEN_EXCLUSIVE`, and uses OpenSSH's atomic replacing rename
-  for renewal and claim promotion, over a second session opened for leases:
-  a transfer holds the main session while it calls back into the run, so a
-  beat on it would wait for the transfer, or deadlock. A shared folder
-  forwards each step to the Mac that shares it
+- **Release:** dropping a lease advances through the same claim protocol,
+  then removes the promoted lock. A competing claim leaves the lock alone;
+  a crash between promotion and removal leaves an ordinary live lease for
+  TTL recovery (delaying a waiting takeover by up to one TTL), never a free
+  lock beside a stale claim.
+- **Transport:** local roots use exclusive create and atomic rename-replace
+  on the held directory handle. SFTP opens the final lock or claim with
+  `OPEN_CREATE|OPEN_EXCLUSIVE`; promotion uses `posix-rename@openssh.com`
+  to atomically replace the live lock without a remove-then-rename gap.
+  Both use a second session opened for leases: a transfer holds the main
+  session while it calls back into the run, so a beat on it would wait for
+  the transfer, or deadlock. A shared folder forwards each step to the Mac
+  that shares it
   (`FolderOp::Lease`), so the file operations run there.
 - A lock in any other format, such as one a newer version wrote, is
   honoured as live until it stays unchanged for a TTL.
@@ -78,9 +85,9 @@ take:   create lock exclusively ──ok──▶ held
   to two minutes; the next run waits that out and takes over.
 - A Mac whose clock jumps cannot steal a live lease: only the beat and
   the reader's own monotonic clock count.
-- Each beat costs one read and one write per root; on SFTP and shared
-  folders, two round trips every 15 s. A run on an SFTP folder opens a
-  second SSH connection.
+- Each beat costs three reads, one exclusive claim create and one promotion
+  per root. A run on an SFTP folder opens a second SSH connection so a
+  transfer holding the main one cannot block its lease traffic.
 - An interrupted SFTP exclusive create can leave an incomplete lock. It is
   kept rather than removed by name, since a delayed cleanup could delete a
   successor's lock; the ordinary invalid-record TTL recovery reclaims it.

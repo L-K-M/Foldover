@@ -429,19 +429,6 @@ impl SftpEndpoint {
         .map_err(|source| write_error(&lock_path(file), source))
     }
 
-    pub(crate) fn replace_lock_file(
-        &self,
-        file: LockFile,
-        content: &[u8],
-    ) -> Result<(), ApplyError> {
-        let remote = self.remote(file.path());
-        self.on_lease_session(|session| {
-            let temporary = self.stage_lock(session, file, content)?;
-            self.rename_replacing_on(session, &temporary, &remote)
-        })
-        .map_err(|source| write_error(&lock_path(file), source))
-    }
-
     pub(crate) fn remove_lock_file(&self, file: LockFile) -> Result<(), ApplyError> {
         let remote = self.remote(file.path());
         self.on_lease_session(|session| match self.removed_file_on(session, &remote) {
@@ -459,30 +446,6 @@ impl SftpEndpoint {
         );
         self.on_lease_session(|session| self.rename_replacing_on(session, &claim, &lock))
             .map_err(|source| write_error(&lock_path(LockFile::Lock), source))
-    }
-
-    /// `content` in a fresh temporary beside `file`, over `session`.
-    fn stage_lock(
-        &self,
-        session: &mut Session,
-        file: LockFile,
-        content: &[u8],
-    ) -> io::Result<Vec<u8>> {
-        self.make_directories_on(session, INTERNAL_DIRECTORY, PRIVATE_DIRECTORY)?;
-        let temporary = self.beside(file.path());
-        match write_new(session, temporary.clone(), PRIVATE_FILE, |sink| {
-            sink(content)
-        }) {
-            Ok(written) => {
-                self.note_added(&written);
-                Ok(written)
-            }
-            // A failed write may have left a partial file behind.
-            Err(error) => {
-                self.forget_parent(&temporary);
-                Err(error)
-            }
-        }
     }
 
     pub fn ignore_rules(&self) -> Result<Vec<String>, ScanError> {
