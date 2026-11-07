@@ -66,8 +66,11 @@ const SSH_PORT: u16 = 22;
 /// Copies a server takes at once when Foldover can open more sessions
 /// to it (PLAN.md §4.9).
 const PARALLEL_COPIES: NonZeroUsize = NonZeroUsize::new(4).expect("four is not zero");
-/// Sessions per server: one per copy worker, and the run's own thread.
-const SESSIONS: usize = PARALLEL_COPIES.get() + 1;
+/// Observation reads are independent of the other endpoint's copy limit.
+const PARALLEL_READS: NonZeroUsize = NonZeroUsize::new(8).expect("eight is not zero");
+/// Data workers plus a reserve for the run's own thread; leases use a
+/// separate session. Refusing servers still clamp the existing pool.
+const SESSIONS: usize = PARALLEL_READS.get() + 1;
 
 pub struct SftpEndpoint {
     sessions: Sessions,
@@ -591,7 +594,10 @@ impl SftpEndpoint {
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<(), ScanError> {
-        let workers = self.workers();
+        let workers = match self.connect {
+            Some(_) => PARALLEL_READS,
+            None => NonZeroUsize::MIN,
+        };
         if workers == NonZeroUsize::MIN || reads.len() < 2 {
             for (path, attributes) in reads {
                 if control() == ScanControl::Cancel {
