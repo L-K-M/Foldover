@@ -21,6 +21,18 @@
       "reason": "Same repository and terms as objc2 (MIT-only per LICENSE.md at tag block2-0.6.2); same text"
     },
     {
+      "name": "objc2-core-foundation",
+      "version": "0.3.2",
+      "files": ["rust/objc2-LICENSE-MIT.txt"],
+      "reason": "Publishes no license text. LICENSE.md at its published source commit 7b1abfd750a2cacaea71d6a56ecfb83cb7de560b in github.com/madsmtm/objc2 offers Zlib, Apache-2.0 or MIT at the user's option; MIT is selected. The common upstream MIT text added in ee9a7ada2131 applies to every crate in that repository and is already copied verbatim"
+    },
+    {
+      "name": "objc2-core-services",
+      "version": "0.3.2",
+      "files": ["rust/objc2-LICENSE-MIT.txt"],
+      "reason": "Publishes no license text. The same published source commit 7b1abfd750a2cacaea71d6a56ecfb83cb7de560b and LICENSE.md as objc2-core-foundation offer MIT as an option; MIT is selected. Reuses the same verbatim common upstream MIT text"
+    },
+    {
       "name": "uniffi*",
       "version": "0.32.2",
       "spdx": "MPL-2.0",

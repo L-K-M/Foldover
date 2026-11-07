@@ -495,7 +495,12 @@ fn access_control(_: &impl AsFd) -> io::Result<AccessControl> {
 
 #[cfg(target_os = "linux")]
 fn attribute_list(file: &impl AsFd, bytes: &mut [u8]) -> io::Result<usize> {
-    rustix::fs::flistxattr(file, bytes).map_err(io::Error::from)
+    // rustix 1.1.6 answers an empty buffer with 0, not the size.
+    if bytes.is_empty() {
+        rustix::fs::flistxattr_query(file).map_err(io::Error::from)
+    } else {
+        rustix::fs::flistxattr(file, bytes).map_err(io::Error::from)
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -505,7 +510,11 @@ fn attribute_value(
     _: u32,
     bytes: &mut [u8],
 ) -> io::Result<usize> {
-    rustix::fs::fgetxattr(file, name, bytes).map_err(io::Error::from)
+    if bytes.is_empty() {
+        rustix::fs::fgetxattr_query(file, name).map_err(io::Error::from)
+    } else {
+        rustix::fs::fgetxattr(file, name, bytes).map_err(io::Error::from)
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]

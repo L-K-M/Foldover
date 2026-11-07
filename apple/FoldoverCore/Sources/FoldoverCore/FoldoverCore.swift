@@ -1990,6 +1990,75 @@ public func FfiConverterTypeRunHistoryEntry_lower(_ value: RunHistoryEntry) -> R
 
 
 /**
+ * The compact pair presentation captured when a working job starts.
+ */
+public struct RunningPairSnapshot: Equatable, Hashable {
+    public var revision: UInt64
+    public var name: String
+    public var leftRoot: Data
+    public var rightRoot: Data
+    public var mode: PairMode
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(revision: UInt64, name: String, leftRoot: Data, rightRoot: Data, mode: PairMode) {
+        self.revision = revision
+        self.name = name
+        self.leftRoot = leftRoot
+        self.rightRoot = rightRoot
+        self.mode = mode
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension RunningPairSnapshot: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRunningPairSnapshot: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RunningPairSnapshot {
+        return
+            try RunningPairSnapshot(
+                revision: FfiConverterUInt64.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                leftRoot: FfiConverterData.read(from: &buf), 
+                rightRoot: FfiConverterData.read(from: &buf), 
+                mode: FfiConverterTypePairMode.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RunningPairSnapshot, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.revision, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterData.write(value.leftRoot, into: &buf)
+        FfiConverterData.write(value.rightRoot, into: &buf)
+        FfiConverterTypePairMode.write(value.mode, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRunningPairSnapshot_lift(_ buf: RustBuffer) throws -> RunningPairSnapshot {
+    return try FfiConverterTypeRunningPairSnapshot.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRunningPairSnapshot_lower(_ value: RunningPairSnapshot) -> RustBuffer {
+    return FfiConverterTypeRunningPairSnapshot.lower(value)
+}
+
+
+/**
  * One folder on an SFTP server, as a pair side can name it.
  */
 public struct ServerFolder: Equatable, Hashable {
@@ -4340,7 +4409,7 @@ public func FfiConverterTypeSyncJobKind_lower(_ value: SyncJobKind) -> RustBuffe
 public enum SyncJobState: Equatable, Hashable {
     
     case idle
-    case working(job: SyncJobKind, cancelling: Bool, progress: SyncWorkProgress
+    case working(job: SyncJobKind, cancelling: Bool, progress: SyncWorkProgress, pair: RunningPairSnapshot
     )
     case previewed(preview: SyncPreviewSummary
     )
@@ -4386,7 +4455,7 @@ public struct FfiConverterTypeSyncJobState: FfiConverterRustBuffer {
         
         case 1: return .idle
         
-        case 2: return .working(job: try FfiConverterTypeSyncJobKind.read(from: &buf), cancelling: try FfiConverterBool.read(from: &buf), progress: try FfiConverterTypeSyncWorkProgress.read(from: &buf)
+        case 2: return .working(job: try FfiConverterTypeSyncJobKind.read(from: &buf), cancelling: try FfiConverterBool.read(from: &buf), progress: try FfiConverterTypeSyncWorkProgress.read(from: &buf), pair: try FfiConverterTypeRunningPairSnapshot.read(from: &buf)
         )
         
         case 3: return .previewed(preview: try FfiConverterTypeSyncPreviewSummary.read(from: &buf)
@@ -4419,11 +4488,12 @@ public struct FfiConverterTypeSyncJobState: FfiConverterRustBuffer {
             writeInt(&buf, Int32(1))
         
         
-        case let .working(job,cancelling,progress):
+        case let .working(job,cancelling,progress,pair):
             writeInt(&buf, Int32(2))
             FfiConverterTypeSyncJobKind.write(job, into: &buf)
             FfiConverterBool.write(cancelling, into: &buf)
             FfiConverterTypeSyncWorkProgress.write(progress, into: &buf)
+            FfiConverterTypeRunningPairSnapshot.write(pair, into: &buf)
             
         
         case let .previewed(preview):

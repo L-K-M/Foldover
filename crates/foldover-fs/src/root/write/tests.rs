@@ -457,6 +457,78 @@ fn metadata_copies_replace_stale_attributes_and_require_fresh_observations() {
     ));
 }
 
+/// An attribute with an empty value is still an attribute: it copies,
+/// replaces what the target held, and travels to another Mac.
+#[test]
+fn empty_attributes_copy_replace_and_travel() {
+    let roots = roots();
+    let source = roots._source_directory.path().join("file");
+    let target = roots.target_directory.path().join("file");
+    fs::write(&source, b"data").unwrap();
+    rustix::fs::fsetxattr(
+        fs::File::open(&source).unwrap(),
+        ATTRIBUTE,
+        b"",
+        rustix::fs::XattrFlags::empty(),
+    )
+    .unwrap();
+    let file = path(b"file");
+    let source_observed = roots.source.metadata(&file).unwrap();
+
+    let staged = roots
+        .target
+        .stage_file(&file, &roots.source, &source_observed, &ALL, &mut proceed)
+        .unwrap();
+    let copied = staged.extended_metadata(&mut proceed).unwrap();
+    let empty = copied
+        .attributes()
+        .iter()
+        .find(|attribute| attribute.name() == ATTRIBUTE.as_bytes())
+        .unwrap();
+    assert_eq!(empty.size(), 0);
+    assert_eq!(empty.digest().as_bytes(), blake3::hash(b"").as_bytes());
+    roots
+        .target
+        .place(staged.into_staged(), &file, Placement::Create, STANDARD)
+        .unwrap();
+    let read = roots
+        .target
+        .native_metadata(
+            &file,
+            &roots.target.metadata(&file).unwrap(),
+            ALL.metadata(),
+        )
+        .unwrap();
+    assert!(
+        read.attributes
+            .contains(&(ATTRIBUTE.as_bytes().to_vec(), vec![]))
+    );
+
+    // A later value on the target is replaced by the empty one.
+    let handle = fs::File::open(&target).unwrap();
+    rustix::fs::fsetxattr(
+        &handle,
+        ATTRIBUTE,
+        b"stale",
+        rustix::fs::XattrFlags::empty(),
+    )
+    .unwrap();
+    let target_observed = roots.target.metadata(&file).unwrap();
+    roots
+        .target
+        .update_metadata(
+            &file,
+            &target_observed,
+            &roots.source,
+            &source_observed,
+            &ALL,
+        )
+        .unwrap();
+    let mut value = [0; 16];
+    let size = rustix::fs::fgetxattr(&handle, ATTRIBUTE, &mut value).unwrap();
+    assert_eq!(&value[..size], b"");
+}
+
 #[test]
 fn changed_sources_are_not_staged() {
     let roots = roots();
