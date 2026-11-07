@@ -4,6 +4,7 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use foldover_net::sftp::Session;
 use foldover_types::{CaseMatching, Durability, NameMatching, PairOptions, UnicodeMatching};
@@ -280,6 +281,77 @@ while True:
 child.wait()
 "#;
 
+/// A proxy that loses the answer to the first `SSH_FXP_RENAME`: the
+/// request reaches the server and its answer comes back, but the proxy
+/// forwards neither, so the client sees a connection closed mid-answer.
+const LOST_RENAME_PROXY: &str = r#"
+import os, struct, subprocess, sys, threading, time
+
+child = subprocess.Popen(
+    sys.argv[1:], stdin=subprocess.PIPE, stdout=subprocess.PIPE
+)
+
+state = {"armed": False, "rename_id": None}
+lock = threading.Lock()
+
+
+def packet(stream):
+    head = stream.read(4)
+    if len(head) < 4:
+        return None
+    (length,) = struct.unpack(">I", head)
+    body = stream.read(length)
+    if len(body) < length:
+        return None
+    return head + body
+
+
+def forward_input():
+    while True:
+        frame = packet(sys.stdin.buffer)
+        if frame is None:
+            break
+        if frame[4] == 18 and len(frame) >= 9:  # SSH_FXP_RENAME
+            with lock:
+                state["armed"] = True
+                state["rename_id"] = struct.unpack(">I", frame[5:9])[0]
+        try:
+            child.stdin.write(frame)
+            child.stdin.flush()
+        except (BrokenPipeError, OSError):
+            break
+    try:
+        child.stdin.close()
+    except OSError:
+        pass
+
+
+threading.Thread(target=forward_input, daemon=True).start()
+
+while True:
+    frame = packet(child.stdout)
+    if frame is None:
+        break
+    with lock:
+        armed = state["armed"]
+        rename_id = state["rename_id"]
+    if (
+        armed
+        and frame[4] == 101  # SSH_FXP_STATUS
+        and len(frame) >= 9
+        and struct.unpack(">I", frame[5:9])[0] == rename_id
+    ):
+        # The rename landed; its answer is what the client never sees.
+        break
+    sys.stdout.buffer.write(frame)
+    sys.stdout.buffer.flush()
+
+# Let the server settle, then close without forwarding the answer.
+time.sleep(0.2)
+child.terminate()
+sys.exit(0)
+"#;
+
 fn proxy(directory: &Path, script: &str, description: &str) -> Option<SftpEndpoint> {
     let python = std::process::Command::new("python3")
         .arg("--version")
@@ -310,6 +382,10 @@ fn without_fsync(directory: &Path) -> Option<SftpEndpoint> {
 
 fn replacing_rename(directory: &Path) -> Option<SftpEndpoint> {
     proxy(directory, REPLACING_RENAME_PROXY, "replacing-rename")
+}
+
+fn lost_rename(directory: &Path) -> Option<SftpEndpoint> {
+    proxy(directory, LOST_RENAME_PROXY, "lost-rename")
 }
 
 fn proceed() -> ScanControl {
@@ -1704,6 +1780,48 @@ fn a_replaced_entry_keeps_the_spelling_its_folder_lists() {
     assert_eq!(sftp.listed(&stored), stored);
 }
 
+/// Ignored: how long a cached spelling lookup takes on folders of
+/// 1k, 10k and 100k names. Three samples each, so a comparison keeps
+/// the run's variance in view. Local subprocess timings against
+/// `sftp-server`, not a LAN measurement.
+#[test]
+#[ignore]
+fn cached_spelling_lookup_bench() {
+    use std::time::Instant;
+
+    const SAMPLES: usize = 3;
+    const ITERATIONS: usize = 200;
+    for &files in &[1_000usize, 10_000, 100_000] {
+        let directory = tempfile::tempdir().unwrap();
+        for file in 0..files {
+            fs::write(directory.path().join(format!("file-{file:06}.txt")), b"").unwrap();
+        }
+        // One composed Unicode name keeps the folder's cache honest about
+        // normalization even though almost every name is ASCII.
+        fs::write(directory.path().join("caf\u{e9}.txt"), b"").unwrap();
+        // An ask in another spelling that is absent, so the lookup walks
+        // the whole cache before giving up.
+        let asked = "/cafe\u{301}.missing";
+        for sample in 0..SAMPLES {
+            let Some(sftp) = sftp(directory.path()) else {
+                return;
+            };
+            let asked = sftp.remote(asked.as_bytes());
+            assert_eq!(sftp.listed(&asked), asked);
+            let start = Instant::now();
+            for _ in 0..ITERATIONS {
+                std::hint::black_box(sftp.listed(&asked));
+            }
+            let elapsed = start.elapsed();
+            eprintln!(
+                "cached_spelling_lookup_bench files={files} sample={sample} \
+                 total={elapsed:?} per_lookup={:?}",
+                elapsed / ITERATIONS as u32,
+            );
+        }
+    }
+}
+
 /// A renamed folder keeps its children on the server, so listings the
 /// run cached under its old path must not answer for names that moved
 /// with it.
@@ -1768,6 +1886,183 @@ fn a_replacing_rename_drops_the_targets_cached_listings() {
     // not answer.
     assert_eq!(sftp.listed(&asked), asked);
     assert_eq!(sftp.listed(&stored), stored);
+}
+
+/// The run's own add, remove and move keep the cached listing exact,
+/// so a decomposed ask resolves through them.
+#[test]
+fn note_added_removed_and_moved_update_the_cached_spelling() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(sftp) = sftp(directory.path()) else {
+        return;
+    };
+    let (decomposed, composed) = ("cafe\u{301}.txt", "caf\u{e9}.txt");
+    let asked = sftp.remote(decomposed.as_bytes());
+    let stored = sftp.remote(composed.as_bytes());
+
+    // Nothing is cached yet, so the decomposed ask does not resolve.
+    assert_eq!(sftp.listed(&asked), asked);
+
+    // A tracked add resolves it; a tracked move uncovers it again.
+    sftp.note_added(&stored);
+    assert_eq!(sftp.listed(&asked), stored);
+    sftp.note_moved(&stored, &sftp.remote(b"plain.txt"));
+    assert_eq!(sftp.listed(&asked), asked);
+
+    // A tracked remove drops the name for good.
+    sftp.note_added(&stored);
+    assert_eq!(sftp.listed(&asked), stored);
+    sftp.note_removed(&stored);
+    assert_eq!(sftp.listed(&asked), asked);
+}
+
+/// A cached spelling lookup composes the asked name once, not every
+/// name in the folder. This is the failing-before test: the linear scan
+/// this index replaced composed all 10k cached names before finding the
+/// match at the end.
+#[test]
+fn a_cached_spelling_lookup_normalizes_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(sftp) = sftp(directory.path()) else {
+        return;
+    };
+    let (decomposed, composed) = ("cafe\u{301}.txt", "caf\u{e9}.txt");
+    let asked = sftp.remote(decomposed.as_bytes());
+    let stored = sftp.remote(composed.as_bytes());
+    // Prime the folder's cache empty, then fill it. The match is last,
+    // so the scan this index replaced walked the whole folder.
+    assert_eq!(sftp.listed(&asked), asked);
+    for file in 0..10_000 {
+        let name = format!("file-{file:05}.txt");
+        sftp.note_added(&sftp.remote(name.as_bytes()));
+    }
+    sftp.note_added(&stored);
+
+    super::spelling::reset_compose_calls();
+    assert_eq!(sftp.listed(&asked), stored);
+    assert!(
+        super::spelling::compose_call_count() <= 2,
+        "the cached lookup composed {} names",
+        super::spelling::compose_call_count()
+    );
+}
+
+/// A view marked Dirty answers nothing until a fresh listing: an entry
+/// that appeared behind the cache's back resolves after a refetch.
+#[test]
+fn a_dirty_view_refetches() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(sftp) = sftp(directory.path()) else {
+        return;
+    };
+    let (decomposed, composed) = ("cafe\u{301}.txt", "caf\u{e9}.txt");
+    let asked = sftp.remote(decomposed.as_bytes());
+    let stored = sftp.remote(composed.as_bytes());
+
+    // Prime: an empty folder, so the ask does not resolve.
+    assert_eq!(sftp.listed(&asked), asked);
+
+    // The file appears behind the cache's back; forgetting its parent
+    // forces the next ask to refetch.
+    fs::write(directory.path().join(composed), b"x").unwrap();
+    sftp.forget_parent(&stored);
+    assert_eq!(sftp.listed(&asked), stored);
+}
+
+/// A mutation while a listing is in flight leaves the folder Dirty, so
+/// the snapshot the fetch returns cannot be stored.
+#[test]
+fn a_mutation_during_a_fetch_leaves_the_folder_dirty() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(sftp) = sftp(directory.path()) else {
+        return;
+    };
+    // A read in flight: the root's view is Fetching.
+    let root = sftp.path().to_vec();
+    sftp.listings.lock().unwrap().fetching(&root);
+    sftp.note_added(&sftp.remote(b"arrived"));
+    assert!(sftp.listings.lock().unwrap().is_dirty(&root));
+}
+
+/// A rename whose answer never arrives may have landed, so every view
+/// it could have touched must stop answering until a fresh listing.
+#[test]
+fn a_lost_rename_answer_drops_the_views() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(sftp) = lost_rename(directory.path()) else {
+        return;
+    };
+    let (decomposed, composed) = ("cafe\u{301}.txt", "caf\u{e9}.txt");
+    fs::create_dir(directory.path().join("old")).unwrap();
+    fs::write(directory.path().join("old").join(composed), b"x").unwrap();
+
+    // Fill the cache: the decomposed ask resolves through old/'s listing.
+    let asked_old = sftp.remote(format!("old/{decomposed}").as_bytes());
+    let stored_old = sftp.remote(format!("old/{composed}").as_bytes());
+    assert_eq!(sftp.listed(&asked_old), stored_old);
+
+    // The rename lands, but its answer never arrives.
+    let error = sftp
+        .renamed(&sftp.remote(b"old"), &sftp.remote(b"new"))
+        .unwrap_err();
+    assert!(!SftpEndpoint::answered(&error), "{error:?}");
+
+    // The lost answer dropped the views, so the next ask refetches: the
+    // old folder is gone and the new one resolves.
+    assert_eq!(sftp.listed(&asked_old), asked_old);
+    let asked_new = sftp.remote(format!("new/{decomposed}").as_bytes());
+    let stored_new = sftp.remote(format!("new/{composed}").as_bytes());
+    assert_eq!(sftp.listed(&asked_new), stored_new);
+}
+
+/// Concurrent lookups and mutations on one folder stay consistent: a
+/// name resolves exactly while it is cached.
+#[test]
+fn concurrent_cached_lookups_and_mutations_stay_consistent() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(sftp) = sftp(directory.path()) else {
+        return;
+    };
+    let sftp = Arc::new(sftp);
+    // Prime the root listing, empty, so the cache holds it.
+    let asked = sftp.remote("cafe\u{301}.txt".as_bytes());
+    assert_eq!(sftp.listed(&asked), asked);
+
+    const THREADS: usize = 4;
+    const STEPS: usize = 100;
+    let mut threads = Vec::new();
+    for thread in 0..THREADS {
+        let sftp = Arc::clone(&sftp);
+        threads.push(std::thread::spawn(move || {
+            for step in 0..STEPS {
+                let name = format!("caf\u{e9}-{thread}-{step:03}.txt");
+                let stored = sftp.remote(name.as_bytes());
+                let asked = sftp.remote(format!("cafe\u{301}-{thread}-{step:03}.txt").as_bytes());
+                sftp.note_added(&stored);
+                assert_eq!(sftp.listed(&asked), stored);
+                if step % 2 == 0 {
+                    sftp.note_removed(&stored);
+                    assert_eq!(sftp.listed(&asked), asked, "{name} should be gone");
+                }
+            }
+        }));
+    }
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    // Every surviving name resolves; every removed one does not.
+    for thread in 0..THREADS {
+        for step in 0..STEPS {
+            let name = format!("caf\u{e9}-{thread}-{step:03}.txt");
+            let stored = sftp.remote(name.as_bytes());
+            let asked = sftp.remote(format!("cafe\u{301}-{thread}-{step:03}.txt").as_bytes());
+            if step % 2 == 0 {
+                assert_eq!(sftp.listed(&asked), asked, "{name} should be gone");
+            } else {
+                assert_eq!(sftp.listed(&asked), stored, "{name}");
+            }
+        }
+    }
 }
 
 /// `Durability::Full` cannot be promised over SFTP at all: namespace

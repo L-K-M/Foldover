@@ -21,7 +21,7 @@ pub(crate) use transfer::{copy, update_metadata};
 
 use sessions::{Borrowed, Connect, Sessions};
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::io;
 use std::num::NonZeroUsize;
 use std::sync::{Mutex, PoisonError};
@@ -89,8 +89,9 @@ pub struct SftpEndpoint {
     /// per respellable name. Updating a hit in place is exact because
     /// only the names matter; a mutation that cannot be tracked exactly
     /// marks the folder Dirty instead — a stale hit could write a path
-    /// in the wrong spelling, a refetch costs one `read_dir`.
-    listings: Mutex<HashMap<Vec<u8>, spelling::FolderView>>,
+    /// in the wrong spelling, a refetch costs one `read_dir`. Indexed
+    /// and bounded, so a wide folder costs one lookup, not one scan.
+    listings: Mutex<spelling::Listings>,
 }
 
 impl SftpEndpoint {

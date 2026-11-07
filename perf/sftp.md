@@ -40,3 +40,34 @@ there is no cache claiming a directory stayed unchanged without checking it.
 These are request-count measurements against a local OpenSSH server, not
 complete LAN speedups. Keep target, corpus, source revision, host load and
 cache conditions with timing results, and compare at least three paired runs.
+
+## Cached spelling lookups
+
+A folder's cached listing used to be scanned linearly for every
+respellable name, composing each cached name until a match. The cache now
+indexes exact bytes and composed forms, so one lookup is a hash probe per
+map and a mutation touches the name it changes. The index keeps the
+server's listing order for aliases that compose alike, leaves invalid
+UTF-8 alone, and is bounded by folder count (512) and a conservative byte
+estimate (~32 MiB) that charges key and table overhead; past either bound
+the cache starts over rather than grow.
+
+`cached_spelling_lookup_bench` (ignored) measures folders of 1k, 10k and
+100k mostly-ASCII names with one composed Unicode name, three samples of
+200 lookups each, asking for an absent decomposed name so the whole cache
+is walked. On this host, before the index (revision `d89d474`) and after:
+
+| cached names | before, per lookup | after, per lookup |
+|---|---|---|
+| 1k | 184, 192, 194 µs | 359, 372, 369 ns |
+| 10k | 1.90, 1.87, 1.89 ms | 308, 343, 346 ns |
+| 100k | 18.2, 18.1, 17.7 ms | 343, 351, 352 ns |
+
+The after column is flat in folder size. These are local subprocess
+timings against `sftp-server`, not a LAN or NAS result: they measure the
+cache's CPU, not wire behaviour, and say nothing about SSH overhead or
+throughput. Reproduce with
+
+```sh
+cargo test --locked --release -p foldover-endpoint --lib cached_spelling_lookup_bench -- --ignored --nocapture
+```
