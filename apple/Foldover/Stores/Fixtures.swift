@@ -118,8 +118,9 @@ enum Fixtures {
         ]
     }
 
-    static func runningPair(_ id: String) -> RunningPair {
-        RunningPair(pairs().first { $0.id == id } ?? pairs()[0])
+    static func runningPair(_ id: String, scenario: FixtureScenario? = nil) -> RunningPair {
+        let catalog = pairs(scenario)
+        return RunningPair(catalog.first { $0.id == id } ?? catalog[0])
     }
 
     static func change(_ path: String, _ action: ChangeAction, bytes: UInt64 = 0,
@@ -390,19 +391,19 @@ actor FixtureSyncClient: SyncClient {
         if scenario == .syncing || scenario == .syncingReduced {
             states[Fixtures.photosID] = .working(.run, cancelling: false,
                                                  progress: WorkProgress(listed: 6_810_813, checked: 371_762),
-                                                 pair: Fixtures.runningPair(Fixtures.photosID))
+                                                 pair: Fixtures.runningPair(Fixtures.photosID, scenario: scenario))
         }
         if scenario == .syncingWaiting {
             // The engine waits after comparing, before it plans.
             states[Fixtures.photosID] = .working(.run, cancelling: false, progress: WorkProgress(
                 listed: 48_211, checked: 48_211, waitingFor: "Mac Studio"),
-                pair: Fixtures.runningPair(Fixtures.photosID))
+                pair: Fixtures.runningPair(Fixtures.photosID, scenario: scenario))
         }
         if scenario == .syncingBackup || scenario == .syncingBackupRight {
             states[Fixtures.projectsID] = .working(.run, cancelling: false, progress: WorkProgress(
                 listed: 2_400, checked: 2_400, changes: 5_320, applied: 1_204,
                 bytes: 40_000_000_000, copied: 16_800_000_000, rate: 85_000_000),
-                pair: Fixtures.runningPair(Fixtures.projectsID))
+                pair: Fixtures.runningPair(Fixtures.projectsID, scenario: scenario))
         }
         if scenario == .failedRun {
             states[Fixtures.photosID] = .finished(RunSummary(
