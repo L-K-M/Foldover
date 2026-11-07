@@ -11,8 +11,8 @@ use std::hint::black_box;
 use criterion::{Criterion, criterion_group, criterion_main};
 use foldover_engine::{Choices, Moves, plan_candidates, plan_resolved};
 use foldover_types::{
-    BaselineEntry, Digest, EntryContent, EntryVersion, NameMatching, PathPrefixIndex, ScanControl,
-    Skip, SyncMode, SyncPath,
+    BaselineEntry, CaseMatching, Digest, EntryContent, EntryVersion, NameMatching, PathPrefixIndex,
+    ScanControl, Skip, SyncMode, SyncPath, UnicodeMatching,
 };
 
 const DIRECTORIES: usize = 1_000;
@@ -204,9 +204,49 @@ fn plan_100k_entries(c: &mut Criterion) {
     });
 }
 
+/// The same 100_000-row pair under the matching a case-insensitive,
+/// normalizing folder uses. Every name is ASCII, so each `name_key` borrows
+/// the path bytes instead of collecting NFC and lower case into a fresh
+/// allocation; this is the per-row hot path `mark_name_clashes` walks.
+fn plan_100k_entries_unicode_names(c: &mut Criterion) {
+    let (base, left, right) = trees();
+    let names = NameMatching::new(CaseMatching::Insensitive, UnicodeMatching::Normalized);
+    let resolutions = std::collections::BTreeMap::new();
+    let skips = std::collections::BTreeMap::new();
+    let choices = Choices {
+        resolutions: &resolutions,
+        skips: &skips,
+        left_names: names,
+        right_names: names,
+        left_moves: Moves::Copy,
+        right_moves: Moves::Copy,
+    };
+    let plan = plan_resolved(SyncMode::Sync, &base, &left, &right, &choices, &mut || {
+        ScanControl::Continue
+    })
+    .unwrap();
+    assert_eq!(plan.rows().len(), EXPECTED_ROWS);
+    c.bench_function("plan_100k_entries_unicode_names", |b| {
+        b.iter(|| {
+            black_box(
+                plan_resolved(
+                    SyncMode::Sync,
+                    black_box(&base),
+                    black_box(&left),
+                    black_box(&right),
+                    black_box(&choices),
+                    &mut || ScanControl::Continue,
+                )
+                .unwrap(),
+            )
+        })
+    });
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(20);
-    targets = plan_100k_entries, plan_skipped_100k_entries, prefix_index_100k_entries_1000_prefixes
+    targets = plan_100k_entries, plan_skipped_100k_entries, prefix_index_100k_entries_1000_prefixes,
+        plan_100k_entries_unicode_names
 }
 criterion_main!(benches);

@@ -1,6 +1,7 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::{UnicodeNormalization, is_nfc};
 
 use foldover_types::{
     BaselineEntry, CaseMatching, ChangeKind, ConflictKind, EntryContent, EntryDecision, EntryKind,
@@ -128,7 +129,7 @@ impl CandidatePlan {
                     ancestors.insert(key[..index].to_vec());
                 }
             }
-            ancestors.insert(key);
+            ancestors.insert(key.into_owned());
         }
         let blocked: BTreeSet<_> = self
             .rows
@@ -139,7 +140,7 @@ impl CandidatePlan {
                     CandidateDecision::Entry(EntryDecision::Archive { .. })
                 )
             })
-            .map(|row| name_key(row.path.as_bytes(), names))
+            .map(|row| name_key(row.path.as_bytes(), names).into_owned())
             .filter(|key| ancestors.contains(key))
             .collect();
         if blocked.is_empty() {
@@ -147,7 +148,7 @@ impl CandidatePlan {
         }
         let inside = |path: &SyncPath| {
             let key = name_key(path.as_bytes(), names);
-            blocked.contains(&key)
+            blocked.contains(key.as_ref())
                 || key
                     .iter()
                     .enumerate()
@@ -359,7 +360,7 @@ fn mark_name_clashes(
     if loose == NameMatching::EXACT {
         return Ok(());
     }
-    let mut keys: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
+    let mut keys: HashMap<Cow<'_, [u8]>, Vec<usize>> = HashMap::new();
     for (index, row) in rows.iter().enumerate() {
         check_control(control)?;
         keys.entry(name_key(row.path.as_bytes(), loose))
@@ -373,7 +374,7 @@ fn mark_name_clashes(
             (Side::Right, right_names, right),
         ] {
             // Spellings this folder stores as one file.
-            let mut same: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
+            let mut same: HashMap<Cow<'_, [u8]>, Vec<usize>> = HashMap::new();
             for &index in &group {
                 check_control(control)?;
                 same.entry(name_key(rows[index].path.as_bytes(), names))
@@ -418,24 +419,43 @@ fn writes_on(decision: &CandidateDecision, side: Side) -> bool {
 /// The bytes two names share when `names` treats them as one: composed
 /// Unicode (NFC) where normalization is ignored, lower case where case is.
 /// Names that are not UTF-8 compare as bytes, ASCII case folded.
-pub(crate) fn name_key(path: &[u8], names: NameMatching) -> Vec<u8> {
+///
+/// The key borrows the path bytes whenever the comparison leaves them
+/// unchanged: exact matching, ASCII under normalization (NFC is the
+/// identity), text already in lower case, and invalid UTF-8 with no ASCII
+/// upper case to fold. Only an actual recomposition or case change
+/// allocates, so the common ASCII path pays nothing.
+pub(crate) fn name_key(path: &[u8], names: NameMatching) -> Cow<'_, [u8]> {
     let insensitive = names.case() == CaseMatching::Insensitive;
     let Ok(text) = std::str::from_utf8(path) else {
-        return if insensitive {
-            path.to_ascii_lowercase()
+        return if insensitive && path.iter().any(u8::is_ascii_uppercase) {
+            Cow::Owned(path.to_ascii_lowercase())
         } else {
-            path.to_vec()
+            Cow::Borrowed(path)
         };
     };
-    let text: String = match names.unicode() {
-        UnicodeMatching::Normalized => text.nfc().collect(),
-        UnicodeMatching::Exact => text.to_owned(),
+    let composed = match names.unicode() {
+        UnicodeMatching::Exact => None,
+        // NFC is the identity for ASCII and for text already composed.
+        UnicodeMatching::Normalized if text.is_ascii() || is_nfc(text) => None,
+        UnicodeMatching::Normalized => Some(text.nfc().collect::<String>()),
     };
-    if insensitive {
-        text.to_lowercase().into_bytes()
+    let text = composed.as_deref().unwrap_or(text);
+    if insensitive && !already_lowercase(text) {
+        Cow::Owned(text.to_lowercase().into_bytes())
+    } else if let Some(composed) = composed {
+        Cow::Owned(composed.into_bytes())
     } else {
-        text.into_bytes()
+        Cow::Borrowed(path)
     }
+}
+
+/// Whether Unicode lower-casing leaves `text` exactly as it is, character
+/// for character. `str::to_lowercase` maps each character independently, so
+/// this decides whether the owned allocation is needed at all.
+fn already_lowercase(text: &str) -> bool {
+    text.chars()
+        .all(|character| character.to_lowercase().eq([character]))
 }
 
 /// The side a person chose for this folder, present on one side only,
@@ -1787,5 +1807,170 @@ mod tests {
         let right = tree(&[(b"caf\xc3\xa9", file(2))]);
         let rows = plan_with_names(&left, &right, case_only);
         assert!(rows.iter().all(|(_, decision)| *decision != CLASH));
+    }
+
+    /// The pre-Cow key, kept here as the equivalence oracle for the borrowed
+    /// and owned fast paths.
+    fn owned_name_key(path: &[u8], names: NameMatching) -> Vec<u8> {
+        let insensitive = names.case() == CaseMatching::Insensitive;
+        let Ok(text) = std::str::from_utf8(path) else {
+            return if insensitive {
+                path.to_ascii_lowercase()
+            } else {
+                path.to_vec()
+            };
+        };
+        let text: String = match names.unicode() {
+            UnicodeMatching::Normalized => text.nfc().collect(),
+            UnicodeMatching::Exact => text.to_owned(),
+        };
+        if insensitive {
+            text.to_lowercase().into_bytes()
+        } else {
+            text.into_bytes()
+        }
+    }
+
+    /// Every matching mode, over UTF-8 and invalid names, must produce the
+    /// same key bytes the owned form always produced.
+    #[test]
+    fn name_keys_match_the_owned_form_for_every_matching_mode() {
+        let paths: &[&[u8]] = &[
+            b"",
+            b"a",
+            b"A",
+            b"REPORT.TXT",
+            b"Report.txt",
+            b"report.txt",
+            b"a-b",
+            b"a.txt",
+            b"a/x",
+            b"a0",
+            b"Finder/File.TXT",
+            "caf\u{e9}".as_bytes(),
+            "CAF\u{c9}".as_bytes(),
+            "cafe\u{301}".as_bytes(),
+            "CAFE\u{301}".as_bytes(),
+            "cafe\u{301}/readable".as_bytes(),
+            "\u{1e69}".as_bytes(),
+            "\u{1e63}\u{307}".as_bytes(),
+            "\u{1c5}".as_bytes(),
+            "\u{1c6}".as_bytes(),
+            "\u{130}".as_bytes(),
+            "\u{3a3}\u{3a3}".as_bytes(),
+            "\u{41f}\u{440}\u{438}\u{432}\u{435}\u{442}".as_bytes(),
+            b"\xff.txt",
+            b"\xc3\x28",
+            b"\xff.TXT",
+            b"caf\xff",
+            b"cafe\xcc\x81\xff",
+        ];
+        let modes = [
+            NameMatching::EXACT,
+            NameMatching::new(CaseMatching::Insensitive, UnicodeMatching::Exact),
+            NameMatching::new(CaseMatching::Exact, UnicodeMatching::Normalized),
+            NameMatching::new(CaseMatching::Insensitive, UnicodeMatching::Normalized),
+        ];
+        for path in paths {
+            for names in modes {
+                assert_eq!(
+                    name_key(path, names).as_ref(),
+                    owned_name_key(path, names).as_slice(),
+                    "{path:?} {names:?}"
+                );
+            }
+        }
+    }
+
+    /// The key borrows the path bytes exactly when the comparison leaves
+    /// them unchanged; every actual case fold or recomposition allocates.
+    #[test]
+    fn name_keys_borrow_the_path_bytes_when_nothing_changes() {
+        let case_insensitive =
+            NameMatching::new(CaseMatching::Insensitive, UnicodeMatching::Normalized);
+        let case_sensitive = NameMatching::new(CaseMatching::Exact, UnicodeMatching::Normalized);
+        // Exact comparison always borrows, UTF-8 or not.
+        for path in [
+            b"\xff.txt".as_slice(),
+            b"Report.txt",
+            "cafe\u{301}".as_bytes(),
+        ] {
+            assert!(
+                matches!(
+                    name_key(path, NameMatching::EXACT),
+                    std::borrow::Cow::Borrowed(_)
+                ),
+                "{path:?}"
+            );
+        }
+        // ASCII is already NFC: normalization alone borrows.
+        assert!(matches!(
+            name_key(b"CAF\xc3\x89", case_sensitive),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        // Already lower case borrows under case folding; invalid UTF-8 with
+        // no upper case byte to fold borrows too.
+        for path in [
+            b"report.txt".as_slice(),
+            b"\xff.txt",
+            "caf\u{e9}".as_bytes(),
+        ] {
+            assert!(
+                matches!(
+                    name_key(path, case_insensitive),
+                    std::borrow::Cow::Borrowed(_)
+                ),
+                "{path:?}"
+            );
+        }
+        // An actual ASCII fold allocates.
+        assert!(matches!(
+            name_key(b"Report.txt", case_insensitive),
+            std::borrow::Cow::Owned(_)
+        ));
+        // Invalid UTF-8 with an upper case byte allocates the folded copy.
+        assert!(matches!(
+            name_key(b"\xff.TXT", case_insensitive),
+            std::borrow::Cow::Owned(_)
+        ));
+        // An actual recomposition allocates, with or without case folding.
+        assert!(matches!(
+            name_key("cafe\u{301}".as_bytes(), case_sensitive),
+            std::borrow::Cow::Owned(_)
+        ));
+        assert!(matches!(
+            name_key("CAFE\u{301}".as_bytes(), case_insensitive),
+            std::borrow::Cow::Owned(_)
+        ));
+    }
+
+    /// The borrow decision must agree with the owned mapping wherever
+    /// lower-casing is not obviously the identity.
+    #[test]
+    fn already_lowercase_agrees_with_unicode_lowercase() {
+        let names = [
+            "\u{130}",
+            "\u{1c5}",
+            "\u{1c6}",
+            "\u{3a3}",
+            "\u{3c2}",
+            "\u{1e9e}",
+            "\u{130}\u{300}",
+            "\u{1e9e}\u{3a3}",
+            "\u{fb00}",
+            "\u{2170}",
+            "\u{2c65}",
+            "\u{a7b5}",
+            "\u{2126}",
+            "Report.txt",
+            "report.txt",
+        ];
+        for name in names {
+            assert_eq!(
+                already_lowercase(name),
+                name.to_lowercase() == name,
+                "{name:?}"
+            );
+        }
     }
 }
