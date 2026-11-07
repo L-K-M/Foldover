@@ -16,8 +16,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use foldover_fs::{
     DataResidency, DirectoryEntry, DirectoryScope, EntryMetadata, ExtendedMetadata, FileIdentity,
-    FilesystemFeatures, HashError, Medium, MetadataReadError, NodeKind, PathScope, Root,
-    RootRelation,
+    FilesystemFeatures, HashError, Medium, MetadataCapture, MetadataReadError, NodeKind,
+    ObserveFileError, PathScope, Root, RootRelation,
 };
 #[cfg(target_os = "macos")]
 use foldover_fs::{DeclaredSupport, FilesystemFeature};
@@ -28,7 +28,7 @@ use foldover_types::{
     Digest, EntryVersion, InvalidSyncPath, MetadataPolicy, NameMatching, SyncPath,
 };
 
-use version::{Attribute, Observed, Payload, entry_version, metadata_version};
+use version::{Attribute, Observed, Payload, capture_for, entry_version, metadata_version};
 
 use crate::{ListedEntry, ListedKind, ObserveStep};
 
@@ -873,19 +873,22 @@ impl LocalEndpoint {
 
     /// Observe native extended metadata under the same namespace/device rules as
     /// data reads. Capabilities and naming policy still precede file versions.
+    /// `capture` selects the values and ACL the caller can use.
     pub fn read_extended_metadata(
         &self,
         entry: &LocalEntry,
+        capture: MetadataCapture,
         control: &mut impl FnMut(u64) -> ScanControl,
     ) -> Result<ExtendedMetadata, ScanError> {
         self.validate_content_access(entry)?;
         self.root
-            .read_extended_metadata(entry.path(), entry.metadata(), control)
+            .read_extended_metadata(entry.path(), entry.metadata(), capture, control)
             .map_err(|source| metadata_error(Some(entry.path.clone()), source))
     }
 
     pub fn read_root_extended_metadata(
         &self,
+        capture: MetadataCapture,
         control: &mut impl FnMut(u64) -> ScanControl,
     ) -> Result<(EntryMetadata, ExtendedMetadata), ScanError> {
         let observed = at_scan(&None, self.root.root_metadata())?;
@@ -894,7 +897,7 @@ impl LocalEndpoint {
         }
         let extended = self
             .root
-            .read_root_extended_metadata(&observed, control)
+            .read_root_extended_metadata(&observed, capture, control)
             .map_err(|source| metadata_error(None, source))?;
         Ok((observed, extended))
     }
@@ -1229,7 +1232,9 @@ impl LocalEndpoint {
     }
 
     /// One entry's content and tracked metadata. Every read is checked
-    /// against the entry's scan observation.
+    /// against the entry's scan observation. A regular file's selected
+    /// extended metadata and data digest come from one held descriptor, with
+    /// the same namespace and change checks as the separate reads.
     pub fn entry_version(
         &self,
         entry: &LocalEntry,
@@ -1238,16 +1243,39 @@ impl LocalEndpoint {
     ) -> Result<EntryVersion, ScanError> {
         let mut checkpoint = |_| control();
         let kind = entry.metadata.kind();
-        let extended = self.optional_extended_metadata(entry, &mut checkpoint)?;
-        let payload = match kind {
-            NodeKind::File => Payload::File(self.hash_file(entry, &mut checkpoint)?),
-            NodeKind::Directory => Payload::Directory,
-            NodeKind::Symlink => Payload::Symlink(
-                entry
+        let (payload, extended) = match kind {
+            NodeKind::File => {
+                // Validate once, then fuse the metadata capture and the data
+                // digest through one descriptor.
+                self.validate_content_access(entry)?;
+                let (digest, captured) = self
+                    .root
+                    .observe_file(
+                        entry.path(),
+                        entry.metadata(),
+                        capture_for(policy, NodeKind::File),
+                        &mut checkpoint,
+                    )
+                    .map_err(|error| observe_file_error(entry.path(), error))?;
+                (Payload::File(digest), Some(captured))
+            }
+            NodeKind::Directory => {
+                let extended = self.optional_extended_metadata(entry, policy, &mut checkpoint)?;
+                (Payload::Directory, extended)
+            }
+            NodeKind::Symlink => {
+                let extended = self.optional_extended_metadata(entry, policy, &mut checkpoint)?;
+                let target = entry
                     .link_target()
-                    .ok_or_else(|| ScanError::UnsupportedEntry(entry.path.clone()))?,
-            ),
-            NodeKind::Other => return Err(ScanError::UnsupportedEntry(entry.path.clone())),
+                    .ok_or_else(|| ScanError::UnsupportedEntry(entry.path.clone()))?;
+                (Payload::Symlink(target), extended)
+            }
+            NodeKind::Other => {
+                // Preserve the existing failure order: the metadata read
+                // reports the unsupported entry before the payload arm.
+                self.optional_extended_metadata(entry, policy, &mut checkpoint)?;
+                return Err(ScanError::UnsupportedEntry(entry.path.clone()));
+            }
         };
 
         let observed = observed(&entry.metadata, extended.as_ref());
@@ -1258,9 +1286,14 @@ impl LocalEndpoint {
     pub(crate) fn optional_extended_metadata(
         &self,
         entry: &LocalEntry,
+        policy: MetadataPolicy,
         control: &mut impl FnMut(u64) -> ScanControl,
     ) -> Result<Option<ExtendedMetadata>, ScanError> {
-        match self.read_extended_metadata(entry, control) {
+        match self.read_extended_metadata(
+            entry,
+            capture_for(policy, entry.metadata.kind()),
+            control,
+        ) {
             Ok(extended) => Ok(Some(extended)),
             // Linux cannot read link xattrs through a held descriptor (ADR 0016).
             Err(ScanError::Metadata {
@@ -1339,6 +1372,23 @@ pub(crate) fn metadata_error(path: Option<SyncPath>, source: MetadataReadError) 
         MetadataReadError::Dataless => ScanError::Dataless(path),
         MetadataReadError::Cancelled => ScanError::Cancelled,
         source => ScanError::Metadata { path, source },
+    }
+}
+
+/// Map a fused observation onto the exact scan failures its separate reads
+/// produced: content errors keep their file paths, metadata errors use the
+/// shared metadata mapping.
+fn observe_file_error(path: &SyncPath, error: ObserveFileError) -> ScanError {
+    match error {
+        ObserveFileError::Hash(HashError::Io(source)) => ScanError::Io {
+            path: Some(path.clone()),
+            source,
+        },
+        ObserveFileError::Hash(HashError::Changed) => ScanError::Changed(Some(path.clone())),
+        ObserveFileError::Hash(HashError::NotRegular) => ScanError::UnsupportedEntry(path.clone()),
+        ObserveFileError::Hash(HashError::Dataless) => ScanError::Dataless(Some(path.clone())),
+        ObserveFileError::Hash(HashError::Cancelled) => ScanError::Cancelled,
+        ObserveFileError::Metadata(source) => metadata_error(Some(path.clone()), source),
     }
 }
 
@@ -1610,7 +1660,7 @@ mod tests {
                 Err(ScanError::ProtectedPath(_) | ScanError::UnclassifiedSidecar(_))
             ));
             assert!(matches!(
-                endpoint.read_extended_metadata(&entry, &mut |_| panic!(
+                endpoint.read_extended_metadata(&entry, MetadataCapture::Full, &mut |_| panic!(
                     "Protected reads must not start"
                 )),
                 Err(ScanError::ProtectedPath(_) | ScanError::UnclassifiedSidecar(_))
@@ -1632,19 +1682,23 @@ mod tests {
             .unwrap();
         let entry = &entries[0];
         endpoint
-            .read_extended_metadata(entry, &mut |_| ScanControl::Continue)
+            .read_extended_metadata(entry, MetadataCapture::Full, &mut |_| ScanControl::Continue)
             .unwrap();
         let (root, _) = endpoint
-            .read_root_extended_metadata(&mut |_| ScanControl::Continue)
+            .read_root_extended_metadata(MetadataCapture::Full, &mut |_| ScanControl::Continue)
             .unwrap();
         assert_eq!(root.identity(), endpoint.identity);
         assert!(matches!(
-            endpoint.read_extended_metadata(entry, &mut |_| ScanControl::Cancel),
+            endpoint.read_extended_metadata(entry, MetadataCapture::Full, &mut |_| {
+                ScanControl::Cancel
+            }),
             Err(ScanError::Cancelled)
         ));
         fs::write(temporary.path().join("file"), b"changed").unwrap();
         assert!(matches!(
-            endpoint.read_extended_metadata(entry, &mut |_| ScanControl::Continue),
+            endpoint.read_extended_metadata(entry, MetadataCapture::Full, &mut |_| {
+                ScanControl::Continue
+            }),
             Err(ScanError::Changed(_))
         ));
     }
@@ -2255,5 +2309,214 @@ mod tests {
             Sidecars::of(DeclaredSupport::NotReported),
             Sidecars::Unclassified
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn policy_aware_capture_matches_full_capture_across_the_policy_matrix() {
+        use foldover_fs::{AccessControl, AttributeRole, MetadataCapture};
+        use foldover_types::Propagation;
+
+        let directory = tempfile::tempdir().unwrap();
+        let file_path = directory.path().join("file");
+        fs::write(&file_path, b"data").unwrap();
+        {
+            let handle = fs::File::open(&file_path).unwrap();
+            for (name, value) in [
+                (c"com.apple.ResourceFork", b"fork".as_slice()),
+                (c"com.apple.metadata:_kMDItemUserTags", b"tags".as_slice()),
+                (c"com.apple.quarantine", b"0083;68b1d0e0;Safari;".as_slice()),
+                (c"com.apple.macl", b"managed".as_slice()),
+            ] {
+                rustix::fs::fsetxattr(&handle, name, value, rustix::fs::XattrFlags::empty())
+                    .unwrap();
+            }
+        }
+        let status = std::process::Command::new("/bin/chmod")
+            .args([
+                "+a",
+                "everyone allow read,readattr,readextattr,readsecurity",
+            ])
+            .arg(&file_path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        let mut entries = Vec::new();
+        endpoint
+            .scan_metadata(&mut |entry| {
+                entries.push(entry);
+                ScanControl::Continue
+            })
+            .unwrap();
+        let entry = entries
+            .into_iter()
+            .find(|entry| entry.path.as_bytes() == b"file")
+            .unwrap();
+
+        let full = endpoint
+            .read_extended_metadata(&entry, MetadataCapture::Full, &mut |_| {
+                ScanControl::Continue
+            })
+            .unwrap();
+        assert!(
+            full.attributes()
+                .iter()
+                .any(|attribute| attribute.name() == b"com.apple.ResourceFork")
+        );
+        assert!(
+            full.attributes()
+                .iter()
+                .any(|attribute| attribute.name() == b"com.apple.quarantine")
+        );
+        assert!(matches!(
+            full.access_control(),
+            AccessControl::MacOs(Some(bytes)) if !bytes.is_empty()
+        ));
+        let data = endpoint
+            .hash_file(&entry, &mut |_| ScanControl::Continue)
+            .unwrap();
+
+        for times in [Propagation::Sync, Propagation::Ignore] {
+            for extended in [Propagation::Sync, Propagation::Ignore] {
+                for permissions in [Propagation::Sync, Propagation::Ignore] {
+                    for quarantine in [Propagation::Sync, Propagation::Ignore] {
+                        let policy = MetadataPolicy::new(times, extended, permissions)
+                            .with_quarantine(quarantine);
+                        let expected = entry_version(
+                            Payload::File(data),
+                            &observed(entry.metadata(), Some(&full)),
+                            policy,
+                        );
+                        let observed_version = endpoint
+                            .entry_version(&entry, policy, &mut || ScanControl::Continue)
+                            .unwrap();
+                        assert_eq!(observed_version, expected, "policy {policy:?}");
+
+                        let capture = capture_for(policy, NodeKind::File);
+                        assert!(capture.wants(AttributeRole::ResourceFork));
+                        assert_eq!(
+                            capture.wants(AttributeRole::Synced),
+                            extended == Propagation::Sync
+                        );
+                        assert_eq!(
+                            capture.wants(AttributeRole::Quarantine),
+                            policy.quarantine() == Propagation::Sync
+                        );
+                        assert!(!capture.wants(AttributeRole::SystemManaged));
+                        assert!(!capture.wants(AttributeRole::CompressionStorage));
+                        assert_eq!(
+                            capture.wants_access_control(),
+                            permissions == Propagation::Sync
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn policy_aware_capture_detects_concurrent_edits_to_wanted_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let file_path = directory.path().join("file");
+        fs::write(&file_path, b"data").unwrap();
+        let path = SyncPath::try_from(b"file".as_slice()).unwrap();
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        let mut entries = Vec::new();
+        endpoint
+            .scan_metadata(&mut |entry| {
+                entries.push(entry);
+                ScanControl::Continue
+            })
+            .unwrap();
+        let entry = entries
+            .into_iter()
+            .find(|entry| entry.path.as_bytes() == b"file")
+            .unwrap();
+
+        let result = endpoint.entry_version(&entry, ALL, &mut || {
+            settled_stat(&endpoint, &path, || {
+                let handle = fs::File::open(&file_path).unwrap();
+                rustix::fs::fsetxattr(
+                    &handle,
+                    c"com.apple.metadata:_kMDItemUserTags",
+                    b"changed",
+                    rustix::fs::XattrFlags::empty(),
+                )
+                .unwrap();
+            });
+            ScanControl::Continue
+        });
+        assert!(matches!(result, Err(ScanError::Changed(_))));
+    }
+
+    #[test]
+    fn fused_file_versions_match_separate_content_and_metadata_reads() {
+        use foldover_types::Propagation;
+
+        let directory = tempfile::tempdir().unwrap();
+        let file_path = directory.path().join("file");
+        fs::write(&file_path, b"data").unwrap();
+        let path = SyncPath::try_from(b"file".as_slice()).unwrap();
+        {
+            let handle = fs::File::open(&file_path).unwrap();
+            rustix::fs::fsetxattr(
+                &handle,
+                TEST_ATTRIBUTE,
+                b"tag",
+                rustix::fs::XattrFlags::empty(),
+            )
+            .unwrap();
+            #[cfg(target_os = "macos")]
+            for (name, value) in [
+                (c"com.apple.ResourceFork", b"fork".as_slice()),
+                (c"com.apple.quarantine", b"0083;68b1d0e0;Safari;".as_slice()),
+            ] {
+                rustix::fs::fsetxattr(&handle, name, value, rustix::fs::XattrFlags::empty())
+                    .unwrap();
+            }
+        }
+
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        let mut entries = Vec::new();
+        endpoint
+            .scan_metadata(&mut |entry| {
+                entries.push(entry);
+                ScanControl::Continue
+            })
+            .unwrap();
+        let entry = entries
+            .into_iter()
+            .find(|entry| entry.path == path)
+            .unwrap();
+        let data = endpoint
+            .hash_file(&entry, &mut |_| ScanControl::Continue)
+            .unwrap();
+
+        for times in [Propagation::Sync, Propagation::Ignore] {
+            for extended in [Propagation::Sync, Propagation::Ignore] {
+                for permissions in [Propagation::Sync, Propagation::Ignore] {
+                    for quarantine in [Propagation::Sync, Propagation::Ignore] {
+                        let policy = MetadataPolicy::new(times, extended, permissions)
+                            .with_quarantine(quarantine);
+                        let capture = capture_for(policy, NodeKind::File);
+                        let extended_metadata = endpoint
+                            .read_extended_metadata(&entry, capture, &mut |_| ScanControl::Continue)
+                            .unwrap();
+                        let expected = entry_version(
+                            Payload::File(data),
+                            &observed(entry.metadata(), Some(&extended_metadata)),
+                            policy,
+                        );
+                        let fused = endpoint
+                            .entry_version(&entry, policy, &mut || ScanControl::Continue)
+                            .unwrap();
+                        assert_eq!(fused, expected, "policy {policy:?}");
+                    }
+                }
+            }
+        }
     }
 }
