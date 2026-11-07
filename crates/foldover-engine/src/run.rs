@@ -1016,18 +1016,23 @@ impl PairRun {
         self.snapshot_changed[side as usize]
     }
 
-    pub fn snapshot(&self, side: Side) -> Vec<SnapshotEntry> {
+    /// This run's effective observation of one side, lazily in the same
+    /// sorted merged order as [`Self::snapshot`]. Consumers that persist the
+    /// rows can stream them without collecting the whole tree first.
+    pub fn snapshot_iter(&self, side: Side) -> impl Iterator<Item = SnapshotEntry> + '_ {
         let cache = match side {
             Side::Left => &self.left_cache,
             Side::Right => &self.right_cache,
         };
-        snapshot_entries(cache, self.observation(side))
-            .map(|(path, entry)| SnapshotEntry {
-                path: path.clone(),
-                fingerprint: entry.fingerprint_bytes(),
-                version: entry.version(),
-            })
-            .collect()
+        snapshot_entries(cache, self.observation(side)).map(|(path, entry)| SnapshotEntry {
+            path: path.clone(),
+            fingerprint: entry.fingerprint_bytes(),
+            version: entry.version(),
+        })
+    }
+
+    pub fn snapshot(&self, side: Side) -> Vec<SnapshotEntry> {
+        self.snapshot_iter(side).collect()
     }
 
     pub fn preview(&self) -> Preview {

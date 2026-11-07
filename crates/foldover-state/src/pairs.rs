@@ -276,6 +276,31 @@ impl PairStore {
             .database
             .replace_snapshot_data(id.as_bytes(), revision, side_name(side), &rows)?)
     }
+
+    /// Replace one side's observation from rows already sorted by path with
+    /// no duplicates, as produced by a run's effective snapshot iterator.
+    /// Each row is encoded once into an owned entry, so no whole-tree vector
+    /// is built between the run and the database.
+    pub fn replace_snapshot_iter<I>(
+        &mut self,
+        id: PairId,
+        revision: u64,
+        side: Side,
+        entries: I,
+    ) -> Result<(), Error>
+    where
+        I: IntoIterator<Item = SnapshotEntry>,
+    {
+        let revision = database_revision(revision)?;
+        let rows = entries.into_iter().map(|entry| EncodedSnapshotOwned {
+            path: entry.path,
+            fingerprint: entry.fingerprint,
+            version: encode(entry.version),
+        });
+        Ok(self
+            .database
+            .replace_snapshot_sorted(id.as_bytes(), revision, side_name(side), rows)?)
+    }
 }
 
 struct EncodedSnapshot<'a> {
@@ -289,6 +314,26 @@ impl SnapshotData for EncodedSnapshot<'_> {
     }
     fn fingerprint(&self) -> &[u8] {
         &self.entry.fingerprint
+    }
+    fn version(&self) -> &[u8] {
+        &self.version
+    }
+}
+
+/// An owned snapshot row: the validated path and opaque fingerprint are kept
+/// as-is, and only the version is encoded into its stored fixed-width form.
+struct EncodedSnapshotOwned {
+    path: SyncPath,
+    fingerprint: Vec<u8>,
+    version: [u8; VERSION_BYTES],
+}
+
+impl SnapshotData for EncodedSnapshotOwned {
+    fn path(&self) -> &[u8] {
+        self.path.as_bytes()
+    }
+    fn fingerprint(&self) -> &[u8] {
+        &self.fingerprint
     }
     fn version(&self) -> &[u8] {
         &self.version
@@ -1396,6 +1441,116 @@ mod tests {
             store.base(pair.id()),
             Err(Error::InvalidStored(_))
         ));
+    }
+
+    #[test]
+    fn replace_snapshot_iter_matches_the_slice_api_across_pages() {
+        use foldover_types::{Digest, EntryContent, EntryVersion};
+
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        let pair = store.create(&draft(SyncMode::Sync)).unwrap();
+        let version = EntryVersion::new(
+            EntryContent::File(Digest::from_bytes([3; Digest::BYTE_LEN])),
+            Digest::from_bytes([4; Digest::BYTE_LEN]),
+        );
+        let entry = |path: &[u8], salt: u8| SnapshotEntry {
+            path: SyncPath::try_from(path).unwrap(),
+            fingerprint: vec![salt; 20],
+            version,
+        };
+        let stored: Vec<SnapshotEntry> = (0..400)
+            .map(|index| entry(format!("p-{index:04}").as_bytes(), 1))
+            .collect();
+        store
+            .replace_snapshot(pair.id(), pair.revision(), Side::Left, &stored)
+            .unwrap();
+
+        // Remove page-boundary rows, change one row, and add paths before,
+        // between, and after pages.
+        let mut replacement: Vec<SnapshotEntry> = (0..400)
+            .filter(|index| !matches!(*index, 0 | 255 | 256 | 399))
+            .map(|index| {
+                let salt = if index == 100 { 2 } else { 1 };
+                entry(format!("p-{index:04}").as_bytes(), salt)
+            })
+            .collect();
+        replacement.push(entry(b"p-0000a", 1));
+        replacement.push(entry(b"p-0255a", 1));
+        replacement.push(entry(b"p-0400", 1));
+        replacement.sort_by(|a, b| a.path.cmp(&b.path));
+
+        store
+            .replace_snapshot_iter(pair.id(), pair.revision(), Side::Left, replacement.clone())
+            .unwrap();
+        assert_eq!(store.snapshot(pair.id(), Side::Left).unwrap(), replacement);
+
+        // Empty iterator clears the side.
+        store
+            .replace_snapshot_iter(pair.id(), pair.revision(), Side::Left, std::iter::empty())
+            .unwrap();
+        assert!(store.snapshot(pair.id(), Side::Left).unwrap().is_empty());
+
+        // All-added through the iterator.
+        store
+            .replace_snapshot_iter(pair.id(), pair.revision(), Side::Left, replacement.clone())
+            .unwrap();
+        assert_eq!(store.snapshot(pair.id(), Side::Left).unwrap(), replacement);
+    }
+
+    #[test]
+    fn replace_snapshot_iter_rejects_unsorted_and_duplicate_input() {
+        use foldover_types::{Digest, EntryContent, EntryVersion};
+
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        let pair = store.create(&draft(SyncMode::Sync)).unwrap();
+        let version = EntryVersion::new(
+            EntryContent::Directory,
+            Digest::from_bytes([7; Digest::BYTE_LEN]),
+        );
+        let entry = |path: &[u8]| SnapshotEntry {
+            path: SyncPath::try_from(path).unwrap(),
+            fingerprint: b"fingerprint".to_vec(),
+            version,
+        };
+        let stored: Vec<SnapshotEntry> = (0..300)
+            .map(|index| entry(format!("p-{index:04}").as_bytes()))
+            .collect();
+        store
+            .replace_snapshot(pair.id(), pair.revision(), Side::Left, &stored)
+            .unwrap();
+
+        // Out of order in the middle, after some page writes.
+        let mut unsorted = stored.clone();
+        unsorted.swap(10, 20);
+        assert!(matches!(
+            store.replace_snapshot_iter(pair.id(), pair.revision(), Side::Left, unsorted,),
+            Err(Error::Storage(foldover_db::Error::UnsortedSnapshot))
+        ));
+        // A duplicate last row, after a real update write.
+        let mut duplicate = stored.clone();
+        duplicate.last_mut().unwrap().fingerprint = b"changed".to_vec();
+        let last = duplicate.last().unwrap().clone();
+        duplicate.push(last);
+        assert!(matches!(
+            store.replace_snapshot_iter(pair.id(), pair.revision(), Side::Left, duplicate,),
+            Err(Error::Storage(foldover_db::Error::UnsortedSnapshot))
+        ));
+        // Both rejected replacements rolled back.
+        assert_eq!(store.snapshot(pair.id(), Side::Left).unwrap(), stored);
+
+        // A stale revision changes nothing.
+        assert!(matches!(
+            store.replace_snapshot_iter(
+                pair.id(),
+                pair.revision() + 1,
+                Side::Left,
+                std::iter::empty(),
+            ),
+            Err(Error::StaleRevision)
+        ));
+        assert_eq!(store.snapshot(pair.id(), Side::Left).unwrap(), stored);
     }
 
     #[test]

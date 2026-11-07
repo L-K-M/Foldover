@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
@@ -50,6 +51,10 @@ const WRITER_RETRY: Duration = Duration::from_millis(20);
 /// Whether the pair has any conflict choices to spend. One seek per
 /// transaction, so an empty resolution table costs nothing per row.
 const HAS_RESOLUTIONS: &str = "SELECT EXISTS(SELECT 1 FROM resolution WHERE pair_id=?1)";
+/// Stored rows fetched per keyset page when replacing a snapshot side. This
+/// bounds both the owned rows held during the merge and the writes applied
+/// before the next page read.
+const SNAPSHOT_PAGE: usize = 256;
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary, schedule_time, schedule_days, records, bandwidth_limit, review_policy, removal_protection";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
@@ -470,6 +475,8 @@ pub enum Error {
     PairNotFound,
     #[error("Pair configuration changed; refresh before updating it")]
     StaleRevision,
+    #[error("Snapshot rows must be sorted by path with no duplicates")]
+    UnsortedSnapshot,
 }
 
 /// Endpoint identity bytes, unknown until a pair's first sync.
@@ -513,6 +520,18 @@ impl SnapshotData for SnapshotRow {
     }
     fn version(&self) -> &[u8] {
         &self.version
+    }
+}
+
+impl<T: SnapshotData + ?Sized> SnapshotData for &T {
+    fn path(&self) -> &[u8] {
+        (**self).path()
+    }
+    fn fingerprint(&self) -> &[u8] {
+        (**self).fingerprint()
+    }
+    fn version(&self) -> &[u8] {
+        (**self).version()
     }
 }
 
@@ -836,6 +855,10 @@ impl Database {
         self.replace_snapshot_data(pair, revision, side, rows)
     }
 
+    /// Replace one side's observation from a slice in any order. The rows
+    /// are sorted by raw path bytes before the streaming merge, so callers
+    /// that already produce sorted rows can use [`Self::replace_snapshot_sorted`]
+    /// and skip the sort.
     pub fn replace_snapshot_data<T: SnapshotData>(
         &mut self,
         pair: &[u8],
@@ -843,6 +866,32 @@ impl Database {
         side: &str,
         rows: &[T],
     ) -> Result<(), Error> {
+        // SQLite sorts BLOB paths by memcmp, the same order Vec<u8>'s Ord
+        // gives. Sort borrowed rows, then stream them into the merge.
+        let mut given: Vec<&T> = rows.iter().collect();
+        given.sort_by(|a, b| a.path().cmp(b.path()));
+        self.replace_snapshot_sorted(pair, revision, side, given)
+    }
+
+    /// Replace one side's observation from rows already sorted by raw path
+    /// bytes with no duplicates. Only bounded keyset pages of the stored side
+    /// are materialized, and no whole-tree diff vectors are built, so a large
+    /// side never adds a second full copy of the tree.
+    ///
+    /// Out-of-order or duplicate rows are rejected as input errors; the
+    /// single transaction rolls back every write made before the bad row.
+    pub fn replace_snapshot_sorted<I, T>(
+        &mut self,
+        pair: &[u8],
+        revision: i64,
+        side: &str,
+        rows: I,
+    ) -> Result<(), Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: SnapshotData,
+    {
+        let mut incoming = rows.into_iter();
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -856,72 +905,127 @@ impl Database {
             Some(current) if current != revision => return Err(Error::StaleRevision),
             Some(_) => {}
         }
-        // Merge in the order the table returns: SQLite sorts BLOB paths by
-        // memcmp, the same order Vec<u8>'s Ord gives.
-        let mut given: Vec<&T> = rows.iter().collect();
-        given.sort_by(|a, b| a.path().cmp(b.path()));
-        let mut removed = Vec::new();
-        let mut added = Vec::new();
-        let mut changed = Vec::new();
-        // Borrowed blobs keep an unchanged row allocation-free, and the
-        // read finishes before any write reuses the table.
-        {
-            let mut statement = transaction.prepare(
-                "SELECT path,fingerprint,version FROM snapshot_entry WHERE pair_id=?1 AND side=?2 ORDER BY path",
-            )?;
-            let mut stored = statement.query(params![pair, side])?;
-            let mut next = 0;
-            while let Some(row) = stored.next()? {
-                let path = borrowed(row, 0)?;
-                while next < given.len() && given[next].path() < path {
-                    added.push(given[next]);
-                    next += 1;
+        let mut remove = transaction
+            .prepare("DELETE FROM snapshot_entry WHERE pair_id=?1 AND side=?2 AND path=?3")?;
+        let mut insert = transaction.prepare(
+            "INSERT INTO snapshot_entry (pair_id,side,path,fingerprint,version) VALUES (?1,?2,?3,?4,?5)",
+        )?;
+        let mut update = transaction.prepare(
+            "UPDATE snapshot_entry SET fingerprint=?4,version=?5 WHERE pair_id=?1 AND side=?2 AND path=?3",
+        )?;
+        // The last pre-existing row fetched, used as the next keyset anchor.
+        // It stays a stored row even if this page deletes or updates it, so
+        // rows inserted from the incoming iterator are never re-read.
+        let mut anchor: Option<Vec<u8>> = None;
+        // The previous incoming path, to reject out-of-order and duplicate
+        // input. The allocation is reused across rows.
+        let mut last_incoming: Option<Vec<u8>> = None;
+        // The next incoming row, taken before it is compared and written.
+        let mut next: Option<T> = incoming.next();
+        loop {
+            // Read one bounded page into owned rows and close the statement
+            // before any write touches the table.
+            let page: Vec<SnapshotRow> = {
+                let mut statement = transaction.prepare(
+                    "SELECT path,fingerprint,version FROM snapshot_entry \
+                     WHERE pair_id=?1 AND side=?2 AND path>?3 ORDER BY path LIMIT ?4",
+                )?;
+                let after: &[u8] = anchor.as_deref().unwrap_or(&[]);
+                let rows = statement.query_map(
+                    params![pair, side, after, SNAPSHOT_PAGE as i64],
+                    |row| {
+                        Ok(SnapshotRow {
+                            path: row.get(0)?,
+                            fingerprint: row.get(1)?,
+                            version: row.get(2)?,
+                        })
+                    },
+                )?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
+            if page.is_empty() {
+                // The stored side is exhausted: every remaining incoming row
+                // is an insert.
+                while let Some(row) = next.take() {
+                    push_sorted(&mut last_incoming, &row)?;
+                    insert.execute(params![
+                        pair,
+                        side,
+                        row.path(),
+                        row.fingerprint(),
+                        row.version()
+                    ])?;
+                    next = incoming.next();
                 }
-                if next < given.len() && given[next].path() == path {
-                    let candidate = given[next];
-                    if candidate.fingerprint() != borrowed(row, 1)?
-                        || candidate.version() != borrowed(row, 2)?
-                    {
-                        changed.push(candidate);
+                break;
+            }
+            // Known before the page's writes, so the next read starts after
+            // the last pre-existing path rather than after an inserted one.
+            let next_anchor = page.last().expect("non-empty page").path.clone();
+            for stored in &page {
+                loop {
+                    let Some(row) = next.as_ref() else {
+                        remove.execute(params![pair, side, stored.path.as_slice()])?;
+                        break;
+                    };
+                    match row.path().cmp(stored.path.as_slice()) {
+                        Ordering::Less => {
+                            let row = next.take().expect("checked above");
+                            push_sorted(&mut last_incoming, &row)?;
+                            insert.execute(params![
+                                pair,
+                                side,
+                                row.path(),
+                                row.fingerprint(),
+                                row.version()
+                            ])?;
+                            next = incoming.next();
+                        }
+                        Ordering::Equal => {
+                            let row = next.take().expect("checked above");
+                            push_sorted(&mut last_incoming, &row)?;
+                            if row.fingerprint() != stored.fingerprint.as_slice()
+                                || row.version() != stored.version.as_slice()
+                            {
+                                update.execute(params![
+                                    pair,
+                                    side,
+                                    row.path(),
+                                    row.fingerprint(),
+                                    row.version()
+                                ])?;
+                            }
+                            next = incoming.next();
+                            break;
+                        }
+                        Ordering::Greater => {
+                            remove.execute(params![pair, side, stored.path.as_slice()])?;
+                            break;
+                        }
                     }
-                    next += 1;
-                } else {
-                    removed.push(path.to_vec());
                 }
             }
-            added.extend_from_slice(&given[next..]);
+            if page.len() < SNAPSHOT_PAGE {
+                // A short page ends the stored side; whatever remains is an
+                // insert past the last stored path.
+                while let Some(row) = next.take() {
+                    push_sorted(&mut last_incoming, &row)?;
+                    insert.execute(params![
+                        pair,
+                        side,
+                        row.path(),
+                        row.fingerprint(),
+                        row.version()
+                    ])?;
+                    next = incoming.next();
+                }
+                break;
+            }
+            anchor = Some(next_anchor);
         }
-        {
-            let mut remove = transaction
-                .prepare("DELETE FROM snapshot_entry WHERE pair_id=?1 AND side=?2 AND path=?3")?;
-            let mut insert = transaction.prepare(
-                "INSERT INTO snapshot_entry (pair_id,side,path,fingerprint,version) VALUES (?1,?2,?3,?4,?5)",
-            )?;
-            let mut update = transaction.prepare(
-                "UPDATE snapshot_entry SET fingerprint=?4,version=?5 WHERE pair_id=?1 AND side=?2 AND path=?3",
-            )?;
-            for path in &removed {
-                remove.execute(params![pair, side, path])?;
-            }
-            for row in &added {
-                insert.execute(params![
-                    pair,
-                    side,
-                    row.path(),
-                    row.fingerprint(),
-                    row.version()
-                ])?;
-            }
-            for row in &changed {
-                update.execute(params![
-                    pair,
-                    side,
-                    row.path(),
-                    row.fingerprint(),
-                    row.version()
-                ])?;
-            }
-        }
+        drop(remove);
+        drop(insert);
+        drop(update);
         transaction.commit()?;
         Ok(())
     }
@@ -1059,12 +1163,18 @@ impl Database {
     }
 }
 
-/// Borrow a column's bytes from the row instead of copying them out.
-fn borrowed<'a>(row: &'a rusqlite::Row<'_>, column: usize) -> Result<&'a [u8], Error> {
-    Ok(row
-        .get_ref(column)?
-        .as_blob()
-        .map_err(rusqlite::Error::from)?)
+/// Record an incoming row's path and reject a path that does not strictly
+/// follow the previous one. The stored vector is reused across rows.
+fn push_sorted<T: SnapshotData>(last: &mut Option<Vec<u8>>, row: &T) -> Result<(), Error> {
+    if let Some(last) = last.as_ref()
+        && row.path() <= last.as_slice()
+    {
+        return Err(Error::UnsortedSnapshot);
+    }
+    let stored = last.get_or_insert_with(Vec::new);
+    stored.clear();
+    stored.extend_from_slice(row.path());
+    Ok(())
 }
 
 fn revision_error(connection: &Connection, id: &[u8]) -> Result<Error, Error> {
@@ -1297,7 +1407,9 @@ fn pair_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairRow> {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::rc::Rc;
 
     pub(super) fn location() -> (tempfile::TempDir, StateLocation) {
         let directory = tempfile::Builder::new()
@@ -2276,6 +2388,34 @@ pub(super) mod tests {
         );
     }
 
+    /// The keyset page read seeks the snapshot primary key, so the merge
+    /// never sorts or scans the whole side.
+    #[test]
+    fn snapshot_keyset_pages_seek_the_primary_key() {
+        let (_directory, location) = location();
+        let database = Database::open(&location).unwrap();
+        let mut statement = database
+            .connection
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT path,fingerprint,version FROM snapshot_entry \
+                 WHERE pair_id=?1 AND side=?2 AND path>?3 ORDER BY path LIMIT ?4",
+            )
+            .unwrap();
+        let plan = statement
+            .query_map(
+                params![b"pair".as_slice(), "left", b"".as_slice(), 256i64],
+                |row| row.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("; ");
+        assert!(
+            plan.contains("SEARCH snapshot_entry USING PRIMARY KEY"),
+            "keyset page planned as {plan}"
+        );
+    }
+
     #[test]
     fn snapshots_replace_whole_sides_and_follow_the_base_rules() {
         let (_directory, location) = location();
@@ -2513,6 +2653,259 @@ pub(super) mod tests {
                 snapshot_row(b"a0"),
             ]
         );
+    }
+
+    fn page_rows(count: usize) -> Vec<SnapshotRow> {
+        (0..count)
+            .map(|index| snapshot_row(format!("p-{index:04}").as_bytes()))
+            .collect()
+    }
+
+    #[test]
+    fn streaming_replacement_matches_the_slice_api_across_page_edges() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let sorted_pair = database.create_pair(&values()).unwrap();
+        let slice_pair = database.create_pair(&values()).unwrap();
+        let initial = page_rows(600);
+        database
+            .replace_snapshot_sorted(&sorted_pair.id, 1, "left", initial.clone())
+            .unwrap();
+        database
+            .replace_snapshot(&slice_pair.id, 1, "left", &initial)
+            .unwrap();
+
+        // Remove rows at both page boundaries, change three rows, and add
+        // paths before, between, and after pages.
+        let mut replacement: Vec<SnapshotRow> = (0..600)
+            .filter(|index| !matches!(*index, 0 | 255 | 256 | 599))
+            .map(|index| {
+                let mut row = snapshot_row(format!("p-{index:04}").as_bytes());
+                if matches!(index, 100 | 300 | 500) {
+                    row.fingerprint = b"changed".to_vec();
+                }
+                row
+            })
+            .collect();
+        replacement.push(snapshot_row(b"p-0000a"));
+        replacement.push(snapshot_row(b"p-0255a"));
+        replacement.push(snapshot_row(b"p-0600"));
+        replacement.sort_by(|a, b| a.path.cmp(&b.path));
+
+        database
+            .replace_snapshot_sorted(&sorted_pair.id, 1, "left", replacement.clone())
+            .unwrap();
+        let mut unsorted = replacement.clone();
+        unsorted.swap(0, 5);
+        unsorted.swap(100, 200);
+        database
+            .replace_snapshot(&slice_pair.id, 1, "left", &unsorted)
+            .unwrap();
+
+        assert_eq!(
+            database.snapshot(&sorted_pair.id, "left").unwrap(),
+            replacement
+        );
+        assert_eq!(
+            database.snapshot(&slice_pair.id, "left").unwrap(),
+            replacement
+        );
+
+        // Empty input removes every stored row.
+        database
+            .replace_snapshot_sorted(&sorted_pair.id, 1, "left", Vec::<SnapshotRow>::new())
+            .unwrap();
+        database
+            .replace_snapshot(&slice_pair.id, 1, "left", &[])
+            .unwrap();
+        assert!(
+            database
+                .snapshot(&sorted_pair.id, "left")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            database
+                .snapshot(&slice_pair.id, "left")
+                .unwrap()
+                .is_empty()
+        );
+
+        // Adding to an empty side agrees too.
+        let added = page_rows(300);
+        database
+            .replace_snapshot_sorted(&sorted_pair.id, 1, "left", added.clone())
+            .unwrap();
+        let mut unsorted_added = added.clone();
+        unsorted_added.reverse();
+        database
+            .replace_snapshot(&slice_pair.id, 1, "left", &unsorted_added)
+            .unwrap();
+        assert_eq!(database.snapshot(&sorted_pair.id, "left").unwrap(), added);
+        assert_eq!(database.snapshot(&slice_pair.id, "left").unwrap(), added);
+    }
+
+    #[test]
+    fn streaming_replacement_handles_page_aligned_sides() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        for count in [255, 256, 257, 512] {
+            database
+                .replace_snapshot_sorted(&pair.id, 1, "left", Vec::<SnapshotRow>::new())
+                .unwrap();
+            let initial = page_rows(count);
+            database
+                .replace_snapshot_sorted(&pair.id, 1, "left", initial.clone())
+                .unwrap();
+            assert_eq!(database.snapshot(&pair.id, "left").unwrap(), initial);
+
+            // Change the first and last rows and add one past the end.
+            let mut replacement = initial.clone();
+            replacement[0].fingerprint = b"first".to_vec();
+            replacement[count - 1].version = b"last".to_vec();
+            replacement.push(snapshot_row(format!("p-{count:04}").as_bytes()));
+            replacement.sort_by(|a, b| a.path.cmp(&b.path));
+            database
+                .replace_snapshot_sorted(&pair.id, 1, "left", replacement.clone())
+                .unwrap();
+            assert_eq!(database.snapshot(&pair.id, "left").unwrap(), replacement);
+        }
+    }
+
+    #[test]
+    fn streaming_replacement_rejects_unsorted_and_duplicate_input_with_rollback() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        let stored = page_rows(300);
+        database
+            .replace_snapshot_sorted(&pair.id, 1, "left", stored.clone())
+            .unwrap();
+
+        // Out of order in the middle.
+        let mut rows = stored.clone();
+        rows.swap(10, 20);
+        assert!(matches!(
+            database.replace_snapshot_sorted(&pair.id, 1, "left", rows),
+            Err(Error::UnsortedSnapshot)
+        ));
+        // Duplicate in the middle.
+        let mut rows = stored.clone();
+        rows[100] = rows[99].clone();
+        assert!(matches!(
+            database.replace_snapshot_sorted(&pair.id, 1, "left", rows),
+            Err(Error::UnsortedSnapshot)
+        ));
+        // A duplicate of the last row, after the whole page is consumed.
+        let mut rows = stored.clone();
+        let last = rows.last().unwrap().clone();
+        rows.push(last);
+        assert!(matches!(
+            database.replace_snapshot_sorted(&pair.id, 1, "left", rows),
+            Err(Error::UnsortedSnapshot)
+        ));
+        // A duplicate of a path already stored, adjacent after sorting.
+        let mut rows = stored.clone();
+        let first = rows[0].clone();
+        rows.push(first);
+        rows.sort_by(|a, b| a.path.cmp(&b.path));
+        assert!(matches!(
+            database.replace_snapshot_sorted(&pair.id, 1, "left", rows),
+            Err(Error::UnsortedSnapshot)
+        ));
+        // A descending pair at the very end.
+        let mut rows = stored.clone();
+        let last = rows.len() - 1;
+        rows.swap(last - 1, last);
+        assert!(matches!(
+            database.replace_snapshot_sorted(&pair.id, 1, "left", rows),
+            Err(Error::UnsortedSnapshot)
+        ));
+        // None of the rejected replacements changed the stored side.
+        assert_eq!(database.snapshot(&pair.id, "left").unwrap(), stored);
+
+        // A stale revision is rejected before any write, empty or not.
+        assert!(matches!(
+            database.replace_snapshot_sorted(&pair.id, 2, "left", Vec::<SnapshotRow>::new()),
+            Err(Error::StaleRevision)
+        ));
+        assert!(matches!(
+            database.replace_snapshot_sorted(&pair.id, 2, "left", stored.clone()),
+            Err(Error::StaleRevision)
+        ));
+        assert!(matches!(
+            database.replace_snapshot_sorted(b"missing-pair", 1, "left", stored.clone()),
+            Err(Error::PairNotFound)
+        ));
+        assert_eq!(database.snapshot(&pair.id, "left").unwrap(), stored);
+    }
+
+    #[test]
+    fn streaming_replacement_writes_only_the_difference() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        let stored = page_rows(600);
+        database
+            .replace_snapshot_sorted(&pair.id, 1, "left", stored.clone())
+            .unwrap();
+
+        let written = database.connection.total_changes();
+        database
+            .replace_snapshot_sorted(&pair.id, 1, "left", stored.clone())
+            .unwrap();
+        assert_eq!(database.connection.total_changes(), written);
+
+        let mut replacement = stored.clone();
+        replacement[0].fingerprint = b"changed".to_vec();
+        replacement.remove(1);
+        replacement.push(snapshot_row(b"p-0600"));
+        let written = database.connection.total_changes();
+        database
+            .replace_snapshot_sorted(&pair.id, 1, "left", replacement.clone())
+            .unwrap();
+        // One update, one delete, one insert among the untouched 598.
+        assert_eq!(database.connection.total_changes() - written, 3);
+        assert_eq!(database.snapshot(&pair.id, "left").unwrap(), replacement);
+    }
+
+    #[test]
+    fn streaming_replacement_consumes_a_lazy_prefix() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        let rows = page_rows(600);
+
+        // Only the taken prefix reaches the table.
+        database
+            .replace_snapshot_sorted(&pair.id, 1, "left", rows.iter().take(3).cloned())
+            .unwrap();
+        assert_eq!(
+            database.snapshot(&pair.id, "left").unwrap(),
+            rows[..3].to_vec()
+        );
+
+        // A lazy producer, never collected, reaches the table whole.
+        database
+            .replace_snapshot_sorted(&pair.id, 1, "left", Vec::<SnapshotRow>::new())
+            .unwrap();
+        let produced = Rc::new(Cell::new(0));
+        let counter = Rc::clone(&produced);
+        let rows = std::iter::from_fn(move || {
+            let index = counter.get();
+            if index < 600 {
+                counter.set(index + 1);
+                Some(snapshot_row(format!("p-{index:04}").as_bytes()))
+            } else {
+                None
+            }
+        });
+        database
+            .replace_snapshot_sorted(&pair.id, 1, "left", rows)
+            .unwrap();
+        assert_eq!(produced.get(), 600);
+        assert_eq!(database.snapshot(&pair.id, "left").unwrap(), page_rows(600));
     }
 
     #[test]

@@ -133,9 +133,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         let exported = Instant::now();
         for side in [Side::Left, Side::Right] {
             if run.snapshot_changed(side) {
-                let snapshot = run.snapshot(side);
                 let stored = Instant::now();
-                engine.store_snapshot(pair.id(), run.revision(), side, &snapshot)?;
+                engine.store_snapshot_iter(
+                    pair.id(),
+                    run.revision(),
+                    side,
+                    run.snapshot_iter(side),
+                )?;
                 metric(
                     iteration,
                     match side {
