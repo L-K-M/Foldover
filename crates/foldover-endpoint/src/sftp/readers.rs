@@ -12,8 +12,9 @@
 //! ```
 
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
@@ -42,39 +43,178 @@ impl Drop for StopOnPanic<'_> {
 ///
 /// `control` cancelling or `landed` failing stops the readers and ends
 /// with that error, after they wound down. A reader's panic is raised
-/// here once all of them have stopped.
-pub(super) fn read_each<T: Sync, R: Send>(
-    items: &[T],
+/// here once all of them have stopped. At most twice the worker count is
+/// produced but not yet recorded; iterator inputs can release completed rows.
+pub(super) fn read_each<I, T: Send, R: Send>(
+    items: I,
     workers: NonZeroUsize,
     read: impl Fn(&T, &dyn Fn() -> ScanControl) -> R + Sync,
-    landed: impl FnMut(&T, R) -> Result<(), ScanError>,
+    mut landed: impl FnMut(&T, R) -> Result<(), ScanError>,
     control: &mut impl FnMut() -> ScanControl,
-) -> Result<(), ScanError> {
-    let next = AtomicUsize::new(0);
+) -> Result<(), ScanError>
+where
+    I: IntoIterator<Item = T>,
+{
     let stop = AtomicBool::new(false);
-    let (sender, results) = mpsc::channel();
     thread::scope(|threads| {
-        let _stop = StopOnPanic(&stop);
-        for _ in 0..workers.get().min(items.len()) {
-            let (sender, next, stop, read) = (sender.clone(), &next, &stop, &read);
-            threads.spawn(move || reader(items, next, stop, read, &sender));
+        let mut pending = Reads::start(threads, workers, &stop, &read);
+        let mut items = items.into_iter();
+        loop {
+            pending.make_room(&mut landed, control)?;
+            let Some(item) = items.next() else { break };
+            pending.submit(item, &mut landed, control)?;
         }
-        // Only the readers hold senders now, so the results end with them.
-        drop(sender);
-
-        let outcome = collect(items, &results, landed, control);
-        stop.store(true, Ordering::Relaxed);
-        outcome
+        pending.finish(&mut landed, control)
     })
 }
 
-/// Take items until they run out or the run stops.
+/// Bounded handoff for either an iterator or a metadata walk's callback.
+/// Only this thread records results and checks the caller's control.
+/// A failed or unwinding producer drops the sender and stops every reader.
+pub(super) struct Reads<'a, T, R> {
+    jobs: Option<SyncSender<T>>,
+    results: Receiver<(T, R)>,
+    stop: &'a AtomicBool,
+    busy: usize,
+    limit: usize,
+}
+
+impl<'a, T, R> Reads<'a, T, R> {
+    pub(super) fn start<'scope>(
+        threads: &'scope thread::Scope<'scope, '_>,
+        workers: NonZeroUsize,
+        stop: &'a AtomicBool,
+        read: &'a (impl Fn(&T, &dyn Fn() -> ScanControl) -> R + Sync),
+    ) -> Self
+    where
+        'a: 'scope,
+        T: Send + 'scope,
+        R: Send + 'scope,
+    {
+        let limit = workers.get().checked_mul(2).expect("bounded worker count");
+        let (jobs, queue) = mpsc::sync_channel(limit);
+        let queue = Arc::new(Mutex::new(queue));
+        let (results, received) = mpsc::channel();
+        for _ in 0..workers.get() {
+            let (queue, results) = (Arc::clone(&queue), results.clone());
+            threads.spawn(move || reader(&queue, stop, read, &results));
+        }
+        drop(results);
+        Self {
+            jobs: Some(jobs),
+            results: received,
+            stop,
+            busy: 0,
+            limit,
+        }
+    }
+
+    pub(super) fn submit(
+        &mut self,
+        item: T,
+        landed: &mut impl FnMut(&T, R) -> Result<(), ScanError>,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), ScanError> {
+        self.make_room(landed, control)?;
+        // busy counts queued, running and completed-but-unrecorded rows, so
+        // the channel cannot fill while busy is below its capacity.
+        if self
+            .jobs
+            .as_ref()
+            .expect("producer still holds its sender")
+            .send(item)
+            .is_err()
+        {
+            self.stop.store(true, Ordering::Relaxed);
+            return Err(readers_gone());
+        }
+        self.busy += 1;
+        while let Ok((item, result)) = self.results.try_recv() {
+            self.check(control)?;
+            self.busy -= 1;
+            if let Err(error) = landed(&item, result) {
+                self.stop.store(true, Ordering::Relaxed);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish(
+        &mut self,
+        landed: &mut impl FnMut(&T, R) -> Result<(), ScanError>,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), ScanError> {
+        self.check(control)?;
+        while self.busy > 0 {
+            self.wait(landed, control)?;
+        }
+        Ok(())
+    }
+
+    fn check(&self, control: &mut impl FnMut() -> ScanControl) -> Result<(), ScanError> {
+        if control() == ScanControl::Cancel || self.stop.load(Ordering::Relaxed) {
+            self.stop.store(true, Ordering::Relaxed);
+            return Err(ScanError::Cancelled);
+        }
+        Ok(())
+    }
+
+    fn make_room(
+        &mut self,
+        landed: &mut impl FnMut(&T, R) -> Result<(), ScanError>,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), ScanError> {
+        self.check(control)?;
+        while self.busy >= self.limit {
+            self.wait(landed, control)?;
+        }
+        Ok(())
+    }
+
+    fn wait(
+        &mut self,
+        landed: &mut impl FnMut(&T, R) -> Result<(), ScanError>,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), ScanError> {
+        self.check(control)?;
+        match self.results.recv_timeout(POLL) {
+            Ok((item, result)) => {
+                self.busy -= 1;
+                let outcome = landed(&item, result);
+                if outcome.is_err() {
+                    self.stop.store(true, Ordering::Relaxed);
+                }
+                outcome
+            }
+            Err(RecvTimeoutError::Timeout) => Ok(()),
+            Err(RecvTimeoutError::Disconnected) => {
+                self.stop.store(true, Ordering::Relaxed);
+                Err(readers_gone())
+            }
+        }
+    }
+}
+
+impl<T, R> Drop for Reads<'_, T, R> {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.jobs.take();
+    }
+}
+
+fn readers_gone() -> ScanError {
+    ScanError::Io {
+        path: None,
+        source: std::io::Error::other("Observation readers stopped before returning every result"),
+    }
+}
+
 fn reader<T, R>(
-    items: &[T],
-    next: &AtomicUsize,
+    queue: &Mutex<Receiver<T>>,
     stop: &AtomicBool,
     read: &impl Fn(&T, &dyn Fn() -> ScanControl) -> R,
-    results: &Sender<(usize, R)>,
+    results: &Sender<(T, R)>,
 ) {
     let _stop = StopOnPanic(stop);
     let asked = || match stop.load(Ordering::Relaxed) {
@@ -82,32 +222,15 @@ fn reader<T, R>(
         false => ScanControl::Continue,
     };
     while asked() == ScanControl::Continue {
-        let index = next.fetch_add(1, Ordering::Relaxed);
-        let Some(item) = items.get(index) else {
+        let Ok(item) = queue.lock().unwrap_or_else(PoisonError::into_inner).recv() else {
             return;
         };
-        if results.send((index, read(item, &asked))).is_err() {
+        if asked() == ScanControl::Cancel {
             return;
         }
-    }
-}
-
-/// Record results as they land, asking `control` between them and at
-/// least every `POLL`.
-fn collect<T, R>(
-    items: &[T],
-    results: &Receiver<(usize, R)>,
-    mut landed: impl FnMut(&T, R) -> Result<(), ScanError>,
-    control: &mut impl FnMut() -> ScanControl,
-) -> Result<(), ScanError> {
-    loop {
-        if control() == ScanControl::Cancel {
-            return Err(ScanError::Cancelled);
-        }
-        match results.recv_timeout(POLL) {
-            Ok((index, result)) => landed(&items[index], result)?,
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return Ok(()),
+        let result = read(&item, &asked);
+        if results.send((item, result)).is_err() {
+            return;
         }
     }
 }
@@ -115,6 +238,7 @@ fn collect<T, R>(
 #[cfg(test)]
 mod tests {
     use std::panic::{self, AssertUnwindSafe};
+    use std::sync::atomic::AtomicUsize;
     use std::time::Instant;
 
     use super::*;
@@ -137,12 +261,114 @@ mod tests {
     }
 
     #[test]
+    fn owned_rows_are_produced_with_bounded_live_storage() {
+        use std::sync::Arc;
+        struct OwnedRow(Arc<AtomicUsize>);
+        impl Drop for OwnedRow {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let live = Arc::new(AtomicUsize::new(0));
+        let mut landed = 0;
+        let rows = (0..10_000).map(|_| {
+            let count = live.fetch_add(1, Ordering::SeqCst) + 1;
+            assert!(
+                count <= 2 * WORKERS.get(),
+                "too many owned rows alive: {count}"
+            );
+            OwnedRow(Arc::clone(&live))
+        });
+        read_each(
+            rows,
+            WORKERS,
+            |_, _| (),
+            |_, ()| {
+                landed += 1;
+                Ok(())
+            },
+            &mut proceed,
+        )
+        .unwrap();
+        assert_eq!(landed, 10_000);
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn owned_rows_can_contain_values_that_are_not_sync() {
+        use std::cell::Cell;
+        let mut seen = Vec::new();
+        read_each(
+            (0..10).map(Cell::new),
+            WORKERS,
+            |value, _| value.get(),
+            |_, value| {
+                seen.push(value);
+                Ok(())
+            },
+            &mut proceed,
+        )
+        .unwrap();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..10).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_panicking_producer_stops_readers_already_in_progress() {
+        let started = AtomicBool::new(false);
+        let stopped = AtomicBool::new(false);
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+            let items = (0..10).inspect(|&index| {
+                if index > 0 {
+                    let waiting = Instant::now();
+                    while !started.load(Ordering::SeqCst) {
+                        assert!(waiting.elapsed() < PATIENCE);
+                        thread::yield_now();
+                    }
+                    panic!("the producer failed");
+                }
+            });
+            read_each(
+                items,
+                WORKERS,
+                |_, asked| {
+                    started.store(true, Ordering::SeqCst);
+                    until_cancelled(asked);
+                    stopped.store(true, Ordering::SeqCst);
+                },
+                |_, ()| Ok(()),
+                &mut proceed,
+            )
+        }));
+        assert!(outcome.is_err());
+        assert!(stopped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_recording_failure_makes_the_handoff_unusable() {
+        let stop = AtomicBool::new(false);
+        let read = |_: &u32, _: &dyn Fn() -> ScanControl| ();
+        thread::scope(|threads| {
+            let mut pending = Reads::start(threads, WORKERS, &stop, &read);
+            let mut refuse = |_: &u32, ()| Err(ScanError::RootMissing);
+            let result = pending
+                .submit(0, &mut refuse, &mut proceed)
+                .and_then(|()| pending.finish(&mut refuse, &mut proceed));
+            assert!(matches!(result, Err(ScanError::RootMissing)));
+            assert!(matches!(
+                pending.submit(1, &mut |_, ()| Ok(()), &mut proceed),
+                Err(ScanError::Cancelled)
+            ));
+        });
+    }
+
+    #[test]
     fn every_item_lands_once_with_its_result() {
         let items: Vec<u32> = (0..100).collect();
         let mut seen = Vec::new();
 
         read_each(
-            &items,
+            items.iter().copied(),
             WORKERS,
             |item, _| item * 2,
             |item, doubled| {
@@ -163,7 +389,7 @@ mod tests {
         let mut landed = 0;
 
         read_each(
-            &[] as &[u32],
+            std::iter::empty::<u32>(),
             WORKERS,
             |_, _| (),
             |_, ()| {
@@ -185,7 +411,7 @@ mod tests {
 
         // Each of the first readers holds on until all of them are in.
         read_each(
-            &items,
+            items.iter().copied(),
             WORKERS,
             |_, _| {
                 let now = running.fetch_add(1, Ordering::SeqCst) + 1;
@@ -211,7 +437,7 @@ mod tests {
         let started = AtomicBool::new(false);
 
         let outcome = read_each(
-            &items,
+            items.iter().copied(),
             WORKERS,
             |_, asked| {
                 started.store(true, Ordering::SeqCst);
@@ -234,7 +460,7 @@ mod tests {
 
         // The first read fails to record; the others wait to be stopped.
         let outcome = read_each(
-            &items,
+            items.iter().copied(),
             WORKERS,
             |_, asked| {
                 if reads.fetch_add(1, Ordering::SeqCst) > 0 {
@@ -262,7 +488,7 @@ mod tests {
         // counts is that the other read ended on its own.
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
             read_each(
-                &items,
+                items.iter().copied(),
                 WORKERS,
                 |item, asked| {
                     if *item == 0 {
