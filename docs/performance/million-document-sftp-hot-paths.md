@@ -25,7 +25,7 @@ Analysis date: 2026-11-07. Source references use commit `c997ae9d3231e862d74f74e
 | Observe and plan | `crates/foldover-engine/src/run.rs:696-886` | `prepare_on` checks identities and filters, observes the left side and then the right side, aligns names, protects unread paths, and plans against the base. |
 | Remote enumeration and comparison | `crates/foldover-endpoint/src/sftp.rs:482-705`; `crates/foldover-net/src/sftp.rs:267-300,339-412` | Directories are listed serially before content reads start. File comparison already uses up to four reader workers, but re-reads SFTP file contents even when attributes match. |
 | Apply and verify | `crates/foldover-engine/src/run.rs:1174-1331`; `crates/foldover-engine/src/run/copies.rs:57-119`; `crates/foldover-endpoint/src/sftp/transfer.rs:130-226,428-531`; `crates/foldover-endpoint/src/sftp.rs:823-837` | Copies already run concurrently where endpoints allow it. Data is staged and checked; an existing destination is version-checked before replacement. Base and journal updates are committed in batches. |
-| Persistence and finish | `crates/foldover-service/src/sync.rs:908-915`; `crates/foldover-db/src/database.rs:806-881,945-994`; `crates/foldover-db/src/database/journal.rs:79-107`; `crates/foldover-engine/src/run.rs:1345-1379` | Observations are cached before execution. Base changes and journal records share a transaction; completed runs also perform archive retention work. |
+| Persistence and finish | `crates/foldover-service/src/sync.rs:908-915`; `crates/foldover-db/src/database.rs:806-881,945-994`; `crates/foldover-db/src/database/journal.rs:79-107`; `crates/foldover-engine/src/run.rs:1297-1326` | Observations are cached before execution. Base changes and journal records share a transaction; completed runs also perform archive retention work. |
 
 **Correctness boundary:** SFTP attributes are not unchanged-content proof. `SftpEndpoint::observe_entry` reads the version before considering reuse of the stored observation (`sftp.rs:631-653`); `docs/adr/0028-sftp-endpoints.md` explains the same-second replacement problem. None of these proposals removes content comparison, planned-version checks, no-replace creation, archives, undo journaling, identities, canaries, review gates, or leases. SFTP Full durability must continue to be rejected. No production server, SSH configuration, application installation or user data was changed for this analysis.
 
@@ -33,7 +33,7 @@ Analysis date: 2026-11-07. Source references use commit `c997ae9d3231e862d74f74e
 
 Host: Apple M4 Max, 14 logical CPUs, 36 GiB RAM, macOS 27.0.1, Rust/Cargo 1.99.0, optimized benchmark profile. The host was busy: observed load averages were approximately 56/45/48. Timings below are **local diagnostic baselines only**, not capacity estimates for an idle host, a NAS or a million-file run. Existing cached Criterion comparisons were not treated as before/after optimization results.
 
-The existing setup is documented in `perf/README.md:10-28`, with budgets in `perf/budgets.toml:7-14`; `xtask/src/bench.rs:14-20` selects five local benchmark targets. It does not measure an SFTP sync, per-256-write journal growth, or full preparation memory.
+The existing setup is documented in `perf/README.md:10-28`, with budgets in `perf/budgets.toml:6-14`; `xtask/src/bench.rs:14-20` selects five local benchmark targets. It does not measure an SFTP sync, per-256-write journal growth, or full preparation memory.
 
 ```sh
 cargo bench --locked -p foldover-engine --bench plan -- --warm-up-time 1 --measurement-time 3
@@ -79,7 +79,7 @@ Two additional, disposable probes supplied deterministic counters:
 
 **Not run:** a representative LAN test needs a dedicated disposable destination and server access. Use a fixed, recorded manifest of 1,000,000 files, initially 4 KiB each in 10,000 directories; separately test 32 KiB, 1 MiB, deep trees, wide directories and a sample matching the real document-size distribution. This is a proposed diagnostic workload, not a claim about the user's files. Use deterministic non-identical payloads and record NAS filesystem, RTT, link rate, SSH cipher, server version, durability and metadata policies.
 
-For each revision measure: first population of an empty target, a no-change repeat, a 1% content-edit repeat, and a preview followed by its execution. Keep review/first-run gates enabled and record human approval wait separately. Time preview and execution separately and together, using the existing CLI's `sync ID --preview` and `sync ID --progress` commands on a matching release build. On macOS use the authorized app-bundled CLI, as required by `README.md:93-96`; do not bypass private IPC authentication. For the repeat-run case, an exact timing command is:
+For each revision measure: first population of an empty target, a no-change repeat, a 1% content-edit repeat, and a preview followed by its execution. Keep review/first-run gates enabled and record human approval wait separately. Time preview and execution separately and together, using the existing CLI's `sync ID --preview` and `sync ID --progress` commands on a matching release build. On macOS use the authorized app-bundled CLI, as required by `README.md:89-91`; do not bypass private IPC authentication. For the repeat-run case, an exact timing command is:
 
 ```sh
 /usr/bin/time -l "$FOLDOVER_CLI" sync "$PAIR_ID" --progress > "$RESULTS/run.jsonl"
@@ -169,6 +169,109 @@ Set `FOLDOVER_CLI`, `PAIR_ID` and `RESULTS` explicitly for the disposable pair. 
 - **Effort and risk** — Approximately 1-3 engineer-days; internal observation helpers, low-to-medium risk. A prefix bug could expose failed subtrees to planning, so separator boundaries, late failures and normalized aliases need regression coverage. No public API or layer change is required.
 - **Measurement plan** — Add an SFTP observation fixture with one million entries and 0, 100, 1,000 and 10,000 unavailable roots; use a scripted server to produce failures consistently without relying on superuser-sensitive permissions. Count root/prefix comparisons and final-retain CPU. Require the same issues, suppressed paths and zero destructive actions under failed roots; test `a`, `a/file` and `ab/file` explicitly. Run the endpoint SFTP suite and `cargo test --locked -p foldover-engine --lib unavailable`, then measure the failure-heavy shared LAN scenario and cancellation latency.
 
+## Reproduce the SFTP request-count probe
+
+Run this Python 3 script from the repository root with the pinned Rust toolchain on PATH. It copies the two transport modules unchanged into an automatically removed external directory, builds a minimal release harness, and runs a protocol fixture without SSH or user files. Its counts are also directly derivable from `Session::read_from`: a short nonempty DATA response suppresses later answers in the window, including EOF, so another 16-request window follows. The in-repository `Fake` regression additions in proposal 1 remain proposed work. The command uses cached dependencies; remove `--offline` if Rust's dependency cache is empty. This reproduces request counts, not LAN timing.
+
+```python
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+server = r'''
+import json, struct, sys
+size, report = int(sys.argv[1]), sys.argv[2]
+counts = dict(size=size, read_requests=0, eof_replies=0, data_bytes=0)
+u32 = lambda n: struct.pack(">I", n)
+field = lambda b: u32(len(b)) + b
+def take(n):
+    data = sys.stdin.buffer.read(n)
+    if len(data) != n:
+        raise EOFError
+    return data
+def send(body):
+    sys.stdout.buffer.write(field(body))
+    sys.stdout.buffer.flush()
+def status(ident, code):
+    send(bytes([101]) + ident + u32(code) + field(b"") + field(b""))
+try:
+    while True:
+        packet = take(struct.unpack(">I", take(4))[0])
+        kind, ident, fields = packet[0], packet[1:5], packet[5:]
+        if kind == 1:
+            send(bytes([2]) + u32(3))
+        elif kind == 3:
+            send(bytes([102]) + ident + field(b"h"))
+        elif kind == 5:
+            counts["read_requests"] += 1
+            handle_size = struct.unpack(">I", fields[:4])[0]
+            offset, wanted = struct.unpack(">QI", fields[4 + handle_size:])
+            length = min(wanted, max(0, size - offset))
+            if length:
+                counts["data_bytes"] += length
+                send(bytes([103]) + ident + field(b"x" * length))
+            else:
+                counts["eof_replies"] += 1
+                status(ident, 1)
+        elif kind == 4:
+            with open(report, "a") as out:
+                out.write(json.dumps(counts, sort_keys=True) + "\n")
+            status(ident, 0)
+        else:
+            raise RuntimeError(kind)
+except EOFError:
+    pass
+'''
+client = r'''
+#[allow(dead_code)] mod sftp;
+use std::{env, ffi::OsStr, path::Path};
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    for size in [0usize, 1, 4096, 32768, 32769, 524288] {
+        let value = size.to_string();
+        let mut session = sftp::Session::spawn(Path::new(&args[1]), &[
+            OsStr::new("-u"), OsStr::new(&args[2]),
+            OsStr::new(&value), OsStr::new(&args[3]),
+        ]).unwrap();
+        let handle = session.open_read(b"fixture").unwrap();
+        let mut taken = 0;
+        session.read_all(&handle, &mut |chunk| {
+            assert!(chunk.iter().all(|byte| *byte == b'x'));
+            taken += chunk.len();
+            Ok(())
+        }).unwrap();
+        session.close(handle).unwrap();
+        assert_eq!(taken, size);
+    }
+}
+'''
+repo = Path.cwd()
+with tempfile.TemporaryDirectory(prefix="foldover-sftp-read-probe-") as directory:
+    work = Path(directory)
+    (work / "src/sftp").mkdir(parents=True)
+    for name in ("sftp.rs", "sftp/wire.rs"):
+        shutil.copyfile(repo / "crates/foldover-net/src" / name,
+                        work / "src" / name)
+    (work / "Cargo.toml").write_text('''[package]
+name = "foldover-sftp-read-probe"
+version = "0.0.0"
+edition = "2024"
+[dependencies]
+rustix = { version = "=1.1.5", features = ["event", "fs"] }
+''')
+    (work / "src/main.rs").write_text(client)
+    (work / "server.py").write_text(server)
+    subprocess.run([
+        "cargo", "run", "--release", "--offline", "--manifest-path",
+        str(work / "Cargo.toml"), "--", sys.executable,
+        str(work / "server.py"), str(work / "counts.jsonl"),
+    ], check=True, env={**os.environ, "CARGO_TARGET_DIR": str(work / "target")})
+    print((work / "counts.jsonl").read_text())
+```
+
 ## Reproduce the journal SQL micro-experiment
 
 Run this from the repository root with Python 3. It extracts the actual final journal schema, measures cleanup only, and keeps the database in memory. VM counts can vary by SQLite version; the query plan and scaling trend are the relevant comparisons. It does not invoke Foldover or prove an end-to-end speedup.
@@ -225,7 +328,7 @@ for size in (8192, 16384, 32768):
 - **Reject a size/mtime-only remote content cache.** It misses content replacements with identical reported attributes, contrary to ADR 0028 and the passing `unchanged_sftp_attributes_cannot_hide_a_content_change` regression. A cooperative server with trustworthy content generations or compatible server-side digests would be a separate, approval-requiring capability design, not a transparent optimization for generic SFTP.
 - **Reject removing validation, archives or undo to win a benchmark.** These change the product's safety behavior and are not needed for the ranked improvements.
 - **Defer build/startup tuning.** `scripts/build.sh:51,147-151` already selects release builds by default, and the long-running agent amortizes startup. There is no CPU profile justifying LTO, codegen-unit or allocator changes ahead of wire, enumeration and data-structure work. This category was inspected but does not warrant one of the eight slots.
-- **Do not blindly increase copy/session counts.** Four file workers, 16 outstanding chunks, pooled sessions, retry/clamping and separate lease traffic already exist (`sftp.rs:65-68,220-243`; `sftp/sessions.rs:105-163`). More workers may help, but NAS saturation and SSH limits must be measured before changing defaults.
+- **Do not blindly increase copy/session counts.** Four file workers, 16 outstanding chunks, pooled sessions, retry/clamping and separate lease traffic already exist (`crates/foldover-endpoint/src/sftp.rs:65-68,220-243`; `crates/foldover-endpoint/src/sftp/sessions.rs:105-163`; `crates/foldover-net/src/sftp.rs:33-35`). More workers may help, but NAS saturation and SSH limits must be measured before changing defaults.
 
 ## Open questions and unverified work
 
