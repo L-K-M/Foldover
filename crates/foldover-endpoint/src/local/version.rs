@@ -14,7 +14,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use foldover_fs::{AccessControl, AttributeRole, NodeKind};
+use foldover_fs::{AccessControl, AttributeRole, CaptureRoles, MetadataCapture, NodeKind};
 use foldover_types::{Digest, EntryContent, EntryVersion, MetadataPolicy, Propagation};
 
 // Domain separation keeps content, link and metadata digests distinct from
@@ -49,6 +49,32 @@ pub(crate) struct Observed<'a> {
     pub(crate) user_flags: Option<u32>,
     pub(crate) attributes: Option<Vec<Attribute<'a>>>,
     pub(crate) access_control: Option<&'a AccessControl>,
+}
+
+/// The native capture an observation needs for `policy`: values for the roles
+/// a version can depend on, and the ACL only when modes sync. This mapping is
+/// the driver's policy knowledge; the root only applies the set. A link's
+/// version never hashes modes, so its ACL is not read either.
+pub(crate) fn capture_for(policy: MetadataPolicy, kind: NodeKind) -> MetadataCapture {
+    let roles = [
+        AttributeRole::ResourceFork,
+        AttributeRole::Synced,
+        AttributeRole::Quarantine,
+    ];
+    let wanted = if policy.extended_attributes() == Propagation::Ignore {
+        // The fork is content, so it travels even when attributes do not.
+        1
+    } else if policy.quarantine() == Propagation::Sync {
+        3
+    } else {
+        2
+    };
+    let roles = CaptureRoles::new(&roles[..wanted]);
+    if policy.permissions() == Propagation::Sync && kind != NodeKind::Symlink {
+        MetadataCapture::ValuesAndAccessControl(roles)
+    } else {
+        MetadataCapture::Values(roles)
+    }
 }
 
 pub(crate) fn entry_version(
@@ -407,6 +433,38 @@ mod tests {
         );
         assert_ne!(forked.content(), plain.content());
         assert_eq!(forked.metadata(), plain.metadata());
+    }
+
+    #[test]
+    fn capture_for_reads_only_what_a_version_can_use() {
+        let capture = capture_for(ALL, NodeKind::File);
+        assert!(capture.wants(AttributeRole::ResourceFork));
+        assert!(capture.wants(AttributeRole::Synced));
+        assert!(capture.wants(AttributeRole::Quarantine));
+        assert!(capture.wants_access_control());
+
+        // A link's version never hashes modes, so its ACL is not read.
+        let link = capture_for(ALL, NodeKind::Symlink);
+        assert!(link.wants(AttributeRole::Synced));
+        assert!(!link.wants_access_control());
+
+        let nothing = MetadataPolicy::new(
+            Propagation::Ignore,
+            Propagation::Ignore,
+            Propagation::Ignore,
+        );
+        let capture = capture_for(nothing, NodeKind::File);
+        // The fork is content, so it travels even when attributes do not.
+        assert!(capture.wants(AttributeRole::ResourceFork));
+        assert!(!capture.wants(AttributeRole::Synced));
+        assert!(!capture.wants(AttributeRole::Quarantine));
+        assert!(!capture.wants_access_control());
+
+        let no_quarantine = ALL.with_quarantine(Propagation::Ignore);
+        let capture = capture_for(no_quarantine, NodeKind::File);
+        assert!(capture.wants(AttributeRole::Synced));
+        assert!(!capture.wants(AttributeRole::Quarantine));
+        assert!(capture.wants_access_control());
     }
 
     #[test]
