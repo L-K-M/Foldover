@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import signal
 import subprocess
 import sys
 import threading
@@ -195,7 +196,7 @@ def main():
             try:
                 child = subprocess.Popen(["/usr/bin/time", *timer_flags, *command],
                                          stdout=subprocess.PIPE, stderr=resources,
-                                         text=True, bufsize=1)
+                                         text=True, bufsize=1, start_new_session=True)
             except OSError as error:
                 summary["error"] = f"runner launch failed: {error}"
                 raise SystemExit(1) from None
@@ -242,14 +243,22 @@ def main():
         raise
     finally:
         if child is not None and child.poll() is None:
-            child.terminate()
+            # time is a wrapper around the Rust runner and its SSH children.
+            # Give this invocation its own process group and stop all of it.
+            try:
+                os.killpg(child.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
             try:
                 child.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                child.kill()
+                os.killpg(child.pid, signal.SIGKILL)
                 child.wait()
-        if child is not None and returncode is None:
-            returncode = child.poll()
+        if child is not None:
+            if child.stdout is not None:
+                child.stdout.close()
+            if returncode is None:
+                returncode = child.poll()
         stopped.set()
         if sampler is not None:
             sampler.join()
@@ -265,7 +274,7 @@ def main():
               "process/phase/metric record(s); see summary.json parsing_errors",
               file=sys.stderr)
     if returncode:
-        raise SystemExit(returncode)
+        raise SystemExit(128 - returncode if returncode < 0 else returncode)
     if summary["parsing_errors"]:
         raise SystemExit(1)
 

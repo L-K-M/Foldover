@@ -4,6 +4,8 @@
 import importlib.util
 import json
 import os
+import signal
+import time
 from pathlib import Path
 import subprocess
 import sys
@@ -161,6 +163,47 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 1)
         summary = self.summary(output)
         self.assertIn("runner launch failed", summary["error"])
+
+    def test_parser_exception_stops_the_runner_and_its_child(self):
+        child_pid_file = self.root / "child.pid"
+        runner_pid_file = self.root / "runner.pid"
+        runner = write_runner(self.root,
+            f'printf "%s" "$$" > "{runner_pid_file}"\n'
+            f'sleep 60 &\nprintf "%s" "$!" > "{child_pid_file}"\n' + process_line() +
+            "printf 'metric\\t0\\tTotal\\t1\\n'\nwait\n")
+        arguments = [str(HARNESS), "--runner", str(runner), "--state", "state",
+                     "--left", "left", "--right", "right", "--iterations", "1",
+                     "--label", "cancel", "--output", str(self.root / "out-cancel"),
+                     "--revision", "test-revision"]
+        original = self.harness.parse_record
+        def fail_metric(line, line_number):
+            if line.startswith("metric"):
+                raise RuntimeError("injected parser failure")
+            return original(line, line_number)
+        pids = []
+        try:
+            with mock.patch.object(sys, "argv", arguments), \
+                    mock.patch.object(self.harness, "parse_record", side_effect=fail_metric):
+                with self.assertRaisesRegex(RuntimeError, "injected parser failure"):
+                    self.harness.main()
+            pids = [int(path.read_text()) for path in (runner_pid_file, child_pid_file)]
+            def running(pid):
+                result = subprocess.run(["ps", "-p", str(pid), "-o", "state="],
+                                        capture_output=True, text=True, check=False)
+                return result.returncode == 0 and not result.stdout.strip().startswith("Z")
+            deadline = time.monotonic() + 2
+            while any(running(pid) for pid in pids) and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertFalse(any(running(pid) for pid in pids), "benchmark descendants survived cleanup")
+            summary = self.summary(self.root / "out-cancel")
+            self.assertIn("injected parser failure", summary["error"])
+        finally:
+            for path in (runner_pid_file, child_pid_file):
+                if path.exists():
+                    try:
+                        os.kill(int(path.read_text()), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
 
     def test_existing_output_directory_is_preserved(self):
         runner = write_runner(self.root, "printf 'metric\\t0\\tTotal\\t1\\n'\n")
