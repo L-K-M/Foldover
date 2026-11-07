@@ -533,12 +533,12 @@ impl MemoryEndpoint {
                 }
             }
             progress(ObserveStep::Listed);
-            let entry = ObservedEntry {
-                version: stored.node.version(policy),
+            let entry = ObservedEntry::new(
+                stored.node.version(policy),
                 // Versions are always recomputed, so a fingerprint never
                 // has to prove anything.
-                fingerprint: Fingerprint::from_key(Vec::new(), stored.node.size(), UNIX_EPOCH),
-            };
+                Fingerprint::from_key(Vec::new(), stored.node.size(), UNIX_EPOCH),
+            );
             progress(ObserveStep::Checked);
             observation.entries.insert(path, entry);
         }
@@ -596,7 +596,7 @@ impl MemoryEndpoint {
         let folder = self.folder();
         let stored = folder
             .get(path.as_bytes())
-            .filter(|stored| stored.node.version(policy) == expected.version)
+            .filter(|stored| stored.node.version(policy) == expected.version())
             .ok_or_else(|| ApplyError::DestinationChanged(path.clone()))?;
         Ok(stored.clone())
     }
@@ -623,7 +623,7 @@ impl MemoryEndpoint {
         match (current, &destination) {
             (Expected::Absent, None) => {}
             (Expected::Present(current), Some(stored))
-                if stored.node.version(policy) == current.version => {}
+                if stored.node.version(policy) == current.version() => {}
             _ => return Err(ApplyError::DestinationChanged(path.clone())),
         }
 
@@ -692,7 +692,7 @@ impl MemoryEndpoint {
         current: &ObservedEntry,
         run: &RunScope,
     ) -> Result<EntryVersion, ApplyError> {
-        if from.version.content() != current.version.content() {
+        if from.version().content() != current.version().content() {
             return Err(ApplyError::Unsupported(path.clone()));
         }
         let policy = run.options().metadata();
@@ -729,10 +729,10 @@ impl MemoryEndpoint {
                     *mode = source_node.mode() & PERMISSION_BITS;
                 }
             }
-            Node::Symlink { .. } => return Ok(current.version),
+            Node::Symlink { .. } => return Ok(current.version()),
         }
         Ok(metadata_version(
-            current.version.content(),
+            current.version().content(),
             &observed(&stored.node),
             policy,
         ))

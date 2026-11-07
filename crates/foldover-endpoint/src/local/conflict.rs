@@ -108,7 +108,7 @@ mod tests {
         let options = PairOptions::default();
         let path = SyncPath::try_from(b"docs/report.txt".as_slice()).unwrap();
         let observed = endpoint.observe(options.metadata(), &mut proceed).unwrap();
-        let version = observed.entries()[&path].version;
+        let version = observed.entries()[&path].version();
         let copy = |endpoint: &LocalEndpoint| {
             endpoint
                 .keep_copy(&path, version, "Folder B", &options, &mut proceed)

@@ -276,7 +276,7 @@ impl LocalEndpoint {
         let extended =
             self.optional_extended_metadata(&updated, run.options().metadata(), &mut checkpoint)?;
         Ok(metadata_version(
-            current.version.content(),
+            current.version().content(),
             &observed(&updated.metadata, extended.as_ref()),
             run.options().metadata(),
         ))

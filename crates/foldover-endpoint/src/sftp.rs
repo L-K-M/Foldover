@@ -666,16 +666,16 @@ impl SftpEndpoint {
         // the snapshot has nothing to rewrite for this entry. The older
         // time misleads nobody, since SFTP versions are never reused unread.
         if let Some(known) = previous.get(path)
-            && known.version == version
-            && known.fingerprint.same_stat(&key, size)
+            && known.version() == version
+            && known.fingerprint().same_stat(&key, size)
         {
             return Ok(known.clone());
         }
 
-        Ok(ObservedEntry {
+        Ok(ObservedEntry::new(
             version,
-            fingerprint: Fingerprint::from_key(key, size, observed_at),
-        })
+            Fingerprint::from_key(key, size, observed_at),
+        ))
     }
 
     /// An entry's version from its attributes, reading its data or link.
@@ -867,7 +867,7 @@ impl SftpEndpoint {
     ) -> Result<(Vec<u8>, Attributes), ApplyError> {
         let changed = || ApplyError::DestinationChanged(path.clone());
         let (stored, attributes) = self.lookup_on(session, path)?.ok_or_else(changed)?;
-        if self.version_on(session, path, &attributes, policy, control)? != expected.version {
+        if self.version_on(session, path, &attributes, policy, control)? != expected.version() {
             return Err(changed());
         }
         Ok((stored, attributes))

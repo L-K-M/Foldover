@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::num::NonZeroUsize;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use foldover_fs::{
@@ -410,52 +411,66 @@ impl Fingerprint {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObservedEntry {
-    pub(crate) version: EntryVersion,
-    pub(crate) fingerprint: Fingerprint,
+    data: Arc<ObservedData>,
+}
+
+/// Verified observations are immutable. Snapshot reuse and held previews can
+/// share the same exact version and fingerprint instead of copying both.
+#[derive(Debug, Eq, PartialEq)]
+struct ObservedData {
+    version: EntryVersion,
+    fingerprint: Fingerprint,
 }
 
 impl ObservedEntry {
+    pub(crate) fn new(version: EntryVersion, fingerprint: Fingerprint) -> Self {
+        Self {
+            data: Arc::new(ObservedData {
+                version,
+                fingerprint,
+            }),
+        }
+    }
+
+    pub(crate) fn fingerprint(&self) -> &Fingerprint {
+        &self.data.fingerprint
+    }
+
     pub fn version(&self) -> EntryVersion {
-        self.version
+        self.data.version
     }
 
     /// Bytes a copy of this entry's data needs.
     pub fn size(&self) -> u64 {
-        self.fingerprint.size
+        self.fingerprint().size
     }
 
     /// Opaque bytes for a snapshot store.
     pub fn fingerprint_bytes(&self) -> Vec<u8> {
-        self.fingerprint.to_bytes()
+        self.fingerprint().to_bytes()
     }
 
     #[cfg(test)]
     pub(crate) fn for_tests(version: EntryVersion, size: u64) -> Self {
-        Self {
+        Self::new(
             version,
-            fingerprint: Fingerprint {
+            Fingerprint {
                 key: vec![1, 2, 3].into_boxed_slice(),
                 size,
                 observed_at: SystemTime::UNIX_EPOCH,
             },
-        }
+        )
     }
 
     /// Rebuild a stored entry; `None` if the bytes are not a fingerprint.
     pub fn restore(version: EntryVersion, fingerprint: &[u8]) -> Option<Self> {
-        Some(Self {
-            version,
-            fingerprint: Fingerprint::from_bytes(fingerprint)?,
-        })
+        Some(Self::new(version, Fingerprint::from_bytes(fingerprint)?))
     }
 
     /// Rebuild a stored entry from its owned bytes; `None` if they are not a
     /// fingerprint. The key is moved out of `fingerprint`, not copied.
     pub fn restore_owned(version: EntryVersion, fingerprint: Vec<u8>) -> Option<Self> {
-        Some(Self {
-            version,
-            fingerprint: Fingerprint::from_owned(fingerprint)?,
-        })
+        Some(Self::new(version, Fingerprint::from_owned(fingerprint)?))
     }
 }
 
@@ -613,7 +628,7 @@ impl Observation {
     pub fn versions(&self) -> BTreeMap<SyncPath, EntryVersion> {
         self.entries
             .iter()
-            .map(|(path, entry)| (path.clone(), entry.version))
+            .map(|(path, entry)| (path.clone(), entry.version()))
             .collect()
     }
 }
@@ -1277,7 +1292,7 @@ impl LocalEndpoint {
             }
         }
         if let Some(known) = previous.get(&entry.path)
-            && known.fingerprint.proves_unchanged(&entry.metadata)
+            && known.fingerprint().proves_unchanged(&entry.metadata)
         {
             observation.entries.insert(entry.path, known.clone());
             return Ok(());
@@ -1292,10 +1307,7 @@ impl LocalEndpoint {
         };
         observation.entries.insert(
             entry.path,
-            ObservedEntry {
-                version,
-                fingerprint: Fingerprint::new(&entry.metadata, observed_at),
-            },
+            ObservedEntry::new(version, Fingerprint::new(&entry.metadata, observed_at)),
         );
         Ok(())
     }
@@ -1679,6 +1691,25 @@ mod tests {
     }
 
     #[test]
+    fn cloning_an_observation_shares_its_immutable_payload() {
+        let version = EntryVersion::new(
+            foldover_types::EntryContent::File(Digest::from_bytes([1; Digest::BYTE_LEN])),
+            Digest::from_bytes([2; Digest::BYTE_LEN]),
+        );
+        let mut bytes = vec![0; FINGERPRINT_HEADER_BYTES];
+        bytes.extend_from_slice(&[7; 93]);
+        let original = ObservedEntry::restore(version, &bytes).unwrap();
+        let cloned = original.clone();
+        assert_eq!(
+            original.fingerprint().key.as_ptr(),
+            cloned.fingerprint().key.as_ptr()
+        );
+        drop(original);
+        assert_eq!(cloned.version(), version);
+        assert_eq!(cloned.fingerprint_bytes(), bytes);
+    }
+
+    #[test]
     fn owned_and_borrowed_restore_roundtrip_exact_key() {
         let version = EntryVersion::new(
             foldover_types::EntryContent::File(Digest::from_bytes([1; Digest::BYTE_LEN])),
@@ -1695,10 +1726,10 @@ mod tests {
         let owned = ObservedEntry::restore_owned(version, bytes.clone()).unwrap();
 
         assert_eq!(borrowed, owned);
-        assert_eq!(&*borrowed.fingerprint.key, key.as_slice());
-        assert_eq!(&*owned.fingerprint.key, key.as_slice());
-        assert_eq!(borrowed.fingerprint.size, 4096);
-        assert_eq!(borrowed.fingerprint.observed_at, observed_at);
+        assert_eq!(&*borrowed.fingerprint().key, key.as_slice());
+        assert_eq!(&*owned.fingerprint().key, key.as_slice());
+        assert_eq!(borrowed.fingerprint().size, 4096);
+        assert_eq!(borrowed.fingerprint().observed_at, observed_at);
         assert_eq!(borrowed.fingerprint_bytes(), bytes);
         assert_eq!(owned.fingerprint_bytes(), bytes);
 
@@ -1706,7 +1737,7 @@ mod tests {
         let empty =
             ObservedEntry::restore_owned(version, bytes[..FINGERPRINT_HEADER_BYTES].to_vec())
                 .unwrap();
-        assert_eq!(empty.fingerprint.key.len(), 0);
+        assert_eq!(empty.fingerprint().key.len(), 0);
         assert_eq!(
             empty.fingerprint_bytes(),
             bytes[..FINGERPRINT_HEADER_BYTES].to_vec()
@@ -1717,7 +1748,7 @@ mod tests {
         roomy.extend_from_slice(&bytes);
         let shrunk = ObservedEntry::restore_owned(version, roomy).unwrap();
         assert_eq!(shrunk, borrowed);
-        assert_eq!(&*shrunk.fingerprint.key, key.as_slice());
+        assert_eq!(&*shrunk.fingerprint().key, key.as_slice());
     }
 
     /// A pre-epoch observation persists as the epoch, its existing behavior.
@@ -1738,8 +1769,8 @@ mod tests {
         );
 
         let restored = ObservedEntry::restore(version, &bytes).unwrap();
-        assert_eq!(restored.fingerprint.observed_at, UNIX_EPOCH);
-        assert_eq!(&*restored.fingerprint.key, &[9, 8, 7, 6]);
+        assert_eq!(restored.fingerprint().observed_at, UNIX_EPOCH);
+        assert_eq!(&*restored.fingerprint().key, &[9, 8, 7, 6]);
     }
 
     #[test]

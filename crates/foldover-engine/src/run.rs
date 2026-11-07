@@ -329,15 +329,26 @@ pub enum Action {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct PreviewItem {
     path: SyncPath,
     action: Action,
-    left: Option<EntryVersion>,
-    right: Option<EntryVersion>,
+    left: Option<ObservedEntry>,
+    right: Option<ObservedEntry>,
     bytes: u64,
     moved_from: Option<SyncPath>,
 }
+
+impl PartialEq for PreviewItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+            && self.action == other.action
+            && self.versions() == other.versions()
+            && self.bytes == other.bytes
+            && self.moved_from == other.moved_from
+    }
+}
+impl Eq for PreviewItem {}
 
 impl PreviewItem {
     pub fn path(&self) -> &SyncPath {
@@ -350,7 +361,10 @@ impl PreviewItem {
 
     /// What each side held when previewed; a resolution is bound to these.
     pub fn versions(&self) -> (Option<EntryVersion>, Option<EntryVersion>) {
-        (self.left, self.right)
+        (
+            self.left.as_ref().map(ObservedEntry::version),
+            self.right.as_ref().map(ObservedEntry::version),
+        )
     }
 
     /// File data the item copies; 0 for everything else.
@@ -490,8 +504,9 @@ impl Preview {
                 hasher.update(&(from.as_bytes().len() as u64).to_le_bytes());
                 hasher.update(from.as_bytes());
             }
-            version(&mut hasher, item.left);
-            version(&mut hasher, item.right);
+            let (left, right) = item.versions();
+            version(&mut hasher, left);
+            version(&mut hasher, right);
             hasher.update(&item.bytes.to_le_bytes());
         }
         for failure in &self.failures {
@@ -1058,12 +1073,8 @@ impl PairRun {
                         EntryDecision::MovedAway { .. } => return None,
                     },
                 };
-                let version = |side: Side| {
-                    self.observation(side)
-                        .entries()
-                        .get(row.path())
-                        .map(ObservedEntry::version)
-                };
+                let version =
+                    |side: Side| self.observation(side).entries().get(row.path()).cloned();
                 Some(PreviewItem {
                     path: row.path().clone(),
                     action,

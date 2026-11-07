@@ -186,7 +186,7 @@ impl LocalEndpoint {
             ),
         };
 
-        let (staged, version) = match from.version.kind() {
+        let (staged, version) = match from.version().kind() {
             EntryKind::Directory => {
                 if destination.is_some() {
                     return Err(ApplyError::Unsupported(path.clone()));
@@ -250,7 +250,7 @@ impl LocalEndpoint {
             }
         };
         if let Some(version) = version
-            && version.content() != from.version.content()
+            && version.content() != from.version().content()
         {
             return Err(ApplyError::ContentNotStored(path.clone()));
         }
@@ -305,7 +305,7 @@ impl LocalEndpoint {
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<EntryVersion, ApplyError> {
         self.guarded(path)?;
-        if from.version.content() != current.version.content() {
+        if from.version().content() != current.version().content() {
             return Err(ApplyError::Unsupported(path.clone()));
         }
         let source_entry = source
@@ -316,7 +316,7 @@ impl LocalEndpoint {
             .map_err(|error| changed_as(error, ApplyError::DestinationChanged(path.clone())))?;
         if destination.metadata.kind() == NodeKind::Symlink {
             // Link metadata is not copied; the content already matches.
-            return Ok(current.version);
+            return Ok(current.version());
         }
         self.root
             .update_metadata(
@@ -337,7 +337,7 @@ impl LocalEndpoint {
         let extended =
             self.optional_extended_metadata(&updated, run.options.metadata(), &mut checkpoint)?;
         Ok(metadata_version(
-            current.version.content(),
+            current.version().content(),
             &observed(&updated.metadata, extended.as_ref()),
             run.options.metadata(),
         ))
@@ -383,7 +383,7 @@ impl LocalEndpoint {
             .verified(path, current, run, control)
             .map_err(|error| changed_as(error, ApplyError::DestinationChanged(path.clone())))?;
         let durability = run.options.durability();
-        let result = match current.version.content() {
+        let result = match current.version().content() {
             EntryContent::Directory => {
                 self.root
                     .remove_directory(path, entry.metadata(), durability)
@@ -459,10 +459,10 @@ impl LocalEndpoint {
     ) -> Result<LocalEntry, ApplyError> {
         let changed = || ApplyError::DestinationChanged(path.clone());
         let entry = self.entry_at(path)?.ok_or_else(changed)?;
-        if expected.fingerprint.proves_unchanged(&entry.metadata) {
+        if expected.fingerprint().proves_unchanged(&entry.metadata) {
             return Ok(entry);
         }
-        if self.entry_version(&entry, run.options.metadata(), control)? != expected.version {
+        if self.entry_version(&entry, run.options.metadata(), control)? != expected.version() {
             return Err(changed());
         }
         Ok(entry)

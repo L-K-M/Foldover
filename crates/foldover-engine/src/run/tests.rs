@@ -4188,3 +4188,63 @@ fn a_canary_left_out_by_an_ignore_file_says_so() {
         "{error:?}"
     );
 }
+
+/// Preview binding depends on verified versions, never cache timestamps or
+/// stat keys. Sharing observations must preserve this equality contract.
+#[test]
+fn shared_preview_observations_keep_version_only_equality() {
+    let version = EntryVersion::new(
+        EntryContent::File(Digest::from_bytes([1; Digest::BYTE_LEN])),
+        Digest::from_bytes([2; Digest::BYTE_LEN]),
+    );
+    let first = ObservedEntry::restore(version, &[0; 21]).unwrap();
+    let mut changed_key = vec![0; 21];
+    changed_key[20] = 1;
+    let second = ObservedEntry::restore(version, &changed_key).unwrap();
+    assert_ne!(first, second);
+    let item = |observation| PreviewItem {
+        path: path(b"file"),
+        action: Action::Copy {
+            to: Side::Right,
+            change: ChangeKind::Create,
+        },
+        left: Some(observation),
+        right: None,
+        bytes: 0,
+        moved_from: None,
+    };
+    let preview = |item| Preview {
+        pair: fixture_pair(),
+        revision: 1,
+        items: vec![item],
+        left_deletions: DeletionCounts::new(1, 0).unwrap(),
+        right_deletions: DeletionCounts::new(0, 0).unwrap(),
+        removal_protection: RemovalProtection::Enabled,
+        failures: Vec::new(),
+    };
+    let left = preview(item(first));
+    let right = preview(item(second));
+    assert_eq!(left, right);
+    assert_eq!(left.token(), right.token());
+    assert_eq!(left.items()[0].versions(), (Some(version), None));
+}
+
+#[test]
+fn a_preview_outlives_its_prepared_run() {
+    let fixture = fixture(SyncMode::Sync);
+    fs::write(fixture.left.path().join("file"), b"kept").unwrap();
+    let run = fixture.prepare();
+    let preview = run.preview();
+    let token = preview.token();
+    let versions: Vec<_> = preview.items().iter().map(PreviewItem::versions).collect();
+    drop(run);
+    assert_eq!(preview.token(), token);
+    assert_eq!(
+        preview
+            .items()
+            .iter()
+            .map(PreviewItem::versions)
+            .collect::<Vec<_>>(),
+        versions
+    );
+}
