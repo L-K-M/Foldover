@@ -1692,8 +1692,10 @@ impl SftpEndpoint {
                             "Archive parent is not a directory",
                         ));
                     }
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error),
+                    // Missing paths can be reported as generic FAILURE.
+                    // Let MKDIR and its existing verification decide; a
+                    // broken transport remains poisoned and cannot write.
+                    Err(_) => {}
                 }
             }
             if let Err(error) = session.make_directory(&remote, permissions) {

@@ -135,6 +135,48 @@ fn archive_parent_reuse_keeps_component_checks_without_mkdir_refusals() {
     assert!(!outside.path().join("child").exists());
 }
 
+/// Some v3 servers report a missing path as generic FAILURE rather than
+/// NO_SUCH_FILE. The stat-first optimization must still attempt creation.
+#[test]
+fn archive_parents_allow_generic_failure_for_missing_paths() {
+    const GENERIC_MISSING: &str = r#"
+import os, struct, subprocess, sys, threading
+child = subprocess.Popen(sys.argv[1:], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+def requests():
+    while chunk := os.read(0, 65536):
+        child.stdin.write(chunk)
+        child.stdin.flush()
+    child.stdin.close()
+threading.Thread(target=requests, daemon=True).start()
+while head := child.stdout.read(4):
+    length = struct.unpack(">I", head)[0]
+    body = child.stdout.read(length)
+    if body[0] == 101 and body[5:9] == struct.pack(">I", 2):
+        body = body[:5] + struct.pack(">I", 4) + body[9:]
+    sys.stdout.buffer.write(head + body)
+    sys.stdout.buffer.flush()
+child.wait()
+"#;
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = proxy(directory.path(), GENERIC_MISSING, "generic missing status") else {
+        return;
+    };
+    let missing = remote
+        .session()
+        .lstat(&remote.remote(b"missing"))
+        .unwrap_err();
+    assert_ne!(missing.kind(), io::ErrorKind::NotFound);
+    remote
+        .make_directories(b".foldover/archive/run/parent", PRIVATE_DIRECTORY)
+        .unwrap();
+    assert!(
+        directory
+            .path()
+            .join(".foldover/archive/run/parent")
+            .is_dir()
+    );
+}
+
 #[test]
 fn changed_staged_metadata_reads_back_the_final_state() {
     use foldover_types::Propagation::Sync;
