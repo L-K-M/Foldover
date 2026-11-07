@@ -16,6 +16,9 @@ pub const ARCHIVE_ITEM_LIMIT: usize = super::SYNC_ITEM_LIMIT;
 #[serde(deny_unknown_fields)]
 pub struct ArchiveKey {
     pub id: String,
+    /// Pair configuration the browser listed. Archive operations must not
+    /// silently follow a later configuration to different roots.
+    pub revision: u64,
     pub side: super::PairSide,
 }
 
@@ -41,6 +44,7 @@ pub struct ArchiveRuns {
 #[serde(deny_unknown_fields)]
 pub struct ArchiveItemQuery {
     pub id: String,
+    pub revision: u64,
     pub side: super::PairSide,
     pub run: String,
     pub after: Option<Vec<u8>>,
@@ -65,6 +69,7 @@ pub struct ArchiveItems {
 #[serde(deny_unknown_fields)]
 pub struct ArchivePutBack {
     pub id: String,
+    pub revision: u64,
     pub side: super::PairSide,
     pub run: String,
     pub path: Vec<u8>,
@@ -75,6 +80,7 @@ pub struct ArchivePutBack {
 #[serde(deny_unknown_fields)]
 pub struct ArchiveRunKey {
     pub id: String,
+    pub revision: u64,
     pub side: super::PairSide,
     pub run: String,
 }

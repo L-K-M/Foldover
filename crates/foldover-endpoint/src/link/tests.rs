@@ -1,10 +1,15 @@
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use foldover_types::ScanControl;
 use tokio::sync::mpsc;
 
 use super::*;
 
 const WAIT: Duration = Duration::from_secs(10);
+// Preserve a generous gap between heartbeat cadence and expiry on busy CI.
+const HEARTBEAT_INACTIVITY: Duration = Duration::from_secs(2);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(60);
 
 /// Whether a link's store takes the devices it is asked to record.
 #[derive(Clone, Copy)]
@@ -296,6 +301,310 @@ impl PeerHost for Waiting {
         let _ = self.0.lock().unwrap().send(());
         let _ = answer.next_data();
     }
+}
+
+/// Leaves its first call unanswered until the asker retires that stream;
+/// later calls prove the connection itself remains usable.
+struct FirstCallWaits {
+    calls: AtomicUsize,
+    started: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
+}
+
+/// Keeps a request alive beyond one inactivity period, then really answers.
+struct HeartbeatsThenDone;
+
+impl PeerHost for HeartbeatsThenDone {
+    fn paired(&self, _: DeviceId, _: String) -> Result<(), NotRecorded> {
+        Ok(())
+    }
+
+    fn serve(&self, _: DeviceId, _: PeerCall, answer: &mut Answer) {
+        let started = std::time::Instant::now();
+        while started.elapsed() < HEARTBEAT_INACTIVITY + Duration::from_millis(500) {
+            answer.heartbeat().unwrap();
+            std::thread::sleep(HEARTBEAT_INTERVAL);
+        }
+        answer.reply(&PeerReply::Done).unwrap();
+    }
+}
+
+/// Reads data around client heartbeats and reports exactly what arrived.
+struct ReadsPastHeartbeats(std::sync::Mutex<std::sync::mpsc::Sender<(Vec<u8>, bool)>>);
+
+impl PeerHost for ReadsPastHeartbeats {
+    fn paired(&self, _: DeviceId, _: String) -> Result<(), NotRecorded> {
+        Ok(())
+    }
+
+    fn serve(&self, _: DeviceId, _: PeerCall, answer: &mut Answer) {
+        let data = answer.next_data().unwrap().unwrap();
+        let ended = answer.next_data().unwrap().is_none();
+        let _ = self.0.lock().unwrap().send((data, ended));
+        answer.reply(&PeerReply::Done).unwrap();
+    }
+}
+
+/// Emits heartbeats until the test requests silence, then keeps the
+/// stream open until the test has observed inactivity rather than closure.
+struct WatchHeartbeatsThenSilence {
+    beats: std::sync::Mutex<std::sync::mpsc::Sender<Result<usize, LinkError>>>,
+    quiet: AtomicBool,
+    quiet_started: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
+    released: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl PeerHost for WatchHeartbeatsThenSilence {
+    fn paired(&self, _: DeviceId, _: String) -> Result<(), NotRecorded> {
+        Ok(())
+    }
+
+    fn serve(&self, _: DeviceId, _: PeerCall, answer: &mut Answer) {
+        let mut index = 0;
+        while !self.quiet.load(Ordering::Relaxed) {
+            let heartbeat = answer.heartbeat();
+            let failed = heartbeat.is_err();
+            let _ = self.beats.lock().unwrap().send(heartbeat.map(|()| index));
+            if failed {
+                return;
+            }
+            index += 1;
+            std::thread::sleep(HEARTBEAT_INTERVAL);
+        }
+        let _ = self.quiet_started.lock().unwrap().send(());
+        // Dropping the sender also releases this wait if an assertion fails.
+        let _ = self.released.lock().unwrap().recv_timeout(WAIT);
+    }
+}
+
+impl PeerHost for FirstCallWaits {
+    fn paired(&self, _: DeviceId, _: String) -> Result<(), NotRecorded> {
+        Ok(())
+    }
+
+    fn serve(&self, _: DeviceId, _: PeerCall, answer: &mut Answer) {
+        if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+            let _ = self.started.lock().unwrap().send(());
+            let _ = answer.next_data();
+            return;
+        }
+        let _ = answer.reply(&PeerReply::Done);
+    }
+}
+
+/// A pair of already-trusted links on one runtime, with `host` answering B.
+fn trusted_links(
+    host: Arc<dyn PeerHost>,
+) -> (tokio::runtime::Runtime, Arc<PeerLink>, Arc<PeerLink>) {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let identities = [Identity::generate().unwrap(), Identity::generate().unwrap()];
+    let devices = identities
+        .each_ref()
+        .map(|identity| DeviceId::from_bytes(*identity.id().as_bytes()));
+    let [a_identity, b_identity] = identities;
+    let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let (a, b) = runtime.block_on(async {
+        let b = PeerLink::start(
+            b_identity,
+            "Studio".into(),
+            loopback,
+            Presence::Unlisted,
+            [devices[0]],
+            host,
+        )
+        .unwrap();
+        let (recorded, _) = mpsc::unbounded_channel();
+        let a = PeerLink::start(
+            a_identity,
+            "Laptop".into(),
+            loopback,
+            Presence::Unlisted,
+            [devices[1]],
+            Arc::new(Host {
+                recorded,
+                store: Store::Working,
+            }),
+        )
+        .unwrap();
+        a.reach(devices[1], b.address().unwrap());
+        (a, b)
+    });
+    (runtime, a, b)
+}
+
+/// A stopped job must retire only its request stream. Its checkpoint can
+/// itself use the peer link; it therefore cannot run inside `Handle::block_on`.
+#[test]
+fn a_stalled_stream_stops_and_its_checkpoint_can_use_the_link() {
+    let (started_tx, started) = std::sync::mpsc::channel();
+    let host = Arc::new(FirstCallWaits {
+        calls: AtomicUsize::new(0),
+        started: std::sync::Mutex::new(started_tx),
+    });
+    let (runtime, asker, answerer) = trusted_links(host);
+    let device = answerer.device();
+    let stopped = Arc::new(AtomicBool::new(false));
+    let worker_link = Arc::clone(&asker);
+    let worker_stop = Arc::clone(&stopped);
+    let (done_tx, done) = std::sync::mpsc::channel();
+    let (release_tx, release) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let mut exchange = worker_link.ask(device, PeerCall::Shares).unwrap();
+        release.recv_timeout(WAIT).unwrap();
+        let mut checked_link = false;
+        let result = exchange.reply_unless(&mut || {
+            if !checked_link {
+                checked_link = true;
+                let mut check = worker_link.ask(device, PeerCall::Shares).unwrap();
+                assert_eq!(check.reply().unwrap(), PeerReply::Done);
+            }
+            if worker_stop.load(Ordering::Relaxed) {
+                ScanControl::Cancel
+            } else {
+                ScanControl::Continue
+            }
+        });
+        let _ = done_tx.send(result);
+    });
+
+    started.recv_timeout(WAIT).unwrap();
+    release_tx.send(()).unwrap();
+    stopped.store(true, Ordering::Relaxed);
+    assert!(matches!(
+        done.recv_timeout(Duration::from_secs(2)),
+        Ok(Err(LinkError::Cancelled))
+    ));
+    worker.join().unwrap();
+
+    // Cancelling one stream does not discard the healthy connection.
+    assert_eq!(
+        runtime
+            .block_on(asker.request(device, PeerCall::Shares))
+            .unwrap(),
+        PeerReply::Done
+    );
+    drop(answerer);
+    drop(asker);
+    drop(runtime);
+}
+
+#[test]
+fn an_inactive_stream_times_out_without_poisoning_its_connection() {
+    let (started_tx, started) = std::sync::mpsc::channel();
+    let host = Arc::new(FirstCallWaits {
+        calls: AtomicUsize::new(0),
+        started: std::sync::Mutex::new(started_tx),
+    });
+    let (runtime, asker, answerer) = trusted_links(host);
+    let device = answerer.device();
+    let mut exchange = asker
+        .ask_unless_with_inactivity(
+            device,
+            PeerCall::Shares,
+            Duration::from_millis(150),
+            &mut || ScanControl::Continue,
+        )
+        .unwrap();
+    started.recv_timeout(WAIT).unwrap();
+
+    assert!(matches!(exchange.reply(), Err(LinkError::TimedOut)));
+    assert!(matches!(exchange.reply(), Err(LinkError::Closed)));
+    assert_eq!(
+        runtime
+            .block_on(asker.request(device, PeerCall::Shares))
+            .unwrap(),
+        PeerReply::Done
+    );
+}
+
+#[test]
+fn transport_heartbeats_reset_the_frame_inactivity_deadline() {
+    let (runtime, asker, answerer) = trusted_links(Arc::new(HeartbeatsThenDone));
+    let mut exchange = asker
+        .ask_unless_with_inactivity(
+            answerer.device(),
+            PeerCall::Shares,
+            HEARTBEAT_INACTIVITY,
+            &mut || ScanControl::Continue,
+        )
+        .unwrap();
+
+    assert_eq!(exchange.reply().unwrap(), PeerReply::Done);
+    drop(answerer);
+    drop(asker);
+    drop(runtime);
+}
+
+#[test]
+fn an_answer_reads_data_and_end_past_client_heartbeats() {
+    let (read_tx, read) = std::sync::mpsc::channel();
+    let (runtime, asker, answerer) = trusted_links(Arc::new(ReadsPastHeartbeats(
+        std::sync::Mutex::new(read_tx),
+    )));
+    let mut exchange = asker.ask(answerer.device(), PeerCall::Shares).unwrap();
+
+    exchange
+        .heartbeat_unless(&mut || ScanControl::Continue)
+        .unwrap();
+    exchange.send_data(b"payload").unwrap();
+    exchange
+        .heartbeat_unless(&mut || ScanControl::Continue)
+        .unwrap();
+    exchange.end_data().unwrap();
+    assert_eq!(exchange.reply().unwrap(), PeerReply::Done);
+    assert_eq!(
+        read.recv_timeout(WAIT).unwrap(),
+        (b"payload".to_vec(), true)
+    );
+    drop(answerer);
+    drop(asker);
+    drop(runtime);
+}
+
+#[test]
+fn a_watch_stays_live_on_heartbeats_then_reports_silence_as_lost() {
+    let (beat_tx, beats) = std::sync::mpsc::channel();
+    let (quiet_tx, quiet_started) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let host = Arc::new(WatchHeartbeatsThenSilence {
+        beats: std::sync::Mutex::new(beat_tx),
+        quiet: AtomicBool::new(false),
+        quiet_started: std::sync::Mutex::new(quiet_tx),
+        released: std::sync::Mutex::new(released),
+    });
+    let (runtime, asker, answerer) = trusted_links(host.clone());
+    let (report_tx, reports) = std::sync::mpsc::channel();
+    // A busy runner can stall longer than the old 200 ms test budget.
+    // Production keeps its 120 s budget; this still tests expiry promptly.
+    let inactivity = HEARTBEAT_INACTIVITY;
+    let handle = asker.watch_with_timing(
+        answerer.device(),
+        PeerCall::Shares,
+        move |report| {
+            let _ = report_tx.send(report);
+        },
+        inactivity,
+        Duration::from_secs(10),
+    );
+
+    beats.recv_timeout(WAIT).unwrap().unwrap();
+    let started = std::time::Instant::now();
+    // Keep receiving beyond an entire inactivity period. Ignoring heartbeat
+    // frames would lose the watch before the peer is told to go quiet.
+    while started.elapsed() < inactivity + Duration::from_millis(500) {
+        beats.recv_timeout(WAIT).unwrap().unwrap();
+    }
+    assert!(reports.try_recv().is_err());
+    host.quiet.store(true, Ordering::Relaxed);
+    quiet_started.recv_timeout(WAIT).unwrap();
+    assert_eq!(reports.recv_timeout(WAIT), Ok(Watched::Lost));
+    drop(handle);
+    drop(release);
+    drop(answerer);
+    drop(asker);
+    drop(runtime);
 }
 
 /// Review: an answer waiting on its stream as its link went away kept

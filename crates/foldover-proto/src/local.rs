@@ -53,7 +53,7 @@ pub use pair::{
 };
 
 pub const JSON_RPC_VERSION: &str = "2.0";
-pub const PROTOCOL_VERSION: u32 = 19;
+pub const PROTOCOL_VERSION: u32 = 20;
 pub const SESSION_HELLO: &str = "session.hello";
 pub const DAEMON_STATUS: &str = "daemon.status";
 /// Leave crash-loop safe mode and sync again.

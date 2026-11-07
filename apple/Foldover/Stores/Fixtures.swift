@@ -586,7 +586,7 @@ actor FixtureSyncClient: SyncClient {
 actor FixtureArchiveClient: ArchiveClient {
     private var restored: Set<Data> = []
 
-    func runs(_ id: String, side: FolderSide) async throws -> ArchiveRuns {
+    func runs(_ id: String, revision: UInt64, side: FolderSide) async throws -> ArchiveRuns {
         guard side == .b else { return ArchiveRuns(runs: [], more: false) }
         return ArchiveRuns(runs: [
             ArchiveRun(name: "2026-10-21T18-00-03Z", started: Date(timeIntervalSinceNow: -20 * 3600)),
@@ -594,7 +594,8 @@ actor FixtureArchiveClient: ArchiveClient {
         ], more: true)
     }
 
-    func items(_ id: String, side: FolderSide, run: String, after: Data?) async throws -> ArchivePage {
+    func items(_ id: String, revision: UInt64, side: FolderSide, run: String,
+               after: Data?) async throws -> ArchivePage {
         guard after == nil else { return ArchivePage(items: [], more: false) }
         let items = [
             ArchiveItem(path: Data("2024/drafts/old-banner.psd".utf8), size: 66_000_000),
@@ -605,12 +606,14 @@ actor FixtureArchiveClient: ArchiveClient {
         return ArchivePage(items: items.filter { !restored.contains($0.path) }, more: false)
     }
 
-    func putBack(_ id: String, side: FolderSide, run: String, path: Data) async throws -> Data {
+    func putBack(_ id: String, revision: UInt64, side: FolderSide, run: String,
+                 path: Data) async throws -> Data {
         restored.insert(path)
         return path
     }
 
-    func putBackAll(_ id: String, side: FolderSide, run: String) async throws -> RunRestore {
+    func putBackAll(_ id: String, revision: UInt64, side: FolderSide,
+                    run: String) async throws -> RunRestore {
         RunRestore(restored: 3, beside: 1, failures: 0)
     }
 }

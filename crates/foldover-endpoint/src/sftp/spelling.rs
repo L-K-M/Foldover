@@ -87,8 +87,17 @@ impl SftpEndpoint {
         &self,
         path: &SyncPath,
     ) -> Result<Option<(Vec<u8>, Attributes)>, ScanError> {
-        let found = self.on_stored(path.as_bytes(), |remote| {
-            self.session()
+        self.lookup_on(&mut self.session(), path)
+    }
+
+    /// `lookup` without borrowing another pooled session.
+    pub(super) fn lookup_on(
+        &self,
+        session: &mut Session,
+        path: &SyncPath,
+    ) -> Result<Option<(Vec<u8>, Attributes)>, ScanError> {
+        let found = self.on_stored_with(session, path.as_bytes(), |session, remote| {
+            session
                 .lstat(remote)
                 .map(|attributes| (remote.to_vec(), attributes))
         });
@@ -102,7 +111,13 @@ impl SftpEndpoint {
     /// `stored` in the spelling its folder lists. A server that ignores
     /// normalization, as a Mac's does, finds an entry by either
     /// spelling, so only the listing tells which one the entry has.
+    #[cfg(test)]
     pub(super) fn listed(&self, stored: &[u8]) -> Vec<u8> {
+        self.listed_on(&mut self.session(), stored)
+    }
+
+    /// `listed` without borrowing another pooled session.
+    pub(super) fn listed_on(&self, session: &mut Session, stored: &[u8]) -> Vec<u8> {
         let (Some(parent), name) = split(stored) else {
             return stored.to_vec();
         };
@@ -113,7 +128,7 @@ impl SftpEndpoint {
             true => b"/".as_slice(),
             false => parent,
         };
-        let Some(names) = self.listing(parent) else {
+        let Some(names) = self.listing_on(session, parent) else {
             return stored.to_vec();
         };
         // Where both spellings are stored, as given wins.
@@ -133,7 +148,7 @@ impl SftpEndpoint {
     /// folder pays one listing, not one per respellable name. Views
     /// track this run's own writes; another client's changes stay
     /// unseen until the run ends.
-    fn listing(&self, parent: &[u8]) -> Option<Arc<Vec<Vec<u8>>>> {
+    fn listing_on(&self, session: &mut Session, parent: &[u8]) -> Option<Arc<Vec<Vec<u8>>>> {
         {
             let mut listings = self
                 .listings
@@ -149,8 +164,7 @@ impl SftpEndpoint {
             }
             listings.insert(parent.to_vec(), FolderView::Fetching);
         }
-        let names: Option<Vec<Vec<u8>>> = self
-            .session()
+        let names: Option<Vec<Vec<u8>>> = session
             .read_dir(parent)
             .ok()
             .map(|entries| entries.into_iter().map(|(name, _)| name).collect());
@@ -388,10 +402,14 @@ impl SftpEndpoint {
     /// that exist in the spelling stored, the rest composed, so a missing
     /// folder never gets a twin of one stored in the other spelling.
     pub(super) fn creatable(&self, path: &[u8]) -> Vec<u8> {
+        self.creatable_on(&mut self.session(), path)
+    }
+
+    /// `creatable` without borrowing another pooled session.
+    pub(super) fn creatable_on(&self, session: &mut Session, path: &[u8]) -> Vec<u8> {
         if !respellable(path) {
             return path.to_vec();
         }
-        let mut session = self.session();
         let mut stored: Vec<u8> = Vec::new();
         let mut missing = false;
         for component in path.split(|byte| *byte == b'/') {
@@ -420,27 +438,34 @@ impl SftpEndpoint {
     /// Where a new entry at `path` goes: in its parent as stored, under
     /// its composed name.
     pub(super) fn fresh(&self, path: &[u8]) -> Vec<u8> {
+        self.fresh_on(&mut self.session(), path)
+    }
+
+    pub(super) fn fresh_on(&self, session: &mut Session, path: &[u8]) -> Vec<u8> {
         let (parent, name) = split(path);
-        join(&self.directory(parent), &compose(name))
+        join(&self.directory_on(session, parent), &compose(name))
     }
 
     /// A new temporary's server path in `path`'s parent as stored.
-    pub(super) fn beside(&self, path: &[u8]) -> Vec<u8> {
+    pub(super) fn beside_on(&self, session: &mut Session, path: &[u8]) -> Vec<u8> {
         let (parent, _) = split(path);
-        join(&self.directory(parent), &super::temporary_name())
+        join(
+            &self.directory_on(session, parent),
+            &super::temporary_name(),
+        )
     }
 
     /// The folder `parent` as stored; the root for `None`. A folder
     /// missing in every spelling keeps the spelling given.
-    fn directory(&self, parent: Option<&[u8]>) -> Vec<u8> {
+    fn directory_on(&self, session: &mut Session, parent: Option<&[u8]>) -> Vec<u8> {
         let Some(parent) = parent else {
             return self.root.clone();
         };
         if !respellable(parent) {
             return self.remote(parent);
         }
-        self.on_stored(parent, |remote| {
-            self.session().lstat(remote).map(|_| remote.to_vec())
+        self.on_stored_with(session, parent, |session, remote| {
+            session.lstat(remote).map(|_| remote.to_vec())
         })
         .unwrap_or_else(|_| self.remote(parent))
     }
