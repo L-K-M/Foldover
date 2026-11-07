@@ -23,7 +23,7 @@ The initial layout review covered `README.md`, `Cargo.toml`, `scripts/build.sh`,
 - Job preparation and persistence: `crates/foldover-service/src/sync.rs:844-977`, `perform`; state loading occurs under the engine lock at lines 854-858.
 - Tree observation and planning: `crates/foldover-engine/src/run.rs:696-900`, `PairRun::prepare_on`; left and right observations are sequential at lines 789-790. Planning consumes materialized version maps at lines 869-876.
 - SFTP inventory and content comparison: `crates/foldover-endpoint/src/sftp.rs:482-804`, `observe_reporting`, `observe_reads`, and `read_range_on`.
-- Application: `crates/foldover-engine/src/run.rs:997-1331`, `execute`; `crates/foldover-engine/src/run/copies.rs:57-118` dispatches bounded concurrent copies. `crates/foldover-endpoint/src/sftp/transfer.rs:448-532`, `send_on`, stages, hashes, checks metadata, archives, and places uploads.
+- Application: `crates/foldover-engine/src/run.rs:997-1331`, `execute`; `crates/foldover-engine/src/run/copies.rs:57-118` dispatches bounded concurrent copies. `crates/foldover-endpoint/src/sftp/transfer.rs:448-531`, `send_on`, stages, hashes, checks metadata, archives, and places uploads.
 - Persistence: `crates/foldover-state/src/pairs.rs:254-295` and `crates/foldover-db/src/database.rs:806-882` serialize and merge snapshots; `run.rs:52,1236-1275` bounds base/journal batches at 256.
 
 Static evidence establishes possible work, not its production frequency or elapsed-time share. All unmeasured costs, scaling claims, and benefits in the proposals are hypotheses. Existing optimizations are not new proposals: four pooled SFTP content readers, four eligible copy workers, pipelined 32 KiB content requests, incremental snapshot writes, and indexed poll lookups already exist. See [ADR 0043](../adr/0043-parallel-copies.md) and [ADR 0046](../adr/0046-snapshot-archive-sftp-performance.md). Their historical measurements are not measurements of this study.
@@ -52,7 +52,7 @@ The target-directory override avoids this checkout's broken `target` symlink; it
 | `db_snapshot_unchanged_100k` | 23.331 ms | Existing incremental replacement, warm unchanged rows |
 | `db_snapshot_rewrite_100k` | 155.367 ms | Every fingerprint changes |
 
-Medians were read from `build/cargo/criterion/<id>/new/estimates.json`, `median.point_estimate / 1_000_000`. Fixture sizes and timing boundaries are in `crates/foldover-engine/benches/plan.rs:56-131` and `crates/foldover-state/benches/db.rs:80-183`. Both test commands passed: 17 net tests and 44 endpoint tests. `/usr/libexec/sftp-server` was present; the real-server cases did not report being skipped. These tests establish baseline behavior, not performance gains.
+Medians were read from `build/cargo/criterion/<id>/new/estimates.json`, `median.point_estimate / 1_000_000`. Fixture sizes and timing boundaries are in `crates/foldover-engine/benches/plan.rs:56-131` and `crates/foldover-state/benches/db.rs:80-178`. Both test commands passed: 17 net tests and 44 endpoint tests. `/usr/libexec/sftp-server` was present; the real-server cases did not report being skipped. These tests establish baseline behavior, not performance gains.
 
 **Measured protocol counts:** a temporary optimized Rust probe linked the current `foldover-net` library, opened each fixture through `Session::spawn`, called `open_read` → `read_all` → `close`, and checked the returned byte count. A Python framed-packet relay forwarded traffic to the local OpenSSH `sftp-server` and counted client packet type 5 (`READ`) between each `OPEN` and `CLOSE`.
 
