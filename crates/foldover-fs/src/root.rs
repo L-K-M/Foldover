@@ -20,7 +20,8 @@ pub use content::HashError;
 
 mod extended;
 pub use extended::{
-    AccessControl, AttributeRole, ExtendedAttribute, ExtendedMetadata, MetadataReadError,
+    AccessControl, AttributeRole, CaptureRoles, ExtendedAttribute, ExtendedMetadata,
+    MetadataCapture, MetadataReadError,
 };
 
 mod write;

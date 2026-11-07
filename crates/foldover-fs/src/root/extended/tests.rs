@@ -31,7 +31,9 @@ fn native_attributes_keep_empty_binary_values_and_exact_sorted_names() {
     let root = Root::open(temporary.path()).unwrap();
     let metadata = root.metadata(&path()).unwrap();
     let result = root
-        .read_extended_metadata(&path(), &metadata, &mut |_| ScanControl::Continue)
+        .read_extended_metadata(&path(), &metadata, MetadataCapture::Full, &mut |_| {
+            ScanControl::Continue
+        })
         .unwrap();
     for (name, value) in [
         (b"user.foldover.z".as_slice(), b"\0\xffbinary".as_slice()),
@@ -54,15 +56,19 @@ fn native_attributes_keep_empty_binary_values_and_exact_sorted_names() {
     assert_eq!(result.access_control(), &AccessControl::NotReported);
     assert_eq!(
         result,
-        root.read_extended_metadata(&path(), &metadata, &mut |_| ScanControl::Continue)
-            .unwrap()
+        root.read_extended_metadata(&path(), &metadata, MetadataCapture::Full, &mut |_| {
+            ScanControl::Continue
+        })
+        .unwrap()
     );
 
     let directory = fs::File::open(temporary.path()).unwrap();
     set(&directory, c"user.foldover.root", b"root metadata");
     let metadata = root.root_metadata().unwrap();
     let result = root
-        .read_root_extended_metadata(&metadata, &mut |_| ScanControl::Continue)
+        .read_root_extended_metadata(&metadata, MetadataCapture::Full, &mut |_| {
+            ScanControl::Continue
+        })
         .unwrap();
     assert_eq!(observed(&result, b"user.foldover.root").size(), 13);
 }
@@ -75,11 +81,13 @@ fn cancellation_mutations_and_stale_observations_never_produce_complete_metadata
     let root = Root::open(temporary.path()).unwrap();
     let metadata = root.metadata(&path()).unwrap();
     assert!(matches!(
-        root.read_extended_metadata(&path(), &metadata, &mut |_| ScanControl::Cancel),
+        root.read_extended_metadata(&path(), &metadata, MetadataCapture::Full, &mut |_| {
+            ScanControl::Cancel
+        }),
         Err(MetadataReadError::Cancelled)
     ));
     assert!(matches!(
-        root.read_extended_metadata(&path(), &metadata, &mut |bytes| {
+        root.read_extended_metadata(&path(), &metadata, MetadataCapture::Full, &mut |bytes| {
             if bytes == 0 {
                 ScanControl::Continue
             } else {
@@ -90,33 +98,34 @@ fn cancellation_mutations_and_stale_observations_never_produce_complete_metadata
     ));
 
     let mut changed = false;
-    let result = root.read_extended_metadata(&path(), &metadata, &mut |bytes| {
-        if bytes > 0 && !changed {
-            changed = true;
-            // `ctime` advances in coarse ticks on several filesystems, so an
-            // xattr write made in the tick the read started in leaves the
-            // stat key — the only thing this read compares before and after
-            // — unchanged. Repeat it, one tick apart, until the key moves.
-            // The bound and the step match `STAT_SETTLE_ATTEMPTS` and
-            // `STAT_SETTLE_STEP` in foldover-endpoint's tests, which settle
-            // the same way; both are named here so the numbers are not bare.
-            const ATTEMPTS: u32 = 250;
-            const STEP: std::time::Duration = std::time::Duration::from_millis(20);
-            for _ in 0..ATTEMPTS {
-                set(&file, c"user.foldover.test", b"new");
-                if root.metadata(&path()).unwrap().stat_key() != metadata.stat_key() {
-                    break;
+    let result =
+        root.read_extended_metadata(&path(), &metadata, MetadataCapture::Full, &mut |bytes| {
+            if bytes > 0 && !changed {
+                changed = true;
+                // `ctime` advances in coarse ticks on several filesystems, so an
+                // xattr write made in the tick the read started in leaves the
+                // stat key — the only thing this read compares before and after
+                // — unchanged. Repeat it, one tick apart, until the key moves.
+                // The bound and the step match `STAT_SETTLE_ATTEMPTS` and
+                // `STAT_SETTLE_STEP` in foldover-endpoint's tests, which settle
+                // the same way; both are named here so the numbers are not bare.
+                const ATTEMPTS: u32 = 250;
+                const STEP: std::time::Duration = std::time::Duration::from_millis(20);
+                for _ in 0..ATTEMPTS {
+                    set(&file, c"user.foldover.test", b"new");
+                    if root.metadata(&path()).unwrap().stat_key() != metadata.stat_key() {
+                        break;
+                    }
+                    std::thread::sleep(STEP);
                 }
-                std::thread::sleep(STEP);
+                assert_ne!(
+                    root.metadata(&path()).unwrap().stat_key(),
+                    metadata.stat_key(),
+                    "the filesystem never showed the xattr write in the stat key"
+                );
             }
-            assert_ne!(
-                root.metadata(&path()).unwrap().stat_key(),
-                metadata.stat_key(),
-                "the filesystem never showed the xattr write in the stat key"
-            );
-        }
-        ScanControl::Continue
-    });
+            ScanControl::Continue
+        });
     assert!(changed);
     assert!(matches!(result, Err(MetadataReadError::Changed)));
     assert_eq!(
@@ -124,7 +133,9 @@ fn cancellation_mutations_and_stale_observations_never_produce_complete_metadata
         root.metadata(&path()).unwrap().modified()
     );
     assert!(matches!(
-        root.read_extended_metadata(&path(), &metadata, &mut |_| ScanControl::Continue),
+        root.read_extended_metadata(&path(), &metadata, MetadataCapture::Full, &mut |_| {
+            ScanControl::Continue
+        }),
         Err(MetadataReadError::Changed)
     ));
 }
@@ -140,7 +151,9 @@ fn swapped_paths_special_files_and_dataless_entries_are_never_read_as_metadata()
     fs::remove_file(temporary.path().join("file")).unwrap();
     symlink(outside.path().join("file"), temporary.path().join("file")).unwrap();
     assert!(matches!(
-        root.read_extended_metadata(&path(), &metadata, &mut |_| ScanControl::Continue),
+        root.read_extended_metadata(&path(), &metadata, MetadataCapture::Full, &mut |_| {
+            ScanControl::Continue
+        }),
         Err(MetadataReadError::Changed)
     ));
     symlink(outside.path(), temporary.path().join("escape")).unwrap();
@@ -148,6 +161,7 @@ fn swapped_paths_special_files_and_dataless_entries_are_never_read_as_metadata()
         root.read_extended_metadata(
             &SyncPath::try_from(b"escape/file".as_slice()).unwrap(),
             &metadata,
+            MetadataCapture::Full,
             &mut |_| ScanControl::Continue
         )
         .is_err()
@@ -156,7 +170,9 @@ fn swapped_paths_special_files_and_dataless_entries_are_never_read_as_metadata()
     let mut dataless = metadata;
     dataless.residency = DataResidency::Dataless;
     assert!(matches!(
-        root.read_extended_metadata(&path(), &dataless, &mut |_| ScanControl::Continue),
+        root.read_extended_metadata(&path(), &dataless, MetadataCapture::Full, &mut |_| {
+            ScanControl::Continue
+        }),
         Err(MetadataReadError::Dataless)
     ));
     fs::remove_file(temporary.path().join("file")).unwrap();
@@ -167,7 +183,9 @@ fn swapped_paths_special_files_and_dataless_entries_are_never_read_as_metadata()
     .unwrap();
     let metadata = root.metadata(&path()).unwrap();
     assert!(matches!(
-        root.read_extended_metadata(&path(), &metadata, &mut |_| ScanControl::Continue),
+        root.read_extended_metadata(&path(), &metadata, MetadataCapture::Full, &mut |_| {
+            ScanControl::Continue
+        }),
         Err(MetadataReadError::UnsupportedEntry)
     ));
 }
@@ -186,7 +204,9 @@ fn held_metadata_access_does_not_switch_to_a_replacement_ambient_root() {
     let replacement = fs::File::create(selected.join("file")).unwrap();
     set(&replacement, c"user.foldover.test", b"replacement");
     let result = root
-        .read_extended_metadata(&path(), &metadata, &mut |_| ScanControl::Continue)
+        .read_extended_metadata(&path(), &metadata, MetadataCapture::Full, &mut |_| {
+            ScanControl::Continue
+        })
         .unwrap();
     assert_eq!(
         observed(&result, b"user.foldover.test").digest().as_bytes(),
@@ -241,7 +261,9 @@ fn unsupported_symlink_metadata_does_not_turn_into_empty_metadata() {
     let root = Root::open(temporary.path()).unwrap();
     let metadata = root.metadata(&path()).unwrap();
     assert!(matches!(
-        root.read_extended_metadata(&path(), &metadata, &mut |_| ScanControl::Continue),
+        root.read_extended_metadata(&path(), &metadata, MetadataCapture::Full, &mut |_| {
+            ScanControl::Continue
+        }),
         Err(MetadataReadError::UnsupportedEntry)
     ));
 }
@@ -264,7 +286,7 @@ fn native_resource_forks_are_streamed_and_acl_changes_are_observed() {
     let metadata = root.metadata(&path()).unwrap();
     let mut progress = Vec::new();
     let result = root
-        .read_extended_metadata(&path(), &metadata, &mut |bytes| {
+        .read_extended_metadata(&path(), &metadata, MetadataCapture::Full, &mut |bytes| {
             progress.push(bytes);
             ScanControl::Continue
         })
@@ -291,13 +313,16 @@ fn native_resource_forks_are_streamed_and_acl_changes_are_observed() {
     );
     assert!(matches!(result.access_control(), AccessControl::MacOs(_)));
     assert!(matches!(
-        root.read_extended_metadata(&path(), &metadata, &mut |bytes| if bytes
-            > ATTRIBUTE_BUFFER_BYTES as u64
-        {
-            ScanControl::Cancel
-        } else {
-            ScanControl::Continue
-        }),
+        root.read_extended_metadata(
+            &path(),
+            &metadata,
+            MetadataCapture::Full,
+            &mut |bytes| if bytes > ATTRIBUTE_BUFFER_BYTES as u64 {
+                ScanControl::Cancel
+            } else {
+                ScanControl::Continue
+            }
+        ),
         Err(MetadataReadError::Cancelled)
     ));
 
@@ -313,7 +338,9 @@ fn native_resource_forks_are_streamed_and_acl_changes_are_observed() {
     let changed = root.metadata(&path()).unwrap();
     assert_eq!(metadata.modified(), changed.modified());
     let updated = root
-        .read_extended_metadata(&path(), &changed, &mut |_| ScanControl::Continue)
+        .read_extended_metadata(&path(), &changed, MetadataCapture::Full, &mut |_| {
+            ScanControl::Continue
+        })
         .unwrap();
     assert_ne!(result.access_control(), updated.access_control());
     assert!(
@@ -346,7 +373,9 @@ fn native_link_metadata_belongs_to_the_link_not_its_outside_target() {
     let root = Root::open(temporary.path()).unwrap();
     let metadata = root.metadata(&path()).unwrap();
     let result = root
-        .read_extended_metadata(&path(), &metadata, &mut |_| ScanControl::Continue)
+        .read_extended_metadata(&path(), &metadata, MetadataCapture::Full, &mut |_| {
+            ScanControl::Continue
+        })
         .unwrap();
     assert_eq!(observed(&result, b"user.foldover.link").size(), 4);
     assert!(
@@ -354,6 +383,72 @@ fn native_link_metadata_belongs_to_the_link_not_its_outside_target() {
             .attributes()
             .iter()
             .any(|attribute| attribute.name() == b"user.foldover.outside")
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn filtered_capture_skips_oversized_ignored_values_and_unneeded_acls() {
+    let temporary = tempfile::tempdir().unwrap();
+    let selected = temporary.path().join("file");
+    let file = fs::File::create(&selected).unwrap();
+    // `com.apple.macl` is system-managed: no version can depend on it, so a
+    // filtered observation must not read its value at all, however large.
+    let oversized = vec![b'm'; MAX_ATTRIBUTE_VALUE_BYTES as usize + 1];
+    set(&file, c"com.apple.macl", &oversized);
+    let status = std::process::Command::new("/bin/chmod")
+        .args([
+            "+a",
+            "everyone allow read,readattr,readextattr,readsecurity",
+        ])
+        .arg(&selected)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let root = Root::open(temporary.path()).unwrap();
+    let metadata = root.metadata(&path()).unwrap();
+
+    let mut maximum = 0;
+    let filtered = root
+        .read_extended_metadata(
+            &path(),
+            &metadata,
+            MetadataCapture::Values(CaptureRoles::NONE),
+            &mut |bytes| {
+                maximum = maximum.max(bytes);
+                ScanControl::Continue
+            },
+        )
+        .unwrap();
+    assert!(filtered.attributes().is_empty());
+    assert_eq!(filtered.access_control(), &AccessControl::NotReported);
+    assert_eq!(maximum, 0, "ignored values must not be read");
+
+    // Full capture still bounds the same value, and still reads the ACL.
+    assert!(matches!(
+        root.read_extended_metadata(&path(), &metadata, MetadataCapture::Full, &mut |_| {
+            ScanControl::Continue
+        }),
+        Err(MetadataReadError::LimitExceeded)
+    ));
+    rustix::fs::fremovexattr(&file, c"com.apple.macl").unwrap();
+    let metadata = root.metadata(&path()).unwrap();
+    let full = root
+        .read_extended_metadata(&path(), &metadata, MetadataCapture::Full, &mut |_| {
+            ScanControl::Continue
+        })
+        .unwrap();
+    assert!(matches!(
+        full.access_control(),
+        AccessControl::MacOs(Some(bytes)) if !bytes.is_empty()
+    ));
+    assert!(
+        std::process::Command::new("/bin/chmod")
+            .arg("-N")
+            .arg(&selected)
+            .status()
+            .unwrap()
+            .success()
     );
 }
 
@@ -372,14 +467,15 @@ fn changing_resource_forks_cannot_extend_the_observed_work_or_publish_a_digest()
         let metadata = root.metadata(&path()).unwrap();
         let mut changed = false;
         let mut maximum = 0;
-        let result = root.read_extended_metadata(&path(), &metadata, &mut |bytes| {
-            maximum = maximum.max(bytes);
-            if bytes >= ATTRIBUTE_BUFFER_BYTES as u64 && !changed {
-                set(&file, RESOURCE_FORK, &replacement);
-                changed = true;
-            }
-            ScanControl::Continue
-        });
+        let result =
+            root.read_extended_metadata(&path(), &metadata, MetadataCapture::Full, &mut |bytes| {
+                maximum = maximum.max(bytes);
+                if bytes >= ATTRIBUTE_BUFFER_BYTES as u64 && !changed {
+                    set(&file, RESOURCE_FORK, &replacement);
+                    changed = true;
+                }
+                ScanControl::Continue
+            });
         assert!(changed);
         assert!(matches!(result, Err(MetadataReadError::Changed)));
         assert!(maximum <= original.len() as u64);

@@ -61,7 +61,7 @@ fn set_policy(value: c_int) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DirectoryScope, Root};
+    use crate::{DirectoryScope, MetadataCapture, Root};
     use foldover_types::{ScanControl, SyncPath};
     use std::fs;
 
@@ -133,7 +133,7 @@ mod tests {
             })
             .unwrap();
             assert_eq!(policy().unwrap(), IOPOL_MATERIALIZE_DATALESS_FILES_OFF);
-            root.read_extended_metadata(&path, &metadata, &mut |_| {
+            root.read_extended_metadata(&path, &metadata, MetadataCapture::Full, &mut |_| {
                 set_policy(IOPOL_MATERIALIZE_DATALESS_FILES_ON).unwrap();
                 ScanControl::Continue
             })
