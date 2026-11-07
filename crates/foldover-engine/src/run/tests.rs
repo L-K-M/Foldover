@@ -1667,6 +1667,67 @@ fn captured_inputs_stay_at_their_revision_when_the_config_moves() {
 }
 
 #[test]
+fn captured_inputs_survive_pair_removal() {
+    let directory = tempfile::tempdir().unwrap();
+    let left = directory.path().join("left");
+    let right = directory.path().join("right");
+    fs::create_dir(&left).unwrap();
+    fs::create_dir(&right).unwrap();
+    let location = foldover_state::StateLocation::Directory(directory.path().join("state"));
+    let mut engine = crate::Engine::open(&location).unwrap();
+    let pair = engine
+        .create_pair(
+            &PairDraft::new("Captured".into(), root(&left), root(&right), SyncMode::Sync).unwrap(),
+        )
+        .unwrap();
+    let version = EntryVersion::new(
+        EntryContent::Directory,
+        Digest::from_bytes([5; Digest::BYTE_LEN]),
+    );
+    let base_path = path(b"file");
+    engine
+        .commit_run(
+            pair.id(),
+            pair.revision(),
+            Commit::Base {
+                run: "run",
+                updates: &[BaseUpdate::Record(
+                    base_path.clone(),
+                    BaselineEntry::new(version, version).unwrap(),
+                )],
+                journal: &[],
+            },
+        )
+        .unwrap();
+    let entry = SnapshotEntry {
+        path: path(b"left"),
+        fingerprint: [0; 20].to_vec(),
+        version,
+    };
+    engine
+        .store_snapshot(
+            pair.id(),
+            pair.revision(),
+            Side::Left,
+            std::slice::from_ref(&entry),
+        )
+        .unwrap();
+    let pending = engine.capture_run_inputs(pair.id()).unwrap();
+
+    // The primary removes the pair after the inputs were captured.
+    engine.remove_pair(pair.id(), pair.revision()).unwrap();
+
+    let decoded = pending.decode().unwrap();
+    assert_eq!(decoded.pair, pair);
+    assert_eq!(
+        decoded.base[&base_path],
+        BaselineEntry::new(version, version).unwrap()
+    );
+    assert_eq!(decoded.left_snapshot.len(), 1);
+    assert!(decoded.left_snapshot.contains_key(&path(b"left")));
+}
+
+#[test]
 fn captured_snapshots_skip_unreadable_fingerprints() {
     let directory = tempfile::tempdir().unwrap();
     let left = directory.path().join("left");

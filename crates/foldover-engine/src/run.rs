@@ -34,8 +34,8 @@ use foldover_endpoint::{
 };
 use foldover_host::RunAwake;
 use foldover_state::{
-    BaseUpdate, JournalAction, JournalEntry, MountSources, RecordedIdentities, RunRecordInputs,
-    RunRecords, SnapshotEntry,
+    BaseUpdate, JournalAction, JournalEntry, MountSources, RecordedIdentities, RunRecords,
+    SnapshotEntry,
 };
 use foldover_types::{
     BaselineEntry, ChangeKind, ConflictKind, Durability, EndpointId, EntryContent, EntryDecision,
@@ -697,28 +697,36 @@ impl PendingRunInputs {
         &self.pair
     }
 
-    /// Decode the captured trees outside the engine lock. Malformed
-    /// snapshot cache versions are cache misses, as before.
+    /// Decode the captured trees outside the engine lock, streaming each
+    /// side into its map. Malformed snapshot cache versions are cache
+    /// misses, and unreadable fingerprints are skipped, as before.
     pub fn decode(self) -> Result<RunInputs, crate::Error> {
-        let RunRecordInputs {
-            base,
-            left_snapshot,
-            right_snapshot,
-        } = self.records.decode()?;
-        let snapshot = |entries: Vec<SnapshotEntry>| -> Result<BTreeMap<_, _>, crate::Error> {
-            Ok(entries
-                .into_iter()
-                .filter_map(|entry| {
-                    let observed = ObservedEntry::restore(entry.version, &entry.fingerprint)?;
-                    Some((entry.path, observed))
-                })
-                .collect())
-        };
-        Ok(
-            RunInputs::new(self.pair, base, self.identities, self.resolutions)
-                .with_snapshots(snapshot(left_snapshot)?, snapshot(right_snapshot)?)
-                .with_reach(self.reach),
-        )
+        let Self {
+            pair,
+            identities,
+            resolutions,
+            reach,
+            records,
+        } = self;
+        let mut base = BTreeMap::new();
+        records.visit_base(|path, entry| {
+            base.insert(path, entry);
+        })?;
+        let mut left_snapshot = BTreeMap::new();
+        records.visit_snapshot(Side::Left, |entry| {
+            if let Some(observed) = ObservedEntry::restore_owned(entry.version, entry.fingerprint) {
+                left_snapshot.insert(entry.path, observed);
+            }
+        })?;
+        let mut right_snapshot = BTreeMap::new();
+        records.visit_snapshot(Side::Right, |entry| {
+            if let Some(observed) = ObservedEntry::restore_owned(entry.version, entry.fingerprint) {
+                right_snapshot.insert(entry.path, observed);
+            }
+        })?;
+        Ok(RunInputs::new(pair, base, identities, resolutions)
+            .with_snapshots(left_snapshot, right_snapshot)
+            .with_reach(reach))
     }
 }
 

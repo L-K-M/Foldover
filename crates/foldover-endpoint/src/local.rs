@@ -365,13 +365,38 @@ impl Fingerprint {
         bytes
     }
 
-    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+    /// The size and observation time from a persisted header. A
+    /// nanosecond field of a full second or more is malformed, not a
+    /// normalizable value: it would change the observation and can panic
+    /// `Duration::new` when the seconds are near `u64::MAX`.
+    fn header(bytes: &[u8]) -> Option<(u64, SystemTime)> {
         let seconds = u64::from_le_bytes(bytes.get(..8)?.try_into().ok()?);
         let nanoseconds = u32::from_le_bytes(bytes.get(8..12)?.try_into().ok()?);
         let size = u64::from_le_bytes(bytes.get(12..FINGERPRINT_HEADER_BYTES)?.try_into().ok()?);
+        if nanoseconds >= 1_000_000_000 {
+            return None;
+        }
         let observed_at = UNIX_EPOCH.checked_add(Duration::new(seconds, nanoseconds))?;
+        Some((size, observed_at))
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let (size, observed_at) = Self::header(bytes)?;
         Some(Self {
             key: bytes.get(FINGERPRINT_HEADER_BYTES..)?.to_vec(),
+            size,
+            observed_at,
+        })
+    }
+
+    /// Rebuild from an owned persisted fingerprint. The header is parsed
+    /// first, then the same buffer is shifted down to its key, so the key is
+    /// never copied into a second retained allocation.
+    fn from_owned(mut bytes: Vec<u8>) -> Option<Self> {
+        let (size, observed_at) = Self::header(&bytes)?;
+        bytes.drain(..FINGERPRINT_HEADER_BYTES);
+        Some(Self {
+            key: bytes,
             size,
             observed_at,
         })
@@ -416,6 +441,15 @@ impl ObservedEntry {
         Some(Self {
             version,
             fingerprint: Fingerprint::from_bytes(fingerprint)?,
+        })
+    }
+
+    /// Rebuild a stored entry from its owned bytes; `None` if they are not a
+    /// fingerprint. The key is moved out of `fingerprint`, not copied.
+    pub fn restore_owned(version: EntryVersion, fingerprint: Vec<u8>) -> Option<Self> {
+        Some(Self {
+            version,
+            fingerprint: Fingerprint::from_owned(fingerprint)?,
         })
     }
 }
