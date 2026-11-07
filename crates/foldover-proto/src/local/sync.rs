@@ -1,6 +1,7 @@
 //! Previews and runs execute as background jobs in the agent; clients start
 //! one, then poll `sync.status`. Results stay until the pair's next job.
 
+use foldover_types::PairConfig;
 use serde::{Deserialize, Serialize};
 
 pub const SYNC_PREVIEW: &str = "sync.preview";
@@ -305,6 +306,31 @@ pub enum SyncJob {
     Undo,
 }
 
+/// The pair settings a working job claimed. Configuration edits may be
+/// published while that job deliberately keeps using this older snapshot.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncPairContext {
+    pub revision: u64,
+    pub name: String,
+    pub left_root: Vec<u8>,
+    pub right_root: Vec<u8>,
+    pub mode: super::PairMode,
+}
+
+impl From<&PairConfig> for SyncPairContext {
+    fn from(pair: &PairConfig) -> Self {
+        let draft = pair.draft();
+        Self {
+            revision: pair.revision(),
+            name: draft.name().to_owned(),
+            left_root: draft.left().as_bytes().to_vec(),
+            right_root: draft.right().as_bytes().to_vec(),
+            mode: draft.mode().into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "camelCase", deny_unknown_fields)]
 pub enum SyncStatus {
@@ -313,6 +339,7 @@ pub enum SyncStatus {
         job: SyncJob,
         cancelling: bool,
         progress: SyncProgress,
+        pair: SyncPairContext,
     },
     Previewed {
         preview: SyncPreview,
@@ -343,6 +370,48 @@ pub enum SyncStatus {
 mod tests {
     use super::*;
     use crate::local::PairSide;
+
+    fn working_pair() -> SyncPairContext {
+        SyncPairContext {
+            revision: u64::MAX,
+            name: "x".repeat(1024),
+            left_root: vec![u8::MAX; 4096],
+            right_root: vec![u8::MAX; 4096],
+            mode: super::super::PairMode::Mirror {
+                source: PairSide::Right,
+            },
+        }
+    }
+
+    #[test]
+    fn working_status_round_trips_the_claimed_pair_context() {
+        let status = SyncStatus::Working {
+            job: SyncJob::Preview,
+            cancelling: false,
+            progress: SyncProgress::default(),
+            pair: SyncPairContext {
+                revision: 7,
+                name: "Archive".into(),
+                left_root: b"/left/\xff".to_vec(),
+                right_root: b"sftp://nas/right".to_vec(),
+                mode: super::super::PairMode::Backup {
+                    source: PairSide::Left,
+                },
+            },
+        };
+        let value = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            value["pair"],
+            serde_json::json!({
+                "revision": 7,
+                "name": "Archive",
+                "left_root": b"/left/\xff",
+                "right_root": b"sftp://nas/right",
+                "mode": {"kind": "backup", "source": "left"},
+            })
+        );
+        assert_eq!(serde_json::from_value::<SyncStatus>(value).unwrap(), status);
+    }
 
     #[test]
     fn worst_case_statuses_fit_the_frame_limit() {
@@ -418,6 +487,22 @@ mod tests {
             },
         };
         assert!(serde_json::to_vec(&result).unwrap().len() < 1024 * 1024);
+        let working = SyncStatus::Working {
+            job: SyncJob::Run,
+            cancelling: true,
+            progress: SyncProgress {
+                listed: u64::MAX,
+                checked: u64::MAX,
+                changes: u64::MAX,
+                applied: u64::MAX,
+                bytes: u64::MAX,
+                copied: u64::MAX,
+                rate: u64::MAX,
+                waiting_for: Some("x".repeat(1024)),
+            },
+            pair: working_pair(),
+        };
+        assert!(serde_json::to_vec(&working).unwrap().len() < 1024 * 1024);
         let copy = SyncAction::Copy {
             to: PairSide::Right,
         };

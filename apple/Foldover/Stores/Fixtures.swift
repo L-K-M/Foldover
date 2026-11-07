@@ -118,6 +118,11 @@ enum Fixtures {
         ]
     }
 
+    static func runningPair(_ id: String, scenario: FixtureScenario? = nil) -> RunningPair {
+        let catalog = pairs(scenario)
+        return RunningPair(catalog.first { $0.id == id } ?? catalog[0])
+    }
+
     static func change(_ path: String, _ action: ChangeAction, bytes: UInt64 = 0,
                        movedFrom: String? = nil) -> PlannedChange {
         PlannedChange(path: Data(path.utf8), action: action, bytes: bytes,
@@ -303,6 +308,11 @@ actor FixturePairClient: PairClient {
         pairs.first { $0.id == id }?.revision ?? 0
     }
 
+    func runningPair(of id: String) throws -> RunningPair {
+        guard let pair = pairs.first(where: { $0.id == id }) else { throw FixtureError.missingPair }
+        return RunningPair(pair)
+    }
+
     func page(after: String?) async throws -> PairCatalogPage {
         if scenario == .pairsFail { throw FixtureError.catalogUnavailable }
         return PairCatalogPage(pairs: after == nil ? pairs : [], next: nil)
@@ -364,7 +374,7 @@ actor FixtureSyncClient: SyncClient {
     /// Choices made on previewed changes, by path: what the next preview
     /// plans instead.
     private var turned: [String: [Data: ChangeAction]] = [:]
-    private var jobs: [String: (job: Job, polls: Int)] = [:]
+    private var jobs: [String: (job: Job, polls: Int, pair: RunningPair)] = [:]
     private var tokens = 0
     /// Runs finished so far; each names its own archive folder, as the
     /// engine's millisecond run names do.
@@ -380,17 +390,20 @@ actor FixtureSyncClient: SyncClient {
         self.pairs = pairs
         if scenario == .syncing || scenario == .syncingReduced {
             states[Fixtures.photosID] = .working(.run, cancelling: false,
-                                                 progress: WorkProgress(listed: 6_810_813, checked: 371_762))
+                                                 progress: WorkProgress(listed: 6_810_813, checked: 371_762),
+                                                 pair: Fixtures.runningPair(Fixtures.photosID, scenario: scenario))
         }
         if scenario == .syncingWaiting {
             // The engine waits after comparing, before it plans.
             states[Fixtures.photosID] = .working(.run, cancelling: false, progress: WorkProgress(
-                listed: 48_211, checked: 48_211, waitingFor: "Mac Studio"))
+                listed: 48_211, checked: 48_211, waitingFor: "Mac Studio"),
+                pair: Fixtures.runningPair(Fixtures.photosID, scenario: scenario))
         }
         if scenario == .syncingBackup || scenario == .syncingBackupRight {
             states[Fixtures.projectsID] = .working(.run, cancelling: false, progress: WorkProgress(
                 listed: 2_400, checked: 2_400, changes: 5_320, applied: 1_204,
-                bytes: 40_000_000_000, copied: 16_800_000_000, rate: 85_000_000))
+                bytes: 40_000_000_000, copied: 16_800_000_000, rate: 85_000_000),
+                pair: Fixtures.runningPair(Fixtures.projectsID, scenario: scenario))
         }
         if scenario == .failedRun {
             states[Fixtures.photosID] = .finished(RunSummary(
@@ -463,18 +476,22 @@ actor FixtureSyncClient: SyncClient {
     }
 
     func preview(_ id: String) async throws -> PairSyncState {
-        jobs[id] = (.preview, Self.polls(.preview))
+        let pair = try await pairs.runningPair(of: id)
+        jobs[id] = (.preview, Self.polls(.preview), pair)
         let state = PairSyncState.working(.preview, cancelling: false,
-                                          progress: progress(.preview, polls: Self.polls(.preview), for: id))
+                                          progress: progress(.preview, polls: Self.polls(.preview), for: id),
+                                          pair: pair)
         states[id] = state
         return state
     }
 
     func run(_ id: String, approvedA: UInt64, approvedB: UInt64,
              reviewToken: String?) async throws -> PairSyncState {
-        jobs[id] = (.run, Self.polls(.run))
+        let pair = try await pairs.runningPair(of: id)
+        jobs[id] = (.run, Self.polls(.run), pair)
         let state = PairSyncState.working(.run, cancelling: false,
-                                          progress: progress(.run, polls: Self.polls(.run), for: id))
+                                          progress: progress(.run, polls: Self.polls(.run), for: id),
+                                          pair: pair)
         states[id] = state
         return state
     }
@@ -484,9 +501,10 @@ actor FixtureSyncClient: SyncClient {
         let job = current.job
         let polls = current.polls
         if polls > 1 {
-            jobs[id] = (job, polls - 1)
+            jobs[id] = (job, polls - 1, current.pair)
             let state = PairSyncState.working(job == .preview ? .preview : .run, cancelling: false,
-                                              progress: progress(job, polls: polls - 1, for: id))
+                                              progress: progress(job, polls: polls - 1, for: id),
+                                              pair: current.pair)
             states[id] = state
             return state
         }
@@ -524,7 +542,7 @@ actor FixtureSyncClient: SyncClient {
 
     func cancel(_ id: String) async throws -> PairSyncState {
         // Launch-time working fixtures have no countdown job to remove.
-        if jobs[id] == nil, case .working(.run, _, _) = states[id] {
+        if jobs[id] == nil, case .working(.run, _, _, _) = states[id] {
             states[id] = .finished(finish(id, cancelled: true))
             return states[id] ?? .idle
         }
