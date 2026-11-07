@@ -259,10 +259,7 @@ impl SftpEndpoint {
 
     /// Read the root's listing: permissions refuse listings, not opening.
     pub fn probe_access(&self) -> Result<(), ScanError> {
-        self.session()
-            .read_dir(&self.root)
-            .map(|_| ())
-            .map_err(io_error)
+        self.session().probe_directory(&self.root).map_err(io_error)
     }
 
     /// One directory's entries for a quick change check; `None` once the
@@ -756,6 +753,9 @@ impl SftpEndpoint {
         control: &mut impl FnMut() -> ScanControl,
         sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
     ) -> Result<Digest, ScanError> {
+        if expected.size.is_some_and(|size| from > size) {
+            return Err(ScanError::Changed(Some(path.clone())));
+        }
         let (handle, remote) = self
             .on_stored_with(session, path.as_bytes(), |session, remote| {
                 session
@@ -767,7 +767,7 @@ impl SftpEndpoint {
         let mut taken = from;
         let mut cancelled = false;
         let mut overrun = false;
-        let read = session.read_from(&handle, from, &mut |chunk| {
+        let mut consume = |chunk: &[u8]| {
             if control() == ScanControl::Cancel {
                 cancelled = true;
                 return Err(io::Error::other("cancelled"));
@@ -781,7 +781,11 @@ impl SftpEndpoint {
             }
             hasher.update(chunk);
             sink(chunk)
-        });
+        };
+        let read = match expected.size {
+            Some(size) => session.read_from_bounded(&handle, from, size - from, &mut consume),
+            None => session.read_from(&handle, from, &mut consume),
+        };
         let _ = session.close(handle);
         if cancelled {
             return Err(ScanError::Cancelled);
@@ -1656,7 +1660,7 @@ fn read_small_on(
         Err(error) => return Err(error),
     };
     let mut content = Vec::new();
-    let read = session.read_all(&handle, &mut |chunk| {
+    let read = session.read_from_bounded(&handle, 0, limit as u64, &mut |chunk| {
         content.extend_from_slice(chunk);
         if content.len() > limit {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "File too large"));
