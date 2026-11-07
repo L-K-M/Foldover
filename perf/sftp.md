@@ -50,7 +50,11 @@ map and a mutation touches the name it changes. The index keeps the
 server's listing order for aliases that compose alike, leaves invalid
 UTF-8 alone, and is bounded by folder count (512) and a conservative byte
 estimate (~32 MiB) that charges key and table overhead; past either bound
-the cache starts over rather than grow.
+the cache starts over rather than grow. Folder keys and Dirty views count too,
+and writes evict views when they cross the limit. A fetched folder index that
+exceeds the limit can serve its current lookup but is not cached; later
+lookups refetch it. The limit bounds retained hints, not a transient directory
+listing returned by the server.
 
 `cached_spelling_lookup_bench` (ignored) measures folders of 1k, 10k and
 100k mostly-ASCII names with one composed Unicode name, three samples of

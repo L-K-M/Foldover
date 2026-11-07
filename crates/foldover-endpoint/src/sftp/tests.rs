@@ -2341,3 +2341,18 @@ fn a_cancel_during_a_bandwidth_wait_cancels_the_copy() {
         "{copied:?}"
     );
 }
+
+#[test]
+fn cached_spelling_writes_cannot_exceed_the_byte_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("café"), b"data").unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    let _ = remote.listed(&remote.remote("café".as_bytes()));
+    for index in 0..50_000 {
+        let name = format!("{index:06}{}", "x".repeat(240));
+        remote.note_added(&remote.remote(name.as_bytes()));
+        assert!(remote.listings.lock().unwrap().retained_bytes() <= 32 * 1024 * 1024);
+    }
+}

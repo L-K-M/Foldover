@@ -43,6 +43,10 @@ const LISTED_FOLDERS: usize = 512;
 /// cache stays under it.
 const LISTING_BYTES: usize = 32 * 1024 * 1024;
 
+// Charge folder keys, hash-map capacity and allocation slack even for views
+// without an index. Dirty parents also accumulate during ASCII-only writes.
+const FOLDER_OVERHEAD: usize = 3 * size_of::<(Vec<u8>, FolderView)>();
+
 /// Bytes charged per slot, live or tombstoned: the slot itself with
 /// `Vec` growth slack.
 const SLOT_BYTES: usize = 2 * size_of::<Option<Box<[u8]>>>();
@@ -232,39 +236,53 @@ impl Listings {
     /// Install `view` at `parent`, refunding the cached index it
     /// replaces and charging the new one.
     fn store(&mut self, parent: Vec<u8>, view: FolderView) {
-        self.bytes = self.bytes.saturating_sub(
-            self.folders
-                .get(&parent)
-                .and_then(FolderView::bytes)
-                .unwrap_or(0),
-        );
-        if let Some(bytes) = FolderView::bytes(&view) {
-            self.bytes = self.bytes.saturating_add(bytes);
+        self.store_bounded(parent, view, LISTING_BYTES);
+    }
+
+    fn store_bounded(&mut self, parent: Vec<u8>, mut view: FolderView, bound: usize) {
+        let overhead = FOLDER_OVERHEAD.saturating_add(parent.len());
+        let mut charge = overhead.saturating_add(view.bytes().unwrap_or(0));
+        if charge > bound {
+            // The fetched index can answer the current lookup without being
+            // retained. Keep a Dirty hint so the next lookup reads afresh.
+            view = FolderView::Dirty;
+            charge = overhead;
         }
+        if charge > bound {
+            self.clear();
+            return;
+        }
+        let old_charge = self
+            .folders
+            .get(&parent)
+            .map_or(0, |old| overhead.saturating_add(old.bytes().unwrap_or(0)));
+        let retained = self.bytes.saturating_sub(old_charge);
+        if (!self.folders.contains_key(&parent) && self.len() >= LISTED_FOLDERS)
+            || retained.saturating_add(charge) > bound
+        {
+            self.clear();
+        } else {
+            self.bytes = retained;
+        }
+        self.bytes = self.bytes.saturating_add(charge);
         self.folders.insert(parent, view);
     }
 
-    /// Cache `index` at `parent`, starting over when `bound` would be
-    /// exceeded. A single folder larger than the bound is still cached:
-    /// its listing is already in hand, and refusing it would only add
-    /// `read_dir`s without bounding the folder itself.
+    /// Cache indexes that fit, evicting old views before crossing the bound.
     fn store_cached(&mut self, parent: Vec<u8>, index: &Arc<Mutex<IndexedNames>>, bound: usize) {
-        let bytes = index
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .bytes();
-        if self.bytes.saturating_add(bytes) > bound {
-            self.clear();
-        }
-        self.store(parent, FolderView::Cached(Arc::clone(index)));
+        self.store_bounded(parent, FolderView::Cached(Arc::clone(index)), bound);
     }
 }
 
 #[cfg(test)]
 impl Listings {
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.bytes
+    }
+
     /// Mark `parent` as a read in flight, as `listing_on` does.
     pub(super) fn fetching(&mut self, parent: &[u8]) {
-        self.folders.insert(parent.to_vec(), FolderView::Fetching);
+        self.store(parent.to_vec(), FolderView::Fetching);
     }
 
     /// Whether `parent`'s view is Dirty.
@@ -413,9 +431,7 @@ impl SftpEndpoint {
             if listings.len() >= LISTED_FOLDERS {
                 listings.clear();
             }
-            listings
-                .folders
-                .insert(parent.to_vec(), FolderView::Fetching);
+            listings.store(parent.to_vec(), FolderView::Fetching);
         }
         // Remote I/O without either lock held.
         let names: Option<Vec<Vec<u8>>> = session
@@ -464,12 +480,15 @@ impl SftpEndpoint {
                 let growth = index.bytes().saturating_sub(before);
                 drop(index);
                 listings.bytes = listings.bytes.saturating_add(growth);
+                if listings.bytes > LISTING_BYTES {
+                    listings.clear();
+                }
             }
             // A read in flight, or a view already untrustworthy: the
             // mutation leaves the folder Dirty.
             Some(view) => *view = FolderView::Dirty,
             None => {
-                listings.folders.insert(parent, FolderView::Dirty);
+                listings.store(parent, FolderView::Dirty);
             }
         }
     }
@@ -493,7 +512,7 @@ impl SftpEndpoint {
             }
             Some(view) => *view = FolderView::Dirty,
             None => {
-                listings.folders.insert(parent, FolderView::Dirty);
+                listings.store(parent, FolderView::Dirty);
             }
         }
     }
@@ -1020,29 +1039,28 @@ mod tests {
     }
 
     #[test]
-    fn a_cached_folder_over_the_byte_bound_starts_over() {
+    fn oversized_folders_are_not_retained_in_the_cache() {
         let index = Arc::new(Mutex::new(IndexedNames::from_listing(vec![
             b"first".to_vec(),
             b"second".to_vec(),
         ])));
         let mut listings = Listings::new();
-        // A tiny bound stands in for `LISTING_BYTES`: the real one is
-        // impractical to fill in a unit test.
         listings.store_cached(b"/one".to_vec(), &index, 1);
-        assert_eq!(listings.len(), 1);
-        assert!(matches!(
-            listings.folders.get(b"/one".as_slice()),
-            Some(FolderView::Cached(_))
-        ));
-        // The next folder does not fit, so the cache starts over and
-        // holds only the new one.
-        listings.store_cached(b"/two".to_vec(), &index, 1);
-        assert_eq!(listings.len(), 1);
-        assert!(matches!(
-            listings.folders.get(b"/two".as_slice()),
-            Some(FolderView::Cached(_))
-        ));
-        assert!(!listings.folders.contains_key(b"/one".as_slice()));
+        assert!(listings.cached(b"/one").is_none());
+        assert!(listings.bytes <= 1);
+    }
+
+    #[test]
+    fn dirty_parent_views_are_bounded_and_charged() {
+        let mut listings = Listings::new();
+        for index in 0..(LISTED_FOLDERS * 3) {
+            listings.store(format!("/parent-{index}").into_bytes(), FolderView::Dirty);
+            assert!(listings.len() <= LISTED_FOLDERS);
+        }
+        assert!(
+            listings.bytes > 0,
+            "folder keys and views occupy memory too"
+        );
     }
 
     #[test]
@@ -1080,7 +1098,7 @@ mod tests {
         let charged = listings.bytes;
         assert!(charged > 0);
         listings.store(b"/one".to_vec(), FolderView::Dirty);
-        assert_eq!(listings.bytes, 0);
+        assert_eq!(listings.bytes, FOLDER_OVERHEAD + b"/one".len());
         listings.store(b"/one".to_vec(), FolderView::Cached(Arc::clone(&index)));
         assert_eq!(listings.bytes, charged);
     }
