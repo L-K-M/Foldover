@@ -440,6 +440,7 @@ struct UnavailablePaths {
 }
 
 impl UnavailablePaths {
+    #[cfg(test)]
     fn from_paths(paths: &[SyncPath]) -> Self {
         Self {
             index: PathPrefixIndex::from_paths(paths),
@@ -1134,82 +1135,58 @@ impl LocalEndpoint {
         if control() == ScanControl::Cancel {
             return Err(ScanError::Cancelled);
         }
-        let mut entries = Vec::new();
-        let stats = self.scan_filtered(filter, &mut |entry| {
-            entries.push(entry);
+        let mut observation = Observation::default();
+        let mut unavailable = UnavailablePaths::default();
+        let mut directories = Vec::new();
+        let mut failure = None;
+        let scanned = self.scan_filtered(filter, &mut |entry| {
             progress(ObserveStep::Listed);
-            control()
-        })?;
-        if control() == ScanControl::Cancel {
-            return Err(ScanError::Cancelled);
-        }
-
-        let mut observation = Observation {
-            entries: BTreeMap::new(),
-            leftovers: stats.leftovers,
-            oversized: stats.oversized,
-            old: stats.old,
-            unavailable: stats.unavailable,
-            issues: stats.issues,
-            unstable: stats.unstable,
-        };
-        let mut unavailable = UnavailablePaths::from_paths(&observation.unavailable);
-        for mut entry in entries {
-            if control() == ScanControl::Cancel {
-                return Err(ScanError::Cancelled);
-            }
-            if unavailable.contains(&entry.path) {
-                progress(ObserveStep::Checked);
-                continue;
-            }
+            // Directory stats may change during traversal. Refresh those after
+            // the walk as before; files need no whole-tree metadata inventory.
             if entry.metadata.kind() == NodeKind::Directory {
-                // Child changes update directory stats during the walk. Read
-                // its current metadata under the same identity; file and link
-                // versions still require their exact listing observations.
-                let current = at_scan(&Some(entry.path.clone()), self.root.metadata(&entry.path));
-                match current {
-                    Ok(current)
-                        if current.kind() == NodeKind::Directory
-                            && current.identity() == entry.metadata.identity() =>
-                    {
-                        if current != entry.metadata {
-                            observation.unstable.push(Some(entry.path.clone()));
-                        }
-                        entry.metadata = current;
-                    }
-                    current => {
-                        let error = current
-                            .err()
-                            .unwrap_or_else(|| ScanError::Changed(Some(entry.path.clone())));
-                        unavailable.skip_error(&mut observation, error)?;
-                        progress(ObserveStep::Checked);
-                        continue;
-                    }
-                }
+                directories.push(entry);
+                return control();
             }
-            if let Some(known) = previous.get(&entry.path)
-                && known.fingerprint.proves_unchanged(&entry.metadata)
-            {
-                observation.entries.insert(entry.path, known.clone());
-                progress(ObserveStep::Checked);
-                continue;
-            }
-            let observed_at = SystemTime::now();
-            let version = match self.entry_version(&entry, policy, control) {
-                Ok(version) => version,
-                Err(error) => {
-                    unavailable.skip_error(&mut observation, error)?;
+            match self.observe_entry(
+                entry,
+                policy,
+                previous,
+                &mut observation,
+                &mut unavailable,
+                control,
+            ) {
+                Ok(()) => {
                     progress(ObserveStep::Checked);
-                    continue;
+                    ScanControl::Continue
                 }
-            };
-            observation.entries.insert(
-                entry.path,
-                ObservedEntry {
-                    version,
-                    fingerprint: Fingerprint::new(&entry.metadata, observed_at),
-                },
-            );
+                Err(error) => {
+                    failure = Some(error);
+                    ScanControl::Cancel
+                }
+            }
+        });
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        let stats = scanned?;
+        observation.leftovers = stats.leftovers;
+        observation.oversized = stats.oversized;
+        observation.old = stats.old;
+        observation.unstable.extend(stats.unstable);
+        for path in &stats.unavailable {
+            unavailable.insert(path);
+        }
+        observation.unavailable.extend(stats.unavailable);
+        observation.issues.extend(stats.issues);
+        for entry in directories {
+            self.observe_entry(
+                entry,
+                policy,
+                previous,
+                &mut observation,
+                &mut unavailable,
+                control,
+            )?;
             progress(ObserveStep::Checked);
         }
         // A directory can fail after its children were inserted. Suppress
@@ -1218,6 +1195,70 @@ impl LocalEndpoint {
         observation.unstable.sort();
         observation.unstable.dedup();
         Ok(observation)
+    }
+
+    /// Retain one verified entry; bounded failures mark its subtree unknown.
+    fn observe_entry(
+        &self,
+        mut entry: LocalEntry,
+        policy: MetadataPolicy,
+        previous: &BTreeMap<SyncPath, ObservedEntry>,
+        observation: &mut Observation,
+        unavailable: &mut UnavailablePaths,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), ScanError> {
+        if control() == ScanControl::Cancel {
+            return Err(ScanError::Cancelled);
+        }
+        if unavailable.contains(&entry.path) {
+            return Ok(());
+        }
+        if entry.metadata.kind() == NodeKind::Directory {
+            // Child changes update directory stats during the walk. Read
+            // its current metadata under the same identity; file and link
+            // versions still require their exact listing observations.
+            let current = at_scan(&Some(entry.path.clone()), self.root.metadata(&entry.path));
+            match current {
+                Ok(current)
+                    if current.kind() == NodeKind::Directory
+                        && current.identity() == entry.metadata.identity() =>
+                {
+                    if current != entry.metadata {
+                        observation.unstable.push(Some(entry.path.clone()));
+                    }
+                    entry.metadata = current;
+                }
+                current => {
+                    let error = current
+                        .err()
+                        .unwrap_or_else(|| ScanError::Changed(Some(entry.path.clone())));
+                    unavailable.skip_error(observation, error)?;
+                    return Ok(());
+                }
+            }
+        }
+        if let Some(known) = previous.get(&entry.path)
+            && known.fingerprint.proves_unchanged(&entry.metadata)
+        {
+            observation.entries.insert(entry.path, known.clone());
+            return Ok(());
+        }
+        let observed_at = SystemTime::now();
+        let version = match self.entry_version(&entry, policy, control) {
+            Ok(version) => version,
+            Err(error) => {
+                unavailable.skip_error(observation, error)?;
+                return Ok(());
+            }
+        };
+        observation.entries.insert(
+            entry.path,
+            ObservedEntry {
+                version,
+                fingerprint: Fingerprint::new(&entry.metadata, observed_at),
+            },
+        );
+        Ok(())
     }
 
     /// One entry's content and tracked metadata. Every read is checked
@@ -2507,5 +2548,68 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn file_observation_does_not_buffer_the_entire_metadata_inventory() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in ["a", "b", "c", "d"] {
+            fs::write(directory.path().join(name), b"payload").unwrap();
+        }
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        let mut listed = 0;
+        let mut first_checked = None;
+        let result = endpoint
+            .observe_reporting(
+                MetadataPolicy::default(),
+                &Filter::none(),
+                &BTreeMap::new(),
+                &mut || ScanControl::Continue,
+                &mut |step| match step {
+                    ObserveStep::Listed => listed += 1,
+                    ObserveStep::Checked => {
+                        first_checked.get_or_insert(listed);
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(result.entries().len(), 4);
+        assert_eq!(first_checked, Some(1));
+    }
+
+    #[test]
+    fn streamed_files_are_discarded_when_their_directory_loses_its_binding() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("parent")).unwrap();
+        fs::write(directory.path().join("parent/file"), b"payload").unwrap();
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        let mut moved = false;
+        let observation = endpoint
+            .observe_reporting(
+                MetadataPolicy::default(),
+                &Filter::none(),
+                &BTreeMap::new(),
+                &mut || ScanControl::Continue,
+                &mut |step| {
+                    if step == ObserveStep::Checked && !moved {
+                        fs::rename(
+                            directory.path().join("parent"),
+                            directory.path().join("moved"),
+                        )
+                        .unwrap();
+                        moved = true;
+                    }
+                },
+            )
+            .unwrap();
+        assert!(moved);
+        let parent = SyncPath::try_from(b"parent".as_slice()).unwrap();
+        assert!(observation.unavailable().contains(&parent));
+        assert!(
+            observation
+                .entries()
+                .keys()
+                .all(|path| path != &parent && !parent.is_ancestor_of(path))
+        );
     }
 }
