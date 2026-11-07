@@ -815,6 +815,35 @@ fn reads_stop_at_the_observed_length_and_refuse_a_changed_file() {
 }
 
 #[test]
+fn bounded_control_reads_reject_overflow_instead_of_truncating() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    let stored = remote.remote(b"control");
+    for data in [b"".as_slice(), b"a", b"four"] {
+        fs::write(directory.path().join("control"), data).unwrap();
+        assert_eq!(
+            read_small_on(&mut remote.session(), &stored, 4).unwrap(),
+            Some(data.to_vec())
+        );
+    }
+    fs::write(directory.path().join("control"), b"four!").unwrap();
+    assert_eq!(
+        read_small_on(&mut remote.session(), &stored, 4)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidData
+    );
+    // Overflow drains the wire, so the next control read still works.
+    fs::write(directory.path().join("control"), b"ok").unwrap();
+    assert_eq!(
+        read_small_on(&mut remote.session(), &stored, 4).unwrap(),
+        Some(b"ok".to_vec())
+    );
+}
+
+#[test]
 fn keep_copy_streams_a_file_beside_the_original_and_cancels_cleanly() {
     let directory = tempfile::tempdir().unwrap();
     let Some(remote) = sftp(directory.path()) else {

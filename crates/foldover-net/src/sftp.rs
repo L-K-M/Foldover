@@ -92,6 +92,12 @@ struct Extensions {
     fsync: bool,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum DirectoryRead {
+    All,
+    Probe,
+}
+
 pub struct Session {
     child: Option<Child>,
     input: File,
@@ -265,6 +271,20 @@ impl Session {
 
     /// Every entry of a directory except `.` and `..`.
     pub fn read_dir(&mut self, path: &[u8]) -> io::Result<Vec<(Vec<u8>, Attributes)>> {
+        self.read_directory(path, DirectoryRead::All)
+    }
+
+    /// Prove listing access with one batch, rather than enumerating a whole
+    /// root that the subsequent observation will enumerate again.
+    pub fn probe_directory(&mut self, path: &[u8]) -> io::Result<()> {
+        self.read_directory(path, DirectoryRead::Probe).map(|_| ())
+    }
+
+    fn read_directory(
+        &mut self,
+        path: &[u8],
+        mode: DirectoryRead,
+    ) -> io::Result<Vec<(Vec<u8>, Attributes)>> {
         let handle = self.handle(|id| Writer::new(wire::OPENDIR, id).bytes(path))?;
         let mut entries = Vec::new();
         let result = loop {
@@ -292,6 +312,9 @@ impl Session {
             })();
             if let Err(error) = parsed {
                 break Err(error);
+            }
+            if mode == DirectoryRead::Probe {
+                break Ok(());
             }
         };
         let closed = self.close(handle);
@@ -342,74 +365,111 @@ impl Session {
         from: u64,
         sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
     ) -> io::Result<()> {
+        self.read_to(handle, from, None, sink)
+    }
+
+    /// Stream at most `length` bytes from `from`, followed by a one-byte
+    /// overflow probe. An early EOF is returned to the caller for its exact
+    /// length check. The probe is delivered to `sink` too, so a caller can
+    /// classify growth with the same check as any other excess data.
+    /// Outstanding replies are consumed before returning a sink error.
+    pub fn read_from_bounded(
+        &mut self,
+        handle: &Handle,
+        from: u64,
+        length: u64,
+        sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let end = from.checked_add(length).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "SFTP read range overflows")
+        })?;
+        self.read_to(handle, from, Some(end), sink)
+    }
+
+    fn read_to(
+        &mut self,
+        handle: &Handle,
+        from: u64,
+        end: Option<u64>,
+        sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
         self.check_alive()?;
         let mut offset = from;
-        loop {
-            // Request a window of chunks, then take the answers in order.
-            let mut pending = VecDeque::new();
-            for index in 0..WINDOW {
-                let at = offset + (index * CHUNK) as u64;
-                let id = self.id();
-                if let Err(error) = self.send_for(
-                    id,
-                    Writer::new(wire::READ, id)
-                        .bytes(&handle.0)
-                        .u64(at)
-                        .u32(CHUNK as u32)
-                        .finish(),
-                ) {
-                    let _ = self.drain();
-                    return Err(error);
-                }
-                pending.push_back(id);
-            }
-            let mut finished = false;
-            let mut short = false;
-            while let Some(id) = pending.pop_front() {
-                let body = match self.receive_for(id) {
-                    Ok(body) => body,
-                    Err(error) => {
-                        let _ = self.drain();
-                        return Err(error);
+        let result = (|| {
+            loop {
+                // Known ranges never speculate past their observed end. The
+                // separate one-byte probe still detects growth, including for
+                // empty files. Unknown-length callers retain the full window.
+                let probing = end == Some(offset);
+                let mut at = offset;
+                let mut pending = VecDeque::new();
+                for _ in 0..WINDOW {
+                    let requested = match end {
+                        Some(_) if probing => 1,
+                        Some(end) => (end - at).min(CHUNK as u64) as usize,
+                        None => CHUNK,
+                    };
+                    if requested == 0 {
+                        break;
                     }
-                };
-                if finished || short {
-                    continue;
+                    let id = self.id();
+                    self.send_for(
+                        id,
+                        Writer::new(wire::READ, id)
+                            .bytes(&handle.0)
+                            .u64(at)
+                            .u32(requested as u32)
+                            .finish(),
+                    )?;
+                    pending.push_back((id, requested));
+                    if probing {
+                        break;
+                    }
+                    at = at.checked_add(requested as u64).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "SFTP read offset overflows")
+                    })?;
                 }
-                if is_eof(&body) {
-                    finished = true;
-                    continue;
-                }
-                let chunk = (|| -> io::Result<&[u8]> {
+                let mut finished = false;
+                let mut short = false;
+                while let Some((id, requested)) = pending.pop_front() {
+                    let body = self.receive_for(id)?;
+                    if finished || short {
+                        continue;
+                    }
+                    if is_eof(&body) {
+                        finished = true;
+                        continue;
+                    }
                     let mut reader = expect(&body, wire::DATA)?;
                     let data = reader.bytes()?;
-                    if data.is_empty() {
+                    if data.is_empty() || data.len() > requested {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
-                            "SFTP read made no progress",
+                            "SFTP read returned an invalid data length",
                         ));
                     }
-                    Ok(data)
-                })();
-                let data = match chunk {
-                    Ok(data) => data,
-                    Err(error) => {
-                        let _ = self.drain();
-                        return Err(error);
+                    sink(data)?;
+                    if probing {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "SFTP file exceeds the read bound",
+                        ));
                     }
-                };
-                if let Err(error) = sink(data) {
-                    let _ = self.drain();
-                    return Err(error);
+                    offset = offset.checked_add(data.len() as u64).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "SFTP read offset overflows")
+                    })?;
+                    // Later answers would leave a gap; ask again from here.
+                    short = data.len() < requested;
                 }
-                offset += data.len() as u64;
-                // Later answers would leave a gap; ask again from here.
-                short = data.len() < CHUNK;
+                if finished {
+                    return Ok(());
+                }
             }
-            if finished {
-                return Ok(());
-            }
+        })();
+        if result.is_err() {
+            let _ = self.drain();
         }
+        result
     }
 
     /// Write everything `source` yields from the start of the file.
