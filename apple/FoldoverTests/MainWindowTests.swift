@@ -105,8 +105,9 @@ private actor WindowSyncClient: SyncClient {
         switch runReply {
         case .finish: break
         case .work:
-            states[id] = .working(.run, cancelling: false)
-            return .working(.run, cancelling: false)
+            let pair = RunningPair(windowPair(id, "Working pair"))
+            states[id] = .working(.run, cancelling: false, pair: pair)
+            return .working(.run, cancelling: false, pair: pair)
         case .fail: throw WindowFixtureError.unexpected
         }
         let state = PairSyncState.finished(runSummary(archive: "run-\(runs)"))
@@ -239,7 +240,7 @@ func theMenuBarPulseObservesWorkWithoutAScene(_ preference: MotionPreference) as
     let viewModel = await windowModel([photos], sync: client, pollInterval: .milliseconds(10))
     let animation = MenuBarAnimation(viewModel: viewModel, motion: MotionStore(preference: preference))
 
-    await client.set(.working(.run, cancelling: false), for: photos.id)
+    await client.set(.working(.run, cancelling: false, pair: RunningPair(photos)), for: photos.id)
     let refresh = Task { await viewModel.sync(for: photos).refresh() }
     #expect(await eventuallyInWindow { viewModel.menuBarStatus == .working })
     switch preference {
@@ -301,6 +302,43 @@ func pairRowsSayHowEachPairReadsAtAGlance() async {
 
 @MainActor
 @Test
+func runningPairPresentationLabelsTheWindowAndRowsUntilItFinishes() async {
+    let saved = SyncPair(id: photosWindowID, revision: 2, settings: PairSettings(
+        name: "Saved name", left: SelectedFolder(bytes: Data("/saved-left".utf8)),
+        right: SelectedFolder(bytes: Data("/saved-right".utf8)), mode: .backupLeft))
+    let claimed = RunningPair(
+        revision: 1, name: "Claimed name",
+        left: SelectedFolder(bytes: Data("/claimed-left".utf8)),
+        right: SelectedFolder(bytes: Data("sftp://nas/claimed-right".utf8)), mode: .mirrorRight)
+    let client = WindowSyncClient()
+    let viewModel = await windowModel([saved], sync: client)
+    viewModel.selectedPairID = saved.id
+    await client.set(.working(.run, cancelling: false, pair: claimed), for: saved.id)
+
+    let refreshing = Task { await viewModel.sync(for: saved).refresh() }
+    #expect(await eventuallyInWindow { viewModel.selectedSync?.usesPreviousSettings == true })
+    let row = viewModel.pairRows.first
+    #expect(row?.name == "Claimed name")
+    #expect(row?.symbol == PairMode.mirrorRight.symbol)
+    #expect(row?.modeTitle == PairMode.mirrorRight.title)
+    #expect(viewModel.selectedPairName == "Claimed name")
+    #expect(viewModel.selectedSync?.activeRevision == 1)
+    #expect(viewModel.selectedSync?.activeLeft == claimed.left)
+    #expect(viewModel.selectedSync?.activeRight == claimed.right)
+    #expect(viewModel.selectedSync?.activeMode == .mirrorRight)
+    #expect(viewModel.selectedSync?.previousSettingsNotice
+        == "This sync is finishing with the previous settings. Saved settings apply next run.")
+
+    await client.set(.idle, for: saved.id)
+    await refreshing.value
+    #expect(viewModel.selectedPairName == "Saved name")
+    #expect(viewModel.pairRows.first?.name == "Saved name")
+    #expect(viewModel.pairRows.first?.symbol == PairMode.backupLeft.symbol)
+    #expect(viewModel.selectedSync?.activeRevision == 2)
+}
+
+@MainActor
+@Test
 func accessResetWaitsForWorkOnAnUnselectedPair() async {
     let photos = windowPair(photosWindowID, "Photos")
     let docs = windowPair(docsWindowID, "Docs")
@@ -316,7 +354,7 @@ func accessResetWaitsForWorkOnAnUnselectedPair() async {
     await sync.checkAll(viewModel.pairs)
     #expect(viewModel.canResetFullDiskAccess)
 
-    await client.set(.working(.run, cancelling: false), for: docs.id)
+    await client.set(.working(.run, cancelling: false, pair: RunningPair(docs)), for: docs.id)
     await sync.checkAll(viewModel.pairs)
     #expect(!viewModel.canResetFullDiskAccess)
     await client.set(.idle, for: docs.id)
@@ -341,7 +379,7 @@ func stoppingAPairFromTheMenuDoesNotStopTheSelectedPair() async {
     let viewModel = await windowModel([photos, docs], sync: client)
     viewModel.selectedPairID = photos.id
 
-    await client.set(.working(.run, cancelling: false), for: docs.id)
+    await client.set(.working(.run, cancelling: false, pair: RunningPair(docs)), for: docs.id)
     let refreshing = Task { await viewModel.sync(for: docs).refresh() }
     #expect(await eventuallyInWindow { viewModel.pairRows.first { $0.id == docs.id }?.canCancel == true })
     await viewModel.stopPair(id: docs.id)
@@ -464,7 +502,7 @@ func eachStateShowsItsPlaceholderActivityAndConflicts() async throws {
     #expect(viewModel.activity == .waiting)
 
     // Working shows progress, not a placeholder.
-    await client.set(.working(.run, cancelling: false), for: pair.id)
+    await client.set(.working(.run, cancelling: false, pair: RunningPair(pair)), for: pair.id)
     let polling = Task { await viewModel.refresh() }
     #expect(await eventuallyInWindow { viewModel.isWorking })
     #expect(viewModel.placeholder == nil)
@@ -740,6 +778,37 @@ func foldersSayWhereTheyAreAndOnlyLocalOnesReveal() async throws {
     #expect(editor.folderSymbol(.left) == "folder.badge.plus")
     editor.chooseServer("sftp://nas.local/srv/docs", side: .right)
     #expect(editor.folderSymbol(.right) == "server.rack")
+}
+
+@MainActor
+@Test
+func finderRevealUsesTheFolderShownForTheRunningSnapshot() async {
+    let saved = SyncPair(id: photosWindowID, revision: 2, settings: PairSettings(
+        name: "Saved", left: SelectedFolder(bytes: Data("/Users/a/New".utf8)),
+        right: SelectedFolder(bytes: Data("/Users/a/NewRight".utf8)), mode: .sync))
+    let claimed = RunningPair(
+        revision: 1, name: "Claimed",
+        left: SelectedFolder(bytes: Data("/Users/a/Old".utf8)),
+        right: SelectedFolder(bytes: Data("sftp://nas/old-right".utf8)), mode: .sync)
+    let recorder = RevealRecorder()
+    let client = WindowSyncClient()
+    let viewModel = await windowModel([saved], sync: client, reveal: { recorder.record($0) })
+    viewModel.selectedPairID = saved.id
+    await client.set(.working(.run, cancelling: false, pair: claimed), for: saved.id)
+
+    let refreshing = Task { await viewModel.sync(for: saved).refresh() }
+    #expect(await eventuallyInWindow { viewModel.selectedSync?.usesPreviousSettings == true })
+    #expect(viewModel.canReveal(.a))
+    #expect(!viewModel.canReveal(.b))
+    viewModel.reveal(.b)
+    viewModel.reveal(.a)
+    #expect(recorder.paths == [["/Users/a/Old"]])
+
+    await client.set(.idle, for: saved.id)
+    await refreshing.value
+    #expect(viewModel.canReveal(.b))
+    viewModel.reveal(.b)
+    #expect(recorder.paths == [["/Users/a/Old"], ["/Users/a/NewRight"]])
 }
 
 @MainActor
