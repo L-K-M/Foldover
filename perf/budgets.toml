@@ -5,6 +5,7 @@
 
 archive_pages_5k = 160
 db_commit_100k = 1000
+db_commit_batches_100k = 2000
 db_read_100k = 300
 db_snapshot_rewrite_100k = 1000
 db_snapshot_unchanged_100k = 200

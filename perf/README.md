@@ -18,6 +18,7 @@ ids are the bench function names; estimates land in
 | `plan_100k_entries` | `foldover-engine` | `plan_candidates` over two 100_000-entry sides with a synthetic base mixing unchanged, copied, conflicting, new and deleted files |
 | `archive_pages_5k` | `foldover-endpoint` | `LocalEndpoint::archived_items` listing 5,000 items in 50 folders, 100 per page |
 | `db_commit_100k` | `foldover-state` | `PairStore::update_base` committing 100_000 base entries |
+| `db_commit_batches_100k` | `foldover-state` | `PairStore::update_base` committing one run's 100_000 base entries and journal entries in the engine's 256-row batches |
 | `db_read_100k` | `foldover-state` | `PairStore::base` reading the 100_000-entry base back |
 | `db_snapshot_unchanged_100k` | `foldover-state` | `PairStore::replace_snapshot` storing the same 100_000-entry observation again |
 | `db_snapshot_rewrite_100k` | `foldover-state` | `PairStore::replace_snapshot` with every one of the 100_000 fingerprints changed |
@@ -36,6 +37,18 @@ It aligns 50,000 respelled names within five seconds, the entire planning
 budget for 500,000 paths in PLAN.md section 5.3. Setup is not timed. It is
 excluded from ordinary unit tests to avoid wall-clock assertions on busy
 runners; the normal suite checks ambiguous aliases and unreadable paths.
+
+The journal batch cleanup has a scaling check in the same style, covering
+100_000 to 800_000 writes in 256-row batches:
+
+```sh
+cargo test --release -p foldover-state journal_batches_commit_linearly -- --ignored --nocapture
+```
+
+Each count must stay within 3x of the 100_000-write time per write, so a
+per-batch journal cleanup that scans the run's own entries (quadratic in
+the run's size) fails from 400_000 writes on. It is ignored for the same
+reason as the preparation budget; the criterion bench is the gate.
 
 ## How budgets were set
 
