@@ -488,6 +488,17 @@ pub struct RunRecords {
 }
 
 impl RunRecords {
+    /// Capacity for the stored base, counted from the same pinned view.
+    pub fn base_len(&self) -> Result<usize, Error> {
+        Ok(self.view.base_len()?)
+    }
+
+    /// Capacity for one stored snapshot. Malformed cache rows may be
+    /// omitted when visited, so this is an upper bound on decoded rows.
+    pub fn snapshot_len(&self, side: Side) -> Result<usize, Error> {
+        Ok(self.view.snapshot_len(side_name(side))?)
+    }
+
     /// Visit the run's base rows in stored path order. Malformed paths and
     /// base versions stay errors, as in [`PairStore::base`].
     pub fn visit_base<F>(&self, mut visit: F) -> Result<(), Error>

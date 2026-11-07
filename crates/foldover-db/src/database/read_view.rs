@@ -50,6 +50,29 @@ pub struct ReadView {
 }
 
 impl ReadView {
+    /// Stored rows in this pinned base, without collecting their payloads.
+    pub fn base_len(&self) -> Result<usize, Error> {
+        let count: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM base_entry WHERE pair_id=?1",
+            [self.pair.as_slice()],
+            |row| row.get(0),
+        )?;
+        usize::try_from(count)
+            .map_err(|_| Error::InvalidState("Base row count exceeds address space"))
+    }
+
+    /// Stored rows in one pinned snapshot side. Invalid cached versions
+    /// still count here; the typed reader may later skip them.
+    pub fn snapshot_len(&self, side: &str) -> Result<usize, Error> {
+        let count: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM snapshot_entry WHERE pair_id=?1 AND side=?2",
+            params![self.pair.as_slice(), side],
+            |row| row.get(0),
+        )?;
+        usize::try_from(count)
+            .map_err(|_| Error::InvalidState("Snapshot row count exceeds address space"))
+    }
+
     /// Visit the pair's base rows in raw path order. Each row is borrowed
     /// for the duration of the call; the driver never collects or copies
     /// the versions.
@@ -238,6 +261,9 @@ mod tests {
             .update_pair(&pair.id, pair.revision, &values())
             .unwrap();
         database.remove_pair(&pair.id, updated.revision).unwrap();
+        assert_eq!(view.base_len().unwrap(), 1);
+        assert_eq!(view.snapshot_len("left").unwrap(), 1);
+        assert_eq!(view.snapshot_len("right").unwrap(), 1);
 
         let mut base = Vec::new();
         view.base_rows(|row| {
