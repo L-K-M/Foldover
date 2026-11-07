@@ -3,7 +3,7 @@
 //! (PLAN.md §5.2). Fails when any median is missing or over budget.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::{ToolError, cargo, workspace_root};
@@ -11,11 +11,12 @@ use crate::{ToolError, cargo, workspace_root};
 /// The bench target per hot path, in the crate that owns the code.
 /// Criterion ids are the bench function names, so `target/criterion/
 /// <id>/new/estimates.json` is keyed by the same ids as the budgets.
-const BENCHES: [(&str, &str); 5] = [
+const BENCHES: [(&str, &str); 6] = [
     ("foldover-fs", "hash"),
     ("foldover-endpoint", "scan"),
     ("foldover-endpoint", "archive"),
     ("foldover-engine", "plan"),
+    ("foldover-engine", "run_inputs"),
     ("foldover-state", "db"),
 ];
 
@@ -39,6 +40,7 @@ pub fn bench_check() -> bool {
 fn check() -> Result<(), ToolError> {
     let root = workspace_root();
     let budgets = read_budgets(&root)?;
+    let target = target_directory(&root)?;
     for (package, bench) in BENCHES {
         run_bench(&root, package, bench)?;
     }
@@ -56,7 +58,7 @@ fn check() -> Result<(), ToolError> {
         "benchmark", "median", "budget"
     );
     for (id, budget_ms) in &budgets {
-        let estimates = root.join(format!("target/criterion/{id}/new/estimates.json"));
+        let estimates = target.join(format!("criterion/{id}/new/estimates.json"));
         let median = std::fs::read_to_string(&estimates)
             .ok()
             .and_then(|content| median_ms(&content));
@@ -92,6 +94,32 @@ fn check() -> Result<(), ToolError> {
     } else {
         Err(ToolError(failures.join("; ")))
     }
+}
+
+/// Cargo resolves environment and workspace/user config overrides itself.
+fn target_directory(root: &Path) -> Result<PathBuf, ToolError> {
+    let output = Command::new(cargo())
+        .current_dir(root)
+        .args(["metadata", "--locked", "--format-version", "1", "--no-deps"])
+        .output()
+        .map_err(|error| ToolError(format!("cargo metadata: {error}")))?;
+    if !output.status.success() {
+        return Err(ToolError(format!(
+            "cargo metadata: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    metadata_target_directory(&output.stdout)
+}
+
+fn metadata_target_directory(metadata: &[u8]) -> Result<PathBuf, ToolError> {
+    #[derive(serde::Deserialize)]
+    struct Metadata {
+        target_directory: PathBuf,
+    }
+    let metadata: Metadata = serde_json::from_slice(metadata)
+        .map_err(|error| ToolError(format!("cargo metadata target directory: {error}")))?;
+    Ok(metadata.target_directory)
 }
 
 /// `budgets = <id = max-median-ms>` from `perf/budgets.toml`, ordered
@@ -153,6 +181,19 @@ fn run_bench(root: &Path, package: &str, bench: &str) -> Result<(), ToolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uses_cargos_resolved_target_directory_and_rejects_missing_metadata() {
+        assert_eq!(
+            metadata_target_directory(
+                br#"{"target_directory":"/builds/custom cache","packages":[]}"#
+            )
+            .unwrap(),
+            PathBuf::from("/builds/custom cache")
+        );
+        assert!(metadata_target_directory(b"{}").is_err());
+        assert!(metadata_target_directory(b"not JSON").is_err());
+    }
 
     #[test]
     fn reads_median_point_estimates_in_milliseconds() {
