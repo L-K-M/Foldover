@@ -655,15 +655,12 @@ impl Session {
     /// `close` and check its result. Transport failures still fail this call.
     pub fn close_read_and_lstat(&mut self, handle: Handle, path: &[u8]) -> io::Result<Attributes> {
         let close_id = self.id();
-        self.send_for(
-            close_id,
-            Writer::new(wire::CLOSE, close_id).bytes(&handle.0).finish(),
-        )?;
         let stat_id = self.id();
-        self.send_for(
-            stat_id,
-            Writer::new(wire::LSTAT, stat_id).bytes(path).finish(),
-        )?;
+        let mut batch = Writer::new(wire::CLOSE, close_id).bytes(&handle.0).finish();
+        batch.extend(Writer::new(wire::LSTAT, stat_id).bytes(path).finish());
+        self.check_alive()?;
+        self.send(batch)?;
+        self.inflight.extend([close_id, stat_id]);
         // Both requests follow the completed read. Their replies may arrive
         // in either order; collect both before parsing so a server refusal
         // cannot leave a reply owed on a reusable session.
