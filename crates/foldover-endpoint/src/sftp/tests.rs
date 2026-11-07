@@ -47,6 +47,124 @@ fn sftp(directory: &Path) -> Option<SftpEndpoint> {
     }
 }
 
+fn counted(directory: &Path, log: &Path) -> Option<SftpEndpoint> {
+    let server = server()?;
+    let relay = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../perf/sftp-relay.py");
+    Some(
+        SftpEndpoint::spawn(
+            Path::new("python3"),
+            &[
+                OsStr::new("-u"),
+                relay.as_os_str(),
+                OsStr::new("--log"),
+                log.as_os_str(),
+                OsStr::new("--"),
+                server.as_os_str(),
+                OsStr::new("-d"),
+                OsStr::new("/"),
+            ],
+            directory.as_os_str().as_encoded_bytes(),
+        )
+        .unwrap(),
+    )
+}
+
+fn requests(log: &Path, kind: u64) -> usize {
+    fs::read_to_string(log)
+        .unwrap()
+        .lines()
+        .filter(|line| {
+            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+            event["event"] == "request" && event["kind"] == kind
+        })
+        .count()
+}
+
+#[test]
+fn unchanged_staged_metadata_uses_one_stat() {
+    use foldover_types::Propagation::Ignore;
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("packets");
+    let Some(remote) = counted(directory.path(), &log) else {
+        return;
+    };
+    fs::write(directory.path().join("staged"), b"bytes").unwrap();
+    let mut session = remote.session();
+    let stored = remote.remote(b"staged");
+    let metadata = SftpEndpoint::foreign_metadata(&session.lstat(&stored).unwrap());
+    let before = requests(&log, 7);
+    let policy = MetadataPolicy::new(Ignore, Ignore, Ignore);
+    remote
+        .set_file_metadata_on(
+            &mut session,
+            &stored,
+            Digest::from_bytes([0; 32]),
+            metadata,
+            policy,
+        )
+        .unwrap();
+    assert_eq!(requests(&log, 7) - before, 1);
+}
+
+#[test]
+fn archive_parent_reuse_keeps_component_checks_without_mkdir_refusals() {
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("packets");
+    let Some(remote) = counted(directory.path(), &log) else {
+        return;
+    };
+    let parent = b".foldover/archive/run/parent";
+    remote.make_directories(parent, PRIVATE_DIRECTORY).unwrap();
+    let before = requests(&log, 14); // SSH_FXP_MKDIR
+    remote.make_directories(parent, PRIVATE_DIRECTORY).unwrap();
+    assert_eq!(requests(&log, 14), before);
+    // Reuse cannot turn an external substitution into a trusted directory.
+    fs::remove_dir(directory.path().join(".foldover/archive/run/parent")).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(
+        outside.path(),
+        directory.path().join(".foldover/archive/run/parent"),
+    )
+    .unwrap();
+    assert!(
+        remote
+            .make_directories(b".foldover/archive/run/parent/child", PRIVATE_DIRECTORY)
+            .is_err()
+    );
+    assert!(!outside.path().join("child").exists());
+}
+
+#[test]
+fn changed_staged_metadata_reads_back_the_final_state() {
+    use foldover_types::Propagation::Sync;
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("packets");
+    let Some(remote) = counted(directory.path(), &log) else {
+        return;
+    };
+    fs::write(directory.path().join("staged"), b"bytes").unwrap();
+    let stored = remote.remote(b"staged");
+    let metadata = crate::ForeignMetadata {
+        permissions: 0o750,
+        modified: UNIX_EPOCH + Duration::from_secs(10),
+    };
+    let mut session = remote.session();
+    let policy = MetadataPolicy::new(Sync, Sync, Sync);
+    let before = requests(&log, 7);
+    let digest = Digest::from_bytes([0; 32]);
+    let version = remote
+        .set_file_metadata_on(&mut session, &stored, digest, metadata, policy)
+        .unwrap();
+    assert_eq!(requests(&log, 7) - before, 2);
+    assert_eq!(requests(&log, 9), 1); // SSH_FXP_SETSTAT
+    assert_eq!(
+        version,
+        remote
+            .staged_version_on(&mut session, &stored, digest, policy)
+            .unwrap()
+    );
+}
+
 /// The real `sftp-server` behind a filter that drops `fsync@openssh.com`
 /// from the version handshake, so the session behaves like a server
 /// without the extension while every other operation stays real.

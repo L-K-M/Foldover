@@ -509,10 +509,7 @@ fn send_on(
                 .map_err(|source| failure.take().unwrap_or_else(|| write_error(path, source)))?;
             let digest =
                 foldover_types::Digest::from_bytes(*digest.into_inner().finalize().as_bytes());
-            let applied =
-                remote.set_metadata_on(session, &staged, EntryKind::File, metadata, policy);
-            let version =
-                applied.and_then(|()| remote.staged_version_on(session, &staged, digest, policy));
+            let version = remote.set_file_metadata_on(session, &staged, digest, metadata, policy);
             let version = match version {
                 Ok(version) if version.content() == expected => version,
                 Ok(_) => {
