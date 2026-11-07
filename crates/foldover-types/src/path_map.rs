@@ -1,12 +1,13 @@
 //! Dense ordered map from raw path bytes to values.
 //!
-//! A one-million-entry observation map built on `BTreeMap<SyncPath, _>`
-//! spends more than 500 MB: every node is separately allocated and carries
-//! tree pointers on top of the path bytes. [`PathMap`] stores one
-//! `(SyncPath, T)` row per entry in a single `Vec`, sorted by raw path
-//! bytes with no duplicate keys. Lookup is a binary search over
-//! contiguous rows, iteration is a slice walk in raw byte order, and
-//! building from unsorted observations is an append-only
+//! A measured 1M-entry observation run backed by `BTreeMap<SyncPath, _>`
+//! exceeded 500 MB total. Every node is separately allocated and carries
+//! tree pointers on top of the path bytes, so the container's own share is
+//! estimated to be large, but only the whole-run figure is measured.
+//! [`PathMap`] stores one `(SyncPath, T)` row per entry in a single `Vec`,
+//! sorted by raw path bytes with no duplicate keys. Lookup is a binary
+//! search over contiguous rows, iteration is a slice walk in raw byte
+//! order, and building from unsorted observations is an append-only
 //! [`PathMapBuilder`] plus one [`PathMapBuilder::freeze`].
 //!
 //! Recorded tradeoffs:
@@ -14,14 +15,19 @@
 //! - [`PathMap::insert`] and [`PathMap::remove`] are `O(n)` row shifts,
 //!   right for the rare respelling or exclusion and wrong for bulk loads.
 //!   The engine batches those edits through the builder.
-//! - `freeze` sorts the builder's rows with an unstable sort keyed on
-//!   `(raw key, insertion ordinal)`, then compacts duplicates in place.
-//!   The unstable sort avoids `sort_by`'s full-payload merge scratch, but
-//!   the standard library does not promise that it allocates nothing and
-//!   this crate has not measured it.
-//! - Compaction moves the surviving rows into the frozen `Vec`, so peak
-//!   memory during `freeze` is the builder's capacity plus the frozen
-//!   map's. The frozen map is then shrunk to its length.
+//! - `freeze` checks for strictly increasing raw keys first. That case
+//!   moves the builder's `Vec` into the map with no second full-payload
+//!   allocation. Otherwise it allocates one `usize` (8 bytes on 64-bit
+//!   targets) per row as a permutation of old indices, sorts those
+//!   indices with an unstable sort keyed on `(raw key ascending, old
+//!   insertion index descending)`, applies the permutation to the payload
+//!   `Vec` in place with cycle swaps, then deduplicates in place. The same
+//!   payload `Vec` is returned. Peak extra memory is the permutation plus
+//!   any scratch the unstable sort allocates; the standard library does
+//!   not promise that it allocates nothing.
+//! - [`PathMap::shrink_to_fit`] may allocate transiently: `Vec`'s
+//!   allocator shrink is not guaranteed to be in place, so a shrink can
+//!   briefly hold the old and new buffers at once.
 //!
 //! The container is vocabulary only: no I/O, no interner, no global state
 //! and no `unsafe`.
@@ -105,8 +111,19 @@ impl<T> PathMap<T> {
     }
 
     /// Reclaim unused capacity after rare edits.
+    ///
+    /// The allocator shrink is not guaranteed to be in place and may
+    /// allocate transiently.
     pub fn shrink_to_fit(&mut self) {
         self.rows.shrink_to_fit();
+    }
+
+    /// Consumes the map and returns its rows in ascending raw byte order.
+    ///
+    /// The returned `Vec` keeps the map's allocation, so a batch of edits
+    /// can go through [`PathMapBuilder`] without copying the payload.
+    pub fn into_rows(self) -> Vec<(SyncPath, T)> {
+        self.rows
     }
 
     /// Looks a path up by borrowed raw bytes or `&SyncPath`.
@@ -309,17 +326,13 @@ impl<T> std::iter::FusedIterator for PathMapIter<'_, T> {}
 ///
 /// [`push`](Self::push) is `O(1)` amortized and keeps every observation;
 /// [`freeze`](Self::freeze) sorts once and resolves duplicate keys by
-/// keeping the last insertion, exactly as `BTreeMap::insert` would.
+/// keeping the last insertion, exactly as `BTreeMap::insert` would. The
+/// builder backs directly onto the map's `Vec<(SyncPath, T)>` row store,
+/// so freezing an already-sorted unique batch moves that allocation
+/// instead of copying the payload.
 #[derive(Clone, Debug, Default)]
 pub struct PathMapBuilder<T> {
-    rows: Vec<BuilderRow<T>>,
-}
-
-#[derive(Clone, Debug)]
-struct BuilderRow<T> {
-    key: SyncPath,
-    value: T,
-    insertion: usize,
+    rows: Vec<(SyncPath, T)>,
 }
 
 impl<T> PathMapBuilder<T> {
@@ -352,32 +365,65 @@ impl<T> PathMapBuilder<T> {
 
     /// Appends one observation. `O(1)` amortized.
     pub fn push(&mut self, key: SyncPath, value: T) {
-        let insertion = self.rows.len();
-        self.rows.push(BuilderRow {
-            key,
-            value,
-            insertion,
-        });
+        self.rows.push((key, value));
     }
 
     /// Sorts once, resolves duplicates by last insertion, and compacts.
+    ///
+    /// Strictly increasing raw keys are already unique and sorted, so the
+    /// builder's `Vec` is moved into the map unchanged. Otherwise one
+    /// `usize` permutation per row is allocated, the payload `Vec` is
+    /// permuted in place with cycle swaps, and duplicate rows are dropped
+    /// in place. The same payload `Vec` is returned; `shrink_to_fit` may
+    /// allocate transiently.
     pub fn freeze(mut self) -> PathMap<T> {
-        // Total order: raw bytes ascending, then insertion descending, so
-        // the first row of each equal-key run is the last one inserted.
-        // An unstable sort is deterministic for a total order and avoids
-        // the stable sort's full-payload merge scratch.
-        self.rows.sort_unstable_by(|left, right| {
-            left.key
+        if self
+            .rows
+            .windows(2)
+            .all(|pair| pair[0].0.as_bytes() < pair[1].0.as_bytes())
+        {
+            let mut map = PathMap { rows: self.rows };
+            map.shrink_to_fit();
+            return map;
+        }
+
+        // Permutation p[new] = old. Sorting indices by raw key ascending,
+        // then old insertion index descending, puts the last insertion
+        // first in each equal-key run. An unstable sort is deterministic
+        // for this total order and swaps only `usize` indices.
+        let mut permutation: Vec<usize> = (0..self.rows.len()).collect();
+        permutation.sort_unstable_by(|&left, &right| {
+            self.rows[left]
+                .0
                 .as_bytes()
-                .cmp(right.key.as_bytes())
-                .then_with(|| right.insertion.cmp(&left.insertion))
+                .cmp(self.rows[right].0.as_bytes())
+                .then_with(|| right.cmp(&left))
         });
-        self.rows.dedup_by(|left, right| left.key == right.key);
-        let mut rows = Vec::with_capacity(self.rows.len());
-        rows.extend(self.rows.into_iter().map(|row| (row.key, row.value)));
-        let mut map = PathMap { rows };
+        apply_permutation(&mut self.rows, &mut permutation);
+        self.rows.dedup_by(|left, right| left.0 == right.0);
+        let mut map = PathMap { rows: self.rows };
         map.shrink_to_fit();
         map
+    }
+}
+
+/// Applies `permutation` to `rows` in place, where `permutation[new]` is
+/// the old index of the row that belongs at `new`. Each cycle is followed
+/// with swaps; consumed entries are marked `usize::MAX` so the next cycle
+/// starts fresh.
+fn apply_permutation<T>(rows: &mut [T], permutation: &mut [usize]) {
+    for start in 0..permutation.len() {
+        if permutation[start] == usize::MAX {
+            continue;
+        }
+        let mut current = start;
+        while permutation[current] != start {
+            let next = permutation[current];
+            rows.swap(current, next);
+            permutation[current] = usize::MAX;
+            current = next;
+        }
+        permutation[current] = usize::MAX;
     }
 }
 
@@ -433,6 +479,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn path(bytes: &[u8]) -> SyncPath {
         SyncPath::try_from(bytes).unwrap()
@@ -610,6 +657,135 @@ mod tests {
         assert_eq!(map.len(), 2);
         assert_eq!(map.get(b"same".as_slice()), Some(&9));
         assert_eq!(map.get(b"other".as_slice()), Some(&99));
+    }
+
+    struct DropCounter<'a> {
+        tag: u32,
+        drops: &'a AtomicUsize,
+    }
+
+    impl<'a> DropCounter<'a> {
+        fn new(tag: u32, drops: &'a AtomicUsize) -> Self {
+            Self { tag, drops }
+        }
+    }
+
+    impl Drop for DropCounter<'_> {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn duplicate_prone_path() -> impl Strategy<Value = SyncPath> {
+        prop_oneof![
+            Just(path(b"a")),
+            Just(path(b"b")),
+            Just(path(b"c")),
+            Just(path(b"a/b")),
+            Just(path(b"a/b/c")),
+            Just(path(b"a.b")),
+        ]
+    }
+
+    #[test]
+    fn builder_freeze_sorted_unique_moves_the_same_buffer() {
+        let entries = vec![
+            (path(b"a"), 1u32),
+            (path(b"a-b"), 2),
+            (path(b"a.b"), 3),
+            (path(b"a/b"), 4),
+            (path(b"a/b/c"), 5),
+            (path(b"a0"), 6),
+            (path(b"a\xff"), 7),
+        ];
+        let mut builder = PathMapBuilder::with_capacity(entries.len());
+        for (key, value) in entries {
+            builder.push(key, value);
+        }
+        assert_eq!(builder.capacity(), builder.len());
+        let before = builder.rows.as_ptr();
+        let map = builder.freeze();
+        assert!(std::ptr::eq(before, map.rows.as_ptr()));
+        assert_eq!(map.len(), 7);
+        assert_eq!(map.capacity(), map.len());
+    }
+
+    #[test]
+    fn builder_freeze_descending_input_sorts_and_keeps_last_insertion() {
+        let entries = vec![
+            (path(b"c"), 1u32),
+            (path(b"b"), 2),
+            (path(b"b"), 3),
+            (path(b"a"), 4),
+            (path(b"a"), 5),
+            (path(b"a"), 6),
+        ];
+        let mut builder = PathMapBuilder::new();
+        for (key, value) in entries {
+            builder.push(key, value);
+        }
+        let map = builder.freeze();
+        assert_eq!(map.len(), 3);
+        assert_eq!(map.get(b"a".as_slice()), Some(&6));
+        assert_eq!(map.get(b"b".as_slice()), Some(&3));
+        assert_eq!(map.get(b"c".as_slice()), Some(&1));
+        assert_eq!(
+            map.keys().map(|key| key.as_bytes()).collect::<Vec<_>>(),
+            [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()],
+        );
+    }
+
+    #[test]
+    fn builder_freeze_unsorted_unique_moves_the_same_payload_buffer() {
+        let entries = vec![(path(b"c"), 3u32), (path(b"a"), 1), (path(b"b"), 2)];
+        let mut builder = PathMapBuilder::with_capacity(entries.len());
+        for (key, value) in entries {
+            builder.push(key, value);
+        }
+        assert_eq!(builder.capacity(), builder.len());
+        let before = builder.rows.as_ptr();
+        let map = builder.freeze();
+        assert!(std::ptr::eq(before, map.rows.as_ptr()));
+        assert_eq!(map.len(), 3);
+        assert_eq!(map.capacity(), map.len());
+    }
+
+    #[test]
+    fn apply_permutation_follows_cycles() {
+        let cases: [(Vec<u32>, Vec<usize>, Vec<u32>); 10] = [
+            (vec![0, 1, 2], vec![0, 1, 2], vec![0, 1, 2]),
+            (vec![0, 1, 2], vec![1, 0, 2], vec![1, 0, 2]),
+            (vec![0, 1, 2], vec![0, 2, 1], vec![0, 2, 1]),
+            (vec![0, 1, 2], vec![1, 2, 0], vec![1, 2, 0]),
+            (vec![0, 1, 2], vec![2, 0, 1], vec![2, 0, 1]),
+            (vec![0, 1, 2, 3], vec![1, 0, 3, 2], vec![1, 0, 3, 2]),
+            (vec![0, 1, 2, 3], vec![2, 1, 0, 3], vec![2, 1, 0, 3]),
+            (vec![0, 1, 2, 3], vec![3, 2, 1, 0], vec![3, 2, 1, 0]),
+            (vec![0, 1, 2, 3], vec![1, 2, 3, 0], vec![1, 2, 3, 0]),
+            (
+                vec![0, 1, 2, 3, 4],
+                vec![4, 0, 1, 2, 3],
+                vec![4, 0, 1, 2, 3],
+            ),
+        ];
+        for (mut rows, mut permutation, expected) in cases {
+            apply_permutation(&mut rows, &mut permutation);
+            assert_eq!(rows, expected);
+            assert!(permutation.iter().all(|&entry| entry == usize::MAX));
+        }
+    }
+
+    #[test]
+    fn into_rows_returns_owned_rows_for_rebuilding() {
+        let entries = vec![(path(b"b"), 2u32), (path(b"a"), 1)];
+        let map: PathMap<u32> = entries.into_iter().collect();
+        let rows = map.into_rows();
+        assert_eq!(rows.len(), 2);
+        let mut builder = PathMapBuilder::new();
+        builder.extend(rows);
+        let rebuilt = builder.freeze();
+        assert_eq!(rebuilt.get(b"a".as_slice()), Some(&1));
+        assert_eq!(rebuilt.get(b"b".as_slice()), Some(&2));
     }
 
     #[test]
@@ -877,6 +1053,74 @@ mod tests {
                 map.iter().collect::<Vec<_>>(),
                 oracle.iter().collect::<Vec<_>>(),
             );
+        }
+
+        #[test]
+        fn freeze_arbitrary_permutation_matches_btree_map_with_drop_counts(
+            entries in prop::collection::vec((valid_path(), any::<u32>()), 0..200).prop_shuffle(),
+        ) {
+            let mut builder = PathMapBuilder::new();
+            let mut oracle = BTreeMap::new();
+            let drops = AtomicUsize::new(0);
+            for (key, tag) in &entries {
+                builder.push(key.clone(), DropCounter::new(*tag, &drops));
+                oracle.insert(key.clone(), *tag);
+            }
+            let map = builder.freeze();
+            prop_assert_eq!(map.len(), oracle.len());
+            for (key, tag) in &oracle {
+                prop_assert_eq!(map.get(key.as_bytes()).unwrap().tag, *tag);
+            }
+            let keys: Vec<&[u8]> = map.keys().map(|key| key.as_bytes()).collect();
+            let mut sorted = keys.clone();
+            sorted.sort();
+            prop_assert_eq!(keys, sorted);
+            drop(map);
+            prop_assert_eq!(drops.load(Ordering::SeqCst), entries.len());
+        }
+
+        #[test]
+        fn freeze_repeated_duplicate_keys_drop_each_value_once(
+            entries in prop::collection::vec((duplicate_prone_path(), any::<u32>()), 0..200)
+                .prop_shuffle(),
+        ) {
+            let mut builder = PathMapBuilder::new();
+            let mut oracle = BTreeMap::new();
+            let drops = AtomicUsize::new(0);
+            for (key, tag) in &entries {
+                builder.push(key.clone(), DropCounter::new(*tag, &drops));
+                oracle.insert(key.clone(), *tag);
+            }
+            let map = builder.freeze();
+            prop_assert_eq!(map.len(), oracle.len());
+            for (key, tag) in &oracle {
+                prop_assert_eq!(map.get(key.as_bytes()).unwrap().tag, *tag);
+            }
+            drop(map);
+            prop_assert_eq!(drops.load(Ordering::SeqCst), entries.len());
+        }
+
+        #[test]
+        fn freeze_sorted_unique_bypass_moves_the_same_buffer(
+            mut entries in prop::collection::vec((valid_path(), any::<u32>()), 0..100),
+        ) {
+            entries.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+            entries.dedup_by(|left, right| left.0 == right.0);
+            let len = entries.len();
+            let mut builder = PathMapBuilder::with_capacity(len);
+            for (key, value) in entries {
+                builder.push(key, value);
+            }
+            prop_assert_eq!(builder.capacity(), builder.len());
+            let before = builder.rows.as_ptr();
+            let map = builder.freeze();
+            prop_assert!(std::ptr::eq(before, map.rows.as_ptr()));
+            prop_assert_eq!(map.len(), len);
+            prop_assert_eq!(map.capacity(), map.len());
+            let keys: Vec<&[u8]> = map.keys().map(|key| key.as_bytes()).collect();
+            let mut sorted = keys.clone();
+            sorted.sort();
+            prop_assert_eq!(keys, sorted);
         }
     }
 }
