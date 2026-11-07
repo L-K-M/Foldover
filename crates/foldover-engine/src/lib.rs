@@ -54,7 +54,7 @@ pub use poll::{ChangePoll, PollMode, Polled};
 pub use readiness::{ReadinessWarning, missing_side, reconnect};
 pub use reconcile::reconcile_entry;
 pub use run::{
-    Action, Approval, Commit, Completion, Failure, NoProgress, PairRun, Preview, PreviewItem,
-    RunError, RunInputs, RunOutcome, RunProgress, RunReport, UndoReport,
+    Action, Approval, Commit, Completion, Failure, NoProgress, PairRun, PendingRunInputs, Preview,
+    PreviewItem, RunError, RunInputs, RunOutcome, RunProgress, RunReport, UndoReport,
 };
 pub use watch::PairWatcher;

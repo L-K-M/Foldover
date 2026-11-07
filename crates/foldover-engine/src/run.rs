@@ -33,7 +33,8 @@ use foldover_endpoint::{
 };
 use foldover_host::RunAwake;
 use foldover_state::{
-    BaseUpdate, JournalAction, JournalEntry, MountSources, RecordedIdentities, SnapshotEntry,
+    BaseUpdate, JournalAction, JournalEntry, MountSources, RecordedIdentities, RunRecordInputs,
+    RunRecords, SnapshotEntry,
 };
 use foldover_types::{
     BaselineEntry, ChangeKind, ConflictKind, Durability, EndpointId, EntryContent, EntryDecision,
@@ -646,6 +647,64 @@ impl RunInputs {
             right_snapshot: right,
             ..self
         }
+    }
+}
+
+/// A run's inputs captured under the engine lock, with the stored trees
+/// still encoded. The service decodes them after releasing that lock,
+/// before opening endpoints or planning.
+pub struct PendingRunInputs {
+    pair: PairConfig,
+    identities: RecordedIdentities,
+    resolutions: BTreeMap<SyncPath, Resolution>,
+    reach: Reach,
+    records: RunRecords,
+}
+
+impl PendingRunInputs {
+    pub(crate) fn new(
+        pair: PairConfig,
+        identities: RecordedIdentities,
+        resolutions: BTreeMap<SyncPath, Resolution>,
+        reach: Reach,
+        records: RunRecords,
+    ) -> Self {
+        Self {
+            pair,
+            identities,
+            resolutions,
+            reach,
+            records,
+        }
+    }
+
+    /// The immutable configuration captured for this job.
+    pub fn configuration(&self) -> &PairConfig {
+        &self.pair
+    }
+
+    /// Decode the captured trees outside the engine lock. Malformed
+    /// snapshot cache versions are cache misses, as before.
+    pub fn decode(self) -> Result<RunInputs, crate::Error> {
+        let RunRecordInputs {
+            base,
+            left_snapshot,
+            right_snapshot,
+        } = self.records.decode()?;
+        let snapshot = |entries: Vec<SnapshotEntry>| -> Result<BTreeMap<_, _>, crate::Error> {
+            Ok(entries
+                .into_iter()
+                .filter_map(|entry| {
+                    let observed = ObservedEntry::restore(entry.version, &entry.fingerprint)?;
+                    Some((entry.path, observed))
+                })
+                .collect())
+        };
+        Ok(
+            RunInputs::new(self.pair, base, self.identities, self.resolutions)
+                .with_snapshots(snapshot(left_snapshot)?, snapshot(right_snapshot)?)
+                .with_reach(self.reach),
+        )
     }
 }
 

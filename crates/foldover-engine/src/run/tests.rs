@@ -2,7 +2,7 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use foldover_types::{LocalRoot, PairDraft, PairId, SyncMode};
+use foldover_types::{Digest, LocalRoot, PairDraft, PairId, SyncMode};
 
 use super::*;
 
@@ -1260,6 +1260,213 @@ fn batched_first_runs_reopen_safely_before_the_identity_commit() {
         assert_eq!(report.completion(), Completion::Finished);
         assert!(engine.first_synced(pair.id()).unwrap());
     }
+}
+
+#[test]
+fn captured_run_inputs_decode_like_the_wrapper() {
+    let directory = tempfile::tempdir().unwrap();
+    let left = directory.path().join("left");
+    let right = directory.path().join("right");
+    fs::create_dir(&left).unwrap();
+    fs::create_dir(&right).unwrap();
+    let location = foldover_state::StateLocation::Directory(directory.path().join("state"));
+    let mut engine = crate::Engine::open(&location).unwrap();
+    let pair = engine
+        .create_pair(
+            &PairDraft::new("Captured".into(), root(&left), root(&right), SyncMode::Sync).unwrap(),
+        )
+        .unwrap();
+
+    let version = EntryVersion::new(
+        EntryContent::File(Digest::from_bytes([3; Digest::BYTE_LEN])),
+        Digest::from_bytes([4; Digest::BYTE_LEN]),
+    );
+    let base_path = path(b"file");
+    engine
+        .commit_run(
+            pair.id(),
+            pair.revision(),
+            Commit::Base {
+                run: "run",
+                updates: &[BaseUpdate::Record(
+                    base_path.clone(),
+                    BaselineEntry::new(version, version).unwrap(),
+                )],
+                journal: &[],
+            },
+        )
+        .unwrap();
+    let left_entry = SnapshotEntry {
+        path: path(b"left"),
+        fingerprint: [0; 20].to_vec(),
+        version,
+    };
+    let right_entry = SnapshotEntry {
+        path: path(b"right"),
+        fingerprint: [0; 20].to_vec(),
+        version,
+    };
+    engine
+        .store_snapshot(
+            pair.id(),
+            pair.revision(),
+            Side::Left,
+            std::slice::from_ref(&left_entry),
+        )
+        .unwrap();
+    engine
+        .store_snapshot(
+            pair.id(),
+            pair.revision(),
+            Side::Right,
+            std::slice::from_ref(&right_entry),
+        )
+        .unwrap();
+    let resolution = Resolution::new(Side::Right, Some(version), None);
+    engine
+        .record_resolution(pair.id(), pair.revision(), &path(b"conflict"), resolution)
+        .unwrap();
+
+    let wrapper = engine.run_inputs(pair.id()).unwrap();
+    let pending = engine.capture_run_inputs(pair.id()).unwrap();
+    assert_eq!(pending.configuration(), wrapper.configuration());
+    let decoded = pending.decode().unwrap();
+    assert_eq!(decoded.pair, wrapper.pair);
+    assert_eq!(decoded.base, wrapper.base);
+    assert_eq!(decoded.identities, wrapper.identities);
+    assert_eq!(decoded.resolutions, wrapper.resolutions);
+    assert_eq!(decoded.left_snapshot, wrapper.left_snapshot);
+    assert_eq!(decoded.right_snapshot, wrapper.right_snapshot);
+    assert_eq!(decoded.reach.state(), wrapper.reach.state());
+    assert_eq!(decoded.skips, wrapper.skips);
+    let observed = ObservedEntry::restore(version, &[0; 20]).unwrap();
+    assert_eq!(decoded.left_snapshot[&path(b"left")], observed);
+    assert_eq!(decoded.right_snapshot[&path(b"right")], observed);
+}
+
+#[test]
+fn captured_inputs_stay_at_their_revision_when_the_config_moves() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = ["a", "b", "c"].map(|name| directory.path().join(name));
+    for path in &paths {
+        fs::create_dir(path).unwrap();
+    }
+    let location = foldover_state::StateLocation::Directory(directory.path().join("state"));
+    let mut engine = crate::Engine::open(&location).unwrap();
+    let pair = engine
+        .create_pair(
+            &PairDraft::new(
+                "Captured".into(),
+                root(&paths[0]),
+                root(&paths[1]),
+                SyncMode::Sync,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let version = EntryVersion::new(
+        EntryContent::Directory,
+        Digest::from_bytes([5; Digest::BYTE_LEN]),
+    );
+    let base_path = path(b"file");
+    engine
+        .commit_run(
+            pair.id(),
+            pair.revision(),
+            Commit::Base {
+                run: "run",
+                updates: &[BaseUpdate::Record(
+                    base_path.clone(),
+                    BaselineEntry::new(version, version).unwrap(),
+                )],
+                journal: &[],
+            },
+        )
+        .unwrap();
+    let pending = engine.capture_run_inputs(pair.id()).unwrap();
+
+    // A new revision lands between capture and decode.
+    let moved = PairDraft::new(
+        "Moved".into(),
+        root(&paths[2]),
+        root(&paths[1]),
+        SyncMode::Sync,
+    )
+    .unwrap();
+    let updated = engine
+        .update_pair(pair.id(), pair.revision(), &moved)
+        .unwrap();
+    assert_eq!(updated.revision(), pair.revision() + 1);
+
+    // The decoded run still reads its captured configuration and base.
+    let decoded = pending.decode().unwrap();
+    assert_eq!(decoded.pair, pair);
+    assert_eq!(decoded.base.len(), 1);
+    assert_eq!(
+        decoded.base[&base_path],
+        BaselineEntry::new(version, version).unwrap()
+    );
+    // Committing the captured run against the new revision is stale.
+    assert!(matches!(
+        engine.commit_run(
+            pair.id(),
+            pair.revision(),
+            Commit::Base {
+                run: "run",
+                updates: &[],
+                journal: &[],
+            },
+        ),
+        Err(crate::Error::StaleRevision)
+    ));
+    assert_eq!(engine.run_inputs(pair.id()).unwrap().pair, updated);
+}
+
+#[test]
+fn captured_snapshots_skip_unreadable_fingerprints() {
+    let directory = tempfile::tempdir().unwrap();
+    let left = directory.path().join("left");
+    let right = directory.path().join("right");
+    fs::create_dir(&left).unwrap();
+    fs::create_dir(&right).unwrap();
+    let location = foldover_state::StateLocation::Directory(directory.path().join("state"));
+    let mut engine = crate::Engine::open(&location).unwrap();
+    let pair = engine
+        .create_pair(
+            &PairDraft::new("Captured".into(), root(&left), root(&right), SyncMode::Sync).unwrap(),
+        )
+        .unwrap();
+    let version = EntryVersion::new(
+        EntryContent::Directory,
+        Digest::from_bytes([6; Digest::BYTE_LEN]),
+    );
+    let entries = [
+        SnapshotEntry {
+            path: path(b"kept"),
+            fingerprint: [0; 20].to_vec(),
+            version,
+        },
+        SnapshotEntry {
+            path: path(b"malformed"),
+            fingerprint: Vec::new(),
+            version,
+        },
+    ];
+    engine
+        .store_snapshot(pair.id(), pair.revision(), Side::Left, &entries)
+        .unwrap();
+
+    let decoded = engine
+        .capture_run_inputs(pair.id())
+        .unwrap()
+        .decode()
+        .unwrap();
+    assert_eq!(decoded.left_snapshot.len(), 1);
+    assert!(decoded.left_snapshot.contains_key(&path(b"kept")));
+    assert_eq!(
+        decoded.left_snapshot,
+        engine.run_inputs(pair.id()).unwrap().left_snapshot
+    );
 }
 
 #[test]
