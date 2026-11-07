@@ -1470,6 +1470,90 @@ fn captured_snapshots_skip_unreadable_fingerprints() {
 }
 
 #[test]
+fn snapshot_iter_streams_sorted_rows_and_store_snapshot_iter_persists_a_prefix() {
+    let directory = tempfile::tempdir().unwrap();
+    let left = directory.path().join("left");
+    let right = directory.path().join("right");
+    fs::create_dir(&left).unwrap();
+    fs::create_dir(&right).unwrap();
+    for index in 0..600 {
+        fs::write(left.join(format!("file-{index:04}")), b"content").unwrap();
+        fs::write(right.join(format!("file-{index:04}")), b"content").unwrap();
+    }
+    let location = foldover_state::StateLocation::Directory(directory.path().join("state"));
+    let mut engine = crate::Engine::open(&location).unwrap();
+    let pair = engine
+        .create_pair(
+            &PairDraft::new("Streamed".into(), root(&left), root(&right), SyncMode::Sync).unwrap(),
+        )
+        .unwrap();
+    let prepared = PairRun::prepare(
+        engine.run_inputs(pair.id()).unwrap(),
+        &mut proceed,
+        &NoProgress,
+    )
+    .unwrap();
+
+    // The lazy iterator is the same sorted, unique effective observation as
+    // the collecting wrapper.
+    let expected = prepared.snapshot(Side::Left);
+    assert_eq!(expected.len(), 600);
+    let streamed: Vec<_> = prepared.snapshot_iter(Side::Left).collect();
+    assert_eq!(expected, streamed);
+    assert!(expected.windows(2).all(|rows| rows[0].path < rows[1].path));
+
+    // Only the taken prefix reaches the table through the engine and store.
+    engine
+        .store_snapshot_iter(
+            pair.id(),
+            pair.revision(),
+            Side::Left,
+            prepared.snapshot_iter(Side::Left).take(5),
+        )
+        .unwrap();
+    let decoded = engine.run_inputs(pair.id()).unwrap();
+    assert_eq!(decoded.left_snapshot.len(), 5);
+    assert_eq!(
+        decoded.left_snapshot.keys().cloned().collect::<Vec<_>>(),
+        expected[..5]
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>()
+    );
+
+    // The full iterator round-trips through the store.
+    engine
+        .store_snapshot_iter(
+            pair.id(),
+            pair.revision(),
+            Side::Right,
+            prepared.snapshot_iter(Side::Right),
+        )
+        .unwrap();
+    let decoded = engine.run_inputs(pair.id()).unwrap();
+    let right_paths = prepared
+        .snapshot(Side::Right)
+        .iter()
+        .map(|entry| entry.path.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        decoded.right_snapshot.keys().cloned().collect::<Vec<_>>(),
+        right_paths
+    );
+
+    // Unsorted iterator input is rejected and leaves the stored side alone.
+    let mut reversed = expected.clone();
+    reversed.reverse();
+    assert!(
+        engine
+            .store_snapshot_iter(pair.id(), pair.revision(), Side::Left, reversed)
+            .is_err()
+    );
+    let decoded = engine.run_inputs(pair.id()).unwrap();
+    assert_eq!(decoded.left_snapshot.len(), 5);
+}
+
+#[test]
 fn mass_deletions_need_approval_and_unattended_runs_stop() {
     let mut pair = fixture(SyncMode::Sync);
     // One file stays, so the emptied-folder gate does not decide this.

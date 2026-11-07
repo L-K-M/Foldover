@@ -910,15 +910,16 @@ fn perform(
             .record_mounts(id, run.revision(), &sources);
     }
     // A cache: a failed store only means the next run rereads more data.
+    // The effective observation streams straight into the database; it is
+    // never collected into a second whole-tree vector here.
     for side in [Side::Left, Side::Right] {
         if !run.snapshot_changed(side) {
             continue;
         }
-        let snapshot = run.snapshot(side);
         let _ = engine
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .store_snapshot(id, run.revision(), side, &snapshot);
+            .store_snapshot_iter(id, run.revision(), side, run.snapshot_iter(side));
     }
     // A panic elsewhere cannot leave a half-applied transaction, so a
     // poisoned lock still guards a consistent store.

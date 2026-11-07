@@ -266,6 +266,24 @@ impl Engine {
         Ok(self.pairs.replace_snapshot(id, revision, side, entries)?)
     }
 
+    /// Store a fresh observation from rows already sorted by path with no
+    /// duplicates, as a run's [`crate::PairRun::snapshot_iter`] yields them.
+    /// The rows reach the database without an intermediate whole-tree vector.
+    pub fn store_snapshot_iter<I>(
+        &mut self,
+        id: PairId,
+        revision: u64,
+        side: Side,
+        entries: I,
+    ) -> Result<(), Error>
+    where
+        I: IntoIterator<Item = SnapshotEntry>,
+    {
+        Ok(self
+            .pairs
+            .replace_snapshot_iter(id, revision, side, entries)?)
+    }
+
     /// Store a person's conflict choice for the pair revision they previewed.
     pub fn record_resolution(
         &mut self,
