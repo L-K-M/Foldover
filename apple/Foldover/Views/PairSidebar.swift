@@ -71,14 +71,14 @@ struct PairSidebar: View {
             Divider()
             Button("Show Folder A in Finder") {
                 viewModel.selectedPairID = pairID
-                viewModel.reveal(.a)
+                viewModel.reveal(sync.activeLeft)
             }
-            .disabled(viewModel.localURL(pair.settings.left) == nil)
+            .disabled(!viewModel.canReveal(sync.activeLeft))
             Button("Show Folder B in Finder") {
                 viewModel.selectedPairID = pairID
-                viewModel.reveal(.b)
+                viewModel.reveal(sync.activeRight)
             }
-            .disabled(viewModel.localURL(pair.settings.right) == nil)
+            .disabled(!viewModel.canReveal(sync.activeRight))
             Divider()
             Button("Remove Pair…") {
                 viewModel.selectedPairID = pairID
