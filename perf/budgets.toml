@@ -16,6 +16,7 @@ run_records_capture_100k = 200
 run_records_capture_decode_100k = 250
 hash_64_mib = 60
 plan_100k_entries = 350
+plan_100k_entries_unicode_names = 200
 plan_skipped_100k_entries = 210
 prefix_index_100k_entries_1000_prefixes = 30
 # PLAN.md §5.3: a cold scan reads at least 10k entries per second.

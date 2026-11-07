@@ -799,6 +799,250 @@ fn ambiguous_unicode_respellings_preserve_every_observed_entry() {
     );
 }
 
+/// The merge walks both trees in raw byte order: exact spellings are
+/// preferred, a respelling is found between interleaved names, and a
+/// case-only rename is never respelled.
+#[test]
+fn alignment_merges_interleaved_raw_names_and_prefers_exact_spellings() {
+    let names = NameMatching::new(
+        foldover_types::CaseMatching::Exact,
+        UnicodeMatching::Normalized,
+    );
+    let memory = foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default());
+    for name in ["Report", "a", "a-b", "a.txt", "a0", "caf\u{e9}", "report"] {
+        memory.put_file(name.as_bytes(), name.as_bytes()).unwrap();
+    }
+    let endpoint = Endpoint::Memory(memory);
+    let mut observation = endpoint
+        .observe_from(
+            foldover_types::MetadataPolicy::default(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+            &mut |_| {},
+        )
+        .unwrap();
+    // The base knows the decomposed alias and the other names, but not
+    // the composed spelling the folder shows.
+    let mut base = BTreeMap::new();
+    for name in ["Report", "a", "a-b", "a.txt", "a0"] {
+        let version = observation.entries()[&path(name.as_bytes())].version();
+        base.insert(
+            path(name.as_bytes()),
+            BaselineEntry::new(version, version).unwrap(),
+        );
+    }
+    let alias = observation.entries()[&path("caf\u{e9}".as_bytes())].version();
+    base.insert(
+        path("cafe\u{301}".as_bytes()),
+        BaselineEntry::new(alias, alias).unwrap(),
+    );
+
+    align_spellings(&mut observation, &base, names);
+
+    // The composed alias maps back to the base's decomposed spelling.
+    assert!(
+        observation
+            .entries()
+            .contains_key(&path("cafe\u{301}".as_bytes()))
+    );
+    assert!(
+        !observation
+            .entries()
+            .contains_key(&path("caf\u{e9}".as_bytes()))
+    );
+    // A case-only rename is a person's, not a respelling.
+    for name in ["report", "Report"] {
+        assert!(observation.entries().contains_key(&path(name.as_bytes())));
+    }
+    // Exact spellings stay exactly as observed.
+    for name in ["a", "a-b", "a.txt", "a0"] {
+        assert!(observation.entries().contains_key(&path(name.as_bytes())));
+    }
+
+    // An exact match wins: the base's other spelling is not used to
+    // respell a name the folder already shows as the base knows it.
+    let memory = foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default());
+    memory.put_file("caf\u{e9}".as_bytes(), b"data").unwrap();
+    let endpoint = Endpoint::Memory(memory);
+    let mut observation = endpoint
+        .observe_from(
+            foldover_types::MetadataPolicy::default(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+            &mut |_| {},
+        )
+        .unwrap();
+    let version = observation.entries()[&path("caf\u{e9}".as_bytes())].version();
+    let base = BTreeMap::from([
+        (
+            path("caf\u{e9}".as_bytes()),
+            BaselineEntry::new(version, version).unwrap(),
+        ),
+        (
+            path("cafe\u{301}".as_bytes()),
+            BaselineEntry::new(version, version).unwrap(),
+        ),
+    ]);
+    align_spellings(&mut observation, &base, names);
+    assert!(
+        observation
+            .entries()
+            .contains_key(&path("caf\u{e9}".as_bytes()))
+    );
+    assert_eq!(observation.entries().len(), 1);
+}
+
+/// The lookup-based alignment rule the sorted merge replaced, kept as an
+/// equivalence oracle.
+fn align_spellings_reference(
+    observation: &mut Observation,
+    base: &BTreeMap<SyncPath, BaselineEntry>,
+    names: NameMatching,
+) {
+    if names.unicode() != UnicodeMatching::Normalized {
+        return;
+    }
+    let composed = |path: &SyncPath| -> Option<String> {
+        let text = std::str::from_utf8(path.as_bytes()).ok()?;
+        Some(text.nfc().collect())
+    };
+    let mut missing: BTreeMap<String, Option<&SyncPath>> = BTreeMap::new();
+    for path in base.keys() {
+        if observation.entries().contains_key(path) {
+            continue;
+        }
+        if let Some(key) = composed(path) {
+            missing
+                .entry(key)
+                .and_modify(|known| *known = None)
+                .or_insert(Some(path));
+        }
+    }
+    if missing.is_empty() {
+        return;
+    }
+    let respelled: Vec<(SyncPath, SyncPath)> = observation
+        .entries()
+        .keys()
+        .chain(observation.unavailable())
+        .filter(|path| !base.contains_key(*path))
+        .filter_map(|path| {
+            let known = missing.get(&composed(path)?)?.as_ref()?;
+            Some((path.clone(), (*known).clone()))
+        })
+        .collect();
+    let mut destinations: BTreeMap<&SyncPath, usize> = BTreeMap::new();
+    for (_, to) in &respelled {
+        *destinations.entry(to).or_default() += 1;
+    }
+    for (from, to) in &respelled {
+        if destinations.get(to) == Some(&1) {
+            observation.respell(from, to.clone());
+        }
+    }
+}
+
+/// The sorted merge must decide exactly what the original lookup rule
+/// decided, including an unavailable alias, an ambiguous composed pair
+/// and an exact match beside a respelling.
+#[test]
+fn alignment_merge_matches_the_lookup_rule_with_unavailable_names() {
+    let names = NameMatching::new(
+        foldover_types::CaseMatching::Exact,
+        UnicodeMatching::Normalized,
+    );
+    let files = [
+        "a",
+        "a-b",
+        "a.txt",
+        "a0",
+        "plain",
+        "other/deep",
+        "caf\u{e9}",
+        "s\u{323}\u{307}",
+        "\u{1e63}\u{307}",
+        "Report",
+        "report",
+        "unavail\u{e9}",
+    ];
+    let observe = || {
+        let memory = foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default());
+        for name in files {
+            memory.put_file(name.as_bytes(), name.as_bytes()).unwrap();
+        }
+        memory.evict("unavail\u{e9}".as_bytes());
+        Endpoint::Memory(memory)
+            .observe_from(
+                foldover_types::MetadataPolicy::default(),
+                &Filter::none(),
+                &BTreeMap::new(),
+                &mut proceed,
+                &mut |_| {},
+            )
+            .unwrap()
+    };
+    let first = observe();
+    let mut merged = observe();
+    let mut expected = observe();
+    let version =
+        |observation: &Observation, name: &[u8]| observation.entries()[&path(name)].version();
+    let mut base = BTreeMap::new();
+    for name in ["a", "a-b", "a.txt", "a0", "plain", "other/deep", "Report"] {
+        let entry = version(&first, name.as_bytes());
+        base.insert(
+            path(name.as_bytes()),
+            BaselineEntry::new(entry, entry).unwrap(),
+        );
+    }
+    let filler = version(&first, b"a");
+    for name in ["cafe\u{301}", "\u{1e69}", "unavaile\u{301}"] {
+        base.insert(
+            path(name.as_bytes()),
+            BaselineEntry::new(filler, filler).unwrap(),
+        );
+    }
+
+    align_spellings(&mut merged, &base, names);
+    align_spellings_reference(&mut expected, &base, names);
+
+    let summarized = |observation: &Observation| {
+        (
+            observation
+                .entries()
+                .iter()
+                .map(|(path, entry)| (path.clone(), entry.version()))
+                .collect::<BTreeMap<_, _>>(),
+            observation.unavailable().to_vec(),
+        )
+    };
+    assert_eq!(summarized(&merged), summarized(&expected));
+    // The scenario respells the unique alias, including an unavailable
+    // one, and leaves the ambiguous pair alone.
+    assert!(
+        merged
+            .entries()
+            .contains_key(&path("cafe\u{301}".as_bytes()))
+    );
+    assert!(
+        merged
+            .unavailable()
+            .contains(&path("unavaile\u{301}".as_bytes()))
+    );
+    assert!(
+        merged
+            .entries()
+            .contains_key(&path("s\u{323}\u{307}".as_bytes()))
+    );
+    assert!(
+        merged
+            .entries()
+            .contains_key(&path("\u{1e63}\u{307}".as_bytes()))
+    );
+    assert!(!merged.entries().contains_key(&path("\u{1e69}".as_bytes())));
+}
+
 /// PLAN.md §5.3 allows five seconds for planning 500k paths after a scan.
 /// This narrower phase must fit that budget even for 50k respelled names.
 #[test]

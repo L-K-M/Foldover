@@ -18,6 +18,7 @@
 //! A crash loses at most an uncommitted batch. The next run then finds both
 //! sides equal and records them, or a leftover temporary and archives it.
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -42,7 +43,7 @@ use foldover_types::{
     PathPrefixIndex, Propagation, RemovalProtection, Resolution, ReviewPolicy, ReviewToken,
     ScanControl, Side, Skip, SyncPath, UnicodeMatching,
 };
-use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::{UnicodeNormalization, is_nfc};
 
 use crate::{
     CandidateDecision, CandidatePlan, Choices, DeletionCounts, DeletionReview, Moves, PlanError,
@@ -1623,34 +1624,87 @@ fn align_spellings(
     if names.unicode() != UnicodeMatching::Normalized {
         return;
     }
-    let composed = |path: &SyncPath| -> Option<String> {
+    // ASCII needs no composition; neither does text already in NFC.
+    fn composed(path: &SyncPath) -> Option<Cow<'_, str>> {
         let text = std::str::from_utf8(path.as_bytes()).ok()?;
-        Some(text.nfc().collect())
-    };
-    // Base spellings this folder no longer shows, by composed form; two
-    // that compose alike are ambiguous and left alone.
-    let mut missing: BTreeMap<String, Option<&SyncPath>> = BTreeMap::new();
-    for path in base.keys() {
-        if observation.entries().contains_key(path) {
-            continue;
-        }
-        if let Some(key) = composed(path) {
-            missing
-                .entry(key)
-                .and_modify(|known| *known = None)
-                .or_insert(Some(path));
+        if text.is_ascii() || is_nfc(text) {
+            Some(Cow::Borrowed(text))
+        } else {
+            Some(Cow::Owned(text.nfc().collect()))
         }
     }
+    // Base spellings this folder no longer shows, by composed form; two
+    // that compose alike are ambiguous and left alone. Both trees are in
+    // raw path order, so one merge finds the base spellings the observation
+    // lacks and the observed names the base never knew, without a lookup
+    // for every unchanged path.
+    let mut missing: BTreeMap<Cow<'_, str>, Option<&SyncPath>> = BTreeMap::new();
+    let mut observed: Vec<&SyncPath> = Vec::new();
+    let mut base_paths = base.keys().peekable();
+    let mut observed_paths = observation.entries().keys().peekable();
+    loop {
+        match (base_paths.peek().copied(), observed_paths.peek().copied()) {
+            (None, None) => break,
+            (Some(base_path), None) => {
+                base_paths.next();
+                if let Some(key) = composed(base_path) {
+                    missing
+                        .entry(key)
+                        .and_modify(|known| *known = None)
+                        .or_insert(Some(base_path));
+                }
+            }
+            (None, Some(observed_path)) => {
+                observed_paths.next();
+                observed.push(observed_path);
+            }
+            (Some(base_path), Some(observed_path)) => match base_path.cmp(observed_path) {
+                std::cmp::Ordering::Less => {
+                    base_paths.next();
+                    if let Some(key) = composed(base_path) {
+                        missing
+                            .entry(key)
+                            .and_modify(|known| *known = None)
+                            .or_insert(Some(base_path));
+                    }
+                }
+                std::cmp::Ordering::Greater => {
+                    observed_paths.next();
+                    observed.push(observed_path);
+                }
+                std::cmp::Ordering::Equal => {
+                    base_paths.next();
+                    observed_paths.next();
+                }
+            },
+        }
+    }
+    // Unavailable roots are recorded as they arrive, so sort their paths
+    // once and merge them against the base too.
+    let mut unavailable: Vec<&SyncPath> = observation.unavailable().iter().collect();
+    unavailable.sort_unstable();
+    let mut base_paths = base.keys();
+    let mut base_path = base_paths.next();
+    for unavailable_path in unavailable {
+        while let Some(path) = base_path {
+            if path < unavailable_path {
+                base_path = base_paths.next();
+            } else {
+                break;
+            }
+        }
+        if base_path != Some(unavailable_path) {
+            observed.push(unavailable_path);
+        }
+    }
+
     if missing.is_empty() {
         return;
     }
-    let respelled: Vec<(SyncPath, SyncPath)> = observation
-        .entries()
-        .keys()
-        .chain(observation.unavailable())
-        .filter(|path| !base.contains_key(*path))
+    let respelled: Vec<(SyncPath, SyncPath)> = observed
+        .into_iter()
         .filter_map(|path| {
-            let known = missing.get(&composed(path)?)?.as_ref()?;
+            let known = missing.get(composed(path)?.as_ref())?.as_ref()?;
             Some((path.clone(), (*known).clone()))
         })
         .collect();
@@ -2055,7 +2109,7 @@ fn unavailable<'a>(
     names: NameMatching,
 ) -> impl Iterator<Item = &'a SyncPath> {
     // Match as the planner does, so another spelling cannot become a deletion.
-    let roots: BTreeSet<Vec<u8>> = left
+    let roots: BTreeSet<Cow<'_, [u8]>> = left
         .unavailable()
         .iter()
         .chain(right.unavailable())
@@ -2066,7 +2120,7 @@ fn unavailable<'a>(
             return false;
         }
         let key = crate::plan::name_key(path.as_bytes(), names);
-        roots.contains(&key)
+        roots.contains(key.as_ref())
             || key
                 .iter()
                 .enumerate()
@@ -2096,14 +2150,14 @@ fn uncertain_absences(
             continue;
         }
         let whole_root = unstable.iter().any(Option::is_none);
-        let directories: BTreeSet<_> = unstable
+        let directories: BTreeSet<Cow<'_, [u8]>> = unstable
             .iter()
             .flatten()
             .map(|path| crate::plan::name_key(path.as_bytes(), names))
             .collect();
         // Consider only missing counterparts and base rows. A first backup
         // with an empty target needs no second index of its source tree.
-        let mut missing: BTreeMap<_, _> = other
+        let mut missing: BTreeMap<Cow<'_, [u8]>, _> = other
             .entries()
             .keys()
             .chain(base.keys())
@@ -2111,7 +2165,7 @@ fn uncertain_absences(
             .map(|path| (crate::plan::name_key(path.as_bytes(), names), path))
             .filter(|(key, _)| {
                 whole_root
-                    || directories.contains(key)
+                    || directories.contains(key.as_ref())
                     || key
                         .iter()
                         .enumerate()
@@ -2124,7 +2178,7 @@ fn uncertain_absences(
         // Both folders may spell an observed entry differently. A case or
         // Unicode alias still proves presence and must remain usable.
         for path in seen.entries().keys() {
-            missing.remove(&crate::plan::name_key(path.as_bytes(), names));
+            missing.remove(crate::plan::name_key(path.as_bytes(), names).as_ref());
         }
         paths.extend(missing);
     }
