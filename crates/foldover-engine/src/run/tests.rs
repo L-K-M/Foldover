@@ -1413,6 +1413,49 @@ fn failed_folders_skip_their_contents_and_later_runs_recover_leftovers() {
     );
 }
 
+/// A failed write suppresses its own subtree, at component boundaries only:
+/// `a/x` waits for another run, while `a-b`, `a.txt` and `a0` sync.
+#[test]
+fn failed_writes_skip_only_their_own_subtrees() {
+    let pair = fixture(SyncMode::Backup { source: Side::Left });
+    let left = pair.left.path().to_owned();
+    let right = pair.right.path().to_owned();
+    fs::create_dir(left.join("a")).unwrap();
+    fs::write(left.join("a/x"), b"x").unwrap();
+    for (folder, file) in [("a-b", "y"), ("a.txt", "z"), ("a0", "w")] {
+        fs::create_dir(left.join(folder)).unwrap();
+        fs::write(left.join(folder).join(file), b"keep").unwrap();
+    }
+    // Prepare, then occupy the new folder's path so its creation fails.
+    let prepared = pair.prepare();
+    fs::write(right.join("a"), b"blocker").unwrap();
+    let outcome = prepared
+        .execute(
+            Approval::default(),
+            RunContext::Reviewed,
+            STARTED,
+            &mut |_, _| Ok(()),
+            &mut proceed,
+            &NoProgress,
+        )
+        .unwrap();
+    let RunOutcome::Ran(report) = outcome else {
+        panic!("expected a run");
+    };
+    assert_eq!(report.failures().len(), 1, "{:?}", report.failures());
+    assert_eq!(report.failures()[0].path(), Some(&path(b"a")));
+    // The three sibling folders and their files copy; `a/x` waits.
+    assert_eq!(report.copied(), 6, "{:?}", report.failures());
+    assert!(!right.join("a/x").exists());
+    for (folder, file) in [("a-b", "y"), ("a.txt", "z"), ("a0", "w")] {
+        assert_eq!(
+            fs::read(right.join(folder).join(file)).unwrap(),
+            b"keep",
+            "{folder}/{file}"
+        );
+    }
+}
+
 #[test]
 fn an_immediate_stop_leaves_leftovers_for_the_next_run() {
     let mut pair = fixture(SyncMode::Sync);

@@ -726,6 +726,76 @@ fn oversized_sidecars_are_excluded_before_classification() {
     assert_eq!(observed.issues()[0].path(), &path(b"._tiny"));
 }
 
+/// An unavailable folder covers its own path and descendants, never a
+/// sibling whose name shares its bytes.
+#[test]
+fn unavailable_directories_suppress_only_their_own_subtrees() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    let private = directory.path().join("d");
+    fs::create_dir(&private).unwrap();
+    fs::write(private.join("child"), b"hidden").unwrap();
+    for name in ["d-b", "d.txt", "d0"] {
+        let folder = directory.path().join(name);
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("keep"), b"keep").unwrap();
+    }
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o0)).unwrap();
+    let observed = remote
+        .observe_from(
+            PairOptions::default().metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+        )
+        .unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(observed.unavailable(), &[path(b"d")]);
+    assert!(!observed.entries().contains_key(&path(b"d")));
+    assert!(!observed.entries().contains_key(&path(b"d/child")));
+    for name in [b"d-b/keep".as_slice(), b"d.txt/keep", b"d0/keep"] {
+        assert!(observed.entries().contains_key(&path(name)), "{name:?}");
+    }
+}
+
+/// A file that cannot be read suppresses its own path, not names that
+/// merely start with the same bytes.
+#[test]
+fn unavailable_files_suppress_only_their_own_path() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    let unreadable = directory.path().join("f");
+    fs::write(&unreadable, b"hidden").unwrap();
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o0)).unwrap();
+    for name in ["f-b", "f.txt", "f0"] {
+        let folder = directory.path().join(name);
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("keep"), b"keep").unwrap();
+    }
+    let observed = remote
+        .observe_from(
+            PairOptions::default().metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+        )
+        .unwrap();
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(observed.unavailable(), &[path(b"f")]);
+    assert!(!observed.entries().contains_key(&path(b"f")));
+    for name in [b"f-b/keep".as_slice(), b"f.txt/keep", b"f0/keep"] {
+        assert!(observed.entries().contains_key(&path(name)), "{name:?}");
+    }
+}
+
 #[test]
 fn unchanged_sftp_attributes_cannot_hide_a_content_change() {
     let directory = tempfile::tempdir().unwrap();

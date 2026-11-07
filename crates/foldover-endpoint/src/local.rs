@@ -8,7 +8,7 @@ mod identity;
 mod lock;
 pub(crate) mod version;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io;
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -25,7 +25,7 @@ pub use foldover_types::ScanControl;
 #[cfg(target_os = "macos")]
 use foldover_types::{CaseMatching, UnicodeMatching};
 use foldover_types::{
-    Digest, EntryVersion, InvalidSyncPath, MetadataPolicy, NameMatching, SyncPath,
+    Digest, EntryVersion, InvalidSyncPath, MetadataPolicy, NameMatching, PathPrefixIndex, SyncPath,
 };
 
 use version::{Attribute, Observed, Payload, entry_version, metadata_version};
@@ -128,7 +128,7 @@ impl ScanError {
 
     /// Only a bounded subtree can be skipped. Root failures, cancellation,
     /// transport loss and protection failures still invalidate the observation.
-    fn into_issue(self) -> Result<ScanIssue, Self> {
+    pub(crate) fn into_issue(self) -> Result<ScanIssue, Self> {
         let path = match &self {
             Self::Io {
                 path: Some(path),
@@ -436,33 +436,22 @@ pub struct Observation {
 /// prefixes, rather than comparing every entry with every failed subtree.
 #[derive(Default)]
 struct UnavailablePaths {
-    roots: BTreeSet<Vec<u8>>,
+    index: PathPrefixIndex,
 }
 
 impl UnavailablePaths {
     fn from_paths(paths: &[SyncPath]) -> Self {
         Self {
-            roots: paths.iter().map(|path| path.as_bytes().to_vec()).collect(),
+            index: PathPrefixIndex::from_paths(paths),
         }
     }
 
     fn insert(&mut self, path: &SyncPath) {
-        self.roots.insert(path.as_bytes().to_vec());
+        self.index.insert(path);
     }
 
     fn contains(&self, path: &SyncPath) -> bool {
-        if self.roots.is_empty() {
-            return false;
-        }
-        let bytes = path.as_bytes();
-        std::iter::once(bytes)
-            .chain(
-                bytes
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, byte)| (*byte == b'/').then_some(&bytes[..index])),
-            )
-            .any(|prefix| self.roots.contains(prefix))
+        self.index.contains(path)
     }
 
     fn retain_entries(
@@ -516,7 +505,7 @@ impl Observation {
         Ok(())
     }
 
-    fn skip_issue(&mut self, issue: ScanIssue) {
+    pub(crate) fn skip_issue(&mut self, issue: ScanIssue) {
         self.unavailable.push(issue.path.clone());
         self.issues.push(issue);
     }
