@@ -291,7 +291,9 @@ const REREAD: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// the version unchanged without rereading data, outside the racy window.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Fingerprint {
-    key: Vec<u8>,
+    /// A boxed slice, so a captured stat key keeps only its actual bytes
+    /// instead of the capture buffer's spare capacity.
+    key: Box<[u8]>,
     size: u64,
     observed_at: SystemTime,
 }
@@ -303,7 +305,7 @@ const FINGERPRINT_HEADER_BYTES: usize = 8 + 4 + 8;
 impl Fingerprint {
     fn new(metadata: &EntryMetadata, observed_at: SystemTime) -> Self {
         Self {
-            key: metadata.stat_key(),
+            key: metadata.stat_key().into_boxed_slice(),
             size: metadata.size(),
             observed_at,
         }
@@ -316,7 +318,7 @@ impl Fingerprint {
     /// Store another system's stat; incomplete keys cannot justify version reuse.
     pub(crate) fn from_key(key: Vec<u8>, size: u64, observed_at: SystemTime) -> Self {
         Self {
-            key,
+            key: key.into_boxed_slice(),
             size,
             observed_at,
         }
@@ -324,7 +326,7 @@ impl Fingerprint {
 
     /// Whether this fingerprint records the stat `key` of `size` bytes.
     pub(crate) fn same_stat(&self, key: &[u8], size: u64) -> bool {
-        self.key == key && self.size == size
+        &*self.key == key && self.size == size
     }
 
     fn proves_unchanged_by(&self, key: &[u8], modified: SystemTime) -> bool {
@@ -333,7 +335,7 @@ impl Fingerprint {
             .observed_at
             .duration_since(modified)
             .is_ok_and(|age| age >= RACY_WINDOW);
-        settled && key == self.key && self.read_within(self.reread_after(), SystemTime::now())
+        settled && key == &*self.key && self.read_within(self.reread_after(), SystemTime::now())
     }
 
     /// How long after it was read this version must be read again:
@@ -365,13 +367,41 @@ impl Fingerprint {
         bytes
     }
 
-    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+    /// The size and observation time from a persisted header. A
+    /// nanosecond field of a full second or more is malformed, not a
+    /// normalizable value: it would change the observation and can panic
+    /// `Duration::new` when the seconds are near `u64::MAX`.
+    fn header(bytes: &[u8]) -> Option<(u64, SystemTime)> {
         let seconds = u64::from_le_bytes(bytes.get(..8)?.try_into().ok()?);
         let nanoseconds = u32::from_le_bytes(bytes.get(8..12)?.try_into().ok()?);
         let size = u64::from_le_bytes(bytes.get(12..FINGERPRINT_HEADER_BYTES)?.try_into().ok()?);
+        if nanoseconds >= 1_000_000_000 {
+            return None;
+        }
         let observed_at = UNIX_EPOCH.checked_add(Duration::new(seconds, nanoseconds))?;
+        Some((size, observed_at))
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let (size, observed_at) = Self::header(bytes)?;
         Some(Self {
-            key: bytes.get(FINGERPRINT_HEADER_BYTES..)?.to_vec(),
+            key: bytes
+                .get(FINGERPRINT_HEADER_BYTES..)?
+                .to_vec()
+                .into_boxed_slice(),
+            size,
+            observed_at,
+        })
+    }
+
+    /// Rebuild from an owned persisted fingerprint. The header is parsed
+    /// first, then the same buffer is shifted down to its key and boxed, so
+    /// the key is never copied into a second retained allocation.
+    fn from_owned(mut bytes: Vec<u8>) -> Option<Self> {
+        let (size, observed_at) = Self::header(&bytes)?;
+        bytes.drain(..FINGERPRINT_HEADER_BYTES);
+        Some(Self {
+            key: bytes.into_boxed_slice(),
             size,
             observed_at,
         })
@@ -404,7 +434,7 @@ impl ObservedEntry {
         Self {
             version,
             fingerprint: Fingerprint {
-                key: vec![1, 2, 3],
+                key: vec![1, 2, 3].into_boxed_slice(),
                 size,
                 observed_at: SystemTime::UNIX_EPOCH,
             },
@@ -416,6 +446,15 @@ impl ObservedEntry {
         Some(Self {
             version,
             fingerprint: Fingerprint::from_bytes(fingerprint)?,
+        })
+    }
+
+    /// Rebuild a stored entry from its owned bytes; `None` if they are not a
+    /// fingerprint. The key is moved out of `fingerprint`, not copied.
+    pub fn restore_owned(version: EntryVersion, fingerprint: Vec<u8>) -> Option<Self> {
+        Some(Self {
+            version,
+            fingerprint: Fingerprint::from_owned(fingerprint)?,
         })
     }
 }
@@ -1609,6 +1648,131 @@ mod tests {
         );
         assert!(limits.len() > 32, "rereads are spread");
     }
+
+    /// PLAN.md §4.8: a full second in the persisted nanosecond field used
+    /// to panic `Duration::new` instead of restoring to `None`.
+    #[test]
+    fn malformed_fingerprint_headers_are_rejected() {
+        let version = EntryVersion::new(
+            foldover_types::EntryContent::File(Digest::from_bytes([1; Digest::BYTE_LEN])),
+            Digest::from_bytes([2; Digest::BYTE_LEN]),
+        );
+        let mut header = Vec::new();
+        header.extend_from_slice(&u64::MAX.to_le_bytes());
+        header.extend_from_slice(&1_000_000_000u32.to_le_bytes());
+        header.extend_from_slice(&7u64.to_le_bytes());
+        header.extend_from_slice(b"key");
+
+        assert!(ObservedEntry::restore(version, &header).is_none());
+        assert!(ObservedEntry::restore_owned(version, header.clone()).is_none());
+
+        // The largest valid nanosecond field with the largest seconds: no
+        // representable observation, so still no entry.
+        header[8..12].copy_from_slice(&0u32.to_le_bytes());
+        assert!(ObservedEntry::restore(version, &header).is_none());
+        assert!(ObservedEntry::restore_owned(version, header.clone()).is_none());
+
+        // Too short for the header is not a fingerprint either.
+        let short = &header[..FINGERPRINT_HEADER_BYTES - 1];
+        assert!(ObservedEntry::restore(version, short).is_none());
+        assert!(ObservedEntry::restore_owned(version, short.to_vec()).is_none());
+    }
+
+    #[test]
+    fn owned_and_borrowed_restore_roundtrip_exact_key() {
+        let version = EntryVersion::new(
+            foldover_types::EntryContent::File(Digest::from_bytes([1; Digest::BYTE_LEN])),
+            Digest::from_bytes([2; Digest::BYTE_LEN]),
+        );
+        // Every byte value, repeated, so an inexact key could not survive.
+        let key: Vec<u8> = (0..=255_u8).chain(0..=63_u8).collect();
+        let observed_at =
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000) + Duration::from_nanos(123_456_789);
+        let fingerprint = Fingerprint::from_key(key.clone(), 4096, observed_at);
+        let bytes = fingerprint.to_bytes();
+
+        let borrowed = ObservedEntry::restore(version, &bytes).unwrap();
+        let owned = ObservedEntry::restore_owned(version, bytes.clone()).unwrap();
+
+        assert_eq!(borrowed, owned);
+        assert_eq!(&*borrowed.fingerprint.key, key.as_slice());
+        assert_eq!(&*owned.fingerprint.key, key.as_slice());
+        assert_eq!(borrowed.fingerprint.size, 4096);
+        assert_eq!(borrowed.fingerprint.observed_at, observed_at);
+        assert_eq!(borrowed.fingerprint_bytes(), bytes);
+        assert_eq!(owned.fingerprint_bytes(), bytes);
+
+        // A header with no key is a valid fingerprint of an empty key.
+        let empty =
+            ObservedEntry::restore_owned(version, bytes[..FINGERPRINT_HEADER_BYTES].to_vec())
+                .unwrap();
+        assert_eq!(empty.fingerprint.key.len(), 0);
+        assert_eq!(
+            empty.fingerprint_bytes(),
+            bytes[..FINGERPRINT_HEADER_BYTES].to_vec()
+        );
+
+        // A stored buffer with spare capacity still yields the exact key.
+        let mut roomy = Vec::with_capacity(1024);
+        roomy.extend_from_slice(&bytes);
+        let shrunk = ObservedEntry::restore_owned(version, roomy).unwrap();
+        assert_eq!(shrunk, borrowed);
+        assert_eq!(&*shrunk.fingerprint.key, key.as_slice());
+    }
+
+    /// A pre-epoch observation persists as the epoch, its existing behavior.
+    #[test]
+    fn pre_epoch_observation_serializes_as_epoch() {
+        let version = EntryVersion::new(
+            foldover_types::EntryContent::File(Digest::from_bytes([1; Digest::BYTE_LEN])),
+            Digest::from_bytes([2; Digest::BYTE_LEN]),
+        );
+        let fingerprint =
+            Fingerprint::from_key(vec![9, 8, 7, 6], 1, UNIX_EPOCH - Duration::from_secs(10));
+        let bytes = fingerprint.to_bytes();
+        assert_eq!(bytes[..8].to_vec(), 0u64.to_le_bytes().to_vec());
+        assert_eq!(bytes[8..12].to_vec(), 0u32.to_le_bytes().to_vec());
+        assert_eq!(
+            bytes[12..FINGERPRINT_HEADER_BYTES].to_vec(),
+            1u64.to_le_bytes().to_vec()
+        );
+
+        let restored = ObservedEntry::restore(version, &bytes).unwrap();
+        assert_eq!(restored.fingerprint.observed_at, UNIX_EPOCH);
+        assert_eq!(&*restored.fingerprint.key, &[9, 8, 7, 6]);
+    }
+
+    #[test]
+    fn captured_stat_key_keeps_only_its_payload() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("file"), b"data").unwrap();
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        let path = SyncPath::try_from(b"file".as_slice()).unwrap();
+        let entry = endpoint
+            .entry_at(&path)
+            .expect("the entry is reachable")
+            .expect("the entry exists");
+        let metadata = entry.metadata();
+        let key = metadata.stat_key();
+        let fingerprint = Fingerprint::new(metadata, SystemTime::UNIX_EPOCH);
+
+        assert!(key.capacity() >= key.len());
+        assert_eq!(fingerprint.key.len(), key.len());
+        assert_eq!(std::mem::size_of_val(&*fingerprint.key), key.len());
+    }
+
+    #[test]
+    fn reread_spread_follows_the_exact_key_bytes() {
+        let now = SystemTime::now();
+        let key: Vec<u8> = (0..=255_u8).collect();
+        let limit = Fingerprint::from_key(key.clone(), 1, now).reread_after();
+
+        let hash = blake3::hash(&key);
+        let spread = u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes"));
+        let half = (REREAD.as_secs() / 2).max(1);
+        assert_eq!(limit, Duration::from_secs(half + spread % half));
+    }
+
     #[cfg(target_os = "linux")]
     use std::ffi::OsStr;
     use std::fs;
