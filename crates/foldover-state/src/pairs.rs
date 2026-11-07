@@ -509,33 +509,14 @@ impl RunRecords {
     /// Visit one side's snapshot rows in stored path order. A malformed
     /// snapshot version is a cache miss, as in [`PairStore::snapshot`];
     /// malformed paths stay errors.
-    pub fn visit_snapshot<F>(&self, side: Side, visit: F) -> Result<(), Error>
-    where
-        F: FnMut(SnapshotEntry),
-    {
-        self.visit_snapshot_with_keys(side, &BTreeMap::new(), visit)
-    }
-
-    /// Visit one side's snapshot rows, reusing a base path's backing bytes
-    /// when the raw paths are equal.
-    fn visit_snapshot_with_keys<F>(
-        &self,
-        side: Side,
-        base_keys: &BTreeMap<Vec<u8>, SyncPath>,
-        mut visit: F,
-    ) -> Result<(), Error>
+    pub fn visit_snapshot<F>(&self, side: Side, mut visit: F) -> Result<(), Error>
     where
         F: FnMut(SnapshotEntry),
     {
         self.view
             .snapshot(side_name(side), |row| {
-                // A base key is already validated, so its Arc backing can be
-                // shared instead of allocating an equal path.
-                let path = match base_keys.get_key_value(row.path) {
-                    Some((_, path)) => path.clone(),
-                    None => SyncPath::try_from(row.path)
-                        .map_err(|_| Error::InvalidStored("snapshot path"))?,
-                };
+                let path = SyncPath::try_from(row.path)
+                    .map_err(|_| Error::InvalidStored("snapshot path"))?;
                 // Versions here are cache hints, not the authoritative base.
                 // A corrupt hint must allow the full observation that replaces it.
                 let Some(version) = decode(row.version).ok() else {
@@ -557,17 +538,21 @@ impl RunRecords {
     /// versions stay errors.
     pub fn decode(self) -> Result<RunRecordInputs, Error> {
         let mut base = BTreeMap::new();
-        let mut base_keys = BTreeMap::new();
         self.visit_base(|path, entry| {
-            base_keys.insert(path.as_bytes().to_vec(), path.clone());
             base.insert(path, entry);
         })?;
         let mut left_snapshot = Vec::new();
-        self.visit_snapshot_with_keys(Side::Left, &base_keys, |entry| {
+        self.visit_snapshot(Side::Left, |mut entry| {
+            if let Some((path, _)) = base.get_key_value(&entry.path) {
+                entry.path = path.clone();
+            }
             left_snapshot.push(entry);
         })?;
         let mut right_snapshot = Vec::new();
-        self.visit_snapshot_with_keys(Side::Right, &base_keys, |entry| {
+        self.visit_snapshot(Side::Right, |mut entry| {
+            if let Some((path, _)) = base.get_key_value(&entry.path) {
+                entry.path = path.clone();
+            }
             right_snapshot.push(entry);
         })?;
         Ok(RunRecordInputs {

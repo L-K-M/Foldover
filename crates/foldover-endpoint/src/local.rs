@@ -408,19 +408,6 @@ impl Fingerprint {
             observed_at,
         })
     }
-
-    /// Rebuild from an owned persisted fingerprint. The header is parsed
-    /// first, then the same buffer is shifted down to its key, so the key is
-    /// never copied into a second retained allocation.
-    fn from_owned(mut bytes: Vec<u8>) -> Option<Self> {
-        let (size, observed_at) = Self::header(&bytes)?;
-        bytes.drain(..FINGERPRINT_HEADER_BYTES);
-        Some(Self {
-            key: bytes,
-            size,
-            observed_at,
-        })
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -507,15 +494,6 @@ impl PreviousObservation for BTreeMap<SyncPath, ObservedEntry> {
 impl PreviousObservation for PathMap<ObservedEntry> {
     fn get_key_value(&self, path: &SyncPath) -> Option<(&SyncPath, &ObservedEntry)> {
         PathMap::get_key_value(self, path)
-    }
-
-    /// Rebuild a stored entry from its owned bytes; `None` if they are not a
-    /// fingerprint. The key is moved out of `fingerprint`, not copied.
-    pub fn restore_owned(version: EntryVersion, fingerprint: Vec<u8>) -> Option<Self> {
-        Some(Self {
-            version,
-            fingerprint: Fingerprint::from_owned(fingerprint)?,
-        })
     }
 }
 

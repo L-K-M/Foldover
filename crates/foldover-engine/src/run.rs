@@ -728,13 +728,21 @@ impl PendingRunInputs {
             base.insert(path, entry);
         })?;
         let mut left_snapshot = BTreeMap::new();
-        records.visit_snapshot(Side::Left, |entry| {
+        records.visit_snapshot(Side::Left, |mut entry| {
+            if let Some((path, _)) = base.get_key_value(&entry.path) {
+                entry.path = path.clone();
+            }
             if let Some(observed) = ObservedEntry::restore_owned(entry.version, entry.fingerprint) {
                 left_snapshot.insert(entry.path, observed);
             }
         })?;
         let mut right_snapshot = BTreeMap::new();
-        records.visit_snapshot(Side::Right, |entry| {
+        records.visit_snapshot(Side::Right, |mut entry| {
+            if let Some((path, _)) = base.get_key_value(&entry.path) {
+                entry.path = path.clone();
+            } else if let Some((path, _)) = left_snapshot.get_key_value(&entry.path) {
+                entry.path = path.clone();
+            }
             if let Some(observed) = ObservedEntry::restore_owned(entry.version, entry.fingerprint) {
                 right_snapshot.insert(entry.path, observed);
             }
