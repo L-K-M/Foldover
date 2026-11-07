@@ -94,6 +94,64 @@ const QUARANTINE: &[u8] = b"com.apple.quarantine";
 #[cfg(not(target_os = "macos"))]
 const USER_NAMESPACE: &[u8] = b"user.";
 
+impl AttributeRole {
+    const fn bit(self) -> u8 {
+        1_u8 << (self as u8)
+    }
+}
+
+/// The attribute roles one capture needs. Roles are the driver's policy
+/// knowledge; the root only applies the set.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CaptureRoles(u8);
+
+impl CaptureRoles {
+    /// Every role.
+    pub const ALL: Self = Self(u8::MAX);
+    /// No role.
+    pub const NONE: Self = Self(0);
+    /// The set of `roles`.
+    pub fn new(roles: &[AttributeRole]) -> Self {
+        let mut bits = 0;
+        for role in roles {
+            bits |= role.bit();
+        }
+        Self(bits)
+    }
+    /// Whether `role` is in the set.
+    pub fn contains(self, role: AttributeRole) -> bool {
+        self.0 & role.bit() != 0
+    }
+}
+
+/// What one extended-metadata read must return. `Full` serves staged writes,
+/// archives and restores; the filtered forms let an observation skip the
+/// values and ACL its policy cannot depend on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MetadataCapture {
+    /// Every attribute value and the ACL.
+    Full,
+    /// Values whose role is in the set; no ACL.
+    Values(CaptureRoles),
+    /// Values whose role is in the set, and the ACL.
+    ValuesAndAccessControl(CaptureRoles),
+}
+
+impl MetadataCapture {
+    /// Whether `role`'s value is part of this capture.
+    pub fn wants(&self, role: AttributeRole) -> bool {
+        match self {
+            Self::Full => true,
+            Self::Values(roles) | Self::ValuesAndAccessControl(roles) => roles.contains(role),
+        }
+    }
+
+    /// Whether the ACL is part of this capture.
+    pub fn wants_access_control(&self) -> bool {
+        matches!(self, Self::Full | Self::ValuesAndAccessControl(_))
+    }
+}
+
 impl EntryMetadata {
     #[cfg(target_os = "macos")]
     pub fn attribute_role(&self, name: &[u8]) -> AttributeRole {
@@ -167,10 +225,13 @@ impl<F: FnMut(u64) -> ScanControl> Progress<'_, F> {
 impl Root {
     /// Read native xattrs/ACLs from the observed entry, never from its link target.
     /// Errors, cancellation and unsupported metadata never become empty metadata.
+    /// `capture` selects the values and ACL the caller can use; the rest are
+    /// never read.
     pub fn read_extended_metadata(
         &self,
         path: &SyncPath,
         expected: &EntryMetadata,
+        capture: MetadataCapture,
         control: &mut impl FnMut(u64) -> ScanControl,
     ) -> Result<ExtendedMetadata, MetadataReadError> {
         let mut progress = Progress { control, bytes: 0 };
@@ -199,7 +260,7 @@ impl Root {
         if EntryMetadata::from_file(&file)? != *expected {
             return Err(MetadataReadError::Changed);
         }
-        let result = capture(&file, &mut progress)?;
+        let result = capture_metadata(&file, expected, capture, &mut progress)?;
         progress.checkpoint()?;
         if EntryMetadata::from_file(&file)? != *expected || self.metadata(path)? != *expected {
             return Err(MetadataReadError::Changed);
@@ -209,9 +270,11 @@ impl Root {
 
     /// Root directory metadata is part of a future snapshot too; keep its access
     /// on the held descriptor rather than reopening an ambient root path.
+    /// `capture` selects the values and ACL the caller can use.
     pub fn read_root_extended_metadata(
         &self,
         expected: &EntryMetadata,
+        capture: MetadataCapture,
         control: &mut impl FnMut(u64) -> ScanControl,
     ) -> Result<ExtendedMetadata, MetadataReadError> {
         let mut progress = Progress { control, bytes: 0 };
@@ -232,7 +295,7 @@ impl Root {
         if EntryMetadata::from_file(&file)? != *expected {
             return Err(MetadataReadError::Changed);
         }
-        let result = capture(&file, &mut progress)?;
+        let result = capture_metadata(&file, expected, capture, &mut progress)?;
         progress.checkpoint()?;
         if EntryMetadata::from_file(&file)? != *expected || self.root_metadata()? != *expected {
             return Err(MetadataReadError::Changed);
@@ -242,15 +305,42 @@ impl Root {
 }
 
 /// Capture through an already-open descriptor the caller owns, such as a
-/// staged temporary that has no observed path yet.
+/// staged temporary that has no observed path yet. Staged writes keep the full
+/// capture: the staged entry's version must match a complete observation.
 pub(super) fn capture_file(
     file: &impl AsFd,
     control: &mut impl FnMut(u64) -> ScanControl,
 ) -> Result<ExtendedMetadata, MetadataReadError> {
     let mut progress = Progress { control, bytes: 0 };
     progress.checkpoint()?;
-    let result = capture(file, &mut progress)?;
+    let expected = EntryMetadata::from_file(file)?;
+    let result = capture_metadata(file, &expected, MetadataCapture::Full, &mut progress)?;
     progress.checkpoint()?;
+    Ok(result)
+}
+
+/// Capture selected extended metadata through a descriptor the caller opened
+/// and already bound to `expected`, such as the one a fused observation holds.
+/// This keeps the same guards as `read_extended_metadata`: residency,
+/// cancellation, value/list limits, the name-list recheck, and the
+/// descriptor's identity before and after the read.
+pub(super) fn capture_observed_file(
+    file: &impl AsFd,
+    expected: &EntryMetadata,
+    capture: MetadataCapture,
+    control: &mut impl FnMut(u64) -> ScanControl,
+) -> Result<ExtendedMetadata, MetadataReadError> {
+    let mut progress = Progress { control, bytes: 0 };
+    progress.checkpoint()?;
+    validate_entry(expected)?;
+    if EntryMetadata::from_file(file)? != *expected {
+        return Err(MetadataReadError::Changed);
+    }
+    let result = capture_metadata(file, expected, capture, &mut progress)?;
+    progress.checkpoint()?;
+    if EntryMetadata::from_file(file)? != *expected {
+        return Err(MetadataReadError::Changed);
+    }
     Ok(result)
 }
 
@@ -270,13 +360,18 @@ fn validate_entry(expected: &EntryMetadata) -> Result<(), MetadataReadError> {
     Ok(())
 }
 
-fn capture(
+fn capture_metadata(
     file: &impl AsFd,
+    expected: &EntryMetadata,
+    capture: MetadataCapture,
     progress: &mut Progress<'_, impl FnMut(u64) -> ScanControl>,
 ) -> Result<ExtendedMetadata, MetadataReadError> {
     let names = attribute_names(file)?;
     let mut attributes = Vec::with_capacity(names.len());
     for name in &names {
+        if !capture.wants(expected.attribute_role(name.as_bytes())) {
+            continue;
+        }
         progress.checkpoint()?;
         let size = attribute_value(file, name, 0, &mut [])? as u64;
         if size > MAX_METADATA_READ_BYTES - progress.bytes {
@@ -293,7 +388,13 @@ fn capture(
         });
     }
     progress.checkpoint()?;
-    let access_control = access_control(file)?;
+    let access_control = if capture.wants_access_control() {
+        access_control(file)?
+    } else {
+        AccessControl::NotReported
+    };
+    // Recheck the names even when the first list was empty: a concurrent
+    // writer can add the first attribute after that listing.
     if attribute_names(file)? != names {
         return Err(MetadataReadError::Changed);
     }
@@ -394,7 +495,12 @@ fn access_control(_: &impl AsFd) -> io::Result<AccessControl> {
 
 #[cfg(target_os = "linux")]
 fn attribute_list(file: &impl AsFd, bytes: &mut [u8]) -> io::Result<usize> {
-    rustix::fs::flistxattr(file, bytes).map_err(io::Error::from)
+    // rustix 1.1.6 answers an empty buffer with 0, not the size.
+    if bytes.is_empty() {
+        rustix::fs::flistxattr_query(file).map_err(io::Error::from)
+    } else {
+        rustix::fs::flistxattr(file, bytes).map_err(io::Error::from)
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -404,7 +510,11 @@ fn attribute_value(
     _: u32,
     bytes: &mut [u8],
 ) -> io::Result<usize> {
-    rustix::fs::fgetxattr(file, name, bytes).map_err(io::Error::from)
+    if bytes.is_empty() {
+        rustix::fs::fgetxattr_query(file, name).map_err(io::Error::from)
+    } else {
+        rustix::fs::fgetxattr(file, name, bytes).map_err(io::Error::from)
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]

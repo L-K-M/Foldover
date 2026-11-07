@@ -47,6 +47,124 @@ fn sftp(directory: &Path) -> Option<SftpEndpoint> {
     }
 }
 
+fn counted(directory: &Path, log: &Path) -> Option<SftpEndpoint> {
+    let server = server()?;
+    let relay = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../perf/sftp-relay.py");
+    Some(
+        SftpEndpoint::spawn(
+            Path::new("python3"),
+            &[
+                OsStr::new("-u"),
+                relay.as_os_str(),
+                OsStr::new("--log"),
+                log.as_os_str(),
+                OsStr::new("--"),
+                server.as_os_str(),
+                OsStr::new("-d"),
+                OsStr::new("/"),
+            ],
+            directory.as_os_str().as_encoded_bytes(),
+        )
+        .unwrap(),
+    )
+}
+
+fn requests(log: &Path, kind: u64) -> usize {
+    fs::read_to_string(log)
+        .unwrap()
+        .lines()
+        .filter(|line| {
+            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+            event["event"] == "request" && event["kind"] == kind
+        })
+        .count()
+}
+
+#[test]
+fn unchanged_staged_metadata_uses_one_stat() {
+    use foldover_types::Propagation::Ignore;
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("packets");
+    let Some(remote) = counted(directory.path(), &log) else {
+        return;
+    };
+    fs::write(directory.path().join("staged"), b"bytes").unwrap();
+    let mut session = remote.session();
+    let stored = remote.remote(b"staged");
+    let metadata = SftpEndpoint::foreign_metadata(&session.lstat(&stored).unwrap());
+    let before = requests(&log, 7);
+    let policy = MetadataPolicy::new(Ignore, Ignore, Ignore);
+    remote
+        .set_file_metadata_on(
+            &mut session,
+            &stored,
+            Digest::from_bytes([0; 32]),
+            metadata,
+            policy,
+        )
+        .unwrap();
+    assert_eq!(requests(&log, 7) - before, 1);
+}
+
+#[test]
+fn archive_parent_reuse_keeps_component_checks_without_mkdir_refusals() {
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("packets");
+    let Some(remote) = counted(directory.path(), &log) else {
+        return;
+    };
+    let parent = b".foldover/archive/run/parent";
+    remote.make_directories(parent, PRIVATE_DIRECTORY).unwrap();
+    let before = requests(&log, 14); // SSH_FXP_MKDIR
+    remote.make_directories(parent, PRIVATE_DIRECTORY).unwrap();
+    assert_eq!(requests(&log, 14), before);
+    // Reuse cannot turn an external substitution into a trusted directory.
+    fs::remove_dir(directory.path().join(".foldover/archive/run/parent")).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(
+        outside.path(),
+        directory.path().join(".foldover/archive/run/parent"),
+    )
+    .unwrap();
+    assert!(
+        remote
+            .make_directories(b".foldover/archive/run/parent/child", PRIVATE_DIRECTORY)
+            .is_err()
+    );
+    assert!(!outside.path().join("child").exists());
+}
+
+#[test]
+fn changed_staged_metadata_reads_back_the_final_state() {
+    use foldover_types::Propagation::Sync;
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("packets");
+    let Some(remote) = counted(directory.path(), &log) else {
+        return;
+    };
+    fs::write(directory.path().join("staged"), b"bytes").unwrap();
+    let stored = remote.remote(b"staged");
+    let metadata = crate::ForeignMetadata {
+        permissions: 0o750,
+        modified: UNIX_EPOCH + Duration::from_secs(10),
+    };
+    let mut session = remote.session();
+    let policy = MetadataPolicy::new(Sync, Sync, Sync);
+    let before = requests(&log, 7);
+    let digest = Digest::from_bytes([0; 32]);
+    let version = remote
+        .set_file_metadata_on(&mut session, &stored, digest, metadata, policy)
+        .unwrap();
+    assert_eq!(requests(&log, 7) - before, 2);
+    assert_eq!(requests(&log, 9), 1); // SSH_FXP_SETSTAT
+    assert_eq!(
+        version,
+        remote
+            .staged_version_on(&mut session, &stored, digest, policy)
+            .unwrap()
+    );
+}
+
 /// The real `sftp-server` behind a filter that drops `fsync@openssh.com`
 /// from the version handshake, so the session behaves like a server
 /// without the extension while every other operation stays real.
@@ -726,6 +844,76 @@ fn oversized_sidecars_are_excluded_before_classification() {
     assert_eq!(observed.issues()[0].path(), &path(b"._tiny"));
 }
 
+/// An unavailable folder covers its own path and descendants, never a
+/// sibling whose name shares its bytes.
+#[test]
+fn unavailable_directories_suppress_only_their_own_subtrees() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    let private = directory.path().join("d");
+    fs::create_dir(&private).unwrap();
+    fs::write(private.join("child"), b"hidden").unwrap();
+    for name in ["d-b", "d.txt", "d0"] {
+        let folder = directory.path().join(name);
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("keep"), b"keep").unwrap();
+    }
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o0)).unwrap();
+    let observed = remote
+        .observe_from(
+            PairOptions::default().metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+        )
+        .unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(observed.unavailable(), &[path(b"d")]);
+    assert!(!observed.entries().contains_key(&path(b"d")));
+    assert!(!observed.entries().contains_key(&path(b"d/child")));
+    for name in [b"d-b/keep".as_slice(), b"d.txt/keep", b"d0/keep"] {
+        assert!(observed.entries().contains_key(&path(name)), "{name:?}");
+    }
+}
+
+/// A file that cannot be read suppresses its own path, not names that
+/// merely start with the same bytes.
+#[test]
+fn unavailable_files_suppress_only_their_own_path() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    let unreadable = directory.path().join("f");
+    fs::write(&unreadable, b"hidden").unwrap();
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o0)).unwrap();
+    for name in ["f-b", "f.txt", "f0"] {
+        let folder = directory.path().join(name);
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("keep"), b"keep").unwrap();
+    }
+    let observed = remote
+        .observe_from(
+            PairOptions::default().metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+        )
+        .unwrap();
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(observed.unavailable(), &[path(b"f")]);
+    assert!(!observed.entries().contains_key(&path(b"f")));
+    for name in [b"f-b/keep".as_slice(), b"f.txt/keep", b"f0/keep"] {
+        assert!(observed.entries().contains_key(&path(name)), "{name:?}");
+    }
+}
+
 #[test]
 fn unchanged_sftp_attributes_cannot_hide_a_content_change() {
     let directory = tempfile::tempdir().unwrap();
@@ -812,6 +1000,35 @@ fn reads_stop_at_the_observed_length_and_refuse_a_changed_file() {
     fs::write(directory.path().join("data"), vec![3; 40]).unwrap();
     let read = remote.read_file(&name, &before, &mut proceed, &mut |_| Ok(()));
     assert!(matches!(read, Err(ScanError::Changed(_))), "{read:?}");
+}
+
+#[test]
+fn bounded_control_reads_reject_overflow_instead_of_truncating() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    let stored = remote.remote(b"control");
+    for data in [b"".as_slice(), b"a", b"four"] {
+        fs::write(directory.path().join("control"), data).unwrap();
+        assert_eq!(
+            read_small_on(&mut remote.session(), &stored, 4).unwrap(),
+            Some(data.to_vec())
+        );
+    }
+    fs::write(directory.path().join("control"), b"four!").unwrap();
+    assert_eq!(
+        read_small_on(&mut remote.session(), &stored, 4)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidData
+    );
+    // Overflow drains the wire, so the next control read still works.
+    fs::write(directory.path().join("control"), b"ok").unwrap();
+    assert_eq!(
+        read_small_on(&mut remote.session(), &stored, 4).unwrap(),
+        Some(b"ok".to_vec())
+    );
 }
 
 #[test]

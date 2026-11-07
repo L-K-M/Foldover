@@ -40,8 +40,8 @@ mod sync;
 pub use sync::{
     ConflictKeep, SYNC_CANCEL, SYNC_ITEM_LIMIT, SYNC_ITEMS, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN,
     SYNC_STATUS, SYNC_UNDO, SyncAction, SyncConflict, SyncCounts, SyncDeletions, SyncFailure,
-    SyncItem, SyncItemKind, SyncItemPage, SyncItemQuery, SyncJob, SyncKey, SyncPreview,
-    SyncProgress, SyncResolve, SyncResult, SyncRun, SyncStatus, UndoResult,
+    SyncItem, SyncItemKind, SyncItemPage, SyncItemQuery, SyncJob, SyncKey, SyncPairContext,
+    SyncPreview, SyncProgress, SyncResolve, SyncResult, SyncRun, SyncStatus, UndoResult,
 };
 
 mod pair;
@@ -53,7 +53,7 @@ pub use pair::{
 };
 
 pub const JSON_RPC_VERSION: &str = "2.0";
-pub const PROTOCOL_VERSION: u32 = 20;
+pub const PROTOCOL_VERSION: u32 = 21;
 pub const SESSION_HELLO: &str = "session.hello";
 pub const DAEMON_STATUS: &str = "daemon.status";
 /// Leave crash-loop safe mode and sync again.

@@ -1107,6 +1107,87 @@ mod tests {
         assert_eq!(store.journal(pair.id()).unwrap(), None);
     }
 
+    /// PLAN.md §5.2: the per-batch journal cleanup must stay linear in a
+    /// run's writes. Ignored by default; run explicitly in release mode
+    /// on an idle host:
+    ///   cargo test --release -p foldover-state journal_batches_commit_linearly -- --ignored --nocapture
+    #[test]
+    #[ignore = "performance budget; run explicitly in release mode on an idle host"]
+    fn journal_batches_commit_linearly() {
+        use std::time::{Duration, Instant};
+
+        const BATCH: usize = 256;
+        const BASE: usize = 100_000;
+        // 1x, 2x, 4x and 8x the writes. The first measurement sets the
+        // linear expectation; the old per-batch cleanup grew as 1x, 4x,
+        // 16x and 64x, which this catches from 4x on.
+        let mut first: Option<(usize, Duration)> = None;
+        for entries in [BASE, 2 * BASE, 4 * BASE, 8 * BASE] {
+            let (_directory, location) = location();
+            let mut store = PairStore::open(&location).unwrap();
+            let pair = store.create(&draft(SyncMode::Sync)).unwrap();
+            let (updates, journal) = batch_writes(entries);
+            let started = Instant::now();
+            for (index, batch) in updates.chunks(BATCH).enumerate() {
+                let start = index * BATCH;
+                store
+                    .update_base(
+                        pair.id(),
+                        pair.revision(),
+                        batch,
+                        JournalUpdate::Record {
+                            run: "2026-10-20T10-00-00.000Z",
+                            entries: &journal[start..start + batch.len()],
+                        },
+                    )
+                    .unwrap();
+            }
+            let elapsed = started.elapsed();
+            eprintln!("{entries} writes in {BATCH}-row batches took {elapsed:?}");
+            if let Some((base, expected)) = first {
+                // Allow 3x per write for B-tree depth, WAL growth and host
+                // noise; the quadratic term would cost entries/base
+                // squared.
+                let allowed = expected * ((entries / base) as u32 * 3);
+                assert!(
+                    elapsed < allowed,
+                    "{entries} writes took {elapsed:?}; over 3x the linear {base}-write expectation"
+                );
+            } else {
+                first = Some((entries, elapsed));
+            }
+        }
+    }
+
+    /// `entries` writes and the journal entries a run records with them.
+    fn batch_writes(entries: usize) -> (Vec<BaseUpdate>, Vec<JournalEntry>) {
+        use foldover_types::{Digest, EntryContent, EntryVersion};
+
+        let version = EntryVersion::new(
+            EntryContent::File(Digest::from_bytes([7; Digest::BYTE_LEN])),
+            Digest::from_bytes([9; Digest::BYTE_LEN]),
+        );
+        let entry = BaselineEntry::new(version, version).unwrap();
+        let mut updates = Vec::with_capacity(entries);
+        let mut journal = Vec::with_capacity(entries);
+        for index in 0..entries {
+            let path = SyncPath::try_from(
+                format!("d-{:05}/f-{:05}", index / 1000, index % 1000).as_bytes(),
+            )
+            .unwrap();
+            updates.push(BaseUpdate::Record(path.clone(), entry));
+            journal.push(JournalEntry {
+                seq: index as u64,
+                path,
+                side: Side::Left,
+                action: JournalAction::Replace(version),
+                before: Some(entry),
+                moved_from: None,
+            });
+        }
+        (updates, journal)
+    }
+
     #[test]
     fn options_round_trip_and_metadata_changes_discard_the_base() {
         use foldover_types::{Digest, EntryContent, EntryVersion};

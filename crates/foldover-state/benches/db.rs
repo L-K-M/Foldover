@@ -9,15 +9,20 @@ use std::os::unix::fs::PermissionsExt;
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use foldover_state::{BaseUpdate, JournalUpdate, PairStore, SnapshotEntry, StateLocation};
+use foldover_state::{
+    BaseUpdate, JournalAction, JournalEntry, JournalUpdate, PairStore, SnapshotEntry, StateLocation,
+};
 use foldover_types::{
-    BaselineEntry, Digest, EntryContent, EntryVersion, LocalRoot, PairDraft, Side, SyncMode,
-    SyncPath,
+    BaselineEntry, Digest, EntryContent, EntryVersion, LocalRoot, PairConfig, PairDraft, Side,
+    SyncMode, SyncPath,
 };
 
 const DIRECTORIES: usize = 1_000;
 const FILES_PER_DIRECTORY: usize = 99;
 const EXPECTED_ENTRIES: usize = DIRECTORIES + DIRECTORIES * FILES_PER_DIRECTORY;
+/// The engine's apply-phase commit batch (`COMMIT_BATCH`,
+/// crates/foldover-engine/src/run.rs:52).
+const COMMIT_BATCH: usize = 256;
 
 fn path(bytes: &[u8]) -> SyncPath {
     SyncPath::try_from(bytes).unwrap()
@@ -54,6 +59,78 @@ fn updates() -> Vec<BaseUpdate> {
     updates
 }
 
+/// One write's base update and the journal entry a run records with it.
+fn write(updates: &mut Vec<BaseUpdate>, journal: &mut Vec<JournalEntry>, bytes: &[u8], seed: u32) {
+    let entry = entry(seed);
+    let seq = updates.len() as u64;
+    updates.push(BaseUpdate::Record(path(bytes), entry));
+    journal.push(JournalEntry {
+        seq,
+        path: path(bytes),
+        side: Side::Left,
+        action: JournalAction::Replace(entry.left()),
+        before: Some(entry),
+        moved_from: None,
+    });
+}
+
+/// The same 100_000 paths `updates` builds, each with the journal entry
+/// a run records for writing it.
+fn writes() -> (Vec<BaseUpdate>, Vec<JournalEntry>) {
+    let mut updates = Vec::with_capacity(EXPECTED_ENTRIES);
+    let mut journal = Vec::with_capacity(EXPECTED_ENTRIES);
+    for folder in 0..DIRECTORIES {
+        let name = format!("d-{folder:04}");
+        write(
+            &mut updates,
+            &mut journal,
+            name.as_bytes(),
+            (EXPECTED_ENTRIES + folder) as u32,
+        );
+        for file in 0..FILES_PER_DIRECTORY {
+            let seed = (folder * FILES_PER_DIRECTORY + file) as u32;
+            write(
+                &mut updates,
+                &mut journal,
+                format!("{name}/f-{file:02}").as_bytes(),
+                seed,
+            );
+        }
+    }
+    (updates, journal)
+}
+
+/// Commit one whole run: `updates` and `journal` in `COMMIT_BATCH`
+/// transactions, the base updates and journal entries of each batch
+/// together. `run` names the run, as a real archive folder does.
+fn commit_run(
+    store: &mut PairStore,
+    pair: &PairConfig,
+    updates: &[BaseUpdate],
+    journal: &[JournalEntry],
+    run: &str,
+) {
+    for (index, batch) in updates.chunks(COMMIT_BATCH).enumerate() {
+        let start = index * COMMIT_BATCH;
+        store
+            .update_base(
+                pair.id(),
+                pair.revision(),
+                batch,
+                JournalUpdate::Record {
+                    run,
+                    entries: &journal[start..start + batch.len()],
+                },
+            )
+            .unwrap();
+    }
+}
+
+/// A run's archive-folder name; every run has its own.
+fn run_name(run: u64) -> String {
+    format!("2026-10-20T10-00-00.000Z-{run:016}")
+}
+
 /// An exclusive store in a fresh 0o700 directory, with one pair; the
 /// temp directory must outlive the benchmark that uses it.
 fn store() -> (tempfile::TempDir, PairStore, foldover_types::PairConfig) {
@@ -87,6 +164,27 @@ fn db_commit_100k(c: &mut Criterion) {
             store
                 .update_base(pair.id(), pair.revision(), &updates, JournalUpdate::None)
                 .unwrap();
+        })
+    });
+}
+
+/// The real apply-phase shape: a run's 100_000 writes committed in
+/// `COMMIT_BATCH` transactions, each batch carrying its journal
+/// entries. Every iteration is one whole run under a fresh run id, so
+/// the first batch replaces the previous run's journal. A per-batch
+/// journal cleanup that scans the run's own entries instead of seeking
+/// the primary key shows up here as a quadratic median.
+fn db_commit_batches_100k(c: &mut Criterion) {
+    let (_directory, mut store, pair) = store();
+    let (updates, journal) = writes();
+    // One warm run, so every measured iteration is a steady-state
+    // rewrite of the same 100_000 paths rather than a first insert.
+    commit_run(&mut store, &pair, &updates, &journal, &run_name(0));
+    let mut run = 1;
+    c.bench_function("db_commit_batches_100k", |b| {
+        b.iter(|| {
+            commit_run(&mut store, &pair, &updates, &journal, &run_name(run));
+            run += 1;
         })
     });
 }
@@ -218,7 +316,7 @@ fn run_records_capture_decode_100k(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = db_commit_100k, db_read_100k, db_snapshot_unchanged_100k, db_snapshot_rewrite_100k,
+    targets = db_commit_100k, db_commit_batches_100k, db_read_100k, db_snapshot_unchanged_100k, db_snapshot_rewrite_100k,
         run_inputs_read_100k, run_records_capture_100k, run_records_capture_decode_100k
 }
 criterion_main!(benches);

@@ -16,11 +16,12 @@ use rustix::fs::{Mode, OFlags};
 use crate::{FilesystemFeatures, prevent_materialization};
 
 mod content;
-pub use content::HashError;
+pub use content::{HashError, ObserveFileError};
 
 mod extended;
 pub use extended::{
-    AccessControl, AttributeRole, ExtendedAttribute, ExtendedMetadata, MetadataReadError,
+    AccessControl, AttributeRole, CaptureRoles, ExtendedAttribute, ExtendedMetadata,
+    MetadataCapture, MetadataReadError,
 };
 
 mod write;
