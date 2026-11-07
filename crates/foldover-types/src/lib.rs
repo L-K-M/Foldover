@@ -8,6 +8,7 @@ mod metadata_policy;
 mod names;
 mod options;
 mod pair;
+mod prefix_index;
 mod reconcile;
 mod review;
 mod root;
@@ -18,6 +19,7 @@ pub use pair::{
     FolderRole, InvalidPair, LocalRoot, MAX_LOCAL_ROOT_BYTES, MAX_PAIR_NAME_BYTES, PairConfig,
     PairDraft, PairId,
 };
+pub use prefix_index::PathPrefixIndex;
 
 pub use device::{DeviceId, InvalidDeviceId};
 pub use endpoint_id::EndpointId;
