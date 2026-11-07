@@ -62,6 +62,9 @@ pub use link::{
 
 mod pace;
 
+#[cfg(test)]
+mod observation_versions;
+
 mod lease;
 pub use lease::{HeldLease, LeaseError, LeaseHolder, LeaseTiming, LockFile};
 
