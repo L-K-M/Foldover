@@ -23,9 +23,13 @@ time.
   | Solid-state disk | 4 |
   | Mounted share (SMB, NFS, AFP, WebDAV) | 4 |
   | Spinning disk, or one that does not say | 1 |
-  | SFTP server | 4, on up to five sessions (one per worker and the run's thread) and one for lease beats; 1 when Foldover cannot open more |
-  | Two SFTP servers in one pair | 1: a copy holds a session on each, and copies in opposite directions could wait on each other once a server refuses more sessions |
+  | SFTP server | 4; observation reads use up to eight sessions from a pool capped at nine (eight readers and the run's thread), plus a separate lease session, so at most ten; 1 when Foldover cannot open more |
+  | Two SFTP servers in one pair | 1 copy: a copy holds a session on each, and copies in opposite directions could wait on each other once a server refuses more sessions. Observations stay sequential, one root at a time, each on its own endpoint's pool |
   | Another Mac | 4, one link stream each; a link takes 64 streams, so change reports and lease beats always find one |
+
+  Observation reads on an SFTP folder do not use this copy count: they read
+  on up to eight pooled sessions, while copies still take the smaller of the
+  two folders' counts.
 
 - **One recorder.** The run's thread keeps planning order, the journal,
   the base, commits, progress and the control (cancel, lease beats). It
@@ -53,6 +57,8 @@ time.
 - **SFTP sessions.** A server's sessions are pooled: a borrower takes
   an idle one, opens another below the limit, or waits for one to come
   back, and holds one at a time, so a handle stays on the session that
-  opened it. A server that refuses another session is shared by the
-  ones it took.
+  opened it. Observation reads use a pool capped at nine (eight readers and
+  the run's thread); the lease beats on a separate session, so an endpoint
+  opens at most ten. A server that refuses another session is shared by the
+  ones it took, and refusals clamp the pool to what the server took.
 - Follow-up: a budget shared by pairs on the same device.
