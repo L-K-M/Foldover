@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::Arc;
 
 const SEPARATOR: u8 = b'/';
 
@@ -8,22 +9,22 @@ const SEPARATOR: u8 = b'/';
 /// root handles, reject symlink traversal and protect Foldover's internal paths.
 /// NFC/case comparison keys are separate from this lossless representation.
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct SyncPath(Vec<u8>);
+pub struct SyncPath(Arc<[u8]>);
 
 impl fmt::Debug for SyncPath {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Errors show a readable filename; the path itself keeps its exact bytes.
-        fmt::Debug::fmt(&String::from_utf8_lossy(&self.0), formatter)
+        fmt::Debug::fmt(&String::from_utf8_lossy(self.0.as_ref()), formatter)
     }
 }
 
 impl SyncPath {
     pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+        self.0.as_ref()
     }
 
     pub fn components(&self) -> impl DoubleEndedIterator<Item = &[u8]> {
-        self.0.split(|byte| *byte == SEPARATOR)
+        self.0.as_ref().split(|byte| *byte == SEPARATOR)
     }
 
     pub fn file_name(&self) -> &[u8] {
@@ -37,12 +38,13 @@ impl SyncPath {
         self.0
             .iter()
             .rposition(|byte| *byte == SEPARATOR)
-            .map(|separator| Self(self.0[..separator].to_vec()))
+            .map(|separator| Self(Arc::from(self.0[..separator].to_vec())))
     }
 
     pub fn is_ancestor_of(&self, other: &Self) -> bool {
         other
             .0
+            .as_ref()
             .strip_prefix(self.as_bytes())
             .is_some_and(|suffix| suffix.first() == Some(&SEPARATOR))
     }
@@ -53,7 +55,7 @@ impl TryFrom<Vec<u8>> for SyncPath {
 
     fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
         validate(&bytes)?;
-        Ok(Self(bytes))
+        Ok(Self(Arc::from(bytes)))
     }
 }
 
@@ -62,7 +64,7 @@ impl TryFrom<&[u8]> for SyncPath {
 
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
         validate(bytes)?;
-        Ok(Self(bytes.to_vec()))
+        Ok(Self(Arc::from(bytes.to_vec())))
     }
 }
 
@@ -115,6 +117,9 @@ fn validate(bytes: &[u8]) -> Result<(), InvalidSyncPath> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::mem::size_of;
 
     fn path(bytes: &[u8]) -> SyncPath {
         SyncPath::try_from(bytes).unwrap()
@@ -207,5 +212,53 @@ mod tests {
             }
             assert_eq!(path(&bytes).as_bytes(), bytes);
         }
+    }
+
+    #[test]
+    fn clone_shares_the_backing_allocation() {
+        let original = path(b"shared/\xff/bytes");
+        let clone = original.clone();
+        assert_eq!(clone.as_bytes().as_ptr(), original.as_bytes().as_ptr());
+        assert_eq!(clone.as_bytes().len(), original.as_bytes().len());
+        drop(original);
+        assert_eq!(clone.as_bytes(), b"shared/\xff/bytes");
+    }
+
+    #[test]
+    fn backing_storage_is_bounded_by_two_usizes() {
+        assert!(size_of::<SyncPath>() <= 2 * size_of::<usize>());
+    }
+
+    #[test]
+    fn independent_same_byte_paths_compare_and_hash_equal() {
+        let left = path(b"one/\xff/two");
+        let right = path(b"one/\xff/two");
+        assert_ne!(left.as_bytes().as_ptr(), right.as_bytes().as_ptr());
+        assert_eq!(left, right);
+
+        let mut left_hasher = DefaultHasher::new();
+        let mut right_hasher = DefaultHasher::new();
+        left.hash(&mut left_hasher);
+        right.hash(&mut right_hasher);
+        assert_eq!(left_hasher.finish(), right_hasher.finish());
+    }
+
+    #[test]
+    fn ordering_is_raw_bytewise_across_component_boundaries() {
+        let mut paths = [
+            path(b"a/b"),
+            path(b"a"),
+            path(b"a.\xff"),
+            path(b"a!\xff"),
+            path(b"a\xff"),
+        ];
+        let mut expected = paths.clone();
+        expected.sort_by(|left, right| Ord::cmp(left.as_bytes(), right.as_bytes()));
+        paths.sort();
+        assert_eq!(paths, expected);
+
+        assert!(path(b"a") < path(b"a/b"));
+        assert!(path(b"a.\xff") < path(b"a/b"));
+        assert!(path(b"a/b") < path(b"a\xff"));
     }
 }
