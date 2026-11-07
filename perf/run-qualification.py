@@ -21,9 +21,12 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--label", required=True)
     parser.add_argument("--revision", help="source revision of a saved comparison binary")
+    parser.add_argument("--prepare-only", action="store_true", help="observe, plan and persist snapshots without applying the plan")
     args = parser.parse_args()
     args.output.mkdir(parents=True)  # Never overwrite a previous measurement.
     command = [str(args.runner.resolve()), args.state, args.left, args.right, str(args.iterations)]
+    if args.prepare_only:
+        command.append("prepare")
     timer_flags = ["-l"] if platform.system() == "Darwin" else ["-v"]
     summary = dict(label=args.label, command=command, host=platform.platform(),
                    python=platform.python_version(), load_start=os.getloadavg(),
