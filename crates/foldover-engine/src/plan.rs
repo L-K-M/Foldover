@@ -15,11 +15,14 @@ use crate::{DeletionCounts, DeletionReview, InvalidDeletionCounts, RunContext, r
 
 /// The planner reads ordered rows and exact paths. It accepts either public
 /// tree inputs or dense observations without cloning their payloads.
-trait Tree {
+pub(crate) trait Tree {
     type Value;
     fn iter(&self) -> impl Iterator<Item = (&SyncPath, &Self::Value)>;
     fn get(&self, path: &SyncPath) -> Option<&Self::Value>;
     fn len(&self) -> usize;
+    fn keys(&self) -> impl Iterator<Item = &SyncPath> {
+        self.iter().map(|(path, _)| path)
+    }
     fn contains_key(&self, path: &SyncPath) -> bool {
         self.get(path).is_some()
     }
@@ -48,6 +51,55 @@ impl<T> Tree for PathMap<T> {
     }
     fn len(&self) -> usize {
         PathMap::len(self)
+    }
+}
+
+impl<T: Tree> Tree for std::sync::Arc<T> {
+    type Value = T::Value;
+    fn iter(&self) -> impl Iterator<Item = (&SyncPath, &Self::Value)> {
+        self.as_ref().iter()
+    }
+    fn get(&self, path: &SyncPath) -> Option<&Self::Value> {
+        self.as_ref().get(path)
+    }
+    fn len(&self) -> usize {
+        self.as_ref().len()
+    }
+}
+
+/// Planning excludes skipped rows without copying or changing the immutable
+/// baseline that verified observations may share.
+pub(crate) struct FilteredBase<'a> {
+    base: &'a PathMap<BaselineEntry>,
+    excluded: &'a [SyncPath],
+}
+
+impl<'a> FilteredBase<'a> {
+    pub(crate) fn new(base: &'a PathMap<BaselineEntry>, excluded: &'a [SyncPath]) -> Self {
+        debug_assert!(excluded.windows(2).all(|pair| pair[0] < pair[1]));
+        Self { base, excluded }
+    }
+    pub(crate) fn is_empty(&self) -> bool {
+        self.iter().next().is_none()
+    }
+}
+
+impl Tree for FilteredBase<'_> {
+    type Value = BaselineEntry;
+    fn iter(&self) -> impl Iterator<Item = (&SyncPath, &BaselineEntry)> {
+        self.base
+            .iter()
+            .filter(|(path, _)| self.excluded.binary_search(path).is_err())
+    }
+    fn get(&self, path: &SyncPath) -> Option<&BaselineEntry> {
+        self.excluded
+            .binary_search(path)
+            .is_err()
+            .then(|| self.base.get(path))
+            .flatten()
+    }
+    fn len(&self) -> usize {
+        self.iter().count()
     }
 }
 
@@ -320,9 +372,9 @@ impl CandidatePlan {
 /// photos/a.jpg   edited on A            ─▶ create on B
 /// photos/b.jpg   unchanged on A         ─▶ create on B   (kept B: all archived on A)
 /// ```
-fn settle_folder_choices<T: Tree>(
+fn settle_folder_choices<B: Tree<Value = BaselineEntry>, T: Tree>(
     rows: &mut [PlanRow],
-    base: &BTreeMap<SyncPath, BaselineEntry>,
+    base: &B,
     left: &T,
     right: &T,
     resolutions: &BTreeMap<SyncPath, Resolution>,
@@ -634,7 +686,7 @@ pub fn plan_resolved(
 
 pub(crate) fn plan_observations(
     mode: SyncMode,
-    base: &BTreeMap<SyncPath, BaselineEntry>,
+    base: &FilteredBase<'_>,
     left: &Observation,
     right: &Observation,
     choices: &Choices<'_>,
@@ -650,9 +702,9 @@ pub(crate) fn plan_observations(
     )
 }
 
-fn plan_trees<T: Tree>(
+fn plan_trees<B: Tree<Value = BaselineEntry>, T: Tree>(
     mode: SyncMode,
-    base: &BTreeMap<SyncPath, BaselineEntry>,
+    base: &B,
     left: &T,
     right: &T,
     choices: &Choices<'_>,
@@ -2229,5 +2281,127 @@ mod tests {
                 "{name:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod filtered_base_tests {
+    use super::*;
+    use foldover_types::Digest;
+
+    fn path(name: &[u8]) -> SyncPath {
+        SyncPath::try_from(name).unwrap()
+    }
+    fn version(kind: EntryContent) -> EntryVersion {
+        EntryVersion::new(kind, Digest::from_bytes([3; 32]))
+    }
+
+    #[test]
+    fn a_filtered_view_plans_like_removing_the_same_owned_rows() {
+        let directory = version(EntryContent::Directory);
+        let file = version(EntryContent::File(Digest::from_bytes([1; 32])));
+        let current: BTreeMap<_, _> = [
+            (b"a".as_slice(), directory),
+            (b"a/x", file),
+            (b"a-b", file),
+            (b"a0", file),
+            (b"other", file),
+        ]
+        .into_iter()
+        .map(|(name, entry)| (path(name), entry))
+        .collect();
+        let base: BTreeMap<_, _> = current
+            .iter()
+            .map(|(path, entry)| (path.clone(), BaselineEntry::new(*entry, *entry).unwrap()))
+            .collect();
+        let dense: PathMap<_> = base.clone().into_iter().collect();
+        for names in [
+            vec![],
+            vec![b"a-b".as_slice()],
+            vec![b"a".as_slice(), b"a/x"],
+            vec![b"missing".as_slice(), b"other"],
+        ] {
+            let mut excluded: Vec<_> = names.into_iter().map(path).collect();
+            excluded.sort();
+            let mut owned = base.clone();
+            owned.retain(|path, _| excluded.binary_search(path).is_err());
+            let filtered = FilteredBase::new(&dense, &excluded);
+            assert_eq!(
+                filtered.iter().collect::<Vec<_>>(),
+                owned.iter().collect::<Vec<_>>()
+            );
+            for key in base.keys().chain(excluded.iter()) {
+                assert_eq!(filtered.get(key), owned.get(key));
+            }
+            for mode in [
+                SyncMode::Sync,
+                SyncMode::Mirror { source: Side::Left },
+                SyncMode::Backup {
+                    source: Side::Right,
+                },
+            ] {
+                let expected = plan_trees(
+                    mode,
+                    &owned,
+                    &current,
+                    &current,
+                    &Choices::NONE,
+                    &mut || ScanControl::Continue,
+                )
+                .unwrap();
+                let actual = plan_trees(
+                    mode,
+                    &filtered,
+                    &current,
+                    &current,
+                    &Choices::NONE,
+                    &mut || ScanControl::Continue,
+                )
+                .unwrap();
+                assert_eq!(actual.rows(), expected.rows());
+                assert_eq!(actual.moves, expected.moves);
+                assert_eq!(actual.left_deletions, expected.left_deletions);
+                assert_eq!(actual.right_deletions, expected.right_deletions);
+            }
+        }
+        assert!(
+            dense.iter().eq(base.iter()),
+            "the shared baseline stays intact"
+        );
+    }
+
+    #[test]
+    fn filtering_a_parent_preserves_validation_error_precedence() {
+        let directory = version(EntryContent::Directory);
+        let file = version(EntryContent::File(Digest::from_bytes([1; 32])));
+        let base: PathMap<_> = [
+            (
+                path(b"a"),
+                BaselineEntry::new(directory, directory).unwrap(),
+            ),
+            (path(b"a/x"), BaselineEntry::new(file, file).unwrap()),
+        ]
+        .into_iter()
+        .collect();
+        let excluded = [path(b"a")];
+        let filtered = FilteredBase::new(&base, &excluded);
+        let empty = BTreeMap::<SyncPath, EntryVersion>::new();
+        let error = plan_trees(
+            SyncMode::Sync,
+            &filtered,
+            &empty,
+            &empty,
+            &Choices::NONE,
+            &mut || ScanControl::Continue,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            PlanError::MissingParent {
+                tree: TreeRole::Base,
+                path: path(b"a/x"),
+                parent: path(b"a")
+            }
+        );
     }
 }

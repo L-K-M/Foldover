@@ -23,6 +23,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -39,11 +40,13 @@ use foldover_state::{
 };
 use foldover_types::{
     BaselineEntry, ChangeKind, ConflictKind, Durability, EndpointId, EntryContent, EntryDecision,
-    EntryKind, EntryVersion, FolderRole, NameMatching, PairConfig, PairId, PairOptions,
-    PathPrefixIndex, Propagation, RemovalProtection, Resolution, ReviewPolicy, ReviewToken,
-    ScanControl, Side, Skip, SyncPath, UnicodeMatching,
+    EntryKind, EntryVersion, FolderRole, NameMatching, PairConfig, PairId, PairOptions, PathMap,
+    PathMapBuilder, PathPrefixIndex, Propagation, RemovalProtection, Resolution, ReviewPolicy,
+    ReviewToken, ScanControl, Side, Skip, SyncPath, UnicodeMatching,
 };
 use unicode_normalization::{UnicodeNormalization, is_nfc};
+
+use crate::plan::Tree;
 
 use crate::{
     CandidateDecision, CandidatePlan, Choices, DeletionCounts, DeletionReview, Moves, PlanError,
@@ -607,12 +610,12 @@ pub enum RunOutcome {
 /// Everything a run reads from the state store, taken under the engine lock.
 pub struct RunInputs {
     pair: PairConfig,
-    base: BTreeMap<SyncPath, BaselineEntry>,
+    base: Arc<PathMap<BaselineEntry>>,
     identities: RecordedIdentities,
     resolutions: BTreeMap<SyncPath, Resolution>,
     skips: BTreeMap<SyncPath, Skip>,
-    left_snapshot: BTreeMap<SyncPath, ObservedEntry>,
-    right_snapshot: BTreeMap<SyncPath, ObservedEntry>,
+    left_snapshot: PathMap<ObservedEntry>,
+    right_snapshot: PathMap<ObservedEntry>,
     reach: Reach,
     lease_timing: LeaseTiming,
 }
@@ -629,14 +632,28 @@ impl RunInputs {
         identities: RecordedIdentities,
         resolutions: BTreeMap<SyncPath, Resolution>,
     ) -> Self {
+        Self::with_base(
+            pair,
+            Arc::new(base.into_iter().collect()),
+            identities,
+            resolutions,
+        )
+    }
+
+    fn with_base(
+        pair: PairConfig,
+        base: Arc<PathMap<BaselineEntry>>,
+        identities: RecordedIdentities,
+        resolutions: BTreeMap<SyncPath, Resolution>,
+    ) -> Self {
         Self {
             pair,
             base,
             identities,
             resolutions,
             skips: BTreeMap::new(),
-            left_snapshot: BTreeMap::new(),
-            right_snapshot: BTreeMap::new(),
+            left_snapshot: PathMap::new(),
+            right_snapshot: PathMap::new(),
             reach: Reach::default(),
             lease_timing: LeaseTiming::STANDARD,
         }
@@ -670,6 +687,14 @@ impl RunInputs {
         self,
         left: BTreeMap<SyncPath, ObservedEntry>,
         right: BTreeMap<SyncPath, ObservedEntry>,
+    ) -> Self {
+        self.with_snapshot_tables(left.into_iter().collect(), right.into_iter().collect())
+    }
+
+    fn with_snapshot_tables(
+        self,
+        left: PathMap<ObservedEntry>,
+        right: PathMap<ObservedEntry>,
     ) -> Self {
         Self {
             left_snapshot: left,
@@ -723,20 +748,22 @@ impl PendingRunInputs {
             reach,
             records,
         } = self;
-        let mut base = BTreeMap::new();
+        let mut base = PathMapBuilder::with_capacity(records.base_len()?);
         records.visit_base(|path, entry| {
-            base.insert(path, entry);
+            base.push(path, entry);
         })?;
-        let mut left_snapshot = BTreeMap::new();
+        let base = Arc::new(base.freeze());
+        let mut left_snapshot = PathMapBuilder::with_capacity(records.snapshot_len(Side::Left)?);
         records.visit_snapshot(Side::Left, |mut entry| {
             if let Some((path, _)) = base.get_key_value(&entry.path) {
                 entry.path = path.clone();
             }
             if let Some(observed) = ObservedEntry::restore_owned(entry.version, entry.fingerprint) {
-                left_snapshot.insert(entry.path, observed);
+                left_snapshot.push(entry.path, observed);
             }
         })?;
-        let mut right_snapshot = BTreeMap::new();
+        let left_snapshot = left_snapshot.freeze();
+        let mut right_snapshot = PathMapBuilder::with_capacity(records.snapshot_len(Side::Right)?);
         records.visit_snapshot(Side::Right, |mut entry| {
             if let Some((path, _)) = base.get_key_value(&entry.path) {
                 entry.path = path.clone();
@@ -744,11 +771,11 @@ impl PendingRunInputs {
                 entry.path = path.clone();
             }
             if let Some(observed) = ObservedEntry::restore_owned(entry.version, entry.fingerprint) {
-                right_snapshot.insert(entry.path, observed);
+                right_snapshot.push(entry.path, observed);
             }
         })?;
-        Ok(RunInputs::new(pair, base, identities, resolutions)
-            .with_snapshots(left_snapshot, right_snapshot)
+        Ok(RunInputs::with_base(pair, base, identities, resolutions)
+            .with_snapshot_tables(left_snapshot, right_snapshot.freeze())
             .with_reach(reach))
     }
 }
@@ -768,7 +795,7 @@ pub struct PairRun {
     snapshot_changed: [bool; 2],
     plan: CandidatePlan,
     /// The base the plan was made against, for the journal's undo records.
-    base: BTreeMap<SyncPath, BaselineEntry>,
+    base: Arc<PathMap<BaselineEntry>>,
     /// Whether the base remembered any entry the filters still include.
     remembers: Remembers,
     lease_timing: LeaseTiming,
@@ -971,10 +998,12 @@ impl PairRun {
         // trees before planning rather than keeping both generations alive.
         drop(left_snapshot);
         drop(right_snapshot);
-        let mut base = base;
-        for path in &skipped {
-            base.remove(path);
-        }
+        let planning_base = crate::plan::FilteredBase::new(&base, &skipped);
+        let remembers = if planning_base.is_empty() {
+            Remembers::Nothing
+        } else {
+            Remembers::Entries
+        };
         let choices = Choices {
             resolutions: &resolutions,
             skips: &skips,
@@ -985,12 +1014,18 @@ impl PairRun {
         };
         progress.measured(RunPhase::AlignAndFilter, aligned.elapsed());
         let planned = Instant::now();
-        let mut plan =
-            crate::plan::plan_observations(draft.mode(), &base, &left, &right, &choices, control)
-                .map_err(|error| match error {
-                PlanError::Cancelled => RunError::Cancelled,
-                error => RunError::Plan(error),
-            })?;
+        let mut plan = crate::plan::plan_observations(
+            draft.mode(),
+            &planning_base,
+            &left,
+            &right,
+            &choices,
+            control,
+        )
+        .map_err(|error| match error {
+            PlanError::Cancelled => RunError::Cancelled,
+            error => RunError::Plan(error),
+        })?;
         let protected: Vec<_> = unavailable.iter().chain(&uncertain).cloned().collect();
         plan.protect_unavailable(&protected, left_names.either(right_names))?;
         plan.protect_uncertain_absences(&uncertain, left_names.either(right_names))?;
@@ -1007,11 +1042,7 @@ impl PairRun {
             right_cache,
             snapshot_changed,
             plan,
-            remembers: if base.is_empty() {
-                Remembers::Nothing
-            } else {
-                Remembers::Entries
-            },
+            remembers,
             base,
             lease_timing,
             options,
@@ -1649,7 +1680,7 @@ fn observe_error(side: Side, source: ScanError) -> RunError {
 /// is a person's, and syncs as one (ADR 0030).
 fn align_spellings(
     observation: &mut Observation,
-    base: &BTreeMap<SyncPath, BaselineEntry>,
+    base: &impl Tree<Value = BaselineEntry>,
     names: NameMatching,
 ) {
     if names.unicode() != UnicodeMatching::Normalized {
@@ -2138,7 +2169,7 @@ fn run_options(options: &PairOptions, endpoints: &EndpointPair) -> Result<PairOp
 fn unavailable<'a>(
     left: &'a Observation,
     right: &'a Observation,
-    base: &'a BTreeMap<SyncPath, BaselineEntry>,
+    base: &'a impl Tree<Value = BaselineEntry>,
     names: NameMatching,
 ) -> impl Iterator<Item = &'a SyncPath> {
     // Match as the planner does, so another spelling cannot become a deletion.
@@ -2173,7 +2204,7 @@ fn unavailable<'a>(
 fn uncertain_absences(
     left: &Observation,
     right: &Observation,
-    base: &BTreeMap<SyncPath, BaselineEntry>,
+    base: &impl Tree<Value = BaselineEntry>,
     names: NameMatching,
 ) -> Vec<SyncPath> {
     let mut paths = BTreeMap::new();
