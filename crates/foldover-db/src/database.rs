@@ -3,6 +3,7 @@ use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -16,6 +17,7 @@ mod journal;
 mod mounts;
 mod pause;
 mod pending;
+mod read_view;
 mod settings;
 mod share;
 mod starts;
@@ -25,6 +27,7 @@ pub use history::HistoryRow;
 pub use journal::{JournalChange, JournalRow};
 pub use mounts::MountRow;
 pub use pause::PauseRow;
+pub use read_view::{BaseBlob, ReadView, ReadViewError, SnapshotBlob};
 pub use settings::AutomationSettingRow;
 pub use share::ShareRow;
 pub use starts::RunMarker;
@@ -461,6 +464,8 @@ pub enum Error {
     Sqlite(#[from] rusqlite::Error),
     #[error("State directory or file has unsafe ownership, type or permissions")]
     UnsafeLocation,
+    #[error("State database file was replaced or is a symlink")]
+    ReplacedState,
     #[error("State storage must be on a supported local filesystem")]
     NonlocalStorage,
     #[error("Another agent owns the state writer lock: {0}")]
@@ -623,7 +628,10 @@ pub struct PairRow {
 
 pub struct Database {
     connection: Connection,
-    _writer: File,
+    _writer: Arc<File>,
+    // The opened database's inode, held so a later read-only reopen can
+    // prove it resolved to the same file.
+    anchor: File,
     directory: PathBuf,
 }
 
@@ -652,16 +660,15 @@ impl Database {
         let held = File::open(&directory)?;
         require_local(&held)?;
         exclude_from_backups(&held);
-        let writer = private_file(&directory.join(WRITER_LOCK))?;
+        let writer = Arc::new(private_file(&directory.join(WRITER_LOCK))?);
         lock_writer(&writer)?;
         let path = directory.join(DATABASE_NAME);
-        let file = private_file(&path)?;
-        let shape = if file.metadata()?.len() == 0 {
+        let anchor = private_file(&path)?;
+        let shape = if anchor.metadata()?.len() == 0 {
             FileShape::Empty
         } else {
             FileShape::Existing
         };
-        drop(file);
 
         // Compatibility checks precede writable SQLite opens and journal pragmas.
         let reader = Connection::open_with_flags(
@@ -695,6 +702,7 @@ impl Database {
         Ok(Self {
             connection,
             _writer: writer,
+            anchor,
             directory,
         })
     }
@@ -1743,7 +1751,7 @@ pub(super) mod tests {
         );
     }
 
-    fn put<'a>(path: &'a [u8], version: &'a [u8]) -> BaseChange<'a> {
+    pub(super) fn put<'a>(path: &'a [u8], version: &'a [u8]) -> BaseChange<'a> {
         BaseChange::Put {
             path,
             left_version: version,
@@ -1927,9 +1935,11 @@ pub(super) mod tests {
             .unwrap();
         let writer = private_file(&directory.path().join(WRITER_LOCK)).unwrap();
         writer.try_lock().unwrap();
+        let anchor = File::open(&path).unwrap();
         let mut legacy = Database {
             connection,
-            _writer: writer,
+            _writer: Arc::new(writer),
+            anchor,
             directory: directory.path().to_owned(),
         };
         let mut input = values();
@@ -2462,7 +2472,7 @@ pub(super) mod tests {
         assert!(database.snapshot(&pair.id, "right").unwrap().is_empty());
     }
 
-    fn snapshot_row(path: &[u8]) -> SnapshotRow {
+    pub(super) fn snapshot_row(path: &[u8]) -> SnapshotRow {
         SnapshotRow {
             path: path.to_vec(),
             fingerprint: b"f".to_vec(),
@@ -2930,9 +2940,11 @@ pub(super) mod tests {
             .unwrap();
         let writer = private_file(&directory.path().join(WRITER_LOCK)).unwrap();
         writer.try_lock().unwrap();
+        let anchor = File::open(&path).unwrap();
         let mut legacy = Database {
             connection,
-            _writer: writer,
+            _writer: Arc::new(writer),
+            anchor,
             directory: directory.path().to_owned(),
         };
         let id = [7; 16];
