@@ -950,12 +950,33 @@ impl SftpEndpoint {
         Ok(entry_version(Payload::File(digest), &observed, policy))
     }
 
+    fn set_file_metadata_on(
+        &self,
+        session: &mut Session,
+        remote: &[u8],
+        digest: Digest,
+        metadata: crate::ForeignMetadata,
+        policy: MetadataPolicy,
+    ) -> io::Result<EntryVersion> {
+        match self.set_metadata_on(session, remote, EntryKind::File, metadata, policy)? {
+            Some(attributes) => {
+                let observed =
+                    observed(&attributes).map_err(|error| io::Error::other(error.to_string()))?;
+                Ok(entry_version(Payload::File(digest), &observed, policy))
+            }
+            // A successful SETSTAT contains no attributes. Read the final
+            // stored state instead of assuming the server kept our values.
+            None => self.staged_version_on(session, remote, digest, policy),
+        }
+    }
+
     /// Remove an unplaced temporary; a leftover only costs space.
     fn discard_on(&self, session: &mut Session, remote: &[u8]) {
         let _ = self.removed_file_on(session, remote);
     }
 
-    /// Give a staged or existing entry the synced part of `metadata`.
+    /// Give an entry the synced part of `metadata`. Return the authoritative
+    /// attributes only when nothing changed after their read.
     fn set_metadata_on(
         &self,
         session: &mut Session,
@@ -963,7 +984,7 @@ impl SftpEndpoint {
         kind: EntryKind,
         metadata: crate::ForeignMetadata,
         policy: MetadataPolicy,
-    ) -> io::Result<()> {
+    ) -> io::Result<Option<Attributes>> {
         let current = session.lstat(remote)?;
         let mode = current.permissions.unwrap_or(0) & PERMISSION_BITS;
         let wanted = match policy.permissions() {
@@ -984,7 +1005,7 @@ impl SftpEndpoint {
                 (seconds, seconds)
             });
         if wanted == mode && times.is_none() {
-            return Ok(());
+            return Ok(Some(current));
         }
         session.set_attributes(
             remote,
@@ -993,7 +1014,8 @@ impl SftpEndpoint {
                 times,
                 ..Attributes::default()
             },
-        )
+        )?;
+        Ok(None)
     }
 
     /// Create a folder at `path` with `permissions`, named composed.
@@ -1256,6 +1278,7 @@ impl SftpEndpoint {
         self.on_stored_with(session, path.as_bytes(), |session, remote| {
             self.set_metadata_on(session, remote, kind, metadata, policy)
         })
+        .map(|_| ())
         .map_err(|source| write_error(path, source))
     }
 
@@ -1628,6 +1651,10 @@ impl SftpEndpoint {
         path: &[u8],
         permissions: u32,
     ) -> io::Result<()> {
+        let archive_parent = path == ARCHIVE_ROOT
+            || path
+                .strip_prefix(ARCHIVE_ROOT)
+                .is_some_and(|suffix| suffix.first() == Some(&b'/'));
         let mut prefix = Vec::new();
         for component in path.split(|byte| *byte == b'/') {
             if !prefix.is_empty() {
@@ -1635,6 +1662,22 @@ impl SftpEndpoint {
             }
             prefix.extend_from_slice(component);
             let remote = self.remote(&prefix);
+            // Archive parents usually already exist for the preceding sibling.
+            // Stat first saves a refused MKDIR for each component, retaining
+            // the path checks that a cached existence claim would omit.
+            if archive_parent {
+                match session.lstat(&remote) {
+                    Ok(existing) if existing.kind() == FileKind::Directory => continue,
+                    Ok(_) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::NotADirectory,
+                            "Archive parent is not a directory",
+                        ));
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
             if let Err(error) = session.make_directory(&remote, permissions) {
                 // SFTP reports an existing folder as a generic failure.
                 match session.lstat(&remote) {
