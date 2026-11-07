@@ -30,7 +30,7 @@ Static evidence establishes possible work, not its production frequency or elaps
 
 ### Measurements performed
 
-Host: Apple M4 Max, 14 cores, 36 GiB, macOS 27.0, Rust 1.99.0, optimized benchmark profile. The host was shared, with load averages roughly 31-47 during setup and execution. These short warm-cache microbenchmarks are descriptive, not release qualification or million-file extrapolations.
+Host: Apple M4 Max, 14 cores, 36 GiB, macOS 27.0.1 (26A434), Rust 1.99.0, optimized benchmark profile. The host was shared, with load averages roughly 31-47 during setup and execution. These short warm-cache microbenchmarks are descriptive, not release qualification or million-file extrapolations.
 
 ```sh
 # PATH needs the installed rustup shims on this host.
