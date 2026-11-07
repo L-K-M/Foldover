@@ -851,18 +851,22 @@ fn perform(
     progress: &Progress,
 ) -> Done {
     let failed = |message: String| Done::from((SyncStatus::Failed { message }, None));
-    let stored = match engine.lock() {
-        Ok(engine) => engine.run_inputs(id).and_then(|inputs| {
-            let pair = inputs.configuration().clone();
-            Ok((inputs, pair, engine.mounts(id)?))
-        }),
+    let captured = match engine.lock() {
+        Ok(engine) => engine
+            .capture_run_inputs(id)
+            .and_then(|pending| engine.mounts(id).map(|mounts| (pending, mounts))),
         Err(_) => return failed("The sync engine failed".into()),
     };
-    let (inputs, pair, mounts) = match stored {
-        Ok(stored) => stored,
+    let (pending, mounts) = match captured {
+        Ok(captured) => captured,
         Err(error) => return failed(error.to_string()),
     };
-    let inputs = inputs.with_skips(skips);
+    // Decode the captured trees outside the lock, before endpoints,
+    // mounts or planning touch anything.
+    let inputs = match pending.decode() {
+        Ok(inputs) => inputs.with_skips(skips),
+        Err(error) => return failed(error.to_string()),
+    };
     let journal = match work {
         Work::Undo => {
             let engine = engine.lock().unwrap_or_else(PoisonError::into_inner);
@@ -879,10 +883,10 @@ fn perform(
     // Someone asked for this run: mount a share that went away. The
     // scheduler makes its own, rate-limited attempts.
     if !matches!(work, Work::Scheduled)
-        && let Some(side) = missing_side(&pair, inputs.reach())
+        && let Some(side) = missing_side(inputs.configuration(), inputs.reach())
         && let Some(source) = mounts.side(side)
     {
-        reconnect(&pair, side, source, inputs.reach());
+        reconnect(inputs.configuration(), side, source, inputs.reach());
     }
     let mut control = || {
         if cancel.load(Ordering::Relaxed) {

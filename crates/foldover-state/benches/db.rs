@@ -170,9 +170,55 @@ fn db_read_100k(c: &mut Criterion) {
     });
 }
 
+/// A store holding a 100_000-row base and both 100_000-entry snapshot
+/// caches, the state a run's inputs are captured from.
+fn populated() -> (tempfile::TempDir, PairStore, foldover_types::PairConfig) {
+    let (directory, mut store, pair) = store();
+    store
+        .update_base(pair.id(), pair.revision(), &updates(), JournalUpdate::None)
+        .unwrap();
+    for side in [Side::Left, Side::Right] {
+        store
+            .replace_snapshot(pair.id(), pair.revision(), side, &snapshots(0))
+            .unwrap();
+    }
+    (directory, store, pair)
+}
+
+/// The reads `Engine::run_inputs` did under the engine lock: decode the
+/// base and both snapshots.
+fn run_inputs_read_100k(c: &mut Criterion) {
+    let (_directory, store, pair) = populated();
+    c.bench_function("run_inputs_read_100k", |b| {
+        b.iter(|| {
+            black_box(store.base(pair.id()).unwrap().len());
+            black_box(store.snapshot(pair.id(), Side::Left).unwrap().len());
+            black_box(store.snapshot(pair.id(), Side::Right).unwrap().len());
+        })
+    });
+}
+
+/// The raw-row capture the engine performs under its lock now.
+fn run_records_capture_100k(c: &mut Criterion) {
+    let (_directory, store, pair) = populated();
+    c.bench_function("run_records_capture_100k", |b| {
+        b.iter(|| black_box(store.run_records(pair.id()).unwrap()))
+    });
+}
+
+/// Capture plus the decode that moved outside the lock, the same work
+/// the old wrapper did.
+fn run_records_capture_decode_100k(c: &mut Criterion) {
+    let (_directory, store, pair) = populated();
+    c.bench_function("run_records_capture_decode_100k", |b| {
+        b.iter(|| black_box(store.run_records(pair.id()).unwrap().decode().unwrap()))
+    });
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = db_commit_100k, db_read_100k, db_snapshot_unchanged_100k, db_snapshot_rewrite_100k
+    targets = db_commit_100k, db_read_100k, db_snapshot_unchanged_100k, db_snapshot_rewrite_100k,
+        run_inputs_read_100k, run_records_capture_100k, run_records_capture_decode_100k
 }
 criterion_main!(benches);
