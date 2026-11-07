@@ -6,12 +6,50 @@ use unicode_normalization::{UnicodeNormalization, is_nfc};
 
 use foldover_types::{
     BaselineEntry, CaseMatching, ChangeKind, ConflictKind, EntryContent, EntryDecision, EntryKind,
-    EntryVersion, NameMatching, PathPrefixIndex, Resolution, ScanControl, Side, Skip, SyncMode,
-    SyncPath, UnicodeMatching,
+    EntryVersion, NameMatching, PathMap, PathPrefixIndex, Resolution, ScanControl, Side, Skip,
+    SyncMode, SyncPath, UnicodeMatching,
 };
 
 use crate::reconcile::resolve;
 use crate::{DeletionCounts, DeletionReview, InvalidDeletionCounts, RunContext, reconcile_entry};
+
+/// The planner reads ordered rows and exact paths. It accepts either public
+/// tree inputs or dense observations without cloning their payloads.
+trait Tree {
+    type Value;
+    fn iter(&self) -> impl Iterator<Item = (&SyncPath, &Self::Value)>;
+    fn get(&self, path: &SyncPath) -> Option<&Self::Value>;
+    fn len(&self) -> usize;
+    fn contains_key(&self, path: &SyncPath) -> bool {
+        self.get(path).is_some()
+    }
+}
+
+impl<T> Tree for BTreeMap<SyncPath, T> {
+    type Value = T;
+    fn iter(&self) -> impl Iterator<Item = (&SyncPath, &T)> {
+        BTreeMap::iter(self)
+    }
+    fn get(&self, path: &SyncPath) -> Option<&T> {
+        BTreeMap::get(self, path)
+    }
+    fn len(&self) -> usize {
+        BTreeMap::len(self)
+    }
+}
+
+impl<T> Tree for PathMap<T> {
+    type Value = T;
+    fn iter(&self) -> impl Iterator<Item = (&SyncPath, &T)> {
+        PathMap::iter(self)
+    }
+    fn get(&self, path: &SyncPath) -> Option<&T> {
+        PathMap::get(self, path)
+    }
+    fn len(&self) -> usize {
+        PathMap::len(self)
+    }
+}
 
 /// A borrowed value projection. Planning owns its output rows, but needs no
 /// second tree of cloned paths just to read observation versions.
@@ -282,14 +320,17 @@ impl CandidatePlan {
 /// photos/a.jpg   edited on A            ─▶ create on B
 /// photos/b.jpg   unchanged on A         ─▶ create on B   (kept B: all archived on A)
 /// ```
-fn settle_folder_choices<T: Versioned>(
+fn settle_folder_choices<T: Tree>(
     rows: &mut [PlanRow],
     base: &BTreeMap<SyncPath, BaselineEntry>,
-    left: &BTreeMap<SyncPath, T>,
-    right: &BTreeMap<SyncPath, T>,
+    left: &T,
+    right: &T,
     resolutions: &BTreeMap<SyncPath, Resolution>,
     control: &mut impl FnMut() -> ScanControl,
-) -> Result<(), PlanError> {
+) -> Result<(), PlanError>
+where
+    T::Value: Versioned,
+{
     let mut branches: BTreeMap<SyncPath, Side> = BTreeMap::new();
     for row in rows.iter_mut() {
         check_control(control)?;
@@ -327,13 +368,16 @@ fn settle_folder_choices<T: Versioned>(
 /// Leave each skipped change and everything inside it as it is: no write,
 /// no base change. A skip applies while both sides still hold what the
 /// person saw at the skipped path.
-fn skip_branches<T: Versioned>(
+fn skip_branches<T: Tree>(
     rows: &mut [PlanRow],
-    left: &BTreeMap<SyncPath, T>,
-    right: &BTreeMap<SyncPath, T>,
+    left: &T,
+    right: &T,
     skips: &BTreeMap<SyncPath, Skip>,
     control: &mut impl FnMut() -> ScanControl,
-) -> Result<(), PlanError> {
+) -> Result<(), PlanError>
+where
+    T::Value: Versioned,
+{
     if skips.is_empty() {
         return Ok(());
     }
@@ -373,13 +417,16 @@ fn skip_branches<T: Versioned>(
 /// A: report.txt  B: Report.txt  A renamed it: B archives Report.txt, copies
 ///                               report.txt
 /// ```
-fn mark_name_clashes<T: Versioned>(
+fn mark_name_clashes<T: Tree>(
     rows: &mut [PlanRow],
-    [left, right]: [&BTreeMap<SyncPath, T>; 2],
+    [left, right]: [&T; 2],
     left_names: NameMatching,
     right_names: NameMatching,
     control: &mut impl FnMut() -> ScanControl,
-) -> Result<(), PlanError> {
+) -> Result<(), PlanError>
+where
+    T::Value: Versioned,
+{
     let loose = left_names.either(right_names);
     if loose == NameMatching::EXACT {
         return Ok(());
@@ -603,14 +650,17 @@ pub(crate) fn plan_observations(
     )
 }
 
-fn plan_trees<T: Versioned>(
+fn plan_trees<T: Tree>(
     mode: SyncMode,
     base: &BTreeMap<SyncPath, BaselineEntry>,
-    left: &BTreeMap<SyncPath, T>,
-    right: &BTreeMap<SyncPath, T>,
+    left: &T,
+    right: &T,
     choices: &Choices<'_>,
     control: &mut impl FnMut() -> ScanControl,
-) -> Result<CandidatePlan, PlanError> {
+) -> Result<CandidatePlan, PlanError>
+where
+    T::Value: Versioned,
+{
     let Choices {
         resolutions,
         skips,
@@ -771,11 +821,14 @@ fn plan_trees<T: Versioned>(
 /// a/x.jpg  Archive { right }              ─▶ MovedAway { right }
 /// b/x.jpg  Propagate { left, Create }     ─▶ Move { right }: rename a/x.jpg
 /// ```
-fn pair_moves<T: Versioned>(
+fn pair_moves<T: Tree>(
     rows: &mut [PlanRow],
-    trees: [&BTreeMap<SyncPath, T>; 2],
+    trees: [&T; 2],
     moves: [Moves; 2],
-) -> BTreeMap<SyncPath, SyncPath> {
+) -> BTreeMap<SyncPath, SyncPath>
+where
+    T::Value: Versioned,
+{
     let takes = |side: Side| moves[side as usize] == Moves::Rename;
     let movable = |side: Side, path: &SyncPath| {
         trees[side as usize]
@@ -854,13 +907,13 @@ fn pair_moves<T: Versioned>(
     paired
 }
 
-fn validate_tree<T>(
-    entries: &BTreeMap<SyncPath, T>,
+fn validate_tree<T: Tree>(
+    entries: &T,
     tree: TreeRole,
-    kind: impl Fn(&T) -> EntryKind,
+    kind: impl Fn(&T::Value) -> EntryKind,
     control: &mut impl FnMut() -> ScanControl,
 ) -> Result<(), PlanError> {
-    for path in entries.keys() {
+    for (path, _) in entries.iter() {
         check_control(control)?;
         let Some(parent) = path.parent() else {
             continue;

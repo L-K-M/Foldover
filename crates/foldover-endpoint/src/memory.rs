@@ -540,8 +540,9 @@ impl MemoryEndpoint {
                 Fingerprint::from_key(Vec::new(), stored.node.size(), UNIX_EPOCH),
             );
             progress(ObserveStep::Checked);
-            observation.entries.insert(path, entry);
+            observation.record(path, entry);
         }
+        observation.finish_entries();
         Ok(observation)
     }
 

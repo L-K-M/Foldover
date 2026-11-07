@@ -1055,7 +1055,7 @@ fn unchanged_sftp_attributes_cannot_hide_a_content_change() {
         .observe_from(
             options.metadata(),
             &Filter::none(),
-            &Default::default(),
+            &BTreeMap::new(),
             &mut proceed,
         )
         .unwrap();

@@ -1713,6 +1713,7 @@ fn align_spellings(
         }
     }
 
+    drop(observed_paths);
     if missing.is_empty() {
         return;
     }
@@ -1731,11 +1732,12 @@ fn align_spellings(
         *destinations.entry(to).or_default() += 1;
     }
 
-    for (from, to) in &respelled {
-        if destinations.get(to) == Some(&1) {
-            observation.respell(from, to.clone());
-        }
-    }
+    let mappings = respelled
+        .iter()
+        .filter(|(_, to)| destinations.get(to) == Some(&1))
+        .cloned()
+        .collect();
+    observation.respell_all(&mappings);
 }
 
 fn require_space(side: Side, needed: u64, available: u64) -> Result<(), RunError> {

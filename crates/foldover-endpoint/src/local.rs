@@ -8,7 +8,7 @@ mod identity;
 mod lock;
 pub(crate) mod version;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -26,7 +26,8 @@ pub use foldover_types::ScanControl;
 #[cfg(target_os = "macos")]
 use foldover_types::{CaseMatching, UnicodeMatching};
 use foldover_types::{
-    Digest, EntryVersion, InvalidSyncPath, MetadataPolicy, NameMatching, PathPrefixIndex, SyncPath,
+    Digest, EntryVersion, InvalidSyncPath, MetadataPolicy, NameMatching, PathMap, PathMapBuilder,
+    PathPrefixIndex, SyncPath,
 };
 
 use version::{Attribute, Observed, Payload, capture_for, entry_version, metadata_version};
@@ -474,16 +475,54 @@ impl ObservedEntry {
     }
 }
 
+/// Previous verified entries for one root under the same metadata policy.
+/// Observation readers only need borrowed exact-path lookups; callers may
+/// keep the rows in either a tree or a dense frozen table.
+pub trait PreviousObservation: Sync {
+    fn get_key_value(&self, path: &SyncPath) -> Option<(&SyncPath, &ObservedEntry)>;
+    fn get(&self, path: &SyncPath) -> Option<&ObservedEntry> {
+        self.get_key_value(path).map(|(_, entry)| entry)
+    }
+}
+
+impl PreviousObservation for BTreeMap<SyncPath, ObservedEntry> {
+    fn get_key_value(&self, path: &SyncPath) -> Option<(&SyncPath, &ObservedEntry)> {
+        BTreeMap::get_key_value(self, path)
+    }
+}
+
+impl PreviousObservation for PathMap<ObservedEntry> {
+    fn get_key_value(&self, path: &SyncPath) -> Option<(&SyncPath, &ObservedEntry)> {
+        PathMap::get_key_value(self, path)
+    }
+}
+
 /// Known entries plus explicit unread subtrees and leftovers to recover.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Observation {
-    pub(crate) entries: BTreeMap<SyncPath, ObservedEntry>,
+    pub(crate) entries: PathMap<ObservedEntry>,
+    pending: PathMapBuilder<ObservedEntry>,
     pub(crate) leftovers: Vec<SyncPath>,
     pub(crate) oversized: Vec<SyncPath>,
     pub(crate) old: Vec<SyncPath>,
     pub(crate) unavailable: Vec<SyncPath>,
     pub(crate) issues: Vec<ScanIssue>,
     pub(crate) unstable: Vec<Option<SyncPath>>,
+}
+
+impl Default for Observation {
+    fn default() -> Self {
+        Self {
+            entries: PathMap::new(),
+            pending: PathMapBuilder::new(),
+            leftovers: Vec::new(),
+            oversized: Vec::new(),
+            old: Vec::new(),
+            unavailable: Vec::new(),
+            issues: Vec::new(),
+            unstable: Vec::new(),
+        }
+    }
 }
 
 /// An unavailable path also covers each descendant. Probe only component
@@ -511,7 +550,7 @@ impl UnavailablePaths {
 
     fn retain_entries(
         &self,
-        entries: &mut BTreeMap<SyncPath, ObservedEntry>,
+        entries: &mut PathMap<ObservedEntry>,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<(), ScanError> {
         let mut cancelled = false;
@@ -544,6 +583,14 @@ impl UnavailablePaths {
 }
 
 impl Observation {
+    pub(crate) fn record(&mut self, path: SyncPath, entry: ObservedEntry) {
+        self.pending.push(path, entry);
+    }
+
+    pub(crate) fn finish_entries(&mut self) {
+        self.entries = std::mem::replace(&mut self.pending, PathMapBuilder::new()).freeze();
+    }
+
     /// Listings that changed while traversed. Read entries remain usable,
     /// but missing paths below these folders do not prove deletion. `None`
     /// denotes the held root, which has no relative sync path.
@@ -565,7 +612,7 @@ impl Observation {
         self.issues.push(issue);
     }
 
-    pub fn entries(&self) -> &BTreeMap<SyncPath, ObservedEntry> {
+    pub fn entries(&self) -> &PathMap<ObservedEntry> {
         &self.entries
     }
 
@@ -617,11 +664,50 @@ impl Observation {
         }
     }
 
+    /// Apply independent spelling changes together. Mapping sources and
+    /// destinations must be distinct; the alignment pass establishes this
+    /// before changing any rows. Dense rows are rebuilt once, so a restored
+    /// tree with many normalized spellings does not shift a whole table for
+    /// every renamed entry.
+    pub fn respell_all(&mut self, mappings: &BTreeMap<SyncPath, SyncPath>) {
+        if mappings.is_empty() {
+            return;
+        }
+        let rename = |path: &mut SyncPath| {
+            if let Some(to) = mappings.get(path) {
+                *path = to.clone();
+            }
+        };
+        self.entries = std::mem::replace(&mut self.entries, PathMap::new())
+            .into_iter()
+            .map(|(mut path, entry)| {
+                rename(&mut path);
+                (path, entry)
+            })
+            .collect();
+        for path in self
+            .oversized
+            .iter_mut()
+            .chain(&mut self.old)
+            .chain(&mut self.unavailable)
+        {
+            rename(path);
+        }
+        for directory in self.unstable.iter_mut().flatten() {
+            rename(directory);
+        }
+        for issue in &mut self.issues {
+            rename(&mut issue.path);
+        }
+    }
+
     /// Drop paths the other folder skipped, so both skip them.
     pub fn exclude(&mut self, paths: &[SyncPath]) {
-        for path in paths {
-            self.entries.remove(path);
+        if paths.is_empty() {
+            return;
         }
+        let paths: BTreeSet<_> = paths.iter().collect();
+        self.entries.retain(|path, _| !paths.contains(path));
     }
 
     /// The versions the planner compares.
@@ -1170,7 +1256,7 @@ impl LocalEndpoint {
         &self,
         policy: MetadataPolicy,
         filter: &Filter,
-        previous: &BTreeMap<SyncPath, ObservedEntry>,
+        previous: &impl PreviousObservation,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<Observation, ScanError> {
         self.observe_reporting(policy, filter, previous, control, &mut |_| {})
@@ -1182,7 +1268,7 @@ impl LocalEndpoint {
         &self,
         policy: MetadataPolicy,
         filter: &Filter,
-        previous: &BTreeMap<SyncPath, ObservedEntry>,
+        previous: &impl PreviousObservation,
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<Observation, ScanError> {
@@ -1245,6 +1331,7 @@ impl LocalEndpoint {
         }
         // A directory can fail after its children were inserted. Suppress
         // those children too, without repeating every failed-root comparison.
+        observation.finish_entries();
         unavailable.retain_entries(&mut observation.entries, control)?;
         observation.unstable.sort();
         observation.unstable.dedup();
@@ -1256,7 +1343,7 @@ impl LocalEndpoint {
         &self,
         mut entry: LocalEntry,
         policy: MetadataPolicy,
-        previous: &BTreeMap<SyncPath, ObservedEntry>,
+        previous: &impl PreviousObservation,
         observation: &mut Observation,
         unavailable: &mut UnavailablePaths,
         control: &mut impl FnMut() -> ScanControl,
@@ -1291,10 +1378,13 @@ impl LocalEndpoint {
                 }
             }
         }
+        if let Some((path, _)) = previous.get_key_value(&entry.path) {
+            entry.path = path.clone();
+        }
         if let Some(known) = previous.get(&entry.path)
             && known.fingerprint().proves_unchanged(&entry.metadata)
         {
-            observation.entries.insert(entry.path, known.clone());
+            observation.record(entry.path, known.clone());
             return Ok(());
         }
         let observed_at = SystemTime::now();
@@ -1305,7 +1395,7 @@ impl LocalEndpoint {
                 return Ok(());
             }
         };
-        observation.entries.insert(
+        observation.record(
             entry.path,
             ObservedEntry::new(version, Fingerprint::new(&entry.metadata, observed_at)),
         );
@@ -2447,7 +2537,7 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(&restored, first.entries());
+        assert!(restored.iter().eq(first.entries().iter()));
         assert!(
             ObservedEntry::restore(
                 first.versions()[&SyncPath::try_from(b"settled".as_slice()).unwrap()],

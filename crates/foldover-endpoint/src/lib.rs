@@ -32,8 +32,8 @@ pub use watch::{RootWatcher, changed_since_event, event_history, event_now};
 #[cfg(unix)]
 pub use local::{
     ApplyError, ArchivedItem, ArchivedRun, Expected, Filter, InvalidFilter, LocalEndpoint,
-    LocalEntry, Observation, ObservedEntry, Pruning, RunScope, ScanControl, ScanError, ScanIssue,
-    ScanStats, archive_name, run_name, run_owner,
+    LocalEntry, Observation, ObservedEntry, PreviousObservation, Pruning, RunScope, ScanControl,
+    ScanError, ScanIssue, ScanStats, archive_name, run_name, run_owner,
 };
 
 #[cfg(unix)]

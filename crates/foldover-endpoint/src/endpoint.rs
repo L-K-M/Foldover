@@ -3,7 +3,6 @@
 //! keep their native path (clones, resource forks, ACLs); every other
 //! combination streams data and carries mode and modification time.
 
-use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::num::NonZeroUsize;
 use std::os::unix::ffi::OsStrExt;
@@ -212,7 +211,7 @@ impl Endpoint {
         &self,
         policy: MetadataPolicy,
         filter: &Filter,
-        previous: &BTreeMap<SyncPath, ObservedEntry>,
+        previous: &impl crate::PreviousObservation,
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<Observation, ScanError> {

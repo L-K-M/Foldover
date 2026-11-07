@@ -21,6 +21,7 @@ pub(crate) use transfer::{copy, update_metadata};
 
 use sessions::{Borrowed, Connect, Sessions};
 
+#[cfg(test)]
 use std::collections::BTreeMap;
 use std::io;
 use std::num::NonZeroUsize;
@@ -474,7 +475,7 @@ impl SftpEndpoint {
         &self,
         policy: MetadataPolicy,
         filter: &Filter,
-        previous: &BTreeMap<SyncPath, ObservedEntry>,
+        previous: &impl crate::PreviousObservation,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<Observation, ScanError> {
         self.observe_reporting(policy, filter, previous, control, &mut |_| {})
@@ -486,7 +487,7 @@ impl SftpEndpoint {
         &self,
         policy: MetadataPolicy,
         filter: &Filter,
-        previous: &BTreeMap<SyncPath, ObservedEntry>,
+        previous: &impl crate::PreviousObservation,
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<Observation, ScanError> {
@@ -514,6 +515,10 @@ impl SftpEndpoint {
             };
             for (name, attributes) in entries {
                 let path = child_path(directory.as_ref(), &name)?;
+                let path = match previous.get_key_value(&path) {
+                    Some((stored, _)) => stored.clone(),
+                    None => path,
+                };
                 if protected(&name) {
                     if temporary(&name) {
                         observation.leftovers.push(path);
@@ -592,6 +597,7 @@ impl SftpEndpoint {
             control,
             progress,
         )?;
+        observation.finish_entries();
         observation
             .entries
             .retain(|path, _| !unavailable.contains(path));
@@ -605,7 +611,7 @@ impl SftpEndpoint {
         &self,
         reads: impl IntoIterator<Item = (SyncPath, Attributes)>,
         read_count: usize,
-        previous: &BTreeMap<SyncPath, ObservedEntry>,
+        previous: &impl crate::PreviousObservation,
         policy: MetadataPolicy,
         observation: &mut Observation,
         unavailable: &mut PathPrefixIndex,
@@ -653,7 +659,7 @@ impl SftpEndpoint {
         &self,
         path: &SyncPath,
         attributes: &Attributes,
-        previous: &BTreeMap<SyncPath, ObservedEntry>,
+        previous: &impl crate::PreviousObservation,
         policy: MetadataPolicy,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<ObservedEntry, ScanError> {
@@ -1800,7 +1806,7 @@ fn record(
 ) -> Result<(), ScanError> {
     match entry {
         Ok(entry) => {
-            observation.entries.insert(path.clone(), entry);
+            observation.record(path.clone(), entry);
             Ok(())
         }
         Err(error) => {
