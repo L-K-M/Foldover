@@ -16,7 +16,7 @@ use rustix::fs::{Mode, OFlags};
 use crate::{FilesystemFeatures, prevent_materialization};
 
 mod content;
-pub use content::HashError;
+pub use content::{HashError, ObserveFileError};
 
 mod extended;
 pub use extended::{
