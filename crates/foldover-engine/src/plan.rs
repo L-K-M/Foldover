@@ -5,8 +5,8 @@ use unicode_normalization::UnicodeNormalization;
 
 use foldover_types::{
     BaselineEntry, CaseMatching, ChangeKind, ConflictKind, EntryContent, EntryDecision, EntryKind,
-    EntryVersion, NameMatching, Resolution, ScanControl, Side, Skip, SyncMode, SyncPath,
-    UnicodeMatching,
+    EntryVersion, NameMatching, PathPrefixIndex, Resolution, ScanControl, Side, Skip, SyncMode,
+    SyncPath, UnicodeMatching,
 };
 
 use crate::reconcile::resolve;
@@ -336,10 +336,10 @@ fn skip_branches<T: Versioned>(
     if skips.is_empty() {
         return Ok(());
     }
-    let mut skipped: Vec<SyncPath> = Vec::new();
+    let mut skipped = PathPrefixIndex::new();
     for row in rows.iter_mut() {
         check_control(control)?;
-        let inside = skipped.iter().any(|root| root.is_ancestor_of(&row.path));
+        let inside = skipped.contains_ancestor(&row.path);
         let current = skips.get(&row.path).is_some_and(|skip| {
             (
                 left.get(&row.path).map(Versioned::version),
@@ -347,7 +347,7 @@ fn skip_branches<T: Versioned>(
             ) == (skip.left(), skip.right())
         });
         if current {
-            skipped.push(row.path.clone());
+            skipped.insert(&row.path);
         }
         if inside || current {
             row.decision = CandidateDecision::Entry(EntryDecision::KeepTarget);
@@ -1245,6 +1245,135 @@ mod tests {
         );
         assert_eq!(candidate.deletions(Side::Right).paths(), 3);
         assert_eq!(candidate.deletions(Side::Right).deletions(), 0);
+    }
+
+    #[test]
+    fn skipped_branches_keep_component_boundaries_and_live_versions() {
+        let left = tree(&[
+            (b"a", directory()),
+            (b"a/x", file(1)),
+            (b"a-b", directory()),
+            (b"a-b/y", file(2)),
+            (b"a.txt", directory()),
+            (b"a.txt/z", file(3)),
+            (b"a0", directory()),
+            (b"a0/w", file(4)),
+        ]);
+        let skips = BTreeMap::from([
+            // Matching versions: `a` covers `a/x` but no shared-prefix sibling.
+            (path(b"a"), Skip::new(Some(directory()), None)),
+            (path(b"a.txt"), Skip::new(Some(directory()), None)),
+            // The versions changed since the person skipped it: no longer current.
+            (path(b"a0"), Skip::new(Some(file(9)), None)),
+        ]);
+        let resolutions = BTreeMap::new();
+        let choices = Choices {
+            resolutions: &resolutions,
+            skips: &skips,
+            ..Choices::NONE
+        };
+        let candidate = plan_resolved(
+            SyncMode::Mirror { source: Side::Left },
+            &BTreeMap::new(),
+            &left,
+            &BTreeMap::new(),
+            &choices,
+            &mut || ScanControl::Continue,
+        )
+        .unwrap();
+        let keep = CandidateDecision::Entry(EntryDecision::KeepTarget);
+        let create = CandidateDecision::Entry(EntryDecision::Propagate {
+            from: Side::Left,
+            change: ChangeKind::Create,
+        });
+        for name in [b"a".as_slice(), b"a/x", b"a.txt", b"a.txt/z"] {
+            assert_eq!(decision(&candidate, name), keep, "{name:?}");
+        }
+        for name in [b"a-b".as_slice(), b"a-b/y", b"a0", b"a0/w"] {
+            assert_eq!(decision(&candidate, name), create, "{name:?}");
+        }
+        // A skip applies only while both sides still hold its versions: an
+        // edited folder no longer matches, so its branch is planned again.
+        let edited = EntryVersion::new(
+            EntryContent::Directory,
+            Digest::from_bytes([9; Digest::BYTE_LEN]),
+        );
+        let mut lapsed = left.clone();
+        lapsed.insert(path(b"a0"), edited);
+        let choices = Choices {
+            skips: &BTreeMap::from([(path(b"a0"), Skip::new(Some(edited), None))]),
+            resolutions: &resolutions,
+            ..Choices::NONE
+        };
+        let candidate = plan_resolved(
+            SyncMode::Mirror { source: Side::Left },
+            &BTreeMap::new(),
+            &lapsed,
+            &BTreeMap::new(),
+            &choices,
+            &mut || ScanControl::Continue,
+        )
+        .unwrap();
+        assert_eq!(decision(&candidate, b"a0"), keep);
+        assert_eq!(decision(&candidate, b"a0/w"), keep);
+    }
+
+    /// The indexed pass decides exactly what the original linear scan
+    /// decided, at the 100k-row, 1k-prefix scale the planner can meet.
+    #[test]
+    fn skip_branches_match_the_linear_rule_at_scale() {
+        const FOLDERS: usize = 1_000;
+        const FILES: usize = 99;
+        let mut rows = Vec::new();
+        let mut left = BTreeMap::new();
+        let mut right = BTreeMap::new();
+        let mut skips = BTreeMap::new();
+        for folder in 0..FOLDERS {
+            let name = format!("d-{folder:04}");
+            let folder_path = path(name.as_bytes());
+            rows.push(PlanRow {
+                path: folder_path.clone(),
+                decision: CandidateDecision::Entry(EntryDecision::Unchanged),
+            });
+            left.insert(folder_path.clone(), directory());
+            right.insert(folder_path.clone(), directory());
+            skips.insert(folder_path, Skip::new(Some(directory()), Some(directory())));
+            for index in 0..FILES {
+                let file_name = format!("{name}/f-{index:02}");
+                let file_path = path(file_name.as_bytes());
+                let version = file((folder * FILES + index) as u8);
+                rows.push(PlanRow {
+                    path: file_path.clone(),
+                    decision: CandidateDecision::Entry(EntryDecision::Unchanged),
+                });
+                left.insert(file_path.clone(), version);
+                right.insert(file_path, version);
+            }
+        }
+        assert_eq!(rows.len(), 100_000);
+
+        // The original linear rule: every row against every active root.
+        let mut expected = rows.clone();
+        let mut skipped: Vec<SyncPath> = Vec::new();
+        for row in &mut expected {
+            let inside = skipped.iter().any(|root| root.is_ancestor_of(&row.path));
+            let current = skips.get(&row.path).is_some_and(|skip| {
+                (left.get(&row.path).copied(), right.get(&row.path).copied())
+                    == (skip.left(), skip.right())
+            });
+            if current {
+                skipped.push(row.path.clone());
+            }
+            if inside || current {
+                row.decision = CandidateDecision::Entry(EntryDecision::KeepTarget);
+            }
+        }
+
+        skip_branches(&mut rows, &left, &right, &skips, &mut || {
+            ScanControl::Continue
+        })
+        .unwrap();
+        assert_eq!(rows, expected);
     }
 
     #[test]

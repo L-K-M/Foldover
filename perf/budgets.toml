@@ -5,10 +5,13 @@
 
 archive_pages_5k = 160
 db_commit_100k = 1000
+db_commit_batches_100k = 2000
 db_read_100k = 300
 db_snapshot_rewrite_100k = 1000
 db_snapshot_unchanged_100k = 200
 hash_64_mib = 60
 plan_100k_entries = 350
+plan_skipped_100k_entries = 210
+prefix_index_100k_entries_1000_prefixes = 30
 # PLAN.md §5.3: a cold scan reads at least 10k entries per second.
 scan_10k_files = 1000

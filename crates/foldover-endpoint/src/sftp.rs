@@ -29,8 +29,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use foldover_net::sftp::{Attributes, FileKind, Handle, Session, SshTarget};
 use foldover_types::{
-    Digest, Durability, EndpointId, EntryKind, EntryVersion, MetadataPolicy, ScanControl, SftpRoot,
-    SyncPath,
+    Digest, Durability, EndpointId, EntryKind, EntryVersion, MetadataPolicy, PathPrefixIndex,
+    ScanControl, SftpRoot, SyncPath,
 };
 
 use crate::lease::{LEASE_LIMIT, LockFile};
@@ -259,10 +259,7 @@ impl SftpEndpoint {
 
     /// Read the root's listing: permissions refuse listings, not opening.
     pub fn probe_access(&self) -> Result<(), ScanError> {
-        self.session()
-            .read_dir(&self.root)
-            .map(|_| ())
-            .map_err(io_error)
+        self.session().probe_directory(&self.root).map_err(io_error)
     }
 
     /// One directory's entries for a quick change check; `None` once the
@@ -543,7 +540,9 @@ impl SftpEndpoint {
             }
         }
         // Folders read nothing, and one that fails rules out what is below
-        // it, so they settle before any read starts.
+        // it, so they settle before any read starts. Unavailable roots arrive
+        // as folders and reads fail, so the index grows with them.
+        let mut unavailable = PathPrefixIndex::from_paths(&observation.unavailable);
         let mut reads = Vec::new();
         for (path, attributes) in listed {
             if attributes.kind() != FileKind::Directory {
@@ -553,14 +552,14 @@ impl SftpEndpoint {
             if control() == ScanControl::Cancel {
                 return Err(ScanError::Cancelled);
             }
-            if !unavailable(&observation, &path) {
+            if !unavailable.contains(&path) {
                 let entry = self.observe_entry(&path, &attributes, previous, policy, control);
-                record(&mut observation, &path, entry)?;
+                record(&mut observation, &mut unavailable, &path, entry)?;
             }
             progress(ObserveStep::Checked);
         }
         reads.retain(|(path, _)| {
-            let skipped = unavailable(&observation, path);
+            let skipped = unavailable.contains(path);
             if skipped {
                 progress(ObserveStep::Checked);
             }
@@ -571,26 +570,26 @@ impl SftpEndpoint {
             previous,
             policy,
             &mut observation,
+            &mut unavailable,
             control,
             progress,
         )?;
-        let unavailable = &observation.unavailable;
-        observation.entries.retain(|path, _| {
-            !unavailable
-                .iter()
-                .any(|root| root == path || root.is_ancestor_of(path))
-        });
+        observation
+            .entries
+            .retain(|path, _| !unavailable.contains(path));
         Ok(observation)
     }
 
     /// Observe `reads`, on as many sessions as the server takes. One at a
     /// time on the calling thread when only one can run, in listed order.
+    #[allow(clippy::too_many_arguments)] // Mirrors observe_reporting plus the index its skips settle.
     fn observe_reads(
         &self,
         reads: &[(SyncPath, Attributes)],
         previous: &BTreeMap<SyncPath, ObservedEntry>,
         policy: MetadataPolicy,
         observation: &mut Observation,
+        unavailable: &mut PathPrefixIndex,
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<(), ScanError> {
@@ -601,7 +600,7 @@ impl SftpEndpoint {
                     return Err(ScanError::Cancelled);
                 }
                 let entry = self.observe_entry(path, attributes, previous, policy, control);
-                record(observation, path, entry)?;
+                record(observation, unavailable, path, entry)?;
                 progress(ObserveStep::Checked);
             }
         } else {
@@ -612,7 +611,7 @@ impl SftpEndpoint {
                     self.observe_entry(path, attributes, previous, policy, &mut || asked())
                 },
                 |(path, _), entry| {
-                    record(observation, path, entry)?;
+                    record(observation, unavailable, path, entry)?;
                     progress(ObserveStep::Checked);
                     Ok(())
                 },
@@ -756,6 +755,9 @@ impl SftpEndpoint {
         control: &mut impl FnMut() -> ScanControl,
         sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
     ) -> Result<Digest, ScanError> {
+        if expected.size.is_some_and(|size| from > size) {
+            return Err(ScanError::Changed(Some(path.clone())));
+        }
         let (handle, remote) = self
             .on_stored_with(session, path.as_bytes(), |session, remote| {
                 session
@@ -767,7 +769,7 @@ impl SftpEndpoint {
         let mut taken = from;
         let mut cancelled = false;
         let mut overrun = false;
-        let read = session.read_from(&handle, from, &mut |chunk| {
+        let mut consume = |chunk: &[u8]| {
             if control() == ScanControl::Cancel {
                 cancelled = true;
                 return Err(io::Error::other("cancelled"));
@@ -781,7 +783,11 @@ impl SftpEndpoint {
             }
             hasher.update(chunk);
             sink(chunk)
-        });
+        };
+        let read = match expected.size {
+            Some(size) => session.read_from_bounded(&handle, from, size - from, &mut consume),
+            None => session.read_from(&handle, from, &mut consume),
+        };
         let _ = session.close(handle);
         if cancelled {
             return Err(ScanError::Cancelled);
@@ -931,12 +937,33 @@ impl SftpEndpoint {
         Ok(entry_version(Payload::File(digest), &observed, policy))
     }
 
+    fn set_file_metadata_on(
+        &self,
+        session: &mut Session,
+        remote: &[u8],
+        digest: Digest,
+        metadata: crate::ForeignMetadata,
+        policy: MetadataPolicy,
+    ) -> io::Result<EntryVersion> {
+        match self.set_metadata_on(session, remote, EntryKind::File, metadata, policy)? {
+            Some(attributes) => {
+                let observed =
+                    observed(&attributes).map_err(|error| io::Error::other(error.to_string()))?;
+                Ok(entry_version(Payload::File(digest), &observed, policy))
+            }
+            // A successful SETSTAT contains no attributes. Read the final
+            // stored state instead of assuming the server kept our values.
+            None => self.staged_version_on(session, remote, digest, policy),
+        }
+    }
+
     /// Remove an unplaced temporary; a leftover only costs space.
     fn discard_on(&self, session: &mut Session, remote: &[u8]) {
         let _ = self.removed_file_on(session, remote);
     }
 
-    /// Give a staged or existing entry the synced part of `metadata`.
+    /// Give an entry the synced part of `metadata`. Return the authoritative
+    /// attributes only when nothing changed after their read.
     fn set_metadata_on(
         &self,
         session: &mut Session,
@@ -944,7 +971,7 @@ impl SftpEndpoint {
         kind: EntryKind,
         metadata: crate::ForeignMetadata,
         policy: MetadataPolicy,
-    ) -> io::Result<()> {
+    ) -> io::Result<Option<Attributes>> {
         let current = session.lstat(remote)?;
         let mode = current.permissions.unwrap_or(0) & PERMISSION_BITS;
         let wanted = match policy.permissions() {
@@ -965,7 +992,7 @@ impl SftpEndpoint {
                 (seconds, seconds)
             });
         if wanted == mode && times.is_none() {
-            return Ok(());
+            return Ok(Some(current));
         }
         session.set_attributes(
             remote,
@@ -974,7 +1001,8 @@ impl SftpEndpoint {
                 times,
                 ..Attributes::default()
             },
-        )
+        )?;
+        Ok(None)
     }
 
     /// Create a folder at `path` with `permissions`, named composed.
@@ -1237,6 +1265,7 @@ impl SftpEndpoint {
         self.on_stored_with(session, path.as_bytes(), |session, remote| {
             self.set_metadata_on(session, remote, kind, metadata, policy)
         })
+        .map(|_| ())
         .map_err(|source| write_error(path, source))
     }
 
@@ -1609,6 +1638,10 @@ impl SftpEndpoint {
         path: &[u8],
         permissions: u32,
     ) -> io::Result<()> {
+        let archive_parent = path == ARCHIVE_ROOT
+            || path
+                .strip_prefix(ARCHIVE_ROOT)
+                .is_some_and(|suffix| suffix.first() == Some(&b'/'));
         let mut prefix = Vec::new();
         for component in path.split(|byte| *byte == b'/') {
             if !prefix.is_empty() {
@@ -1616,6 +1649,22 @@ impl SftpEndpoint {
             }
             prefix.extend_from_slice(component);
             let remote = self.remote(&prefix);
+            // Archive parents usually already exist for the preceding sibling.
+            // Stat first saves a refused MKDIR for each component, retaining
+            // the path checks that a cached existence claim would omit.
+            if archive_parent {
+                match session.lstat(&remote) {
+                    Ok(existing) if existing.kind() == FileKind::Directory => continue,
+                    Ok(_) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::NotADirectory,
+                            "Archive parent is not a directory",
+                        ));
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
             if let Err(error) = session.make_directory(&remote, permissions) {
                 // SFTP reports an existing folder as a generic failure.
                 match session.lstat(&remote) {
@@ -1656,7 +1705,7 @@ fn read_small_on(
         Err(error) => return Err(error),
     };
     let mut content = Vec::new();
-    let read = session.read_all(&handle, &mut |chunk| {
+    let read = session.read_from_bounded(&handle, 0, limit as u64, &mut |chunk| {
         content.extend_from_slice(chunk);
         if content.len() > limit {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "File too large"));
@@ -1708,18 +1757,11 @@ fn temporary_name() -> Vec<u8> {
     .concat()
 }
 
-/// Available stat fields, useful as observations but not unchanged-data proof.
-/// Whether `path` is, or lies below, what the observation could not read.
-fn unavailable(observation: &Observation, path: &SyncPath) -> bool {
-    observation
-        .unavailable
-        .iter()
-        .any(|root| root == path || root.is_ancestor_of(path))
-}
-
 /// Keep what observing `path` found, or skip it when its error allows.
+/// A skip also enters `unavailable`, so later paths below it are not read.
 fn record(
     observation: &mut Observation,
+    unavailable: &mut PathPrefixIndex,
     path: &SyncPath,
     entry: Result<ObservedEntry, ScanError>,
 ) -> Result<(), ScanError> {
@@ -1728,7 +1770,12 @@ fn record(
             observation.entries.insert(path.clone(), entry);
             Ok(())
         }
-        Err(error) => observation.skip_error(error),
+        Err(error) => {
+            let issue = error.into_issue()?;
+            unavailable.insert(&issue.path);
+            observation.skip_issue(issue);
+            Ok(())
+        }
     }
 }
 

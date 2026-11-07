@@ -38,8 +38,8 @@ use foldover_state::{
 use foldover_types::{
     BaselineEntry, ChangeKind, ConflictKind, Durability, EndpointId, EntryContent, EntryDecision,
     EntryKind, EntryVersion, FolderRole, NameMatching, PairConfig, PairId, PairOptions,
-    Propagation, RemovalProtection, Resolution, ReviewPolicy, ReviewToken, ScanControl, Side, Skip,
-    SyncPath, UnicodeMatching,
+    PathPrefixIndex, Propagation, RemovalProtection, Resolution, ReviewPolicy, ReviewToken,
+    ScanControl, Side, Skip, SyncPath, UnicodeMatching,
 };
 use unicode_normalization::UnicodeNormalization;
 
@@ -1201,7 +1201,7 @@ impl PairRun {
             pending: Vec::new(),
             journal: Vec::new(),
             written: 0,
-            failed: Vec::new(),
+            failed: PathPrefixIndex::new(),
         };
         let mut commit_batch = |executor: &mut Executor<'_>| {
             let updates = Commit::Base {
@@ -1672,7 +1672,7 @@ struct Executor<'a> {
     /// Writes journaled so far: the next entry's sequence number.
     written: u64,
     /// Paths whose change failed; their descendants are skipped.
-    failed: Vec<SyncPath>,
+    failed: PathPrefixIndex,
 }
 
 /// What a write needs from the run, shared by the run's thread and the
@@ -1753,7 +1753,7 @@ impl<'a> Executor<'a> {
     }
 
     fn below_failure(&self, path: &SyncPath) -> bool {
-        self.failed.iter().any(|failed| failed.is_ancestor_of(path))
+        self.failed.contains_ancestor(path)
     }
 
     /// Record the copy a worker made for `row`.
@@ -1847,7 +1847,7 @@ impl<'a> Executor<'a> {
         let Some(from) = run.plan.moved_from(to) else {
             return self.fail_message(to, "Planned move has no source");
         };
-        if self.failed.iter().any(|failed| failed.is_ancestor_of(from)) {
+        if self.failed.contains_ancestor(from) {
             return;
         }
         let (Some(current), Some(source)) = (
@@ -1947,7 +1947,7 @@ impl<'a> Executor<'a> {
             path: Some(path.clone()),
             message: message.to_owned(),
         });
-        self.failed.push(path.clone());
+        self.failed.insert(path);
     }
 }
 
