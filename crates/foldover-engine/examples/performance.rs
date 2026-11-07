@@ -22,6 +22,12 @@ struct Progress {
     applied: Cell<u64>,
 }
 
+#[derive(PartialEq)]
+enum RunMode {
+    Complete,
+    PrepareOnly,
+}
+
 impl RunProgress for Progress {
     fn measured(&self, phase: RunPhase, elapsed: Duration) {
         println!(
@@ -61,11 +67,19 @@ fn metric(iteration: usize, name: &str, elapsed: Duration) {
 fn main() -> Result<(), Box<dyn Error>> {
     println!("process\t{}", std::process::id());
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    if args.len() != 4 {
+    if !(4..=5).contains(&args.len()) {
         return Err(
-            "usage: performance STATE LEFT RIGHT ITERATIONS (synthetic fixtures only)".into(),
+            "usage: performance STATE LEFT RIGHT ITERATIONS [prepare] (synthetic fixtures only)"
+                .into(),
         );
     }
+    let mode = match args.get(4).map(|arg| arg.as_bytes()) {
+        None => RunMode::Complete,
+        Some(b"prepare") => RunMode::PrepareOnly,
+        Some(_) => {
+            return Err("unknown run mode; use prepare or omit it for a complete run".into());
+        }
+    };
     // Refuse the ordinary app catalog and folders. The harness can approve
     // every change only because all three paths are explicitly disposable.
     if args[..3].iter().any(|arg| {
@@ -148,6 +162,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
         metric(iteration, "Preview", previewed.elapsed());
         drop(preview);
+        if mode == RunMode::PrepareOnly {
+            println!("prepared\t{iteration}");
+            metric(iteration, "Total", total.elapsed());
+            continue;
+        }
         let mut commits = 0u64;
         let mut commit_time = Duration::ZERO;
         let applied = Instant::now();
