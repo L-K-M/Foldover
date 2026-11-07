@@ -54,7 +54,7 @@ struct FoldFolderLabel: View {
         .help(text)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text("\(PairSyncViewModel.folderName(side)): \(text)"))
-        .contextMenu { FoldFolderMenu(viewModel: viewModel, folder: folder, side: side) }
+        .contextMenu { FoldFolderMenu(viewModel: viewModel, folder: folder) }
     }
 
     /// A folder's text as its name and where it is: "Photos" on
@@ -80,11 +80,10 @@ struct FoldFolderLabel: View {
 private struct FoldFolderMenu: View {
     let viewModel: MainViewModel
     let folder: SelectedFolder
-    let side: FolderSide
 
     var body: some View {
         if viewModel.localURL(folder) != nil {
-            Button("Show in Finder") { viewModel.reveal(side) }
+            Button("Show in Finder") { viewModel.reveal(folder) }
         }
         Button("Copy Path") {
             let pasteboard = NSPasteboard.general
@@ -150,7 +149,7 @@ struct FoldRunFolder: View {
         .help(text)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text("\(role.eyebrow(side)): \(text)"))
-        .contextMenu { FoldFolderMenu(viewModel: viewModel, folder: folder, side: side) }
+        .contextMenu { FoldFolderMenu(viewModel: viewModel, folder: folder) }
     }
 }
 

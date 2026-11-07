@@ -3,6 +3,7 @@
 
 import pathlib
 import re
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -36,8 +37,15 @@ def changelog(version: str) -> str:
 
 
 def main() -> None:
-    if len(sys.argv) != 2 or not re.fullmatch(r"\d+\.\d+\.\d+", sys.argv[1]):
-        sys.exit("usage: release-notes.py X.Y.Z")
+    if len(sys.argv) != 2:
+        sys.exit("usage: release-notes.py X.Y.Z[-suffix]")
+    # Keep notes aligned with the version the publishing pipeline accepted.
+    shape = subprocess.run(
+        ["bash", str(ROOT / "scripts/version-shape.sh")],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    if not shape or not re.fullmatch(shape, sys.argv[1]):
+        sys.exit("usage: release-notes.py X.Y.Z[-suffix]")
     version = sys.argv[1]
     print(INSTALL.format(version=version))
     print("## Changes\n")

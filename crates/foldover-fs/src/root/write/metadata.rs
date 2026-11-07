@@ -90,7 +90,7 @@ pub(super) fn native(
         if !wanted {
             continue;
         }
-        let size = rustix::fs::fgetxattr(file, name.as_c_str(), &mut [0_u8; 0][..])?;
+        let size = rustix::fs::fgetxattr_query(file, name.as_c_str())?;
         bytes += name.as_bytes().len() + size;
         if bytes > MAX_NATIVE_BYTES {
             return Err(io::Error::other(
@@ -268,7 +268,7 @@ fn copy_attribute(
 }
 
 fn copy_attribute_value(source: &impl AsFd, target: &impl AsFd, name: &CStr) -> io::Result<()> {
-    let size = rustix::fs::fgetxattr(source, name, &mut [0_u8; 0][..])?;
+    let size = rustix::fs::fgetxattr_query(source, name)?;
     if size > MAX_VALUE_BYTES {
         return Err(io::Error::other(
             "Extended attribute exceeds the copy limit",
@@ -282,7 +282,7 @@ fn copy_attribute_value(source: &impl AsFd, target: &impl AsFd, name: &CStr) -> 
 }
 
 pub(super) fn attribute_names(file: &impl AsFd) -> io::Result<Vec<CString>> {
-    let size = rustix::fs::flistxattr(file, &mut [0_u8; 0][..])?;
+    let size = rustix::fs::flistxattr_query(file)?;
     let mut bytes = vec![0; size];
     let size = rustix::fs::flistxattr(file, &mut bytes)?;
     bytes.truncate(size);
@@ -348,7 +348,7 @@ fn copy_access_control(
 #[cfg(target_os = "macos")]
 fn attribute_value(file: &impl AsFd, name: &CStr) -> io::Result<Option<Vec<u8>>> {
     for _ in 0..ATTRIBUTE_READS {
-        let size = match rustix::fs::fgetxattr(file, name, &mut [0_u8; 0][..]) {
+        let size = match rustix::fs::fgetxattr_query(file, name) {
             Ok(size) => size,
             Err(rustix::io::Errno::NOATTR) => return Ok(None),
             Err(error) => return Err(error.into()),

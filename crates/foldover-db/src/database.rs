@@ -1180,7 +1180,11 @@ fn backup(connection: &Connection, directory: &Path, schema: i64) -> Result<(), 
         .mode(FILE_MODE)
         .open(&path)?;
     drop(destination);
-    connection.backup(rusqlite::MAIN_DB, &path, None)?;
+    connection.backup(
+        rusqlite::MAIN_DB,
+        &path,
+        None::<fn(rusqlite::backup::Progress)>,
+    )?;
     File::open(&path)?.sync_all()?;
     File::open(directory)?.sync_all()?;
     Ok(())

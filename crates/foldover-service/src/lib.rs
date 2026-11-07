@@ -673,10 +673,10 @@ mod tests {
     use foldover_engine::{
         Completion, Environment, MountSources, NetworkCost, PowerMode, local_time,
     };
-    use foldover_proto::local::SyncProgress;
     use foldover_proto::local::{
         SyncCounts, SyncDeletions, SyncJob, SyncPreview, SyncResult, SyncStatus,
     };
+    use foldover_proto::local::{SyncPairContext, SyncProgress};
     use foldover_types::LocalDateTime;
     use serde_json::json;
     use std::{fs, os::unix::ffi::OsStrExt, path::Path, time::SystemTime};
@@ -686,6 +686,11 @@ mod tests {
         let engine =
             Engine::open(&StateLocation::Directory(directory.path().join("state"))).unwrap();
         (directory, Service::new(engine))
+    }
+
+    fn pair_context(service: &Service, id: PairId) -> SyncPairContext {
+        let pair = service.engine.lock().unwrap().active_pair(id).unwrap();
+        SyncPairContext::from(&pair)
     }
 
     fn input(directory: &Path, name: &str) -> Value {
@@ -1514,12 +1519,14 @@ mod tests {
             );
         }
         let missing = json!({"id": "01010101010101010101010101010101"});
-        service
-            .handle(Request::call(2, SYNC_PREVIEW, Some(missing.clone())))
-            .await
-            .unwrap();
-        let failed = settled(&service, &missing).await;
-        assert_eq!(failed["state"], "failed");
+        assert_eq!(
+            service
+                .handle(Request::call(2, SYNC_PREVIEW, Some(missing)))
+                .await
+                .unwrap_err()
+                .code(),
+            PAIR_NOT_FOUND
+        );
     }
 
     #[tokio::test]
@@ -3460,6 +3467,7 @@ mod tests {
                 job: SyncJob::Run,
                 cancelling: false,
                 progress: SyncProgress::default(),
+                pair: pair_context(&service, id),
             },
         ] {
             service.jobs.force_status(id, status.clone());
@@ -4106,6 +4114,7 @@ mod tests {
                 job: SyncJob::Run,
                 cancelling: false,
                 progress: SyncProgress::default(),
+                pair: pair_context(&service, id),
             },
         );
         assert_eq!(
@@ -4206,6 +4215,7 @@ mod tests {
                 job: SyncJob::Run,
                 cancelling: false,
                 progress: SyncProgress::default(),
+                pair: pair_context(&service, id),
             },
         );
         let saved = service.handle(update()).await.unwrap();
@@ -4422,6 +4432,7 @@ mod tests {
                 job: SyncJob::Run,
                 cancelling: false,
                 progress: SyncProgress::default(),
+                pair: pair_context(&service, id),
             },
         ] {
             service.jobs.force_status(id, status.clone());
