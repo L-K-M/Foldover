@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 use std::os::unix::ffi::OsStrExt;
 
+#[cfg(test)]
+use foldover_db::SnapshotRow;
 use foldover_db::{
-    BaseChange, Database, PairRow, PairValues, ResolutionRow, SnapshotRow, StateLocation,
+    BaseChange, Database, PairRow, PairValues, ResolutionRow, SnapshotData, StateLocation,
 };
 use foldover_types::{
     BaselineEntry, DailySchedule, Durability, EndpointId, Filters, FolderRecords, InvalidPair,
@@ -12,7 +14,7 @@ use foldover_types::{
 };
 
 use crate::BaseUpdate;
-use crate::base::{decode, decode_entry, encode};
+use crate::base::{VERSION_BYTES, decode, decode_entry, encode};
 
 mod cursor;
 mod device;
@@ -283,15 +285,31 @@ impl PairStore {
         let revision = database_revision(revision)?;
         let rows: Vec<_> = entries
             .iter()
-            .map(|entry| SnapshotRow {
-                path: entry.path.as_bytes().to_vec(),
-                fingerprint: entry.fingerprint.clone(),
-                version: encode(entry.version).to_vec(),
+            .map(|entry| EncodedSnapshot {
+                entry,
+                version: encode(entry.version),
             })
             .collect();
         Ok(self
             .database
-            .replace_snapshot(id.as_bytes(), revision, side_name(side), &rows)?)
+            .replace_snapshot_data(id.as_bytes(), revision, side_name(side), &rows)?)
+    }
+}
+
+struct EncodedSnapshot<'a> {
+    entry: &'a SnapshotEntry,
+    version: [u8; VERSION_BYTES],
+}
+
+impl SnapshotData for EncodedSnapshot<'_> {
+    fn path(&self) -> &[u8] {
+        self.entry.path.as_bytes()
+    }
+    fn fingerprint(&self) -> &[u8] {
+        &self.entry.fingerprint
+    }
+    fn version(&self) -> &[u8] {
+        &self.version
     }
 }
 

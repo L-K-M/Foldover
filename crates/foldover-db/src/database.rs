@@ -493,6 +493,26 @@ pub struct SnapshotRow {
     pub version: Vec<u8>,
 }
 
+/// Opaque encoded snapshot fields. Borrowed callers can serialize a version
+/// once without cloning each path and fingerprint at the database boundary.
+pub trait SnapshotData {
+    fn path(&self) -> &[u8];
+    fn fingerprint(&self) -> &[u8];
+    fn version(&self) -> &[u8];
+}
+
+impl SnapshotData for SnapshotRow {
+    fn path(&self) -> &[u8] {
+        &self.path
+    }
+    fn fingerprint(&self) -> &[u8] {
+        &self.fingerprint
+    }
+    fn version(&self) -> &[u8] {
+        &self.version
+    }
+}
+
 /// One stored base row. Version bytes are opaque to this driver.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BaseRow {
@@ -810,6 +830,16 @@ impl Database {
         side: &str,
         rows: &[SnapshotRow],
     ) -> Result<(), Error> {
+        self.replace_snapshot_data(pair, revision, side, rows)
+    }
+
+    pub fn replace_snapshot_data<T: SnapshotData>(
+        &mut self,
+        pair: &[u8],
+        revision: i64,
+        side: &str,
+        rows: &[T],
+    ) -> Result<(), Error> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -825,8 +855,8 @@ impl Database {
         }
         // Merge in the order the table returns: SQLite sorts BLOB paths by
         // memcmp, the same order Vec<u8>'s Ord gives.
-        let mut given: Vec<&SnapshotRow> = rows.iter().collect();
-        given.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut given: Vec<&T> = rows.iter().collect();
+        given.sort_by(|a, b| a.path().cmp(b.path()));
         let mut removed = Vec::new();
         let mut added = Vec::new();
         let mut changed = Vec::new();
@@ -840,14 +870,14 @@ impl Database {
             let mut next = 0;
             while let Some(row) = stored.next()? {
                 let path = borrowed(row, 0)?;
-                while next < given.len() && given[next].path.as_slice() < path {
+                while next < given.len() && given[next].path() < path {
                     added.push(given[next]);
                     next += 1;
                 }
-                if next < given.len() && given[next].path.as_slice() == path {
+                if next < given.len() && given[next].path() == path {
                     let candidate = given[next];
-                    if candidate.fingerprint.as_slice() != borrowed(row, 1)?
-                        || candidate.version.as_slice() != borrowed(row, 2)?
+                    if candidate.fingerprint() != borrowed(row, 1)?
+                        || candidate.version() != borrowed(row, 2)?
                     {
                         changed.push(candidate);
                     }
@@ -871,10 +901,22 @@ impl Database {
                 remove.execute(params![pair, side, path])?;
             }
             for row in &added {
-                insert.execute(params![pair, side, row.path, row.fingerprint, row.version])?;
+                insert.execute(params![
+                    pair,
+                    side,
+                    row.path(),
+                    row.fingerprint(),
+                    row.version()
+                ])?;
             }
             for row in &changed {
-                update.execute(params![pair, side, row.path, row.fingerprint, row.version])?;
+                update.execute(params![
+                    pair,
+                    side,
+                    row.path(),
+                    row.fingerprint(),
+                    row.version()
+                ])?;
             }
         }
         transaction.commit()?;

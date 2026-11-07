@@ -969,6 +969,9 @@ fn perform(
     }
     // A cache: a failed store only means the next run rereads more data.
     for side in [Side::Left, Side::Right] {
+        if !run.snapshot_changed(side) {
+            continue;
+        }
         let snapshot = run.snapshot(side);
         let _ = engine
             .lock()
@@ -1007,16 +1010,21 @@ fn perform(
             return (status, Some(Reviewed::from(&planned))).into();
         }
         Work::Run(approval, token) => {
-            let planned = run.preview();
+            let planned = (held.is_some() || token.is_some() || approval.approves_anything())
+                .then(|| run.preview());
             // ADR 0013: approval binds to the exact reviewed plan. A run is
             // reviewed only when the presented token names the held preview
             // and that plan still equals the fresh one. Any presented token
             // or nonzero approval without both stops with the fresh plan
             // instead of touching either folder.
-            let reviewed = held.as_ref().is_some_and(|held| {
-                held.plan == planned && token.is_some_and(|token| token == held.token)
-            });
+            let reviewed = held
+                .as_ref()
+                .zip(planned.as_ref())
+                .is_some_and(|(held, planned)| {
+                    held.plan == *planned && token.is_some_and(|token| token == held.token)
+                });
             if !reviewed && (token.is_some() || approval.approves_anything()) {
+                let planned = planned.expect("presented approval builds a fresh preview");
                 return (
                     SyncStatus::NeedsApproval {
                         preview: preview(&planned),

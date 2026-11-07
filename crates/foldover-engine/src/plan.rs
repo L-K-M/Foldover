@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use foldover_endpoint::{Observation, ObservedEntry};
 use unicode_normalization::UnicodeNormalization;
 
 use foldover_types::{
@@ -10,6 +11,24 @@ use foldover_types::{
 
 use crate::reconcile::resolve;
 use crate::{DeletionCounts, DeletionReview, InvalidDeletionCounts, RunContext, reconcile_entry};
+
+/// A borrowed value projection. Planning owns its output rows, but needs no
+/// second tree of cloned paths just to read observation versions.
+trait Versioned {
+    fn version(&self) -> EntryVersion;
+}
+
+impl Versioned for EntryVersion {
+    fn version(&self) -> EntryVersion {
+        *self
+    }
+}
+
+impl Versioned for ObservedEntry {
+    fn version(&self) -> EntryVersion {
+        ObservedEntry::version(self)
+    }
+}
 
 fn decide(
     decision: EntryDecision,
@@ -262,18 +281,21 @@ impl CandidatePlan {
 /// photos/a.jpg   edited on A            ─▶ create on B
 /// photos/b.jpg   unchanged on A         ─▶ create on B   (kept B: all archived on A)
 /// ```
-fn settle_folder_choices(
+fn settle_folder_choices<T: Versioned>(
     rows: &mut [PlanRow],
     base: &BTreeMap<SyncPath, BaselineEntry>,
-    left: &BTreeMap<SyncPath, EntryVersion>,
-    right: &BTreeMap<SyncPath, EntryVersion>,
+    left: &BTreeMap<SyncPath, T>,
+    right: &BTreeMap<SyncPath, T>,
     resolutions: &BTreeMap<SyncPath, Resolution>,
     control: &mut impl FnMut() -> ScanControl,
 ) -> Result<(), PlanError> {
     let mut branches: BTreeMap<SyncPath, Side> = BTreeMap::new();
     for row in rows.iter_mut() {
         check_control(control)?;
-        let (left, right) = (left.get(&row.path).copied(), right.get(&row.path).copied());
+        let (left, right) = (
+            left.get(&row.path).map(Versioned::version),
+            right.get(&row.path).map(Versioned::version),
+        );
         let mut keep = None;
         let mut parent = row.path.parent();
         while let Some(path) = parent {
@@ -304,10 +326,10 @@ fn settle_folder_choices(
 /// Leave each skipped change and everything inside it as it is: no write,
 /// no base change. A skip applies while both sides still hold what the
 /// person saw at the skipped path.
-fn skip_branches(
+fn skip_branches<T: Versioned>(
     rows: &mut [PlanRow],
-    left: &BTreeMap<SyncPath, EntryVersion>,
-    right: &BTreeMap<SyncPath, EntryVersion>,
+    left: &BTreeMap<SyncPath, T>,
+    right: &BTreeMap<SyncPath, T>,
     skips: &BTreeMap<SyncPath, Skip>,
     control: &mut impl FnMut() -> ScanControl,
 ) -> Result<(), PlanError> {
@@ -319,8 +341,10 @@ fn skip_branches(
         check_control(control)?;
         let inside = skipped.iter().any(|root| root.is_ancestor_of(&row.path));
         let current = skips.get(&row.path).is_some_and(|skip| {
-            (left.get(&row.path).copied(), right.get(&row.path).copied())
-                == (skip.left(), skip.right())
+            (
+                left.get(&row.path).map(Versioned::version),
+                right.get(&row.path).map(Versioned::version),
+            ) == (skip.left(), skip.right())
         });
         if current {
             skipped.push(row.path.clone());
@@ -348,9 +372,9 @@ fn skip_branches(
 /// A: report.txt  B: Report.txt  A renamed it: B archives Report.txt, copies
 ///                               report.txt
 /// ```
-fn mark_name_clashes(
+fn mark_name_clashes<T: Versioned>(
     rows: &mut [PlanRow],
-    [left, right]: [&BTreeMap<SyncPath, EntryVersion>; 2],
+    [left, right]: [&BTreeMap<SyncPath, T>; 2],
     left_names: NameMatching,
     right_names: NameMatching,
     control: &mut impl FnMut() -> ScanControl,
@@ -512,6 +536,35 @@ pub fn plan_resolved(
     choices: &Choices<'_>,
     control: &mut impl FnMut() -> ScanControl,
 ) -> Result<CandidatePlan, PlanError> {
+    plan_trees(mode, base, left, right, choices, control)
+}
+
+pub(crate) fn plan_observations(
+    mode: SyncMode,
+    base: &BTreeMap<SyncPath, BaselineEntry>,
+    left: &Observation,
+    right: &Observation,
+    choices: &Choices<'_>,
+    control: &mut impl FnMut() -> ScanControl,
+) -> Result<CandidatePlan, PlanError> {
+    plan_trees(
+        mode,
+        base,
+        left.entries(),
+        right.entries(),
+        choices,
+        control,
+    )
+}
+
+fn plan_trees<T: Versioned>(
+    mode: SyncMode,
+    base: &BTreeMap<SyncPath, BaselineEntry>,
+    left: &BTreeMap<SyncPath, T>,
+    right: &BTreeMap<SyncPath, T>,
+    choices: &Choices<'_>,
+    control: &mut impl FnMut() -> ScanControl,
+) -> Result<CandidatePlan, PlanError> {
     let Choices {
         resolutions,
         skips,
@@ -521,8 +574,18 @@ pub fn plan_resolved(
         right_moves,
     } = *choices;
     validate_tree(base, TreeRole::Base, |entry| entry.left().kind(), control)?;
-    validate_tree(left, TreeRole::Left, |entry| entry.kind(), control)?;
-    validate_tree(right, TreeRole::Right, |entry| entry.kind(), control)?;
+    validate_tree(
+        left,
+        TreeRole::Left,
+        |entry| entry.version().kind(),
+        control,
+    )?;
+    validate_tree(
+        right,
+        TreeRole::Right,
+        |entry| entry.version().kind(),
+        control,
+    )?;
 
     let mut base_entries = base.iter().peekable();
     let mut left_entries = left.iter().peekable();
@@ -547,10 +610,10 @@ pub fn plan_resolved(
             .map(|(_, entry)| *entry);
         let left = left_entries
             .next_if(|(key, _)| *key == &path)
-            .map(|(_, entry)| *entry);
+            .map(|(_, entry)| entry.version());
         let right = right_entries
             .next_if(|(key, _)| *key == &path)
-            .map(|(_, entry)| *entry);
+            .map(|(_, entry)| entry.version());
         if [left, right, baseline.map(BaselineEntry::left)]
             .into_iter()
             .flatten()
@@ -662,16 +725,16 @@ pub fn plan_resolved(
 /// a/x.jpg  Archive { right }              ─▶ MovedAway { right }
 /// b/x.jpg  Propagate { left, Create }     ─▶ Move { right }: rename a/x.jpg
 /// ```
-fn pair_moves(
+fn pair_moves<T: Versioned>(
     rows: &mut [PlanRow],
-    trees: [&BTreeMap<SyncPath, EntryVersion>; 2],
+    trees: [&BTreeMap<SyncPath, T>; 2],
     moves: [Moves; 2],
 ) -> BTreeMap<SyncPath, SyncPath> {
     let takes = |side: Side| moves[side as usize] == Moves::Rename;
     let movable = |side: Side, path: &SyncPath| {
         trees[side as usize]
             .get(path)
-            .map(|version| version.content())
+            .map(|version| version.version().content())
             .filter(|content| matches!(content, EntryContent::File(_) | EntryContent::Symlink(_)))
     };
     let mut gone: HashMap<(Side, EntryContent), Vec<usize>> = HashMap::new();
