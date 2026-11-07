@@ -8,7 +8,43 @@ import os
 from pathlib import Path
 import platform
 import subprocess
+import threading
 import time
+
+
+def sample_process(pid, stopped, output, samples, errors, started):
+    try:
+        _sample_process(pid, stopped, output, samples, errors, started)
+    except Exception as error:
+        errors.append(f"process sampling failed: {error}")
+
+
+def _sample_process(pid, stopped, output, samples, errors, started):
+    """Keep sampling during long phases, including the runner's SSH children."""
+    with output.open("x") as log:
+        while not stopped.is_set():
+            result = subprocess.run(["ps", "-axo", "pid=,ppid=,rss=,pcpu=,comm="],
+                                    capture_output=True, text=True, check=False,
+                                    env={**os.environ, "LC_ALL": "C"})
+            if result.returncode:
+                errors.append(result.stderr.strip() or f"ps exited {result.returncode}")
+                return
+            processes = []
+            for line in result.stdout.splitlines():
+                fields = line.split(None, 4)
+                if len(fields) == 5:
+                    processes.append((int(fields[0]), int(fields[1]), int(fields[2]),
+                                      float(fields[3]), fields[4]))
+            runner = next((row for row in processes if row[0] == pid), None)
+            if runner:
+                children = [row for row in processes if row[1] == pid and Path(row[4]).name == "ssh"]
+                point = dict(elapsed_seconds=time.monotonic() - started, rss_kib=runner[2],
+                             cpu_percent=runner[3], ssh_children=len(children),
+                             ssh_rss_kib=sum(row[2] for row in children))
+                samples.append(point)
+                log.write(json.dumps(point) + "\n")
+                log.flush()
+            stopped.wait(1)
 
 
 def main():
@@ -34,6 +70,9 @@ def main():
                    binary_sha256=hashlib.sha256(args.runner.read_bytes()).hexdigest(),
                    measurements=[], started_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
     process_id = None
+    sampler = None
+    stopped = threading.Event()
+    samples, sampling_errors = [], []
     started = time.monotonic()
     with (args.output / "runner.tsv").open("x") as log, (args.output / "resources.txt").open("x") as resources:
         child = subprocess.Popen(["/usr/bin/time", *timer_flags, *command], stdout=subprocess.PIPE,
@@ -46,6 +85,10 @@ def main():
                 fields = line.rstrip("\n").split("\t")
                 if fields[:1] == ["process"]:
                     process_id = fields[1]
+                    sampler = threading.Thread(target=sample_process,
+                                               args=(int(process_id), stopped, args.output / "samples.jsonl",
+                                                     samples, sampling_errors, started))
+                    sampler.start()
                 if fields[:1] in (["phase"], ["metric"]) and len(fields) == 4:
                     point = dict(event=fields[0], iteration=int(fields[1]), phase=fields[2], ns=int(fields[3]))
                     if process_id:
@@ -60,6 +103,12 @@ def main():
             if child.poll() is None:
                 child.terminate()
                 child.wait()
+            stopped.set()
+            if sampler:
+                sampler.join()
+    summary.update(sampled_peak_rss_kib=max((row["rss_kib"] for row in samples), default=None),
+                   sampled_peak_ssh_children=max((row["ssh_children"] for row in samples), default=None),
+                   sampling_errors=sampling_errors)
     summary.update(elapsed_seconds=time.monotonic() - started, load_end=os.getloadavg())
     (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     if summary["returncode"]:
