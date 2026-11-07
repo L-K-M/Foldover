@@ -164,6 +164,29 @@ impl<T> PathMap<T> {
         self.rows.get(index).map(|(key, value)| (key, value))
     }
 
+    /// Position of a path in raw byte order, by borrowed lookup.
+    ///
+    /// This is the row index [`get_index`](Self::get_index) accepts, so a
+    /// caller can hold a stable position instead of searching again.
+    pub fn index_of<Q>(&self, key: &Q) -> Option<usize>
+    where
+        Q: ?Sized + Ord,
+        SyncPath: Borrow<Q>,
+    {
+        self.rows
+            .binary_search_by(|row| row.0.borrow().cmp(key))
+            .ok()
+    }
+
+    /// The stored key and value at a row position, in `O(1)`.
+    ///
+    /// `index` comes from [`index_of`](Self::index_of) or a walk of
+    /// [`keys`](Self::keys); a position at or past [`len`](Self::len)
+    /// is `None`.
+    pub fn get_index(&self, index: usize) -> Option<(&SyncPath, &T)> {
+        self.rows.get(index).map(|(key, value)| (key, value))
+    }
+
     /// Whether a path is present, by borrowed raw bytes or `&SyncPath`.
     pub fn contains_key<Q>(&self, key: &Q) -> bool
     where
@@ -559,6 +582,56 @@ mod tests {
         *map.get_mut(b"one".as_slice()).unwrap() = 20;
         assert_eq!(map.get(b"one".as_slice()), Some(&20));
         assert_eq!(map.get_mut(b"absent".as_slice()), None);
+    }
+
+    #[test]
+    fn index_of_matches_btree_position_and_get_index_returns_the_row() {
+        let entries = vec![
+            (path(b"a"), 1u32),
+            (path(b"a.b"), 2),
+            (path(b"a/b"), 3),
+            (path(b"a\xff"), 4),
+            (path(b"b"), 5),
+        ];
+        let map: PathMap<u32> = entries.iter().cloned().collect();
+        let oracle: BTreeMap<SyncPath, u32> = entries.into_iter().collect();
+
+        for (index, key) in oracle.keys().enumerate() {
+            assert_eq!(map.index_of(key.as_bytes()), Some(index), "{key:?}");
+            assert_eq!(map.index_of(key), Some(index), "{key:?}");
+            let (stored_key, value) = map.get_index(index).unwrap();
+            assert_eq!(stored_key, key);
+            assert_eq!(*value, oracle[key]);
+        }
+
+        assert_eq!(map.index_of(b"absent".as_slice()), None);
+        assert_eq!(map.index_of(b"a/bb".as_slice()), None);
+        assert_eq!(map.index_of(b"a/".as_slice()), None);
+        assert_eq!(map.get_index(oracle.len()), None);
+        assert_eq!(map.get_index(usize::MAX), None);
+    }
+
+    #[test]
+    fn index_accessors_work_for_non_clone_values() {
+        #[derive(Debug, PartialEq)]
+        struct Row {
+            value: u32,
+        }
+
+        let mut map = PathMap::new();
+        assert_eq!(map.insert(path(b"one"), Row { value: 1 }), None);
+        assert_eq!(map.insert(path(b"two"), Row { value: 2 }), None);
+        assert_eq!(map.index_of(b"one".as_slice()), Some(0));
+        assert_eq!(map.index_of(b"two".as_slice()), Some(1));
+        assert_eq!(map.index_of(b"three".as_slice()), None);
+
+        let (key, row) = map.get_index(0).unwrap();
+        assert_eq!(key, &path(b"one"));
+        assert_eq!(row.value, 1);
+        let (key, row) = map.get_index(1).unwrap();
+        assert_eq!(key, &path(b"two"));
+        assert_eq!(row.value, 2);
+        assert_eq!(map.get_index(2), None);
     }
 
     #[test]
@@ -1121,6 +1194,23 @@ mod tests {
             let mut sorted = keys.clone();
             sorted.sort();
             prop_assert_eq!(keys, sorted);
+        }
+
+        #[test]
+        fn index_of_matches_btree_oracle(
+            entries in prop::collection::vec((valid_path(), any::<u32>()), 0..200),
+        ) {
+            let map: PathMap<u32> = entries.iter().cloned().collect();
+            let oracle: BTreeMap<SyncPath, u32> = entries.into_iter().collect();
+
+            for (index, key) in oracle.keys().enumerate() {
+                prop_assert_eq!(map.index_of(key.as_bytes()), Some(index));
+                prop_assert_eq!(map.index_of(key), Some(index));
+                let (stored_key, value) = map.get_index(index).unwrap();
+                prop_assert_eq!(stored_key, key);
+                prop_assert_eq!(*value, oracle[key]);
+            }
+            prop_assert_eq!(map.get_index(oracle.len()), None);
         }
     }
 }
