@@ -45,7 +45,7 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::{
     CandidateDecision, CandidatePlan, Choices, DeletionCounts, DeletionReview, Moves, PlanError,
-    PlanRow, RunContext, plan_resolved,
+    PlanRow, RunContext,
 };
 
 /// Base updates per commit: bounds the work a crash can make the next run redo.
@@ -661,6 +661,7 @@ pub struct PairRun {
     /// Observations the filters excluded, kept for the next run's cache.
     left_cache: BTreeMap<SyncPath, ObservedEntry>,
     right_cache: BTreeMap<SyncPath, ObservedEntry>,
+    snapshot_changed: [bool; 2],
     plan: CandidatePlan,
     /// The base the plan was made against, for the journal's undo records.
     base: BTreeMap<SyncPath, BaselineEntry>,
@@ -849,6 +850,14 @@ impl PairRun {
         let right_cache = cache(&right);
         left.exclude(&skipped);
         right.exclude(&skipped);
+        let snapshot_changed = [
+            !snapshot_entries(&left_cache, &left).eq(left_snapshot.iter()),
+            !snapshot_entries(&right_cache, &right).eq(right_snapshot.iter()),
+        ];
+        // Observations own the entries they reused. Release the previous
+        // trees before planning rather than keeping both generations alive.
+        drop(left_snapshot);
+        drop(right_snapshot);
         let mut base = base;
         for path in &skipped {
             base.remove(path);
@@ -861,18 +870,12 @@ impl PairRun {
             left_moves: moves(endpoints.endpoint(Side::Left)),
             right_moves: moves(endpoints.endpoint(Side::Right)),
         };
-        let mut plan = plan_resolved(
-            draft.mode(),
-            &base,
-            &left.versions(),
-            &right.versions(),
-            &choices,
-            control,
-        )
-        .map_err(|error| match error {
-            PlanError::Cancelled => RunError::Cancelled,
-            error => RunError::Plan(error),
-        })?;
+        let mut plan =
+            crate::plan::plan_observations(draft.mode(), &base, &left, &right, &choices, control)
+                .map_err(|error| match error {
+                PlanError::Cancelled => RunError::Cancelled,
+                error => RunError::Plan(error),
+            })?;
         let protected: Vec<_> = unavailable.iter().chain(&uncertain).cloned().collect();
         plan.protect_unavailable(&protected, left_names.either(right_names))?;
         plan.protect_uncertain_absences(&uncertain, left_names.either(right_names))?;
@@ -886,6 +889,7 @@ impl PairRun {
             uncertain,
             left_cache,
             right_cache,
+            snapshot_changed,
             plan,
             remembers: if base.is_empty() {
                 Remembers::Nothing
@@ -922,17 +926,17 @@ impl PairRun {
     /// This run's observation of one side, for the next run to reuse,
     /// filtered entries included: skipping them in the plan must not make
     /// the next run reread unchanged data.
+    /// Whether storing this effective observation would change the cache.
+    pub fn snapshot_changed(&self, side: Side) -> bool {
+        self.snapshot_changed[side as usize]
+    }
+
     pub fn snapshot(&self, side: Side) -> Vec<SnapshotEntry> {
         let cache = match side {
             Side::Left => &self.left_cache,
             Side::Right => &self.right_cache,
         };
-        let entries: BTreeMap<_, _> = cache
-            .iter()
-            .chain(self.observation(side).entries())
-            .collect();
-        entries
-            .into_iter()
+        snapshot_entries(cache, self.observation(side))
             .map(|(path, entry)| SnapshotEntry {
                 path: path.clone(),
                 fingerprint: entry.fingerprint_bytes(),
@@ -1491,6 +1495,25 @@ impl PairRun {
             }
         }
     }
+}
+
+/// Merge the excluded-entry cache and current observation in path order.
+/// Current entries win a duplicate, matching the original map overlay.
+fn snapshot_entries<'a>(
+    cache: &'a BTreeMap<SyncPath, ObservedEntry>,
+    observation: &'a Observation,
+) -> impl Iterator<Item = (&'a SyncPath, &'a ObservedEntry)> {
+    let mut cached = cache.iter().peekable();
+    let mut observed = observation.entries().iter().peekable();
+    std::iter::from_fn(move || match (cached.peek(), observed.peek()) {
+        (Some((left, _)), Some((right, _))) if left < right => cached.next(),
+        (Some((left, _)), Some((right, _))) if left == right => {
+            cached.next();
+            observed.next()
+        }
+        (_, Some(_)) => observed.next(),
+        _ => cached.next(),
+    })
 }
 
 /// A failed read of one side, with guidance when access was refused.

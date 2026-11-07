@@ -1739,6 +1739,8 @@ fn earlier_snapshots_supply_versions_for_settled_unchanged_entries() {
     let inputs = RunInputs::new(config, BTreeMap::new(), pair.identities, BTreeMap::new())
         .with_snapshots(left, BTreeMap::new());
     let second = PairRun::prepare(inputs, &mut proceed, &NoProgress).unwrap();
+    assert!(!second.snapshot_changed(Side::Left));
+    assert!(!second.snapshot_changed(Side::Right));
     let preview = second.preview();
     assert_eq!(preview.items()[0].versions().0, Some(stored));
 }
@@ -1914,6 +1916,8 @@ fn age_excluded_files_stay_in_the_snapshot_cache_for_reuse() {
     .collect();
     let inputs = pair.inputs().with_snapshots(left, BTreeMap::new());
     let second = PairRun::prepare(inputs, &mut proceed, &NoProgress).unwrap();
+    assert!(!second.snapshot_changed(Side::Left));
+    assert!(!second.snapshot_changed(Side::Right));
     assert!(second.preview().items().is_empty());
     assert_eq!(
         second
@@ -1922,6 +1926,61 @@ fn age_excluded_files_stay_in_the_snapshot_cache_for_reuse() {
             .find(|entry| entry.path == path(b"old"))
             .map(|entry| entry.version),
         Some(stored)
+    );
+}
+
+#[test]
+fn snapshot_changes_include_edits_additions_and_removals() {
+    let pair = fixture(SyncMode::Sync);
+    fs::write(pair.left.path().join("a"), b"first").unwrap();
+    let first = pair.prepare();
+    assert!(first.snapshot_changed(Side::Left));
+    let previous: BTreeMap<_, _> = first
+        .snapshot(Side::Left)
+        .into_iter()
+        .map(|entry| {
+            (
+                entry.path,
+                ObservedEntry::restore(entry.version, &entry.fingerprint).unwrap(),
+            )
+        })
+        .collect();
+    fs::write(pair.left.path().join("a"), b"edited with another size").unwrap();
+    fs::write(pair.left.path().join("a-b"), b"added").unwrap();
+    let edited = PairRun::prepare(
+        pair.inputs().with_snapshots(previous, BTreeMap::new()),
+        &mut proceed,
+        &NoProgress,
+    )
+    .unwrap();
+    assert!(edited.snapshot_changed(Side::Left));
+    assert!(!edited.snapshot_changed(Side::Right));
+    let previous: BTreeMap<_, _> = edited
+        .snapshot(Side::Left)
+        .into_iter()
+        .map(|entry| {
+            (
+                entry.path,
+                ObservedEntry::restore(entry.version, &entry.fingerprint).unwrap(),
+            )
+        })
+        .collect();
+    fs::remove_file(pair.left.path().join("a")).unwrap();
+    let removed = PairRun::prepare(
+        pair.inputs().with_snapshots(previous, BTreeMap::new()),
+        &mut proceed,
+        &NoProgress,
+    )
+    .unwrap();
+    assert!(removed.snapshot_changed(Side::Left));
+    assert!(!removed.snapshot_changed(Side::Right));
+    assert_eq!(
+        removed
+            .snapshot(Side::Left)
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>(),
+        [path(b"a-b")]
     );
 }
 

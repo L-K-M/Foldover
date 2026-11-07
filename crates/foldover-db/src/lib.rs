@@ -9,5 +9,5 @@ mod database;
 pub use database::{
     AutomationSettingRow, BaseChange, BaseRow, Database, DeviceRow, Error, HistoryRow, IdentityRow,
     JournalChange, JournalRow, MountRow, PairRow, PairValues, PauseRow, ResolutionRow, RunMarker,
-    ShareRow, SnapshotRow, StateLocation, WatchCursorRow,
+    ShareRow, SnapshotData, SnapshotRow, StateLocation, WatchCursorRow,
 };

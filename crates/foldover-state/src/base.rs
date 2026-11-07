@@ -9,7 +9,7 @@ use foldover_types::{BaselineEntry, Digest, EntryContent, EntryVersion, SyncPath
 
 use crate::Error;
 
-const VERSION_BYTES: usize = 1 + 2 * Digest::BYTE_LEN;
+pub(crate) const VERSION_BYTES: usize = 1 + 2 * Digest::BYTE_LEN;
 const FILE: u8 = 1;
 const DIRECTORY: u8 = 2;
 const SYMLINK: u8 = 3;
