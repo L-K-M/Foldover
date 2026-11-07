@@ -83,26 +83,43 @@ impl EntryVersion {
 }
 
 /// Per-side versions prevent accepted metadata loss from causing copy loops.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// A baseline requires equal content on both sides, so store that content once
+/// and keep each side's metadata digest apart.
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct BaselineEntry {
-    left: EntryVersion,
-    right: EntryVersion,
+    content: EntryContent,
+    left_metadata: Digest,
+    right_metadata: Digest,
 }
 
 impl BaselineEntry {
     pub fn new(left: EntryVersion, right: EntryVersion) -> Result<Self, BaselineMismatch> {
-        if left.content != right.content {
+        if left.content() != right.content() {
             return Err(BaselineMismatch);
         }
-        Ok(Self { left, right })
+        Ok(Self {
+            content: left.content(),
+            left_metadata: left.metadata(),
+            right_metadata: right.metadata(),
+        })
     }
 
     pub const fn left(self) -> EntryVersion {
-        self.left
+        EntryVersion::new(self.content, self.left_metadata)
     }
 
     pub const fn right(self) -> EntryVersion {
-        self.right
+        EntryVersion::new(self.content, self.right_metadata)
+    }
+}
+
+impl fmt::Debug for BaselineEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BaselineEntry")
+            .field("left", &self.left())
+            .field("right", &self.right())
+            .finish()
     }
 }
 
@@ -220,6 +237,44 @@ pub enum EntryDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn baseline_layout_is_smaller_than_two_versions() {
+        // One shared EntryContent plus two metadata digests: 33 + 32 + 32 = 97,
+        // against 2 * 65 bytes for two EntryVersions.
+        assert_eq!(size_of::<BaselineEntry>(), 97);
+        assert_eq!(size_of::<EntryVersion>() * 2, 130);
+        assert!(size_of::<BaselineEntry>() < size_of::<EntryVersion>() * 2);
+    }
+
+    #[test]
+    fn baseline_round_trips_each_kind_with_differing_metadata() {
+        let digest = Digest::from_bytes([9; Digest::BYTE_LEN]);
+        for content in [
+            EntryContent::File(digest),
+            EntryContent::Directory,
+            EntryContent::Symlink(digest),
+        ] {
+            let left = EntryVersion::new(content, Digest::from_bytes([2; Digest::BYTE_LEN]));
+            let right = EntryVersion::new(content, Digest::from_bytes([3; Digest::BYTE_LEN]));
+            let base = BaselineEntry::new(left, right).unwrap();
+            assert_eq!(base.left(), left);
+            assert_eq!(base.right(), right);
+            assert_ne!(base.left().metadata(), base.right().metadata());
+        }
+    }
+
+    #[test]
+    fn baseline_debug_presents_left_and_right_versions() {
+        let content = EntryContent::File(Digest::from_bytes([1; Digest::BYTE_LEN]));
+        let left = EntryVersion::new(content, Digest::from_bytes([2; Digest::BYTE_LEN]));
+        let right = EntryVersion::new(content, Digest::from_bytes([3; Digest::BYTE_LEN]));
+        let base = BaselineEntry::new(left, right).unwrap();
+        assert_eq!(
+            format!("{base:?}"),
+            format!("BaselineEntry {{ left: {left:?}, right: {right:?} }}")
+        );
+    }
 
     #[test]
     fn baseline_requires_equal_content_but_retains_each_sides_metadata() {
