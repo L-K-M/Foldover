@@ -1746,6 +1746,41 @@ fn earlier_snapshots_supply_versions_for_settled_unchanged_entries() {
 }
 
 #[test]
+fn preparation_timings_stay_on_the_run_thread() {
+    struct Timings {
+        thread: std::thread::ThreadId,
+        phases: RefCell<Vec<RunPhase>>,
+    }
+    impl RunProgress for Timings {
+        fn measured(&self, phase: RunPhase, _elapsed: Duration) {
+            assert_eq!(std::thread::current().id(), self.thread);
+            self.phases.borrow_mut().push(phase);
+        }
+        fn observed(&self, _side: Side, _step: ObserveStep) {}
+        fn planned(&self, _changes: u64, _bytes: u64) {}
+        fn applied(&self, _bytes: u64) {}
+        fn waiting(&self, _holder: Option<&str>) {}
+    }
+    let pair = fixture(SyncMode::Sync);
+    let timings = Timings {
+        thread: std::thread::current().id(),
+        phases: RefCell::new(Vec::new()),
+    };
+    PairRun::prepare(pair.inputs(), &mut proceed, &timings).unwrap();
+    assert_eq!(
+        *timings.phases.borrow(),
+        [
+            RunPhase::OpenEndpoints,
+            RunPhase::Readiness,
+            RunPhase::ObserveLeft,
+            RunPhase::ObserveRight,
+            RunPhase::AlignAndFilter,
+            RunPhase::Plan
+        ]
+    );
+}
+
+#[test]
 fn filters_from_the_pair_and_both_ignore_files_exclude_entries_on_both_sides() {
     let mut pair = fixture(SyncMode::Sync);
     pair.filters = vec!["*.tmp".into()];
