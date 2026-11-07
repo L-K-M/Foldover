@@ -13,6 +13,8 @@ use std::io;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use foldover_fs::{
@@ -32,6 +34,7 @@ use foldover_types::{
 
 use version::{Attribute, Observed, Payload, capture_for, entry_version, metadata_version};
 
+use crate::observation_reads::Reads;
 use crate::{ListedEntry, ListedKind, ObserveStep};
 
 pub(crate) use apply::Archiving;
@@ -1272,9 +1275,40 @@ impl LocalEndpoint {
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<Observation, ScanError> {
+        self.observe_reporting_workers(policy, filter, previous, control, progress, self.workers())
+    }
+
+    /// `observe_reporting` on a chosen worker count. One worker keeps the
+    /// serial walk; more overlap it with bounded reads. Tests choose the
+    /// count, so no public switch exists.
+    fn observe_reporting_workers(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: &impl PreviousObservation,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+        workers: NonZeroUsize,
+    ) -> Result<Observation, ScanError> {
         if control() == ScanControl::Cancel {
             return Err(ScanError::Cancelled);
         }
+        if workers == NonZeroUsize::MIN {
+            self.observe_reporting_serial(policy, filter, previous, control, progress)
+        } else {
+            self.observe_reporting_overlapped(policy, filter, previous, control, progress, workers)
+        }
+    }
+
+    /// The walk and the reads on this thread, one entry at a time.
+    fn observe_reporting_serial(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: &impl PreviousObservation,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+    ) -> Result<Observation, ScanError> {
         let mut observation = Observation::default();
         let mut unavailable = UnavailablePaths::default();
         let mut directories = Vec::new();
@@ -1309,6 +1343,166 @@ impl LocalEndpoint {
             return Err(error);
         }
         let stats = scanned?;
+        self.finish_observation(
+            policy,
+            previous,
+            observation,
+            unavailable,
+            directories,
+            stats,
+            control,
+            progress,
+        )
+    }
+
+    /// The walk on this thread, the reads on bounded workers. This thread
+    /// alone asks `control`, reports `progress`, and mutates the observation,
+    /// the unavailable index and the stats; a worker only captures one
+    /// entry's verified version and checks the shared stop.
+    fn observe_reporting_overlapped(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: &impl PreviousObservation,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+        workers: NonZeroUsize,
+    ) -> Result<Observation, ScanError> {
+        let read = |(entry, _observed_at): &(LocalEntry, SystemTime),
+                    asked: &dyn Fn() -> ScanControl| {
+            self.entry_version(entry, policy, &mut || asked())
+        };
+        self.observe_reporting_overlapped_with(
+            policy, filter, previous, control, progress, workers, &read,
+        )
+    }
+
+    /// The overlapped walk with a chosen read, so a test can substitute a
+    /// deterministic helper and observe the driver's own handoff. The
+    /// production read calls `entry_version`.
+    #[allow(clippy::too_many_arguments)]
+    fn observe_reporting_overlapped_with<G>(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: &impl PreviousObservation,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+        workers: NonZeroUsize,
+        read: &G,
+    ) -> Result<Observation, ScanError>
+    where
+        G: Fn(
+                &(LocalEntry, SystemTime),
+                &dyn Fn() -> ScanControl,
+            ) -> Result<EntryVersion, ScanError>
+            + Sync,
+    {
+        let mut observation = Observation::default();
+        let mut unavailable = UnavailablePaths::default();
+        let mut directories = Vec::new();
+        let mut failure = None;
+        let stop = AtomicBool::new(false);
+        let (scanned, finish) = thread::scope(|threads| {
+            let mut pending = Reads::start(threads, workers, &stop, read);
+            let scanned = self.scan_filtered(filter, &mut |entry| {
+                progress(ObserveStep::Listed);
+                // Directory stats may change during traversal. Refresh those
+                // after the readers finish; files need no whole-tree metadata
+                // inventory.
+                if entry.metadata.kind() == NodeKind::Directory {
+                    directories.push(entry);
+                    return ScanControl::Continue;
+                }
+                let prepared = match self.prepare_entry(
+                    entry,
+                    previous,
+                    &mut observation,
+                    &mut unavailable,
+                    control,
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        failure = Some(error);
+                        return ScanControl::Cancel;
+                    }
+                };
+                let Some(job) = prepared else {
+                    progress(ObserveStep::Checked);
+                    return ScanControl::Continue;
+                };
+                if let Err(error) = pending.submit(
+                    job,
+                    &mut |(entry, observed_at), result| {
+                        land_entry(
+                            entry,
+                            *observed_at,
+                            result,
+                            &mut observation,
+                            &mut unavailable,
+                        )?;
+                        progress(ObserveStep::Checked);
+                        Ok(())
+                    },
+                    control,
+                ) {
+                    failure = Some(error);
+                    return ScanControl::Cancel;
+                }
+                ScanControl::Continue
+            });
+            if failure.is_some() || scanned.is_err() {
+                // A producer failure is terminal even when a caller's
+                // cancellation callback returns Continue on its next call.
+                stop.store(true, Ordering::Relaxed);
+            }
+            let finish = pending.finish(
+                &mut |(entry, observed_at), result| {
+                    land_entry(
+                        entry,
+                        *observed_at,
+                        result,
+                        &mut observation,
+                        &mut unavailable,
+                    )?;
+                    progress(ObserveStep::Checked);
+                    Ok(())
+                },
+                control,
+            );
+            (scanned, finish)
+        });
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        let stats = scanned?;
+        finish?;
+        self.finish_observation(
+            policy,
+            previous,
+            observation,
+            unavailable,
+            directories,
+            stats,
+            control,
+            progress,
+        )
+    }
+
+    /// Settle the walk's stats, refresh the deferred directories, then drop
+    /// rows below a subtree that failed late.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_observation(
+        &self,
+        policy: MetadataPolicy,
+        previous: &impl PreviousObservation,
+        mut observation: Observation,
+        mut unavailable: UnavailablePaths,
+        directories: Vec<LocalEntry>,
+        stats: ScanStats,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+    ) -> Result<Observation, ScanError> {
         observation.leftovers = stats.leftovers;
         observation.oversized = stats.oversized;
         observation.old = stats.old;
@@ -1341,18 +1535,38 @@ impl LocalEndpoint {
     /// Retain one verified entry; bounded failures mark its subtree unknown.
     fn observe_entry(
         &self,
-        mut entry: LocalEntry,
+        entry: LocalEntry,
         policy: MetadataPolicy,
         previous: &impl PreviousObservation,
         observation: &mut Observation,
         unavailable: &mut UnavailablePaths,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<(), ScanError> {
+        if let Some((entry, observed_at)) =
+            self.prepare_entry(entry, previous, observation, unavailable, control)?
+        {
+            let result = self.entry_version(&entry, policy, control);
+            land_entry(&entry, observed_at, result, observation, unavailable)?;
+        }
+        Ok(())
+    }
+
+    /// Check the caller's control, a settled cache entry and a directory's
+    /// fresh binding, and capture the observation time before any read.
+    /// `None` means the entry is already recorded and needs no read.
+    fn prepare_entry(
+        &self,
+        mut entry: LocalEntry,
+        previous: &impl PreviousObservation,
+        observation: &mut Observation,
+        unavailable: &mut UnavailablePaths,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<Option<(LocalEntry, SystemTime)>, ScanError> {
         if control() == ScanControl::Cancel {
             return Err(ScanError::Cancelled);
         }
         if unavailable.contains(&entry.path) {
-            return Ok(());
+            return Ok(None);
         }
         if entry.metadata.kind() == NodeKind::Directory {
             // Child changes update directory stats during the walk. Read
@@ -1374,7 +1588,7 @@ impl LocalEndpoint {
                         .err()
                         .unwrap_or_else(|| ScanError::Changed(Some(entry.path.clone())));
                     unavailable.skip_error(observation, error)?;
-                    return Ok(());
+                    return Ok(None);
                 }
             }
         }
@@ -1385,21 +1599,9 @@ impl LocalEndpoint {
             && known.fingerprint().proves_unchanged(&entry.metadata)
         {
             observation.record(entry.path, known.clone());
-            return Ok(());
+            return Ok(None);
         }
-        let observed_at = SystemTime::now();
-        let version = match self.entry_version(&entry, policy, control) {
-            Ok(version) => version,
-            Err(error) => {
-                unavailable.skip_error(observation, error)?;
-                return Ok(());
-            }
-        };
-        observation.record(
-            entry.path,
-            ObservedEntry::new(version, Fingerprint::new(&entry.metadata, observed_at)),
-        );
-        Ok(())
+        Ok(Some((entry, SystemTime::now())))
     }
 
     /// One entry's content and tracked metadata. Every read is checked
@@ -1507,6 +1709,27 @@ impl LocalEndpoint {
             NodeKind::File | NodeKind::Directory => {}
         }
         Ok(Some(entry))
+    }
+}
+
+/// Record one read result, or mark its subtree unavailable. Bounded read
+/// failures never discard the whole observation; cancellation propagates.
+fn land_entry(
+    entry: &LocalEntry,
+    observed_at: SystemTime,
+    result: Result<EntryVersion, ScanError>,
+    observation: &mut Observation,
+    unavailable: &mut UnavailablePaths,
+) -> Result<(), ScanError> {
+    match result {
+        Ok(version) => {
+            observation.record(
+                entry.path.clone(),
+                ObservedEntry::new(version, Fingerprint::new(&entry.metadata, observed_at)),
+            );
+            Ok(())
+        }
+        Err(error) => unavailable.skip_error(observation, error),
     }
 }
 
@@ -1727,6 +1950,7 @@ pub(crate) fn settled_stat(endpoint: &LocalEndpoint, path: &SyncPath, mut mutate
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     /// PLAN.md §4.8: an unchanged stat stands for a version only until it
     /// is half a week to a week old, so same-size, same-time edits are
@@ -2836,16 +3060,21 @@ mod tests {
     }
 
     #[test]
-    fn file_observation_does_not_buffer_the_entire_metadata_inventory() {
+    fn file_observation_streams_checks_within_the_reader_queue_bound() {
         let directory = tempfile::tempdir().unwrap();
-        for name in ["a", "b", "c", "d"] {
-            fs::write(directory.path().join(name), b"payload").unwrap();
+        let workers = NonZeroUsize::new(4).expect("four is not zero");
+        // More files than the bounded queue holds, so a walk that buffered
+        // the whole inventory would check only after listing every entry.
+        let files = 2 * workers.get() + 2;
+        for index in 0..files {
+            fs::write(directory.path().join(format!("file-{index}")), b"payload").unwrap();
         }
         let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+
         let mut listed = 0;
         let mut first_checked = None;
         let result = endpoint
-            .observe_reporting(
+            .observe_reporting_workers(
                 MetadataPolicy::default(),
                 &Filter::none(),
                 &BTreeMap::new(),
@@ -2856,10 +3085,381 @@ mod tests {
                         first_checked.get_or_insert(listed);
                     }
                 },
+                workers,
             )
             .unwrap();
-        assert_eq!(result.entries().len(), 4);
+        assert_eq!(result.entries().len(), files);
+        let first_checked = first_checked.expect("every file is checked");
+        assert!(
+            first_checked <= 2 * workers.get() + 1,
+            "the first check landed at {first_checked}, past the reader queue"
+        );
+        assert!(
+            first_checked < files,
+            "the first check landed at {first_checked}, after the whole walk"
+        );
+
+        // One worker keeps the serial order: each entry is checked as it is
+        // listed.
+        let mut listed = 0;
+        let mut first_checked = None;
+        endpoint
+            .observe_reporting_workers(
+                MetadataPolicy::default(),
+                &Filter::none(),
+                &BTreeMap::new(),
+                &mut || ScanControl::Continue,
+                &mut |step| match step {
+                    ObserveStep::Listed => listed += 1,
+                    ObserveStep::Checked => {
+                        first_checked.get_or_insert(listed);
+                    }
+                },
+                NonZeroUsize::MIN,
+            )
+            .unwrap();
         assert_eq!(first_checked, Some(1));
+    }
+
+    /// The overlapped walk must really read on several workers at once. The
+    /// probe counts active `entry_version` calls; one worker would leave the
+    /// maximum at one.
+    #[test]
+    fn overlapped_observation_reads_on_several_threads_at_once() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Condvar, Mutex};
+        use std::time::Duration;
+
+        let directory = tempfile::tempdir().unwrap();
+        let files = 16;
+        for index in 0..files {
+            fs::write(directory.path().join(format!("file-{index}")), b"payload").unwrap();
+        }
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+
+        // The helper waits until four reads are in flight. A bounded wait
+        // keeps a broken driver from hanging the test; the flag records
+        // whether they met.
+        let active = Arc::new((Mutex::new(0_usize), Condvar::new()));
+        let reached = Arc::new(AtomicBool::new(false));
+        let required = 4;
+        let met = Arc::clone(&reached);
+        let read = move |_: &(LocalEntry, SystemTime), _: &dyn Fn() -> ScanControl| {
+            let (lock, changed) = &*active;
+            let mut in_flight = lock.lock().unwrap();
+            *in_flight += 1;
+            if *in_flight >= required {
+                met.store(true, Ordering::SeqCst);
+                changed.notify_all();
+            } else {
+                let (guard, _timeout) = changed
+                    .wait_timeout_while(in_flight, Duration::from_secs(5), |in_flight| {
+                        *in_flight < required && !met.load(Ordering::SeqCst)
+                    })
+                    .unwrap();
+                in_flight = guard;
+            }
+            drop(in_flight);
+            Ok(EntryVersion::new(
+                foldover_types::EntryContent::Directory,
+                Digest::from_bytes([0; Digest::BYTE_LEN]),
+            ))
+        };
+
+        let observation = endpoint
+            .observe_reporting_overlapped_with(
+                MetadataPolicy::default(),
+                &Filter::none(),
+                &BTreeMap::new(),
+                &mut || ScanControl::Continue,
+                &mut |_| {},
+                NonZeroUsize::new(required).unwrap(),
+                &read,
+            )
+            .unwrap();
+        assert_eq!(observation.entries().len(), files);
+        assert!(
+            reached.load(Ordering::SeqCst),
+            "reads did not overlap on four workers"
+        );
+    }
+
+    /// Workers only capture versions; the caller's control and progress run
+    /// on the walk's thread, so a cancellation or a progress callback cannot
+    /// race the observation it describes.
+    #[test]
+    fn control_and_progress_stay_on_the_run_thread() {
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..8 {
+            fs::write(directory.path().join(format!("file-{index}")), b"payload").unwrap();
+        }
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        let caller = std::thread::current().id();
+        let mut control_thread = None;
+        let mut progress_thread = None;
+        let observation = endpoint
+            .observe_reporting_workers(
+                MetadataPolicy::default(),
+                &Filter::none(),
+                &BTreeMap::new(),
+                &mut || {
+                    control_thread.get_or_insert(std::thread::current().id());
+                    ScanControl::Continue
+                },
+                &mut |_| {
+                    progress_thread.get_or_insert(std::thread::current().id());
+                },
+                NonZeroUsize::new(4).expect("four is not zero"),
+            )
+            .unwrap();
+        assert_eq!(observation.entries().len(), 8);
+        assert_eq!(control_thread, Some(caller));
+        assert_eq!(progress_thread, Some(caller));
+    }
+
+    /// Cancelling stops the readers and winds them down; the failed call
+    /// publishes no partial observation, and the endpoint observes again.
+    #[test]
+    fn cancelling_an_overlapped_observation_leaves_no_partial_result() {
+        let directory = tempfile::tempdir().unwrap();
+        let files = 64;
+        for index in 0..files {
+            fs::write(directory.path().join(format!("file-{index}")), b"payload").unwrap();
+        }
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        let checked = Cell::new(0);
+        let result = endpoint.observe_reporting_workers(
+            MetadataPolicy::default(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut || match checked.get() {
+                0 => ScanControl::Continue,
+                _ => ScanControl::Cancel,
+            },
+            &mut |step| {
+                if step == ObserveStep::Checked {
+                    checked.set(checked.get() + 1);
+                }
+            },
+            NonZeroUsize::new(4).expect("four is not zero"),
+        );
+        assert!(matches!(result, Err(ScanError::Cancelled)), "{result:?}");
+
+        let observation = endpoint
+            .observe_reporting_workers(
+                MetadataPolicy::default(),
+                &Filter::none(),
+                &BTreeMap::new(),
+                &mut || ScanControl::Continue,
+                &mut |_| {},
+                NonZeroUsize::new(4).expect("four is not zero"),
+            )
+            .unwrap();
+        assert_eq!(observation.entries().len(), files);
+    }
+
+    /// A settled cache entry is recorded without a read job; a recent one
+    /// still needs the worker's read.
+    #[test]
+    fn one_shot_producer_cancellation_stops_reads_already_in_progress() {
+        use std::sync::mpsc;
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a"), b"a").unwrap();
+        fs::write(directory.path().join("b"), b"b").unwrap();
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        let (started, wait_started) = mpsc::channel();
+        let (finished, wait_finished) = mpsc::channel();
+        let release = AtomicBool::new(false);
+        let stopped = AtomicBool::new(false);
+        let cancel_next = Cell::new(false);
+        let listed = Cell::new(0);
+        thread::scope(|threads| {
+            let watchdog_release = &release;
+            threads.spawn(move || {
+                // A broken implementation still exits so the regression
+                // fails rather than hanging the suite.
+                if wait_finished.recv_timeout(Duration::from_secs(5)).is_err() {
+                    watchdog_release.store(true, Ordering::Relaxed);
+                }
+            });
+            let read = |_: &(LocalEntry, SystemTime), asked: &dyn Fn() -> ScanControl| {
+                started.send(()).unwrap();
+                while !release.load(Ordering::Relaxed) {
+                    if asked() == ScanControl::Cancel {
+                        stopped.store(true, Ordering::Relaxed);
+                        finished.send(()).unwrap();
+                        return Err(ScanError::Cancelled);
+                    }
+                    thread::yield_now();
+                }
+                Err(ScanError::Cancelled)
+            };
+            let result = endpoint.observe_reporting_overlapped_with(
+                MetadataPolicy::default(),
+                &Filter::none(),
+                &BTreeMap::new(),
+                &mut || {
+                    if cancel_next.replace(false) {
+                        ScanControl::Cancel
+                    } else {
+                        ScanControl::Continue
+                    }
+                },
+                &mut |step| {
+                    if step == ObserveStep::Listed {
+                        listed.set(listed.get() + 1);
+                        if listed.get() == 2 {
+                            wait_started.recv_timeout(Duration::from_secs(5)).unwrap();
+                            cancel_next.set(true);
+                        }
+                    }
+                },
+                NonZeroUsize::new(2).unwrap(),
+                &read,
+            );
+            assert!(matches!(result, Err(ScanError::Cancelled)));
+        });
+        assert!(
+            stopped.load(Ordering::Relaxed),
+            "producer cancellation did not reach an active read"
+        );
+    }
+
+    #[test]
+    fn settled_previous_entries_need_no_read_job() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let past = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        fs::write(root.join("settled"), b"one").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(root.join("settled"))
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+        fs::write(root.join("recent"), b"two").unwrap();
+        let endpoint = LocalEndpoint::open(root).unwrap();
+        let previous = endpoint
+            .observe(ALL, &mut || ScanControl::Continue)
+            .unwrap();
+        let mut observation = Observation::default();
+        let mut unavailable = UnavailablePaths::default();
+        let mut control = || ScanControl::Continue;
+        let path = |name: &[u8]| SyncPath::try_from(name).unwrap();
+
+        let settled = endpoint.entry_at(&path(b"settled")).unwrap().unwrap();
+        assert!(
+            endpoint
+                .prepare_entry(
+                    settled,
+                    previous.entries(),
+                    &mut observation,
+                    &mut unavailable,
+                    &mut control,
+                )
+                .unwrap()
+                .is_none()
+        );
+        observation.finish_entries();
+        assert!(observation.entries().contains_key(&path(b"settled")));
+
+        let recent = endpoint.entry_at(&path(b"recent")).unwrap().unwrap();
+        assert!(
+            endpoint
+                .prepare_entry(
+                    recent,
+                    previous.entries(),
+                    &mut observation,
+                    &mut unavailable,
+                    &mut control,
+                )
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// One worker and four find the same versions, skips, unstable
+    /// directories and progress counts, so the overlap changes only the
+    /// order in which reads finish.
+    #[test]
+    fn serial_and_overlapped_observations_agree() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir(root.join("folder")).unwrap();
+        fs::write(root.join("folder/file"), b"data").unwrap();
+        fs::write(root.join("notes"), b"notes").unwrap();
+        symlink("folder/file", root.join("link")).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(root.join("pipe"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        let endpoint = LocalEndpoint::open(root).unwrap();
+
+        let observe = |workers| {
+            let mut steps = Vec::new();
+            let observation = endpoint
+                .observe_reporting_workers(
+                    MetadataPolicy::default(),
+                    &Filter::none(),
+                    &BTreeMap::new(),
+                    &mut || ScanControl::Continue,
+                    &mut |step| steps.push(step),
+                    workers,
+                )
+                .unwrap();
+            (observation, steps)
+        };
+        let (serial, serial_steps) = observe(NonZeroUsize::MIN);
+        let (overlapped, overlapped_steps) = observe(NonZeroUsize::new(4).unwrap());
+
+        let versions = |observation: &Observation| {
+            observation
+                .entries()
+                .iter()
+                .map(|(path, entry)| (path.clone(), entry.version()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(versions(&overlapped), versions(&serial));
+
+        let unavailable = |observation: &Observation| {
+            let mut paths = observation.unavailable().to_vec();
+            paths.sort();
+            paths
+        };
+        assert_eq!(unavailable(&overlapped), unavailable(&serial));
+
+        let unstable = |observation: &Observation| {
+            let mut directories = observation.unstable_directories().to_vec();
+            directories.sort();
+            directories
+        };
+        assert_eq!(unstable(&overlapped), unstable(&serial));
+
+        let issues = |observation: &Observation| {
+            let mut issues = observation
+                .issues()
+                .iter()
+                .map(|issue| (issue.path().clone(), issue.message().to_string()))
+                .collect::<Vec<_>>();
+            issues.sort();
+            issues
+        };
+        assert_eq!(issues(&overlapped), issues(&serial));
+
+        let count = |steps: &[ObserveStep], wanted: ObserveStep| {
+            steps.iter().filter(|&&step| step == wanted).count()
+        };
+        assert_eq!(
+            count(&overlapped_steps, ObserveStep::Listed),
+            count(&serial_steps, ObserveStep::Listed)
+        );
+        assert_eq!(
+            count(&overlapped_steps, ObserveStep::Checked),
+            count(&serial_steps, ObserveStep::Checked)
+        );
     }
 
     #[test]
