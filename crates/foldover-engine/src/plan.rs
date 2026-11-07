@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use foldover_endpoint::{Observation, ObservedEntry};
 use unicode_normalization::{UnicodeNormalization, is_nfc};
@@ -384,22 +384,47 @@ fn mark_name_clashes<T: Versioned>(
     if loose == NameMatching::EXACT {
         return Ok(());
     }
-    let mut keys: HashMap<Cow<'_, [u8]>, Vec<usize>> = HashMap::new();
+    // Raw rows are already sorted. When normalization leaves their keys
+    // strictly increasing, there cannot be a clash and no index is needed.
+    let mut previous: Option<Cow<'_, [u8]>> = None;
+    let mut ordered_unique = true;
+    for row in rows.iter() {
+        check_control(control)?;
+        let key = name_key(row.path.as_bytes(), loose);
+        if previous
+            .as_deref()
+            .is_some_and(|known| known >= key.as_ref())
+        {
+            ordered_unique = false;
+            break;
+        }
+        previous = Some(key);
+    }
+    if ordered_unique {
+        return Ok(());
+    }
+    drop(previous);
+    // A flat vector avoids a hash bucket and singleton ordinal allocation
+    // per path. Only groups that actually collide need the per-side index.
+    let mut keys = Vec::with_capacity(rows.len());
     for (index, row) in rows.iter().enumerate() {
         check_control(control)?;
-        keys.entry(name_key(row.path.as_bytes(), loose))
-            .or_default()
-            .push(index);
+        keys.push((name_key(row.path.as_bytes(), loose), index));
     }
+    keys.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    check_control(control)?;
     let mut clashes = Vec::new();
-    for group in keys.into_values().filter(|group| group.len() > 1) {
+    for group in keys
+        .chunk_by(|left, right| left.0 == right.0)
+        .filter(|group| group.len() > 1)
+    {
         for (side, names, present) in [
             (Side::Left, left_names, left),
             (Side::Right, right_names, right),
         ] {
             // Spellings this folder stores as one file.
             let mut same: HashMap<Cow<'_, [u8]>, Vec<usize>> = HashMap::new();
-            for &index in &group {
+            for &(_, index) in group {
                 check_control(control)?;
                 same.entry(name_key(rows[index].path.as_bytes(), names))
                     .or_default()
@@ -424,6 +449,7 @@ fn mark_name_clashes<T: Versioned>(
             }
         }
     }
+    drop(keys);
     for index in clashes {
         rows[index].decision =
             CandidateDecision::Entry(EntryDecision::Conflict(ConflictKind::NameClash));
@@ -757,35 +783,69 @@ fn pair_moves<T: Versioned>(
             .map(|version| version.version().content())
             .filter(|content| matches!(content, EntryContent::File(_) | EntryContent::Symlink(_)))
     };
-    let mut gone: HashMap<(Side, EntryContent), Vec<usize>> = HashMap::new();
-    let mut came: HashMap<(Side, EntryContent), Vec<usize>> = HashMap::new();
-    for (index, row) in rows.iter().enumerate() {
-        let CandidateDecision::Entry(decision) = &row.decision else {
-            continue;
-        };
-        match *decision {
-            EntryDecision::Archive { on } if takes(on) => {
-                if let Some(content) = movable(on, &row.path) {
-                    gone.entry((on, content)).or_default().push(index);
-                }
-            }
-            EntryDecision::Propagate {
-                from,
-                change: ChangeKind::Create,
-            } if takes(from.other()) => {
-                if let Some(content) = movable(from, &row.path) {
-                    came.entry((from.other(), content)).or_default().push(index);
-                }
-            }
+    #[derive(Clone, Copy, PartialEq)]
+    enum Role {
+        Archive,
+        Create,
+    }
+    let candidate = |row: &PlanRow| match row.decision {
+        CandidateDecision::Entry(EntryDecision::Archive { on }) => Some((on, Role::Archive, on)),
+        CandidateDecision::Entry(EntryDecision::Propagate {
+            from,
+            change: ChangeKind::Create,
+        }) => Some((from.other(), Role::Create, from)),
+        _ => None,
+    };
+    let mut archives = [0usize; 2];
+    let mut creates = [0usize; 2];
+    for row in rows.iter() {
+        match candidate(row) {
+            Some((on, Role::Archive, _)) if takes(on) => archives[on as usize] += 1,
+            Some((on, Role::Create, _)) if takes(on) => creates[on as usize] += 1,
             _ => {}
         }
     }
     let mut paired = BTreeMap::new();
-    for (&(on, content), sources) in &gone {
-        let Some(targets) = came.get(&(on, content)) else {
+    for on in [Side::Left, Side::Right] {
+        if archives[on as usize] == 0 || creates[on as usize] == 0 {
             continue;
+        }
+        // A move needs both roles. Index only the smaller role and consume
+        // its paths in order while scanning the other, preserving the old
+        // per-content zip without indexing every unmatched create/archive.
+        let indexed = if archives[on as usize] <= creates[on as usize] {
+            Role::Archive
+        } else {
+            Role::Create
         };
-        for (&from, &to) in sources.iter().zip(targets) {
+        let mut waiting: HashMap<EntryContent, VecDeque<usize>> = HashMap::new();
+        for (index, row) in rows.iter().enumerate() {
+            if let Some((target, role, source)) = candidate(row)
+                && target == on
+                && role == indexed
+                && let Some(content) = movable(source, &row.path)
+            {
+                waiting.entry(content).or_default().push_back(index);
+            }
+        }
+        if waiting.is_empty() {
+            continue;
+        }
+        let mut matches = Vec::new();
+        for (index, row) in rows.iter().enumerate() {
+            if let Some((target, role, source)) = candidate(row)
+                && target == on
+                && role != indexed
+                && let Some(content) = movable(source, &row.path)
+                && let Some(other) = waiting.get_mut(&content).and_then(VecDeque::pop_front)
+            {
+                matches.push(match indexed {
+                    Role::Archive => (other, index),
+                    Role::Create => (index, other),
+                });
+            }
+        }
+        for (from, to) in matches {
             rows[from].decision = CandidateDecision::Entry(EntryDecision::MovedAway { on });
             rows[to].decision = CandidateDecision::Entry(EntryDecision::Move { on });
             paired.insert(rows[to].path.clone(), rows[from].path.clone());
@@ -1810,6 +1870,87 @@ mod tests {
             rows.iter().all(|(_, decision)| *decision == CLASH),
             "{rows:?}"
         );
+    }
+
+    #[test]
+    fn move_pairing_preserves_path_order_when_either_role_is_smaller() {
+        for on in [Side::Left, Side::Right] {
+            for (archived, created) in [(2, 4), (4, 2), (3, 3)] {
+                let old: Vec<_> = (0..archived)
+                    .map(|i| path(format!("old-{i}").as_bytes()))
+                    .collect();
+                let new: Vec<_> = (0..created)
+                    .map(|i| path(format!("new-{i}").as_bytes()))
+                    .collect();
+                let target: BTreeMap<_, _> = old.iter().map(|p| (p.clone(), file(1))).collect();
+                let source: BTreeMap<_, _> = new.iter().map(|p| (p.clone(), file(1))).collect();
+                let mut rows: Vec<_> = old
+                    .iter()
+                    .map(|p| PlanRow {
+                        path: p.clone(),
+                        decision: CandidateDecision::Entry(EntryDecision::Archive { on }),
+                    })
+                    .chain(new.iter().map(|p| PlanRow {
+                        path: p.clone(),
+                        decision: CandidateDecision::Entry(EntryDecision::Propagate {
+                            from: on.other(),
+                            change: ChangeKind::Create,
+                        }),
+                    }))
+                    .collect();
+                rows.sort_by(|left, right| left.path.cmp(&right.path));
+                let trees = match on {
+                    Side::Left => [&target, &source],
+                    Side::Right => [&source, &target],
+                };
+                let paired = pair_moves(&mut rows, trees, [Moves::Rename; 2]);
+                let expected: BTreeMap<_, _> = new.into_iter().zip(old).collect();
+                assert_eq!(paired, expected);
+                assert_eq!(
+                    rows.iter()
+                        .filter(|row| matches!(
+                            row.decision,
+                            CandidateDecision::Entry(EntryDecision::Move { .. })
+                        ))
+                        .count(),
+                    archived.min(created)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn move_pairing_without_both_roles_does_not_index_versions() {
+        use std::cell::Cell;
+        struct Counted<'a>(&'a Cell<usize>);
+        impl Versioned for Counted<'_> {
+            fn version(&self) -> EntryVersion {
+                self.0.set(self.0.get() + 1);
+                file(1)
+            }
+        }
+        let reads = Cell::new(0);
+        let tree: BTreeMap<_, _> = (0..10_000)
+            .map(|index| (path(format!("file-{index:05}").as_bytes()), Counted(&reads)))
+            .collect();
+        for decision in [
+            EntryDecision::Archive { on: Side::Left },
+            EntryDecision::Propagate {
+                from: Side::Right,
+                change: ChangeKind::Create,
+            },
+        ] {
+            reads.set(0);
+            let mut rows: Vec<_> = tree
+                .keys()
+                .map(|path| PlanRow {
+                    path: path.clone(),
+                    decision: CandidateDecision::Entry(decision),
+                })
+                .collect();
+            assert!(pair_moves(&mut rows, [&tree, &tree], [Moves::Rename; 2]).is_empty());
+            assert_eq!(reads.get(), 0, "one role alone cannot form a move");
+        }
     }
 
     /// Review: a spelling deleted on a Mac and a new one created on a

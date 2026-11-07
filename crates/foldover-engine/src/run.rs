@@ -1008,9 +1008,6 @@ impl PairRun {
         }
     }
 
-    /// This run's observation of one side, for the next run to reuse,
-    /// filtered entries included: skipping them in the plan must not make
-    /// the next run reread unchanged data.
     /// Whether storing this effective observation would change the cache.
     pub fn snapshot_changed(&self, side: Side) -> bool {
         self.snapshot_changed[side as usize]
@@ -1031,6 +1028,8 @@ impl PairRun {
         })
     }
 
+    /// This run's observation of one side, filtered entries included, for the
+    /// next run to reuse. Persistence can use [`Self::snapshot_iter`] instead.
     pub fn snapshot(&self, side: Side) -> Vec<SnapshotEntry> {
         self.snapshot_iter(side).collect()
     }
