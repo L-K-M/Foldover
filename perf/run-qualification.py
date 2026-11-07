@@ -2,6 +2,7 @@
 """Run the isolated Rust harness and retain timings, memory, CPU and host metadata."""
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,13 +20,15 @@ def main():
     parser.add_argument("--iterations", default=3, type=int)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--label", required=True)
+    parser.add_argument("--revision", help="source revision of a saved comparison binary")
     args = parser.parse_args()
     args.output.mkdir(parents=True)  # Never overwrite a previous measurement.
     command = [str(args.runner.resolve()), args.state, args.left, args.right, str(args.iterations)]
     timer_flags = ["-l"] if platform.system() == "Darwin" else ["-v"]
     summary = dict(label=args.label, command=command, host=platform.platform(),
                    python=platform.python_version(), load_start=os.getloadavg(),
-                   revision=subprocess.check_output(["git", "describe", "--always", "--dirty"]).decode().strip(),
+                   revision=args.revision or subprocess.check_output(["git", "describe", "--always", "--dirty"]).decode().strip(),
+                   binary_sha256=hashlib.sha256(args.runner.read_bytes()).hexdigest(),
                    measurements=[], started_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
     process_id = None
     started = time.monotonic()

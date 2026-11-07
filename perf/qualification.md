@@ -4,14 +4,15 @@ Build the engine example in release mode, then generate a new fixture:
 
 ```sh
 cargo build --release --locked -p foldover-engine --example performance
-mkdir -p /private/tmp/foldover-perf-example
-python3 perf/make-corpus.py /private/tmp/foldover-perf-example/source --files 10000
-mkdir /private/tmp/foldover-perf-example/target
+FOLDOVER_PERF_ROOT="$PWD/build/foldover-perf-example"
+mkdir -p "$FOLDOVER_PERF_ROOT"
+python3 perf/make-corpus.py "$FOLDOVER_PERF_ROOT/source" --files 10000
+mkdir "$FOLDOVER_PERF_ROOT/target"
 python3 perf/run-qualification.py --runner target/release/examples/performance \
-  --state /private/tmp/foldover-perf-example/state \
-  --left /private/tmp/foldover-perf-example/source \
-  --right /private/tmp/foldover-perf-example/target \
-  --iterations 3 --label development --output /private/tmp/foldover-perf-example/results
+  --state "$FOLDOVER_PERF_ROOT/state" \
+  --left "$FOLDOVER_PERF_ROOT/source" \
+  --right "$FOLDOVER_PERF_ROOT/target" \
+  --iterations 3 --label development --output "$FOLDOVER_PERF_ROOT/results"
 ```
 
 Use an absolute `sftp://user@host/path` root for real LAN runs. Authentication
@@ -34,6 +35,8 @@ and JSON host/revision/load/phase samples with RSS and CPU readings. Sampling an
 reporting add overhead to total time. Kernel peak RSS covers transient peaks
 between samples. Phases can overlap only when the implementation supports it;
 do not add overlapping phase times to predict total duration.
+For saved binaries, pass `--revision` with their source commit rather than the
+current checkout's commit. The binary's SHA-256 is recorded independently.
 
 Use 10k files for development, 100k for comparisons and 1M for qualification.
 Vary `--bytes` (1/8/32 KiB and a separate large-file set) and `--width` for flat
