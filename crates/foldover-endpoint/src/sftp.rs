@@ -12,7 +12,6 @@
 //! - `Durability::Full` is refused, not downgraded: namespace changes
 //!   have no protocol flush.
 
-mod readers;
 mod sessions;
 mod spelling;
 mod transfer;
@@ -632,7 +631,7 @@ impl SftpEndpoint {
                 progress(ObserveStep::Checked);
             }
         } else {
-            readers::read_each(
+            crate::observation_reads::read_each(
                 reads,
                 workers,
                 |(path, attributes), asked| {

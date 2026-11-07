@@ -1,9 +1,9 @@
-//! Reads files on several sessions at once (PLAN.md §4.9). SFTP stat
-//! cannot prove a file unchanged, so an observation reads every file, and
-//! many small files would otherwise wait on the network one at a time.
-//! As while copies run (ADR 0043), the run's own thread is the only one
-//! that records and asks the run's control, so cancelling and lease beats
-//! never wait for a large file.
+//! Reads entries on several threads at once (PLAN.md §4.9). Neither an
+//! SFTP stat nor a local one can prove a file unchanged, so an observation
+//! reads every file, and many small files would otherwise wait one at a
+//! time. As while copies run (ADR 0043), the run's own thread is the only
+//! one that records and asks the run's control, so cancelling and lease
+//! beats never wait for a large file.
 //!
 //! ```text
 //!               files             results
@@ -45,7 +45,7 @@ impl Drop for StopOnPanic<'_> {
 /// with that error, after they wound down. A reader's panic is raised
 /// here once all of them have stopped. At most twice the worker count is
 /// produced but not yet recorded; iterator inputs can release completed rows.
-pub(super) fn read_each<I, T: Send, R: Send>(
+pub(crate) fn read_each<I, T: Send, R: Send>(
     items: I,
     workers: NonZeroUsize,
     read: impl Fn(&T, &dyn Fn() -> ScanControl) -> R + Sync,
@@ -71,7 +71,7 @@ where
 /// Bounded handoff for either an iterator or a metadata walk's callback.
 /// Only this thread records results and checks the caller's control.
 /// A failed or unwinding producer drops the sender and stops every reader.
-pub(super) struct Reads<'a, T, R> {
+pub(crate) struct Reads<'a, T, R> {
     jobs: Option<SyncSender<T>>,
     results: Receiver<(T, R)>,
     stop: &'a AtomicBool,
@@ -80,7 +80,7 @@ pub(super) struct Reads<'a, T, R> {
 }
 
 impl<'a, T, R> Reads<'a, T, R> {
-    pub(super) fn start<'scope>(
+    pub(crate) fn start<'scope>(
         threads: &'scope thread::Scope<'scope, '_>,
         workers: NonZeroUsize,
         stop: &'a AtomicBool,
@@ -109,7 +109,7 @@ impl<'a, T, R> Reads<'a, T, R> {
         }
     }
 
-    pub(super) fn submit(
+    pub(crate) fn submit(
         &mut self,
         item: T,
         landed: &mut impl FnMut(&T, R) -> Result<(), ScanError>,
@@ -140,7 +140,7 @@ impl<'a, T, R> Reads<'a, T, R> {
         Ok(())
     }
 
-    pub(super) fn finish(
+    pub(crate) fn finish(
         &mut self,
         landed: &mut impl FnMut(&T, R) -> Result<(), ScanError>,
         control: &mut impl FnMut() -> ScanControl,

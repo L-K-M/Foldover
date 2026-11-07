@@ -18,6 +18,9 @@ pub use peer_identity::{PeerIdentityError, load_peer_identity};
 mod pair;
 
 #[cfg(unix)]
+mod observation_reads;
+
+#[cfg(unix)]
 mod sftp;
 
 #[cfg(unix)]
