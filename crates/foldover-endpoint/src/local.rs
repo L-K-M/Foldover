@@ -13,7 +13,7 @@ use std::io;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1451,6 +1451,11 @@ impl LocalEndpoint {
                 }
                 ScanControl::Continue
             });
+            if failure.is_some() || scanned.is_err() {
+                // A producer failure is terminal even when a caller's
+                // cancellation callback returns Continue on its next call.
+                stop.store(true, Ordering::Relaxed);
+            }
             let finish = pending.finish(
                 &mut |(entry, observed_at), result| {
                     land_entry(
@@ -3255,6 +3260,71 @@ mod tests {
 
     /// A settled cache entry is recorded without a read job; a recent one
     /// still needs the worker's read.
+    #[test]
+    fn one_shot_producer_cancellation_stops_reads_already_in_progress() {
+        use std::sync::mpsc;
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a"), b"a").unwrap();
+        fs::write(directory.path().join("b"), b"b").unwrap();
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        let (started, wait_started) = mpsc::channel();
+        let (finished, wait_finished) = mpsc::channel();
+        let release = AtomicBool::new(false);
+        let stopped = AtomicBool::new(false);
+        let cancel_next = Cell::new(false);
+        let listed = Cell::new(0);
+        thread::scope(|threads| {
+            let watchdog_release = &release;
+            threads.spawn(move || {
+                // A broken implementation still exits so the regression
+                // fails rather than hanging the suite.
+                if wait_finished.recv_timeout(Duration::from_secs(5)).is_err() {
+                    watchdog_release.store(true, Ordering::Relaxed);
+                }
+            });
+            let read = |_: &(LocalEntry, SystemTime), asked: &dyn Fn() -> ScanControl| {
+                started.send(()).unwrap();
+                while !release.load(Ordering::Relaxed) {
+                    if asked() == ScanControl::Cancel {
+                        stopped.store(true, Ordering::Relaxed);
+                        finished.send(()).unwrap();
+                        return Err(ScanError::Cancelled);
+                    }
+                    thread::yield_now();
+                }
+                Err(ScanError::Cancelled)
+            };
+            let result = endpoint.observe_reporting_overlapped_with(
+                MetadataPolicy::default(),
+                &Filter::none(),
+                &BTreeMap::new(),
+                &mut || {
+                    if cancel_next.replace(false) {
+                        ScanControl::Cancel
+                    } else {
+                        ScanControl::Continue
+                    }
+                },
+                &mut |step| {
+                    if step == ObserveStep::Listed {
+                        listed.set(listed.get() + 1);
+                        if listed.get() == 2 {
+                            wait_started.recv_timeout(Duration::from_secs(5)).unwrap();
+                            cancel_next.set(true);
+                        }
+                    }
+                },
+                NonZeroUsize::new(2).unwrap(),
+                &read,
+            );
+            assert!(matches!(result, Err(ScanError::Cancelled)));
+        });
+        assert!(
+            stopped.load(Ordering::Relaxed),
+            "producer cancellation did not reach an active read"
+        );
+    }
+
     #[test]
     fn settled_previous_entries_need_no_read_job() {
         let directory = tempfile::tempdir().unwrap();
