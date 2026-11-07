@@ -71,6 +71,8 @@ const PARALLEL_READS: NonZeroUsize = NonZeroUsize::new(8).expect("eight is not z
 /// Data workers plus a reserve for the run's own thread; leases use a
 /// separate session. Refusing servers still clamp the existing pool.
 const SESSIONS: usize = PARALLEL_READS.get() + 1;
+/// Release listed file metadata in small pages as verified rows replace it.
+const OBSERVATION_PAGE: usize = 256;
 
 pub struct SftpEndpoint {
     sessions: Sessions,
@@ -489,9 +491,10 @@ impl SftpEndpoint {
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<Observation, ScanError> {
         let mut observation = Observation::default();
-        // Listing the whole tree first, as local roots do, makes checked
-        // over listed a fair measure of how far the comparison is.
-        let mut listed = Vec::new();
+        // Settle directory failures before reading files. File metadata is
+        // paged so consumed pages can drop as verified observations grow.
+        let mut directories = Vec::new();
+        let mut reads: Vec<Vec<(SyncPath, Attributes)>> = Vec::new();
         let mut pending: Vec<Option<SyncPath>> = vec![None];
         while let Some(directory) = pending.pop() {
             if control() == ScanControl::Cancel {
@@ -538,21 +541,27 @@ impl SftpEndpoint {
                 }
                 if kind == FileKind::Directory {
                     pending.push(Some(path.clone()));
+                    directories.push((path, attributes));
+                } else {
+                    if reads
+                        .last()
+                        .is_none_or(|page| page.len() == OBSERVATION_PAGE)
+                    {
+                        reads.push(Vec::with_capacity(OBSERVATION_PAGE));
+                    }
+                    reads
+                        .last_mut()
+                        .expect("a file page exists")
+                        .push((path, attributes));
                 }
                 progress(ObserveStep::Listed);
-                listed.push((path, attributes));
             }
         }
         // Folders read nothing, and one that fails rules out what is below
         // it, so they settle before any read starts. Unavailable roots arrive
         // as folders and reads fail, so the index grows with them.
         let mut unavailable = PathPrefixIndex::from_paths(&observation.unavailable);
-        let mut reads = Vec::new();
-        for (path, attributes) in listed {
-            if attributes.kind() != FileKind::Directory {
-                reads.push((path, attributes));
-                continue;
-            }
+        for (path, attributes) in directories {
             if control() == ScanControl::Cancel {
                 return Err(ScanError::Cancelled);
             }
@@ -562,15 +571,20 @@ impl SftpEndpoint {
             }
             progress(ObserveStep::Checked);
         }
-        reads.retain(|(path, _)| {
-            let skipped = unavailable.contains(path);
-            if skipped {
-                progress(ObserveStep::Checked);
-            }
-            !skipped
-        });
+        let mut read_count = 0;
+        for page in &mut reads {
+            page.retain(|(path, _)| {
+                let skipped = unavailable.contains(path);
+                if skipped {
+                    progress(ObserveStep::Checked);
+                }
+                !skipped
+            });
+            read_count += page.len();
+        }
         self.observe_reads(
-            &reads,
+            reads.into_iter().flatten(),
+            read_count,
             previous,
             policy,
             &mut observation,
@@ -589,7 +603,8 @@ impl SftpEndpoint {
     #[allow(clippy::too_many_arguments)] // Mirrors observe_reporting plus the index its skips settle.
     fn observe_reads(
         &self,
-        reads: &[(SyncPath, Attributes)],
+        reads: impl IntoIterator<Item = (SyncPath, Attributes)>,
+        read_count: usize,
         previous: &BTreeMap<SyncPath, ObservedEntry>,
         policy: MetadataPolicy,
         observation: &mut Observation,
@@ -601,13 +616,13 @@ impl SftpEndpoint {
             Some(_) => PARALLEL_READS,
             None => NonZeroUsize::MIN,
         };
-        if workers == NonZeroUsize::MIN || reads.len() < 2 {
+        if workers == NonZeroUsize::MIN || read_count < 2 {
             for (path, attributes) in reads {
                 if control() == ScanControl::Cancel {
                     return Err(ScanError::Cancelled);
                 }
-                let entry = self.observe_entry(path, attributes, previous, policy, control);
-                record(observation, unavailable, path, entry)?;
+                let entry = self.observe_entry(&path, &attributes, previous, policy, control);
+                record(observation, unavailable, &path, entry)?;
                 progress(ObserveStep::Checked);
             }
         } else {
