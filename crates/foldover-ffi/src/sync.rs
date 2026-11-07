@@ -1,11 +1,12 @@
 //! Sync jobs for Swift: start a preview or run, then poll its state.
 
 use foldover_client::{
-    PairSide, ReviewToken, SocketLocation, SyncAction, SyncConflict, SyncDeletions, SyncItemKind,
-    SyncItemPage, SyncJob, SyncPreview, SyncProgress, SyncResult, SyncStatus, UndoResult,
+    PairMode as ProtocolPairMode, PairSide, ReviewToken, SocketLocation, SyncAction, SyncConflict,
+    SyncDeletions, SyncItemKind, SyncItemPage, SyncJob, SyncPairContext, SyncPreview, SyncProgress,
+    SyncResult, SyncStatus, UndoResult,
 };
 
-use crate::{AgentError, invalid_configuration};
+use crate::{AgentError, PairMode, invalid_configuration};
 
 /// A review token is the hex fingerprint from a `SyncPreviewSummary`;
 /// presenting a malformed one fails before the agent is asked.
@@ -169,6 +170,42 @@ impl From<SyncProgress> for SyncWorkProgress {
     }
 }
 
+/// The compact pair presentation captured when a working job starts.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct RunningPairSnapshot {
+    pub revision: u64,
+    pub name: String,
+    pub left_root: Vec<u8>,
+    pub right_root: Vec<u8>,
+    pub mode: PairMode,
+}
+
+impl From<SyncPairContext> for RunningPairSnapshot {
+    fn from(pair: SyncPairContext) -> Self {
+        Self {
+            revision: pair.revision,
+            name: pair.name,
+            left_root: pair.left_root,
+            right_root: pair.right_root,
+            mode: match pair.mode {
+                ProtocolPairMode::Sync => PairMode::Sync,
+                ProtocolPairMode::Mirror {
+                    source: PairSide::Left,
+                } => PairMode::MirrorLeft,
+                ProtocolPairMode::Mirror {
+                    source: PairSide::Right,
+                } => PairMode::MirrorRight,
+                ProtocolPairMode::Backup {
+                    source: PairSide::Left,
+                } => PairMode::BackupLeft,
+                ProtocolPairMode::Backup {
+                    source: PairSide::Right,
+                } => PairMode::BackupRight,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Enum)]
 pub enum SyncJobState {
     Idle,
@@ -176,6 +213,7 @@ pub enum SyncJobState {
         job: SyncJobKind,
         cancelling: bool,
         progress: SyncWorkProgress,
+        pair: RunningPairSnapshot,
     },
     Previewed {
         preview: SyncPreviewSummary,
@@ -397,6 +435,7 @@ impl From<SyncStatus> for SyncJobState {
                 job,
                 cancelling,
                 progress,
+                pair,
             } => Self::Working {
                 job: match job {
                     SyncJob::Preview => SyncJobKind::Preview,
@@ -405,6 +444,7 @@ impl From<SyncStatus> for SyncJobState {
                 },
                 cancelling,
                 progress: progress.into(),
+                pair: pair.into(),
             },
             SyncStatus::Previewed { preview } => Self::Previewed {
                 preview: preview.into(),
@@ -565,18 +605,32 @@ mod tests {
 
     #[test]
     fn statuses_keep_every_count_path_byte_and_side() {
-        let SyncJobState::Working { progress, .. } = SyncStatus::Working {
+        let SyncJobState::Working { progress, pair, .. } = SyncStatus::Working {
             job: SyncJob::Run,
             cancelling: false,
             progress: SyncProgress {
                 rate: 17,
                 ..SyncProgress::default()
             },
+            pair: SyncPairContext {
+                revision: 9,
+                name: "Remote backup".into(),
+                left_root: b"/local/\xff".to_vec(),
+                right_root: b"sftp://nas/archive".to_vec(),
+                mode: ProtocolPairMode::Backup {
+                    source: PairSide::Right,
+                },
+            },
         }
         .into() else {
             panic!("unexpected state");
         };
         assert_eq!(progress.rate, 17);
+        assert_eq!(pair.revision, 9);
+        assert_eq!(pair.name, "Remote backup");
+        assert_eq!(pair.left_root, b"/local/\xff");
+        assert_eq!(pair.right_root, b"sftp://nas/archive");
+        assert_eq!(pair.mode, PairMode::BackupRight);
 
         let preview = SyncPreview {
             items: vec![
