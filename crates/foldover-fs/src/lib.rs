@@ -40,6 +40,6 @@ pub use root::{
     AccessControl, AttributeRole, CaptureRoles, Chunks, DataResidency, DirectoryEntry,
     DirectoryScope, Displaced, EntryMetadata, ExtendedAttribute, ExtendedMetadata, FileIdentity,
     ForeignMetadata, HashError, Medium, MetadataCapture, MetadataReadError, NativeMetadata,
-    NodeKind, PARTIAL_MIN_BYTES, PathScope, Placement, Resume, Root, RootRelation, Staged,
-    StagedFile, WriteError,
+    NodeKind, ObserveFileError, PARTIAL_MIN_BYTES, PathScope, Placement, Resume, Root,
+    RootRelation, Staged, StagedFile, WriteError,
 };

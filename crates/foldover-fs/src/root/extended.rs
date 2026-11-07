@@ -319,6 +319,31 @@ pub(super) fn capture_file(
     Ok(result)
 }
 
+/// Capture selected extended metadata through a descriptor the caller opened
+/// and already bound to `expected`, such as the one a fused observation holds.
+/// This keeps the same guards as `read_extended_metadata`: residency,
+/// cancellation, value/list limits, the name-list recheck, and the
+/// descriptor's identity before and after the read.
+pub(super) fn capture_observed_file(
+    file: &impl AsFd,
+    expected: &EntryMetadata,
+    capture: MetadataCapture,
+    control: &mut impl FnMut(u64) -> ScanControl,
+) -> Result<ExtendedMetadata, MetadataReadError> {
+    let mut progress = Progress { control, bytes: 0 };
+    progress.checkpoint()?;
+    validate_entry(expected)?;
+    if EntryMetadata::from_file(file)? != *expected {
+        return Err(MetadataReadError::Changed);
+    }
+    let result = capture_metadata(file, expected, capture, &mut progress)?;
+    progress.checkpoint()?;
+    if EntryMetadata::from_file(file)? != *expected {
+        return Err(MetadataReadError::Changed);
+    }
+    Ok(result)
+}
+
 fn validate_entry(expected: &EntryMetadata) -> Result<(), MetadataReadError> {
     if expected.data_residency() == DataResidency::Dataless {
         return Err(MetadataReadError::Dataless);
