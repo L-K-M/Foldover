@@ -29,8 +29,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use foldover_net::sftp::{Attributes, FileKind, Handle, Session, SshTarget};
 use foldover_types::{
-    Digest, Durability, EndpointId, EntryKind, EntryVersion, MetadataPolicy, ScanControl, SftpRoot,
-    SyncPath,
+    Digest, Durability, EndpointId, EntryKind, EntryVersion, MetadataPolicy, PathPrefixIndex,
+    ScanControl, SftpRoot, SyncPath,
 };
 
 use crate::lease::{LEASE_LIMIT, LockFile};
@@ -540,7 +540,9 @@ impl SftpEndpoint {
             }
         }
         // Folders read nothing, and one that fails rules out what is below
-        // it, so they settle before any read starts.
+        // it, so they settle before any read starts. Unavailable roots arrive
+        // as folders and reads fail, so the index grows with them.
+        let mut unavailable = PathPrefixIndex::from_paths(&observation.unavailable);
         let mut reads = Vec::new();
         for (path, attributes) in listed {
             if attributes.kind() != FileKind::Directory {
@@ -550,14 +552,14 @@ impl SftpEndpoint {
             if control() == ScanControl::Cancel {
                 return Err(ScanError::Cancelled);
             }
-            if !unavailable(&observation, &path) {
+            if !unavailable.contains(&path) {
                 let entry = self.observe_entry(&path, &attributes, previous, policy, control);
-                record(&mut observation, &path, entry)?;
+                record(&mut observation, &mut unavailable, &path, entry)?;
             }
             progress(ObserveStep::Checked);
         }
         reads.retain(|(path, _)| {
-            let skipped = unavailable(&observation, path);
+            let skipped = unavailable.contains(path);
             if skipped {
                 progress(ObserveStep::Checked);
             }
@@ -568,26 +570,26 @@ impl SftpEndpoint {
             previous,
             policy,
             &mut observation,
+            &mut unavailable,
             control,
             progress,
         )?;
-        let unavailable = &observation.unavailable;
-        observation.entries.retain(|path, _| {
-            !unavailable
-                .iter()
-                .any(|root| root == path || root.is_ancestor_of(path))
-        });
+        observation
+            .entries
+            .retain(|path, _| !unavailable.contains(path));
         Ok(observation)
     }
 
     /// Observe `reads`, on as many sessions as the server takes. One at a
     /// time on the calling thread when only one can run, in listed order.
+    #[allow(clippy::too_many_arguments)] // Mirrors observe_reporting plus the index its skips settle.
     fn observe_reads(
         &self,
         reads: &[(SyncPath, Attributes)],
         previous: &BTreeMap<SyncPath, ObservedEntry>,
         policy: MetadataPolicy,
         observation: &mut Observation,
+        unavailable: &mut PathPrefixIndex,
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<(), ScanError> {
@@ -598,7 +600,7 @@ impl SftpEndpoint {
                     return Err(ScanError::Cancelled);
                 }
                 let entry = self.observe_entry(path, attributes, previous, policy, control);
-                record(observation, path, entry)?;
+                record(observation, unavailable, path, entry)?;
                 progress(ObserveStep::Checked);
             }
         } else {
@@ -609,7 +611,7 @@ impl SftpEndpoint {
                     self.observe_entry(path, attributes, previous, policy, &mut || asked())
                 },
                 |(path, _), entry| {
-                    record(observation, path, entry)?;
+                    record(observation, unavailable, path, entry)?;
                     progress(ObserveStep::Checked);
                     Ok(())
                 },
@@ -1755,18 +1757,11 @@ fn temporary_name() -> Vec<u8> {
     .concat()
 }
 
-/// Available stat fields, useful as observations but not unchanged-data proof.
-/// Whether `path` is, or lies below, what the observation could not read.
-fn unavailable(observation: &Observation, path: &SyncPath) -> bool {
-    observation
-        .unavailable
-        .iter()
-        .any(|root| root == path || root.is_ancestor_of(path))
-}
-
 /// Keep what observing `path` found, or skip it when its error allows.
+/// A skip also enters `unavailable`, so later paths below it are not read.
 fn record(
     observation: &mut Observation,
+    unavailable: &mut PathPrefixIndex,
     path: &SyncPath,
     entry: Result<ObservedEntry, ScanError>,
 ) -> Result<(), ScanError> {
@@ -1775,7 +1770,12 @@ fn record(
             observation.entries.insert(path.clone(), entry);
             Ok(())
         }
-        Err(error) => observation.skip_error(error),
+        Err(error) => {
+            let issue = error.into_issue()?;
+            unavailable.insert(&issue.path);
+            observation.skip_issue(issue);
+            Ok(())
+        }
     }
 }
 

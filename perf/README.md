@@ -16,6 +16,8 @@ ids are the bench function names; estimates land in
 | `scan_10k_files` | `foldover-endpoint` | `LocalEndpoint::observe` over 10_000 small files in nested directories |
 | `hash_64_mib` | `foldover-fs` | `Root::hash_file`, the bounded BLAKE3 read behind `LocalEndpoint::hash_file`, over a 64 MiB file |
 | `plan_100k_entries` | `foldover-engine` | `plan_candidates` over two 100_000-entry sides with a synthetic base mixing unchanged, copied, conflicting, new and deleted files |
+| `plan_skipped_100k_entries` | `foldover-engine` | `plan_resolved` over the same 100_000-row pair with all 1_000 top-level folders skipped, the focused prefix-index workload |
+| `prefix_index_100k_entries_1000_prefixes` | `foldover-engine` | `PathPrefixIndex` ancestor lookups: 100_000 paths against 1_000 roots, the shared helper behind unavailable roots, failed writes and skipped branches |
 | `archive_pages_5k` | `foldover-endpoint` | `LocalEndpoint::archived_items` listing 5,000 items in 50 folders, 100 per page |
 | `db_commit_100k` | `foldover-state` | `PairStore::update_base` committing 100_000 base entries |
 | `db_commit_batches_100k` | `foldover-state` | `PairStore::update_base` committing one run's 100_000 base entries and journal entries in the engine's 256-row batches |
