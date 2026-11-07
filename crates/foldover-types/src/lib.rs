@@ -8,6 +8,7 @@ mod metadata_policy;
 mod names;
 mod options;
 mod pair;
+mod path_map;
 mod prefix_index;
 mod reconcile;
 mod review;
@@ -30,6 +31,7 @@ pub use options::{
     PairOptions, RemovalProtection, ReviewPolicy, Schedule, ScheduleInterval, TimeOfDay, Weekday,
     Weekdays,
 };
+pub use path_map::{InvalidSortedPathMap, PathMap, PathMapBuilder, PathMapIter};
 pub use review::{InvalidReviewToken, ReviewToken};
 pub use root::{PairRoot, PeerRoot, SftpRoot};
 pub use share::{InvalidShareId, ShareId};

@@ -50,6 +50,18 @@ impl SyncPath {
     }
 }
 
+/// Borrow the exact path bytes so maps can look entries up by `&[u8]`.
+///
+/// `SyncPath`'s `Eq`, `Ord` and `Hash` are derived on the backing
+/// `Arc<[u8]>`, which delegates to the slice's implementations, so a
+/// borrowed slice observes the same equality, order and hash as the path
+/// itself. The contract holds for non-UTF8 names too.
+impl std::borrow::Borrow<[u8]> for SyncPath {
+    fn borrow(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
 impl TryFrom<Vec<u8>> for SyncPath {
     type Error = InvalidSyncPath;
 
@@ -117,6 +129,7 @@ fn validate(bytes: &[u8]) -> Result<(), InvalidSyncPath> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::borrow::Borrow;
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     use std::mem::size_of;
@@ -241,6 +254,39 @@ mod tests {
         left.hash(&mut left_hasher);
         right.hash(&mut right_hasher);
         assert_eq!(left_hasher.finish(), right_hasher.finish());
+    }
+
+    #[test]
+    fn borrowed_bytes_follow_the_eq_ord_and_hash_contract() {
+        let left = path(b"one/\xff/two");
+        let right = path(b"one/\xff/two");
+        let bytes: &[u8] = left.borrow();
+        assert_eq!(bytes, right.as_bytes());
+        assert_eq!(left.cmp(&right), bytes.cmp(right.as_bytes()));
+        let a = path(b"a");
+        let b = path(b"b");
+        let a_bytes: &[u8] = a.borrow();
+        let b_bytes: &[u8] = b.borrow();
+        assert_ne!(a_bytes, b_bytes);
+
+        let mut path_hasher = DefaultHasher::new();
+        let mut byte_hasher = DefaultHasher::new();
+        left.hash(&mut path_hasher);
+        bytes.hash(&mut byte_hasher);
+        assert_eq!(path_hasher.finish(), byte_hasher.finish());
+    }
+
+    #[test]
+    fn maps_find_paths_by_borrowed_bytes() {
+        let mut hashed = std::collections::HashMap::new();
+        hashed.insert(path(b"a/\xff"), 7);
+        assert_eq!(hashed.get::<[u8]>(b"a/\xff".as_slice()), Some(&7));
+        assert_eq!(hashed.get::<[u8]>(b"a/"), None);
+        assert_eq!(hashed.get::<[u8]>(b"a/\xfe"), None);
+
+        let mut ordered = std::collections::BTreeMap::new();
+        ordered.insert(path(b"a/\xff"), 7);
+        assert_eq!(ordered.get::<[u8]>(b"a/\xff".as_slice()), Some(&7));
     }
 
     #[test]
