@@ -2,8 +2,8 @@
 //!
 //! A measured synthetic 1M-path run decoded a baseline plus two snapshots
 //! into 840 MB before any scan, even though the first copy pass used
-//! 472 MB. Keeping two `EntryVersion` values per baseline row duplicates
-//! 72 bytes per side that the baseline already stores once. This module
+//! 472 MB. Keeping a separate `EntryVersion` in each snapshot duplicates
+//! 65 bytes per side already represented by the shared baseline. This module
 //! keeps one immutable baseline row per path and lets each observed
 //! path-side resolve either that row or an appended owned version.
 //!
@@ -207,7 +207,7 @@ impl VersionHandle {
             0 => VersionLocation::Owned,
             1 => VersionLocation::BaseLeft,
             2 => VersionLocation::BaseRight,
-            _ => unreachable!("two location bits hold 0..=3"),
+            _ => unreachable!("version slots are constructed with a defined location"),
         }
     }
 
