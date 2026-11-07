@@ -261,6 +261,87 @@ fn fixture(options: Options, script: impl FnOnce(Fake) + Send + 'static) -> Sess
     Session::over(file(input), file(client), errors, options, None).unwrap()
 }
 
+#[test]
+fn read_finish_sends_close_and_stat_before_waiting_and_routes_reversed_replies() {
+    let mut session = fixture(snappy(), |mut server| {
+        server.handshake();
+        let Some((close, close_id, _)) = server.request() else {
+            return;
+        };
+        assert_eq!(close, wire::CLOSE);
+        // Waiting for CLOSE here would time out: both requests must be in flight.
+        let Some((stat, stat_id, fields)) = server.request() else {
+            return;
+        };
+        assert_eq!(stat, wire::LSTAT);
+        assert_eq!(Reader::new(&fields).bytes().unwrap(), b"file");
+        server.attrs(stat_id);
+        server.status(close_id, wire::STATUS_OK);
+        server.serve(|server, kind, id, _| {
+            assert_eq!(kind, wire::LSTAT);
+            server.attrs(id);
+        });
+    });
+    session
+        .close_read_and_lstat(Handle(b"read".to_vec()), b"file")
+        .unwrap();
+    session.lstat(b"next").unwrap();
+    assert!(session.alive());
+}
+
+#[test]
+fn read_finish_drains_close_refusals_and_stat_errors_before_reuse() {
+    let mut session = fixture(quick(), |mut server| {
+        server.handshake();
+        let (_, close_id, _) = server.request().unwrap();
+        let (_, stat_id, _) = server.request().unwrap();
+        server.status(stat_id, wire::STATUS_NO_SUCH_FILE);
+        server.status(close_id, wire::STATUS_PERMISSION_DENIED);
+        server.serve(|server, _, id, _| server.attrs(id));
+    });
+    let error = session
+        .close_read_and_lstat(Handle(b"read".to_vec()), b"gone")
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    session.lstat(b"next").unwrap();
+
+    let mut session = fixture(quick(), |mut server| {
+        server.handshake();
+        let (_, close_id, _) = server.request().unwrap();
+        let (_, stat_id, _) = server.request().unwrap();
+        server.status(close_id, wire::STATUS_PERMISSION_DENIED);
+        server.attrs(stat_id);
+        server.serve(|server, _, id, _| server.attrs(id));
+    });
+    session
+        .close_read_and_lstat(Handle(b"read".to_vec()), b"file")
+        .unwrap();
+    session.lstat(b"next").unwrap();
+}
+
+#[test]
+fn read_finish_discards_a_session_with_an_unanswered_close() {
+    let mut session = fixture(snappy(), |mut server| {
+        server.handshake();
+        if server.request().is_none() {
+            return;
+        }
+        let Some((_, stat_id, _)) = server.request() else {
+            return;
+        };
+        server.attrs(stat_id);
+        // Keep the connection open without answering CLOSE until the client drops it.
+        while server.request().is_some() {}
+    });
+    assert!(
+        session
+            .close_read_and_lstat(Handle(b"read".to_vec()), b"file")
+            .is_err()
+    );
+    assert!(!session.alive());
+    assert!(session.lstat(b"next").is_err());
+}
+
 #[derive(Default)]
 struct ReadTrace {
     requests: Vec<(u64, usize)>,

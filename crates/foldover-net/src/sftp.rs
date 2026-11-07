@@ -650,6 +650,29 @@ impl Session {
         status(&body)
     }
 
+    /// Finish a read-only handle and obtain the path's post-read attributes.
+    /// A server's CLOSE status is best effort for reads; writes must use
+    /// `close` and check its result. Transport failures still fail this call.
+    pub fn close_read_and_lstat(&mut self, handle: Handle, path: &[u8]) -> io::Result<Attributes> {
+        let close_id = self.id();
+        self.send_for(
+            close_id,
+            Writer::new(wire::CLOSE, close_id).bytes(&handle.0).finish(),
+        )?;
+        let stat_id = self.id();
+        self.send_for(
+            stat_id,
+            Writer::new(wire::LSTAT, stat_id).bytes(path).finish(),
+        )?;
+        // Both requests follow the completed read. Their replies may arrive
+        // in either order; collect both before parsing so a server refusal
+        // cannot leave a reply owed on a reusable session.
+        let closed = self.receive_for(close_id)?;
+        let attributes = self.receive_for(stat_id)?;
+        let _ = status(&closed);
+        expect(&attributes, wire::ATTRS)?.attributes()
+    }
+
     pub fn make_directory(&mut self, path: &[u8], permissions: u32) -> io::Result<()> {
         let attributes = Attributes {
             permissions: Some(permissions),

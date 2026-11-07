@@ -792,7 +792,16 @@ impl SftpEndpoint {
             Some(size) => session.read_from_bounded(&handle, from, size - from, &mut consume),
             None => session.read_from(&handle, from, &mut consume),
         };
-        let _ = session.close(handle);
+        let complete = read.is_ok()
+            && !cancelled
+            && !overrun
+            && expected.size.is_none_or(|size| taken == size);
+        let after = if complete {
+            Some(session.close_read_and_lstat(handle, &remote))
+        } else {
+            let _ = session.close(handle);
+            None
+        };
         if cancelled {
             return Err(ScanError::Cancelled);
         }
@@ -804,8 +813,8 @@ impl SftpEndpoint {
         if expected.size.is_some_and(|size| taken != size) {
             return Err(ScanError::Changed(Some(path.clone())));
         }
-        let after = session
-            .lstat(&remote)
+        let after = after
+            .expect("a complete read closes and re-stats its source")
             .map_err(|source| at(Some(path), source))?;
         if stat_key(&after) != stat_key(expected) {
             return Err(ScanError::Changed(Some(path.clone())));
