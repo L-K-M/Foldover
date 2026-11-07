@@ -47,6 +47,9 @@ const EXCLUDED_BY_BACKUPD: &[u8] = b"bplist00_\x10\x11com.apple.backupd\x08\0\0\
 /// until it runs its program, which a busy machine can stretch.
 const WRITER_WAIT: Duration = Duration::from_millis(500);
 const WRITER_RETRY: Duration = Duration::from_millis(20);
+/// Whether the pair has any conflict choices to spend. One seek per
+/// transaction, so an empty resolution table costs nothing per row.
+const HAS_RESOLUTIONS: &str = "SELECT EXISTS(SELECT 1 FROM resolution WHERE pair_id=?1)";
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary, schedule_time, schedule_days, records, bandwidth_limit, review_policy, removal_protection";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
@@ -1011,9 +1014,14 @@ impl Database {
             )?;
             let mut remove =
                 transaction.prepare("DELETE FROM base_entry WHERE pair_id=?1 AND path=?2")?;
-            // A synced path's conflict choice is spent.
-            let mut resolved =
-                transaction.prepare("DELETE FROM resolution WHERE pair_id=?1 AND path=?2")?;
+            // A synced path's conflict choice is spent. The table is
+            // empty for nearly every pair, so one check per transaction
+            // saves an indexed delete per base row against nothing.
+            let has_resolutions: bool =
+                transaction.query_row(HAS_RESOLUTIONS, [pair], |row| row.get(0))?;
+            let mut resolved = has_resolutions
+                .then(|| transaction.prepare("DELETE FROM resolution WHERE pair_id=?1 AND path=?2"))
+                .transpose()?;
             for change in changes {
                 match *change {
                     BaseChange::Put {
@@ -1022,11 +1030,15 @@ impl Database {
                         right_version,
                     } => {
                         put.execute(params![pair, path, left_version, right_version])?;
-                        resolved.execute(params![pair, path])?;
+                        if let Some(resolved) = resolved.as_mut() {
+                            resolved.execute(params![pair, path])?;
+                        }
                     }
                     BaseChange::Remove { path } => {
                         remove.execute(params![pair, path])?;
-                        resolved.execute(params![pair, path])?;
+                        if let Some(resolved) = resolved.as_mut() {
+                            resolved.execute(params![pair, path])?;
+                        }
                     }
                 }
             }
@@ -2186,6 +2198,82 @@ pub(super) mod tests {
         moved.left_root = b"/moved".to_vec();
         database.update_pair(&pair.id, 1, &moved).unwrap();
         assert!(database.resolutions(&pair.id).unwrap().is_empty());
+    }
+
+    /// The empty-resolution fast path must not skip real spending: a
+    /// changed path's choice is deleted, other paths' and other pairs'
+    /// choices survive, and once the table is empty later changes still
+    /// work.
+    #[test]
+    fn resolutions_are_spent_only_for_the_changed_paths_of_their_pair() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        let other = database.create_pair(&values()).unwrap();
+        let row = |path: &[u8]| ResolutionRow {
+            path: path.to_vec(),
+            keep: "left".into(),
+            left_version: Some(b"l".to_vec()),
+            right_version: None,
+        };
+        database.record_resolution(&pair.id, 1, &row(b"a")).unwrap();
+        database.record_resolution(&pair.id, 1, &row(b"b")).unwrap();
+        database
+            .record_resolution(&other.id, 1, &row(b"c"))
+            .unwrap();
+
+        database
+            .change_base(&pair.id, 1, &[put(b"a", b"1")], JournalChange::None)
+            .unwrap();
+        assert_eq!(database.resolutions(&pair.id).unwrap(), [row(b"b")]);
+        assert_eq!(database.resolutions(&other.id).unwrap(), [row(b"c")]);
+
+        database
+            .change_base(
+                &pair.id,
+                1,
+                &[BaseChange::Remove { path: b"b" }],
+                JournalChange::None,
+            )
+            .unwrap();
+        assert!(database.resolutions(&pair.id).unwrap().is_empty());
+
+        // The fast path: no resolutions left, so the per-row deletes are
+        // skipped, and a change that would have spent one still works.
+        database
+            .change_base(&pair.id, 1, &[put(b"d", b"2")], JournalChange::None)
+            .unwrap();
+        let paths: Vec<_> = database
+            .base_rows(&pair.id)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.path)
+            .collect();
+        assert_eq!(paths, [b"a".to_vec(), b"d".to_vec()]);
+        assert!(database.resolutions(&pair.id).unwrap().is_empty());
+        assert_eq!(database.resolutions(&other.id).unwrap(), [row(b"c")]);
+    }
+
+    /// The fast path's check seeks the resolution primary key once per
+    /// transaction rather than scanning the table.
+    #[test]
+    fn the_resolution_fast_path_check_seeks_the_primary_key() {
+        let (_directory, location) = location();
+        let database = Database::open(&location).unwrap();
+        let mut statement = database
+            .connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {HAS_RESOLUTIONS}"))
+            .unwrap();
+        let plan = statement
+            .query_map([b"pair".as_slice()], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("; ");
+        assert!(
+            plan.contains("SEARCH resolution USING PRIMARY KEY (pair_id=?)"),
+            "{HAS_RESOLUTIONS} planned as {plan}"
+        );
     }
 
     #[test]
