@@ -47,6 +47,16 @@ pub enum JournalChange<'a> {
     },
 }
 
+/// The statements that drop every other run's entries when a run's
+/// first recorded batch arrives. Each is a range over the PRIMARY KEY
+/// (pair_id, run, seq), so both seek instead of scanning every journal
+/// row of the pair: the old single `run != ?` delete could not seek on
+/// `run` and made every batch of a run quadratic in the run's size.
+const REPLACE_OTHER_RUNS: [&str; 2] = [
+    "DELETE FROM run_journal WHERE pair_id=?1 AND run<?2",
+    "DELETE FROM run_journal WHERE pair_id=?1 AND run>?2",
+];
+
 pub(super) fn apply(
     transaction: &Transaction<'_>,
     pair: &[u8],
@@ -80,10 +90,9 @@ pub(super) fn apply(
             if rows.is_empty() {
                 return Ok(());
             }
-            transaction.execute(
-                "DELETE FROM run_journal WHERE pair_id=?1 AND run!=?2",
-                params![pair, run],
-            )?;
+            for sql in REPLACE_OTHER_RUNS {
+                transaction.execute(sql, params![pair, run])?;
+            }
             let mut insert = transaction.prepare(
                 "INSERT INTO run_journal (pair_id,run,seq,path,side,action,version,base_left,base_right,source)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
@@ -155,6 +164,183 @@ mod tests {
             base: (action != "create").then(|| (vec![1], vec![2])),
             source: (action == "move").then(|| b"from".to_vec()),
         }
+    }
+
+    /// The plan SQLite chooses for `sql`, as the semicolon-joined
+    /// details of `EXPLAIN QUERY PLAN`.
+    fn plan<P: rusqlite::Params>(database: &Database, sql: &str, params: P) -> String {
+        let mut statement = database
+            .connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        statement
+            .query_map(params, |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("; ")
+    }
+
+    /// The regression guard for the per-batch journal cleanup: the old
+    /// single `DELETE ... run!=?` could not seek on `run`, so every batch
+    /// of a run scanned all of the pair's journal rows and the run's
+    /// commit cost grew quadratically. The replacement deletes are ranges
+    /// over the PRIMARY KEY (pair_id, run, seq), one seek per side.
+    #[test]
+    fn journal_replacement_deletes_seek_the_primary_key() {
+        let (_directory, location) = location();
+        let database = Database::open(&location).unwrap();
+        assert_eq!(
+            plan(
+                &database,
+                "DELETE FROM run_journal WHERE pair_id=?1 AND run!=?2",
+                params![b"pair".as_slice(), "run"]
+            ),
+            "SEARCH run_journal USING PRIMARY KEY (pair_id=?)"
+        );
+        assert_eq!(
+            plan(
+                &database,
+                REPLACE_OTHER_RUNS[0],
+                params![b"pair".as_slice(), "run"]
+            ),
+            "SEARCH run_journal USING PRIMARY KEY (pair_id=? AND run<?)"
+        );
+        assert_eq!(
+            plan(
+                &database,
+                REPLACE_OTHER_RUNS[1],
+                params![b"pair".as_slice(), "run"]
+            ),
+            "SEARCH run_journal USING PRIMARY KEY (pair_id=? AND run>?)"
+        );
+    }
+
+    /// A run's batches accumulate; an empty batch changes nothing; a new
+    /// run replaces the previous run's entries whether its id sorts older
+    /// or newer; another pair's journal is never touched.
+    #[test]
+    fn batches_of_a_run_accumulate_and_a_new_run_replaces_only_its_own() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        let other = database.create_pair(&values()).unwrap();
+        let record = |database: &mut Database, pair: &[u8], run: &str, rows: &[JournalRow]| {
+            database.change_base(pair, 1, &[], JournalChange::Record { run, rows })
+        };
+        let first = [row(0, b"a", "create"), row(1, b"b", "create")];
+        let second = [row(2, b"c", "replace")];
+        record(&mut database, &pair.id, "2026-10-20T10-00-00.000Z", &first).unwrap();
+        record(&mut database, &pair.id, "2026-10-20T10-00-00.000Z", &second).unwrap();
+        assert_eq!(
+            database.journal(&pair.id).unwrap().unwrap(),
+            (
+                "2026-10-20T10-00-00.000Z".into(),
+                [first[0].clone(), first[1].clone(), second[0].clone()].to_vec()
+            )
+        );
+
+        // An empty batch, even under a new run id, keeps the journal.
+        record(&mut database, &pair.id, "2026-10-20T11-00-00.000Z", &[]).unwrap();
+        assert_eq!(database.journal(&pair.id).unwrap().unwrap().1.len(), 3);
+
+        // Another pair's journal is untouched by either run.
+        let other_rows = [row(0, b"x", "create")];
+        record(
+            &mut database,
+            &other.id,
+            "2026-10-20T09-00-00.000Z",
+            &other_rows,
+        )
+        .unwrap();
+        assert_eq!(
+            database.journal(&other.id).unwrap().unwrap(),
+            ("2026-10-20T09-00-00.000Z".into(), other_rows.to_vec())
+        );
+        assert_eq!(database.journal(&pair.id).unwrap().unwrap().1.len(), 3);
+
+        // A new run replaces the previous run's entries, and a run whose
+        // id sorts before the current one removes the newer run's too.
+        let newer = [row(0, b"d", "metadata")];
+        record(&mut database, &pair.id, "2026-10-20T12-00-00.000Z", &newer).unwrap();
+        assert_eq!(
+            database.journal(&pair.id).unwrap().unwrap(),
+            ("2026-10-20T12-00-00.000Z".into(), newer.to_vec())
+        );
+        let older = [row(0, b"e", "archive")];
+        record(&mut database, &pair.id, "2026-10-20T09-00-00.000Z", &older).unwrap();
+        assert_eq!(
+            database.journal(&pair.id).unwrap().unwrap(),
+            ("2026-10-20T09-00-00.000Z".into(), older.to_vec())
+        );
+        assert_eq!(
+            database.journal(&other.id).unwrap().unwrap(),
+            ("2026-10-20T09-00-00.000Z".into(), other_rows.to_vec())
+        );
+    }
+
+    /// A batch that fails rolls back with its base changes: the journal
+    /// keeps the entries the run already committed.
+    #[test]
+    fn a_failed_batch_rolls_back_its_base_and_journal() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        let run = "2026-10-20T10-00-00.000Z";
+        let first = [row(0, b"a", "create")];
+        database
+            .change_base(
+                &pair.id,
+                1,
+                &[],
+                JournalChange::Record { run, rows: &first },
+            )
+            .unwrap();
+
+        // A move without its source breaks the schema, so the base change
+        // in the same transaction is rolled back with the journal insert.
+        let mut invalid = row(1, b"m", "move");
+        invalid.source = None;
+        assert!(
+            database
+                .change_base(
+                    &pair.id,
+                    1,
+                    &[BaseChange::Put {
+                        path: b"m",
+                        left_version: b"1",
+                        right_version: b"1",
+                    }],
+                    JournalChange::Record {
+                        run,
+                        rows: std::slice::from_ref(&invalid),
+                    },
+                )
+                .is_err()
+        );
+        assert!(database.base_rows(&pair.id).unwrap().is_empty());
+        assert_eq!(database.journal(&pair.id).unwrap().unwrap().1, first);
+
+        // An invalid base row runs first and leaves the journal alone.
+        assert!(
+            database
+                .change_base(
+                    &pair.id,
+                    1,
+                    &[BaseChange::Put {
+                        path: b"/absolute",
+                        left_version: b"1",
+                        right_version: b"1",
+                    }],
+                    JournalChange::Record {
+                        run,
+                        rows: std::slice::from_ref(&row(2, b"n", "create")),
+                    },
+                )
+                .is_err()
+        );
+        assert!(database.base_rows(&pair.id).unwrap().is_empty());
+        assert_eq!(database.journal(&pair.id).unwrap().unwrap().1, first);
     }
 
     #[test]
