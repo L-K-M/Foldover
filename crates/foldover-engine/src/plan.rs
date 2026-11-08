@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::{Arc, LazyLock};
 
 use foldover_endpoint::{Observation, ObservedEntry};
 use unicode_normalization::{UnicodeNormalization, is_nfc};
@@ -171,16 +172,162 @@ pub enum CandidateDecision {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlanRow {
     path: SyncPath,
-    decision: CandidateDecision,
+    /// One canonical `Arc` per distinct decision: the finite `EntryDecision`
+    /// set shares immutable singletons, and blocked rows share the Arc of
+    /// their outermost blocking ancestor within the plan.
+    decision: Arc<CandidateDecision>,
 }
 
 impl PlanRow {
+    /// Construct a row with a canonical decision reference. Entry decisions
+    /// share the immutable singleton table; a dynamic blocked path gets a
+    /// fresh `Arc` here, and plan-local sharing is applied separately.
+    fn new(path: SyncPath, decision: CandidateDecision) -> Self {
+        Self {
+            path,
+            decision: canonical_decision(decision),
+        }
+    }
+
+    /// Replace the decision with a canonical reference.
+    fn set_decision(&mut self, decision: CandidateDecision) {
+        self.decision = canonical_decision(decision);
+    }
+
+    /// Replace the decision with an already-canonical shared reference.
+    fn set_shared_decision(&mut self, decision: Arc<CandidateDecision>) {
+        self.decision = decision;
+    }
+
     pub fn path(&self) -> &SyncPath {
         &self.path
     }
 
     pub fn decision(&self) -> &CandidateDecision {
-        &self.decision
+        self.decision.as_ref()
+    }
+}
+
+/// The 21 finite `EntryDecision` values, each with one immutable `Arc` that
+/// every row carrying it shares. `EntryDecision` is `Copy` and has no heap
+/// payload, so an exhaustive match selects the singleton without a lookup
+/// key or a growing cache.
+static ENTRY_DECISIONS: LazyLock<[Arc<CandidateDecision>; 21]> = LazyLock::new(|| {
+    use ChangeKind::{Create, ReplaceContent, UpdateMetadata};
+    use ConflictKind::{BothChanged, DeletedVersusEdited, MetadataOnly, NameClash, TypeMismatch};
+    use EntryDecision::{
+        Archive, Conflict, ForgetBase, KeepTarget, Move as MoveDecision, MovedAway, Propagate,
+        RecordBase, Unchanged,
+    };
+    use Side::{Left, Right};
+    [
+        Arc::new(CandidateDecision::Entry(Unchanged)),
+        Arc::new(CandidateDecision::Entry(RecordBase)),
+        Arc::new(CandidateDecision::Entry(ForgetBase)),
+        Arc::new(CandidateDecision::Entry(KeepTarget)),
+        Arc::new(CandidateDecision::Entry(Propagate {
+            from: Left,
+            change: Create,
+        })),
+        Arc::new(CandidateDecision::Entry(Propagate {
+            from: Left,
+            change: ReplaceContent,
+        })),
+        Arc::new(CandidateDecision::Entry(Propagate {
+            from: Left,
+            change: UpdateMetadata,
+        })),
+        Arc::new(CandidateDecision::Entry(Propagate {
+            from: Right,
+            change: Create,
+        })),
+        Arc::new(CandidateDecision::Entry(Propagate {
+            from: Right,
+            change: ReplaceContent,
+        })),
+        Arc::new(CandidateDecision::Entry(Propagate {
+            from: Right,
+            change: UpdateMetadata,
+        })),
+        Arc::new(CandidateDecision::Entry(Archive { on: Left })),
+        Arc::new(CandidateDecision::Entry(Archive { on: Right })),
+        Arc::new(CandidateDecision::Entry(MoveDecision { on: Left })),
+        Arc::new(CandidateDecision::Entry(MoveDecision { on: Right })),
+        Arc::new(CandidateDecision::Entry(MovedAway { on: Left })),
+        Arc::new(CandidateDecision::Entry(MovedAway { on: Right })),
+        Arc::new(CandidateDecision::Entry(Conflict(BothChanged))),
+        Arc::new(CandidateDecision::Entry(Conflict(DeletedVersusEdited))),
+        Arc::new(CandidateDecision::Entry(Conflict(TypeMismatch))),
+        Arc::new(CandidateDecision::Entry(Conflict(MetadataOnly))),
+        Arc::new(CandidateDecision::Entry(Conflict(NameClash))),
+    ]
+});
+
+/// The singleton index for one of the finite `EntryDecision` values.
+fn entry_decision_index(decision: EntryDecision) -> usize {
+    use ChangeKind::{Create, ReplaceContent, UpdateMetadata};
+    use ConflictKind::{BothChanged, DeletedVersusEdited, MetadataOnly, NameClash, TypeMismatch};
+    use EntryDecision::{
+        Archive, Conflict, ForgetBase, KeepTarget, Move as MoveDecision, MovedAway, Propagate,
+        RecordBase, Unchanged,
+    };
+    use Side::{Left, Right};
+    match decision {
+        Unchanged => 0,
+        RecordBase => 1,
+        ForgetBase => 2,
+        KeepTarget => 3,
+        Propagate {
+            from: Left,
+            change: Create,
+        } => 4,
+        Propagate {
+            from: Left,
+            change: ReplaceContent,
+        } => 5,
+        Propagate {
+            from: Left,
+            change: UpdateMetadata,
+        } => 6,
+        Propagate {
+            from: Right,
+            change: Create,
+        } => 7,
+        Propagate {
+            from: Right,
+            change: ReplaceContent,
+        } => 8,
+        Propagate {
+            from: Right,
+            change: UpdateMetadata,
+        } => 9,
+        Archive { on: Left } => 10,
+        Archive { on: Right } => 11,
+        MoveDecision { on: Left } => 12,
+        MoveDecision { on: Right } => 13,
+        MovedAway { on: Left } => 14,
+        MovedAway { on: Right } => 15,
+        Conflict(BothChanged) => 16,
+        Conflict(DeletedVersusEdited) => 17,
+        Conflict(TypeMismatch) => 18,
+        Conflict(MetadataOnly) => 19,
+        Conflict(NameClash) => 20,
+    }
+}
+
+/// The one immutable `Arc` shared by every row carrying `decision`.
+fn entry_decision(decision: EntryDecision) -> Arc<CandidateDecision> {
+    ENTRY_DECISIONS[entry_decision_index(decision)].clone()
+}
+
+/// The canonical `Arc` for a decision: the immutable singleton for a finite
+/// `EntryDecision`, or a fresh `Arc` for a dynamic blocked path. Plan-local
+/// blocked decisions are shared separately, so this only runs where no
+/// sharing is required.
+fn canonical_decision(decision: CandidateDecision) -> Arc<CandidateDecision> {
+    match decision {
+        CandidateDecision::Entry(entry) => entry_decision(entry),
+        CandidateDecision::BlockedByAncestor(_) => Arc::new(decision),
     }
 }
 
@@ -245,7 +392,7 @@ impl CandidatePlan {
             .iter()
             .filter(|row| {
                 matches!(
-                    row.decision,
+                    row.decision.as_ref(),
                     CandidateDecision::Entry(EntryDecision::Archive { .. })
                 )
             })
@@ -277,7 +424,7 @@ impl CandidatePlan {
         });
         for row in &mut self.rows {
             if inside(&row.path) || disarmed.contains(&row.path) {
-                row.decision = CandidateDecision::Entry(EntryDecision::KeepTarget);
+                row.set_decision(CandidateDecision::Entry(EntryDecision::KeepTarget));
             }
         }
         self.recount_deletions()
@@ -311,14 +458,14 @@ impl CandidatePlan {
         });
         for row in &mut self.rows {
             let safe_create = matches!(
-                row.decision,
+                row.decision.as_ref(),
                 CandidateDecision::Entry(EntryDecision::Propagate {
                     change: ChangeKind::Create,
                     ..
                 })
             );
             if disarmed.contains(&row.path) {
-                row.decision = match row.decision {
+                row.set_decision(match row.decision.as_ref() {
                     CandidateDecision::Entry(EntryDecision::Move { on }) => {
                         CandidateDecision::Entry(EntryDecision::Propagate {
                             from: on.other(),
@@ -326,9 +473,9 @@ impl CandidatePlan {
                         })
                     }
                     _ => CandidateDecision::Entry(EntryDecision::KeepTarget),
-                };
+                });
             } else if uncertain(&row.path) && !safe_create {
-                row.decision = CandidateDecision::Entry(EntryDecision::KeepTarget);
+                row.set_decision(CandidateDecision::Entry(EntryDecision::KeepTarget));
             }
         }
         self.recount_deletions()
@@ -341,8 +488,8 @@ impl CandidatePlan {
                 .iter()
                 .filter(|row| {
                     matches!(
-                        row.decision,
-                        CandidateDecision::Entry(EntryDecision::Archive { on }) if on == target
+                        row.decision.as_ref(),
+                        CandidateDecision::Entry(EntryDecision::Archive { on }) if *on == target
                     )
                 })
                 .count();
@@ -407,12 +554,12 @@ where
         let Some(keep) = keep else {
             continue;
         };
-        row.decision = CandidateDecision::Entry(reconcile_entry(
+        row.set_decision(CandidateDecision::Entry(reconcile_entry(
             SyncMode::Mirror { source: keep },
             base.get(&row.path).copied(),
             left,
             right,
-        ));
+        )));
     }
     Ok(())
 }
@@ -447,7 +594,7 @@ where
             skipped.insert(&row.path);
         }
         if inside || current {
-            row.decision = CandidateDecision::Entry(EntryDecision::KeepTarget);
+            row.set_decision(CandidateDecision::Entry(EntryDecision::KeepTarget));
         }
     }
     Ok(())
@@ -534,11 +681,11 @@ where
             for spellings in same.into_values().filter(|spellings| spellings.len() > 1) {
                 let (writes, untouched): (Vec<usize>, Vec<usize>) = spellings
                     .iter()
-                    .partition(|&&index| writes_on(&rows[index].decision, side));
+                    .partition(|&&index| writes_on(rows[index].decision.as_ref(), side));
                 let stays = untouched.iter().any(|&index| {
                     present.contains_key(&rows[index].path)
                         || matches!(
-                            rows[index].decision,
+                            rows[index].decision.as_ref(),
                             CandidateDecision::Entry(EntryDecision::Conflict(_))
                         )
                 });
@@ -550,8 +697,9 @@ where
     }
     drop(keys);
     for index in clashes {
-        rows[index].decision =
-            CandidateDecision::Entry(EntryDecision::Conflict(ConflictKind::NameClash));
+        rows[index].set_decision(CandidateDecision::Entry(EntryDecision::Conflict(
+            ConflictKind::NameClash,
+        )));
     }
     Ok(())
 }
@@ -769,15 +917,15 @@ where
         {
             directories.insert(path.clone(), rows.len());
         }
-        rows.push(PlanRow {
-            path: path.clone(),
-            decision: CandidateDecision::Entry(decide(
+        rows.push(PlanRow::new(
+            path.clone(),
+            CandidateDecision::Entry(decide(
                 reconcile_entry(mode, baseline, left, right),
                 resolutions.get(&path),
                 left,
                 right,
             )),
-        });
+        ));
 
         if mode != SyncMode::Sync {
             continue;
@@ -795,12 +943,12 @@ where
             while let Some(path) = parent {
                 check_control(control)?;
                 if let Some(&index) = directories.get(&path)
-                    && rows[index].decision
-                        == CandidateDecision::Entry(EntryDecision::Archive { on: side })
+                    && rows[index].decision.as_ref()
+                        == &CandidateDecision::Entry(EntryDecision::Archive { on: side })
                 {
-                    rows[index].decision = CandidateDecision::Entry(EntryDecision::Conflict(
+                    rows[index].set_decision(CandidateDecision::Entry(EntryDecision::Conflict(
                         ConflictKind::DeletedVersusEdited,
-                    ));
+                    )));
                 }
                 parent = path.parent();
             }
@@ -812,7 +960,10 @@ where
     mark_name_clashes(&mut rows, [left, right], left_names, right_names, control)?;
 
     // Ancestors precede descendants. Suppression therefore propagates an outer
-    // conflict through the whole branch without recursive traversal.
+    // conflict through the whole branch without recursive traversal. One
+    // `Arc` per outermost blocking ancestor is shared by every row it covers;
+    // the table is local to this plan, so no path-keyed global cache grows.
+    let mut blocked_decisions: BTreeMap<SyncPath, Arc<CandidateDecision>> = BTreeMap::new();
     for index in 0..rows.len() {
         check_control(control)?;
         let mut parent = rows[index].path.parent();
@@ -820,7 +971,7 @@ where
         while let Some(path) = parent {
             check_control(control)?;
             if let Some(&ancestor) = directories.get(&path) {
-                match &rows[ancestor].decision {
+                match rows[ancestor].decision.as_ref() {
                     CandidateDecision::Entry(EntryDecision::Conflict(_)) => {
                         blocked = Some(path.clone())
                     }
@@ -831,7 +982,11 @@ where
             parent = path.parent();
         }
         if let Some(ancestor) = blocked {
-            rows[index].decision = CandidateDecision::BlockedByAncestor(ancestor);
+            let decision = blocked_decisions
+                .entry(ancestor.clone())
+                .or_insert_with(|| Arc::new(CandidateDecision::BlockedByAncestor(ancestor)))
+                .clone();
+            rows[index].set_shared_decision(decision);
         }
     }
     let moves = pair_moves(&mut rows, [left, right], [left_moves, right_moves]);
@@ -841,7 +996,7 @@ where
             .iter()
             .filter(|row| {
                 matches!(
-                    &row.decision,
+                    row.decision.as_ref(),
                     CandidateDecision::Entry(EntryDecision::Archive { on }) if *on == target
                 )
             })
@@ -893,12 +1048,12 @@ where
         Archive,
         Create,
     }
-    let candidate = |row: &PlanRow| match row.decision {
-        CandidateDecision::Entry(EntryDecision::Archive { on }) => Some((on, Role::Archive, on)),
+    let candidate = |row: &PlanRow| match row.decision.as_ref() {
+        CandidateDecision::Entry(EntryDecision::Archive { on }) => Some((*on, Role::Archive, *on)),
         CandidateDecision::Entry(EntryDecision::Propagate {
             from,
             change: ChangeKind::Create,
-        }) => Some((from.other(), Role::Create, from)),
+        }) => Some((from.other(), Role::Create, *from)),
         _ => None,
     };
     let mut archives = [0usize; 2];
@@ -951,8 +1106,8 @@ where
             }
         }
         for (from, to) in matches {
-            rows[from].decision = CandidateDecision::Entry(EntryDecision::MovedAway { on });
-            rows[to].decision = CandidateDecision::Entry(EntryDecision::Move { on });
+            rows[from].set_decision(CandidateDecision::Entry(EntryDecision::MovedAway { on }));
+            rows[to].set_decision(CandidateDecision::Entry(EntryDecision::Move { on }));
             paired.insert(rows[to].path.clone(), rows[from].path.clone());
         }
     }
@@ -1126,6 +1281,7 @@ mod tests {
             .find(|row| row.path == path(name))
             .unwrap()
             .decision
+            .as_ref()
             .clone()
     }
 
@@ -1516,10 +1672,10 @@ mod tests {
         for folder in 0..FOLDERS {
             let name = format!("d-{folder:04}");
             let folder_path = path(name.as_bytes());
-            rows.push(PlanRow {
-                path: folder_path.clone(),
-                decision: CandidateDecision::Entry(EntryDecision::Unchanged),
-            });
+            rows.push(PlanRow::new(
+                folder_path.clone(),
+                CandidateDecision::Entry(EntryDecision::Unchanged),
+            ));
             left.insert(folder_path.clone(), directory());
             right.insert(folder_path.clone(), directory());
             skips.insert(folder_path, Skip::new(Some(directory()), Some(directory())));
@@ -1527,10 +1683,10 @@ mod tests {
                 let file_name = format!("{name}/f-{index:02}");
                 let file_path = path(file_name.as_bytes());
                 let version = file((folder * FILES + index) as u8);
-                rows.push(PlanRow {
-                    path: file_path.clone(),
-                    decision: CandidateDecision::Entry(EntryDecision::Unchanged),
-                });
+                rows.push(PlanRow::new(
+                    file_path.clone(),
+                    CandidateDecision::Entry(EntryDecision::Unchanged),
+                ));
                 left.insert(file_path.clone(), version);
                 right.insert(file_path, version);
             }
@@ -1550,7 +1706,7 @@ mod tests {
                 skipped.push(row.path.clone());
             }
             if inside || current {
-                row.decision = CandidateDecision::Entry(EntryDecision::KeepTarget);
+                row.set_decision(CandidateDecision::Entry(EntryDecision::KeepTarget));
             }
         }
 
@@ -1604,8 +1760,8 @@ mod tests {
             (SyncMode::Mirror { source: Side::Left }, BTreeMap::new()),
         ] {
             let candidate = plan(mode, &base, &BTreeMap::new(), &target);
-            assert!(candidate.rows.iter().all(|row| row.decision
-                == CandidateDecision::Entry(EntryDecision::Archive { on: Side::Right })));
+            assert!(candidate.rows.iter().all(|row| row.decision.as_ref()
+                == &CandidateDecision::Entry(EntryDecision::Archive { on: Side::Right })));
             assert_eq!(
                 candidate.deletion_review(Side::Right, RunContext::Unattended),
                 DeletionReview::StopUnattended
@@ -1631,8 +1787,8 @@ mod tests {
             CandidateDecision::BlockedByAncestor(path(b"folder"))
         );
         let candidate = plan(SyncMode::Sync, &BTreeMap::new(), &source, &BTreeMap::new());
-        assert!(candidate.rows.iter().all(|row| row.decision
-            == CandidateDecision::Entry(EntryDecision::Propagate {
+        assert!(candidate.rows.iter().all(|row| row.decision.as_ref()
+            == &CandidateDecision::Entry(EntryDecision::Propagate {
                 from: Side::Left,
                 change: ChangeKind::Create
             })));
@@ -1799,7 +1955,7 @@ mod tests {
                         );
                         for (row, other) in candidate.rows.iter().zip(&swapped.rows) {
                             assert_eq!(row.path, other.path);
-                            let expected = match &row.decision {
+                            let expected = match row.decision.as_ref() {
                                 CandidateDecision::Entry(EntryDecision::Propagate {
                                     from,
                                     change,
@@ -1814,8 +1970,10 @@ mod tests {
                                 }
                                 other => other.clone(),
                             };
-                            assert_eq!(other.decision, expected);
-                            if let CandidateDecision::BlockedByAncestor(ancestor) = &row.decision {
+                            assert_eq!(other.decision.as_ref(), &expected);
+                            if let CandidateDecision::BlockedByAncestor(ancestor) =
+                                row.decision.as_ref()
+                            {
                                 assert!(ancestor.is_ancestor_of(&row.path));
                                 assert!(matches!(
                                     decision(&candidate, ancestor.as_bytes()),
@@ -1844,8 +2002,8 @@ mod tests {
         let candidate = plan(SyncMode::Sync, &BTreeMap::new(), &left, &BTreeMap::new());
         let elapsed = started.elapsed();
         assert_eq!(candidate.rows.len(), 500_000);
-        assert!(candidate.rows.iter().all(|row| row.decision
-            == CandidateDecision::Entry(EntryDecision::Propagate {
+        assert!(candidate.rows.iter().all(|row| row.decision.as_ref()
+            == &CandidateDecision::Entry(EntryDecision::Propagate {
                 from: Side::Left,
                 change: ChangeKind::Create
             })));
@@ -1991,16 +2149,20 @@ mod tests {
                 let source: BTreeMap<_, _> = new.iter().map(|p| (p.clone(), file(1))).collect();
                 let mut rows: Vec<_> = old
                     .iter()
-                    .map(|p| PlanRow {
-                        path: p.clone(),
-                        decision: CandidateDecision::Entry(EntryDecision::Archive { on }),
+                    .map(|p| {
+                        PlanRow::new(
+                            p.clone(),
+                            CandidateDecision::Entry(EntryDecision::Archive { on }),
+                        )
                     })
-                    .chain(new.iter().map(|p| PlanRow {
-                        path: p.clone(),
-                        decision: CandidateDecision::Entry(EntryDecision::Propagate {
-                            from: on.other(),
-                            change: ChangeKind::Create,
-                        }),
+                    .chain(new.iter().map(|p| {
+                        PlanRow::new(
+                            p.clone(),
+                            CandidateDecision::Entry(EntryDecision::Propagate {
+                                from: on.other(),
+                                change: ChangeKind::Create,
+                            }),
+                        )
                     }))
                     .collect();
                 rows.sort_by(|left, right| left.path.cmp(&right.path));
@@ -2014,7 +2176,7 @@ mod tests {
                 assert_eq!(
                     rows.iter()
                         .filter(|row| matches!(
-                            row.decision,
+                            row.decision.as_ref(),
                             CandidateDecision::Entry(EntryDecision::Move { .. })
                         ))
                         .count(),
@@ -2048,10 +2210,7 @@ mod tests {
             reads.set(0);
             let mut rows: Vec<_> = tree
                 .keys()
-                .map(|path| PlanRow {
-                    path: path.clone(),
-                    decision: CandidateDecision::Entry(decision),
-                })
+                .map(|path| PlanRow::new(path.clone(), CandidateDecision::Entry(decision)))
                 .collect();
             assert!(pair_moves(&mut rows, [&tree, &tree], [Moves::Rename; 2]).is_empty());
             assert_eq!(reads.get(), 0, "one role alone cannot form a move");
@@ -2281,6 +2440,247 @@ mod tests {
                 "{name:?}"
             );
         }
+    }
+
+    /// The planner's row is one path and one shared decision reference:
+    /// 16 bytes of `SyncPath` plus an 8-byte `Arc`, not the 24-byte
+    /// `CandidateDecision` inline.
+    #[test]
+    fn plan_row_is_one_path_and_one_shared_decision_reference() {
+        assert_eq!(size_of::<usize>(), 8);
+        assert_eq!(
+            size_of::<std::sync::Arc<CandidateDecision>>(),
+            size_of::<usize>()
+        );
+        assert_eq!(size_of::<PlanRow>(), 24);
+    }
+
+    /// Independently enumerate every finite `EntryDecision` combination and
+    /// verify both its semantic value and that all rows carrying it share one
+    /// canonical `Arc`.
+    #[test]
+    fn every_entry_decision_shares_one_canonical_reference() {
+        let mut all = vec![
+            EntryDecision::Unchanged,
+            EntryDecision::RecordBase,
+            EntryDecision::ForgetBase,
+            EntryDecision::KeepTarget,
+        ];
+        for from in [Side::Left, Side::Right] {
+            for change in [
+                ChangeKind::Create,
+                ChangeKind::ReplaceContent,
+                ChangeKind::UpdateMetadata,
+            ] {
+                all.push(EntryDecision::Propagate { from, change });
+            }
+        }
+        for on in [Side::Left, Side::Right] {
+            all.push(EntryDecision::Archive { on });
+        }
+        for on in [Side::Left, Side::Right] {
+            all.push(EntryDecision::Move { on });
+        }
+        for on in [Side::Left, Side::Right] {
+            all.push(EntryDecision::MovedAway { on });
+        }
+        for kind in [
+            ConflictKind::BothChanged,
+            ConflictKind::DeletedVersusEdited,
+            ConflictKind::TypeMismatch,
+            ConflictKind::MetadataOnly,
+            ConflictKind::NameClash,
+        ] {
+            all.push(EntryDecision::Conflict(kind));
+        }
+        assert_eq!(all.len(), 21);
+        assert_eq!(ENTRY_DECISIONS.len(), 21);
+        for (index, decision) in all.iter().enumerate() {
+            let expected = CandidateDecision::Entry(*decision);
+            let first = PlanRow::new(path(b"first"), expected.clone());
+            let second = PlanRow::new(path(b"second"), expected.clone());
+            assert_eq!(first.decision(), &expected, "decision {index}");
+            assert_eq!(
+                Arc::as_ptr(&first.decision),
+                Arc::as_ptr(&second.decision),
+                "decision {index} must share its singleton"
+            );
+            assert!(
+                ENTRY_DECISIONS
+                    .iter()
+                    .any(|canonical| Arc::as_ptr(canonical) == Arc::as_ptr(&first.decision)),
+                "decision {index} must use the canonical table"
+            );
+            for other in all.iter().skip(index + 1) {
+                let other_row = PlanRow::new(path(b"other"), CandidateDecision::Entry(*other));
+                assert_ne!(
+                    Arc::as_ptr(&first.decision),
+                    Arc::as_ptr(&other_row.decision),
+                    "decisions {index} and {other:?} must not share a singleton"
+                );
+            }
+        }
+    }
+
+    /// Many rows blocked by one ancestor share a single `Arc`, while each
+    /// still reports the exact original ancestor path.
+    #[test]
+    fn many_blocked_children_share_one_ancestor_reference() {
+        const CHILDREN: usize = 10_000;
+        let mut left = BTreeMap::new();
+        let mut right = BTreeMap::new();
+        left.insert(path(b"folder"), directory());
+        right.insert(path(b"folder"), file(0));
+        for index in 0..CHILDREN {
+            left.insert(
+                path(format!("folder/file-{index:05}").as_bytes()),
+                file(index as u8),
+            );
+        }
+        let candidate = plan(SyncMode::Sync, &BTreeMap::new(), &left, &right);
+        assert_eq!(candidate.rows.len(), CHILDREN + 1);
+        assert_eq!(
+            candidate.rows[0].decision(),
+            &CandidateDecision::Entry(EntryDecision::Conflict(ConflictKind::TypeMismatch))
+        );
+        let expected = CandidateDecision::BlockedByAncestor(path(b"folder"));
+        let mut shared = None;
+        for row in &candidate.rows[1..] {
+            assert_eq!(row.decision(), &expected);
+            let pointer = Arc::as_ptr(&row.decision);
+            match shared {
+                None => shared = Some(pointer),
+                Some(first) => assert_eq!(pointer, first),
+            }
+        }
+        assert!(shared.is_some());
+    }
+
+    /// Ten thousand no-op rows keep the one-million-row no-op concept at a
+    /// fraction of the fixture memory: every row shares the `Unchanged`
+    /// singleton and the row count is unchanged.
+    #[test]
+    fn ten_thousand_noop_rows_share_one_decision_reference() {
+        const ROWS: usize = 10_000;
+        let mut left = BTreeMap::new();
+        let mut base = BTreeMap::new();
+        for index in 0..ROWS {
+            let version = file(index as u8);
+            let entry_path = path(format!("file-{index:05}").as_bytes());
+            left.insert(entry_path.clone(), version);
+            base.insert(entry_path, BaselineEntry::new(version, version).unwrap());
+        }
+        let candidate = plan(SyncMode::Sync, &base, &left, &left);
+        assert_eq!(candidate.rows.len(), ROWS);
+        let expected = CandidateDecision::Entry(EntryDecision::Unchanged);
+        let shared = Arc::as_ptr(&candidate.rows[0].decision);
+        assert_eq!(candidate.rows[0].decision(), &expected);
+        assert!(
+            candidate
+                .rows
+                .iter()
+                .all(|row| Arc::as_ptr(&row.decision) == shared),
+            "every no-op row must share the Unchanged singleton"
+        );
+    }
+
+    /// `Arc` equality and `Debug` follow the decision's content, not the
+    /// pointer, so two independently allocated blocked decisions compare and
+    /// print identically.
+    #[test]
+    fn arc_rows_compare_and_debug_by_content_not_pointer() {
+        let decision = CandidateDecision::BlockedByAncestor(path(b"a"));
+        let left = PlanRow::new(path(b"a/x"), decision.clone());
+        let right = PlanRow::new(path(b"a/x"), decision.clone());
+        assert_ne!(
+            Arc::as_ptr(&left.decision),
+            Arc::as_ptr(&right.decision),
+            "the constructor allocates a fresh blocked Arc"
+        );
+        assert_eq!(left.decision(), right.decision());
+        assert_eq!(left, right);
+        assert_eq!(format!("{:?}", left), format!("{:?}", right));
+        assert_eq!(
+            format!("{:?}", left.decision()),
+            format!("{:?}", right.decision())
+        );
+    }
+
+    /// Blocking follows component boundaries: `a-b` is not inside `a`, and
+    /// `a/x` reports the exact outermost blocking ancestor `a`.
+    #[test]
+    fn blocking_uses_component_boundaries_and_the_outermost_ancestor() {
+        let mut left = BTreeMap::new();
+        let mut right = BTreeMap::new();
+        left.insert(path(b"a"), directory());
+        left.insert(path(b"a/x"), file(1));
+        left.insert(path(b"a-b"), directory());
+        left.insert(path(b"a-b/y"), file(2));
+        right.insert(path(b"a"), file(0));
+        right.insert(path(b"a-b"), directory());
+        right.insert(path(b"a-b/y"), file(2));
+        let candidate = plan(SyncMode::Sync, &BTreeMap::new(), &left, &right);
+        assert_eq!(
+            decision(&candidate, b"a"),
+            CandidateDecision::Entry(EntryDecision::Conflict(ConflictKind::TypeMismatch))
+        );
+        assert_eq!(
+            decision(&candidate, b"a/x"),
+            CandidateDecision::BlockedByAncestor(path(b"a"))
+        );
+        for name in [b"a-b".as_slice(), b"a-b/y"] {
+            assert_ne!(
+                decision(&candidate, name),
+                CandidateDecision::BlockedByAncestor(path(b"a")),
+                "{name:?} must not be blocked by a shared-prefix sibling"
+            );
+        }
+    }
+
+    /// The planner's control-check cadence and row count are unchanged: a
+    /// small two-row plan checks control exactly twelve times and returns
+    /// exactly two rows.
+    #[test]
+    fn control_cadence_and_row_count_are_unchanged() {
+        let left = tree(&[(b"folder", directory()), (b"folder/file", file(0))]);
+        let mut checks = 0;
+        let candidate = plan_candidates(
+            SyncMode::Sync,
+            &BTreeMap::new(),
+            &left,
+            &BTreeMap::new(),
+            &mut || {
+                checks += 1;
+                ScanControl::Continue
+            },
+        )
+        .unwrap();
+        assert_eq!(candidate.rows.len(), 2);
+        assert_eq!(checks, 12);
+    }
+
+    /// The outermost conflict wins: an inner type conflict under a metadata
+    /// conflict is suppressed and reports the outer ancestor.
+    #[test]
+    fn outermost_conflict_suppresses_an_inner_conflict() {
+        let metadata = |byte| {
+            EntryVersion::new(
+                EntryContent::Directory,
+                Digest::from_bytes([byte; Digest::BYTE_LEN]),
+            )
+        };
+        let base = baseline(&tree(&[(b"a", metadata(0)), (b"a/x", metadata(0))]));
+        let left = tree(&[(b"a", metadata(1)), (b"a/x", metadata(0))]);
+        let right = tree(&[(b"a", metadata(2)), (b"a/x", file(0))]);
+        let candidate = plan(SyncMode::Sync, &base, &left, &right);
+        assert_eq!(
+            decision(&candidate, b"a"),
+            CandidateDecision::Entry(EntryDecision::Conflict(ConflictKind::MetadataOnly))
+        );
+        assert_eq!(
+            decision(&candidate, b"a/x"),
+            CandidateDecision::BlockedByAncestor(path(b"a"))
+        );
     }
 }
 
