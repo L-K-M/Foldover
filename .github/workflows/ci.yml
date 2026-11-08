@@ -30,7 +30,14 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Cache downloads may fail independently of the build and test gates.
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        id: sccache
+        continue-on-error: true
+
+      - name: Compile without cache when setup fails
+        if: steps.sccache.outcome != 'success'
+        run: echo 'RUSTC_WRAPPER=' >> "$GITHUB_ENV"
 
       # The pinned toolchain (rust-toolchain.toml) is installed by the
       # rustup shim on first use; this step makes that explicit and logs
@@ -145,7 +152,14 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Cache downloads may fail independently of the build and test gates.
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        id: sccache
+        continue-on-error: true
+
+      - name: Compile without cache when setup fails
+        if: steps.sccache.outcome != 'success'
+        run: echo 'RUSTC_WRAPPER=' >> "$GITHUB_ENV"
 
       - name: Log toolchain and image
         run: |

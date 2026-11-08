@@ -33,10 +33,19 @@ local CI command encounters three native filesystem failures also reproduced
 on unchanged main; they are documented with the qualification gaps. Final
 integration CI and review are recorded on the PR.
 
+The isolated signed agent's real IPC million-file preview exposed a further
+502.8 MB peak. Finalizing the first side's exact comparison after its own
+spelling alignment, before observing the second side, reduces it to 494.9 MB.
+Raw version hints are captured before alignment; subsequent planning exclusions
+preserve snapshot values. All 334 endpoint tests, 194 engine tests and workspace
+clippy pass for this follow-up. Its CI and review are recorded on its PR.
+
 One 100k LAN no-change run completed cleanly. The attempted paired 100k
-baseline and both million-file LAN diagnostics lost SSH and failed. A new
-log-only diagnostic build is investigating the transport failure. No
-million-file LAN qualification, complete overnight/device release matrix,
-or beta/release readiness is claimed. Complete those runs with connection diagnostics;
+baseline and two million-file LAN diagnostics lost SSH and failed. The log-only
+retry completed a matching-folder million-file baseline in 6,927.1 seconds at
+416.7 MB peak RSS, with zero physical writes. Earlier disconnects remain
+unexplained. Fresh 100k comparisons are running. Warm tracked LAN,
+installed-app, complete overnight/device matrix and beta/release readiness
+remain unqualified. Continue using connection diagnostics;
 stat-only SFTP trust, weaker durability, larger commit batches, less frequent
 root checks and the other excluded proposals remain outside this work.

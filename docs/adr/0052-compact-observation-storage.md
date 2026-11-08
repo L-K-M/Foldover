@@ -37,10 +37,13 @@ in [qualification results](../../perf/qualification-results.md).
   separate original key index. Duplicate reads still see the original time.
 - After spelling alignment, compare each effective snapshot with its valid
   original. Preserve original source and destination values before a rename
-  overwrites their comparison payload. Missing rows, late failures and
-  exclusions participate in this comparison; unseen rows never become
-  verified observations. These flags and indexes are transient, outside
-  persistence and approval tokens.
+  overwrites their comparison payload. Missing rows and late failures
+  participate in this comparison; unseen rows never become verified
+  observations. Finalize the first side before observing the second, after
+  collecting hints with its original raw spellings. Later cross-side
+  exclusions change planning visibility only and preserve snapshot values.
+  This releases its comparison entries and timestamp column early. These
+  flags and indexes are transient, outside persistence and approval tokens.
 - Let the second endpoint share matching verified versions and exact path
   storage from the completed first observation. Hints contain no fingerprint
   and cannot skip hashing or stat verification. Full version equality is
@@ -70,5 +73,8 @@ spelling-cycle regressions cover the representation boundaries. Real
 million-file fixtures cover initial populated folders, tracked no-change
 and forced periodic rehashes. Those samples establish specific workload
 results, not a universal bound for arbitrary path lengths, metadata,
-concurrent previews or installed-agent configurations. The failed million-
-file LAN sample remains a qualification gap.
+concurrent previews or installed-agent configurations. The isolated signed
+agent's real IPC preview peaked at 502.8 MB before releasing the first
+comparison early and 494.9 MB afterward, with 1,001,000 paths per side and
+zero changes. A million-file LAN matching-folder baseline also completed;
+warm tracked LAN and release qualification remain separate checks.

@@ -4,7 +4,7 @@ The worthwhile changes in the [action plan](../docs/performance/action-plan.md)
 are implemented. These measurements separate completed runs, failed runs and
 unqualified cases. They do not establish release readiness.
 
-The [evidence bundle](results/qualification-2026-11-08.tar.gz) contains 103 cases:
+The [evidence bundle](results/qualification-2026-11-08.tar.gz) contains 108 cases:
 sanitized JSON summaries, traces, resource reports, samples and provenance.
 The [index](results/index.csv) records revisions, binary hashes, return codes,
 per-iteration timings and kernel peak RSS; the [manifest](results/manifest.json)
@@ -12,6 +12,12 @@ records artifact hashes. Private paths, the LAN address and synthetic review
 tokens are redacted. No binaries or corpus contents are included. Extract it
 with `tar -xzf perf/results/qualification-2026-11-08.tar.gz` into a separate
 working directory.
+
+Index schema 2 preserves original build descriptions in `source_label` and
+records a full `source_base_commit` when the explicit commit can be resolved.
+A patched build still requires its label and saved source patch. Process-wide
+`harness_elapsed_s` and kernel RSS repeat across that process's iteration rows;
+the `total_s` duration belongs to the individual iteration.
 
 ## Conditions and limits
 
@@ -92,6 +98,8 @@ and a preview, but does not transfer all files.
 | Real Service preview over expired local caches, initial plan allocation | 500.2 | Completed, narrowly over budget |
 | Service preview with initial reservation experiment | 498.6 | Intermediate passing sample |
 | Service preview with exact union reservation | 489.9 | Completed below budget |
+| Isolated signed agent, real IPC, persistent expired-cache fixture | 502.8 | Complete zero-change preview, over budget |
+| Same agent workload, first comparison released before the second scan | 494.9 | Complete zero-change preview, below budget |
 
 For expiry cases, regular file mtimes were aged 30 days before seeding.
 Copies of the closed warm catalog had only fingerprint observation times
@@ -109,6 +117,38 @@ and deletions; an extra cancellable read-only pass is the tradeoff. See
 version lifetimes and exact cache comparison. These results cover one active
 preview and these path/metadata distributions, not arbitrary concurrent plans
 or an installed-agent memory guarantee.
+
+The agent case runs the real `foldoverd`, authenticated CLI/IPC and scheduler
+in a private uninstalled signed bundle. Its app identity stub is never
+launched. The diagnostic patch selects an explicit fixture catalog; startup,
+crash accounting, authentication and engine behavior remain active. There is
+one manual local pair and no paired devices. Each preview covers 1,001,000
+paths per side, proposes zero changes and remains held after its client exits.
+Status samples include CLI startup and IPC; the maximum after the change was
+83.934 ms, which is not comparable to the direct-Service handler measurement.
+
+The first side's exact comparison can finish after its own spelling alignment.
+Hints are captured first at their original raw spellings. Cross-side exclusions
+later change planning visibility only, preserving verified snapshot values.
+Releasing its prior entries and eight-byte timestamp column before the second
+observation removes about 8 MB of overlapping storage. Functional tests cover
+equal, refreshed, replaced and missing rows with exclusions before and after
+comparison. The same closed seed and byte-exact 21-day cache-age mutation were
+used for both agent cases. Whole-process durations were 100.4 and 167.0 seconds
+on the shared host; no wall-clock improvement is claimed from these samples.
+
+An earlier agent trial failed its completeness assertion: the old aged
+temporary trees contained only their 1,000 directories per side, while the
+catalog still held the million-file snapshots. Its 554.6 MB peak is retained
+as a failed fixture trial, not a normal million-file preview result. The cause
+of the missing physical files is unknown. A new persistent owned corpus was
+cloned from the intact original: exactly one million actual 8 KiB files per
+side, aged 30 days, then freshly seeded with zero physical writes. That seed
+peaked at 449.4 MB. Before aging its cache, independent streaming checks verified
+all 2,002,000 snapshot rows, the unchanged stat bytes/nanoseconds/versions, all
+other tables and the source catalog hash. File counts were checked again before
+each agent run. These isolated agent cases do not qualify the installed app,
+multiple previews or peer discovery.
 
 ## Additional workload and service checks
 
@@ -159,9 +199,16 @@ transport. Its peak was 513.9 MB on the earlier representation. Neither is
 a successful qualification. The final-code retry also failed after 5,567.5
 seconds near 780k remote entries, with the same SSH broken pipe. Its 314.7 MB
 peak covers that incomplete run, not a completed million-file qualification.
-All failed artifacts are retained. The final implementation still has no
-completed million-file LAN run. A new isolated build adds only per-connection
-SSH client logging; its qualification is in progress and is excluded here.
+All failed artifacts are retained. The isolated retry with per-connection SSH
+client logging then completed: local observation 54.627 s, remote observation
+6,530.469 s, apply 335.538 s and total 6,927.075 s. Kernel peak RSS was
+416.7 MB, with zero copies, updates or archives and 3,912 recording commits.
+This uses a fresh catalog over two already populated matching million-file
+folders; it establishes their baseline, rather than qualifying warm tracked
+input loading. Its binary has the earlier final production core plus logging
+only. The subsequent comparison-lifetime change is qualified by the agent cases.
+Three new 100k baseline/current pairs are running and are excluded from this
+bundle until their results are complete.
 
 The owner reports no known SSH session limits or network interruptions.
 Read-only checks found no corresponding Mac sleep event. The API-provided
@@ -219,7 +266,7 @@ resource-fork work bounds, quarantine preservation and archive-restoration
 mode expectations. They are not reported as passing. CI/review for the final
 commit is recorded on the integration PR.
 
-Completed million-file LAN qualification, true cold-cache runs, installed-daemon
+Warm tracked million-file LAN qualification, true cold-cache runs, installed-app
 qualification, the full physical-device/overnight matrix and release/beta
 qualification remain. Wide flat directories, deeper paths, more metadata,
 multiple active previews, HDDs and restrictive SSH servers can change time
