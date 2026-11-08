@@ -19,6 +19,8 @@ ids are the bench function names; estimates land in
 | `plan_100k_entries_unicode_names` | `foldover-engine` | `plan_resolved` over the same 100_000-row pair under case-insensitive, normalized matching, the per-row `name_key` path in `mark_name_clashes` |
 | `plan_skipped_100k_entries` | `foldover-engine` | `plan_resolved` over the same 100_000-row pair with all 1_000 top-level folders skipped, the focused prefix-index workload |
 | `prefix_index_100k_entries_1000_prefixes` | `foldover-engine` | `PathPrefixIndex` ancestor lookups: 100_000 paths against 1_000 roots, the shared helper behind unavailable roots, failed writes and skipped branches |
+| `prefix_index_shallow_unicode_1m_queries_10k_roots` | `foldover-engine` | `PathPrefixIndex` ancestor lookups: 1_000_000 shallow Unicode raw-byte paths against 10_000 roots, half descendants and half boundary siblings |
+| `prefix_index_deep_unicode_1m_queries_10k_roots` | `foldover-engine` | `PathPrefixIndex` ancestor lookups: 1_000_000 deep Unicode raw-byte paths against 10_000 roots, half descendants and half boundary siblings |
 | `archive_pages_5k` | `foldover-endpoint` | `LocalEndpoint::archived_items` listing 5,000 items in 50 folders, 100 per page |
 | `db_commit_100k` | `foldover-state` | `PairStore::update_base` committing 100_000 base entries |
 | `db_commit_batches_100k` | `foldover-state` | `PairStore::update_base` committing one run's 100_000 base entries and journal entries in the engine's 256-row batches |
