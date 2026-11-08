@@ -16,6 +16,9 @@
 //! `shared/` is exposed only through a `LocalRoot`; `control/` holds the
 //! fixture's private state and is never served.
 //!
+//! The marker is a fixture convention, not a sandbox against another process
+//! running as the same user. Use a private root that no other process modifies.
+//!
 //! The operator reads `control/status.json` over authenticated SSH, compares
 //! the six-digit codes on both Macs, and writes `control/confirm.json`.
 //! The fixture confirms only the exact expected pending device and code.
