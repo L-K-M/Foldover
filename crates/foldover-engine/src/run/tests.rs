@@ -2695,6 +2695,86 @@ fn staged_bytes(folder: &Path) -> u64 {
         .sum()
 }
 
+/// Cancelling the last in-flight copy must not become a failed, finished
+/// run just because there is no next row at which to notice the stop.
+#[test]
+fn an_inflight_copy_cancels_without_becoming_a_failure() {
+    for (left_kind, right_kind) in [
+        (RightKind::Local, RightKind::Local),
+        (RightKind::Local, RightKind::Sftp),
+        (RightKind::Sftp, RightKind::Sftp),
+    ] {
+        if (left_kind == RightKind::Sftp || right_kind == RightKind::Sftp)
+            && sftp_server().is_none()
+        {
+            eprintln!("sftp-server not found; skipping streamed cancellation cases");
+            continue;
+        }
+        let mut pair = fixture(SyncMode::Sync);
+        pair.bandwidth_limit = Some(MIB as u64);
+        let data = vec![37; 4 * MIB];
+        fs::write(pair.left.path().join("big.bin"), &data).unwrap();
+        let endpoint = |folder: &Path, kind| {
+            if kind == RightKind::Sftp {
+                foldover_endpoint::Endpoint::Sftp(
+                    foldover_endpoint::SftpEndpoint::spawn(
+                        &sftp_server().unwrap(),
+                        &[std::ffi::OsStr::new("-d"), std::ffi::OsStr::new("/")],
+                        folder.as_os_str().as_bytes(),
+                    )
+                    .unwrap(),
+                )
+            } else {
+                foldover_endpoint::Endpoint::Local(
+                    foldover_endpoint::LocalEndpoint::open(folder).unwrap(),
+                )
+            }
+        };
+        let endpoints = foldover_endpoint::EndpointPair::new(
+            endpoint(pair.left.path(), left_kind),
+            endpoint(pair.right.path(), right_kind),
+        );
+        let prepared =
+            PairRun::prepare_on(pair.inputs(), endpoints, &mut proceed, &NoProgress).unwrap();
+        let right = pair.right.path().to_owned();
+        let mut store = pair.store();
+        let outcome = prepared
+            .execute(
+                Approval::default(),
+                RunContext::Reviewed,
+                STARTED,
+                &mut |revision, commit| store.apply(revision, commit),
+                &mut || match staged_bytes(&right) >= MIB as u64 / 4 {
+                    true => ScanControl::Cancel,
+                    false => ScanControl::Continue,
+                },
+                &NoProgress,
+            )
+            .unwrap();
+        let RunOutcome::Ran(report) = outcome else {
+            panic!("expected a cancelled run");
+        };
+        assert_eq!(
+            report.completion(),
+            Completion::Cancelled,
+            "{:?}; copied {}",
+            report.failures(),
+            report.copied()
+        );
+        assert!(report.failures().is_empty(), "{:?}", report.failures());
+        assert_eq!(report.copied(), 0);
+        assert!(!right.join("big.bin").exists());
+        assert!(pair.base.is_empty());
+        assert!(pair.identities.side(Side::Right).is_none());
+        pair.bandwidth_limit = None;
+        pair.right_kind = right_kind;
+        let report = pair.sync();
+        assert_eq!(report.completion(), Completion::Finished);
+        assert!(report.failures().is_empty(), "{:?}", report.failures());
+        assert_eq!(fs::read(right.join("big.bin")).unwrap(), data);
+    }
+}
+
 /// Run a paced copy into the left folder, cancel it once `BREAK_OFF_AT`
 /// arrived, then lift the pace; returns the partial it kept.
 fn break_off(pair: &mut Fixture) -> std::path::PathBuf {
@@ -2720,6 +2800,8 @@ fn break_off(pair: &mut Fixture) -> std::path::PathBuf {
         panic!("unexpected approval request");
     };
     assert_eq!(report.copied(), 0);
+    assert_eq!(report.completion(), Completion::Cancelled);
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
     let mut kept = fs::read_dir(pair.left.path().join(".foldover/partial"))
         .unwrap()
         .map(|entry| entry.unwrap().path());

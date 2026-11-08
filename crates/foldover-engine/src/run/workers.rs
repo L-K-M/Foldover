@@ -17,7 +17,7 @@ use std::time::Duration;
 use foldover_endpoint::ApplyError;
 use foldover_types::{EntryVersion, ScanControl};
 
-use super::{Executor, RunProgress, Writer, is_archive, writes};
+use super::{Completion, Executor, RunProgress, Writer, is_archive, writes};
 use crate::PlanRow;
 
 /// How often the run's thread asks its control while copies run, so a
@@ -182,6 +182,9 @@ impl<'a> Workers<'a> {
                 self.stop.store(true, Ordering::Relaxed);
                 panic::resume_unwind(payload)
             }
+        }
+        if executor.report.completion == Completion::Cancelled {
+            self.stop.store(true, Ordering::Relaxed);
         }
     }
 }
