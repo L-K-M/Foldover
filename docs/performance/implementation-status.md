@@ -43,7 +43,7 @@ clippy pass for this follow-up. Its CI and review are recorded on its PR.
 One 100k LAN no-change run completed cleanly. The earlier paired 100k
 baseline and two million-file LAN diagnostics lost SSH and failed. The log-only
 retry completed a matching-folder million-file baseline in 6,927.1 seconds at
-416.7 MB peak RSS, with zero physical writes. Earlier disconnects remain
+416.7 MB peak RSS, with zero copies, updates or archives. Earlier disconnects remain
 unexplained. Three new 100k LAN baseline/current pairs completed with zero
 changes. Median complete time was 1410.2 → 571.0 seconds on the shared host;
 all samples and the alternating pair order are retained. Warm tracked

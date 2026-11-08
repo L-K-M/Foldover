@@ -155,7 +155,7 @@ catalog still held the million-file snapshots. Its 554.6 MB peak is retained
 as a failed fixture trial, not a normal million-file preview result. The cause
 of the missing physical files is unknown. A new persistent owned corpus was
 cloned from the intact original: exactly one million actual 8 KiB files per
-side, aged 30 days, then freshly seeded with zero physical writes. That seed
+side, aged 30 days, then freshly seeded with zero copies, updates or archives. That seed
 peaked at 449.4 MB. Before aging its cache, independent streaming checks verified
 all 2,002,000 snapshot rows, the unchanged stat bytes/nanoseconds/versions, all
 other tables and the source catalog hash. File counts were checked again before
