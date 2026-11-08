@@ -5,6 +5,11 @@ no engine behavior or performance budgets change with this document.
 Scope: eleven reviews on main plus the two review documents in PRs 255 and
 256, pinned to the revisions linked in the source routing table.
 
+Accepted production work is implemented. See the
+[implementation status](implementation-status.md) and
+[qualification results](../../perf/qualification-results.md) for delivered
+changes, measurements, rejected experiments and remaining qualification gaps.
+
 ## Recommendation
 
 Implement the excess SFTP read-request and repeated journal-scan fixes first.
