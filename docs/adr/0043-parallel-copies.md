@@ -74,7 +74,10 @@ The deletion-heavy LAN diagnostic archived 1,000 files among 10,000 tracked
 files in 95.9 seconds of apply time, out of 154.5 seconds overall. This uses
 separate synthetic local/NAS folders on a shared host and establishes that
 the serial archive phase is material; it is not a paired speedup claim.
-The extension needs paired LAN measurements and regressions for overlap,
-copy and folder barriers, failure, cancellation, worker panic and undo
-before promotion. Single-worker runs and two-SFTP pairs keep their existing
+Three paired LAN samples completed with exactly 1,000 archives each: median
+apply time fell from 93.014 to 29.644 seconds, and total time from 148.290
+to 87.825 seconds. Overlap, copy and folder barriers, failure, cancellation,
+worker panic and native undo regressions pass. The extension is promoted.
+See [qualification results](../../perf/qualification-results.md) for raw
+evidence and conditions. Single-worker runs and two-SFTP pairs keep their existing
 serial behavior. Root-check cadence, commit size and durability stay fixed.

@@ -23,6 +23,11 @@ ids are the bench function names; estimates land in
 | `db_commit_100k` | `foldover-state` | `PairStore::update_base` committing 100_000 base entries |
 | `db_commit_batches_100k` | `foldover-state` | `PairStore::update_base` committing one run's 100_000 base entries and journal entries in the engine's 256-row batches |
 | `db_read_100k` | `foldover-state` | `PairStore::base` reading the 100_000-entry base back |
+| `capture_run_inputs_100k` | `foldover-engine` | Capture a pinned read view for 100,000 baseline rows and two 100,000-row snapshots |
+| `run_inputs_100k` | `foldover-engine` | Capture and decode that view into typed run inputs outside the service lock |
+| `run_inputs_read_100k` | `foldover-state` | Read the baseline and both snapshots independently |
+| `run_records_capture_100k` | `foldover-state` | Capture the pinned database view without decoding rows |
+| `run_records_capture_decode_100k` | `foldover-state` | Capture and decode the baseline and both snapshots |
 | `db_snapshot_unchanged_100k` | `foldover-state` | `PairStore::replace_snapshot` storing the same 100_000-entry observation again |
 | `db_snapshot_rewrite_100k` | `foldover-state` | `PairStore::replace_snapshot` with every one of the 100_000 fingerprints changed |
 
@@ -71,3 +76,11 @@ on runners but passes locally was set too tight, not too loose.
 3. Keep every id identical to a criterion bench function name: a
    budget without matching criterion estimates fails the check, and
    a bench without a budget is silently unchecked.
+
+## End-to-end evidence
+
+[Qualification results](qualification-results.md) summarize the measured LAN,
+local, memory and release-profile experiments. The linked compressed evidence
+and CSV index retain failed samples as well as successful runs. The
+[qualification guide](qualification.md) covers isolated engine and service
+measurements; those results do not replace physical-device or release checks.

@@ -85,9 +85,9 @@ eight-reader baseline, and a rerun with the SSH sampler still showed two
 86-second outliers (86.234, 85.765, 58.008 s). It was not promoted.
 
 The attempted 100k paired comparison stopped when its first baseline
-lost SSH; that failed sample is retained. A 1M NAS diagnostic is running.
-These qualifications are incomplete, and no 500 MB peak-RSS result is claimed for all
-cases.
+lost SSH; that failed sample is retained. The 1M NAS diagnostic also failed after an SSH disconnect.
+These LAN qualifications are incomplete. The [qualification results](qualification-results.md)
+record completed local memory cases and the retained failures.
 
 Reproduce with the isolated harness in [qualification.md](qualification.md).
 Generate an 8 KiB, 1,000-per-folder corpus, create an empty target, and run
