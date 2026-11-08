@@ -308,3 +308,52 @@ fn moving_a_refreshed_source_preserves_its_original_for_a_later_return() {
         assert_eq!(observed.finish_snapshot(), Some(false));
     }
 }
+
+#[test]
+fn overwriting_a_refreshed_destination_keeps_its_original_comparison_value() {
+    for batch in [false, true] {
+        for final_seed in [3, 2] {
+            let a = entry(entry_version(1), 100, 123, 10, b"stat-a");
+            let b = entry(entry_version(2), 100, 123, 20, b"stat-b");
+            let other = entry(entry_version(3), 100, 123, 30, b"stat-other");
+            let previous: PathMap<_> = [(path(b"a"), a.clone()), (path(b"b"), b.clone())]
+                .into_iter()
+                .collect();
+            let (mut observed, _) =
+                Observation::recycling(previous.clone(), Arc::new(PathMap::new()), Side::Left);
+            observed.record(path(b"a"), a);
+            observed.record(path(b"b"), entry(entry_version(2), 200, 456, 20, b"stat-b"));
+            observed.record(path(b"x"), other.clone());
+            observed.record(path(b"y"), if final_seed == 2 { b.clone() } else { other });
+            observed.finish_entries();
+            for from in [b"x", b"y"] {
+                if batch {
+                    observed.respell_all(&[(path(from), path(b"b"))].into_iter().collect());
+                } else {
+                    observed.respell(&path(from), path(b"b"));
+                }
+            }
+            let changed = !observed.snapshot_entries().eq(previous.iter());
+            assert_eq!(changed, final_seed != 2);
+            assert_eq!(
+                observed.finish_snapshot(),
+                Some(changed),
+                "batch={batch}, final version={final_seed}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_equal_original_can_be_respelled_away_and_back_without_a_cache_change() {
+    let original = entry(entry_version(1), 100, 123, 10, b"stat");
+    let previous: PathMap<_> = [(path(b"p"), original.clone())].into_iter().collect();
+    let (mut observed, _) =
+        Observation::recycling(previous.clone(), Arc::new(PathMap::new()), Side::Left);
+    observed.record(path(b"p"), original);
+    observed.finish_entries();
+    observed.respell(&path(b"p"), path(b"q"));
+    observed.respell(&path(b"q"), path(b"p"));
+    assert!(observed.snapshot_entries().eq(previous.iter()));
+    assert_eq!(observed.finish_snapshot(), Some(false));
+}

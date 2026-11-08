@@ -857,6 +857,7 @@ impl Observation {
             .map(|entry| self.aligned_origin(&to, entry));
         if origin.is_some() {
             self.preserve_original(from);
+            self.preserve_original(&to);
         }
         if let Some(origin) = origin
             && let Some(mut entry) = self.entries.remove(from)
@@ -916,9 +917,10 @@ impl Observation {
             .zip(&origins)
             .filter_map(|((_, to), origin)| origin.is_some().then_some(to))
             .collect();
-        for ((from, _), origin) in mappings.iter().zip(&origins) {
+        for ((from, to), origin) in mappings.iter().zip(&origins) {
             if origin.is_some() {
                 self.preserve_original(from);
+                self.preserve_original(to);
             }
         }
         for ((from, _), origin) in mappings.iter().zip(&origins) {

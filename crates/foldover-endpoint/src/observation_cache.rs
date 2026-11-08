@@ -148,13 +148,23 @@ impl Comparison {
     /// Moving or dropping a refreshed row would lose the stat/version that
     /// its compact time refers to. Preserve just these exceptional originals.
     pub(crate) fn preserve_original(&mut self, path: &SyncPath, entry: &ObservedEntry) {
-        if let Some(time) = self.original_time(path)
-            && !self.changed.contains_key(path)
-        {
+        if self.changed.contains_key(path) {
+            return;
+        }
+        let mut original = if let Some(time) = self.original_time(path) {
             let mut original = entry.clone();
             original.set_observed_at(time);
-            self.changed.insert(path.clone(), Arc::new(original));
-        }
+            original
+        } else if matches!(
+            entry.origin(),
+            ObservationOrigin::PriorEqual | ObservationOrigin::Uncompared
+        ) {
+            entry.clone()
+        } else {
+            return;
+        };
+        original.set_origin(ObservationOrigin::Uncompared);
+        self.changed.insert(path.clone(), Arc::new(original));
     }
 }
 
