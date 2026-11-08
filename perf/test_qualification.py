@@ -189,6 +189,18 @@ class HarnessTests(unittest.TestCase):
         raw = (output / "runner.tsv").read_text(encoding="utf-8")
         self.assertIn("phase\t0\tOpenEndpoints\t5678", raw)
 
+    def test_counter_values_are_retained_without_duration_units(self):
+        runner = write_runner(self.root,
+                              "printf 'counter\\t0\\tAppliedLogicalBytes\\t8192\\n'\n"
+                              "printf 'metric\\t0\\tTotal\\t9012\\n'\n")
+        result, output = self.run_harness(runner, "counter")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        measurements = self.summary(output)["measurements"]
+        self.assertEqual(len(measurements), 2)
+        self.assertEqual(measurements[0], dict(event="counter", iteration=0,
+                                             phase="AppliedLogicalBytes", value=8192))
+        self.assertEqual(measurements[1]["ns"], 9012)
+
     def test_malformed_known_record_fails_with_raw_trace_and_clear_error(self):
         runner = write_runner(self.root, process_line() +
                               "printf 'phase\\t0\\tOpenEndpoints\\tnot-a-number\\n'\n"
@@ -207,6 +219,8 @@ class HarnessTests(unittest.TestCase):
 
     def test_malformed_records_are_rejected(self):
         cases = {
+            "negative-counter": "printf 'counter\\t0\\tAppliedLogicalBytes\\t-1\\n'",
+            "short-counter": "printf 'counter\\t0\\tAppliedLogicalBytes\\n'",
             "negative-ns": "printf 'metric\\t0\\tTotal\\t-5\\n'",
             "short-phase": "printf 'phase\\t0\\tOpenEndpoints\\n'",
             "empty-name": "printf 'metric\\t0\\t\\t5\\n'",

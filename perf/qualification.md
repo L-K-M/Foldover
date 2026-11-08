@@ -94,3 +94,32 @@ service test does not start an installed daemon, IPC listener, scheduler or
 peer discovery. It changes no authentication policy or home-directory setting.
 See [qualification results](qualification-results.md) for the real fixtures,
 retained failed samples and limits.
+
+## Diagnostic units and focused probes
+
+The engine runner emits duration records as `metric`/`phase` with nanoseconds,
+and `counter` records with unitless integer `value` fields in the JSON summary.
+`PlannedLogicalBytes` and `AppliedLogicalBytes` count logical file data reported
+by the engine, not encrypted network traffic or resumed-transfer payloads.
+Use the framed relay for SFTP request/response and DATA-byte counts.
+
+Two more opt-in tests use the same explicitly marked local catalog and the
+same release test executable:
+
+```sh
+FOLDOVER_PERF_SERVICE_STATE="$FOLDOVER_PERF_ROOT/state-service" \
+  /usr/bin/time -l "$FOLDOVER_SERVICE_TEST" --ignored --exact \
+  performance_tests::million_file_service_input_lock --nocapture
+FOLDOVER_PERF_SERVICE_STATE="$FOLDOVER_PERF_ROOT/state-service" \
+  /usr/bin/time -l "$FOLDOVER_SERVICE_TEST" --ignored --exact \
+  performance_tests::million_file_service_scan_cancellation --nocapture
+```
+
+The input probe times the real capture and mount lookup under the service
+engine mutex, then decodes outside it. A second caller contends for that
+mutex; the barrier handshake is excluded from capture time. This measures
+input-lock contention, not a complete second-pair RPC or installed daemon.
+The cancellation probe waits for at least 10,000 checked entries, sends the
+real service cancellation request and polls completion every 5 ms. It covers
+local observation cancellation; input decoding, transfers and stalled remote
+I/O have separate behavior and are not qualified by this sample.

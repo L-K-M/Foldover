@@ -21,6 +21,7 @@ struct Progress {
     iteration: usize,
     checked: Cell<u64>,
     applied: Cell<u64>,
+    applied_bytes: Cell<u128>,
 }
 
 #[derive(PartialEq)]
@@ -48,8 +49,12 @@ impl RunProgress for Progress {
     }
     fn planned(&self, changes: u64, bytes: u64) {
         println!("planned\t{}\t{changes}\t{bytes}", self.iteration);
+        counter(self.iteration, "PlannedChanges", u128::from(changes));
+        counter(self.iteration, "PlannedLogicalBytes", u128::from(bytes));
     }
-    fn applied(&self, _bytes: u64) {
+    fn applied(&self, bytes: u64) {
+        self.applied_bytes
+            .set(self.applied_bytes.get() + u128::from(bytes));
         let applied = self.applied.get() + 1;
         self.applied.set(applied);
         if applied.is_multiple_of(1_000) {
@@ -59,6 +64,10 @@ impl RunProgress for Progress {
     fn waiting(&self, holder: Option<&str>) {
         println!("waiting\t{}\t{holder:?}", self.iteration);
     }
+}
+
+fn counter(iteration: usize, name: &str, value: u128) {
+    println!("counter\t{iteration}\t{name}\t{value}");
 }
 
 fn metric(iteration: usize, name: &str, elapsed: Duration) {
@@ -170,6 +179,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             iteration,
             checked: Cell::new(0),
             applied: Cell::new(0),
+            applied_bytes: Cell::new(0),
         };
         let total = Instant::now();
         let loaded = Instant::now();
@@ -236,6 +246,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             &mut || ScanControl::Continue,
             &progress,
         )?;
+        counter(
+            iteration,
+            "AppliedLogicalBytes",
+            progress.applied_bytes.get(),
+        );
         metric(iteration, "Apply", applied.elapsed());
         metric(iteration, "Commits", commit_time);
         match outcome {
