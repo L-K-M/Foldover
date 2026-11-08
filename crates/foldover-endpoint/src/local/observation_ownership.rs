@@ -93,4 +93,25 @@ mod tests {
         assert_eq!(payload, observed.entries()[&path].fingerprint.key.as_ptr());
         assert_eq!(observed.finish_snapshot(), Some(false));
     }
+
+    #[test]
+    fn a_settled_cache_hit_moves_the_original_payload_without_cloning_it() {
+        let path = SyncPath::try_from(b"a".as_slice()).unwrap();
+        let entry = ObservedEntry::for_tests(
+            EntryVersion::new(
+                EntryContent::File(Digest::from_bytes([1; 32])),
+                Digest::from_bytes([2; 32]),
+            ),
+            12,
+        );
+        let previous: PathMap<_> = [(path.clone(), entry)].into_iter().collect();
+        let payload = previous[&path].fingerprint.key.as_ptr();
+        let (mut observed, cache) =
+            Observation::recycling(previous, Arc::new(PathMap::new()), Side::Left);
+        let known = cache.get(&path).unwrap();
+        observed.reuse(path.clone(), known);
+        observed.finish_entries();
+        assert_eq!(payload, observed.entries()[&path].fingerprint.key.as_ptr());
+        assert_eq!(observed.finish_snapshot(), Some(false));
+    }
 }

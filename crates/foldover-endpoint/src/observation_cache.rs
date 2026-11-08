@@ -102,6 +102,20 @@ impl Recycled {
         Some(original)
     }
 
+    pub(crate) fn reuse(&mut self, path: &SyncPath, known: Arc<ObservedEntry>) {
+        let index = self.index(path).expect("a cache hit has an original row");
+        let original = self
+            .originals
+            .remove(&index)
+            .expect("lookup retains the original");
+        // Release this read's reference before trying to move the payload.
+        // Only another live duplicate can now require a bounded copy.
+        drop(known);
+        let mut entry = Arc::try_unwrap(original).unwrap_or_else(|shared| (*shared).clone());
+        entry.set_origin(ObservationOrigin::PriorEqual);
+        self.rows[index].1 = entry;
+    }
+
     pub(crate) fn record(&mut self, path: SyncPath, mut entry: ObservedEntry) {
         let Some(index) = self.index(&path) else {
             let handle = self
@@ -333,6 +347,23 @@ mod tests {
         observed.record(path(b"p"), entry(1));
         observed.finish_entries();
         observed.respell(&path(b"p"), path(b"q"));
+        assert_comparison(observed, &previous);
+    }
+
+    #[test]
+    fn batch_respelling_reads_all_original_flags_before_changing_any() {
+        let previous: PathMap<_> = [(path(b"b"), entry(1)), (path(b"c"), entry(1))]
+            .into_iter()
+            .collect();
+        let mut observed = observation(previous.clone());
+        observed.record(path(b"a"), entry(1));
+        observed.record(path(b"b"), entry(1));
+        observed.finish_entries();
+        observed.respell_all(
+            &[(path(b"a"), path(b"b")), (path(b"b"), path(b"a"))]
+                .into_iter()
+                .collect(),
+        );
         assert_comparison(observed, &previous);
     }
 }

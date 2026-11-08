@@ -702,6 +702,20 @@ impl Observation {
         self.pending.push(path, entry);
     }
 
+    fn reuse(&mut self, path: SyncPath, known: Arc<ObservedEntry>) {
+        if let Some(recycled) = &self.recycled {
+            recycled
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .reuse(&path, known);
+        } else {
+            self.record(
+                path,
+                Arc::try_unwrap(known).unwrap_or_else(|shared| (*shared).clone()),
+            );
+        }
+    }
+
     pub(crate) fn finish_entries(&mut self) {
         if let Some(recycled) = self.recycled.take() {
             let (rows, comparison) = recycled
@@ -856,22 +870,41 @@ impl Observation {
                 *path = to.clone();
             }
         };
-        // Compare at the final path before changing any keys. Destinations
-        // have no visible observation in the alignment pass, but can retain
-        // an unseen original from the consumed snapshot.
-        for (from, to) in mappings {
-            if let Some(entry) = self.entries.get(from) {
-                let origin = self.aligned_origin(to, entry);
-                self.entries.set_origin(from, origin);
+        // Compare every final path against the original flags before
+        // changing any flag. Mapping cycles must not make a newly observed
+        // source look like an original at another mapping's destination.
+        let origins: Vec<_> = mappings
+            .iter()
+            .map(|(from, to)| {
+                self.entries
+                    .get(from)
+                    .map(|entry| self.aligned_origin(to, entry))
+            })
+            .collect();
+        let mut targets: Vec<_> = mappings
+            .iter()
+            .zip(&origins)
+            .filter_map(|((_, to), origin)| origin.is_some().then_some(to))
+            .collect();
+        for ((from, _), origin) in mappings.iter().zip(&origins) {
+            if let Some(origin) = origin {
+                self.entries.set_origin(from, *origin);
             }
         }
-        let mut targets: Vec<_> = mappings.values().collect();
+        drop(origins);
         targets.sort_unstable();
-        self.entries
-            .retain(|path, _| mappings.contains_key(path) || targets.binary_search(&path).is_err());
+        self.entries.retain(|path, entry| {
+            (entry.origin() != ObservationOrigin::Uncompared
+                && !entry.is_excluded()
+                && mappings.contains_key(path))
+                || targets.binary_search(&path).is_err()
+        });
+        drop(targets);
         let mut rows = std::mem::take(&mut self.entries).into_rows();
-        for (path, _) in &mut rows {
-            rename(path);
+        for (path, entry) in &mut rows {
+            if entry.origin() != ObservationOrigin::Uncompared && !entry.is_excluded() {
+                rename(path);
+            }
         }
         self.entries = ObservationEntries::new(PathMapBuilder::from_rows(rows).freeze());
         for path in self
@@ -1873,7 +1906,7 @@ impl LocalEndpoint {
         if let Some(known) = previous.get(&entry.path)
             && known.fingerprint().proves_unchanged(&entry.metadata)
         {
-            observation.record(entry.path, known.as_ref().clone());
+            observation.reuse(entry.path, known);
             return Ok(None);
         }
         Ok(Some((entry, SystemTime::now())))
