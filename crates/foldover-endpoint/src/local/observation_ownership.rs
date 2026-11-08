@@ -69,6 +69,43 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn cancelling_a_directory_only_walk_stops_after_the_first_listing() {
+        use crate::{Filter, LocalEndpoint, ObserveStep, ScanControl, ScanError};
+        use std::cell::Cell;
+        use std::num::NonZeroUsize;
+        let root = tempfile::tempdir().unwrap();
+        for index in 0..32 {
+            std::fs::create_dir(root.path().join(format!("d-{index:03}"))).unwrap();
+        }
+        let endpoint = LocalEndpoint::open(root.path()).unwrap();
+        let listed = Cell::new(0);
+        let result = endpoint.observe_reporting_workers(
+            foldover_types::MetadataPolicy::default(),
+            &Filter::none(),
+            &std::collections::BTreeMap::new(),
+            &mut || {
+                if listed.get() == 0 {
+                    ScanControl::Continue
+                } else {
+                    ScanControl::Cancel
+                }
+            },
+            &mut |step| {
+                if step == ObserveStep::Listed {
+                    listed.set(listed.get() + 1);
+                }
+            },
+            NonZeroUsize::new(4).unwrap(),
+        );
+        assert!(matches!(result, Err(ScanError::Cancelled)));
+        assert_eq!(
+            listed.get(),
+            1,
+            "directory inventory must honor the caller's stop"
+        );
+    }
+
+    #[test]
     fn an_equal_result_keeps_the_original_row_and_fingerprint_allocations() {
         let path = SyncPath::try_from(b"a".as_slice()).unwrap();
         let entry = ObservedEntry::for_tests(

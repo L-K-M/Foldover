@@ -84,13 +84,14 @@ rejected as noisy and regressive: its 10k remote observations were 85.206,
 eight-reader baseline, and a rerun with the SSH sampler still showed two
 86-second outliers (86.234, 85.765, 58.008 s). It was not promoted.
 
-The 100k-pair and 1M NAS qualification is still running; this section does
-not claim it is finished, and no 500 MB peak-RSS result is claimed for all
+The attempted 100k paired comparison stopped when its first baseline
+lost SSH; that failed sample is retained. A 1M NAS diagnostic is running.
+These qualifications are incomplete, and no 500 MB peak-RSS result is claimed for all
 cases.
 
 Reproduce with the isolated harness in [qualification.md](qualification.md).
 Generate an 8 KiB, 1,000-per-folder corpus, create an empty target, and run
-three paired no-change iterations against your own `sftp://user@host/path`
+three paired no-change iterations against your own `sftp://user@host/absolute/foldover-perf-example/target`
 root with a saved binary and `--revision`:
 
 ```sh
@@ -101,7 +102,7 @@ mkdir "$FOLDOVER_PERF_ROOT/target"
 python3 perf/run-qualification.py --runner target/release/examples/performance \
   --state "$FOLDOVER_PERF_ROOT/state" \
   --left "$FOLDOVER_PERF_ROOT/source" \
-  --right "sftp://user@host/path" \
+  --right "sftp://user@host/absolute/foldover-perf-example/target" \
   --iterations 3 --label development --output "$FOLDOVER_PERF_ROOT/results"
 ```
 

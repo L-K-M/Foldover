@@ -1720,7 +1720,7 @@ impl LocalEndpoint {
                 // inventory.
                 if entry.metadata.kind() == NodeKind::Directory {
                     directories.push(entry);
-                    return ScanControl::Continue;
+                    return control();
                 }
                 let prepared = match self.prepare_entry(
                     entry,

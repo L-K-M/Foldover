@@ -40,12 +40,15 @@ A performance audit found four costs that grow with a pair's size:
   overlapping one of those keeps nothing. The window never answers with a
   short page while more follow: a walk would not, and an empty page ends
   the CLI's listing.
-- **SFTP reads:** folders settle first, then files are read on up to eight
-  sessions of the existing pool. As in ADR 0043, only the run's thread
+- **SFTP reads:** the walk lists one folder at a time, observes its folders
+  on the caller and reads its files on up to eight pooled sessions. As in ADR 0043, only the run's thread
   records results and asks the run's control. The handoff holds at most
   twice the worker count of queued, running and completed-but-unrecorded
-  owned jobs, and listed file metadata is released in 256-row pages as
-  verified rows replace it. Content verification is unchanged. Endpoints
+  owned jobs. Each folder's listing is released as its entries are handed
+  off; the walk does not retain the whole tree's file metadata. A single
+  wide flat folder is still materialized by `Session::read_dir`. Late
+  directory failures suppress any already read descendants. Content
+  verification is unchanged. Endpoints
   without a session pool stay serial. A read waiting for a session gives
   up when the run cancels, so a server that went away cannot hold up
   cancelling.

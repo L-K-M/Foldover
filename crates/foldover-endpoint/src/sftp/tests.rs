@@ -534,6 +534,110 @@ fn proceed() -> ScanControl {
     ScanControl::Continue
 }
 
+#[test]
+fn cancelling_a_directory_listing_does_not_process_its_remaining_rows() {
+    use std::cell::Cell;
+    for parallel in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..32 {
+            fs::create_dir(directory.path().join(format!("d-{index:03}"))).unwrap();
+        }
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let remote = if parallel {
+            pooled(directory.path(), log.path())
+        } else {
+            sftp(directory.path())
+        };
+        let Some(remote) = remote else { return };
+        let listed = Cell::new(0);
+        let result = remote.observe_reporting(
+            PairOptions::default().metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut || {
+                if listed.get() == 0 {
+                    ScanControl::Continue
+                } else {
+                    ScanControl::Cancel
+                }
+            },
+            &mut |step| {
+                if step == ObserveStep::Listed {
+                    listed.set(listed.get() + 1);
+                }
+            },
+        );
+        assert!(matches!(result, Err(ScanError::Cancelled)));
+        assert_eq!(
+            listed.get(),
+            1,
+            "directory rows must honor the caller's stop"
+        );
+    }
+}
+
+#[test]
+fn owned_observations_preserve_exact_cache_values_and_report_real_changes() {
+    for parallel in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("folder")).unwrap();
+        for index in 0..40 {
+            fs::write(
+                directory.path().join(format!("folder/{index:03}")),
+                b"content",
+            )
+            .unwrap();
+        }
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let remote = if parallel {
+            pooled(directory.path(), log.path())
+        } else {
+            sftp(directory.path())
+        };
+        let Some(remote) = remote else { return };
+        let policy = PairOptions::default().metadata();
+        let previous = remote
+            .observe_from(policy, &Filter::none(), &BTreeMap::new(), &mut proceed)
+            .unwrap()
+            .into_snapshot();
+        let expected = previous.clone();
+        let mut observed = remote
+            .observe_owned(
+                policy,
+                &Filter::none(),
+                previous,
+                Arc::new(foldover_types::PathMap::new()),
+                foldover_types::Side::Right,
+                &mut proceed,
+                &mut |_| {},
+            )
+            .unwrap();
+        assert!(observed.snapshot_entries().eq(expected.iter()));
+        assert_eq!(observed.finish_snapshot(), Some(false));
+
+        fs::write(directory.path().join("folder/000"), b"changed").unwrap();
+        fs::remove_file(directory.path().join("folder/001")).unwrap();
+        let previous = observed.into_snapshot();
+        let borrowed = remote
+            .observe_from(policy, &Filter::none(), &previous, &mut proceed)
+            .unwrap();
+        let mut owned = remote
+            .observe_owned(
+                policy,
+                &Filter::none(),
+                previous,
+                Arc::new(foldover_types::PathMap::new()),
+                foldover_types::Side::Right,
+                &mut proceed,
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(owned.versions(), borrowed.versions());
+        assert_eq!(owned.finish_snapshot(), Some(true));
+        assert!(!owned.entries().contains_key(&path(b"folder/001")));
+    }
+}
+
 fn path(bytes: &[u8]) -> SyncPath {
     SyncPath::try_from(bytes).unwrap()
 }

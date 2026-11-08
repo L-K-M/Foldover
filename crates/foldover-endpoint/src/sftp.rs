@@ -43,6 +43,7 @@ use crate::local::archive::{
 use crate::local::filter::{IGNORE_FILE, IGNORE_FILE_LIMIT, parse_ignore_file};
 use crate::local::version::{Observed, Payload, entry_version, metadata_version};
 use crate::local::{Fingerprint, TEMPORARY_PREFIX, child_path, protected, temporary};
+use crate::observation_cache::Cache;
 use crate::observation_reads::Reads;
 use crate::{
     ApplyError, ArchivedItem, ArchivedRun, Filter, ListedEntry, ListedKind, NodeKind, Observation,
@@ -482,10 +483,8 @@ impl SftpEndpoint {
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<Observation, ScanError> {
-        let mut observation =
-            self.observe_reporting(policy, filter, &previous, control, progress)?;
-        observation.recycle_from(previous, base, side);
-        Ok(observation)
+        let (observation, previous) = Observation::recycling(previous, base, side);
+        self.observe_cached(policy, filter, &previous, observation, control, progress)
     }
 
     pub fn observe_from(
@@ -500,8 +499,8 @@ impl SftpEndpoint {
 
     /// `observe_from`, reporting each entry as it is found and again once
     /// its version is known. The walk lists one directory at a time and
-    /// streams its file jobs to one bounded reader pool, so a future compact
-    /// tree's metadata is never held whole. One gap remains: a single wide
+    /// streams its file jobs to one bounded reader pool. Each folder's
+    /// listing is released before the walk reaches the next. A single wide
     /// flat folder is still materialized by `Session::read_dir`, which
     /// returns the whole folder as one `Vec`; only the walk's own inventory
     /// is bounded, not the server's per-folder reply.
@@ -513,14 +512,42 @@ impl SftpEndpoint {
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<Observation, ScanError> {
+        self.observe_cached(
+            policy,
+            filter,
+            &Cache::Borrowed(previous),
+            Observation::default(),
+            control,
+            progress,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe_cached(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: &Cache<'_>,
+        observation: Observation,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+    ) -> Result<Observation, ScanError> {
         let workers = match self.connect {
             Some(_) => PARALLEL_READS,
             None => NonZeroUsize::MIN,
         };
         if workers == NonZeroUsize::MIN {
-            self.observe_reporting_serial(policy, filter, previous, control, progress)
+            self.observe_reporting_serial(policy, filter, previous, observation, control, progress)
         } else {
-            self.observe_reporting_overlapped(policy, filter, previous, control, progress, workers)
+            self.observe_reporting_overlapped(
+                policy,
+                filter,
+                previous,
+                observation,
+                control,
+                progress,
+                workers,
+            )
         }
     }
 
@@ -529,11 +556,11 @@ impl SftpEndpoint {
         &self,
         policy: MetadataPolicy,
         filter: &Filter,
-        previous: &impl crate::PreviousObservation,
+        previous: &Cache<'_>,
+        mut observation: Observation,
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<Observation, ScanError> {
-        let mut observation = Observation::default();
         let mut unavailable = PathPrefixIndex::default();
         self.walk_observation(
             policy,
@@ -550,6 +577,9 @@ impl SftpEndpoint {
                 Ok(())
             },
         )?;
+        if control() == ScanControl::Cancel {
+            return Err(ScanError::Cancelled);
+        }
         Self::finish_observation(observation, unavailable)
     }
 
@@ -562,12 +592,12 @@ impl SftpEndpoint {
         &self,
         policy: MetadataPolicy,
         filter: &Filter,
-        previous: &impl crate::PreviousObservation,
+        previous: &Cache<'_>,
+        mut observation: Observation,
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
         workers: NonZeroUsize,
     ) -> Result<Observation, ScanError> {
-        let mut observation = Observation::default();
         let mut unavailable = PathPrefixIndex::default();
         let stop = AtomicBool::new(false);
         let read = |(path, attributes): &(SyncPath, Attributes),
@@ -624,7 +654,7 @@ impl SftpEndpoint {
         &self,
         policy: MetadataPolicy,
         filter: &Filter,
-        previous: &impl crate::PreviousObservation,
+        previous: &Cache<'_>,
         observation: &mut Observation,
         unavailable: &mut PathPrefixIndex,
         control: &mut impl FnMut() -> ScanControl,
@@ -666,6 +696,9 @@ impl SftpEndpoint {
                 }
             };
             for (name, attributes) in entries {
+                if control() == ScanControl::Cancel {
+                    return Err(ScanError::Cancelled);
+                }
                 let Some((path, attributes)) = classify_listing_entry(
                     directory.as_ref(),
                     &name,
@@ -728,7 +761,7 @@ impl SftpEndpoint {
         &self,
         path: &SyncPath,
         attributes: &Attributes,
-        previous: &impl crate::PreviousObservation,
+        previous: &Cache<'_>,
         policy: MetadataPolicy,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<ObservedEntry, ScanError> {
@@ -744,7 +777,7 @@ impl SftpEndpoint {
             && known.version() == version
             && known.fingerprint().same_stat(&key, size)
         {
-            return Ok(known.clone());
+            return Ok(known.as_ref().clone());
         }
 
         Ok(ObservedEntry::new(
@@ -1873,14 +1906,11 @@ fn classify_listing_entry(
     name: &[u8],
     attributes: Attributes,
     filter: &Filter,
-    previous: &impl crate::PreviousObservation,
+    previous: &Cache<'_>,
     observation: &mut Observation,
 ) -> Result<Option<(SyncPath, Attributes)>, ScanError> {
     let path = child_path(directory, name)?;
-    let path = match previous.get_key_value(&path) {
-        Some((stored, _)) => stored.clone(),
-        None => path,
-    };
+    let path = previous.key(&path).unwrap_or(path);
     if protected(name) {
         if temporary(name) {
             observation.leftovers.push(path);
