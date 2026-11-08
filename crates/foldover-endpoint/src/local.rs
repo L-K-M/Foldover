@@ -25,16 +25,17 @@ use foldover_fs::{
 #[cfg(target_os = "macos")]
 use foldover_fs::{DeclaredSupport, FilesystemFeature};
 pub use foldover_types::ScanControl;
+use foldover_types::{
+    BaselineEntry, Digest, EntryVersion, InvalidSyncPath, MetadataPolicy, NameMatching, PathMap,
+    PathMapBuilder, PathPrefixIndex, Side, SyncPath,
+};
 #[cfg(target_os = "macos")]
 use foldover_types::{CaseMatching, UnicodeMatching};
-use foldover_types::{
-    Digest, EntryVersion, InvalidSyncPath, MetadataPolicy, NameMatching, PathMap, PathMapBuilder,
-    PathPrefixIndex, SyncPath,
-};
 
 use version::{Attribute, Observed, Payload, capture_for, entry_version, metadata_version};
 
 use crate::observation_reads::Reads;
+use crate::observation_versions::{ObservedVersion, VersionPoolBuilder};
 use crate::{ListedEntry, ListedKind, ObserveStep};
 
 pub(crate) use apply::Archiving;
@@ -411,45 +412,55 @@ impl Fingerprint {
     }
 }
 
+/// One verified observation: an exact version handle plus the exact stat it
+/// was derived from.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObservedEntry {
-    data: Arc<ObservedData>,
-}
-
-/// Verified observations are immutable. Snapshot reuse and held previews can
-/// share the same exact version and fingerprint instead of copying both.
-#[derive(Debug, Eq, PartialEq)]
-struct ObservedData {
-    version: EntryVersion,
+    version: Option<ObservedVersion>,
     fingerprint: Fingerprint,
 }
 
 impl ObservedEntry {
     pub(crate) fn new(version: EntryVersion, fingerprint: Fingerprint) -> Self {
+        Self::with_version(ObservedVersion::single(version), fingerprint)
+    }
+
+    pub(crate) fn with_version(version: ObservedVersion, fingerprint: Fingerprint) -> Self {
         Self {
-            data: Arc::new(ObservedData {
-                version,
-                fingerprint,
-            }),
+            version: Some(version),
+            fingerprint,
         }
     }
 
     pub(crate) fn fingerprint(&self) -> &Fingerprint {
-        &self.data.fingerprint
+        &self.fingerprint
     }
 
+    /// The resolved version. Every normal entry holds one; the option is
+    /// internal bookkeeping.
     pub fn version(&self) -> EntryVersion {
-        self.data.version
+        self.version
+            .as_ref()
+            .expect("an observed entry always holds a version")
+            .version()
+    }
+
+    /// The version handle, for previews that must resolve it after the run
+    /// and its inputs are gone.
+    pub fn observed_version(&self) -> ObservedVersion {
+        self.version
+            .clone()
+            .expect("an observed entry always holds a version")
     }
 
     /// Bytes a copy of this entry's data needs.
     pub fn size(&self) -> u64 {
-        self.fingerprint().size
+        self.fingerprint.size
     }
 
     /// Opaque bytes for a snapshot store.
     pub fn fingerprint_bytes(&self) -> Vec<u8> {
-        self.fingerprint().to_bytes()
+        self.fingerprint.to_bytes()
     }
 
     #[cfg(test)]
@@ -473,6 +484,60 @@ impl ObservedEntry {
     /// remains allocated after decoding.
     pub fn restore_owned(version: EntryVersion, fingerprint: Vec<u8>) -> Option<Self> {
         Some(Self::new(version, Fingerprint::from_owned(fingerprint)?))
+    }
+}
+
+/// Builds one side's observed snapshot against the shared immutable base.
+///
+/// A version that exactly matches the baseline row's side resolves to that
+/// row; anything else is appended to one per-side pool. The base is shared,
+/// not copied, so a snapshot holds a handle per row instead of a second
+/// version per row.
+pub struct SnapshotBuilder {
+    versions: VersionPoolBuilder,
+    rows: PathMapBuilder<ObservedEntry>,
+    side: Side,
+}
+
+impl SnapshotBuilder {
+    /// A builder over `base` for `side`, with room for `capacity` rows.
+    pub fn new(base: Arc<PathMap<BaselineEntry>>, side: Side, capacity: usize) -> Self {
+        Self {
+            versions: VersionPoolBuilder::new(base),
+            rows: PathMapBuilder::with_capacity(capacity),
+            side,
+        }
+    }
+
+    /// Adds one observed row. `false` when `fingerprint` is not a valid
+    /// fingerprint; nothing is interned in that case. The path is consumed
+    /// once, borrowed only to resolve its baseline row.
+    pub fn insert(&mut self, path: SyncPath, version: EntryVersion, fingerprint: &[u8]) -> bool {
+        let Some(fingerprint) = Fingerprint::from_bytes(fingerprint) else {
+            return false;
+        };
+        let version = self.versions.intern(&path, self.side, version);
+        self.rows
+            .push(path, ObservedEntry::with_version(version, fingerprint));
+        true
+    }
+
+    /// Seals the appended versions first, then freezes the rows. Handles
+    /// already handed out keep the pool alive.
+    pub fn freeze(self) -> PathMap<ObservedEntry> {
+        let Self {
+            versions,
+            rows,
+            side: _,
+        } = self;
+        drop(versions.freeze());
+        rows.freeze()
+    }
+
+    /// Number of appended versions, for tests.
+    #[cfg(test)]
+    pub(crate) fn owned_versions(&self) -> usize {
+        self.versions.owned_len()
     }
 }
 
@@ -2002,23 +2067,113 @@ mod tests {
         assert!(ObservedEntry::restore_owned(version, short.to_vec()).is_none());
     }
 
+    /// The inline representation is bounded: a version handle plus the
+    /// exact fingerprint payload, with no shared data allocation.
+    #[cfg(target_pointer_width = "64")]
     #[test]
-    fn cloning_an_observation_shares_its_immutable_payload() {
-        let version = EntryVersion::new(
-            foldover_types::EntryContent::File(Digest::from_bytes([1; Digest::BYTE_LEN])),
-            Digest::from_bytes([2; Digest::BYTE_LEN]),
-        );
+    fn observed_entry_is_56_bytes_on_64_bit() {
+        assert_eq!(size_of::<ObservedEntry>(), 56);
+    }
+
+    fn path(bytes: &[u8]) -> SyncPath {
+        SyncPath::try_from(bytes).unwrap()
+    }
+
+    fn file_version(content: u8, metadata: u8) -> EntryVersion {
+        EntryVersion::new(
+            foldover_types::EntryContent::File(Digest::from_bytes([content; Digest::BYTE_LEN])),
+            Digest::from_bytes([metadata; Digest::BYTE_LEN]),
+        )
+    }
+
+    fn fingerprint_bytes(key: u8) -> Vec<u8> {
         let mut bytes = vec![0; FINGERPRINT_HEADER_BYTES];
-        bytes.extend_from_slice(&[7; 93]);
+        bytes.extend_from_slice(&[key; 93]);
+        bytes
+    }
+
+    /// An inline entry clones by value: the fingerprint payload is copied,
+    /// so the clone stays valid when the original is dropped.
+    #[test]
+    fn cloning_an_observation_copies_its_value() {
+        let version = file_version(1, 2);
+        let bytes = fingerprint_bytes(7);
         let original = ObservedEntry::restore(version, &bytes).unwrap();
         let cloned = original.clone();
-        assert_eq!(
+        assert_ne!(
             original.fingerprint().key.as_ptr(),
             cloned.fingerprint().key.as_ptr()
         );
+        assert_eq!(cloned, original);
         drop(original);
         assert_eq!(cloned.version(), version);
         assert_eq!(cloned.fingerprint_bytes(), bytes);
+    }
+
+    #[test]
+    fn canonical_builder_resolves_unequal_metadata_sides() {
+        let left = file_version(1, 2);
+        let right = file_version(1, 3);
+        let base = BaselineEntry::new(left, right).unwrap();
+        let map = PathMap::from_sorted(vec![(path(b"a"), base)]).unwrap();
+        let mut builder = SnapshotBuilder::new(Arc::new(map), Side::Left, 2);
+        let bytes = fingerprint_bytes(9);
+
+        // An exact left-side match resolves to the baseline row.
+        assert!(builder.insert(path(b"a"), left, &bytes));
+        assert_eq!(builder.owned_versions(), 0);
+
+        // The right side's version does not match the left side, so it
+        // appends an owned version instead of borrowing the wrong row.
+        assert!(builder.insert(path(b"a"), right, &bytes));
+        assert_eq!(builder.owned_versions(), 1);
+
+        let snapshot = builder.freeze();
+        let entry = snapshot.get(&path(b"a")).unwrap();
+        assert_eq!(entry.version(), right);
+        assert_eq!(entry.fingerprint_bytes(), bytes);
+    }
+
+    #[test]
+    fn canonical_builder_skips_invalid_fingerprints() {
+        let mut builder = SnapshotBuilder::new(Arc::new(PathMap::new()), Side::Left, 1);
+        let version = file_version(1, 2);
+        let short = vec![0; FINGERPRINT_HEADER_BYTES - 1];
+        assert!(!builder.insert(path(b"a"), version, &short));
+        assert_eq!(builder.owned_versions(), 0);
+        assert!(builder.freeze().is_empty());
+    }
+
+    #[test]
+    fn builder_versions_survive_builder_and_map_drop() {
+        let version = file_version(4, 5);
+        let bytes = fingerprint_bytes(1);
+        let mut builder = SnapshotBuilder::new(Arc::new(PathMap::new()), Side::Right, 1);
+        assert!(builder.insert(path(b"new"), version, &bytes));
+        let snapshot = builder.freeze();
+        let handle = snapshot.get(&path(b"new")).unwrap().observed_version();
+        drop(snapshot);
+        assert_eq!(handle.version(), version);
+    }
+
+    #[test]
+    fn equal_versions_and_fingerprints_compare_equal_across_pools() {
+        let version = file_version(3, 4);
+        let bytes = fingerprint_bytes(2);
+        let mut first = SnapshotBuilder::new(Arc::new(PathMap::new()), Side::Left, 1);
+        first.insert(path(b"a"), version, &bytes);
+        let mut second = SnapshotBuilder::new(Arc::new(PathMap::new()), Side::Right, 1);
+        second.insert(path(b"a"), version, &bytes);
+        let first_entry = first.freeze().get(&path(b"a")).unwrap().clone();
+        let second_entry = second.freeze().get(&path(b"a")).unwrap().clone();
+        assert_eq!(first_entry, second_entry);
+
+        let mut changed = bytes.clone();
+        changed[FINGERPRINT_HEADER_BYTES] ^= 1;
+        let mut third = SnapshotBuilder::new(Arc::new(PathMap::new()), Side::Left, 1);
+        third.insert(path(b"a"), version, &changed);
+        let third_entry = third.freeze().get(&path(b"a")).unwrap().clone();
+        assert_ne!(first_entry, third_entry);
     }
 
     /// Shrinking a Vec may keep its old malloc size class. A new payload
