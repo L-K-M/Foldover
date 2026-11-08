@@ -3010,21 +3010,26 @@ mod tests {
         fs::write(temporary.path().join("changed"), b"before").unwrap();
         fs::write(temporary.path().join("safe"), b"keep").unwrap();
         let endpoint = LocalEndpoint::open(temporary.path()).unwrap();
-        let mut listed = 0;
+        // A streamed first file may finish before the second listing.
+        // Change this file at its read boundary, after its stat was listed,
+        // so the regression depends on neither scheduling nor readdir order.
+        let read = |(entry, _): &(LocalEntry, SystemTime), asked: &dyn Fn() -> ScanControl| {
+            if entry.path.as_bytes() == b"changed" {
+                fs::write(temporary.path().join("changed"), b"after").unwrap();
+            }
+            endpoint.entry_version(entry, ALL, &mut || asked())
+        };
+        let previous = BTreeMap::new();
         let observation = endpoint
-            .observe_reporting(
+            .observe_cached_overlapped_with(
                 ALL,
                 &Filter::none(),
-                &BTreeMap::new(),
+                &Cache::Borrowed(&previous),
+                Observation::default(),
                 &mut || ScanControl::Continue,
-                &mut |step| {
-                    if step == ObserveStep::Listed {
-                        listed += 1;
-                        if listed == 2 {
-                            fs::write(temporary.path().join("changed"), b"after").unwrap();
-                        }
-                    }
-                },
+                &mut |_| {},
+                NonZeroUsize::new(4).unwrap(),
+                &read,
             )
             .unwrap();
         assert_eq!(observation.entries().len(), 1);

@@ -1038,3 +1038,5 @@ fn a_name_a_folder_stores_decomposed_syncs_once() {
 }
 
 mod archive_gate;
+
+mod archive_parallel;
