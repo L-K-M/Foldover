@@ -70,6 +70,8 @@ pub struct Quirks {
     pub workers: NonZeroUsize,
     /// How long each copy into the folder takes, outside its lock.
     pub copy_time: Duration,
+    /// How long each file/link archive takes, outside its lock.
+    pub archive_time: Duration,
 }
 
 impl Default for Quirks {
@@ -82,6 +84,7 @@ impl Default for Quirks {
             capacity: None,
             workers: NonZeroUsize::MIN,
             copy_time: Duration::ZERO,
+            archive_time: Duration::ZERO,
         }
     }
 }
@@ -108,6 +111,14 @@ pub enum Replace {
 /// A copy into a folder, counted while it lives.
 struct Copying<'a>(&'a MemoryEndpoint);
 
+struct ArchivingEntry<'a>(&'a MemoryEndpoint);
+
+impl Drop for ArchivingEntry<'_> {
+    fn drop(&mut self) {
+        self.0.folder().archiving -= 1;
+    }
+}
+
 impl Drop for Copying<'_> {
     fn drop(&mut self) {
         self.0.folder().copying -= 1;
@@ -133,6 +144,10 @@ struct Folder {
     /// Copies into the folder in progress, and the most at once.
     copying: usize,
     peak_copies: usize,
+    archiving: usize,
+    peak_archives: usize,
+    archive_barrier_broken: bool,
+    panic_on_archive: bool,
     temporaries: u64,
     /// Folded paths kept only in the cloud, as iCloud evicts them.
     evicted: std::collections::BTreeSet<Vec<u8>>,
@@ -226,6 +241,10 @@ impl MemoryEndpoint {
                 fault: None,
                 copying: 0,
                 peak_copies: 0,
+                archiving: 0,
+                peak_archives: 0,
+                archive_barrier_broken: false,
+                panic_on_archive: false,
                 temporaries: 0,
                 evicted: std::collections::BTreeSet::new(),
             })),
@@ -251,9 +270,34 @@ impl MemoryEndpoint {
         self.folder().peak_copies
     }
 
+    /// The most independent file/link archives in progress together.
+    pub fn peak_archives(&self) -> usize {
+        self.folder().peak_archives
+    }
+
+    /// Whether copies and archives stayed separate, and folder removals
+    /// waited for every in-flight file/link archive on this endpoint.
+    pub fn archive_barriers_held(&self) -> bool {
+        !self.folder().archive_barrier_broken
+    }
+
+    /// Panic at the next file/link archive, outside the folder's lock.
+    pub fn inject_archive_panic(&self) {
+        self.folder().panic_on_archive = true;
+    }
+
+    fn archiving(&self) -> ArchivingEntry<'_> {
+        let mut folder = self.folder();
+        folder.archive_barrier_broken |= folder.copying != 0;
+        folder.archiving += 1;
+        folder.peak_archives = folder.peak_archives.max(folder.archiving);
+        ArchivingEntry(self)
+    }
+
     /// Count a copy into the folder until the guard drops.
     fn copying(&self) -> Copying<'_> {
         let mut folder = self.folder();
+        folder.archive_barrier_broken |= folder.archiving != 0;
         folder.copying += 1;
         folder.peak_copies = folder.peak_copies.max(folder.copying);
         Copying(self)
@@ -770,9 +814,25 @@ impl MemoryEndpoint {
         current: &ObservedEntry,
         run: &RunScope,
     ) -> Result<(), ApplyError> {
+        let _archiving = if current.version().kind() != foldover_types::EntryKind::Directory {
+            let guard = self.archiving();
+            let (delay, crash) = {
+                let mut folder = self.folder();
+                (
+                    folder.quirks.archive_time,
+                    std::mem::take(&mut folder.panic_on_archive),
+                )
+            };
+            assert!(!crash, "injected archive panic");
+            std::thread::sleep(delay);
+            Some(guard)
+        } else {
+            None
+        };
         let stored = self.verified(path, current, run.options().metadata())?;
         let mut folder = self.folder();
         if let Node::Directory { .. } = stored.node {
+            folder.archive_barrier_broken |= folder.archiving != 0;
             if folder.children(&stored.path).next().is_some() {
                 return Err(ApplyError::NotEmpty(path.clone()));
             }
