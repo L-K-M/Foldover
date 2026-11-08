@@ -37,12 +37,16 @@ cargo run --locked --release -p foldover-net --example sftp_probe -- \
 ```
 
 The CSV keeps the per-round `*_ns` latency columns and adds `data_bytes`, the
-payload bytes the read delivered. The probe still stats the fixture before and
-after every round and fails if it changed. In each JSONL log, response events
-with `"kind":103` are `SSH_FXP_DATA`; count those per run to compare bounded
-versus unknown read packet counts. Keep the target, fixture, rounds and host
-load with the result, and compare at least three paired runs. No run is
-recorded in this revision: this only documents the invocation.
+payload bytes the read delivered. The probe stats the fixture before and
+after each round and fails if the byte count or checked attributes change.
+Request events with `"kind":5` are `SSH_FXP_READ`; count those to compare the
+read-request budget. Response events with `"kind":103` are `SSH_FXP_DATA`;
+sum their `data_bytes` to check the payload count. Both read modes can return
+the same number of DATA frames despite very different READ counts. The relay
+also records outstanding requests and framed protocol bytes, excluding SSH
+encryption overhead. Keep the target, fixture, rounds and host load with the
+result, and compare at least three paired runs. No run is recorded in this
+revision: this only documents the invocation.
 
 Run the deterministic request budgets with:
 

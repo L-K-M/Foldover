@@ -31,7 +31,7 @@ def parse_nonnegative_int(field, line_number, name):
 
 
 def parse_record(line, line_number):
-    """Parse a process/phase/metric record, or return None for pass-through lines."""
+    """Parse a process/phase/metric/counter record, or return None for pass-through lines."""
     text = line.rstrip("\n")
     fields = text.split("\t")
     event = fields[0]
@@ -50,9 +50,10 @@ def parse_record(line, line_number):
             raise ParseError(f"line {line_number}: malformed process record {text!r}: "
                              f"PID {pid} is not a positive process id")
         return ("process", pid)
+    unit_name = "VALUE" if event == "counter" else "NANOS"
     if len(fields) != 4:
         raise ParseError(f"line {line_number}: malformed {event} record {text!r}: "
-                         f"expected '{event}\\tITERATION\\tNAME\\tNANOS'")
+                         f"expected '{event}\\tITERATION\\tNAME\\t{unit_name}'")
     iteration = parse_nonnegative_int(fields[1], line_number, f"{event} iteration")
     if not fields[2]:
         raise ParseError(f"line {line_number}: malformed {event} record {text!r}: empty name")

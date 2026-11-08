@@ -4,7 +4,7 @@ The worthwhile changes in the [action plan](../docs/performance/action-plan.md)
 are implemented. These measurements separate completed runs, failed runs and
 unqualified cases. They do not establish release readiness.
 
-The [evidence bundle](results/qualification-2026-11-08.tar.gz) contains 83 cases:
+The [evidence bundle](results/qualification-2026-11-08.tar.gz) contains 94 cases:
 sanitized JSON summaries, traces, resource reports, samples and provenance.
 The [index](results/index.csv) records revisions, binary hashes, return codes,
 per-iteration timings and kernel peak RSS; the [manifest](results/manifest.json)
@@ -18,7 +18,10 @@ working directory.
 Runs used an Apple M4 Max (Mac16,9, 14 CPU cores, 36 GiB RAM), macOS 27.0.1,
 and Rust 1.99.0. The host was shared, with background work and uncontrolled
 OS caches. No idle-host, cold-cache or network RTT claim is made. The NAS
-hardware and SSH disconnect cause were not established. LAN fixtures used
+hardware and SSH disconnect cause were not established. A later preflight
+recorded Linux `6.12.105-production+truenas`, OpenSSH 9.2p1 on the server and
+OpenSSH 10.3 on the client. These are environment observations, not a cause
+for the earlier disconnects. LAN fixtures used
 8 KiB unique deterministic SHAKE documents, 1,000 files per directory.
 
 Memory uses decimal MB and a strict 500,000,000-byte comparison. Kernel peak
@@ -97,6 +100,40 @@ version lifetimes and exact cache comparison. These results cover one active
 preview and these path/metadata distributions, not arbitrary concurrent plans
 or an installed-agent memory guarantee.
 
+## Additional workload and service checks
+
+Eight complete local cases cover 10,000 flat 1 KiB files and 10,000 files
+under eight Unicode directory levels at 32 KiB each. Both fixtures passed
+initial copy, no-change, exactly 100 content edits, and then 100 different
+atomic replacements plus 100 different deletions. The initial deep copy
+also created 4,254 directories. Each edit case copied 100 files; each final
+case copied 100 and archived 100. No-change cases proposed no writes.
+Per-case verifiers compared counters, file/directory path sets and content
+hashes. A separate parent check hashed all 9,900 final files on each side.
+These are single shared-host observations, not paired speedup measurements.
+
+The real million-file Service input probe measured 0.593 ms for capture and
+mount lookup under the engine mutex, 0.610 ms waiting by a contending caller,
+and 3.613 s decoding after release. The barrier handshake is excluded from
+capture time. A separate service scan cancelled after 10,228 checked entries
+and settled in 37.673 ms, with completion polled every 5 ms. These focused
+probes do not measure installed-daemon RPCs, input-decode cancellation or
+stalled remote I/O. Their peaks of 454.0 and 456.6 MB cover input loading and
+a cancelled scan, not a completed preview or sync.
+
+A known 12,288-byte local copy and its following no-change run verified the
+new logical-byte counters: 12,288 and zero respectively. Counter values are
+retained separately from duration nanoseconds; logical bytes do not describe
+SSH traffic or resumed-transfer payloads.
+
+Two new budgets cover one million prefix queries against 10,000 roots,
+with shallow and deeper Unicode paths. Each fixture asserts 500,000 hits
+and 500,000 boundary-sibling misses before timing. The full gate measured
+123.8 and 387.8 ms against new 369 and 1,147 ms limits, calibrated at about
+three times the earlier medians. Existing limits are unchanged. These time
+`contains_ancestor`; setup and allocation counts are excluded. Raw Criterion
+samples and calibration provenance are in the evidence bundle.
+
 ## Completed and failed LAN qualification
 
 The clean 100k no-change run completed with zero copies, updates or archives:
@@ -135,8 +172,9 @@ so the earlier disconnects remain unexplained transport failures.
 
 ## Verification and remaining gaps
 
-All seventeen benchmark medians passed with the final exact-union
-reservation. The evidence bundle includes the final gate table.
+All nineteen benchmark medians passed with the final exact-union
+reservation, including the two new prefix-scaling cases. The seventeen
+existing limits are unchanged. The evidence bundle includes the final gate table.
 The device matrix passed on case-sensitive APFS, HFS+, exFAT and FAT32.
 FFI binding drift/type resolution, layer checks, agent lifecycle smoke and
 focused tests passed locally. The full local CI command still reports three
@@ -145,7 +183,7 @@ resource-fork work bounds, quarantine preservation and archive-restoration
 mode expectations. They are not reported as passing. CI/review for the final
 commit is recorded on the integration PR.
 
-Stable-target million-file LAN runs, true cold-cache runs, installed-daemon
+Completed million-file LAN qualification, true cold-cache runs, installed-daemon
 qualification, the full physical-device/overnight matrix and release/beta
 qualification remain. Wide flat directories, deeper paths, more metadata,
 multiple active previews, HDDs and restrictive SSH servers can change time

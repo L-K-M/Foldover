@@ -19,7 +19,8 @@ The benchmark budgets and sync safety policies are unchanged.
 | X3 release profile | Three paired 10k runs found no repeatable runtime gain from thin LTO/one codegen unit. Keep the release defaults. Build timings used different cache states and do not establish a clean-build cost ratio. |
 | X4 archives | Independent file/link archives use the bounded write workers, after copies and before folder removals. Three LAN pairs improved median apply time from 93.014 to 29.644 s for 1,000 deletions. Failure, cancel, panic, single-worker and native undo regressions pass. [ADR 0043](../adr/0043-parallel-copies.md). |
 
-All seventeen local benchmark medians pass their existing budgets. Specific
+All nineteen local benchmark medians pass, including the two new million-query
+prefix cases. The seventeen existing limits are unchanged. Specific
 real million-file local engine cases peak below 500 MB: 473.9 MB for two
 populated folders establishing a baseline and 498.3 MB for periodic rehashes.
 The final Service preview over expired caches peaks at 489.9 MB while holding
@@ -35,6 +36,6 @@ integration CI and review are recorded on the PR.
 One 100k LAN no-change run completed cleanly. The attempted paired 100k
 baseline and the million-file LAN diagnostic lost SSH and failed. No
 million-file LAN qualification, complete overnight/device release matrix,
-or beta/release readiness is claimed. Re-run those on a stable target;
+or beta/release readiness is claimed. Complete those runs with connection diagnostics;
 stat-only SFTP trust, weaker durability, larger commit batches, less frequent
 root checks and the other excluded proposals remain outside this work.
