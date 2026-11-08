@@ -28,11 +28,12 @@ were absent before qualification and were claimed for the test. No home,
 state, IPC-authentication or production-source override was used. The GUI was
 closed and relaunched during some background runs. Manually launched agent
 sessions used the same installed binary and are labelled separately from
-SMAppService lifecycle checks. The recorded binary hashes identify each build. The long NAS, local metadata
-and initial memory runs used the descriptor-fixed build from PR 271. Final
-installed cancellation checks used the later candidate containing PR 272 and
-the lease-wait fix from PR 274; these are not presented as reruns of the
-entire matrix on one binary.
+SMAppService lifecycle checks. The recorded binary hashes identify each build. The long NAS and corrected
+local metadata runs used the descriptor-fixed build from PR 271. The initial
+local million-file and memory runs used `61f73c5`. Final memory and installed
+cancellation checks used the later candidate containing PR 272 and the
+lease-wait fix from PR 274; these are not presented as reruns of the entire
+matrix on one binary.
 
 CLI status latency includes starting the CLI and its IPC round trip; it is not
 an isolated service-handler duration. Sampled RSS is not kernel peak RSS.
