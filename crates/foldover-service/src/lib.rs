@@ -3490,6 +3490,42 @@ mod tests {
         }
     }
 
+    /// The purge task the agent starts wakes for a removal made after
+    /// its first pass, so a wake is never lost.
+    #[tokio::test]
+    async fn a_removal_wakes_the_running_purge() {
+        let (directory, service) = fixture();
+        service.start_purge();
+        let pending =
+            |service: &Service| service.engine.lock().unwrap().removals_pending().unwrap();
+        for name in ["First", "Second"] {
+            let pair = service
+                .handle(Request::call(
+                    1,
+                    PAIR_CREATE,
+                    Some(input(directory.path(), name)),
+                ))
+                .await
+                .unwrap();
+            service
+                .handle(Request::call(
+                    2,
+                    PAIR_REMOVE,
+                    Some(json!({"id": pair["id"], "revision": pair["revision"]})),
+                ))
+                .await
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while pending(&service) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{name}: the purge must wake"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    }
+
     /// PLAN.md §3.5: an environment hold keeps a due pair waiting
     /// without consuming its schedule; the pair runs once it lifts.
     /// Manual starts and the pause are untouched.
