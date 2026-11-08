@@ -1390,7 +1390,10 @@ impl PairRun {
             let mut stopped = recovery_cancelled;
             let mut archiving = false;
             for (index, row) in forward.chain(reverse).enumerate() {
-                if stopped || control() == ScanControl::Cancel {
+                if stopped
+                    || executor.report.completion == Completion::Cancelled
+                    || control() == ScanControl::Cancel
+                {
                     stopped = true;
                     break;
                 }
@@ -2157,6 +2160,10 @@ impl<'a> Executor<'a> {
     }
 
     fn fail(&mut self, path: &SyncPath, error: &ApplyError) {
+        if matches!(error, ApplyError::Scan(ScanError::Cancelled)) {
+            self.report.completion = Completion::Cancelled;
+            return;
+        }
         self.fail_message(path, &error.to_string());
     }
 

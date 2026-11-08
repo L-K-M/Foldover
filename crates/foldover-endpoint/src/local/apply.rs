@@ -222,6 +222,9 @@ impl LocalEndpoint {
                         &mut checkpoint,
                     )
                     .map_err(|error| match error {
+                        WriteError::Source(foldover_fs::HashError::Cancelled) => {
+                            ApplyError::Scan(ScanError::Cancelled)
+                        }
                         WriteError::Source(_) => ApplyError::SourceChanged(path.clone()),
                         error => write_error(path, error),
                     })?;
