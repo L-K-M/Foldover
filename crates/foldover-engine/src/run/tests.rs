@@ -2738,6 +2738,7 @@ fn an_inflight_copy_cancels_without_becoming_a_failure() {
             PairRun::prepare_on(pair.inputs(), endpoints, &mut proceed, &NoProgress).unwrap();
         let right = pair.right.path().to_owned();
         let mut store = pair.store();
+        let cancelled = std::cell::Cell::new(false);
         let outcome = prepared
             .execute(
                 Approval::default(),
@@ -2745,12 +2746,16 @@ fn an_inflight_copy_cancels_without_becoming_a_failure() {
                 STARTED,
                 &mut |revision, commit| store.apply(revision, commit),
                 &mut || match staged_bytes(&right) >= MIB as u64 / 4 {
-                    true => ScanControl::Cancel,
+                    true => {
+                        cancelled.set(true);
+                        ScanControl::Cancel
+                    }
                     false => ScanControl::Continue,
                 },
                 &NoProgress,
             )
             .unwrap();
+        assert!(cancelled.get(), "the control must cancel an in-flight copy");
         let RunOutcome::Ran(report) = outcome else {
             panic!("expected a cancelled run");
         };
@@ -2773,6 +2778,42 @@ fn an_inflight_copy_cancels_without_becoming_a_failure() {
         assert!(report.failures().is_empty(), "{:?}", report.failures());
         assert_eq!(fs::read(right.join("big.bin")).unwrap(), data);
     }
+}
+
+#[test]
+fn cancelling_a_copy_preserves_another_entries_failure() {
+    let mut pair = fixture(SyncMode::Sync);
+    pair.bandwidth_limit = Some(MIB as u64);
+    fs::write(pair.left.path().join("a"), b"planned").unwrap();
+    fs::write(pair.left.path().join("b"), vec![37; 4 * MIB]).unwrap();
+    let prepared = pair.prepare();
+    let right = pair.right.path().to_owned();
+    // This copy must fail, independently of the later stop of `b`.
+    fs::write(right.join("a"), b"unreviewed change").unwrap();
+    let mut store = pair.store();
+    let outcome = prepared
+        .execute(
+            Approval::default(),
+            RunContext::Reviewed,
+            STARTED,
+            &mut |revision, commit| store.apply(revision, commit),
+            &mut || match staged_bytes(&right) >= MIB as u64 / 4 {
+                true => ScanControl::Cancel,
+                false => ScanControl::Continue,
+            },
+            &NoProgress,
+        )
+        .unwrap();
+    let RunOutcome::Ran(report) = outcome else {
+        panic!("expected a cancelled run");
+    };
+    assert_eq!(report.completion(), Completion::Cancelled);
+    assert_eq!(report.failures().len(), 1, "{:?}", report.failures());
+    assert_eq!(report.failures()[0].path(), Some(&path(b"a")));
+    assert_eq!(fs::read(right.join("a")).unwrap(), b"unreviewed change");
+    assert!(!right.join("b").exists());
+    assert!(pair.base.is_empty());
+    assert!(pair.identities.side(Side::Right).is_none());
 }
 
 /// Run a paced copy into the left folder, cancel it once `BREAK_OFF_AT`
