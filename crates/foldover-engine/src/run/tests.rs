@@ -4263,13 +4263,13 @@ fn shared_preview_observations_keep_version_only_equality() {
     changed_key[20] = 1;
     let second = ObservedEntry::restore(version, &changed_key).unwrap();
     assert_ne!(first, second);
-    let item = |observation| PreviewItem {
+    let item = |version| PreviewItem {
         path: path(b"file"),
         action: Action::Copy {
             to: Side::Right,
             change: ChangeKind::Create,
         },
-        left: Some(observation),
+        left: Some(version),
         right: None,
         bytes: 0,
         moved_from: None,
@@ -4283,8 +4283,8 @@ fn shared_preview_observations_keep_version_only_equality() {
         removal_protection: RemovalProtection::Enabled,
         failures: Vec::new(),
     };
-    let left = preview(item(first));
-    let right = preview(item(second));
+    let left = preview(item(first.observed_version()));
+    let right = preview(item(second.observed_version()));
     assert_eq!(left, right);
     assert_eq!(left.token(), right.token());
     assert_eq!(left.items()[0].versions(), (Some(version), None));

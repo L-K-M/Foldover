@@ -7,7 +7,7 @@
 //! keeps one immutable baseline row per path and lets each observed
 //! path-side resolve either that row or an appended owned version.
 //!
-//! A [`VersionHandle`] is 16 bytes on 64-bit targets: an
+//! An [`ObservedVersion`] is 16 bytes on 64-bit targets: an
 //! `Arc<VersionPool>` plus a packed `usize` slot. The slot holds a row
 //! index in its low bits, a location in the next two bits and a
 //! transient comparison origin in the top two. The origin is
@@ -96,7 +96,7 @@ impl VersionPoolBuilder {
         path: &SyncPath,
         side: Side,
         version: EntryVersion,
-    ) -> VersionHandle {
+    ) -> ObservedVersion {
         if let Some(index) = self.pool.base.index_of(path)
             && let Some((_, baseline)) = self.pool.base.get_index(index)
         {
@@ -105,7 +105,7 @@ impl VersionPoolBuilder {
                 Side::Right => baseline.right(),
             };
             if stored == version {
-                return VersionHandle::new(
+                return ObservedVersion::new(
                     Arc::clone(&self.pool),
                     slot(index, base_location(side)),
                 );
@@ -114,7 +114,7 @@ impl VersionPoolBuilder {
 
         let index = self.owned.len();
         self.owned.push(version);
-        VersionHandle::new(Arc::clone(&self.pool), slot(index, VersionLocation::Owned))
+        ObservedVersion::new(Arc::clone(&self.pool), slot(index, VersionLocation::Owned))
     }
 
     /// Seals the pool's appended versions and returns the shared pool.
@@ -129,6 +129,13 @@ impl VersionPoolBuilder {
             .expect("freeze seals a version pool exactly once");
         self.pool
     }
+
+    /// Number of appended versions, for tests that distinguish a baseline
+    /// hit from an append.
+    #[cfg(test)]
+    pub(crate) fn owned_len(&self) -> usize {
+        self.owned.len()
+    }
 }
 
 impl Default for VersionPoolBuilder {
@@ -138,13 +145,16 @@ impl Default for VersionPoolBuilder {
 }
 
 /// A 16-byte (on 64-bit) reference to one canonical version.
+///
+/// The reference keeps its pool alive, so a held preview resolves its
+/// versions after the run and its inputs are gone.
 #[derive(Clone)]
-pub(crate) struct VersionHandle {
+pub struct ObservedVersion {
     pool: Arc<VersionPool>,
     slot: usize,
 }
 
-impl VersionHandle {
+impl ObservedVersion {
     fn new(pool: Arc<VersionPool>, slot: usize) -> Self {
         Self { pool, slot }
     }
@@ -162,7 +172,7 @@ impl VersionHandle {
     ///
     /// Panics when the handle points at an owned version whose pool has
     /// not been frozen yet.
-    pub(crate) fn version(&self) -> EntryVersion {
+    pub fn version(&self) -> EntryVersion {
         match self.location() {
             VersionLocation::Owned => self
                 .pool
@@ -198,6 +208,7 @@ impl VersionHandle {
 
     /// Sets the transient comparison origin without touching the
     /// location or index.
+    #[cfg(test)]
     pub(crate) fn set_origin(&mut self, origin: ObservationOrigin) {
         self.slot = (self.slot & !ORIGIN_MASK) | ((origin as usize) << ORIGIN_SHIFT);
     }
@@ -216,15 +227,15 @@ impl VersionHandle {
     }
 }
 
-impl PartialEq for VersionHandle {
+impl PartialEq for ObservedVersion {
     fn eq(&self, other: &Self) -> bool {
         self.version() == other.version()
     }
 }
 
-impl Eq for VersionHandle {}
+impl Eq for ObservedVersion {}
 
-impl Hash for VersionHandle {
+impl Hash for ObservedVersion {
     fn hash<H>(&self, state: &mut H)
     where
         H: Hasher,
@@ -233,10 +244,10 @@ impl Hash for VersionHandle {
     }
 }
 
-impl fmt::Debug for VersionHandle {
+impl fmt::Debug for ObservedVersion {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("VersionHandle")
+            .debug_struct("ObservedVersion")
             .field("location", &self.location())
             .field("origin", &self.origin())
             .field("index", &self.index())
@@ -460,7 +471,7 @@ mod tests {
     #[test]
     fn single_handle_is_sealed_and_ready() {
         let version = file_version(7, 8);
-        let handle = VersionHandle::single(version);
+        let handle = ObservedVersion::single(version);
         assert_eq!(handle.version(), version);
         assert_eq!(handle.location(), VersionLocation::Owned);
         assert_eq!(handle.index(), 0);
@@ -505,7 +516,7 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn handle_is_sixteen_bytes_on_64_bit() {
-        assert_eq!(size_of::<VersionHandle>(), 16);
+        assert_eq!(size_of::<ObservedVersion>(), 16);
         assert_eq!(size_of::<Arc<VersionPool>>(), size_of::<usize>());
         assert_eq!(size_of::<usize>(), 8);
     }
@@ -579,9 +590,9 @@ mod tests {
 
     #[test]
     fn debug_reports_the_slot_without_resolving() {
-        let handle = VersionHandle::single(file_version(1, 2));
+        let handle = ObservedVersion::single(file_version(1, 2));
         let rendered = format!("{handle:?}");
-        assert!(rendered.contains("VersionHandle"), "{rendered}");
+        assert!(rendered.contains("ObservedVersion"), "{rendered}");
         assert!(rendered.contains("Owned"), "{rendered}");
         assert!(rendered.contains("Uncompared"), "{rendered}");
     }

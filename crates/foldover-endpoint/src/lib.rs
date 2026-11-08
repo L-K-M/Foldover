@@ -36,7 +36,7 @@ pub use watch::{RootWatcher, changed_since_event, event_history, event_now};
 pub use local::{
     ApplyError, ArchivedItem, ArchivedRun, Expected, Filter, InvalidFilter, LocalEndpoint,
     LocalEntry, Observation, ObservedEntry, PreviousObservation, Pruning, RunScope, ScanControl,
-    ScanError, ScanIssue, ScanStats, archive_name, run_name, run_owner,
+    ScanError, ScanIssue, ScanStats, SnapshotBuilder, archive_name, run_name, run_owner,
 };
 
 #[cfg(unix)]
@@ -65,8 +65,11 @@ pub use link::{
 
 mod pace;
 
-#[cfg(test)]
+#[cfg(unix)]
 mod observation_versions;
+
+#[cfg(unix)]
+pub use observation_versions::ObservedVersion;
 
 mod lease;
 pub use lease::{HeldLease, LeaseError, LeaseHolder, LeaseTiming, LockFile};

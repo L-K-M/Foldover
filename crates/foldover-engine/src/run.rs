@@ -30,8 +30,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use foldover_endpoint::{
     ApplyError, Endpoint, EndpointPair, Expected, Filter, HeldLease, InvalidFilter, LeaseError,
-    LeaseHolder, LeaseTiming, Observation, ObserveStep, ObservedEntry, PairRootError, Pruning,
-    Reach, RunScope, ScanError, access_denied,
+    LeaseHolder, LeaseTiming, Observation, ObserveStep, ObservedEntry, ObservedVersion,
+    PairRootError, Pruning, Reach, RunScope, ScanError, SnapshotBuilder, access_denied,
 };
 use foldover_host::RunAwake;
 use foldover_state::{
@@ -336,8 +336,8 @@ pub enum Action {
 pub struct PreviewItem {
     path: SyncPath,
     action: Action,
-    left: Option<ObservedEntry>,
-    right: Option<ObservedEntry>,
+    left: Option<ObservedVersion>,
+    right: Option<ObservedVersion>,
     bytes: u64,
     moved_from: Option<SyncPath>,
 }
@@ -365,8 +365,8 @@ impl PreviewItem {
     /// What each side held when previewed; a resolution is bound to these.
     pub fn versions(&self) -> (Option<EntryVersion>, Option<EntryVersion>) {
         (
-            self.left.as_ref().map(ObservedEntry::version),
-            self.right.as_ref().map(ObservedEntry::version),
+            self.left.as_ref().map(ObservedVersion::version),
+            self.right.as_ref().map(ObservedVersion::version),
         )
     }
 
@@ -753,29 +753,33 @@ impl PendingRunInputs {
             base.push(path, entry);
         })?;
         let base = Arc::new(base.freeze());
-        let mut left_snapshot = PathMapBuilder::with_capacity(records.snapshot_len(Side::Left)?);
+        let mut left_builder = SnapshotBuilder::new(
+            Arc::clone(&base),
+            Side::Left,
+            records.snapshot_len(Side::Left)?,
+        );
         records.visit_snapshot(Side::Left, |mut entry| {
             if let Some((path, _)) = base.get_key_value(&entry.path) {
                 entry.path = path.clone();
             }
-            if let Some(observed) = ObservedEntry::restore_owned(entry.version, entry.fingerprint) {
-                left_snapshot.push(entry.path, observed);
-            }
+            left_builder.insert(entry.path, entry.version, &entry.fingerprint);
         })?;
-        let left_snapshot = left_snapshot.freeze();
-        let mut right_snapshot = PathMapBuilder::with_capacity(records.snapshot_len(Side::Right)?);
+        let left_snapshot = left_builder.freeze();
+        let mut right_builder = SnapshotBuilder::new(
+            Arc::clone(&base),
+            Side::Right,
+            records.snapshot_len(Side::Right)?,
+        );
         records.visit_snapshot(Side::Right, |mut entry| {
             if let Some((path, _)) = base.get_key_value(&entry.path) {
                 entry.path = path.clone();
             } else if let Some((path, _)) = left_snapshot.get_key_value(&entry.path) {
                 entry.path = path.clone();
             }
-            if let Some(observed) = ObservedEntry::restore_owned(entry.version, entry.fingerprint) {
-                right_snapshot.push(entry.path, observed);
-            }
+            right_builder.insert(entry.path, entry.version, &entry.fingerprint);
         })?;
         Ok(RunInputs::with_base(pair, base, identities, resolutions)
-            .with_snapshot_tables(left_snapshot, right_snapshot.freeze())
+            .with_snapshot_tables(left_snapshot, right_builder.freeze())
             .with_reach(reach))
     }
 }
@@ -1120,8 +1124,12 @@ impl PairRun {
                         EntryDecision::MovedAway { .. } => return None,
                     },
                 };
-                let version =
-                    |side: Side| self.observation(side).entries().get(row.path()).cloned();
+                let version = |side: Side| {
+                    self.observation(side)
+                        .entries()
+                        .get(row.path())
+                        .map(ObservedEntry::observed_version)
+                };
                 Some(PreviewItem {
                     path: row.path().clone(),
                     action,
