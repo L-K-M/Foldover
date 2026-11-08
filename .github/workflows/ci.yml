@@ -97,6 +97,9 @@ jobs:
       - name: build.sh --install against a fake macOS toolchain
         run: bash scripts/test-build-install.sh
 
+      - name: Qualification harness regressions
+        run: python3 -m unittest discover -s perf -p 'test_*.py'
+
       - name: Release notes regressions
         run: python3 scripts/test-release-notes.py
 

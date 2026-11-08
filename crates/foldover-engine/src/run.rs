@@ -24,7 +24,7 @@ use std::io;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use foldover_endpoint::{
     ApplyError, Endpoint, EndpointPair, Expected, Filter, HeldLease, InvalidFilter, LeaseError,
@@ -201,6 +201,9 @@ pub enum Commit<'a> {
 /// works. Calls come from the run's own thread; implementations keep
 /// counters other threads read.
 pub trait RunProgress {
+    /// Diagnostic phase timing, on the run's thread. Normal UI consumers can
+    /// ignore it; qualification harnesses use the production boundaries.
+    fn measured(&self, _phase: RunPhase, _elapsed: Duration) {}
     fn observed(&self, side: Side, step: ObserveStep);
     /// The plan is ready: the changes to make and the bytes they copy.
     fn planned(&self, changes: u64, bytes: u64);
@@ -209,6 +212,16 @@ pub trait RunProgress {
     /// The run waits for another Mac's sync of a folder, shown by its
     /// name, e.g. "Studio"; `None` once it goes on.
     fn waiting(&self, holder: Option<&str>);
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunPhase {
+    OpenEndpoints,
+    Readiness,
+    ObserveLeft,
+    ObserveRight,
+    AlignAndFilter,
+    Plan,
 }
 
 /// For callers that show no progress.
@@ -748,7 +761,9 @@ impl PairRun {
         progress: &dyn RunProgress,
     ) -> Result<Self, RunError> {
         let draft = inputs.pair.draft();
+        let opened = Instant::now();
         let endpoints = EndpointPair::open(draft.left(), draft.right(), &inputs.reach)?;
+        progress.measured(RunPhase::OpenEndpoints, opened.elapsed());
         Self::prepare_on(inputs, endpoints, control, progress)
     }
 
@@ -759,6 +774,7 @@ impl PairRun {
         control: &mut impl FnMut() -> ScanControl,
         progress: &dyn RunProgress,
     ) -> Result<Self, RunError> {
+        let readiness = Instant::now();
         let RunInputs {
             pair,
             base,
@@ -830,8 +846,14 @@ impl PairRun {
                     source => observe_error(side, source),
                 })
         };
+        progress.measured(RunPhase::Readiness, readiness.elapsed());
+        let observed = Instant::now();
         let mut left = observe(Side::Left, control)?;
+        progress.measured(RunPhase::ObserveLeft, observed.elapsed());
+        let observed = Instant::now();
         let mut right = observe(Side::Right, control)?;
+        progress.measured(RunPhase::ObserveRight, observed.elapsed());
+        let aligned = Instant::now();
         let left_names = endpoints.endpoint(Side::Left).name_matching();
         let right_names = endpoints.endpoint(Side::Right).name_matching();
         align_spellings(&mut left, &base, left_names);
@@ -929,6 +951,8 @@ impl PairRun {
             left_moves: moves(endpoints.endpoint(Side::Left)),
             right_moves: moves(endpoints.endpoint(Side::Right)),
         };
+        progress.measured(RunPhase::AlignAndFilter, aligned.elapsed());
+        let planned = Instant::now();
         let mut plan =
             crate::plan::plan_observations(draft.mode(), &base, &left, &right, &choices, control)
                 .map_err(|error| match error {
@@ -938,6 +962,7 @@ impl PairRun {
         let protected: Vec<_> = unavailable.iter().chain(&uncertain).cloned().collect();
         plan.protect_unavailable(&protected, left_names.either(right_names))?;
         plan.protect_uncertain_absences(&uncertain, left_names.either(right_names))?;
+        progress.measured(RunPhase::Plan, planned.elapsed());
         Ok(Self {
             pair,
             identities,
