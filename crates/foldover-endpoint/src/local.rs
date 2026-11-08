@@ -492,6 +492,11 @@ impl ObservedEntry {
     }
 }
 
+/// One-percent growth headroom reserved for new paths when a snapshot is
+/// recycled. `capacity.div_ceil(ROW_GROWTH_HEADROOM_DIVISOR)` extra rows
+/// keep a small number of additions in the existing allocation.
+pub(crate) const ROW_GROWTH_HEADROOM_DIVISOR: usize = 100;
+
 /// Builds one side's observed snapshot against the shared immutable base.
 ///
 /// A version that exactly matches the baseline row's side resolves to that
@@ -505,11 +510,13 @@ pub struct SnapshotBuilder {
 }
 
 impl SnapshotBuilder {
-    /// A builder over `base` for `side`, with room for `capacity` rows.
+    /// A builder over `base` for `side`, with room for `capacity` rows plus
+    /// one percent growth headroom.
     pub fn new(base: Arc<PathMap<BaselineEntry>>, side: Side, capacity: usize) -> Self {
+        let reserved = capacity.saturating_add(capacity.div_ceil(ROW_GROWTH_HEADROOM_DIVISOR));
         Self {
             versions: VersionPoolBuilder::new(base),
-            rows: PathMapBuilder::with_capacity(capacity),
+            rows: PathMapBuilder::with_capacity(reserved),
             side,
         }
     }
@@ -536,7 +543,12 @@ impl SnapshotBuilder {
             side: _,
         } = self;
         drop(versions.freeze());
-        rows.freeze()
+        let mut rows = rows.freeze_retaining_capacity();
+        if rows.is_empty() {
+            // An all-invalid cache must not retain the reserved payload.
+            rows.shrink_to_fit();
+        }
+        rows
     }
 
     /// Number of appended versions, for tests.
@@ -908,7 +920,8 @@ impl Observation {
                 rename(path);
             }
         }
-        self.entries = ObservationEntries::new(PathMapBuilder::from_rows(rows).freeze());
+        self.entries =
+            ObservationEntries::new(PathMapBuilder::from_rows(rows).freeze_retaining_capacity());
         for path in self
             .oversized
             .iter_mut()
@@ -2389,6 +2402,27 @@ mod tests {
         assert!(!builder.insert(path(b"a"), version, &short));
         assert_eq!(builder.owned_versions(), 0);
         assert!(builder.freeze().is_empty());
+    }
+
+    #[test]
+    fn snapshot_builder_reserves_one_percent_growth_headroom() {
+        let builder = SnapshotBuilder::new(Arc::new(PathMap::new()), Side::Left, 100);
+        assert!(builder.rows.capacity() >= 101);
+    }
+
+    #[test]
+    fn snapshot_builder_freeze_releases_capacity_when_every_row_is_invalid() {
+        let mut builder = SnapshotBuilder::new(Arc::new(PathMap::new()), Side::Left, 100);
+        let version = file_version(1, 2);
+        let short = vec![0; FINGERPRINT_HEADER_BYTES - 1];
+        for index in 0..100u8 {
+            let name = format!("k{index:03}");
+            assert!(!builder.insert(path(name.as_bytes()), version, &short));
+        }
+        assert_eq!(builder.owned_versions(), 0);
+        let snapshot = builder.freeze();
+        assert!(snapshot.is_empty());
+        assert_eq!(snapshot.capacity(), 0);
     }
 
     #[test]

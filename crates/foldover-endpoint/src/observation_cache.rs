@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use foldover_types::{BaselineEntry, PathMap, PathMapBuilder, Side, SyncPath};
 
-use crate::local::{ObservedEntry, PreviousObservation};
+use crate::local::{ObservedEntry, PreviousObservation, ROW_GROWTH_HEADROOM_DIVISOR};
 use crate::observation_versions::{ObservationOrigin, ObservationVisibility, VersionPoolBuilder};
 
 /// Borrowed compatibility input, or the storage being recycled by this run.
@@ -67,6 +67,11 @@ impl Recycled {
         side: Side,
     ) -> Self {
         let mut rows = previous.into_rows();
+        // Reserve one percent of the decoded prefix as spare row capacity
+        // before touching the rows so additions land in the existing
+        // allocation when possible. A snapshot already built with headroom
+        // needs no change; small maps keep their exact allocation.
+        rows.reserve_exact(rows.len() / ROW_GROWTH_HEADROOM_DIVISOR);
         // Origins belong to this comparison, not to the persisted snapshot.
         for (_, entry) in &mut rows {
             entry.set_origin(ObservationOrigin::Uncompared);
@@ -179,8 +184,17 @@ impl Recycled {
             }
         }
         let mut rows = std::mem::take(&mut self.rows);
-        rows.append(&mut self.additions);
-        let rows = PathMapBuilder::from_rows(rows).freeze();
+        if rows.is_empty() {
+            // The original prefix is gone; move the additions allocation
+            // instead of copying it into the unused empty row buffer.
+            rows = std::mem::take(&mut self.additions);
+        } else {
+            // Reserve exactly the additions so a larger batch does not
+            // trigger the default doubling growth.
+            rows.reserve_exact(self.additions.len());
+            rows.append(&mut self.additions);
+        }
+        let rows = PathMapBuilder::from_rows(rows).freeze_retaining_capacity();
         (
             rows,
             Comparison {
@@ -302,6 +316,44 @@ mod tests {
             ObservationOrigin::New
         );
         assert_eq!(comparison.original_len, 0);
+    }
+
+    #[test]
+    fn empty_original_finish_moves_the_additions_allocation() {
+        let mut rows = Recycled::new(PathMap::new(), Arc::new(PathMap::new()), Side::Left);
+        for (key, seed) in [(b"a", 1u8), (b"b", 2), (b"c", 3), (b"d", 4)] {
+            rows.record(path(key), entry(seed));
+        }
+        let additions = rows.additions.as_ptr();
+        let (finished, comparison) = rows.finish();
+        assert_eq!(comparison.original_len, 0);
+        let finished_rows = finished.into_rows();
+        assert_eq!(finished_rows.len(), 4);
+        assert!(
+            std::ptr::eq(additions, finished_rows.as_ptr()),
+            "an empty original prefix must reuse the additions allocation"
+        );
+        assert_eq!(finished_rows[3].1.version(), entry(4).version());
+    }
+
+    #[test]
+    fn finish_keeps_the_original_row_allocation_and_spare_capacity() {
+        let mut previous = PathMap::with_capacity(102);
+        for index in 0..100u8 {
+            let name = format!("k{index:03}");
+            previous.insert(path(name.as_bytes()), entry(index));
+        }
+        assert_eq!(previous.capacity(), 102);
+        let original = previous.get_index(0).unwrap().1 as *const ObservedEntry;
+
+        let mut recycled = Recycled::new(previous, Arc::new(PathMap::new()), Side::Left);
+        recycled.record(path(b"zz"), entry(200));
+
+        let (finished, comparison) = recycled.finish();
+        assert_eq!(comparison.original_len, 100);
+        assert_eq!(finished.len(), 101);
+        assert_eq!(finished.capacity(), 102);
+        assert!(std::ptr::eq(original, &finished[&path(b"k000")]));
     }
 
     fn observation(previous: PathMap<ObservedEntry>) -> crate::Observation {
