@@ -138,6 +138,43 @@ def sample_point(pid):
     return (rss, cpu), None
 
 
+def stop_child_group(child, errors):
+    """Stop the child's own process group and reap the child.
+
+    The child was started with ``start_new_session=True``, so its pid is also
+    its process group id.  A group that disappeared between ``poll`` and the
+    signal is a normal exit race; any other OS error is recorded so the
+    invocation can fail instead of silently reporting success.
+    """
+    if child is None or child.poll() is not None:
+        return
+    # time is a wrapper around the Rust runner and its SSH children.  Stop all
+    # of this invocation's group, never another process group.
+    try:
+        os.killpg(child.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except OSError as error:
+        errors.append(f"SIGTERM to process group {child.pid} failed: "
+                      f"{type(error).__name__}: {error}")
+    try:
+        child.wait(timeout=5)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError as error:
+        errors.append(f"SIGKILL to process group {child.pid} failed: "
+                      f"{type(error).__name__}: {error}")
+    try:
+        child.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        errors.append(f"process group {child.pid} did not exit after SIGKILL")
+
+
 def resolve_revision(args):
     if args.revision:
         return args.revision
@@ -242,33 +279,38 @@ def main():
         summary["error"] = f"{type(error).__name__}: {error}"
         raise
     finally:
-        if child is not None and child.poll() is None:
-            # time is a wrapper around the Rust runner and its SSH children.
-            # Give this invocation its own process group and stop all of it.
-            try:
-                os.killpg(child.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                os.killpg(child.pid, signal.SIGKILL)
-                child.wait()
-        if child is not None:
-            if child.stdout is not None:
-                child.stdout.close()
-            if returncode is None:
+        cleanup_errors = []
+        try:
+            stop_child_group(child, cleanup_errors)
+            if child is not None and child.stdout is not None:
+                try:
+                    child.stdout.close()
+                except OSError as error:
+                    cleanup_errors.append(f"closing runner stdout for pid {child.pid} "
+                                          f"failed: {type(error).__name__}: {error}")
+            if child is not None and returncode is None:
                 returncode = child.poll()
+        except Exception as error:
+            cleanup_errors.append(f"cleanup failed: {type(error).__name__}: {error}")
+        # The sampler is non-daemon: always signal and join it before writing
+        # the summary or propagating any cleanup error.
         stopped.set()
         if sampler is not None:
             sampler.join()
         summary["returncode"] = returncode
+        summary["cleanup_errors"] = cleanup_errors
+        if cleanup_errors and not summary.get("error"):
+            summary["error"] = "; ".join(cleanup_errors)
         summary.update(sampled_peak_rss_kib=max((row["rss_kib"] for row in samples), default=None),
                        sampled_peak_ssh_children=max((row["ssh_children"] for row in samples),
                                                      default=None),
                        elapsed_seconds=time.monotonic() - started,
                        load_end=os.getloadavg())
         (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+        # A failed cleanup must fail the invocation, but it must not replace an
+        # exception already propagating from the measured run.
+        if cleanup_errors and sys.exc_info()[0] is None:
+            raise SystemExit(1)
     if summary["parsing_errors"]:
         print(f"runner emitted {len(summary['parsing_errors'])} malformed "
               "process/phase/metric record(s); see summary.json parsing_errors",
