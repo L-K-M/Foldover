@@ -9,9 +9,17 @@ db_commit_batches_100k = 2000
 db_read_100k = 300
 db_snapshot_rewrite_100k = 1000
 db_snapshot_unchanged_100k = 200
+capture_run_inputs_100k = 200
+run_inputs_100k = 300
+run_inputs_read_100k = 250
+run_records_capture_100k = 200
+run_records_capture_decode_100k = 250
 hash_64_mib = 60
 plan_100k_entries = 350
+plan_100k_entries_unicode_names = 200
 plan_skipped_100k_entries = 210
 prefix_index_100k_entries_1000_prefixes = 30
+prefix_index_shallow_unicode_1m_queries_10k_roots = 369
+prefix_index_deep_unicode_1m_queries_10k_roots = 1147
 # PLAN.md §5.3: a cold scan reads at least 10k entries per second.
 scan_10k_files = 1000

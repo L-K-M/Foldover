@@ -4,14 +4,19 @@ mod conflict;
 pub(crate) mod filter;
 mod foreign;
 pub(crate) use foreign::Carried;
+mod fingerprint_key;
 mod identity;
 mod lock;
+mod observation_ownership;
 pub(crate) mod version;
 
 use std::collections::BTreeMap;
 use std::io;
 use std::num::NonZeroUsize;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use foldover_fs::{
@@ -22,15 +27,21 @@ use foldover_fs::{
 #[cfg(target_os = "macos")]
 use foldover_fs::{DeclaredSupport, FilesystemFeature};
 pub use foldover_types::ScanControl;
+use foldover_types::{
+    BaselineEntry, Digest, EntryVersion, InvalidSyncPath, MetadataPolicy, NameMatching, PathMap,
+    PathMapBuilder, PathPrefixIndex, Side, SyncPath,
+};
 #[cfg(target_os = "macos")]
 use foldover_types::{CaseMatching, UnicodeMatching};
-use foldover_types::{
-    Digest, EntryVersion, InvalidSyncPath, MetadataPolicy, NameMatching, PathPrefixIndex, SyncPath,
-};
 
+use fingerprint_key::FingerprintKey;
 use version::{Attribute, Observed, Payload, capture_for, entry_version, metadata_version};
 
-use crate::{ListedEntry, ListedKind, ObserveStep};
+use crate::observation_cache::{Cache, Comparison, Recycled};
+use crate::observation_entries::ObservationEntries;
+use crate::observation_reads::Reads;
+use crate::observation_versions::{ObservationOrigin, ObservedVersion, VersionPoolBuilder};
+use crate::{ListedEntry, ListedKind, ObservationHints, ObserveStep};
 
 pub(crate) use apply::Archiving;
 pub use apply::{ApplyError, Expected, RunScope};
@@ -291,7 +302,9 @@ const REREAD: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// the version unchanged without rereading data, outside the racy window.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Fingerprint {
-    key: Vec<u8>,
+    /// Lossless in-memory storage; persistence and reread jitter use the
+    /// original stat bytes, including every zero and timestamp field.
+    key: FingerprintKey,
     size: u64,
     observed_at: SystemTime,
 }
@@ -302,8 +315,11 @@ const FINGERPRINT_HEADER_BYTES: usize = 8 + 4 + 8;
 
 impl Fingerprint {
     fn new(metadata: &EntryMetadata, observed_at: SystemTime) -> Self {
+        let captured = metadata.stat_key();
         Self {
-            key: metadata.stat_key(),
+            // A realloc shrink may keep the capture's larger malloc size
+            // class. Allocate the payload while that buffer is still held.
+            key: FingerprintKey::new(captured.as_slice()),
             size: metadata.size(),
             observed_at,
         }
@@ -316,7 +332,7 @@ impl Fingerprint {
     /// Store another system's stat; incomplete keys cannot justify version reuse.
     pub(crate) fn from_key(key: Vec<u8>, size: u64, observed_at: SystemTime) -> Self {
         Self {
-            key,
+            key: FingerprintKey::new(key.as_slice()),
             size,
             observed_at,
         }
@@ -324,7 +340,7 @@ impl Fingerprint {
 
     /// Whether this fingerprint records the stat `key` of `size` bytes.
     pub(crate) fn same_stat(&self, key: &[u8], size: u64) -> bool {
-        self.key == key && self.size == size
+        self.key.matches(key) && self.size == size
     }
 
     fn proves_unchanged_by(&self, key: &[u8], modified: SystemTime) -> bool {
@@ -333,13 +349,13 @@ impl Fingerprint {
             .observed_at
             .duration_since(modified)
             .is_ok_and(|age| age >= RACY_WINDOW);
-        settled && key == self.key && self.read_within(self.reread_after(), SystemTime::now())
+        settled && self.key.matches(key) && self.read_within(self.reread_after(), SystemTime::now())
     }
 
     /// How long after it was read this version must be read again:
     /// between half of `REREAD` and all of it, fixed by the stat.
     fn reread_after(&self) -> Duration {
-        let hash = blake3::hash(&self.key);
+        let hash = self.key.hash();
         let spread = u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes"));
         let half = (REREAD.as_secs() / 2).max(1);
         Duration::from_secs(half + spread % half)
@@ -361,32 +377,85 @@ impl Fingerprint {
         bytes.extend_from_slice(&since.as_secs().to_le_bytes());
         bytes.extend_from_slice(&since.subsec_nanos().to_le_bytes());
         bytes.extend_from_slice(&self.size.to_le_bytes());
-        bytes.extend_from_slice(&self.key);
+        self.key.append_to(&mut bytes);
         bytes
     }
 
-    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+    /// The size and observation time from a persisted header. A
+    /// nanosecond field of a full second or more is malformed, not a
+    /// normalizable value: it would change the observation and can panic
+    /// `Duration::new` when the seconds are near `u64::MAX`.
+    fn header(bytes: &[u8]) -> Option<(u64, SystemTime)> {
         let seconds = u64::from_le_bytes(bytes.get(..8)?.try_into().ok()?);
         let nanoseconds = u32::from_le_bytes(bytes.get(8..12)?.try_into().ok()?);
         let size = u64::from_le_bytes(bytes.get(12..FINGERPRINT_HEADER_BYTES)?.try_into().ok()?);
+        if nanoseconds >= 1_000_000_000 {
+            return None;
+        }
         let observed_at = UNIX_EPOCH.checked_add(Duration::new(seconds, nanoseconds))?;
+        Some((size, observed_at))
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let (size, observed_at) = Self::header(bytes)?;
         Some(Self {
-            key: bytes.get(FINGERPRINT_HEADER_BYTES..)?.to_vec(),
+            key: FingerprintKey::new(bytes.get(FINGERPRINT_HEADER_BYTES..)?),
+            size,
+            observed_at,
+        })
+    }
+
+    /// Consume a stored fingerprint and retain a fresh key allocation.
+    /// Shrinking the original buffer can keep the header's malloc size class.
+    fn from_owned(bytes: Vec<u8>) -> Option<Self> {
+        let (size, observed_at) = Self::header(&bytes)?;
+        Some(Self {
+            key: FingerprintKey::new(&bytes[FINGERPRINT_HEADER_BYTES..]),
             size,
             observed_at,
         })
     }
 }
 
+/// One verified observation: an exact version handle plus the exact stat it
+/// was derived from.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObservedEntry {
-    pub(crate) version: EntryVersion,
-    pub(crate) fingerprint: Fingerprint,
+    version: Option<ObservedVersion>,
+    fingerprint: Fingerprint,
 }
 
 impl ObservedEntry {
+    pub(crate) fn new(version: EntryVersion, fingerprint: Fingerprint) -> Self {
+        Self::with_version(ObservedVersion::single(version), fingerprint)
+    }
+
+    pub(crate) fn with_version(version: ObservedVersion, fingerprint: Fingerprint) -> Self {
+        Self {
+            version: Some(version),
+            fingerprint,
+        }
+    }
+
+    pub(crate) fn fingerprint(&self) -> &Fingerprint {
+        &self.fingerprint
+    }
+
+    /// The resolved version. Every normal entry holds one; the option is
+    /// internal bookkeeping.
     pub fn version(&self) -> EntryVersion {
         self.version
+            .as_ref()
+            .expect("an observed entry always holds a version")
+            .version()
+    }
+
+    /// The version handle, for previews that must resolve it after the run
+    /// and its inputs are gone.
+    pub fn observed_version(&self) -> ObservedVersion {
+        self.version
+            .clone()
+            .expect("an observed entry always holds a version")
     }
 
     /// Bytes a copy of this entry's data needs.
@@ -401,35 +470,157 @@ impl ObservedEntry {
 
     #[cfg(test)]
     pub(crate) fn for_tests(version: EntryVersion, size: u64) -> Self {
-        Self {
+        Self::new(
             version,
-            fingerprint: Fingerprint {
-                key: vec![1, 2, 3],
+            Fingerprint {
+                key: FingerprintKey::new(&[1, 2, 3]),
                 size,
                 observed_at: SystemTime::UNIX_EPOCH,
             },
-        }
+        )
     }
 
     /// Rebuild a stored entry; `None` if the bytes are not a fingerprint.
     pub fn restore(version: EntryVersion, fingerprint: &[u8]) -> Option<Self> {
-        Some(Self {
-            version,
-            fingerprint: Fingerprint::from_bytes(fingerprint)?,
-        })
+        Some(Self::new(version, Fingerprint::from_bytes(fingerprint)?))
+    }
+
+    /// Consume a stored fingerprint; `None` if invalid. Only its key payload
+    /// remains allocated after decoding.
+    pub fn restore_owned(version: EntryVersion, fingerprint: Vec<u8>) -> Option<Self> {
+        Some(Self::new(version, Fingerprint::from_owned(fingerprint)?))
+    }
+}
+
+/// One-percent growth headroom reserved for new paths when a snapshot is
+/// recycled. `capacity.div_ceil(ROW_GROWTH_HEADROOM_DIVISOR)` extra rows
+/// keep a small number of additions in the existing allocation.
+pub(crate) const ROW_GROWTH_HEADROOM_DIVISOR: usize = 100;
+
+/// Builds one side's observed snapshot against the shared immutable base.
+///
+/// A version that exactly matches the baseline row's side resolves to that
+/// row; anything else is appended to one per-side pool. The base is shared,
+/// not copied, so a snapshot holds a handle per row instead of a second
+/// version per row.
+pub struct SnapshotBuilder {
+    versions: VersionPoolBuilder,
+    rows: PathMapBuilder<ObservedEntry>,
+    side: Side,
+}
+
+impl SnapshotBuilder {
+    /// A builder over `base` for `side`, with room for `capacity` rows plus
+    /// one percent growth headroom.
+    pub fn new(base: Arc<PathMap<BaselineEntry>>, side: Side, capacity: usize) -> Self {
+        let reserved = capacity.saturating_add(capacity.div_ceil(ROW_GROWTH_HEADROOM_DIVISOR));
+        Self {
+            versions: VersionPoolBuilder::new(base),
+            rows: PathMapBuilder::with_capacity(reserved),
+            side,
+        }
+    }
+
+    /// Adds one observed row. `false` when `fingerprint` is not a valid
+    /// fingerprint; nothing is interned in that case. The path is consumed
+    /// once, borrowed only to resolve its baseline row.
+    pub fn insert(&mut self, path: SyncPath, version: EntryVersion, fingerprint: &[u8]) -> bool {
+        let Some(fingerprint) = Fingerprint::from_bytes(fingerprint) else {
+            return false;
+        };
+        let version = self.versions.intern(&path, self.side, version);
+        self.rows
+            .push(path, ObservedEntry::with_version(version, fingerprint));
+        true
+    }
+
+    /// Seals the appended versions first, then freezes the rows. Handles
+    /// already handed out keep the pool alive.
+    pub fn freeze(self) -> PathMap<ObservedEntry> {
+        let Self {
+            versions,
+            rows,
+            side: _,
+        } = self;
+        drop(versions.freeze());
+        let mut rows = rows.freeze_retaining_capacity();
+        if rows.is_empty() {
+            // An all-invalid cache must not retain the reserved payload.
+            rows.shrink_to_fit();
+        }
+        rows
+    }
+
+    /// Number of appended versions, for tests.
+    #[cfg(test)]
+    pub(crate) fn owned_versions(&self) -> usize {
+        self.versions.owned_len()
+    }
+}
+
+/// Previous verified entries for one root under the same metadata policy.
+/// Observation readers only need borrowed exact-path lookups; callers may
+/// keep the rows in either a tree or a dense frozen table.
+pub trait PreviousObservation: Sync {
+    fn get_key_value(&self, path: &SyncPath) -> Option<(&SyncPath, &ObservedEntry)>;
+    fn get(&self, path: &SyncPath) -> Option<&ObservedEntry> {
+        self.get_key_value(path).map(|(_, entry)| entry)
+    }
+}
+
+impl PreviousObservation for BTreeMap<SyncPath, ObservedEntry> {
+    fn get_key_value(&self, path: &SyncPath) -> Option<(&SyncPath, &ObservedEntry)> {
+        BTreeMap::get_key_value(self, path)
+    }
+}
+
+impl PreviousObservation for PathMap<ObservedEntry> {
+    fn get_key_value(&self, path: &SyncPath) -> Option<(&SyncPath, &ObservedEntry)> {
+        PathMap::get_key_value(self, path)
     }
 }
 
 /// Known entries plus explicit unread subtrees and leftovers to recover.
-#[derive(Debug, Default)]
 pub struct Observation {
-    pub(crate) entries: BTreeMap<SyncPath, ObservedEntry>,
+    pub(crate) entries: ObservationEntries,
+    pending: PathMapBuilder<ObservedEntry>,
+    versions: Option<VersionPoolBuilder>,
+    recycled: Option<Arc<Mutex<Recycled>>>,
+    comparison: Option<Comparison>,
     pub(crate) leftovers: Vec<SyncPath>,
     pub(crate) oversized: Vec<SyncPath>,
     pub(crate) old: Vec<SyncPath>,
     pub(crate) unavailable: Vec<SyncPath>,
     pub(crate) issues: Vec<ScanIssue>,
     pub(crate) unstable: Vec<Option<SyncPath>>,
+}
+
+impl Default for Observation {
+    fn default() -> Self {
+        Self {
+            entries: ObservationEntries::default(),
+            pending: PathMapBuilder::new(),
+            versions: Some(VersionPoolBuilder::default()),
+            recycled: None,
+            comparison: None,
+            leftovers: Vec::new(),
+            oversized: Vec::new(),
+            old: Vec::new(),
+            unavailable: Vec::new(),
+            issues: Vec::new(),
+            unstable: Vec::new(),
+        }
+    }
+}
+
+impl std::fmt::Debug for Observation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Observation")
+            .field("entries", &self.entries)
+            .field("issues", &self.issues)
+            .field("unavailable", &self.unavailable)
+            .finish()
+    }
 }
 
 /// An unavailable path also covers each descendant. Probe only component
@@ -440,6 +631,7 @@ struct UnavailablePaths {
 }
 
 impl UnavailablePaths {
+    #[cfg(test)]
     fn from_paths(paths: &[SyncPath]) -> Self {
         Self {
             index: PathPrefixIndex::from_paths(paths),
@@ -456,11 +648,11 @@ impl UnavailablePaths {
 
     fn retain_entries(
         &self,
-        entries: &mut BTreeMap<SyncPath, ObservedEntry>,
+        observation: &mut Observation,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<(), ScanError> {
         let mut cancelled = false;
-        entries.retain(|path, _| {
+        observation.retain_entries(|path, _| {
             if cancelled {
                 return true;
             }
@@ -489,6 +681,128 @@ impl UnavailablePaths {
 }
 
 impl Observation {
+    #[cfg(test)]
+    pub(crate) fn recycling(
+        previous: PathMap<ObservedEntry>,
+        base: Arc<PathMap<BaselineEntry>>,
+        side: Side,
+    ) -> (Self, Cache<'static>) {
+        Self::recycling_with_hints(previous, base, side, ObservationHints::default())
+    }
+
+    pub(crate) fn recycling_with_hints(
+        previous: PathMap<ObservedEntry>,
+        base: Arc<PathMap<BaselineEntry>>,
+        side: Side,
+        hints: ObservationHints,
+    ) -> (Self, Cache<'static>) {
+        let recycled = Arc::new(Mutex::new(Recycled::with_hints(
+            previous, base, side, hints,
+        )));
+        let cache = Cache::Owned(Arc::clone(&recycled));
+        (
+            Self {
+                recycled: Some(recycled),
+                versions: None,
+                ..Self::default()
+            },
+            cache,
+        )
+    }
+
+    pub(crate) fn record(&mut self, path: SyncPath, mut entry: ObservedEntry) {
+        if let Some(recycled) = &self.recycled {
+            recycled
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .record(path, entry);
+            return;
+        }
+        let version = self
+            .versions
+            .as_mut()
+            .expect("record precedes finish")
+            .intern(&path, Side::Left, entry.version());
+        entry.set_version(version);
+        entry.set_origin(ObservationOrigin::New);
+        self.pending.push(path, entry);
+    }
+
+    fn reuse(&mut self, path: SyncPath, known: Arc<ObservedEntry>) {
+        if let Some(recycled) = &self.recycled {
+            recycled
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .reuse(&path, known);
+        } else {
+            self.record(
+                path,
+                Arc::try_unwrap(known).unwrap_or_else(|shared| (*shared).clone()),
+            );
+        }
+    }
+
+    pub(crate) fn finish_entries(&mut self) {
+        if let Some(recycled) = self.recycled.take() {
+            let (rows, comparison) = recycled
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .finish();
+            self.entries = ObservationEntries::new(rows);
+            self.comparison = Some(comparison);
+            return;
+        }
+        self.versions.take().expect("finish once").freeze();
+        self.entries = ObservationEntries::new(
+            std::mem::replace(&mut self.pending, PathMapBuilder::new()).freeze(),
+        );
+    }
+
+    /// Verified cache rows, including entries excluded from the plan.
+    pub fn snapshot_entries(&self) -> impl Iterator<Item = (&SyncPath, &ObservedEntry)> {
+        self.entries.snapshot()
+    }
+
+    /// Finish exact comparison with the consumed snapshot after alignment
+    /// and filtering. Unseen old rows never reach persistence or planning.
+    pub fn finish_snapshot(&mut self) -> Option<bool> {
+        let comparison = self.comparison.take()?;
+        let mut equal = 0;
+        let mut changed = false;
+        for (_, entry) in self.entries.snapshot() {
+            match entry.origin() {
+                ObservationOrigin::PriorEqual => equal += 1,
+                ObservationOrigin::PriorChanged | ObservationOrigin::New => changed = true,
+                ObservationOrigin::Uncompared => unreachable!("snapshot hides unseen entries"),
+            }
+        }
+        self.entries
+            .retain(|_, entry| entry.origin() != ObservationOrigin::Uncompared);
+        Some(changed || equal != comparison.original_len)
+    }
+
+    pub(crate) fn into_snapshot(self) -> PathMap<ObservedEntry> {
+        self.entries.into_snapshot()
+    }
+
+    /// Reconcile a peer/simulation result with the caller's consumed cache.
+    pub(crate) fn recycle_from(
+        &mut self,
+        previous: PathMap<ObservedEntry>,
+        base: Arc<PathMap<BaselineEntry>>,
+        side: Side,
+        hints: ObservationHints,
+    ) {
+        let current = std::mem::take(&mut self.entries).into_snapshot();
+        let (mut replacement, _) = Self::recycling_with_hints(previous, base, side, hints);
+        self.recycled = replacement.recycled.take();
+        self.versions = None;
+        for (path, entry) in current {
+            self.record(path, entry);
+        }
+        self.finish_entries();
+    }
+
     /// Listings that changed while traversed. Read entries remain usable,
     /// but missing paths below these folders do not prove deletion. `None`
     /// denotes the held root, which has no relative sync path.
@@ -510,7 +824,7 @@ impl Observation {
         self.issues.push(issue);
     }
 
-    pub fn entries(&self) -> &BTreeMap<SyncPath, ObservedEntry> {
+    pub fn entries(&self) -> &ObservationEntries {
         &self.entries
     }
 
@@ -537,7 +851,18 @@ impl Observation {
     /// Report the entry at `from` under `to`: the same file, spelled as
     /// the pair knows it.
     pub fn respell(&mut self, from: &SyncPath, to: SyncPath) {
-        if let Some(entry) = self.entries.remove(from) {
+        let origin = self
+            .entries
+            .get(from)
+            .map(|entry| self.aligned_origin(&to, entry));
+        if origin.is_some() {
+            self.preserve_original(from);
+            self.preserve_original(&to);
+        }
+        if let Some(origin) = origin
+            && let Some(mut entry) = self.entries.remove(from)
+        {
+            entry.set_origin(origin);
             self.entries.insert(to.clone(), entry);
         }
         for listed in self
@@ -562,18 +887,143 @@ impl Observation {
         }
     }
 
+    /// Apply independent spelling changes together. Mapping sources and
+    /// destinations must be distinct; the alignment pass establishes this
+    /// before changing any rows. Dense rows are rebuilt once, so a restored
+    /// tree with many normalized spellings does not shift a whole table for
+    /// every renamed entry.
+    pub fn respell_all(&mut self, mappings: &BTreeMap<SyncPath, SyncPath>) {
+        if mappings.is_empty() {
+            return;
+        }
+        let rename = |path: &mut SyncPath| {
+            if let Some(to) = mappings.get(path) {
+                *path = to.clone();
+            }
+        };
+        // Compare every final path against the original flags before
+        // changing any flag. Mapping cycles must not make a newly observed
+        // source look like an original at another mapping's destination.
+        let origins: Vec<_> = mappings
+            .iter()
+            .map(|(from, to)| {
+                self.entries
+                    .get(from)
+                    .map(|entry| self.aligned_origin(to, entry))
+            })
+            .collect();
+        let mut targets: Vec<_> = mappings
+            .iter()
+            .zip(&origins)
+            .filter_map(|((_, to), origin)| origin.is_some().then_some(to))
+            .collect();
+        for ((from, to), origin) in mappings.iter().zip(&origins) {
+            if origin.is_some() {
+                self.preserve_original(from);
+                self.preserve_original(to);
+            }
+        }
+        for ((from, _), origin) in mappings.iter().zip(&origins) {
+            if let Some(origin) = origin {
+                self.entries.set_origin(from, *origin);
+            }
+        }
+        drop(origins);
+        targets.sort_unstable();
+        self.entries.retain(|path, entry| {
+            (entry.origin() != ObservationOrigin::Uncompared
+                && !entry.is_excluded()
+                && mappings.contains_key(path))
+                || targets.binary_search(&path).is_err()
+        });
+        drop(targets);
+        let mut rows = std::mem::take(&mut self.entries).into_rows();
+        for (path, entry) in &mut rows {
+            if entry.origin() != ObservationOrigin::Uncompared && !entry.is_excluded() {
+                rename(path);
+            }
+        }
+        self.entries =
+            ObservationEntries::new(PathMapBuilder::from_rows(rows).freeze_retaining_capacity());
+        for path in self
+            .oversized
+            .iter_mut()
+            .chain(&mut self.old)
+            .chain(&mut self.unavailable)
+        {
+            rename(path);
+        }
+        for directory in self.unstable.iter_mut().flatten() {
+            rename(directory);
+        }
+        for issue in &mut self.issues {
+            rename(&mut issue.path);
+        }
+    }
+
+    fn aligned_origin(&self, path: &SyncPath, entry: &ObservedEntry) -> ObservationOrigin {
+        let Some(comparison) = &self.comparison else {
+            return entry.origin();
+        };
+        if !comparison.changed.contains_key(path)
+            && let Some(time) = comparison.original_time(path)
+            && let Some(original) = self.entries.raw().get(path)
+        {
+            return if original.equals_at(entry, time) {
+                ObservationOrigin::PriorEqual
+            } else {
+                ObservationOrigin::PriorChanged
+            };
+        }
+        let original = comparison.changed.get(path).map(Arc::as_ref).or_else(|| {
+            self.entries.raw().get(path).filter(|entry| {
+                matches!(
+                    entry.origin(),
+                    ObservationOrigin::Uncompared | ObservationOrigin::PriorEqual
+                )
+            })
+        });
+        match original {
+            Some(original) if original == entry => ObservationOrigin::PriorEqual,
+            Some(_) => ObservationOrigin::PriorChanged,
+            None => ObservationOrigin::New,
+        }
+    }
+
+    fn preserve_original(&mut self, path: &SyncPath) {
+        if let Some(comparison) = &mut self.comparison
+            && let Some(entry) = self.entries.raw().get(path)
+        {
+            comparison.preserve_original(path, entry);
+        }
+    }
+
+    pub(crate) fn retain_entries(
+        &mut self,
+        mut keep: impl FnMut(&SyncPath, &ObservedEntry) -> bool,
+    ) {
+        self.entries.retain(|path, entry| {
+            let retained = keep(path, entry);
+            if !retained && let Some(comparison) = &mut self.comparison {
+                comparison.preserve_original(path, entry);
+            }
+            retained
+        });
+    }
+
     /// Drop paths the other folder skipped, so both skip them.
     pub fn exclude(&mut self, paths: &[SyncPath]) {
-        for path in paths {
-            self.entries.remove(path);
+        if paths.is_empty() {
+            return;
         }
+        self.entries.exclude(paths);
     }
 
     /// The versions the planner compares.
     pub fn versions(&self) -> BTreeMap<SyncPath, EntryVersion> {
         self.entries
             .iter()
-            .map(|(path, entry)| (path.clone(), entry.version))
+            .map(|(path, entry)| (path.clone(), entry.version()))
             .collect()
     }
 }
@@ -1115,7 +1565,7 @@ impl LocalEndpoint {
         &self,
         policy: MetadataPolicy,
         filter: &Filter,
-        previous: &BTreeMap<SyncPath, ObservedEntry>,
+        previous: &impl PreviousObservation,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<Observation, ScanError> {
         self.observe_reporting(policy, filter, previous, control, &mut |_| {})
@@ -1127,97 +1577,410 @@ impl LocalEndpoint {
         &self,
         policy: MetadataPolicy,
         filter: &Filter,
-        previous: &BTreeMap<SyncPath, ObservedEntry>,
+        previous: &impl PreviousObservation,
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
+    ) -> Result<Observation, ScanError> {
+        self.observe_reporting_workers(policy, filter, previous, control, progress, self.workers())
+    }
+
+    /// `observe_reporting` on a chosen worker count. One worker keeps the
+    /// serial walk; more overlap it with bounded reads. Tests choose the
+    /// count, so no public switch exists.
+    fn observe_reporting_workers(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: &impl PreviousObservation,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+        workers: NonZeroUsize,
+    ) -> Result<Observation, ScanError> {
+        self.observe_cached(
+            policy,
+            filter,
+            &Cache::Borrowed(previous),
+            Observation::default(),
+            control,
+            progress,
+            workers,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn observe_owned(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: PathMap<ObservedEntry>,
+        base: Arc<PathMap<BaselineEntry>>,
+        side: Side,
+        hints: ObservationHints,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+    ) -> Result<Observation, ScanError> {
+        let (observation, previous) =
+            Observation::recycling_with_hints(previous, base, side, hints);
+        self.observe_cached(
+            policy,
+            filter,
+            &previous,
+            observation,
+            control,
+            progress,
+            self.workers(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe_cached(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: &Cache<'_>,
+        observation: Observation,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+        workers: NonZeroUsize,
     ) -> Result<Observation, ScanError> {
         if control() == ScanControl::Cancel {
             return Err(ScanError::Cancelled);
         }
-        let mut entries = Vec::new();
-        let stats = self.scan_filtered(filter, &mut |entry| {
-            entries.push(entry);
-            progress(ObserveStep::Listed);
-            control()
-        })?;
-        if control() == ScanControl::Cancel {
-            return Err(ScanError::Cancelled);
-        }
-
-        let mut observation = Observation {
-            entries: BTreeMap::new(),
-            leftovers: stats.leftovers,
-            oversized: stats.oversized,
-            old: stats.old,
-            unavailable: stats.unavailable,
-            issues: stats.issues,
-            unstable: stats.unstable,
-        };
-        let mut unavailable = UnavailablePaths::from_paths(&observation.unavailable);
-        for mut entry in entries {
-            if control() == ScanControl::Cancel {
-                return Err(ScanError::Cancelled);
-            }
-            if unavailable.contains(&entry.path) {
-                progress(ObserveStep::Checked);
-                continue;
-            }
-            if entry.metadata.kind() == NodeKind::Directory {
-                // Child changes update directory stats during the walk. Read
-                // its current metadata under the same identity; file and link
-                // versions still require their exact listing observations.
-                let current = at_scan(&Some(entry.path.clone()), self.root.metadata(&entry.path));
-                match current {
-                    Ok(current)
-                        if current.kind() == NodeKind::Directory
-                            && current.identity() == entry.metadata.identity() =>
-                    {
-                        if current != entry.metadata {
-                            observation.unstable.push(Some(entry.path.clone()));
-                        }
-                        entry.metadata = current;
-                    }
-                    current => {
-                        let error = current
-                            .err()
-                            .unwrap_or_else(|| ScanError::Changed(Some(entry.path.clone())));
-                        unavailable.skip_error(&mut observation, error)?;
-                        progress(ObserveStep::Checked);
-                        continue;
-                    }
-                }
-            }
-            if let Some(known) = previous.get(&entry.path)
-                && known.fingerprint.proves_unchanged(&entry.metadata)
-            {
-                observation.entries.insert(entry.path, known.clone());
-                progress(ObserveStep::Checked);
-                continue;
-            }
-            let observed_at = SystemTime::now();
-            let version = match self.entry_version(&entry, policy, control) {
-                Ok(version) => version,
-                Err(error) => {
-                    unavailable.skip_error(&mut observation, error)?;
-                    progress(ObserveStep::Checked);
-                    continue;
-                }
+        if workers == NonZeroUsize::MIN {
+            self.observe_reporting_serial(policy, filter, previous, observation, control, progress)
+        } else {
+            let read = |(entry, _observed_at): &(LocalEntry, SystemTime),
+                        asked: &dyn Fn() -> ScanControl| {
+                self.entry_version(entry, policy, &mut || asked())
             };
-            observation.entries.insert(
-                entry.path,
-                ObservedEntry {
-                    version,
-                    fingerprint: Fingerprint::new(&entry.metadata, observed_at),
+            self.observe_cached_overlapped_with(
+                policy,
+                filter,
+                previous,
+                observation,
+                control,
+                progress,
+                workers,
+                &read,
+            )
+        }
+    }
+
+    /// The walk and the reads on this thread, one entry at a time.
+    fn observe_reporting_serial(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: &Cache<'_>,
+        mut observation: Observation,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+    ) -> Result<Observation, ScanError> {
+        let mut unavailable = UnavailablePaths::default();
+        let mut directories = Vec::new();
+        let mut failure = None;
+        let scanned = self.scan_filtered(filter, &mut |entry| {
+            progress(ObserveStep::Listed);
+            // Directory stats may change during traversal. Refresh those after
+            // the walk as before; files need no whole-tree metadata inventory.
+            if entry.metadata.kind() == NodeKind::Directory {
+                directories.push(entry);
+                return control();
+            }
+            match self.observe_entry(
+                entry,
+                policy,
+                previous,
+                &mut observation,
+                &mut unavailable,
+                control,
+            ) {
+                Ok(()) => {
+                    progress(ObserveStep::Checked);
+                    ScanControl::Continue
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    ScanControl::Cancel
+                }
+            }
+        });
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        let stats = scanned?;
+        self.finish_observation(
+            policy,
+            previous,
+            observation,
+            unavailable,
+            directories,
+            stats,
+            control,
+            progress,
+        )
+    }
+
+    /// The overlapped walk with a chosen read, so a test can substitute a
+    /// deterministic helper and observe the driver's own handoff. The
+    /// production read calls `entry_version`.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    fn observe_reporting_overlapped_with<G>(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: &impl PreviousObservation,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+        workers: NonZeroUsize,
+        read: &G,
+    ) -> Result<Observation, ScanError>
+    where
+        G: Fn(
+                &(LocalEntry, SystemTime),
+                &dyn Fn() -> ScanControl,
+            ) -> Result<EntryVersion, ScanError>
+            + Sync,
+    {
+        self.observe_cached_overlapped_with(
+            policy,
+            filter,
+            &Cache::Borrowed(previous),
+            Observation::default(),
+            control,
+            progress,
+            workers,
+            read,
+        )
+    }
+
+    /// The walk on this thread, the reads on bounded workers. This thread
+    /// alone asks `control`, reports `progress`, and mutates the observation,
+    /// the unavailable index and the stats; a worker only captures one
+    /// entry's verified version and checks the shared stop.
+    #[allow(clippy::too_many_arguments)]
+    fn observe_cached_overlapped_with<G>(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: &Cache<'_>,
+        mut observation: Observation,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+        workers: NonZeroUsize,
+        read: &G,
+    ) -> Result<Observation, ScanError>
+    where
+        G: Fn(
+                &(LocalEntry, SystemTime),
+                &dyn Fn() -> ScanControl,
+            ) -> Result<EntryVersion, ScanError>
+            + Sync,
+    {
+        let mut unavailable = UnavailablePaths::default();
+        let mut directories = Vec::new();
+        let mut failure = None;
+        let stop = AtomicBool::new(false);
+        let (scanned, finish) = thread::scope(|threads| {
+            let mut pending = Reads::start(threads, workers, &stop, read);
+            let scanned = self.scan_filtered(filter, &mut |entry| {
+                progress(ObserveStep::Listed);
+                // Directory stats may change during traversal. Refresh those
+                // after the readers finish; files need no whole-tree metadata
+                // inventory.
+                if entry.metadata.kind() == NodeKind::Directory {
+                    directories.push(entry);
+                    return control();
+                }
+                let prepared = match self.prepare_entry(
+                    entry,
+                    previous,
+                    &mut observation,
+                    &mut unavailable,
+                    control,
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        failure = Some(error);
+                        return ScanControl::Cancel;
+                    }
+                };
+                let Some(job) = prepared else {
+                    progress(ObserveStep::Checked);
+                    return ScanControl::Continue;
+                };
+                if let Err(error) = pending.submit(
+                    job,
+                    &mut |(entry, observed_at), result| {
+                        land_entry(
+                            entry,
+                            *observed_at,
+                            result,
+                            &mut observation,
+                            &mut unavailable,
+                        )?;
+                        progress(ObserveStep::Checked);
+                        Ok(())
+                    },
+                    control,
+                ) {
+                    failure = Some(error);
+                    return ScanControl::Cancel;
+                }
+                ScanControl::Continue
+            });
+            if failure.is_some() || scanned.is_err() {
+                // A producer failure is terminal even when a caller's
+                // cancellation callback returns Continue on its next call.
+                stop.store(true, Ordering::Relaxed);
+            }
+            let finish = pending.finish(
+                &mut |(entry, observed_at), result| {
+                    land_entry(
+                        entry,
+                        *observed_at,
+                        result,
+                        &mut observation,
+                        &mut unavailable,
+                    )?;
+                    progress(ObserveStep::Checked);
+                    Ok(())
                 },
+                control,
             );
+            (scanned, finish)
+        });
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        let stats = scanned?;
+        finish?;
+        self.finish_observation(
+            policy,
+            previous,
+            observation,
+            unavailable,
+            directories,
+            stats,
+            control,
+            progress,
+        )
+    }
+
+    /// Settle the walk's stats, refresh the deferred directories, then drop
+    /// rows below a subtree that failed late.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_observation(
+        &self,
+        policy: MetadataPolicy,
+        previous: &Cache<'_>,
+        mut observation: Observation,
+        mut unavailable: UnavailablePaths,
+        directories: Vec<LocalEntry>,
+        stats: ScanStats,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+    ) -> Result<Observation, ScanError> {
+        observation.leftovers = stats.leftovers;
+        observation.oversized = stats.oversized;
+        observation.old = stats.old;
+        observation.unstable.extend(stats.unstable);
+        for path in &stats.unavailable {
+            unavailable.insert(path);
+        }
+        observation.unavailable.extend(stats.unavailable);
+        observation.issues.extend(stats.issues);
+        for entry in directories {
+            self.observe_entry(
+                entry,
+                policy,
+                previous,
+                &mut observation,
+                &mut unavailable,
+                control,
+            )?;
             progress(ObserveStep::Checked);
         }
         // A directory can fail after its children were inserted. Suppress
         // those children too, without repeating every failed-root comparison.
-        unavailable.retain_entries(&mut observation.entries, control)?;
+        observation.finish_entries();
+        unavailable.retain_entries(&mut observation, control)?;
         observation.unstable.sort();
         observation.unstable.dedup();
         Ok(observation)
+    }
+
+    /// Retain one verified entry; bounded failures mark its subtree unknown.
+    fn observe_entry(
+        &self,
+        entry: LocalEntry,
+        policy: MetadataPolicy,
+        previous: &Cache<'_>,
+        observation: &mut Observation,
+        unavailable: &mut UnavailablePaths,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), ScanError> {
+        if let Some((entry, observed_at)) =
+            self.prepare_entry(entry, previous, observation, unavailable, control)?
+        {
+            let result = self.entry_version(&entry, policy, control);
+            land_entry(&entry, observed_at, result, observation, unavailable)?;
+        }
+        Ok(())
+    }
+
+    /// Check the caller's control, a settled cache entry and a directory's
+    /// fresh binding, and capture the observation time before any read.
+    /// `None` means the entry is already recorded and needs no read.
+    fn prepare_entry(
+        &self,
+        mut entry: LocalEntry,
+        previous: &Cache<'_>,
+        observation: &mut Observation,
+        unavailable: &mut UnavailablePaths,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<Option<(LocalEntry, SystemTime)>, ScanError> {
+        if control() == ScanControl::Cancel {
+            return Err(ScanError::Cancelled);
+        }
+        if unavailable.contains(&entry.path) {
+            return Ok(None);
+        }
+        if entry.metadata.kind() == NodeKind::Directory {
+            // Child changes update directory stats during the walk. Read
+            // its current metadata under the same identity; file and link
+            // versions still require their exact listing observations.
+            let current = at_scan(&Some(entry.path.clone()), self.root.metadata(&entry.path));
+            match current {
+                Ok(current)
+                    if current.kind() == NodeKind::Directory
+                        && current.identity() == entry.metadata.identity() =>
+                {
+                    if current != entry.metadata {
+                        observation.unstable.push(Some(entry.path.clone()));
+                    }
+                    entry.metadata = current;
+                }
+                current => {
+                    let error = current
+                        .err()
+                        .unwrap_or_else(|| ScanError::Changed(Some(entry.path.clone())));
+                    unavailable.skip_error(observation, error)?;
+                    return Ok(None);
+                }
+            }
+        }
+        if let Some(path) = previous.key(&entry.path) {
+            entry.path = path;
+        }
+        if let Some(known) = previous.get(&entry.path)
+            && known.fingerprint().proves_unchanged(&entry.metadata)
+        {
+            observation.reuse(entry.path, known);
+            return Ok(None);
+        }
+        Ok(Some((entry, SystemTime::now())))
     }
 
     /// One entry's content and tracked metadata. Every read is checked
@@ -1325,6 +2088,27 @@ impl LocalEndpoint {
             NodeKind::File | NodeKind::Directory => {}
         }
         Ok(Some(entry))
+    }
+}
+
+/// Record one read result, or mark its subtree unavailable. Bounded read
+/// failures never discard the whole observation; cancellation propagates.
+fn land_entry(
+    entry: &LocalEntry,
+    observed_at: SystemTime,
+    result: Result<EntryVersion, ScanError>,
+    observation: &mut Observation,
+    unavailable: &mut UnavailablePaths,
+) -> Result<(), ScanError> {
+    match result {
+        Ok(version) => {
+            observation.record(
+                entry.path.clone(),
+                ObservedEntry::new(version, Fingerprint::new(&entry.metadata, observed_at)),
+            );
+            Ok(())
+        }
+        Err(error) => unavailable.skip_error(observation, error),
     }
 }
 
@@ -1504,6 +2288,8 @@ fn at_scan<T>(path: &Option<SyncPath>, result: io::Result<T>) -> Result<T, ScanE
 mod churn_tests;
 #[cfg(test)]
 mod filtering_tests;
+#[cfg(test)]
+mod refresh_tests;
 
 /// How long a filesystem may take to show a mutation in an entry's stat
 /// key. `ctime` advances in coarse ticks on several filesystems, so a
@@ -1545,6 +2331,7 @@ pub(crate) fn settled_stat(endpoint: &LocalEndpoint, path: &SyncPath, mut mutate
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     /// PLAN.md §4.8: an unchanged stat stands for a version only until it
     /// is half a week to a week old, so same-size, same-time edits are
@@ -1568,6 +2355,291 @@ mod tests {
         );
         assert!(limits.len() > 32, "rereads are spread");
     }
+
+    /// PLAN.md §4.8: a full second in the persisted nanosecond field used
+    /// to panic `Duration::new` instead of restoring to `None`.
+    #[test]
+    fn malformed_fingerprint_headers_are_rejected() {
+        let version = EntryVersion::new(
+            foldover_types::EntryContent::File(Digest::from_bytes([1; Digest::BYTE_LEN])),
+            Digest::from_bytes([2; Digest::BYTE_LEN]),
+        );
+        let mut header = Vec::new();
+        header.extend_from_slice(&u64::MAX.to_le_bytes());
+        header.extend_from_slice(&1_000_000_000u32.to_le_bytes());
+        header.extend_from_slice(&7u64.to_le_bytes());
+        header.extend_from_slice(b"key");
+
+        assert!(ObservedEntry::restore(version, &header).is_none());
+        assert!(ObservedEntry::restore_owned(version, header.clone()).is_none());
+
+        // The largest valid nanosecond field with the largest seconds: no
+        // representable observation, so still no entry.
+        header[8..12].copy_from_slice(&0u32.to_le_bytes());
+        assert!(ObservedEntry::restore(version, &header).is_none());
+        assert!(ObservedEntry::restore_owned(version, header.clone()).is_none());
+
+        // Too short for the header is not a fingerprint either.
+        let short = &header[..FINGERPRINT_HEADER_BYTES - 1];
+        assert!(ObservedEntry::restore(version, short).is_none());
+        assert!(ObservedEntry::restore_owned(version, short.to_vec()).is_none());
+    }
+
+    /// The inline representation is bounded: a version handle plus the
+    /// exact fingerprint payload, with no shared data allocation.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn observed_entry_is_56_bytes_on_64_bit() {
+        assert_eq!(size_of::<ObservedEntry>(), 56);
+    }
+
+    fn path(bytes: &[u8]) -> SyncPath {
+        SyncPath::try_from(bytes).unwrap()
+    }
+
+    fn file_version(content: u8, metadata: u8) -> EntryVersion {
+        EntryVersion::new(
+            foldover_types::EntryContent::File(Digest::from_bytes([content; Digest::BYTE_LEN])),
+            Digest::from_bytes([metadata; Digest::BYTE_LEN]),
+        )
+    }
+
+    fn fingerprint_bytes(key: u8) -> Vec<u8> {
+        let mut bytes = vec![0; FINGERPRINT_HEADER_BYTES];
+        bytes.extend_from_slice(&[key; 93]);
+        bytes
+    }
+
+    /// An inline entry clones by value: the fingerprint payload is copied,
+    /// so the clone stays valid when the original is dropped.
+    #[test]
+    fn cloning_an_observation_copies_its_value() {
+        let version = file_version(1, 2);
+        let bytes = fingerprint_bytes(7);
+        let original = ObservedEntry::restore(version, &bytes).unwrap();
+        let cloned = original.clone();
+        assert_ne!(
+            original.fingerprint().key.as_ptr(),
+            cloned.fingerprint().key.as_ptr()
+        );
+        assert_eq!(cloned, original);
+        drop(original);
+        assert_eq!(cloned.version(), version);
+        assert_eq!(cloned.fingerprint_bytes(), bytes);
+    }
+
+    #[test]
+    fn canonical_builder_resolves_unequal_metadata_sides() {
+        let left = file_version(1, 2);
+        let right = file_version(1, 3);
+        let base = BaselineEntry::new(left, right).unwrap();
+        let map = PathMap::from_sorted(vec![(path(b"a"), base)]).unwrap();
+        let mut builder = SnapshotBuilder::new(Arc::new(map), Side::Left, 2);
+        let bytes = fingerprint_bytes(9);
+
+        // An exact left-side match resolves to the baseline row.
+        assert!(builder.insert(path(b"a"), left, &bytes));
+        assert_eq!(builder.owned_versions(), 0);
+
+        // The right side's version does not match the left side, so it
+        // appends an owned version instead of borrowing the wrong row.
+        assert!(builder.insert(path(b"a"), right, &bytes));
+        assert_eq!(builder.owned_versions(), 1);
+
+        let snapshot = builder.freeze();
+        let entry = snapshot.get(&path(b"a")).unwrap();
+        assert_eq!(entry.version(), right);
+        assert_eq!(entry.fingerprint_bytes(), bytes);
+    }
+
+    #[test]
+    fn canonical_builder_skips_invalid_fingerprints() {
+        let mut builder = SnapshotBuilder::new(Arc::new(PathMap::new()), Side::Left, 1);
+        let version = file_version(1, 2);
+        let short = vec![0; FINGERPRINT_HEADER_BYTES - 1];
+        assert!(!builder.insert(path(b"a"), version, &short));
+        assert_eq!(builder.owned_versions(), 0);
+        assert!(builder.freeze().is_empty());
+    }
+
+    #[test]
+    fn snapshot_builder_reserves_one_percent_growth_headroom() {
+        let builder = SnapshotBuilder::new(Arc::new(PathMap::new()), Side::Left, 100);
+        assert!(builder.rows.capacity() >= 101);
+    }
+
+    #[test]
+    fn snapshot_builder_freeze_releases_capacity_when_every_row_is_invalid() {
+        let mut builder = SnapshotBuilder::new(Arc::new(PathMap::new()), Side::Left, 100);
+        let version = file_version(1, 2);
+        let short = vec![0; FINGERPRINT_HEADER_BYTES - 1];
+        for index in 0..100u8 {
+            let name = format!("k{index:03}");
+            assert!(!builder.insert(path(name.as_bytes()), version, &short));
+        }
+        assert_eq!(builder.owned_versions(), 0);
+        let snapshot = builder.freeze();
+        assert!(snapshot.is_empty());
+        assert_eq!(snapshot.capacity(), 0);
+    }
+
+    #[test]
+    fn builder_versions_survive_builder_and_map_drop() {
+        let version = file_version(4, 5);
+        let bytes = fingerprint_bytes(1);
+        let mut builder = SnapshotBuilder::new(Arc::new(PathMap::new()), Side::Right, 1);
+        assert!(builder.insert(path(b"new"), version, &bytes));
+        let snapshot = builder.freeze();
+        let handle = snapshot.get(&path(b"new")).unwrap().observed_version();
+        drop(snapshot);
+        assert_eq!(handle.version(), version);
+    }
+
+    #[test]
+    fn equal_versions_and_fingerprints_compare_equal_across_pools() {
+        let version = file_version(3, 4);
+        let bytes = fingerprint_bytes(2);
+        let mut first = SnapshotBuilder::new(Arc::new(PathMap::new()), Side::Left, 1);
+        first.insert(path(b"a"), version, &bytes);
+        let mut second = SnapshotBuilder::new(Arc::new(PathMap::new()), Side::Right, 1);
+        second.insert(path(b"a"), version, &bytes);
+        let first_entry = first.freeze().get(&path(b"a")).unwrap().clone();
+        let second_entry = second.freeze().get(&path(b"a")).unwrap().clone();
+        assert_eq!(first_entry, second_entry);
+
+        let mut changed = bytes.clone();
+        changed[FINGERPRINT_HEADER_BYTES] ^= 1;
+        let mut third = SnapshotBuilder::new(Arc::new(PathMap::new()), Side::Left, 1);
+        third.insert(path(b"a"), version, &changed);
+        let third_entry = third.freeze().get(&path(b"a")).unwrap().clone();
+        assert_ne!(first_entry, third_entry);
+    }
+
+    /// Shrinking a Vec may keep its old malloc size class. A new payload
+    /// allocation avoids retaining the serialized header or capture slack.
+    #[test]
+    fn fingerprint_payload_does_not_retain_its_capture_buffer() {
+        let version = EntryVersion::new(
+            foldover_types::EntryContent::File(Digest::from_bytes([1; Digest::BYTE_LEN])),
+            Digest::from_bytes([2; Digest::BYTE_LEN]),
+        );
+        let mut bytes = vec![0; FINGERPRINT_HEADER_BYTES];
+        bytes.extend_from_slice(&[7; 93]);
+        let original = bytes.as_ptr();
+        let restored = ObservedEntry::restore_owned(version, bytes).unwrap();
+        assert_ne!(
+            restored.fingerprint().key.as_ptr(),
+            original,
+            "a serialized fingerprint allocation must not become the retained stat key"
+        );
+        let mut capture = vec![7; 128];
+        capture.truncate(93);
+        let original = capture.as_ptr();
+        let fingerprint = Fingerprint::from_key(capture, 0, UNIX_EPOCH);
+        assert_ne!(
+            fingerprint.key.as_ptr(),
+            original,
+            "capture spare capacity must not be retained by the key"
+        );
+    }
+
+    #[test]
+    fn owned_and_borrowed_restore_roundtrip_exact_key() {
+        let version = EntryVersion::new(
+            foldover_types::EntryContent::File(Digest::from_bytes([1; Digest::BYTE_LEN])),
+            Digest::from_bytes([2; Digest::BYTE_LEN]),
+        );
+        // Every byte value, repeated, so an inexact key could not survive.
+        let key: Vec<u8> = (0..=255_u8).chain(0..=63_u8).collect();
+        let observed_at =
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000) + Duration::from_nanos(123_456_789);
+        let fingerprint = Fingerprint::from_key(key.clone(), 4096, observed_at);
+        let bytes = fingerprint.to_bytes();
+
+        let borrowed = ObservedEntry::restore(version, &bytes).unwrap();
+        let owned = ObservedEntry::restore_owned(version, bytes.clone()).unwrap();
+
+        assert_eq!(borrowed, owned);
+        assert!(borrowed.fingerprint().key.matches(&key));
+        assert!(owned.fingerprint().key.matches(&key));
+        assert_eq!(borrowed.fingerprint().size, 4096);
+        assert_eq!(borrowed.fingerprint().observed_at, observed_at);
+        assert_eq!(borrowed.fingerprint_bytes(), bytes);
+        assert_eq!(owned.fingerprint_bytes(), bytes);
+
+        // A header with no key is a valid fingerprint of an empty key.
+        let empty =
+            ObservedEntry::restore_owned(version, bytes[..FINGERPRINT_HEADER_BYTES].to_vec())
+                .unwrap();
+        assert_eq!(empty.fingerprint().key.len(), 0);
+        assert_eq!(
+            empty.fingerprint_bytes(),
+            bytes[..FINGERPRINT_HEADER_BYTES].to_vec()
+        );
+
+        // A stored buffer with spare capacity still yields the exact key.
+        let mut roomy = Vec::with_capacity(1024);
+        roomy.extend_from_slice(&bytes);
+        let shrunk = ObservedEntry::restore_owned(version, roomy).unwrap();
+        assert_eq!(shrunk, borrowed);
+        assert!(shrunk.fingerprint().key.matches(&key));
+    }
+
+    /// A pre-epoch observation persists as the epoch, its existing behavior.
+    #[test]
+    fn pre_epoch_observation_serializes_as_epoch() {
+        let version = EntryVersion::new(
+            foldover_types::EntryContent::File(Digest::from_bytes([1; Digest::BYTE_LEN])),
+            Digest::from_bytes([2; Digest::BYTE_LEN]),
+        );
+        let fingerprint =
+            Fingerprint::from_key(vec![9, 8, 7, 6], 1, UNIX_EPOCH - Duration::from_secs(10));
+        let bytes = fingerprint.to_bytes();
+        assert_eq!(bytes[..8].to_vec(), 0u64.to_le_bytes().to_vec());
+        assert_eq!(bytes[8..12].to_vec(), 0u32.to_le_bytes().to_vec());
+        assert_eq!(
+            bytes[12..FINGERPRINT_HEADER_BYTES].to_vec(),
+            1u64.to_le_bytes().to_vec()
+        );
+
+        let restored = ObservedEntry::restore(version, &bytes).unwrap();
+        assert_eq!(restored.fingerprint().observed_at, UNIX_EPOCH);
+        assert!(restored.fingerprint().key.matches(&[9, 8, 7, 6]));
+    }
+
+    #[test]
+    fn captured_stat_key_keeps_only_its_payload() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("file"), b"data").unwrap();
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        let path = SyncPath::try_from(b"file".as_slice()).unwrap();
+        let entry = endpoint
+            .entry_at(&path)
+            .expect("the entry is reachable")
+            .expect("the entry exists");
+        let metadata = entry.metadata();
+        let key = metadata.stat_key();
+        let fingerprint = Fingerprint::new(metadata, SystemTime::UNIX_EPOCH);
+
+        assert!(key.capacity() >= key.len());
+        assert_eq!(fingerprint.key.len(), key.len());
+        assert!(fingerprint.key.matches(&key));
+        assert!(fingerprint.key.encoded_len() <= key.len() + 1);
+        assert_eq!(&fingerprint.to_bytes()[FINGERPRINT_HEADER_BYTES..], key);
+    }
+
+    #[test]
+    fn reread_spread_follows_the_exact_key_bytes() {
+        let now = SystemTime::now();
+        let key: Vec<u8> = (0..=255_u8).collect();
+        let limit = Fingerprint::from_key(key.clone(), 1, now).reread_after();
+
+        let hash = blake3::hash(&key);
+        let spread = u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes"));
+        let half = (REREAD.as_secs() / 2).max(1);
+        assert_eq!(limit, Duration::from_secs(half + spread % half));
+    }
+
     #[cfg(target_os = "linux")]
     use std::ffi::OsStr;
     use std::fs;
@@ -1938,21 +3010,26 @@ mod tests {
         fs::write(temporary.path().join("changed"), b"before").unwrap();
         fs::write(temporary.path().join("safe"), b"keep").unwrap();
         let endpoint = LocalEndpoint::open(temporary.path()).unwrap();
-        let mut listed = 0;
+        // A streamed first file may finish before the second listing.
+        // Change this file at its read boundary, after its stat was listed,
+        // so the regression depends on neither scheduling nor readdir order.
+        let read = |(entry, _): &(LocalEntry, SystemTime), asked: &dyn Fn() -> ScanControl| {
+            if entry.path.as_bytes() == b"changed" {
+                fs::write(temporary.path().join("changed"), b"after").unwrap();
+            }
+            endpoint.entry_version(entry, ALL, &mut || asked())
+        };
+        let previous = BTreeMap::new();
         let observation = endpoint
-            .observe_reporting(
+            .observe_cached_overlapped_with(
                 ALL,
                 &Filter::none(),
-                &BTreeMap::new(),
+                &Cache::Borrowed(&previous),
+                Observation::default(),
                 &mut || ScanControl::Continue,
-                &mut |step| {
-                    if step == ObserveStep::Listed {
-                        listed += 1;
-                        if listed == 2 {
-                            fs::write(temporary.path().join("changed"), b"after").unwrap();
-                        }
-                    }
-                },
+                &mut |_| {},
+                NonZeroUsize::new(4).unwrap(),
+                &read,
             )
             .unwrap();
         assert_eq!(observation.entries().len(), 1);
@@ -2211,7 +3288,7 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(&restored, first.entries());
+        assert!(restored.iter().eq(first.entries().iter()));
         assert!(
             ObservedEntry::restore(
                 first.versions()[&SyncPath::try_from(b"settled".as_slice()).unwrap()],
@@ -2507,5 +3584,444 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn file_observation_streams_checks_within_the_reader_queue_bound() {
+        let directory = tempfile::tempdir().unwrap();
+        let workers = NonZeroUsize::new(4).expect("four is not zero");
+        // More files than the bounded queue holds, so a walk that buffered
+        // the whole inventory would check only after listing every entry.
+        let files = 2 * workers.get() + 2;
+        for index in 0..files {
+            fs::write(directory.path().join(format!("file-{index}")), b"payload").unwrap();
+        }
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+
+        let mut listed = 0;
+        let mut first_checked = None;
+        let result = endpoint
+            .observe_reporting_workers(
+                MetadataPolicy::default(),
+                &Filter::none(),
+                &BTreeMap::new(),
+                &mut || ScanControl::Continue,
+                &mut |step| match step {
+                    ObserveStep::Listed => listed += 1,
+                    ObserveStep::Checked => {
+                        first_checked.get_or_insert(listed);
+                    }
+                },
+                workers,
+            )
+            .unwrap();
+        assert_eq!(result.entries().len(), files);
+        let first_checked = first_checked.expect("every file is checked");
+        assert!(
+            first_checked <= 2 * workers.get() + 1,
+            "the first check landed at {first_checked}, past the reader queue"
+        );
+        assert!(
+            first_checked < files,
+            "the first check landed at {first_checked}, after the whole walk"
+        );
+
+        // One worker keeps the serial order: each entry is checked as it is
+        // listed.
+        let mut listed = 0;
+        let mut first_checked = None;
+        endpoint
+            .observe_reporting_workers(
+                MetadataPolicy::default(),
+                &Filter::none(),
+                &BTreeMap::new(),
+                &mut || ScanControl::Continue,
+                &mut |step| match step {
+                    ObserveStep::Listed => listed += 1,
+                    ObserveStep::Checked => {
+                        first_checked.get_or_insert(listed);
+                    }
+                },
+                NonZeroUsize::MIN,
+            )
+            .unwrap();
+        assert_eq!(first_checked, Some(1));
+    }
+
+    /// The overlapped walk must really read on several workers at once. The
+    /// probe counts active `entry_version` calls; one worker would leave the
+    /// maximum at one.
+    #[test]
+    fn overlapped_observation_reads_on_several_threads_at_once() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Condvar, Mutex};
+        use std::time::Duration;
+
+        let directory = tempfile::tempdir().unwrap();
+        let files = 16;
+        for index in 0..files {
+            fs::write(directory.path().join(format!("file-{index}")), b"payload").unwrap();
+        }
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+
+        // The helper waits until four reads are in flight. A bounded wait
+        // keeps a broken driver from hanging the test; the flag records
+        // whether they met.
+        let active = Arc::new((Mutex::new(0_usize), Condvar::new()));
+        let reached = Arc::new(AtomicBool::new(false));
+        let required = 4;
+        let met = Arc::clone(&reached);
+        let read = move |_: &(LocalEntry, SystemTime), _: &dyn Fn() -> ScanControl| {
+            let (lock, changed) = &*active;
+            let mut in_flight = lock.lock().unwrap();
+            *in_flight += 1;
+            if *in_flight >= required {
+                met.store(true, Ordering::SeqCst);
+                changed.notify_all();
+            } else {
+                let (guard, _timeout) = changed
+                    .wait_timeout_while(in_flight, Duration::from_secs(5), |in_flight| {
+                        *in_flight < required && !met.load(Ordering::SeqCst)
+                    })
+                    .unwrap();
+                in_flight = guard;
+            }
+            drop(in_flight);
+            Ok(EntryVersion::new(
+                foldover_types::EntryContent::Directory,
+                Digest::from_bytes([0; Digest::BYTE_LEN]),
+            ))
+        };
+
+        let observation = endpoint
+            .observe_reporting_overlapped_with(
+                MetadataPolicy::default(),
+                &Filter::none(),
+                &BTreeMap::new(),
+                &mut || ScanControl::Continue,
+                &mut |_| {},
+                NonZeroUsize::new(required).unwrap(),
+                &read,
+            )
+            .unwrap();
+        assert_eq!(observation.entries().len(), files);
+        assert!(
+            reached.load(Ordering::SeqCst),
+            "reads did not overlap on four workers"
+        );
+    }
+
+    /// Workers only capture versions; the caller's control and progress run
+    /// on the walk's thread, so a cancellation or a progress callback cannot
+    /// race the observation it describes.
+    #[test]
+    fn control_and_progress_stay_on_the_run_thread() {
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..8 {
+            fs::write(directory.path().join(format!("file-{index}")), b"payload").unwrap();
+        }
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        let caller = std::thread::current().id();
+        let mut control_thread = None;
+        let mut progress_thread = None;
+        let observation = endpoint
+            .observe_reporting_workers(
+                MetadataPolicy::default(),
+                &Filter::none(),
+                &BTreeMap::new(),
+                &mut || {
+                    control_thread.get_or_insert(std::thread::current().id());
+                    ScanControl::Continue
+                },
+                &mut |_| {
+                    progress_thread.get_or_insert(std::thread::current().id());
+                },
+                NonZeroUsize::new(4).expect("four is not zero"),
+            )
+            .unwrap();
+        assert_eq!(observation.entries().len(), 8);
+        assert_eq!(control_thread, Some(caller));
+        assert_eq!(progress_thread, Some(caller));
+    }
+
+    /// Cancelling stops the readers and winds them down; the failed call
+    /// publishes no partial observation, and the endpoint observes again.
+    #[test]
+    fn cancelling_an_overlapped_observation_leaves_no_partial_result() {
+        let directory = tempfile::tempdir().unwrap();
+        let files = 64;
+        for index in 0..files {
+            fs::write(directory.path().join(format!("file-{index}")), b"payload").unwrap();
+        }
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        let checked = Cell::new(0);
+        let result = endpoint.observe_reporting_workers(
+            MetadataPolicy::default(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut || match checked.get() {
+                0 => ScanControl::Continue,
+                _ => ScanControl::Cancel,
+            },
+            &mut |step| {
+                if step == ObserveStep::Checked {
+                    checked.set(checked.get() + 1);
+                }
+            },
+            NonZeroUsize::new(4).expect("four is not zero"),
+        );
+        assert!(matches!(result, Err(ScanError::Cancelled)), "{result:?}");
+
+        let observation = endpoint
+            .observe_reporting_workers(
+                MetadataPolicy::default(),
+                &Filter::none(),
+                &BTreeMap::new(),
+                &mut || ScanControl::Continue,
+                &mut |_| {},
+                NonZeroUsize::new(4).expect("four is not zero"),
+            )
+            .unwrap();
+        assert_eq!(observation.entries().len(), files);
+    }
+
+    /// A settled cache entry is recorded without a read job; a recent one
+    /// still needs the worker's read.
+    #[test]
+    fn one_shot_producer_cancellation_stops_reads_already_in_progress() {
+        use std::sync::mpsc;
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a"), b"a").unwrap();
+        fs::write(directory.path().join("b"), b"b").unwrap();
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        let (started, wait_started) = mpsc::channel();
+        let (finished, wait_finished) = mpsc::channel();
+        let release = AtomicBool::new(false);
+        let stopped = AtomicBool::new(false);
+        let cancel_next = Cell::new(false);
+        let listed = Cell::new(0);
+        thread::scope(|threads| {
+            let watchdog_release = &release;
+            threads.spawn(move || {
+                // A broken implementation still exits so the regression
+                // fails rather than hanging the suite.
+                if wait_finished.recv_timeout(Duration::from_secs(5)).is_err() {
+                    watchdog_release.store(true, Ordering::Relaxed);
+                }
+            });
+            let read = |_: &(LocalEntry, SystemTime), asked: &dyn Fn() -> ScanControl| {
+                started.send(()).unwrap();
+                while !release.load(Ordering::Relaxed) {
+                    if asked() == ScanControl::Cancel {
+                        stopped.store(true, Ordering::Relaxed);
+                        finished.send(()).unwrap();
+                        return Err(ScanError::Cancelled);
+                    }
+                    thread::yield_now();
+                }
+                Err(ScanError::Cancelled)
+            };
+            let result = endpoint.observe_reporting_overlapped_with(
+                MetadataPolicy::default(),
+                &Filter::none(),
+                &BTreeMap::new(),
+                &mut || {
+                    if cancel_next.replace(false) {
+                        ScanControl::Cancel
+                    } else {
+                        ScanControl::Continue
+                    }
+                },
+                &mut |step| {
+                    if step == ObserveStep::Listed {
+                        listed.set(listed.get() + 1);
+                        if listed.get() == 2 {
+                            wait_started.recv_timeout(Duration::from_secs(5)).unwrap();
+                            cancel_next.set(true);
+                        }
+                    }
+                },
+                NonZeroUsize::new(2).unwrap(),
+                &read,
+            );
+            assert!(matches!(result, Err(ScanError::Cancelled)));
+        });
+        assert!(
+            stopped.load(Ordering::Relaxed),
+            "producer cancellation did not reach an active read"
+        );
+    }
+
+    #[test]
+    fn settled_previous_entries_need_no_read_job() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let past = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        fs::write(root.join("settled"), b"one").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(root.join("settled"))
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+        fs::write(root.join("recent"), b"two").unwrap();
+        let endpoint = LocalEndpoint::open(root).unwrap();
+        let previous = endpoint
+            .observe(ALL, &mut || ScanControl::Continue)
+            .unwrap();
+        let mut observation = Observation::default();
+        let mut unavailable = UnavailablePaths::default();
+        let mut control = || ScanControl::Continue;
+        let path = |name: &[u8]| SyncPath::try_from(name).unwrap();
+
+        let settled = endpoint.entry_at(&path(b"settled")).unwrap().unwrap();
+        assert!(
+            endpoint
+                .prepare_entry(
+                    settled,
+                    &Cache::Borrowed(previous.entries()),
+                    &mut observation,
+                    &mut unavailable,
+                    &mut control,
+                )
+                .unwrap()
+                .is_none()
+        );
+        observation.finish_entries();
+        assert!(observation.entries().contains_key(&path(b"settled")));
+
+        let recent = endpoint.entry_at(&path(b"recent")).unwrap().unwrap();
+        assert!(
+            endpoint
+                .prepare_entry(
+                    recent,
+                    &Cache::Borrowed(previous.entries()),
+                    &mut observation,
+                    &mut unavailable,
+                    &mut control,
+                )
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// One worker and four find the same versions, skips, unstable
+    /// directories and progress counts, so the overlap changes only the
+    /// order in which reads finish.
+    #[test]
+    fn serial_and_overlapped_observations_agree() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir(root.join("folder")).unwrap();
+        fs::write(root.join("folder/file"), b"data").unwrap();
+        fs::write(root.join("notes"), b"notes").unwrap();
+        symlink("folder/file", root.join("link")).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(root.join("pipe"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        let endpoint = LocalEndpoint::open(root).unwrap();
+
+        let observe = |workers| {
+            let mut steps = Vec::new();
+            let observation = endpoint
+                .observe_reporting_workers(
+                    MetadataPolicy::default(),
+                    &Filter::none(),
+                    &BTreeMap::new(),
+                    &mut || ScanControl::Continue,
+                    &mut |step| steps.push(step),
+                    workers,
+                )
+                .unwrap();
+            (observation, steps)
+        };
+        let (serial, serial_steps) = observe(NonZeroUsize::MIN);
+        let (overlapped, overlapped_steps) = observe(NonZeroUsize::new(4).unwrap());
+
+        let versions = |observation: &Observation| {
+            observation
+                .entries()
+                .iter()
+                .map(|(path, entry)| (path.clone(), entry.version()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(versions(&overlapped), versions(&serial));
+
+        let unavailable = |observation: &Observation| {
+            let mut paths = observation.unavailable().to_vec();
+            paths.sort();
+            paths
+        };
+        assert_eq!(unavailable(&overlapped), unavailable(&serial));
+
+        let unstable = |observation: &Observation| {
+            let mut directories = observation.unstable_directories().to_vec();
+            directories.sort();
+            directories
+        };
+        assert_eq!(unstable(&overlapped), unstable(&serial));
+
+        let issues = |observation: &Observation| {
+            let mut issues = observation
+                .issues()
+                .iter()
+                .map(|issue| (issue.path().clone(), issue.message().to_string()))
+                .collect::<Vec<_>>();
+            issues.sort();
+            issues
+        };
+        assert_eq!(issues(&overlapped), issues(&serial));
+
+        let count = |steps: &[ObserveStep], wanted: ObserveStep| {
+            steps.iter().filter(|&&step| step == wanted).count()
+        };
+        assert_eq!(
+            count(&overlapped_steps, ObserveStep::Listed),
+            count(&serial_steps, ObserveStep::Listed)
+        );
+        assert_eq!(
+            count(&overlapped_steps, ObserveStep::Checked),
+            count(&serial_steps, ObserveStep::Checked)
+        );
+    }
+
+    #[test]
+    fn streamed_files_are_discarded_when_their_directory_loses_its_binding() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("parent")).unwrap();
+        fs::write(directory.path().join("parent/file"), b"payload").unwrap();
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        let mut moved = false;
+        let observation = endpoint
+            .observe_reporting(
+                MetadataPolicy::default(),
+                &Filter::none(),
+                &BTreeMap::new(),
+                &mut || ScanControl::Continue,
+                &mut |step| {
+                    if step == ObserveStep::Checked && !moved {
+                        fs::rename(
+                            directory.path().join("parent"),
+                            directory.path().join("moved"),
+                        )
+                        .unwrap();
+                        moved = true;
+                    }
+                },
+            )
+            .unwrap();
+        assert!(moved);
+        let parent = SyncPath::try_from(b"parent".as_slice()).unwrap();
+        assert!(observation.unavailable().contains(&parent));
+        assert!(
+            observation
+                .entries()
+                .keys()
+                .all(|path| path != &parent && !parent.is_ancestor_of(path))
+        );
     }
 }

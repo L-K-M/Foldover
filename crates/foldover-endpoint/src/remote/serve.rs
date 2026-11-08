@@ -3,12 +3,14 @@
 //! opens the folder with the local endpoint and does what was asked.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use foldover_fs::Resume;
@@ -20,7 +22,7 @@ use foldover_proto::peer::{
 };
 use foldover_types::{
     CaseMatching, Digest, Durability, EntryVersion, LocalRoot, MetadataPolicy, PairOptions,
-    Propagation, ScanControl, SyncPath, UnicodeMatching,
+    Propagation, ScanControl, Side, SyncPath, UnicodeMatching,
 };
 
 use super::wire;
@@ -90,25 +92,29 @@ impl<'a> AnswerControl<'a> {
 /// Versions carry the policy's metadata digest, so a scan builds only on
 /// one made under the same policy.
 #[derive(Default)]
-pub struct FolderCache(Mutex<HashMap<CacheKey, BTreeMap<SyncPath, ObservedEntry>>>);
+pub struct FolderCache(Mutex<HashMap<CacheKey, foldover_types::PathMap<ObservedEntry>>>);
 
 type CacheKey = (Vec<u8>, MetadataPolicy);
 
 impl FolderCache {
     /// The observation to build on for `root` scanned under `policy`.
-    fn take(&self, root: &LocalRoot, policy: MetadataPolicy) -> BTreeMap<SyncPath, ObservedEntry> {
+    fn take(
+        &self,
+        root: &LocalRoot,
+        policy: MetadataPolicy,
+    ) -> foldover_types::PathMap<ObservedEntry> {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&(root.as_bytes().to_vec(), policy))
-            .unwrap_or_default()
+            .unwrap_or_else(foldover_types::PathMap::new)
     }
 
     fn keep(
         &self,
         root: &LocalRoot,
         policy: MetadataPolicy,
-        entries: BTreeMap<SyncPath, ObservedEntry>,
+        entries: foldover_types::PathMap<ObservedEntry>,
     ) {
         self.0
             .lock()
@@ -422,10 +428,13 @@ fn observe(
     let listed = Cell::new(0);
     let checked = Cell::new(0);
     let reported = Cell::new(Instant::now());
-    let observed = endpoint.observe_reporting(
+    let observed = endpoint.observe_owned(
         policy,
         &filter,
-        &previous,
+        previous,
+        Arc::new(foldover_types::PathMap::new()),
+        Side::Left,
+        crate::ObservationHints::default(),
         &mut || {
             if gone.get() {
                 return ScanControl::Cancel;
@@ -515,7 +524,7 @@ fn observe(
             })
             .is_ok();
     if sent {
-        cache.keep(root, policy, observation.entries().clone());
+        cache.keep(root, policy, observation.into_snapshot());
     }
 }
 
@@ -823,10 +832,10 @@ mod tests {
         let entries = BTreeMap::from([(SyncPath::try_from(&b"album"[..]).unwrap(), entry)]);
         let cache = FolderCache::default();
 
-        cache.keep(&root, with_times, entries.clone());
+        cache.keep(&root, with_times, entries.clone().into_iter().collect());
         assert!(cache.take(&root, without).is_empty());
-        cache.keep(&root, with_times, entries.clone());
-        assert_eq!(cache.take(&root, with_times), entries);
+        cache.keep(&root, with_times, entries.clone().into_iter().collect());
+        assert!(cache.take(&root, with_times).iter().eq(entries.iter()));
     }
 
     /// Review: the asking Mac's clock and retention decided what this

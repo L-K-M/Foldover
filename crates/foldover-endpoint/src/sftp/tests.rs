@@ -394,6 +394,106 @@ child.terminate()
 sys.exit(0)
 "#;
 
+/// A proxy that lists every root entry twice and fails the second listing
+/// of `parent`, so the folder's children are hashed before its late listing
+/// failure covers them. The final unavailable-prefix retain must drop them.
+const LATE_LISTING_PROXY: &str = r#"
+import struct, subprocess, sys, threading
+
+child = subprocess.Popen(sys.argv[1:], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+lock = threading.Lock()
+opened = {}
+handles = {}
+listing = {}
+counts = {}
+root = [None]
+
+
+def packet(stream):
+    head = stream.read(4)
+    if len(head) < 4:
+        return None
+    (length,) = struct.unpack(">I", head)
+    body = stream.read(length)
+    if len(body) < length:
+        return None
+    return head + body
+
+
+def string(body, offset):
+    (count,) = struct.unpack(">I", body[offset : offset + 4])
+    return bytes(body[offset + 4 : offset + 4 + count]), offset + 4 + count
+
+
+def requests():
+    while True:
+        frame = packet(sys.stdin.buffer)
+        if frame is None:
+            break
+        body = frame[4:]
+        kind = body[0]
+        request = struct.unpack(">I", body[1:5])[0]
+        if kind == 11:  # SSH_FXP_OPENDIR
+            path, _ = string(body, 5)
+            with lock:
+                opened[request] = path
+                if root[0] is None:
+                    root[0] = path
+                counts[path] = counts.get(path, 0) + 1
+                late = path.endswith(b"/parent") and counts[path] > 1
+            if late:
+                status = (
+                    bytes([101])
+                    + struct.pack(">I", request)
+                    + struct.pack(">I", 4)
+                    + struct.pack(">I", 4)
+                    + b"late"
+                    + struct.pack(">I", 0)
+                )
+                sys.stdout.buffer.write(struct.pack(">I", len(status)) + status)
+                sys.stdout.buffer.flush()
+                continue
+        elif kind == 12:  # SSH_FXP_READDIR
+            handle, _ = string(body, 5)
+            with lock:
+                path = handles.get(handle)
+                if path is not None:
+                    listing[request] = path
+        child.stdin.write(frame)
+        child.stdin.flush()
+    child.stdin.close()
+
+
+threading.Thread(target=requests, daemon=True).start()
+
+while True:
+    frame = packet(child.stdout)
+    if frame is None:
+        break
+    body = frame[4:]
+    kind = body[0]
+    if kind == 102:  # SSH_FXP_HANDLE
+        request = struct.unpack(">I", body[1:5])[0]
+        handle, _ = string(body, 5)
+        with lock:
+            path = opened.pop(request, None)
+            if path is not None:
+                handles[handle] = path
+    elif kind == 104:  # SSH_FXP_NAME
+        request = struct.unpack(">I", body[1:5])[0]
+        with lock:
+            duplicate = listing.get(request) is not None and listing.get(request) == root[0]
+        if duplicate:
+            (count,) = struct.unpack(">I", body[5:9])
+            entries = body[9:]
+            body = body[:5] + struct.pack(">I", count * 2) + entries + entries
+            frame = struct.pack(">I", len(body)) + body
+    sys.stdout.buffer.write(frame)
+    sys.stdout.buffer.flush()
+
+child.wait()
+"#;
+
 fn proxy(directory: &Path, script: &str, description: &str) -> Option<SftpEndpoint> {
     let python = std::process::Command::new("python3")
         .arg("--version")
@@ -432,6 +532,112 @@ fn lost_rename(directory: &Path) -> Option<SftpEndpoint> {
 
 fn proceed() -> ScanControl {
     ScanControl::Continue
+}
+
+#[test]
+fn cancelling_a_directory_listing_does_not_process_its_remaining_rows() {
+    use std::cell::Cell;
+    for parallel in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..32 {
+            fs::create_dir(directory.path().join(format!("d-{index:03}"))).unwrap();
+        }
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let remote = if parallel {
+            pooled(directory.path(), log.path())
+        } else {
+            sftp(directory.path())
+        };
+        let Some(remote) = remote else { return };
+        let listed = Cell::new(0);
+        let result = remote.observe_reporting(
+            PairOptions::default().metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut || {
+                if listed.get() == 0 {
+                    ScanControl::Continue
+                } else {
+                    ScanControl::Cancel
+                }
+            },
+            &mut |step| {
+                if step == ObserveStep::Listed {
+                    listed.set(listed.get() + 1);
+                }
+            },
+        );
+        assert!(matches!(result, Err(ScanError::Cancelled)));
+        assert_eq!(
+            listed.get(),
+            1,
+            "directory rows must honor the caller's stop"
+        );
+    }
+}
+
+#[test]
+fn owned_observations_preserve_exact_cache_values_and_report_real_changes() {
+    for parallel in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("folder")).unwrap();
+        for index in 0..40 {
+            fs::write(
+                directory.path().join(format!("folder/{index:03}")),
+                b"content",
+            )
+            .unwrap();
+        }
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let remote = if parallel {
+            pooled(directory.path(), log.path())
+        } else {
+            sftp(directory.path())
+        };
+        let Some(remote) = remote else { return };
+        let policy = PairOptions::default().metadata();
+        let previous = remote
+            .observe_from(policy, &Filter::none(), &BTreeMap::new(), &mut proceed)
+            .unwrap()
+            .into_snapshot();
+        let expected = previous.clone();
+        let mut observed = remote
+            .observe_owned(
+                policy,
+                &Filter::none(),
+                previous,
+                Arc::new(foldover_types::PathMap::new()),
+                foldover_types::Side::Right,
+                crate::ObservationHints::default(),
+                &mut proceed,
+                &mut |_| {},
+            )
+            .unwrap();
+        assert!(observed.snapshot_entries().eq(expected.iter()));
+        assert_eq!(observed.finish_snapshot(), Some(false));
+
+        fs::write(directory.path().join("folder/000"), b"changed").unwrap();
+        fs::remove_file(directory.path().join("folder/001")).unwrap();
+        let previous = observed.into_snapshot();
+        let borrowed = remote
+            .observe_from(policy, &Filter::none(), &previous, &mut proceed)
+            .unwrap();
+        let mut owned = remote
+            .observe_owned(
+                policy,
+                &Filter::none(),
+                previous,
+                Arc::new(foldover_types::PathMap::new()),
+                foldover_types::Side::Right,
+                crate::ObservationHints::default(),
+                &mut proceed,
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(owned.versions(), borrowed.versions());
+        assert_eq!(owned.finish_snapshot(), Some(true));
+        assert!(!owned.entries().contains_key(&path(b"folder/001")));
+    }
 }
 
 fn path(bytes: &[u8]) -> SyncPath {
@@ -502,31 +708,194 @@ fn archived_runs_are_only_directories_named_like_runs() {
     assert_eq!(runs, [tied_second, tied_first, run]);
 }
 
-/// Review: each entry was listed and checked back to back, so the
-/// comparison read nearly complete from the first file.
+/// The walk streams checks as it lists, so a nested tree of more than the
+/// reader queue is not fully listed before its first check lands. A
+/// whole-tree inventory checked only after listing every entry.
 #[test]
-fn the_whole_tree_is_listed_before_any_entry_is_checked() {
-    let directory = tempfile::tempdir().unwrap();
-    let Some(remote) = sftp(directory.path()) else {
+fn checks_land_while_a_nested_tree_is_still_being_listed() {
+    const FOLDERS: usize = 8;
+    const FILES_PER_FOLDER: usize = 4;
+    let (directory, logs) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let Some(remote) = pooled(directory.path(), &logs.path().join("sessions")) else {
         return;
     };
-    fs::create_dir(directory.path().join("folder")).unwrap();
-    for name in ["a", "b", "folder/c", "folder/d"] {
-        fs::write(directory.path().join(name), name).unwrap();
+    for folder in 0..FOLDERS {
+        let folder = directory.path().join(format!("folder-{folder}"));
+        fs::create_dir(&folder).unwrap();
+        for file in 0..FILES_PER_FOLDER {
+            fs::write(folder.join(format!("{file}.txt")), b"payload").unwrap();
+        }
     }
-    let mut steps = Vec::new();
-    remote
+    let total = FOLDERS * (FILES_PER_FOLDER + 1);
+    let mut listed = 0;
+    let mut checked = 0;
+    let mut first_checked = None;
+    let observation = remote
         .observe_reporting(
             PairOptions::default().metadata(),
             &Filter::none(),
-            &std::collections::BTreeMap::new(),
+            &BTreeMap::new(),
             &mut proceed,
-            &mut |step| steps.push(step),
+            &mut |step| match step {
+                ObserveStep::Listed => listed += 1,
+                ObserveStep::Checked => {
+                    checked += 1;
+                    first_checked.get_or_insert(listed);
+                }
+            },
         )
         .unwrap();
-    let listed = vec![ObserveStep::Listed; 5];
-    let checked = vec![ObserveStep::Checked; 5];
-    assert_eq!(steps, [listed, checked].concat());
+    assert_eq!(listed, total);
+    assert_eq!(checked, total);
+    assert_eq!(observation.entries().len(), total);
+    let first_checked = first_checked.expect("every entry is checked");
+    assert!(
+        first_checked <= 2 * PARALLEL_READS.get() + 1,
+        "the first check landed at {first_checked}, past the reader queue"
+    );
+    assert!(
+        first_checked < total,
+        "the first check landed at {first_checked}, after the whole walk"
+    );
+}
+
+/// A folder listed once to hash its children and listed again to failure
+/// covers those children: the final unavailable-prefix retain drops them,
+/// as the streamed local walk does.
+#[test]
+fn a_late_parent_listing_failure_suppresses_its_hashed_children() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::create_dir(directory.path().join("parent")).unwrap();
+    fs::write(directory.path().join("parent/child"), b"payload").unwrap();
+    let Some(remote) = proxy(directory.path(), LATE_LISTING_PROXY, "late listing") else {
+        return;
+    };
+    let observed = remote
+        .observe_from(
+            PairOptions::default().metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+        )
+        .unwrap();
+    assert_eq!(observed.unavailable(), &[path(b"parent")]);
+    assert!(!observed.entries().contains_key(&path(b"parent")));
+    assert!(!observed.entries().contains_key(&path(b"parent/child")));
+}
+
+/// Workers only capture versions; the caller's control and progress run on
+/// the walk's thread, so a cancellation or a progress callback cannot race
+/// the observation it describes.
+#[test]
+fn control_and_progress_stay_on_the_run_thread() {
+    let (directory, logs) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let Some(remote) = pooled(directory.path(), &logs.path().join("sessions")) else {
+        return;
+    };
+    for index in 0..8 {
+        fs::write(directory.path().join(format!("file-{index}")), b"payload").unwrap();
+    }
+    let caller = std::thread::current().id();
+    let mut control_thread = None;
+    let mut progress_thread = None;
+    let observation = remote
+        .observe_reporting(
+            PairOptions::default().metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut || {
+                control_thread.get_or_insert(std::thread::current().id());
+                ScanControl::Continue
+            },
+            &mut |_| {
+                progress_thread.get_or_insert(std::thread::current().id());
+            },
+        )
+        .unwrap();
+    assert_eq!(observation.entries().len(), 8);
+    assert_eq!(control_thread, Some(caller));
+    assert_eq!(progress_thread, Some(caller));
+}
+
+/// A cancellation callback that returns Cancel once and then Continue must
+/// still stop the readers: the shared stop is terminal, and the failed call
+/// publishes nothing.
+#[test]
+fn a_one_shot_cancellation_is_terminal() {
+    const FILES: usize = 64;
+    let (directory, logs) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let Some(remote) = pooled(directory.path(), &logs.path().join("sessions")) else {
+        return;
+    };
+    for file in 0..FILES {
+        fs::write(directory.path().join(format!("{file}.txt")), b"payload").unwrap();
+    }
+    let mut calls = 0;
+    let result = remote.observe_from(
+        PairOptions::default().metadata(),
+        &Filter::none(),
+        &BTreeMap::new(),
+        &mut || {
+            calls += 1;
+            if calls == 5 {
+                ScanControl::Cancel
+            } else {
+                ScanControl::Continue
+            }
+        },
+    );
+    assert!(matches!(result, Err(ScanError::Cancelled)), "{result:?}");
+    assert!(calls >= 5);
+
+    let observed = remote
+        .observe_from(
+            PairOptions::default().metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+        )
+        .unwrap();
+    assert_eq!(observed.entries().len(), FILES);
+}
+
+/// Cancelling stops the readers and winds them down; the failed call
+/// publishes no partial observation, and the endpoint observes again.
+#[test]
+fn cancelling_an_overlapped_observation_leaves_no_partial_result() {
+    const FILES: usize = 64;
+    let (directory, logs) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let Some(remote) = pooled(directory.path(), &logs.path().join("sessions")) else {
+        return;
+    };
+    for file in 0..FILES {
+        fs::write(directory.path().join(format!("{file}.txt")), b"payload").unwrap();
+    }
+    let checked = std::cell::Cell::new(0);
+    let result = remote.observe_reporting(
+        PairOptions::default().metadata(),
+        &Filter::none(),
+        &BTreeMap::new(),
+        &mut || match checked.get() {
+            0 => ScanControl::Continue,
+            _ => ScanControl::Cancel,
+        },
+        &mut |step| {
+            if step == ObserveStep::Checked {
+                checked.set(checked.get() + 1);
+            }
+        },
+    );
+    assert!(matches!(result, Err(ScanError::Cancelled)), "{result:?}");
+
+    let observation = remote
+        .observe_from(
+            PairOptions::default().metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+        )
+        .unwrap();
+    assert_eq!(observation.entries().len(), FILES);
 }
 
 /// An endpoint that can open more sessions, each started through a shell
@@ -1055,7 +1424,7 @@ fn unchanged_sftp_attributes_cannot_hide_a_content_change() {
         .observe_from(
             options.metadata(),
             &Filter::none(),
-            &Default::default(),
+            &BTreeMap::new(),
             &mut proceed,
         )
         .unwrap();

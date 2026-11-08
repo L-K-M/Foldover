@@ -1,16 +1,121 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::{Arc, LazyLock};
 
-use foldover_endpoint::{Observation, ObservedEntry};
-use unicode_normalization::UnicodeNormalization;
+use foldover_endpoint::{Observation, ObservationEntries, ObservedEntry};
+use unicode_normalization::{UnicodeNormalization, is_nfc};
 
 use foldover_types::{
     BaselineEntry, CaseMatching, ChangeKind, ConflictKind, EntryContent, EntryDecision, EntryKind,
-    EntryVersion, NameMatching, PathPrefixIndex, Resolution, ScanControl, Side, Skip, SyncMode,
-    SyncPath, UnicodeMatching,
+    EntryVersion, NameMatching, PathMap, PathPrefixIndex, Resolution, ScanControl, Side, Skip,
+    SyncMode, SyncPath, UnicodeMatching,
 };
 
 use crate::reconcile::resolve;
 use crate::{DeletionCounts, DeletionReview, InvalidDeletionCounts, RunContext, reconcile_entry};
+
+/// The planner reads ordered rows and exact paths. It accepts either public
+/// tree inputs or dense observations without cloning their payloads.
+pub(crate) trait Tree {
+    type Value;
+    fn iter(&self) -> impl Iterator<Item = (&SyncPath, &Self::Value)>;
+    fn get(&self, path: &SyncPath) -> Option<&Self::Value>;
+    fn len(&self) -> usize;
+    fn keys(&self) -> impl Iterator<Item = &SyncPath> {
+        self.iter().map(|(path, _)| path)
+    }
+    fn contains_key(&self, path: &SyncPath) -> bool {
+        self.get(path).is_some()
+    }
+}
+
+impl<T> Tree for BTreeMap<SyncPath, T> {
+    type Value = T;
+    fn iter(&self) -> impl Iterator<Item = (&SyncPath, &T)> {
+        BTreeMap::iter(self)
+    }
+    fn get(&self, path: &SyncPath) -> Option<&T> {
+        BTreeMap::get(self, path)
+    }
+    fn len(&self) -> usize {
+        BTreeMap::len(self)
+    }
+}
+
+impl<T> Tree for PathMap<T> {
+    type Value = T;
+    fn iter(&self) -> impl Iterator<Item = (&SyncPath, &T)> {
+        PathMap::iter(self)
+    }
+    fn get(&self, path: &SyncPath) -> Option<&T> {
+        PathMap::get(self, path)
+    }
+    fn len(&self) -> usize {
+        PathMap::len(self)
+    }
+}
+
+impl Tree for ObservationEntries {
+    type Value = ObservedEntry;
+    fn iter(&self) -> impl Iterator<Item = (&SyncPath, &ObservedEntry)> {
+        ObservationEntries::iter(self)
+    }
+    fn get(&self, path: &SyncPath) -> Option<&ObservedEntry> {
+        ObservationEntries::get(self, path)
+    }
+    fn len(&self) -> usize {
+        ObservationEntries::len(self)
+    }
+}
+
+impl<T: Tree> Tree for std::sync::Arc<T> {
+    type Value = T::Value;
+    fn iter(&self) -> impl Iterator<Item = (&SyncPath, &Self::Value)> {
+        self.as_ref().iter()
+    }
+    fn get(&self, path: &SyncPath) -> Option<&Self::Value> {
+        self.as_ref().get(path)
+    }
+    fn len(&self) -> usize {
+        self.as_ref().len()
+    }
+}
+
+/// Planning excludes skipped rows without copying or changing the immutable
+/// baseline that verified observations may share.
+pub(crate) struct FilteredBase<'a> {
+    base: &'a PathMap<BaselineEntry>,
+    excluded: &'a [SyncPath],
+}
+
+impl<'a> FilteredBase<'a> {
+    pub(crate) fn new(base: &'a PathMap<BaselineEntry>, excluded: &'a [SyncPath]) -> Self {
+        debug_assert!(excluded.windows(2).all(|pair| pair[0] < pair[1]));
+        Self { base, excluded }
+    }
+    pub(crate) fn is_empty(&self) -> bool {
+        self.iter().next().is_none()
+    }
+}
+
+impl Tree for FilteredBase<'_> {
+    type Value = BaselineEntry;
+    fn iter(&self) -> impl Iterator<Item = (&SyncPath, &BaselineEntry)> {
+        self.base
+            .iter()
+            .filter(|(path, _)| self.excluded.binary_search(path).is_err())
+    }
+    fn get(&self, path: &SyncPath) -> Option<&BaselineEntry> {
+        self.excluded
+            .binary_search(path)
+            .is_err()
+            .then(|| self.base.get(path))
+            .flatten()
+    }
+    fn len(&self) -> usize {
+        self.iter().count()
+    }
+}
 
 /// A borrowed value projection. Planning owns its output rows, but needs no
 /// second tree of cloned paths just to read observation versions.
@@ -80,16 +185,162 @@ pub enum CandidateDecision {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlanRow {
     path: SyncPath,
-    decision: CandidateDecision,
+    /// One canonical `Arc` per distinct decision: the finite `EntryDecision`
+    /// set shares immutable singletons, and blocked rows share the Arc of
+    /// their outermost blocking ancestor within the plan.
+    decision: Arc<CandidateDecision>,
 }
 
 impl PlanRow {
+    /// Construct a row with a canonical decision reference. Entry decisions
+    /// share the immutable singleton table; a dynamic blocked path gets a
+    /// fresh `Arc` here, and plan-local sharing is applied separately.
+    fn new(path: SyncPath, decision: CandidateDecision) -> Self {
+        Self {
+            path,
+            decision: canonical_decision(decision),
+        }
+    }
+
+    /// Replace the decision with a canonical reference.
+    fn set_decision(&mut self, decision: CandidateDecision) {
+        self.decision = canonical_decision(decision);
+    }
+
+    /// Replace the decision with an already-canonical shared reference.
+    fn set_shared_decision(&mut self, decision: Arc<CandidateDecision>) {
+        self.decision = decision;
+    }
+
     pub fn path(&self) -> &SyncPath {
         &self.path
     }
 
     pub fn decision(&self) -> &CandidateDecision {
-        &self.decision
+        self.decision.as_ref()
+    }
+}
+
+/// The 21 finite `EntryDecision` values, each with one immutable `Arc` that
+/// every row carrying it shares. `EntryDecision` is `Copy` and has no heap
+/// payload, so an exhaustive match selects the singleton without a lookup
+/// key or a growing cache.
+static ENTRY_DECISIONS: LazyLock<[Arc<CandidateDecision>; 21]> = LazyLock::new(|| {
+    use ChangeKind::{Create, ReplaceContent, UpdateMetadata};
+    use ConflictKind::{BothChanged, DeletedVersusEdited, MetadataOnly, NameClash, TypeMismatch};
+    use EntryDecision::{
+        Archive, Conflict, ForgetBase, KeepTarget, Move as MoveDecision, MovedAway, Propagate,
+        RecordBase, Unchanged,
+    };
+    use Side::{Left, Right};
+    [
+        Arc::new(CandidateDecision::Entry(Unchanged)),
+        Arc::new(CandidateDecision::Entry(RecordBase)),
+        Arc::new(CandidateDecision::Entry(ForgetBase)),
+        Arc::new(CandidateDecision::Entry(KeepTarget)),
+        Arc::new(CandidateDecision::Entry(Propagate {
+            from: Left,
+            change: Create,
+        })),
+        Arc::new(CandidateDecision::Entry(Propagate {
+            from: Left,
+            change: ReplaceContent,
+        })),
+        Arc::new(CandidateDecision::Entry(Propagate {
+            from: Left,
+            change: UpdateMetadata,
+        })),
+        Arc::new(CandidateDecision::Entry(Propagate {
+            from: Right,
+            change: Create,
+        })),
+        Arc::new(CandidateDecision::Entry(Propagate {
+            from: Right,
+            change: ReplaceContent,
+        })),
+        Arc::new(CandidateDecision::Entry(Propagate {
+            from: Right,
+            change: UpdateMetadata,
+        })),
+        Arc::new(CandidateDecision::Entry(Archive { on: Left })),
+        Arc::new(CandidateDecision::Entry(Archive { on: Right })),
+        Arc::new(CandidateDecision::Entry(MoveDecision { on: Left })),
+        Arc::new(CandidateDecision::Entry(MoveDecision { on: Right })),
+        Arc::new(CandidateDecision::Entry(MovedAway { on: Left })),
+        Arc::new(CandidateDecision::Entry(MovedAway { on: Right })),
+        Arc::new(CandidateDecision::Entry(Conflict(BothChanged))),
+        Arc::new(CandidateDecision::Entry(Conflict(DeletedVersusEdited))),
+        Arc::new(CandidateDecision::Entry(Conflict(TypeMismatch))),
+        Arc::new(CandidateDecision::Entry(Conflict(MetadataOnly))),
+        Arc::new(CandidateDecision::Entry(Conflict(NameClash))),
+    ]
+});
+
+/// The singleton index for one of the finite `EntryDecision` values.
+fn entry_decision_index(decision: EntryDecision) -> usize {
+    use ChangeKind::{Create, ReplaceContent, UpdateMetadata};
+    use ConflictKind::{BothChanged, DeletedVersusEdited, MetadataOnly, NameClash, TypeMismatch};
+    use EntryDecision::{
+        Archive, Conflict, ForgetBase, KeepTarget, Move as MoveDecision, MovedAway, Propagate,
+        RecordBase, Unchanged,
+    };
+    use Side::{Left, Right};
+    match decision {
+        Unchanged => 0,
+        RecordBase => 1,
+        ForgetBase => 2,
+        KeepTarget => 3,
+        Propagate {
+            from: Left,
+            change: Create,
+        } => 4,
+        Propagate {
+            from: Left,
+            change: ReplaceContent,
+        } => 5,
+        Propagate {
+            from: Left,
+            change: UpdateMetadata,
+        } => 6,
+        Propagate {
+            from: Right,
+            change: Create,
+        } => 7,
+        Propagate {
+            from: Right,
+            change: ReplaceContent,
+        } => 8,
+        Propagate {
+            from: Right,
+            change: UpdateMetadata,
+        } => 9,
+        Archive { on: Left } => 10,
+        Archive { on: Right } => 11,
+        MoveDecision { on: Left } => 12,
+        MoveDecision { on: Right } => 13,
+        MovedAway { on: Left } => 14,
+        MovedAway { on: Right } => 15,
+        Conflict(BothChanged) => 16,
+        Conflict(DeletedVersusEdited) => 17,
+        Conflict(TypeMismatch) => 18,
+        Conflict(MetadataOnly) => 19,
+        Conflict(NameClash) => 20,
+    }
+}
+
+/// The one immutable `Arc` shared by every row carrying `decision`.
+fn entry_decision(decision: EntryDecision) -> Arc<CandidateDecision> {
+    ENTRY_DECISIONS[entry_decision_index(decision)].clone()
+}
+
+/// The canonical `Arc` for a decision: the immutable singleton for a finite
+/// `EntryDecision`, or a fresh `Arc` for a dynamic blocked path. Plan-local
+/// blocked decisions are shared separately, so this only runs where no
+/// sharing is required.
+fn canonical_decision(decision: CandidateDecision) -> Arc<CandidateDecision> {
+    match decision {
+        CandidateDecision::Entry(entry) => entry_decision(entry),
+        CandidateDecision::BlockedByAncestor(_) => Arc::new(decision),
     }
 }
 
@@ -147,18 +398,18 @@ impl CandidatePlan {
                     ancestors.insert(key[..index].to_vec());
                 }
             }
-            ancestors.insert(key);
+            ancestors.insert(key.into_owned());
         }
         let blocked: BTreeSet<_> = self
             .rows
             .iter()
             .filter(|row| {
                 matches!(
-                    row.decision,
+                    row.decision.as_ref(),
                     CandidateDecision::Entry(EntryDecision::Archive { .. })
                 )
             })
-            .map(|row| name_key(row.path.as_bytes(), names))
+            .map(|row| name_key(row.path.as_bytes(), names).into_owned())
             .filter(|key| ancestors.contains(key))
             .collect();
         if blocked.is_empty() {
@@ -166,7 +417,7 @@ impl CandidatePlan {
         }
         let inside = |path: &SyncPath| {
             let key = name_key(path.as_bytes(), names);
-            blocked.contains(&key)
+            blocked.contains(key.as_ref())
                 || key
                     .iter()
                     .enumerate()
@@ -186,7 +437,7 @@ impl CandidatePlan {
         });
         for row in &mut self.rows {
             if inside(&row.path) || disarmed.contains(&row.path) {
-                row.decision = CandidateDecision::Entry(EntryDecision::KeepTarget);
+                row.set_decision(CandidateDecision::Entry(EntryDecision::KeepTarget));
             }
         }
         self.recount_deletions()
@@ -220,14 +471,14 @@ impl CandidatePlan {
         });
         for row in &mut self.rows {
             let safe_create = matches!(
-                row.decision,
+                row.decision.as_ref(),
                 CandidateDecision::Entry(EntryDecision::Propagate {
                     change: ChangeKind::Create,
                     ..
                 })
             );
             if disarmed.contains(&row.path) {
-                row.decision = match row.decision {
+                row.set_decision(match row.decision.as_ref() {
                     CandidateDecision::Entry(EntryDecision::Move { on }) => {
                         CandidateDecision::Entry(EntryDecision::Propagate {
                             from: on.other(),
@@ -235,9 +486,9 @@ impl CandidatePlan {
                         })
                     }
                     _ => CandidateDecision::Entry(EntryDecision::KeepTarget),
-                };
+                });
             } else if uncertain(&row.path) && !safe_create {
-                row.decision = CandidateDecision::Entry(EntryDecision::KeepTarget);
+                row.set_decision(CandidateDecision::Entry(EntryDecision::KeepTarget));
             }
         }
         self.recount_deletions()
@@ -250,8 +501,8 @@ impl CandidatePlan {
                 .iter()
                 .filter(|row| {
                     matches!(
-                        row.decision,
-                        CandidateDecision::Entry(EntryDecision::Archive { on }) if on == target
+                        row.decision.as_ref(),
+                        CandidateDecision::Entry(EntryDecision::Archive { on }) if *on == target
                     )
                 })
                 .count();
@@ -281,14 +532,17 @@ impl CandidatePlan {
 /// photos/a.jpg   edited on A            ─▶ create on B
 /// photos/b.jpg   unchanged on A         ─▶ create on B   (kept B: all archived on A)
 /// ```
-fn settle_folder_choices<T: Versioned>(
+fn settle_folder_choices<B: Tree<Value = BaselineEntry>, T: Tree>(
     rows: &mut [PlanRow],
-    base: &BTreeMap<SyncPath, BaselineEntry>,
-    left: &BTreeMap<SyncPath, T>,
-    right: &BTreeMap<SyncPath, T>,
+    base: &B,
+    left: &T,
+    right: &T,
     resolutions: &BTreeMap<SyncPath, Resolution>,
     control: &mut impl FnMut() -> ScanControl,
-) -> Result<(), PlanError> {
+) -> Result<(), PlanError>
+where
+    T::Value: Versioned,
+{
     let mut branches: BTreeMap<SyncPath, Side> = BTreeMap::new();
     for row in rows.iter_mut() {
         check_control(control)?;
@@ -313,12 +567,12 @@ fn settle_folder_choices<T: Versioned>(
         let Some(keep) = keep else {
             continue;
         };
-        row.decision = CandidateDecision::Entry(reconcile_entry(
+        row.set_decision(CandidateDecision::Entry(reconcile_entry(
             SyncMode::Mirror { source: keep },
             base.get(&row.path).copied(),
             left,
             right,
-        ));
+        )));
     }
     Ok(())
 }
@@ -326,13 +580,16 @@ fn settle_folder_choices<T: Versioned>(
 /// Leave each skipped change and everything inside it as it is: no write,
 /// no base change. A skip applies while both sides still hold what the
 /// person saw at the skipped path.
-fn skip_branches<T: Versioned>(
+fn skip_branches<T: Tree>(
     rows: &mut [PlanRow],
-    left: &BTreeMap<SyncPath, T>,
-    right: &BTreeMap<SyncPath, T>,
+    left: &T,
+    right: &T,
     skips: &BTreeMap<SyncPath, Skip>,
     control: &mut impl FnMut() -> ScanControl,
-) -> Result<(), PlanError> {
+) -> Result<(), PlanError>
+where
+    T::Value: Versioned,
+{
     if skips.is_empty() {
         return Ok(());
     }
@@ -350,7 +607,7 @@ fn skip_branches<T: Versioned>(
             skipped.insert(&row.path);
         }
         if inside || current {
-            row.decision = CandidateDecision::Entry(EntryDecision::KeepTarget);
+            row.set_decision(CandidateDecision::Entry(EntryDecision::KeepTarget));
         }
     }
     Ok(())
@@ -372,33 +629,61 @@ fn skip_branches<T: Versioned>(
 /// A: report.txt  B: Report.txt  A renamed it: B archives Report.txt, copies
 ///                               report.txt
 /// ```
-fn mark_name_clashes<T: Versioned>(
+fn mark_name_clashes<T: Tree>(
     rows: &mut [PlanRow],
-    [left, right]: [&BTreeMap<SyncPath, T>; 2],
+    [left, right]: [&T; 2],
     left_names: NameMatching,
     right_names: NameMatching,
     control: &mut impl FnMut() -> ScanControl,
-) -> Result<(), PlanError> {
+) -> Result<(), PlanError>
+where
+    T::Value: Versioned,
+{
     let loose = left_names.either(right_names);
     if loose == NameMatching::EXACT {
         return Ok(());
     }
-    let mut keys: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
+    // Raw rows are already sorted. When normalization leaves their keys
+    // strictly increasing, there cannot be a clash and no index is needed.
+    let mut previous: Option<Cow<'_, [u8]>> = None;
+    let mut ordered_unique = true;
+    for row in rows.iter() {
+        check_control(control)?;
+        let key = name_key(row.path.as_bytes(), loose);
+        if previous
+            .as_deref()
+            .is_some_and(|known| known >= key.as_ref())
+        {
+            ordered_unique = false;
+            break;
+        }
+        previous = Some(key);
+    }
+    if ordered_unique {
+        return Ok(());
+    }
+    drop(previous);
+    // A flat vector avoids a hash bucket and singleton ordinal allocation
+    // per path. Only groups that actually collide need the per-side index.
+    let mut keys = Vec::with_capacity(rows.len());
     for (index, row) in rows.iter().enumerate() {
         check_control(control)?;
-        keys.entry(name_key(row.path.as_bytes(), loose))
-            .or_default()
-            .push(index);
+        keys.push((name_key(row.path.as_bytes(), loose), index));
     }
+    keys.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    check_control(control)?;
     let mut clashes = Vec::new();
-    for group in keys.into_values().filter(|group| group.len() > 1) {
+    for group in keys
+        .chunk_by(|left, right| left.0 == right.0)
+        .filter(|group| group.len() > 1)
+    {
         for (side, names, present) in [
             (Side::Left, left_names, left),
             (Side::Right, right_names, right),
         ] {
             // Spellings this folder stores as one file.
-            let mut same: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
-            for &index in &group {
+            let mut same: HashMap<Cow<'_, [u8]>, Vec<usize>> = HashMap::new();
+            for &(_, index) in group {
                 check_control(control)?;
                 same.entry(name_key(rows[index].path.as_bytes(), names))
                     .or_default()
@@ -409,11 +694,11 @@ fn mark_name_clashes<T: Versioned>(
             for spellings in same.into_values().filter(|spellings| spellings.len() > 1) {
                 let (writes, untouched): (Vec<usize>, Vec<usize>) = spellings
                     .iter()
-                    .partition(|&&index| writes_on(&rows[index].decision, side));
+                    .partition(|&&index| writes_on(rows[index].decision.as_ref(), side));
                 let stays = untouched.iter().any(|&index| {
                     present.contains_key(&rows[index].path)
                         || matches!(
-                            rows[index].decision,
+                            rows[index].decision.as_ref(),
                             CandidateDecision::Entry(EntryDecision::Conflict(_))
                         )
                 });
@@ -423,9 +708,11 @@ fn mark_name_clashes<T: Versioned>(
             }
         }
     }
+    drop(keys);
     for index in clashes {
-        rows[index].decision =
-            CandidateDecision::Entry(EntryDecision::Conflict(ConflictKind::NameClash));
+        rows[index].set_decision(CandidateDecision::Entry(EntryDecision::Conflict(
+            ConflictKind::NameClash,
+        )));
     }
     Ok(())
 }
@@ -442,24 +729,43 @@ fn writes_on(decision: &CandidateDecision, side: Side) -> bool {
 /// The bytes two names share when `names` treats them as one: composed
 /// Unicode (NFC) where normalization is ignored, lower case where case is.
 /// Names that are not UTF-8 compare as bytes, ASCII case folded.
-pub(crate) fn name_key(path: &[u8], names: NameMatching) -> Vec<u8> {
+///
+/// The key borrows the path bytes whenever the comparison leaves them
+/// unchanged: exact matching, ASCII under normalization (NFC is the
+/// identity), text already in lower case, and invalid UTF-8 with no ASCII
+/// upper case to fold. Only an actual recomposition or case change
+/// allocates, so the common ASCII path pays nothing.
+pub(crate) fn name_key(path: &[u8], names: NameMatching) -> Cow<'_, [u8]> {
     let insensitive = names.case() == CaseMatching::Insensitive;
     let Ok(text) = std::str::from_utf8(path) else {
-        return if insensitive {
-            path.to_ascii_lowercase()
+        return if insensitive && path.iter().any(u8::is_ascii_uppercase) {
+            Cow::Owned(path.to_ascii_lowercase())
         } else {
-            path.to_vec()
+            Cow::Borrowed(path)
         };
     };
-    let text: String = match names.unicode() {
-        UnicodeMatching::Normalized => text.nfc().collect(),
-        UnicodeMatching::Exact => text.to_owned(),
+    let composed = match names.unicode() {
+        UnicodeMatching::Exact => None,
+        // NFC is the identity for ASCII and for text already composed.
+        UnicodeMatching::Normalized if text.is_ascii() || is_nfc(text) => None,
+        UnicodeMatching::Normalized => Some(text.nfc().collect::<String>()),
     };
-    if insensitive {
-        text.to_lowercase().into_bytes()
+    let text = composed.as_deref().unwrap_or(text);
+    if insensitive && !already_lowercase(text) {
+        Cow::Owned(text.to_lowercase().into_bytes())
+    } else if let Some(composed) = composed {
+        Cow::Owned(composed.into_bytes())
     } else {
-        text.into_bytes()
+        Cow::Borrowed(path)
     }
+}
+
+/// Whether Unicode lower-casing leaves `text` exactly as it is, character
+/// for character. `str::to_lowercase` maps each character independently, so
+/// this decides whether the owned allocation is needed at all.
+fn already_lowercase(text: &str) -> bool {
+    text.chars()
+        .all(|character| character.to_lowercase().eq([character]))
 }
 
 /// The side a person chose for this folder, present on one side only,
@@ -541,7 +847,7 @@ pub fn plan_resolved(
 
 pub(crate) fn plan_observations(
     mode: SyncMode,
-    base: &BTreeMap<SyncPath, BaselineEntry>,
+    base: &FilteredBase<'_>,
     left: &Observation,
     right: &Observation,
     choices: &Choices<'_>,
@@ -557,14 +863,46 @@ pub(crate) fn plan_observations(
     )
 }
 
-fn plan_trees<T: Versioned>(
+fn plan_row_count<B: Tree, T: Tree>(
+    base: &B,
+    left: &T,
+    right: &T,
+    control: &mut impl FnMut() -> ScanControl,
+) -> Result<usize, PlanError> {
+    let mut base = base.iter().peekable();
+    let mut left = left.iter().peekable();
+    let mut right = right.iter().peekable();
+    let mut count = 0usize;
+    loop {
+        check_control(control)?;
+        let Some(path) = [
+            base.peek().map(|(path, _)| *path),
+            left.peek().map(|(path, _)| *path),
+            right.peek().map(|(path, _)| *path),
+        ]
+        .into_iter()
+        .flatten()
+        .min() else {
+            return Ok(count);
+        };
+        base.next_if(|(key, _)| *key == path);
+        left.next_if(|(key, _)| *key == path);
+        right.next_if(|(key, _)| *key == path);
+        count = count.checked_add(1).ok_or(PlanError::CountOverflow)?;
+    }
+}
+
+fn plan_trees<B: Tree<Value = BaselineEntry>, T: Tree>(
     mode: SyncMode,
-    base: &BTreeMap<SyncPath, BaselineEntry>,
-    left: &BTreeMap<SyncPath, T>,
-    right: &BTreeMap<SyncPath, T>,
+    base: &B,
+    left: &T,
+    right: &T,
     choices: &Choices<'_>,
     control: &mut impl FnMut() -> ScanControl,
-) -> Result<CandidatePlan, PlanError> {
+) -> Result<CandidatePlan, PlanError>
+where
+    T::Value: Versioned,
+{
     let Choices {
         resolutions,
         skips,
@@ -587,10 +925,14 @@ fn plan_trees<T: Versioned>(
         control,
     )?;
 
+    // Count the immutable union without copying its paths. An exact
+    // reservation avoids both growth slack and a near-double allocation
+    // when a small mixture of additions and deletions exceeds one side.
+    let capacity = plan_row_count(base, left, right, control)?;
     let mut base_entries = base.iter().peekable();
     let mut left_entries = left.iter().peekable();
     let mut right_entries = right.iter().peekable();
-    let mut rows: Vec<PlanRow> = Vec::new();
+    let mut rows: Vec<PlanRow> = Vec::with_capacity(capacity);
     let mut directories = BTreeMap::new();
     loop {
         check_control(control)?;
@@ -621,15 +963,15 @@ fn plan_trees<T: Versioned>(
         {
             directories.insert(path.clone(), rows.len());
         }
-        rows.push(PlanRow {
-            path: path.clone(),
-            decision: CandidateDecision::Entry(decide(
+        rows.push(PlanRow::new(
+            path.clone(),
+            CandidateDecision::Entry(decide(
                 reconcile_entry(mode, baseline, left, right),
                 resolutions.get(&path),
                 left,
                 right,
             )),
-        });
+        ));
 
         if mode != SyncMode::Sync {
             continue;
@@ -647,12 +989,12 @@ fn plan_trees<T: Versioned>(
             while let Some(path) = parent {
                 check_control(control)?;
                 if let Some(&index) = directories.get(&path)
-                    && rows[index].decision
-                        == CandidateDecision::Entry(EntryDecision::Archive { on: side })
+                    && rows[index].decision.as_ref()
+                        == &CandidateDecision::Entry(EntryDecision::Archive { on: side })
                 {
-                    rows[index].decision = CandidateDecision::Entry(EntryDecision::Conflict(
+                    rows[index].set_decision(CandidateDecision::Entry(EntryDecision::Conflict(
                         ConflictKind::DeletedVersusEdited,
-                    ));
+                    )));
                 }
                 parent = path.parent();
             }
@@ -664,7 +1006,10 @@ fn plan_trees<T: Versioned>(
     mark_name_clashes(&mut rows, [left, right], left_names, right_names, control)?;
 
     // Ancestors precede descendants. Suppression therefore propagates an outer
-    // conflict through the whole branch without recursive traversal.
+    // conflict through the whole branch without recursive traversal. One
+    // `Arc` per outermost blocking ancestor is shared by every row it covers;
+    // the table is local to this plan, so no path-keyed global cache grows.
+    let mut blocked_decisions: BTreeMap<SyncPath, Arc<CandidateDecision>> = BTreeMap::new();
     for index in 0..rows.len() {
         check_control(control)?;
         let mut parent = rows[index].path.parent();
@@ -672,7 +1017,7 @@ fn plan_trees<T: Versioned>(
         while let Some(path) = parent {
             check_control(control)?;
             if let Some(&ancestor) = directories.get(&path) {
-                match &rows[ancestor].decision {
+                match rows[ancestor].decision.as_ref() {
                     CandidateDecision::Entry(EntryDecision::Conflict(_)) => {
                         blocked = Some(path.clone())
                     }
@@ -683,7 +1028,11 @@ fn plan_trees<T: Versioned>(
             parent = path.parent();
         }
         if let Some(ancestor) = blocked {
-            rows[index].decision = CandidateDecision::BlockedByAncestor(ancestor);
+            let decision = blocked_decisions
+                .entry(ancestor.clone())
+                .or_insert_with(|| Arc::new(CandidateDecision::BlockedByAncestor(ancestor)))
+                .clone();
+            rows[index].set_shared_decision(decision);
         }
     }
     let moves = pair_moves(&mut rows, [left, right], [left_moves, right_moves]);
@@ -693,7 +1042,7 @@ fn plan_trees<T: Versioned>(
             .iter()
             .filter(|row| {
                 matches!(
-                    &row.decision,
+                    row.decision.as_ref(),
                     CandidateDecision::Entry(EntryDecision::Archive { on }) if *on == target
                 )
             })
@@ -725,11 +1074,14 @@ fn plan_trees<T: Versioned>(
 /// a/x.jpg  Archive { right }              ─▶ MovedAway { right }
 /// b/x.jpg  Propagate { left, Create }     ─▶ Move { right }: rename a/x.jpg
 /// ```
-fn pair_moves<T: Versioned>(
+fn pair_moves<T: Tree>(
     rows: &mut [PlanRow],
-    trees: [&BTreeMap<SyncPath, T>; 2],
+    trees: [&T; 2],
     moves: [Moves; 2],
-) -> BTreeMap<SyncPath, SyncPath> {
+) -> BTreeMap<SyncPath, SyncPath>
+where
+    T::Value: Versioned,
+{
     let takes = |side: Side| moves[side as usize] == Moves::Rename;
     let movable = |side: Side, path: &SyncPath| {
         trees[side as usize]
@@ -737,50 +1089,84 @@ fn pair_moves<T: Versioned>(
             .map(|version| version.version().content())
             .filter(|content| matches!(content, EntryContent::File(_) | EntryContent::Symlink(_)))
     };
-    let mut gone: HashMap<(Side, EntryContent), Vec<usize>> = HashMap::new();
-    let mut came: HashMap<(Side, EntryContent), Vec<usize>> = HashMap::new();
-    for (index, row) in rows.iter().enumerate() {
-        let CandidateDecision::Entry(decision) = &row.decision else {
-            continue;
-        };
-        match *decision {
-            EntryDecision::Archive { on } if takes(on) => {
-                if let Some(content) = movable(on, &row.path) {
-                    gone.entry((on, content)).or_default().push(index);
-                }
-            }
-            EntryDecision::Propagate {
-                from,
-                change: ChangeKind::Create,
-            } if takes(from.other()) => {
-                if let Some(content) = movable(from, &row.path) {
-                    came.entry((from.other(), content)).or_default().push(index);
-                }
-            }
+    #[derive(Clone, Copy, PartialEq)]
+    enum Role {
+        Archive,
+        Create,
+    }
+    let candidate = |row: &PlanRow| match row.decision.as_ref() {
+        CandidateDecision::Entry(EntryDecision::Archive { on }) => Some((*on, Role::Archive, *on)),
+        CandidateDecision::Entry(EntryDecision::Propagate {
+            from,
+            change: ChangeKind::Create,
+        }) => Some((from.other(), Role::Create, *from)),
+        _ => None,
+    };
+    let mut archives = [0usize; 2];
+    let mut creates = [0usize; 2];
+    for row in rows.iter() {
+        match candidate(row) {
+            Some((on, Role::Archive, _)) if takes(on) => archives[on as usize] += 1,
+            Some((on, Role::Create, _)) if takes(on) => creates[on as usize] += 1,
             _ => {}
         }
     }
     let mut paired = BTreeMap::new();
-    for (&(on, content), sources) in &gone {
-        let Some(targets) = came.get(&(on, content)) else {
+    for on in [Side::Left, Side::Right] {
+        if archives[on as usize] == 0 || creates[on as usize] == 0 {
             continue;
+        }
+        // A move needs both roles. Index only the smaller role and consume
+        // its paths in order while scanning the other, preserving the old
+        // per-content zip without indexing every unmatched create/archive.
+        let indexed = if archives[on as usize] <= creates[on as usize] {
+            Role::Archive
+        } else {
+            Role::Create
         };
-        for (&from, &to) in sources.iter().zip(targets) {
-            rows[from].decision = CandidateDecision::Entry(EntryDecision::MovedAway { on });
-            rows[to].decision = CandidateDecision::Entry(EntryDecision::Move { on });
+        let mut waiting: HashMap<EntryContent, VecDeque<usize>> = HashMap::new();
+        for (index, row) in rows.iter().enumerate() {
+            if let Some((target, role, source)) = candidate(row)
+                && target == on
+                && role == indexed
+                && let Some(content) = movable(source, &row.path)
+            {
+                waiting.entry(content).or_default().push_back(index);
+            }
+        }
+        if waiting.is_empty() {
+            continue;
+        }
+        let mut matches = Vec::new();
+        for (index, row) in rows.iter().enumerate() {
+            if let Some((target, role, source)) = candidate(row)
+                && target == on
+                && role != indexed
+                && let Some(content) = movable(source, &row.path)
+                && let Some(other) = waiting.get_mut(&content).and_then(VecDeque::pop_front)
+            {
+                matches.push(match indexed {
+                    Role::Archive => (other, index),
+                    Role::Create => (index, other),
+                });
+            }
+        }
+        for (from, to) in matches {
+            rows[from].set_decision(CandidateDecision::Entry(EntryDecision::MovedAway { on }));
+            rows[to].set_decision(CandidateDecision::Entry(EntryDecision::Move { on }));
             paired.insert(rows[to].path.clone(), rows[from].path.clone());
         }
     }
     paired
 }
 
-fn validate_tree<T>(
-    entries: &BTreeMap<SyncPath, T>,
+fn validate_tree<T: Tree>(
+    entries: &T,
     tree: TreeRole,
-    kind: impl Fn(&T) -> EntryKind,
+    kind: impl Fn(&T::Value) -> EntryKind,
     control: &mut impl FnMut() -> ScanControl,
 ) -> Result<(), PlanError> {
-    for path in entries.keys() {
+    for (path, _) in entries.iter() {
         check_control(control)?;
         let Some(parent) = path.parent() else {
             continue;
@@ -941,6 +1327,7 @@ mod tests {
             .find(|row| row.path == path(name))
             .unwrap()
             .decision
+            .as_ref()
             .clone()
     }
 
@@ -1331,10 +1718,10 @@ mod tests {
         for folder in 0..FOLDERS {
             let name = format!("d-{folder:04}");
             let folder_path = path(name.as_bytes());
-            rows.push(PlanRow {
-                path: folder_path.clone(),
-                decision: CandidateDecision::Entry(EntryDecision::Unchanged),
-            });
+            rows.push(PlanRow::new(
+                folder_path.clone(),
+                CandidateDecision::Entry(EntryDecision::Unchanged),
+            ));
             left.insert(folder_path.clone(), directory());
             right.insert(folder_path.clone(), directory());
             skips.insert(folder_path, Skip::new(Some(directory()), Some(directory())));
@@ -1342,10 +1729,10 @@ mod tests {
                 let file_name = format!("{name}/f-{index:02}");
                 let file_path = path(file_name.as_bytes());
                 let version = file((folder * FILES + index) as u8);
-                rows.push(PlanRow {
-                    path: file_path.clone(),
-                    decision: CandidateDecision::Entry(EntryDecision::Unchanged),
-                });
+                rows.push(PlanRow::new(
+                    file_path.clone(),
+                    CandidateDecision::Entry(EntryDecision::Unchanged),
+                ));
                 left.insert(file_path.clone(), version);
                 right.insert(file_path, version);
             }
@@ -1365,7 +1752,7 @@ mod tests {
                 skipped.push(row.path.clone());
             }
             if inside || current {
-                row.decision = CandidateDecision::Entry(EntryDecision::KeepTarget);
+                row.set_decision(CandidateDecision::Entry(EntryDecision::KeepTarget));
             }
         }
 
@@ -1419,8 +1806,8 @@ mod tests {
             (SyncMode::Mirror { source: Side::Left }, BTreeMap::new()),
         ] {
             let candidate = plan(mode, &base, &BTreeMap::new(), &target);
-            assert!(candidate.rows.iter().all(|row| row.decision
-                == CandidateDecision::Entry(EntryDecision::Archive { on: Side::Right })));
+            assert!(candidate.rows.iter().all(|row| row.decision.as_ref()
+                == &CandidateDecision::Entry(EntryDecision::Archive { on: Side::Right })));
             assert_eq!(
                 candidate.deletion_review(Side::Right, RunContext::Unattended),
                 DeletionReview::StopUnattended
@@ -1446,8 +1833,8 @@ mod tests {
             CandidateDecision::BlockedByAncestor(path(b"folder"))
         );
         let candidate = plan(SyncMode::Sync, &BTreeMap::new(), &source, &BTreeMap::new());
-        assert!(candidate.rows.iter().all(|row| row.decision
-            == CandidateDecision::Entry(EntryDecision::Propagate {
+        assert!(candidate.rows.iter().all(|row| row.decision.as_ref()
+            == &CandidateDecision::Entry(EntryDecision::Propagate {
                 from: Side::Left,
                 change: ChangeKind::Create
             })));
@@ -1614,7 +2001,7 @@ mod tests {
                         );
                         for (row, other) in candidate.rows.iter().zip(&swapped.rows) {
                             assert_eq!(row.path, other.path);
-                            let expected = match &row.decision {
+                            let expected = match row.decision.as_ref() {
                                 CandidateDecision::Entry(EntryDecision::Propagate {
                                     from,
                                     change,
@@ -1629,8 +2016,10 @@ mod tests {
                                 }
                                 other => other.clone(),
                             };
-                            assert_eq!(other.decision, expected);
-                            if let CandidateDecision::BlockedByAncestor(ancestor) = &row.decision {
+                            assert_eq!(other.decision.as_ref(), &expected);
+                            if let CandidateDecision::BlockedByAncestor(ancestor) =
+                                row.decision.as_ref()
+                            {
                                 assert!(ancestor.is_ancestor_of(&row.path));
                                 assert!(matches!(
                                     decision(&candidate, ancestor.as_bytes()),
@@ -1659,8 +2048,8 @@ mod tests {
         let candidate = plan(SyncMode::Sync, &BTreeMap::new(), &left, &BTreeMap::new());
         let elapsed = started.elapsed();
         assert_eq!(candidate.rows.len(), 500_000);
-        assert!(candidate.rows.iter().all(|row| row.decision
-            == CandidateDecision::Entry(EntryDecision::Propagate {
+        assert!(candidate.rows.iter().all(|row| row.decision.as_ref()
+            == &CandidateDecision::Entry(EntryDecision::Propagate {
                 from: Side::Left,
                 change: ChangeKind::Create
             })));
@@ -1792,6 +2181,88 @@ mod tests {
         );
     }
 
+    #[test]
+    fn move_pairing_preserves_path_order_when_either_role_is_smaller() {
+        for on in [Side::Left, Side::Right] {
+            for (archived, created) in [(2, 4), (4, 2), (3, 3)] {
+                let old: Vec<_> = (0..archived)
+                    .map(|i| path(format!("old-{i}").as_bytes()))
+                    .collect();
+                let new: Vec<_> = (0..created)
+                    .map(|i| path(format!("new-{i}").as_bytes()))
+                    .collect();
+                let target: BTreeMap<_, _> = old.iter().map(|p| (p.clone(), file(1))).collect();
+                let source: BTreeMap<_, _> = new.iter().map(|p| (p.clone(), file(1))).collect();
+                let mut rows: Vec<_> = old
+                    .iter()
+                    .map(|p| {
+                        PlanRow::new(
+                            p.clone(),
+                            CandidateDecision::Entry(EntryDecision::Archive { on }),
+                        )
+                    })
+                    .chain(new.iter().map(|p| {
+                        PlanRow::new(
+                            p.clone(),
+                            CandidateDecision::Entry(EntryDecision::Propagate {
+                                from: on.other(),
+                                change: ChangeKind::Create,
+                            }),
+                        )
+                    }))
+                    .collect();
+                rows.sort_by(|left, right| left.path.cmp(&right.path));
+                let trees = match on {
+                    Side::Left => [&target, &source],
+                    Side::Right => [&source, &target],
+                };
+                let paired = pair_moves(&mut rows, trees, [Moves::Rename; 2]);
+                let expected: BTreeMap<_, _> = new.into_iter().zip(old).collect();
+                assert_eq!(paired, expected);
+                assert_eq!(
+                    rows.iter()
+                        .filter(|row| matches!(
+                            row.decision.as_ref(),
+                            CandidateDecision::Entry(EntryDecision::Move { .. })
+                        ))
+                        .count(),
+                    archived.min(created)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn move_pairing_without_both_roles_does_not_index_versions() {
+        use std::cell::Cell;
+        struct Counted<'a>(&'a Cell<usize>);
+        impl Versioned for Counted<'_> {
+            fn version(&self) -> EntryVersion {
+                self.0.set(self.0.get() + 1);
+                file(1)
+            }
+        }
+        let reads = Cell::new(0);
+        let tree: BTreeMap<_, _> = (0..10_000)
+            .map(|index| (path(format!("file-{index:05}").as_bytes()), Counted(&reads)))
+            .collect();
+        for decision in [
+            EntryDecision::Archive { on: Side::Left },
+            EntryDecision::Propagate {
+                from: Side::Right,
+                change: ChangeKind::Create,
+            },
+        ] {
+            reads.set(0);
+            let mut rows: Vec<_> = tree
+                .keys()
+                .map(|path| PlanRow::new(path.clone(), CandidateDecision::Entry(decision)))
+                .collect();
+            assert!(pair_moves(&mut rows, [&tree, &tree], [Moves::Rename; 2]).is_empty());
+            assert_eq!(reads.get(), 0, "one role alone cannot form a move");
+        }
+    }
+
     /// Review: a spelling deleted on a Mac and a new one created on a
     /// byte-exact server never meet on either side, so they sync.
     #[test]
@@ -1850,5 +2321,606 @@ mod tests {
         let right = tree(&[(b"caf\xc3\xa9", file(2))]);
         let rows = plan_with_names(&left, &right, case_only);
         assert!(rows.iter().all(|(_, decision)| *decision != CLASH));
+    }
+
+    /// The pre-Cow key, kept here as the equivalence oracle for the borrowed
+    /// and owned fast paths.
+    fn owned_name_key(path: &[u8], names: NameMatching) -> Vec<u8> {
+        let insensitive = names.case() == CaseMatching::Insensitive;
+        let Ok(text) = std::str::from_utf8(path) else {
+            return if insensitive {
+                path.to_ascii_lowercase()
+            } else {
+                path.to_vec()
+            };
+        };
+        let text: String = match names.unicode() {
+            UnicodeMatching::Normalized => text.nfc().collect(),
+            UnicodeMatching::Exact => text.to_owned(),
+        };
+        if insensitive {
+            text.to_lowercase().into_bytes()
+        } else {
+            text.into_bytes()
+        }
+    }
+
+    /// Every matching mode, over UTF-8 and invalid names, must produce the
+    /// same key bytes the owned form always produced.
+    #[test]
+    fn name_keys_match_the_owned_form_for_every_matching_mode() {
+        let paths: &[&[u8]] = &[
+            b"",
+            b"a",
+            b"A",
+            b"REPORT.TXT",
+            b"Report.txt",
+            b"report.txt",
+            b"a-b",
+            b"a.txt",
+            b"a/x",
+            b"a0",
+            b"Finder/File.TXT",
+            "caf\u{e9}".as_bytes(),
+            "CAF\u{c9}".as_bytes(),
+            "cafe\u{301}".as_bytes(),
+            "CAFE\u{301}".as_bytes(),
+            "cafe\u{301}/readable".as_bytes(),
+            "\u{1e69}".as_bytes(),
+            "\u{1e63}\u{307}".as_bytes(),
+            "\u{1c5}".as_bytes(),
+            "\u{1c6}".as_bytes(),
+            "\u{130}".as_bytes(),
+            "\u{3a3}\u{3a3}".as_bytes(),
+            "\u{41f}\u{440}\u{438}\u{432}\u{435}\u{442}".as_bytes(),
+            b"\xff.txt",
+            b"\xc3\x28",
+            b"\xff.TXT",
+            b"caf\xff",
+            b"cafe\xcc\x81\xff",
+        ];
+        let modes = [
+            NameMatching::EXACT,
+            NameMatching::new(CaseMatching::Insensitive, UnicodeMatching::Exact),
+            NameMatching::new(CaseMatching::Exact, UnicodeMatching::Normalized),
+            NameMatching::new(CaseMatching::Insensitive, UnicodeMatching::Normalized),
+        ];
+        for path in paths {
+            for names in modes {
+                assert_eq!(
+                    name_key(path, names).as_ref(),
+                    owned_name_key(path, names).as_slice(),
+                    "{path:?} {names:?}"
+                );
+            }
+        }
+    }
+
+    /// The key borrows the path bytes exactly when the comparison leaves
+    /// them unchanged; every actual case fold or recomposition allocates.
+    #[test]
+    fn name_keys_borrow_the_path_bytes_when_nothing_changes() {
+        let case_insensitive =
+            NameMatching::new(CaseMatching::Insensitive, UnicodeMatching::Normalized);
+        let case_sensitive = NameMatching::new(CaseMatching::Exact, UnicodeMatching::Normalized);
+        // Exact comparison always borrows, UTF-8 or not.
+        for path in [
+            b"\xff.txt".as_slice(),
+            b"Report.txt",
+            "cafe\u{301}".as_bytes(),
+        ] {
+            assert!(
+                matches!(
+                    name_key(path, NameMatching::EXACT),
+                    std::borrow::Cow::Borrowed(_)
+                ),
+                "{path:?}"
+            );
+        }
+        // ASCII is already NFC: normalization alone borrows.
+        assert!(matches!(
+            name_key(b"CAF\xc3\x89", case_sensitive),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        // Already lower case borrows under case folding; invalid UTF-8 with
+        // no upper case byte to fold borrows too.
+        for path in [
+            b"report.txt".as_slice(),
+            b"\xff.txt",
+            "caf\u{e9}".as_bytes(),
+        ] {
+            assert!(
+                matches!(
+                    name_key(path, case_insensitive),
+                    std::borrow::Cow::Borrowed(_)
+                ),
+                "{path:?}"
+            );
+        }
+        // An actual ASCII fold allocates.
+        assert!(matches!(
+            name_key(b"Report.txt", case_insensitive),
+            std::borrow::Cow::Owned(_)
+        ));
+        // Invalid UTF-8 with an upper case byte allocates the folded copy.
+        assert!(matches!(
+            name_key(b"\xff.TXT", case_insensitive),
+            std::borrow::Cow::Owned(_)
+        ));
+        // An actual recomposition allocates, with or without case folding.
+        assert!(matches!(
+            name_key("cafe\u{301}".as_bytes(), case_sensitive),
+            std::borrow::Cow::Owned(_)
+        ));
+        assert!(matches!(
+            name_key("CAFE\u{301}".as_bytes(), case_insensitive),
+            std::borrow::Cow::Owned(_)
+        ));
+    }
+
+    /// The borrow decision must agree with the owned mapping wherever
+    /// lower-casing is not obviously the identity.
+    #[test]
+    fn already_lowercase_agrees_with_unicode_lowercase() {
+        let names = [
+            "\u{130}",
+            "\u{1c5}",
+            "\u{1c6}",
+            "\u{3a3}",
+            "\u{3c2}",
+            "\u{1e9e}",
+            "\u{130}\u{300}",
+            "\u{1e9e}\u{3a3}",
+            "\u{fb00}",
+            "\u{2170}",
+            "\u{2c65}",
+            "\u{a7b5}",
+            "\u{2126}",
+            "Report.txt",
+            "report.txt",
+        ];
+        for name in names {
+            assert_eq!(
+                already_lowercase(name),
+                name.to_lowercase() == name,
+                "{name:?}"
+            );
+        }
+    }
+
+    /// The planner's row is one path and one shared decision reference:
+    /// 16 bytes of `SyncPath` plus an 8-byte `Arc`, not the 24-byte
+    /// `CandidateDecision` inline.
+    #[test]
+    fn plan_row_is_one_path_and_one_shared_decision_reference() {
+        assert_eq!(size_of::<usize>(), 8);
+        assert_eq!(
+            size_of::<std::sync::Arc<CandidateDecision>>(),
+            size_of::<usize>()
+        );
+        assert_eq!(size_of::<PlanRow>(), 24);
+    }
+
+    /// Independently enumerate every finite `EntryDecision` combination and
+    /// verify both its semantic value and that all rows carrying it share one
+    /// canonical `Arc`.
+    #[test]
+    fn every_entry_decision_shares_one_canonical_reference() {
+        let mut all = vec![
+            EntryDecision::Unchanged,
+            EntryDecision::RecordBase,
+            EntryDecision::ForgetBase,
+            EntryDecision::KeepTarget,
+        ];
+        for from in [Side::Left, Side::Right] {
+            for change in [
+                ChangeKind::Create,
+                ChangeKind::ReplaceContent,
+                ChangeKind::UpdateMetadata,
+            ] {
+                all.push(EntryDecision::Propagate { from, change });
+            }
+        }
+        for on in [Side::Left, Side::Right] {
+            all.push(EntryDecision::Archive { on });
+        }
+        for on in [Side::Left, Side::Right] {
+            all.push(EntryDecision::Move { on });
+        }
+        for on in [Side::Left, Side::Right] {
+            all.push(EntryDecision::MovedAway { on });
+        }
+        for kind in [
+            ConflictKind::BothChanged,
+            ConflictKind::DeletedVersusEdited,
+            ConflictKind::TypeMismatch,
+            ConflictKind::MetadataOnly,
+            ConflictKind::NameClash,
+        ] {
+            all.push(EntryDecision::Conflict(kind));
+        }
+        assert_eq!(all.len(), 21);
+        assert_eq!(ENTRY_DECISIONS.len(), 21);
+        for (index, decision) in all.iter().enumerate() {
+            let expected = CandidateDecision::Entry(*decision);
+            let first = PlanRow::new(path(b"first"), expected.clone());
+            let second = PlanRow::new(path(b"second"), expected.clone());
+            assert_eq!(first.decision(), &expected, "decision {index}");
+            assert_eq!(
+                Arc::as_ptr(&first.decision),
+                Arc::as_ptr(&second.decision),
+                "decision {index} must share its singleton"
+            );
+            assert!(
+                ENTRY_DECISIONS
+                    .iter()
+                    .any(|canonical| Arc::as_ptr(canonical) == Arc::as_ptr(&first.decision)),
+                "decision {index} must use the canonical table"
+            );
+            for other in all.iter().skip(index + 1) {
+                let other_row = PlanRow::new(path(b"other"), CandidateDecision::Entry(*other));
+                assert_ne!(
+                    Arc::as_ptr(&first.decision),
+                    Arc::as_ptr(&other_row.decision),
+                    "decisions {index} and {other:?} must not share a singleton"
+                );
+            }
+        }
+    }
+
+    /// Many rows blocked by one ancestor share a single `Arc`, while each
+    /// still reports the exact original ancestor path.
+    #[test]
+    fn many_blocked_children_share_one_ancestor_reference() {
+        const CHILDREN: usize = 10_000;
+        let mut left = BTreeMap::new();
+        let mut right = BTreeMap::new();
+        left.insert(path(b"folder"), directory());
+        right.insert(path(b"folder"), file(0));
+        for index in 0..CHILDREN {
+            left.insert(
+                path(format!("folder/file-{index:05}").as_bytes()),
+                file(index as u8),
+            );
+        }
+        let candidate = plan(SyncMode::Sync, &BTreeMap::new(), &left, &right);
+        assert_eq!(candidate.rows.len(), CHILDREN + 1);
+        assert_eq!(
+            candidate.rows[0].decision(),
+            &CandidateDecision::Entry(EntryDecision::Conflict(ConflictKind::TypeMismatch))
+        );
+        let expected = CandidateDecision::BlockedByAncestor(path(b"folder"));
+        let mut shared = None;
+        for row in &candidate.rows[1..] {
+            assert_eq!(row.decision(), &expected);
+            let pointer = Arc::as_ptr(&row.decision);
+            match shared {
+                None => shared = Some(pointer),
+                Some(first) => assert_eq!(pointer, first),
+            }
+        }
+        assert!(shared.is_some());
+    }
+
+    /// Ten thousand no-op rows keep the one-million-row no-op concept at a
+    /// fraction of the fixture memory: every row shares the `Unchanged`
+    /// singleton and the row count is unchanged.
+    #[test]
+    fn ten_thousand_noop_rows_share_one_decision_reference() {
+        const ROWS: usize = 10_000;
+        let mut left = BTreeMap::new();
+        let mut base = BTreeMap::new();
+        for index in 0..ROWS {
+            let version = file(index as u8);
+            let entry_path = path(format!("file-{index:05}").as_bytes());
+            left.insert(entry_path.clone(), version);
+            base.insert(entry_path, BaselineEntry::new(version, version).unwrap());
+        }
+        let candidate = plan(SyncMode::Sync, &base, &left, &left);
+        assert_eq!(candidate.rows.len(), ROWS);
+        let expected = CandidateDecision::Entry(EntryDecision::Unchanged);
+        let shared = Arc::as_ptr(&candidate.rows[0].decision);
+        assert_eq!(candidate.rows[0].decision(), &expected);
+        assert!(
+            candidate
+                .rows
+                .iter()
+                .all(|row| Arc::as_ptr(&row.decision) == shared),
+            "every no-op row must share the Unchanged singleton"
+        );
+    }
+
+    /// `Arc` equality and `Debug` follow the decision's content, not the
+    /// pointer, so two independently allocated blocked decisions compare and
+    /// print identically.
+    #[test]
+    fn arc_rows_compare_and_debug_by_content_not_pointer() {
+        let decision = CandidateDecision::BlockedByAncestor(path(b"a"));
+        let left = PlanRow::new(path(b"a/x"), decision.clone());
+        let right = PlanRow::new(path(b"a/x"), decision.clone());
+        assert_ne!(
+            Arc::as_ptr(&left.decision),
+            Arc::as_ptr(&right.decision),
+            "the constructor allocates a fresh blocked Arc"
+        );
+        assert_eq!(left.decision(), right.decision());
+        assert_eq!(left, right);
+        assert_eq!(format!("{:?}", left), format!("{:?}", right));
+        assert_eq!(
+            format!("{:?}", left.decision()),
+            format!("{:?}", right.decision())
+        );
+    }
+
+    /// Blocking follows component boundaries: `a-b` is not inside `a`, and
+    /// `a/x` reports the exact outermost blocking ancestor `a`.
+    #[test]
+    fn blocking_uses_component_boundaries_and_the_outermost_ancestor() {
+        let mut left = BTreeMap::new();
+        let mut right = BTreeMap::new();
+        left.insert(path(b"a"), directory());
+        left.insert(path(b"a/x"), file(1));
+        left.insert(path(b"a-b"), directory());
+        left.insert(path(b"a-b/y"), file(2));
+        right.insert(path(b"a"), file(0));
+        right.insert(path(b"a-b"), directory());
+        right.insert(path(b"a-b/y"), file(2));
+        let candidate = plan(SyncMode::Sync, &BTreeMap::new(), &left, &right);
+        assert_eq!(
+            decision(&candidate, b"a"),
+            CandidateDecision::Entry(EntryDecision::Conflict(ConflictKind::TypeMismatch))
+        );
+        assert_eq!(
+            decision(&candidate, b"a/x"),
+            CandidateDecision::BlockedByAncestor(path(b"a"))
+        );
+        for name in [b"a-b".as_slice(), b"a-b/y"] {
+            assert_ne!(
+                decision(&candidate, name),
+                CandidateDecision::BlockedByAncestor(path(b"a")),
+                "{name:?} must not be blocked by a shared-prefix sibling"
+            );
+        }
+    }
+
+    /// The count pass checks both paths and its end, in addition to the
+    /// existing twelve validation/build checks. It changes no plan rows.
+    #[test]
+    fn control_checks_cover_counting_and_building_without_changing_rows() {
+        let left = tree(&[(b"folder", directory()), (b"folder/file", file(0))]);
+        let mut checks = 0;
+        let candidate = plan_candidates(
+            SyncMode::Sync,
+            &BTreeMap::new(),
+            &left,
+            &BTreeMap::new(),
+            &mut || {
+                checks += 1;
+                ScanControl::Continue
+            },
+        )
+        .unwrap();
+        assert_eq!(candidate.rows.len(), 2);
+        assert_eq!(checks, 15);
+    }
+
+    /// The outermost conflict wins: an inner type conflict under a metadata
+    /// conflict is suppressed and reports the outer ancestor.
+    #[test]
+    fn outermost_conflict_suppresses_an_inner_conflict() {
+        let metadata = |byte| {
+            EntryVersion::new(
+                EntryContent::Directory,
+                Digest::from_bytes([byte; Digest::BYTE_LEN]),
+            )
+        };
+        let base = baseline(&tree(&[(b"a", metadata(0)), (b"a/x", metadata(0))]));
+        let left = tree(&[(b"a", metadata(1)), (b"a/x", metadata(0))]);
+        let right = tree(&[(b"a", metadata(2)), (b"a/x", file(0))]);
+        let candidate = plan(SyncMode::Sync, &base, &left, &right);
+        assert_eq!(
+            decision(&candidate, b"a"),
+            CandidateDecision::Entry(EntryDecision::Conflict(ConflictKind::MetadataOnly))
+        );
+        assert_eq!(
+            decision(&candidate, b"a/x"),
+            CandidateDecision::BlockedByAncestor(path(b"a"))
+        );
+    }
+}
+
+#[cfg(test)]
+mod filtered_base_tests {
+    use super::*;
+    use foldover_types::Digest;
+
+    fn path(name: &[u8]) -> SyncPath {
+        SyncPath::try_from(name).unwrap()
+    }
+    fn version(kind: EntryContent) -> EntryVersion {
+        EntryVersion::new(kind, Digest::from_bytes([3; 32]))
+    }
+
+    #[test]
+    fn a_filtered_view_plans_like_removing_the_same_owned_rows() {
+        let directory = version(EntryContent::Directory);
+        let file = version(EntryContent::File(Digest::from_bytes([1; 32])));
+        let current: BTreeMap<_, _> = [
+            (b"a".as_slice(), directory),
+            (b"a/x", file),
+            (b"a-b", file),
+            (b"a0", file),
+            (b"other", file),
+        ]
+        .into_iter()
+        .map(|(name, entry)| (path(name), entry))
+        .collect();
+        let base: BTreeMap<_, _> = current
+            .iter()
+            .map(|(path, entry)| (path.clone(), BaselineEntry::new(*entry, *entry).unwrap()))
+            .collect();
+        let dense: PathMap<_> = base.clone().into_iter().collect();
+        for names in [
+            vec![],
+            vec![b"a-b".as_slice()],
+            vec![b"a".as_slice(), b"a/x"],
+            vec![b"missing".as_slice(), b"other"],
+        ] {
+            let mut excluded: Vec<_> = names.into_iter().map(path).collect();
+            excluded.sort();
+            let mut owned = base.clone();
+            owned.retain(|path, _| excluded.binary_search(path).is_err());
+            let filtered = FilteredBase::new(&dense, &excluded);
+            assert_eq!(
+                filtered.iter().collect::<Vec<_>>(),
+                owned.iter().collect::<Vec<_>>()
+            );
+            for key in base.keys().chain(excluded.iter()) {
+                assert_eq!(filtered.get(key), owned.get(key));
+            }
+            for mode in [
+                SyncMode::Sync,
+                SyncMode::Mirror { source: Side::Left },
+                SyncMode::Backup {
+                    source: Side::Right,
+                },
+            ] {
+                let expected = plan_trees(
+                    mode,
+                    &owned,
+                    &current,
+                    &current,
+                    &Choices::NONE,
+                    &mut || ScanControl::Continue,
+                )
+                .unwrap();
+                let actual = plan_trees(
+                    mode,
+                    &filtered,
+                    &current,
+                    &current,
+                    &Choices::NONE,
+                    &mut || ScanControl::Continue,
+                )
+                .unwrap();
+                assert_eq!(actual.rows(), expected.rows());
+                assert_eq!(actual.moves, expected.moves);
+                assert_eq!(actual.left_deletions, expected.left_deletions);
+                assert_eq!(actual.right_deletions, expected.right_deletions);
+            }
+        }
+        assert!(
+            dense.iter().eq(base.iter()),
+            "the shared baseline stays intact"
+        );
+    }
+
+    #[test]
+    fn filtering_a_parent_preserves_validation_error_precedence() {
+        let directory = version(EntryContent::Directory);
+        let file = version(EntryContent::File(Digest::from_bytes([1; 32])));
+        let base: PathMap<_> = [
+            (
+                path(b"a"),
+                BaselineEntry::new(directory, directory).unwrap(),
+            ),
+            (path(b"a/x"), BaselineEntry::new(file, file).unwrap()),
+        ]
+        .into_iter()
+        .collect();
+        let excluded = [path(b"a")];
+        let filtered = FilteredBase::new(&base, &excluded);
+        let empty = BTreeMap::<SyncPath, EntryVersion>::new();
+        let error = plan_trees(
+            SyncMode::Sync,
+            &filtered,
+            &empty,
+            &empty,
+            &Choices::NONE,
+            &mut || ScanControl::Continue,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            PlanError::MissingParent {
+                tree: TreeRole::Base,
+                path: path(b"a/x"),
+                parent: path(b"a")
+            }
+        );
+    }
+    #[test]
+    fn matching_trees_reserve_only_the_needed_plan_rows() {
+        let file = version(EntryContent::File(Digest::from_bytes([1; 32])));
+        let entries: BTreeMap<_, _> = (0..1000)
+            .map(|index| (path(format!("p-{index:04}").as_bytes()), file))
+            .collect();
+        let base = entries
+            .iter()
+            .map(|(path, version)| {
+                (
+                    path.clone(),
+                    BaselineEntry::new(*version, *version).unwrap(),
+                )
+            })
+            .collect();
+        let plan = plan_candidates(SyncMode::Sync, &base, &entries, &entries, &mut || {
+            ScanControl::Continue
+        })
+        .unwrap();
+        assert_eq!(plan.rows.len(), entries.len());
+        assert_eq!(
+            plan.rows.capacity(),
+            entries.len(),
+            "matching trees need no growth slack in the plan"
+        );
+    }
+    #[test]
+    fn mixed_replacements_reserve_the_union_without_doubling_the_plan() {
+        let file = version(EntryContent::File(Digest::from_bytes([1; 32])));
+        let original: BTreeMap<_, _> = (0..1000)
+            .map(|index| (path(format!("p-{index:04}").as_bytes()), file))
+            .collect();
+        let base = original
+            .iter()
+            .map(|(path, version)| {
+                (
+                    path.clone(),
+                    BaselineEntry::new(*version, *version).unwrap(),
+                )
+            })
+            .collect();
+        let mut left = original.clone();
+        left.remove(&path(b"p-0000"));
+        left.insert(path(b"q"), file);
+        let plan = plan_candidates(SyncMode::Sync, &base, &left, &original, &mut || {
+            ScanControl::Continue
+        })
+        .unwrap();
+        assert_eq!(plan.rows.len(), 1001);
+        assert_eq!(plan.rows.capacity(), 1001);
+    }
+    #[test]
+    fn plan_row_count_can_be_cancelled_before_rows_are_allocated() {
+        let file = version(EntryContent::File(Digest::from_bytes([1; 32])));
+        let entries = [(path(b"a"), file), (path(b"b"), file), (path(b"c"), file)]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        let mut checks = 0;
+        let result = plan_row_count(
+            &BTreeMap::<SyncPath, BaselineEntry>::new(),
+            &entries,
+            &BTreeMap::new(),
+            &mut || {
+                checks += 1;
+                if checks == 2 {
+                    ScanControl::Cancel
+                } else {
+                    ScanControl::Continue
+                }
+            },
+        );
+        assert_eq!(result, Err(PlanError::Cancelled));
+        assert_eq!(checks, 2);
     }
 }

@@ -218,7 +218,9 @@ impl PeerEndpoint {
                 }
                 Incoming::Data(batch) => {
                     let entries = wire::entries(&batch).ok_or_else(unexpected)?;
-                    observation.entries.extend(entries);
+                    for (path, entry) in entries {
+                        observation.record(path, entry);
+                    }
                 }
                 Incoming::Reply(PeerReply::ScanIssue { path, message }) => {
                     let path = SyncPath::try_from(path)?;
@@ -243,6 +245,7 @@ impl PeerEndpoint {
                     observation.unavailable.extend(paths(unavailable)?);
                     observation.unavailable.sort();
                     observation.unavailable.dedup();
+                    observation.finish_entries();
                     let unavailable = &observation.unavailable;
                     observation.entries.retain(|path, _| {
                         !unavailable

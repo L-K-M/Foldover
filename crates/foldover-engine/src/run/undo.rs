@@ -242,8 +242,9 @@ impl PairRun {
             .name_matching()
             .either(self.endpoints.endpoint(Side::Right).name_matching());
         for path in std::iter::once(&entry.path).chain(entry.moved_from.as_ref()) {
-            let canonical = SyncPath::try_from(crate::plan::name_key(path.as_bytes(), names))
-                .expect("a name key is a valid path");
+            let canonical =
+                SyncPath::try_from(crate::plan::name_key(path.as_bytes(), names).as_ref())
+                    .expect("a name key is a valid path");
             for observation in [&self.left, &self.right] {
                 if observation.entries().contains_key(path) {
                     continue;
@@ -253,9 +254,10 @@ impl PairRun {
                 // A changed listing still cannot prove these names absent.
                 if observation.unstable_directories().iter().any(|directory| {
                     directory.as_ref().is_none_or(|directory| {
-                        let directory =
-                            SyncPath::try_from(crate::plan::name_key(directory.as_bytes(), names))
-                                .expect("a name key is a valid path");
+                        let directory = SyncPath::try_from(
+                            crate::plan::name_key(directory.as_bytes(), names).as_ref(),
+                        )
+                        .expect("a name key is a valid path");
                         directory == canonical || directory.is_ancestor_of(&canonical)
                     })
                 }) {
@@ -269,8 +271,9 @@ impl PairRun {
                 .chain(self.right.unavailable())
                 .chain(&self.uncertain)
             {
-                let unread = SyncPath::try_from(crate::plan::name_key(unread.as_bytes(), names))
-                    .expect("a name key is a valid path");
+                let unread =
+                    SyncPath::try_from(crate::plan::name_key(unread.as_bytes(), names).as_ref())
+                        .expect("a name key is a valid path");
                 if canonical == unread
                     || canonical.is_ancestor_of(&unread)
                     || unread.is_ancestor_of(&canonical)

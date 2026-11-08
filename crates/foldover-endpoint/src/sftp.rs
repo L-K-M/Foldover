@@ -12,7 +12,6 @@
 //! - `Durability::Full` is refused, not downgraded: namespace changes
 //!   have no protocol flush.
 
-mod readers;
 mod sessions;
 mod spelling;
 mod transfer;
@@ -21,10 +20,13 @@ pub(crate) use transfer::{copy, update_metadata};
 
 use sessions::{Borrowed, Connect, Sessions};
 
+#[cfg(test)]
 use std::collections::BTreeMap;
 use std::io;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use foldover_net::sftp::{Attributes, FileKind, Handle, Session, SshTarget};
@@ -41,6 +43,8 @@ use crate::local::archive::{
 use crate::local::filter::{IGNORE_FILE, IGNORE_FILE_LIMIT, parse_ignore_file};
 use crate::local::version::{Observed, Payload, entry_version, metadata_version};
 use crate::local::{Fingerprint, TEMPORARY_PREFIX, child_path, protected, temporary};
+use crate::observation_cache::Cache;
+use crate::observation_reads::Reads;
 use crate::{
     ApplyError, ArchivedItem, ArchivedRun, Filter, ListedEntry, ListedKind, NodeKind, Observation,
     ObserveStep, ObservedEntry, RunScope, ScanError,
@@ -66,8 +70,11 @@ const SSH_PORT: u16 = 22;
 /// Copies a server takes at once when Foldover can open more sessions
 /// to it (PLAN.md §4.9).
 const PARALLEL_COPIES: NonZeroUsize = NonZeroUsize::new(4).expect("four is not zero");
-/// Sessions per server: one per copy worker, and the run's own thread.
-const SESSIONS: usize = PARALLEL_COPIES.get() + 1;
+/// Observation reads are independent of the other endpoint's copy limit.
+const PARALLEL_READS: NonZeroUsize = NonZeroUsize::new(8).expect("eight is not zero");
+/// Data workers plus a reserve for the run's own thread; leases use a
+/// separate session. Refusing servers still clamp the existing pool.
+const SESSIONS: usize = PARALLEL_READS.get() + 1;
 
 pub struct SftpEndpoint {
     sessions: Sessions,
@@ -465,32 +472,206 @@ impl SftpEndpoint {
 
     /// Reobserve contents and link targets: SFTP stat cannot prove they
     /// stayed unchanged, even when size and modification time match.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn observe_owned(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: foldover_types::PathMap<ObservedEntry>,
+        base: std::sync::Arc<foldover_types::PathMap<foldover_types::BaselineEntry>>,
+        side: foldover_types::Side,
+        hints: crate::ObservationHints,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+    ) -> Result<Observation, ScanError> {
+        let (observation, previous) =
+            Observation::recycling_with_hints(previous, base, side, hints);
+        self.observe_cached(policy, filter, &previous, observation, control, progress)
+    }
+
     pub fn observe_from(
         &self,
         policy: MetadataPolicy,
         filter: &Filter,
-        previous: &BTreeMap<SyncPath, ObservedEntry>,
+        previous: &impl crate::PreviousObservation,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<Observation, ScanError> {
         self.observe_reporting(policy, filter, previous, control, &mut |_| {})
     }
 
     /// `observe_from`, reporting each entry as it is found and again once
-    /// its version is known.
+    /// its version is known. The walk lists one directory at a time and
+    /// streams its file jobs to one bounded reader pool. Each folder's
+    /// listing is released before the walk reaches the next. A single wide
+    /// flat folder is still materialized by `Session::read_dir`, which
+    /// returns the whole folder as one `Vec`; only the walk's own inventory
+    /// is bounded, not the server's per-folder reply.
     pub fn observe_reporting(
         &self,
         policy: MetadataPolicy,
         filter: &Filter,
-        previous: &BTreeMap<SyncPath, ObservedEntry>,
+        previous: &impl crate::PreviousObservation,
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<Observation, ScanError> {
-        let mut observation = Observation::default();
-        // Listing the whole tree first, as local roots do, makes checked
-        // over listed a fair measure of how far the comparison is.
-        let mut listed = Vec::new();
-        let mut pending: Vec<Option<SyncPath>> = vec![None];
-        while let Some(directory) = pending.pop() {
+        self.observe_cached(
+            policy,
+            filter,
+            &Cache::Borrowed(previous),
+            Observation::default(),
+            control,
+            progress,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe_cached(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: &Cache<'_>,
+        observation: Observation,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+    ) -> Result<Observation, ScanError> {
+        let workers = match self.connect {
+            Some(_) => PARALLEL_READS,
+            None => NonZeroUsize::MIN,
+        };
+        if workers == NonZeroUsize::MIN {
+            self.observe_reporting_serial(policy, filter, previous, observation, control, progress)
+        } else {
+            self.observe_reporting_overlapped(
+                policy,
+                filter,
+                previous,
+                observation,
+                control,
+                progress,
+                workers,
+            )
+        }
+    }
+
+    /// The walk and its reads on this thread, one entry at a time.
+    fn observe_reporting_serial(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: &Cache<'_>,
+        mut observation: Observation,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+    ) -> Result<Observation, ScanError> {
+        let mut unavailable = PathPrefixIndex::default();
+        self.walk_observation(
+            policy,
+            filter,
+            previous,
+            &mut observation,
+            &mut unavailable,
+            control,
+            progress,
+            |path, attributes, observation, unavailable, progress, mut control| {
+                let entry = self.observe_entry(&path, &attributes, previous, policy, &mut control);
+                record(observation, unavailable, &path, entry)?;
+                progress(ObserveStep::Checked);
+                Ok(())
+            },
+        )?;
+        if control() == ScanControl::Cancel {
+            return Err(ScanError::Cancelled);
+        }
+        Self::finish_observation(observation, unavailable)
+    }
+
+    /// The walk on this thread, the reads on one bounded pool scoped to the
+    /// whole walk. This thread alone asks `control`, reports `progress`, and
+    /// mutates the observation and the unavailable index; a worker only
+    /// captures one entry's verified version and checks the shared stop.
+    #[allow(clippy::too_many_arguments)] // Mirrors the serial walk plus the pool its jobs use.
+    fn observe_reporting_overlapped(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: &Cache<'_>,
+        mut observation: Observation,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+        workers: NonZeroUsize,
+    ) -> Result<Observation, ScanError> {
+        let mut unavailable = PathPrefixIndex::default();
+        let stop = AtomicBool::new(false);
+        let read = |(path, attributes): &(SyncPath, Attributes),
+                    asked: &dyn Fn() -> ScanControl| {
+            self.observe_entry(path, attributes, previous, policy, &mut || asked())
+        };
+        let (walked, finish_reads) = thread::scope(|threads| {
+            let mut pending = Reads::start(threads, workers, &stop, &read);
+            let walked = self.walk_observation(
+                policy,
+                filter,
+                previous,
+                &mut observation,
+                &mut unavailable,
+                control,
+                progress,
+                |path, attributes, observation, unavailable, progress, mut control| {
+                    pending.submit(
+                        (path, attributes),
+                        &mut |(path, _), entry| {
+                            record(observation, unavailable, path, entry)?;
+                            progress(ObserveStep::Checked);
+                            Ok(())
+                        },
+                        &mut control,
+                    )
+                },
+            );
+            if walked.is_err() {
+                // A producer failure is terminal even when a caller's
+                // cancellation callback returns Continue on its next call.
+                stop.store(true, Ordering::Relaxed);
+            }
+            let finish_reads = pending.finish(
+                &mut |(path, _), entry| {
+                    record(&mut observation, &mut unavailable, path, entry)?;
+                    progress(ObserveStep::Checked);
+                    Ok(())
+                },
+                control,
+            );
+            (walked, finish_reads)
+        });
+        walked?;
+        finish_reads?;
+        Self::finish_observation(observation, unavailable)
+    }
+
+    /// Walk the tree, streaming one listing batch at a time. `submit`
+    /// verifies a listed file on this thread or on the reader pool; a
+    /// directory settles here, needing no server request.
+    #[allow(clippy::too_many_arguments)] // One walk, one handoff, one settle.
+    fn walk_observation(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: &Cache<'_>,
+        observation: &mut Observation,
+        unavailable: &mut PathPrefixIndex,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+        mut submit: impl FnMut(
+            SyncPath,
+            Attributes,
+            &mut Observation,
+            &mut PathPrefixIndex,
+            &mut dyn FnMut(ObserveStep),
+            &mut dyn FnMut() -> ScanControl,
+        ) -> Result<(), ScanError>,
+    ) -> Result<(), ScanError> {
+        let mut directories: Vec<Option<SyncPath>> = vec![None];
+        while let Some(directory) = directories.pop() {
             if control() == ScanControl::Cancel {
                 return Err(ScanError::Cancelled);
             }
@@ -498,141 +679,89 @@ impl SftpEndpoint {
                 None => self.root.clone(),
                 Some(path) => self.remote(path.as_bytes()),
             };
-            let listing = self.session_unless_cancelled(control)?.read_dir(&remote);
-            let entries = match listing {
-                Ok(entries) => entries,
-                Err(source) => {
-                    observation.skip_error(at(directory.as_ref(), source))?;
-                    continue;
+            // A directory's whole listing is one batch. The session is
+            // released before any queue handoff, so a full queue never
+            // waits on a held session. A wide flat folder is still
+            // materialized here by `Session::read_dir`, which returns its
+            // entries as one `Vec`; only the walk's own inventory is
+            // bounded, not the server's per-folder reply.
+            let entries = {
+                let mut session = self.session_unless_cancelled(control)?;
+                match session.read_dir(&remote) {
+                    Ok(entries) => entries,
+                    Err(source) => {
+                        let issue = at(directory.as_ref(), source).into_issue()?;
+                        unavailable.insert(&issue.path);
+                        observation.skip_issue(issue);
+                        continue;
+                    }
                 }
             };
             for (name, attributes) in entries {
-                let path = child_path(directory.as_ref(), &name)?;
-                if protected(&name) {
-                    if temporary(&name) {
-                        observation.leftovers.push(path);
-                    }
-                    continue;
-                }
-                let kind = attributes.kind();
-                if filter.excludes(&path, kind == FileKind::Directory) {
-                    continue;
-                }
-                // Size and age exclusions come before sidecar
-                // classification, as in local roots.
-                if kind == FileKind::File {
-                    if filter.too_large(attributes.size.unwrap_or(0)) {
-                        observation.oversized.push(path);
-                        continue;
-                    }
-                    if filter.is_old(modified(&attributes)) {
-                        observation.old.push(path.clone());
-                    }
-                }
-                if name.starts_with(b"._") {
-                    observation.skip_error(ScanError::UnclassifiedSidecar(path))?;
-                    continue;
-                }
-                if kind == FileKind::Directory {
-                    pending.push(Some(path.clone()));
-                }
-                progress(ObserveStep::Listed);
-                listed.push((path, attributes));
-            }
-        }
-        // Folders read nothing, and one that fails rules out what is below
-        // it, so they settle before any read starts. Unavailable roots arrive
-        // as folders and reads fail, so the index grows with them.
-        let mut unavailable = PathPrefixIndex::from_paths(&observation.unavailable);
-        let mut reads = Vec::new();
-        for (path, attributes) in listed {
-            if attributes.kind() != FileKind::Directory {
-                reads.push((path, attributes));
-                continue;
-            }
-            if control() == ScanControl::Cancel {
-                return Err(ScanError::Cancelled);
-            }
-            if !unavailable.contains(&path) {
-                let entry = self.observe_entry(&path, &attributes, previous, policy, control);
-                record(&mut observation, &mut unavailable, &path, entry)?;
-            }
-            progress(ObserveStep::Checked);
-        }
-        reads.retain(|(path, _)| {
-            let skipped = unavailable.contains(path);
-            if skipped {
-                progress(ObserveStep::Checked);
-            }
-            !skipped
-        });
-        self.observe_reads(
-            &reads,
-            previous,
-            policy,
-            &mut observation,
-            &mut unavailable,
-            control,
-            progress,
-        )?;
-        observation
-            .entries
-            .retain(|path, _| !unavailable.contains(path));
-        Ok(observation)
-    }
-
-    /// Observe `reads`, on as many sessions as the server takes. One at a
-    /// time on the calling thread when only one can run, in listed order.
-    #[allow(clippy::too_many_arguments)] // Mirrors observe_reporting plus the index its skips settle.
-    fn observe_reads(
-        &self,
-        reads: &[(SyncPath, Attributes)],
-        previous: &BTreeMap<SyncPath, ObservedEntry>,
-        policy: MetadataPolicy,
-        observation: &mut Observation,
-        unavailable: &mut PathPrefixIndex,
-        control: &mut impl FnMut() -> ScanControl,
-        progress: &mut impl FnMut(ObserveStep),
-    ) -> Result<(), ScanError> {
-        let workers = self.workers();
-        if workers == NonZeroUsize::MIN || reads.len() < 2 {
-            for (path, attributes) in reads {
                 if control() == ScanControl::Cancel {
                     return Err(ScanError::Cancelled);
                 }
-                let entry = self.observe_entry(path, attributes, previous, policy, control);
-                record(observation, unavailable, path, entry)?;
-                progress(ObserveStep::Checked);
-            }
-        } else {
-            readers::read_each(
-                reads,
-                workers,
-                |(path, attributes), asked| {
-                    self.observe_entry(path, attributes, previous, policy, &mut || asked())
-                },
-                |(path, _), entry| {
-                    record(observation, unavailable, path, entry)?;
+                let Some((path, attributes)) = classify_listing_entry(
+                    directory.as_ref(),
+                    &name,
+                    attributes,
+                    filter,
+                    previous,
+                    observation,
+                )?
+                else {
+                    continue;
+                };
+                progress(ObserveStep::Listed);
+                // A folder that failed after its children were listed
+                // covers them too; skip their reads but keep the count.
+                if unavailable.contains(&path) {
                     progress(ObserveStep::Checked);
-                    Ok(())
-                },
-                control,
-            )?;
+                    continue;
+                }
+                if attributes.kind() == FileKind::Directory {
+                    if control() == ScanControl::Cancel {
+                        return Err(ScanError::Cancelled);
+                    }
+                    let entry = self.observe_entry(&path, &attributes, previous, policy, control);
+                    record(observation, unavailable, &path, entry)?;
+                    progress(ObserveStep::Checked);
+                    directories.push(Some(path));
+                } else {
+                    submit(
+                        path,
+                        attributes,
+                        &mut *observation,
+                        &mut *unavailable,
+                        &mut *progress,
+                        &mut *control,
+                    )?;
+                }
+            }
         }
+        Ok(())
+    }
 
-        // Reads land in any order, and folders come first; what a run
-        // reports should depend on neither, nor on how many sessions read.
+    /// Freeze the recorded rows, drop what a late failure covers, and sort
+    /// the issues once: reads land in any order and folders settle among
+    /// them, so what a run reports depends on neither.
+    fn finish_observation(
+        mut observation: Observation,
+        unavailable: PathPrefixIndex,
+    ) -> Result<Observation, ScanError> {
+        observation.finish_entries();
+        observation.retain_entries(|path, _| !unavailable.contains(path));
         observation
             .issues
             .sort_by(|left, right| left.path.cmp(&right.path));
-        Ok(())
+        Ok(observation)
     }
 
     fn observe_entry(
         &self,
         path: &SyncPath,
         attributes: &Attributes,
-        previous: &BTreeMap<SyncPath, ObservedEntry>,
+        previous: &Cache<'_>,
         policy: MetadataPolicy,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<ObservedEntry, ScanError> {
@@ -645,16 +774,16 @@ impl SftpEndpoint {
         // the snapshot has nothing to rewrite for this entry. The older
         // time misleads nobody, since SFTP versions are never reused unread.
         if let Some(known) = previous.get(path)
-            && known.version == version
-            && known.fingerprint.same_stat(&key, size)
+            && known.version() == version
+            && known.fingerprint().same_stat(&key, size)
         {
-            return Ok(known.clone());
+            return Ok(known.as_ref().clone());
         }
 
-        Ok(ObservedEntry {
+        Ok(ObservedEntry::new(
             version,
-            fingerprint: Fingerprint::from_key(key, size, observed_at),
-        })
+            Fingerprint::from_key(key, size, observed_at),
+        ))
     }
 
     /// An entry's version from its attributes, reading its data or link.
@@ -789,7 +918,16 @@ impl SftpEndpoint {
             Some(size) => session.read_from_bounded(&handle, from, size - from, &mut consume),
             None => session.read_from(&handle, from, &mut consume),
         };
-        let _ = session.close(handle);
+        let complete = read.is_ok()
+            && !cancelled
+            && !overrun
+            && expected.size.is_none_or(|size| taken == size);
+        let after = if complete {
+            Some(session.close_read_and_lstat(handle, &remote))
+        } else {
+            let _ = session.close(handle);
+            None
+        };
         if cancelled {
             return Err(ScanError::Cancelled);
         }
@@ -801,8 +939,8 @@ impl SftpEndpoint {
         if expected.size.is_some_and(|size| taken != size) {
             return Err(ScanError::Changed(Some(path.clone())));
         }
-        let after = session
-            .lstat(&remote)
+        let after = after
+            .expect("a complete read closes and re-stats its source")
             .map_err(|source| at(Some(path), source))?;
         if stat_key(&after) != stat_key(expected) {
             return Err(ScanError::Changed(Some(path.clone())));
@@ -837,7 +975,7 @@ impl SftpEndpoint {
     ) -> Result<(Vec<u8>, Attributes), ApplyError> {
         let changed = || ApplyError::DestinationChanged(path.clone());
         let (stored, attributes) = self.lookup_on(session, path)?.ok_or_else(changed)?;
-        if self.version_on(session, path, &attributes, policy, control)? != expected.version {
+        if self.version_on(session, path, &attributes, policy, control)? != expected.version() {
             return Err(changed());
         }
         Ok((stored, attributes))
@@ -1760,6 +1898,47 @@ fn temporary_name() -> Vec<u8> {
     .concat()
 }
 
+/// Classify one listing entry, recording exclusions. `Some` for an entry
+/// that joins the observation, `None` for a protected, filtered, oversized
+/// or unclassified name.
+fn classify_listing_entry(
+    directory: Option<&SyncPath>,
+    name: &[u8],
+    attributes: Attributes,
+    filter: &Filter,
+    previous: &Cache<'_>,
+    observation: &mut Observation,
+) -> Result<Option<(SyncPath, Attributes)>, ScanError> {
+    let path = child_path(directory, name)?;
+    let path = previous.key(&path).unwrap_or(path);
+    if protected(name) {
+        if temporary(name) {
+            observation.leftovers.push(path);
+        }
+        return Ok(None);
+    }
+    let kind = attributes.kind();
+    if filter.excludes(&path, kind == FileKind::Directory) {
+        return Ok(None);
+    }
+    // Size and age exclusions come before sidecar classification, as in
+    // local roots.
+    if kind == FileKind::File {
+        if filter.too_large(attributes.size.unwrap_or(0)) {
+            observation.oversized.push(path);
+            return Ok(None);
+        }
+        if filter.is_old(modified(&attributes)) {
+            observation.old.push(path.clone());
+        }
+    }
+    if name.starts_with(b"._") {
+        observation.skip_error(ScanError::UnclassifiedSidecar(path))?;
+        return Ok(None);
+    }
+    Ok(Some((path, attributes)))
+}
+
 /// Keep what observing `path` found, or skip it when its error allows.
 /// A skip also enters `unavailable`, so later paths below it are not read.
 fn record(
@@ -1770,7 +1949,7 @@ fn record(
 ) -> Result<(), ScanError> {
     match entry {
         Ok(entry) => {
-            observation.entries.insert(path.clone(), entry);
+            observation.record(path.clone(), entry);
             Ok(())
         }
         Err(error) => {

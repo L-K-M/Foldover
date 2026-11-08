@@ -31,11 +31,11 @@ def parse_nonnegative_int(field, line_number, name):
 
 
 def parse_record(line, line_number):
-    """Parse a process/phase/metric record, or return None for pass-through lines."""
+    """Parse a process/phase/metric/counter record, or return None for pass-through lines."""
     text = line.rstrip("\n")
     fields = text.split("\t")
     event = fields[0]
-    if event not in ("process", "phase", "metric"):
+    if event not in ("process", "phase", "metric", "counter"):
         return None
     if event == "process":
         if len(fields) != 2:
@@ -50,13 +50,15 @@ def parse_record(line, line_number):
             raise ParseError(f"line {line_number}: malformed process record {text!r}: "
                              f"PID {pid} is not a positive process id")
         return ("process", pid)
+    unit_name = "VALUE" if event == "counter" else "NANOS"
     if len(fields) != 4:
         raise ParseError(f"line {line_number}: malformed {event} record {text!r}: "
-                         f"expected '{event}\\tITERATION\\tNAME\\tNANOS'")
+                         f"expected '{event}\\tITERATION\\tNAME\\t{unit_name}'")
     iteration = parse_nonnegative_int(fields[1], line_number, f"{event} iteration")
     if not fields[2]:
         raise ParseError(f"line {line_number}: malformed {event} record {text!r}: empty name")
-    nanos = parse_nonnegative_int(fields[3], line_number, f"{event} nanoseconds")
+    unit = "value" if event == "counter" else "nanoseconds"
+    nanos = parse_nonnegative_int(fields[3], line_number, f"{event} {unit}")
     return (event, iteration, fields[2], nanos)
 
 
@@ -261,8 +263,8 @@ def main():
                               samples, summary["sampling_errors"], started))
                     sampler.start()
                     continue
-                point = dict(event=record[0], iteration=record[1],
-                             phase=record[2], ns=record[3])
+                point = dict(event=record[0], iteration=record[1], phase=record[2])
+                point["value" if record[0] == "counter" else "ns"] = record[3]
                 if process_id is not None:
                     values, error = sample_point(process_id)
                     if error is None:
@@ -319,7 +321,7 @@ def main():
                 raise SystemExit(1)
     if summary["parsing_errors"]:
         print(f"runner emitted {len(summary['parsing_errors'])} malformed "
-              "process/phase/metric record(s); see summary.json parsing_errors",
+              "process/phase/metric/counter record(s); see summary.json parsing_errors",
               file=sys.stderr)
     if returncode:
         raise SystemExit(128 - returncode if returncode < 0 else returncode)

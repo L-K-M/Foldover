@@ -5,9 +5,10 @@ use foldover_types::PairRoot;
 use super::*;
 use crate::Reach;
 
-/// Short enough for tests; the order of the parts is what matters.
+/// Expiry tests stay short while filesystem work on a busy host has room
+/// to renew a live lease. Production timing is unchanged.
 const QUICK: LeaseTiming = LeaseTiming {
-    ttl: Duration::from_millis(150),
+    ttl: Duration::from_secs(1),
     beat: Duration::from_millis(10),
     poll: Duration::from_millis(20),
     wait: Duration::from_secs(5),

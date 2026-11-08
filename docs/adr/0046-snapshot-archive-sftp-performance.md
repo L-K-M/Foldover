@@ -40,17 +40,23 @@ A performance audit found four costs that grow with a pair's size:
   overlapping one of those keeps nothing. The window never answers with a
   short page while more follow: a walk would not, and an empty page ends
   the CLI's listing.
-- **SFTP reads:** folders settle first, then files are read on up to four
-  sessions of the existing pool. As in ADR 0043, only the run's thread
-  records results and asks the run's control. Content verification is
-  unchanged. Endpoints without a session pool stay serial. A read waiting
-  for a session gives up when the run cancels, so a server that went away
-  cannot hold up cancelling.
+- **SFTP reads:** the walk lists one folder at a time, observes its folders
+  on the caller and reads its files on up to eight pooled sessions. As in ADR 0043, only the run's thread
+  records results and asks the run's control. The handoff holds at most
+  twice the worker count of queued, running and completed-but-unrecorded
+  owned jobs. Each folder's listing is released as its entries are handed
+  off; the walk does not retain the whole tree's file metadata. A single
+  wide flat folder is still materialized by `Session::read_dir`. Late
+  directory failures suppress any already read descendants. Content
+  verification is unchanged. Endpoints
+  without a session pool stay serial. A read waiting for a session gives
+  up when the run cancels, so a server that went away cannot hold up
+  cancelling.
 
 ## Measurements
 
-Synthetic data and release builds throughout. No NAS or real WAN was
-measured.
+Synthetic data and release builds throughout the Linux and Mac tables. The
+LAN no-change runs below are real SSH-over-LAN measurements against a NAS.
 
 ### Linux host
 
@@ -98,6 +104,16 @@ per server message, or nothing.
 Two values are two runs. Service pages are the median of 15 walks over
 the run: 514 ms to 1.55 s before, 64 to 306 ms after.
 
+### LAN no-change runs
+
+On a shared macOS host (M4 Max, 14 cores, macOS 27.0.1) against a NAS over
+SSH, three paired no-change runs of a 10k-file corpus (8 KiB files, 1,000 per
+folder) measured the remote observation at 130.501-134.597 s with four readers
+(median 133.013 s) and 69.623-76.648 s with eight (median 70.548 s). The host
+was busy with other agents, so this is not an idle qualification. See
+[perf/sftp.md](../../perf/sftp.md) for provenance, raw ranges and the
+one-write read-completion batching runs.
+
 ## Consequences
 
 - Another computer's change to an archive can take up to 30 seconds to
@@ -107,7 +123,8 @@ the run: 514 ms to 1.55 s before, 64 to 306 ms after.
   root that went away shows at the next walk.
 - A single folder holding very many items is still listed once per 1,000
   items, so such a run lists slowly.
-- A preview or sync on an SFTP folder can open up to four SSH connections
-  for reading, plus the run's lease connection.
+- A preview or sync on an SFTP folder can open up to eight SSH connections
+  for reading from a pool capped at nine, plus a separate lease connection,
+  for at most ten.
 - Budgets `db_snapshot_unchanged_100k`, `db_snapshot_rewrite_100k` and
   `archive_pages_5k` guard the snapshot and archive costs.

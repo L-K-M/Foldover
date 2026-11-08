@@ -23,7 +23,7 @@ and never opens the installed agent's state. It mirrors left to right, keeps
 normal archives/leases and approves its freshly computed synthetic plan. Never
 point it at user data. Failed/conflicting/incomplete runs exit unsuccessfully.
 
-The `foldover-perf` marker is a naming convention on a whole path component,
+The `foldover-perf` marker is a naming convention on a path-component prefix,
 not a security sandbox: it does not prove filesystem ownership and does not
 defend against a hostile concurrent rename. `make-corpus.py` resolves the
 physical path before checking the marker and writes only to that resolved
@@ -63,3 +63,63 @@ describe it as NAS qualification. Keep existing performance budgets unchanged.
 Generate only bounded corpora, monitor free space, and remove only the exact
 uniquely named fixture directories created for the experiment after preserving
 results. Neither corpus generator nor qualification runner cleans arbitrary paths.
+
+## Service preview and status qualification
+
+The opt-in `performance_tests::million_file_service_preview` test exercises
+`Service::handle`, snapshot persistence and a held preview while polling
+status. It accepts only an explicit synthetic catalog with one local pair;
+both roots must be inside the catalog's parent fixture directory. It creates
+no corpus. Seed a matching, no-change pair first with the engine runner.
+Clone the closed catalog before forcing fingerprint expiry, and record any
+file-time/header changes as fixture provenance. Keep the source/target roots
+and the copied catalog under the same `foldover-perf` container.
+
+Build the release test executable and use Cargo's reported `executable` path
+for the `foldover_service` test target (this honors custom target directories):
+
+```sh
+cargo test --release -p foldover-service --lib --no-run --message-format=json
+FOLDOVER_SERVICE_TEST=/absolute/path/reported/by/cargo
+FOLDOVER_PERF_SERVICE_STATE="$FOLDOVER_PERF_ROOT/state-service" \
+  /usr/bin/time -l "$FOLDOVER_SERVICE_TEST" --ignored --exact \
+  performance_tests::million_file_service_preview --nocapture
+```
+
+Measure the test executable, not the Cargo wrapper. The macOS resource report
+gives kernel peak RSS; the test prints preview duration, maximum handler
+latency and maximum timer lateness. A successful test asserts a no-change
+preview; compare its RSS separately with the unchanged budget. This direct
+service test does not start an installed daemon, IPC listener, scheduler or
+peer discovery. It changes no authentication policy or home-directory setting.
+See [qualification results](qualification-results.md) for the real fixtures,
+retained failed samples and limits.
+
+## Diagnostic units and focused probes
+
+The engine runner emits duration records as `metric`/`phase` with nanoseconds,
+and `counter` records with unitless integer `value` fields in the JSON summary.
+`PlannedLogicalBytes` and `AppliedLogicalBytes` count logical file data reported
+by the engine, not encrypted network traffic or resumed-transfer payloads.
+Use the framed relay for SFTP request/response and DATA-byte counts.
+
+Two more opt-in tests use the same explicitly marked local catalog and the
+same release test executable:
+
+```sh
+FOLDOVER_PERF_SERVICE_STATE="$FOLDOVER_PERF_ROOT/state-service" \
+  /usr/bin/time -l "$FOLDOVER_SERVICE_TEST" --ignored --exact \
+  performance_tests::million_file_service_input_lock --nocapture
+FOLDOVER_PERF_SERVICE_STATE="$FOLDOVER_PERF_ROOT/state-service" \
+  /usr/bin/time -l "$FOLDOVER_SERVICE_TEST" --ignored --exact \
+  performance_tests::million_file_service_scan_cancellation --nocapture
+```
+
+The input probe times the real capture and mount lookup under the service
+engine mutex, then decodes outside it. A second caller contends for that
+mutex; the barrier handshake is excluded from capture time. This measures
+input-lock contention, not a complete second-pair RPC or installed daemon.
+The cancellation probe waits for at least 10,000 checked entries, sends the
+real service cancellation request and polls completion every 5 ms. It covers
+local observation cancellation; input decoding, transfers and stalled remote
+I/O have separate behavior and are not qualified by this sample.

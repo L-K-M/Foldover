@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import os
 from pathlib import Path
 
 FIXTURE_MARKER = "foldover-perf"
@@ -44,10 +45,14 @@ def main():
     for index in range(args.files):
         folder = directory / f"d-{index // args.width:06}"
         if index % args.width == 0:
-            folder.mkdir()
+            folder.mkdir(mode=0o700)
         data = hashlib.shake_256(str(index).encode()).digest(args.bytes)
         with (folder / f"f-{index % args.width:06}").open("xb") as stream:
             stream.write(data)
+            # Inherited NAS ACLs can grant execute permission to new files.
+            # These fixtures are documents; keep that cross-platform content
+            # property explicit even when permission syncing is disabled.
+            os.fchmod(stream.fileno(), 0o600)
         if (index + 1) % 10_000 == 0:
             print(f"created {index + 1}", flush=True)
 

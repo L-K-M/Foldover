@@ -16,12 +16,20 @@ ids are the bench function names; estimates land in
 | `scan_10k_files` | `foldover-endpoint` | `LocalEndpoint::observe` over 10_000 small files in nested directories |
 | `hash_64_mib` | `foldover-fs` | `Root::hash_file`, the bounded BLAKE3 read behind `LocalEndpoint::hash_file`, over a 64 MiB file |
 | `plan_100k_entries` | `foldover-engine` | `plan_candidates` over two 100_000-entry sides with a synthetic base mixing unchanged, copied, conflicting, new and deleted files |
+| `plan_100k_entries_unicode_names` | `foldover-engine` | `plan_resolved` over the same 100_000-row pair under case-insensitive, normalized matching, the per-row `name_key` path in `mark_name_clashes` |
 | `plan_skipped_100k_entries` | `foldover-engine` | `plan_resolved` over the same 100_000-row pair with all 1_000 top-level folders skipped, the focused prefix-index workload |
 | `prefix_index_100k_entries_1000_prefixes` | `foldover-engine` | `PathPrefixIndex` ancestor lookups: 100_000 paths against 1_000 roots, the shared helper behind unavailable roots, failed writes and skipped branches |
+| `prefix_index_shallow_unicode_1m_queries_10k_roots` | `foldover-engine` | `PathPrefixIndex` ancestor lookups: 1_000_000 shallow Unicode raw-byte paths against 10_000 roots, half descendants and half boundary siblings |
+| `prefix_index_deep_unicode_1m_queries_10k_roots` | `foldover-engine` | `PathPrefixIndex` ancestor lookups: 1_000_000 deep Unicode raw-byte paths against 10_000 roots, half descendants and half boundary siblings |
 | `archive_pages_5k` | `foldover-endpoint` | `LocalEndpoint::archived_items` listing 5,000 items in 50 folders, 100 per page |
 | `db_commit_100k` | `foldover-state` | `PairStore::update_base` committing 100_000 base entries |
 | `db_commit_batches_100k` | `foldover-state` | `PairStore::update_base` committing one run's 100_000 base entries and journal entries in the engine's 256-row batches |
 | `db_read_100k` | `foldover-state` | `PairStore::base` reading the 100_000-entry base back |
+| `capture_run_inputs_100k` | `foldover-engine` | Capture a pinned read view for 100,000 baseline rows and two 100,000-row snapshots |
+| `run_inputs_100k` | `foldover-engine` | Capture and decode that view into typed run inputs outside the service lock |
+| `run_inputs_read_100k` | `foldover-state` | Read the baseline and both snapshots independently |
+| `run_records_capture_100k` | `foldover-state` | Capture the pinned database view without decoding rows |
+| `run_records_capture_decode_100k` | `foldover-state` | Capture and decode the baseline and both snapshots |
 | `db_snapshot_unchanged_100k` | `foldover-state` | `PairStore::replace_snapshot` storing the same 100_000-entry observation again |
 | `db_snapshot_rewrite_100k` | `foldover-state` | `PairStore::replace_snapshot` with every one of the 100_000 fingerprints changed |
 
@@ -54,12 +62,17 @@ reason as the preparation budget; the criterion bench is the gate.
 
 ## How budgets were set
 
-Each budget is a maximum median in milliseconds, set at roughly 3x
-the median measured on the development machine they were calibrated
-on (2026-10-20, Linux, release profile, short criterion windows). The
-headroom absorbs slower and noisier CI runners, which is where the
-gate runs weekly and on dispatch (`bench.yml`). A budget that fails
-on runners but passes locally was set too tight, not too loose.
+Each budget is a maximum median in milliseconds. The original scan,
+hash, plan and DB limits were calibrated at roughly 3x development medians
+on Linux on 2026-10-20, with release builds and short Criterion windows.
+Later additions record their calibration in the owning PR or the
+[qualification results](qualification-results.md). The new million-query
+prefix limits use about 3x the shared-host Mac measurements; the seventeen
+previous limits remain fixed as their implementations get faster.
+
+The headroom absorbs slower and noisier CI runners, where the gate runs
+weekly and on dispatch (`bench.yml`). Check runner conditions and retained
+samples when investigating a budget failure.
 
 ## Updating
 
@@ -70,3 +83,11 @@ on runners but passes locally was set too tight, not too loose.
 3. Keep every id identical to a criterion bench function name: a
    budget without matching criterion estimates fails the check, and
    a bench without a budget is silently unchecked.
+
+## End-to-end evidence
+
+[Qualification results](qualification-results.md) summarize the measured LAN,
+local, memory and release-profile experiments. The linked compressed evidence
+and CSV index retain failed samples as well as successful runs. The
+[qualification guide](qualification.md) covers isolated engine and service
+measurements; those results do not replace physical-device or release checks.
