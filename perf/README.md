@@ -91,3 +91,7 @@ local, memory and release-profile experiments. The linked compressed evidence
 and CSV index retain failed samples as well as successful runs. The
 [qualification guide](qualification.md) covers isolated engine and service
 measurements; those results do not replace physical-device or release checks.
+
+[Installed-app qualification](release-readiness-results.md) records the
+subsequent stock-app, NAS and second-Mac checks, including retained failures
+and the remaining release gates.
