@@ -608,6 +608,7 @@ fn owned_observations_preserve_exact_cache_values_and_report_real_changes() {
                 previous,
                 Arc::new(foldover_types::PathMap::new()),
                 foldover_types::Side::Right,
+                crate::ObservationHints::default(),
                 &mut proceed,
                 &mut |_| {},
             )
@@ -628,6 +629,7 @@ fn owned_observations_preserve_exact_cache_values_and_report_real_changes() {
                 previous,
                 Arc::new(foldover_types::PathMap::new()),
                 foldover_types::Side::Right,
+                crate::ObservationHints::default(),
                 &mut proceed,
                 &mut |_| {},
             )

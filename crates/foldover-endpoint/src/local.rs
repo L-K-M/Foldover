@@ -41,7 +41,7 @@ use crate::observation_cache::{Cache, Comparison, Recycled};
 use crate::observation_entries::ObservationEntries;
 use crate::observation_reads::Reads;
 use crate::observation_versions::{ObservationOrigin, ObservedVersion, VersionPoolBuilder};
-use crate::{ListedEntry, ListedKind, ObserveStep};
+use crate::{ListedEntry, ListedKind, ObservationHints, ObserveStep};
 
 pub(crate) use apply::Archiving;
 pub use apply::{ApplyError, Expected, RunScope};
@@ -681,12 +681,24 @@ impl UnavailablePaths {
 }
 
 impl Observation {
+    #[cfg(test)]
     pub(crate) fn recycling(
         previous: PathMap<ObservedEntry>,
         base: Arc<PathMap<BaselineEntry>>,
         side: Side,
     ) -> (Self, Cache<'static>) {
-        let recycled = Arc::new(Mutex::new(Recycled::new(previous, base, side)));
+        Self::recycling_with_hints(previous, base, side, ObservationHints::default())
+    }
+
+    pub(crate) fn recycling_with_hints(
+        previous: PathMap<ObservedEntry>,
+        base: Arc<PathMap<BaselineEntry>>,
+        side: Side,
+        hints: ObservationHints,
+    ) -> (Self, Cache<'static>) {
+        let recycled = Arc::new(Mutex::new(Recycled::with_hints(
+            previous, base, side, hints,
+        )));
         let cache = Cache::Owned(Arc::clone(&recycled));
         (
             Self {
@@ -779,9 +791,10 @@ impl Observation {
         previous: PathMap<ObservedEntry>,
         base: Arc<PathMap<BaselineEntry>>,
         side: Side,
+        hints: ObservationHints,
     ) {
         let current = std::mem::take(&mut self.entries).into_snapshot();
-        let (mut replacement, _) = Self::recycling(previous, base, side);
+        let (mut replacement, _) = Self::recycling_with_hints(previous, base, side, hints);
         self.recycled = replacement.recycled.take();
         self.versions = None;
         for (path, entry) in current {
@@ -1600,10 +1613,12 @@ impl LocalEndpoint {
         previous: PathMap<ObservedEntry>,
         base: Arc<PathMap<BaselineEntry>>,
         side: Side,
+        hints: ObservationHints,
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<Observation, ScanError> {
-        let (observation, previous) = Observation::recycling(previous, base, side);
+        let (observation, previous) =
+            Observation::recycling_with_hints(previous, base, side, hints);
         self.observe_cached(
             policy,
             filter,

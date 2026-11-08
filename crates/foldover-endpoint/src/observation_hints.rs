@@ -53,16 +53,26 @@ impl ObservationHints {
         base: &PathMap<BaselineEntry>,
         side: Side,
     ) -> Self {
-        let mut rows = PathMapBuilder::with_capacity(observation.snapshot_entries().count());
-        for (path, entry) in observation.snapshot_entries() {
+        let needed = |path: &SyncPath, version| {
             if let Some(baseline) = base.get(path.as_bytes()) {
                 let stored = match side {
                     Side::Left => baseline.left(),
                     Side::Right => baseline.right(),
                 };
-                if stored == entry.version() {
-                    continue;
+                if stored == version {
+                    return false;
                 }
+            }
+            true
+        };
+        let count = observation
+            .snapshot_entries()
+            .filter(|(path, entry)| needed(path, entry.version()))
+            .count();
+        let mut rows = PathMapBuilder::with_capacity(count);
+        for (path, entry) in observation.snapshot_entries() {
+            if !needed(path, entry.version()) {
+                continue;
             }
             rows.push(path.clone(), entry.observed_version());
         }
@@ -74,9 +84,6 @@ impl ObservationHints {
     /// The exact stored key for `path`, sharing its allocation.
     ///
     /// Returns `None` when the hint map has no row at that exact raw path.
-    /// The cache wiring that shares path keys is the next step; keep the
-    /// crate-private API available now.
-    #[allow(dead_code)]
     pub(crate) fn key(&self, path: &SyncPath) -> Option<SyncPath> {
         self.rows
             .get_key_value(path.as_bytes())
@@ -392,5 +399,25 @@ mod tests {
         drop(pool);
         assert_eq!(first.version(), version);
         assert_eq!(second.version(), version);
+    }
+    #[test]
+    fn matching_baseline_does_not_reserve_discarded_hint_rows() {
+        let version = file_version(1, 2);
+        let source = completed(
+            (0..1000)
+                .map(|i| (path(format!("p-{i:04}").as_bytes()), version))
+                .collect(),
+        );
+        let base = source
+            .snapshot_entries()
+            .map(|(path, _)| (path.clone(), baseline(version)))
+            .collect();
+        let hints = ObservationHints::from_observation(&source, &base, Side::Right);
+        assert!(hints.rows.is_empty());
+        assert_eq!(
+            hints.rows.capacity(),
+            0,
+            "baseline hits need no hint row allocation"
+        );
     }
 }

@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use foldover_types::{BaselineEntry, PathMap, PathMapBuilder, Side, SyncPath};
 
+use crate::ObservationHints;
 use crate::local::{ObservedEntry, PreviousObservation, ROW_GROWTH_HEADROOM_DIVISOR};
 use crate::observation_versions::{ObservationOrigin, ObservationVisibility, VersionPoolBuilder};
 
@@ -51,6 +52,7 @@ pub(crate) struct Recycled {
     original_times: Option<OriginalTimes>,
     versions: Option<VersionPoolBuilder>,
     base: Arc<PathMap<BaselineEntry>>,
+    hints: ObservationHints,
     side: Side,
     original_len: usize,
 }
@@ -157,10 +159,20 @@ impl Comparison {
 }
 
 impl Recycled {
+    #[cfg(test)]
     pub(crate) fn new(
         previous: PathMap<ObservedEntry>,
         base: Arc<PathMap<BaselineEntry>>,
         side: Side,
+    ) -> Self {
+        Self::with_hints(previous, base, side, ObservationHints::default())
+    }
+
+    pub(crate) fn with_hints(
+        previous: PathMap<ObservedEntry>,
+        base: Arc<PathMap<BaselineEntry>>,
+        side: Side,
+        hints: ObservationHints,
     ) -> Self {
         let mut rows = previous.into_rows();
         // Reserve one percent of the decoded prefix as spare row capacity
@@ -179,8 +191,12 @@ impl Recycled {
             additions: Vec::new(),
             originals: BTreeMap::new(),
             original_times: None,
-            versions: Some(VersionPoolBuilder::new(Arc::clone(&base))),
+            versions: Some(VersionPoolBuilder::with_hints(
+                Arc::clone(&base),
+                hints.clone(),
+            )),
             base,
+            hints,
             side,
             original_len,
         }
@@ -194,6 +210,7 @@ impl Recycled {
         self.index(path)
             .map(|index| self.rows[index].0.clone())
             .or_else(|| self.base.get_key_value(path).map(|(key, _)| key.clone()))
+            .or_else(|| self.hints.key(path))
     }
 
     fn get(&mut self, path: &SyncPath) -> Option<Arc<ObservedEntry>> {
@@ -244,11 +261,7 @@ impl Recycled {
         let Some(index) = self.index(&path) else {
             // Sharing the exact raw key does not reuse its baseline version
             // or fingerprint: this remains a newly verified snapshot row.
-            let path = self
-                .base
-                .get_key_value(&path)
-                .map(|(key, _)| key.clone())
-                .unwrap_or(path);
+            let path = self.key(&path).unwrap_or(path);
             let handle = self
                 .versions
                 .as_mut()
@@ -297,6 +310,9 @@ impl Recycled {
     /// Unseen originals remain as hidden comparison rows until alignment.
     pub(crate) fn finish(&mut self) -> (PathMap<ObservedEntry>, Comparison) {
         self.versions.take().expect("finish once").freeze();
+        // Matching handles retain the sealed source pool themselves; the
+        // temporary path index is no longer needed while sorting rows.
+        self.hints = ObservationHints::default();
         let mut changed = BTreeMap::new();
         for (index, original) in std::mem::take(&mut self.originals) {
             if self.rows[index].1.is_taken() {
@@ -339,6 +355,46 @@ mod refresh_tests;
 mod tests {
     use super::*;
     use foldover_types::{Digest, EntryContent, EntryVersion};
+
+    #[test]
+    fn version_hints_share_raw_paths_without_becoming_previous_observations() {
+        let mut source = crate::Observation::default();
+        source.record(path(b"shared"), entry(1));
+        source.finish_entries();
+        let raw_key = source
+            .entries()
+            .get_key_value(&path(b"shared"))
+            .unwrap()
+            .0
+            .as_bytes()
+            .as_ptr();
+        let base = Arc::new(PathMap::new());
+        let hints = ObservationHints::from_observation(&source, &base, Side::Right);
+        let mut rows = Recycled::with_hints(PathMap::new(), base, Side::Right, hints);
+        let shared = rows.key(&path(b"shared")).unwrap();
+        assert_eq!(shared.as_bytes().as_ptr(), raw_key);
+        assert!(
+            rows.get(&path(b"shared")).is_none(),
+            "hints supply no prior stat or fingerprint"
+        );
+        let mut fingerprint = entry(2).fingerprint_bytes();
+        fingerprint[12..20].copy_from_slice(&9876u64.to_le_bytes());
+        let verified = ObservedEntry::restore(entry(2).version(), &fingerprint).unwrap();
+        rows.record(path(b"shared"), verified.clone());
+        assert_eq!(rows.versions.as_ref().unwrap().owned_len(), 1);
+        let (finished, _) = rows.finish();
+        assert_eq!(finished[&path(b"shared")], verified);
+        assert_eq!(finished[&path(b"shared")].origin(), ObservationOrigin::New);
+        assert_eq!(
+            finished
+                .get_key_value(&path(b"shared"))
+                .unwrap()
+                .0
+                .as_bytes()
+                .as_ptr(),
+            raw_key
+        );
+    }
 
     #[test]
     fn compact_original_times_keep_nanoseconds_and_out_of_range_dates() {

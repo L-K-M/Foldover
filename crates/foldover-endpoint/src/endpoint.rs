@@ -21,7 +21,7 @@ use crate::remote::PeerEndpoint;
 use crate::sftp::SftpEndpoint;
 use crate::{
     ApplyError, ArchivedItem, ArchivedRun, Expected, Filter, LocalEndpoint, Observation,
-    ObservedEntry, Pruning, RootRelation, RunScope, ScanError,
+    ObservationHints, ObservedEntry, Pruning, RootRelation, RunScope, ScanError,
 };
 
 /// Copies another Mac's folder takes at once.
@@ -240,28 +240,29 @@ impl Endpoint {
         previous: PathMap<ObservedEntry>,
         base: Arc<PathMap<BaselineEntry>>,
         side: Side,
+        hints: ObservationHints,
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<Observation, ScanError> {
         match self {
-            Self::Local(endpoint) => {
-                endpoint.observe_owned(policy, filter, previous, base, side, control, progress)
-            }
-            Self::Sftp(endpoint) => {
-                endpoint.observe_owned(policy, filter, previous, base, side, control, progress)
-            }
+            Self::Local(endpoint) => endpoint.observe_owned(
+                policy, filter, previous, base, side, hints, control, progress,
+            ),
+            Self::Sftp(endpoint) => endpoint.observe_owned(
+                policy, filter, previous, base, side, hints, control, progress,
+            ),
             // Peers keep a root-local cache on the serving Mac. Fold their
             // received observations into the caller's comparison afterward.
             Self::Peer(endpoint) => {
                 let mut observation =
                     endpoint.observe_reporting(policy, filter, control, progress)?;
-                observation.recycle_from(previous, base, side);
+                observation.recycle_from(previous, base, side, hints);
                 Ok(observation)
             }
             #[cfg(feature = "simulation")]
             Self::Memory(endpoint) => {
                 let mut observation = endpoint.observe(policy, filter, control, progress)?;
-                observation.recycle_from(previous, base, side);
+                observation.recycle_from(previous, base, side, hints);
                 Ok(observation)
             }
         }

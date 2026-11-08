@@ -30,8 +30,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use foldover_endpoint::{
     ApplyError, Endpoint, EndpointPair, Expected, Filter, HeldLease, InvalidFilter, LeaseError,
-    LeaseHolder, LeaseTiming, Observation, ObserveStep, ObservedEntry, ObservedVersion,
-    PairRootError, Pruning, Reach, RunScope, ScanError, SnapshotBuilder, access_denied,
+    LeaseHolder, LeaseTiming, Observation, ObservationHints, ObserveStep, ObservedEntry,
+    ObservedVersion, PairRootError, Pruning, Reach, RunScope, ScanError, SnapshotBuilder,
+    access_denied,
 };
 use foldover_host::RunAwake;
 use foldover_state::{
@@ -894,6 +895,7 @@ impl PairRun {
         }
         let observe = |side: Side,
                        previous: PathMap<ObservedEntry>,
+                       hints: ObservationHints,
                        control: &mut dyn FnMut() -> ScanControl| {
             endpoints
                 .endpoint(side)
@@ -903,6 +905,7 @@ impl PairRun {
                     previous,
                     Arc::clone(&base),
                     side,
+                    hints,
                     &mut || control(),
                     &mut |step| progress.observed(side, step),
                 )
@@ -913,10 +916,16 @@ impl PairRun {
         };
         progress.measured(RunPhase::Readiness, readiness.elapsed());
         let observed = Instant::now();
-        let mut left = observe(Side::Left, left_snapshot, control)?;
+        let mut left = observe(
+            Side::Left,
+            left_snapshot,
+            ObservationHints::default(),
+            control,
+        )?;
         progress.measured(RunPhase::ObserveLeft, observed.elapsed());
         let observed = Instant::now();
-        let mut right = observe(Side::Right, right_snapshot, control)?;
+        let hints = ObservationHints::from_observation(&left, &base, Side::Right);
+        let mut right = observe(Side::Right, right_snapshot, hints, control)?;
         progress.measured(RunPhase::ObserveRight, observed.elapsed());
         let aligned = Instant::now();
         let left_names = endpoints.endpoint(Side::Left).name_matching();

@@ -434,6 +434,7 @@ fn observe(
         previous,
         Arc::new(foldover_types::PathMap::new()),
         Side::Left,
+        crate::ObservationHints::default(),
         &mut || {
             if gone.get() {
                 return ScanControl::Cancel;

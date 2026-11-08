@@ -480,10 +480,12 @@ impl SftpEndpoint {
         previous: foldover_types::PathMap<ObservedEntry>,
         base: std::sync::Arc<foldover_types::PathMap<foldover_types::BaselineEntry>>,
         side: foldover_types::Side,
+        hints: crate::ObservationHints,
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<Observation, ScanError> {
-        let (observation, previous) = Observation::recycling(previous, base, side);
+        let (observation, previous) =
+            Observation::recycling_with_hints(previous, base, side, hints);
         self.observe_cached(policy, filter, &previous, observation, control, progress)
     }
 
