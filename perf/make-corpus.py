@@ -5,6 +5,20 @@ import argparse
 import hashlib
 from pathlib import Path
 
+FIXTURE_MARKER = "foldover-perf"
+
+
+def resolve_fixture_directory(directory: Path) -> Path:
+    """Return the physical path whose components carry the fixture marker.
+
+    The marker is a naming convention, not a sandbox: it does not prove
+    filesystem ownership and does not defend against a concurrent rename.
+    """
+    try:
+        return directory.resolve()
+    except (OSError, RuntimeError) as error:
+        raise ValueError(f"cannot resolve fixture directory {directory}: {error}") from error
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -15,11 +29,20 @@ def main():
     args = parser.parse_args()
     if not 0 < args.files <= 1_000_000 or not 0 <= args.bytes <= 1024 * 1024 or args.width < 1:
         parser.error("invalid corpus bounds")
-    if not any(part.startswith("foldover-perf") for part in args.directory.parts):
-        parser.error("use an isolated foldover-perf directory")
-    args.directory.mkdir(mode=0o700)
+    try:
+        directory = resolve_fixture_directory(args.directory)
+    except ValueError as error:
+        parser.error(str(error))
+    if not any(part.startswith(FIXTURE_MARKER) for part in directory.parts):
+        parser.error(f"use an isolated {FIXTURE_MARKER} directory")
+    try:
+        directory.mkdir(mode=0o700)
+    except FileExistsError:
+        parser.error(f"fixture directory already exists: {directory}")
+    except OSError as error:
+        parser.error(f"cannot create fixture directory {directory}: {error}")
     for index in range(args.files):
-        folder = args.directory / f"d-{index // args.width:06}"
+        folder = directory / f"d-{index // args.width:06}"
         if index % args.width == 0:
             folder.mkdir()
         data = hashlib.shake_256(str(index).encode()).digest(args.bytes)

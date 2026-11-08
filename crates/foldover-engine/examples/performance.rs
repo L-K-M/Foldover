@@ -3,8 +3,9 @@
 
 use std::cell::Cell;
 use std::error::Error;
+use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use foldover_engine::{
@@ -64,6 +65,53 @@ fn metric(iteration: usize, name: &str, elapsed: Duration) {
     println!("metric\t{iteration}\t{name}\t{}", elapsed.as_nanos());
 }
 
+const FIXTURE_MARKER: &[u8] = b"foldover-perf";
+
+fn fixture_path_error(path: &Path) -> Option<&'static str> {
+    let mut marked = false;
+    for component in path.components() {
+        match component {
+            Component::Normal(name) => {
+                if name.as_encoded_bytes().starts_with(FIXTURE_MARKER) {
+                    marked = true;
+                }
+            }
+            Component::ParentDir => {
+                return Some("fixture paths must not contain '..' components");
+            }
+            _ => {}
+        }
+    }
+    if marked {
+        None
+    } else {
+        Some("fixture paths must contain a foldover-perf directory component")
+    }
+}
+
+fn validate_state_path(state: &Path) -> Result<(), String> {
+    if let Some(error) = fixture_path_error(state) {
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+fn validate_pair_root(root: &PairRoot) -> Result<(), String> {
+    // Judge only the parsed remote path, never the SFTP user or host, and
+    // keep local roots as bytes so non-UTF-8 paths stay valid.
+    let path = match root {
+        PairRoot::Local(local) => Path::new(OsStr::from_bytes(local.as_bytes())),
+        PairRoot::Sftp(sftp) => Path::new(OsStr::from_bytes(sftp.path())),
+        PairRoot::Peer(_) => {
+            return Err("peer roots are outside the local/SFTP qualification matrix".into());
+        }
+    };
+    if let Some(error) = fixture_path_error(path) {
+        return Err(error.into());
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     println!("process\t{}", std::process::id());
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -82,13 +130,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     // Refuse the ordinary app catalog and folders. The harness can approve
     // every change only because all three paths are explicitly disposable.
-    if args[..3].iter().any(|arg| {
-        !arg.as_bytes()
-            .windows(b"foldover-perf".len())
-            .any(|part| part == b"foldover-perf")
-    }) {
-        return Err("state and both roots must be inside foldover-perf fixture directories".into());
-    }
+    // The marker is a naming convention, not a sandbox: it does not prove
+    // filesystem ownership and does not defend against a concurrent rename.
+    validate_state_path(Path::new(&args[0]))?;
+    let left = PairRoot::from_bytes(args[1].as_bytes().to_vec())?;
+    let right = PairRoot::from_bytes(args[2].as_bytes().to_vec())?;
+    validate_pair_root(&left)?;
+    validate_pair_root(&right)?;
     let iterations: usize = args[3]
         .to_str()
         .ok_or("iterations must be UTF-8")?
@@ -98,8 +146,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let draft = PairDraft::new(
         "Performance fixture".into(),
-        PairRoot::from_bytes(args[1].as_bytes().to_vec())?,
-        PairRoot::from_bytes(args[2].as_bytes().to_vec())?,
+        left,
+        right,
         SyncMode::Mirror { source: Side::Left },
     )?
     .with_options(PairOptions::new(
@@ -204,4 +252,87 @@ fn main() -> Result<(), Box<dyn Error>> {
         metric(iteration, "Total", total.elapsed());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn local(bytes: &[u8]) -> PairRoot {
+        match PairRoot::from_bytes(bytes.to_vec()) {
+            Ok(root @ PairRoot::Local(_)) => root,
+            other => panic!("not a local root: {other:?}"),
+        }
+    }
+
+    fn sftp(text: &str) -> PairRoot {
+        match PairRoot::from_bytes(text.as_bytes().to_vec()) {
+            Ok(root @ PairRoot::Sftp(_)) => root,
+            other => panic!("not an SFTP root: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn marker_in_authority_or_leading_characters_is_not_a_fixture() {
+        for root in [
+            sftp("sftp://foldover-perf@nas.local/ordinary"),
+            sftp("sftp://user@foldover-perf.local/ordinary"),
+            sftp("sftp://user@nas.local/my-foldover-perf-notes"),
+            local(b"/tmp/my-foldover-perf-notes"),
+        ] {
+            assert!(validate_pair_root(&root).is_err(), "{root:?}");
+        }
+        assert!(validate_state_path(Path::new("/tmp/my-foldover-perf-notes/state")).is_err());
+    }
+
+    #[test]
+    fn local_and_sftp_paths_with_marker_components_pass() {
+        for root in [
+            local(b"/tmp/foldover-perf-abc/source"),
+            local(b"/tmp/foldover-perf/source"),
+            local(b"/tmp/foldover-perf.2026/source"),
+            sftp("sftp://user@nas.local/foldover-perf-abc/source"),
+            sftp("sftp://foldover-perf@nas.local/foldover-perf-abc"),
+            sftp("sftp://user@foldover-perf.local/foldover-perf-abc"),
+            sftp("sftp://nas/~/foldover-perf-abc"),
+        ] {
+            assert!(validate_pair_root(&root).is_ok(), "{root:?}");
+        }
+        assert!(validate_state_path(Path::new("/tmp/foldover-perf-abc/state")).is_ok());
+    }
+
+    #[test]
+    fn parent_dir_components_are_rejected_even_with_marker() {
+        for root in [
+            local(b"/tmp/foldover-perf-abc/../escape"),
+            local(b"/tmp/foldover-perf-abc/sub/../../escape"),
+            local(b"/tmp/../foldover-perf-abc"),
+            sftp("sftp://nas/foldover-perf-abc/../escape"),
+            sftp("sftp://nas/foldover-perf-abc/sub/../../escape"),
+        ] {
+            assert!(validate_pair_root(&root).is_err(), "{root:?}");
+        }
+        for state in [
+            "/tmp/foldover-perf-abc/../state",
+            "/tmp/foldover-perf-abc/state/..",
+        ] {
+            assert!(validate_state_path(Path::new(state)).is_err(), "{state}");
+        }
+    }
+
+    #[test]
+    fn non_utf8_local_paths_keep_the_marker_rule() {
+        assert!(validate_pair_root(&local(b"/tmp/foldover-perf-\xff/source")).is_ok());
+        assert!(validate_pair_root(&local(b"/tmp/foldover-perf-abc/\xff")).is_ok());
+        assert!(validate_pair_root(&local(b"/tmp/foldover-perf-\xff/../escape")).is_err());
+        assert!(validate_pair_root(&local(b"/tmp/\xff-my-foldover-perf")).is_err());
+    }
+
+    #[test]
+    fn peer_roots_are_outside_the_qualification_matrix() {
+        let device = "ab".repeat(32);
+        let share = "cd".repeat(16);
+        let root = PairRoot::from_bytes(format!("peer://{device}/{share}").into_bytes()).unwrap();
+        assert!(validate_pair_root(&root).is_err());
+    }
 }
