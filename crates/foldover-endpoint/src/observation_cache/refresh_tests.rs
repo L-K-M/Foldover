@@ -40,6 +40,44 @@ fn entry(
 }
 
 #[test]
+fn planning_exclusions_do_not_change_snapshot_comparison() {
+    let name = path(b"file");
+    let original = entry(entry_version(7), 100, 123, 4096, b"stat");
+    let refreshed = entry(entry_version(7), 200, 456, 4096, b"stat");
+    let replaced = entry(entry_version(8), 200, 456, 8192, b"new-stat");
+    for (candidate, changed) in [
+        (Some(original.clone()), false),
+        (Some(refreshed), true),
+        (Some(replaced), true),
+        (None, true),
+    ] {
+        let make = || {
+            let previous = [(name.clone(), original.clone())].into_iter().collect();
+            let (mut observed, _) =
+                Observation::recycling(previous, Arc::new(PathMap::new()), Side::Left);
+            if let Some(candidate) = &candidate {
+                observed.record(name.clone(), candidate.clone());
+            }
+            observed.finish_entries();
+            observed
+        };
+        let mut early = make();
+        let mut late = make();
+        assert_eq!(early.finish_snapshot(), Some(changed));
+        early.exclude(std::slice::from_ref(&name));
+        late.exclude(std::slice::from_ref(&name));
+        assert_eq!(late.finish_snapshot(), Some(changed));
+        assert!(early.entries().is_empty());
+        assert!(late.entries().is_empty());
+        assert!(early.snapshot_entries().eq(late.snapshot_entries()));
+        assert_eq!(
+            early.snapshot_entries().count(),
+            usize::from(candidate.is_some())
+        );
+    }
+}
+
+#[test]
 fn time_only_refreshes_do_not_retain_full_originals() {
     const COUNT: usize = 1000;
     let old_at = (1_600_000_000u64, 123_456_789u32);

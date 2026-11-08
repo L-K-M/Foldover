@@ -923,14 +923,24 @@ impl PairRun {
             control,
         )?;
         progress.measured(RunPhase::ObserveLeft, observed.elapsed());
-        let observed = Instant::now();
+        let left_names = endpoints.endpoint(Side::Left).name_matching();
+        let right_names = endpoints.endpoint(Side::Right).name_matching();
+        // Hints keep the observed raw spellings even when alignment renames
+        // the left rows. Finish that side's exact comparison now, releasing
+        // its old entries and timestamp column before observing the right.
+        // Later exclusions affect planning visibility only; verified cache
+        // rows still participate in the snapshot with the same values.
         let hints = ObservationHints::from_observation(&left, &base, Side::Right);
+        let aligned = Instant::now();
+        align_spellings(&mut left, &base, left_names);
+        let left_snapshot_changed = left
+            .finish_snapshot()
+            .expect("owned observation compares its consumed snapshot");
+        let left_alignment = aligned.elapsed();
+        let observed = Instant::now();
         let mut right = observe(Side::Right, right_snapshot, hints, control)?;
         progress.measured(RunPhase::ObserveRight, observed.elapsed());
         let aligned = Instant::now();
-        let left_names = endpoints.endpoint(Side::Left).name_matching();
-        let right_names = endpoints.endpoint(Side::Right).name_matching();
-        align_spellings(&mut left, &base, left_names);
         align_spellings(&mut right, &base, right_names);
         let mut failures = Vec::new();
         for (side, observation) in [(Side::Left, &left), (Side::Right, &right)] {
@@ -997,8 +1007,7 @@ impl PairRun {
         left.exclude(&skipped);
         right.exclude(&skipped);
         let snapshot_changed = [
-            left.finish_snapshot()
-                .expect("owned observation compares its consumed snapshot"),
+            left_snapshot_changed,
             right
                 .finish_snapshot()
                 .expect("owned observation compares its consumed snapshot"),
@@ -1017,7 +1026,7 @@ impl PairRun {
             left_moves: moves(endpoints.endpoint(Side::Left)),
             right_moves: moves(endpoints.endpoint(Side::Right)),
         };
-        progress.measured(RunPhase::AlignAndFilter, aligned.elapsed());
+        progress.measured(RunPhase::AlignAndFilter, left_alignment + aligned.elapsed());
         let planned = Instant::now();
         let mut plan = crate::plan::plan_observations(
             draft.mode(),
