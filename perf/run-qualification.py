@@ -280,6 +280,8 @@ def main():
         raise
     finally:
         cleanup_errors = []
+        cleanup_exception = None
+        primary_exception = sys.exc_info()[1]
         try:
             stop_child_group(child, cleanup_errors)
             if child is not None and child.stdout is not None:
@@ -290,13 +292,14 @@ def main():
                                           f"failed: {type(error).__name__}: {error}")
             if child is not None and returncode is None:
                 returncode = child.poll()
-        except Exception as error:
+        except BaseException as error:
+            cleanup_exception = error
             cleanup_errors.append(f"cleanup failed: {type(error).__name__}: {error}")
-        # The sampler is non-daemon: always signal and join it before writing
-        # the summary or propagating any cleanup error.
-        stopped.set()
-        if sampler is not None:
-            sampler.join()
+        finally:
+            # A second interrupt during teardown must still stop the sampler.
+            stopped.set()
+            if sampler is not None:
+                sampler.join()
         summary["returncode"] = returncode
         summary["cleanup_errors"] = cleanup_errors
         if cleanup_errors and not summary.get("error"):
@@ -309,8 +312,11 @@ def main():
         (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
         # A failed cleanup must fail the invocation, but it must not replace an
         # exception already propagating from the measured run.
-        if cleanup_errors and sys.exc_info()[0] is None:
-            raise SystemExit(1)
+        if primary_exception is None:
+            if cleanup_exception is not None:
+                raise cleanup_exception
+            if cleanup_errors:
+                raise SystemExit(1)
     if summary["parsing_errors"]:
         print(f"runner emitted {len(summary['parsing_errors'])} malformed "
               "process/phase/metric record(s); see summary.json parsing_errors",

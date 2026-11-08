@@ -154,6 +154,8 @@ class HarnessTests(unittest.TestCase):
         except BaseException as caught:
             error = caught
         finally:
+            spy.stopped_before_test_cleanup = all(event.is_set() for event in spy.events)
+            spy.joined_before_test_cleanup = all(not thread.is_alive() for thread in spy.threads)
             for event in spy.events:
                 event.set()
             for thread in spy.threads:
@@ -312,6 +314,27 @@ class HarnessTests(unittest.TestCase):
                         os.kill(int(path.read_text()), signal.SIGKILL)
                     except ProcessLookupError:
                         pass
+
+    def test_interrupt_during_cleanup_stops_sampling_and_preserves_primary_error(self):
+        for parse_failure in (False, True):
+            with self.subTest(parse_failure=parse_failure):
+                # Each invocation uses a new output directory.
+                self.root = self.root / ("primary" if parse_failure else "interrupt")
+                self.root.mkdir()
+                error, summary, spy, child = self.run_fake_child(
+                    ["process\t4242\n", "metric\t0\tTotal\t1\n"],
+                    killpg_side_effect=KeyboardInterrupt("cleanup interrupted"),
+                    parse_failure=parse_failure,
+                )
+                self.assertTrue(spy.stopped_before_test_cleanup)
+                self.assertTrue(spy.joined_before_test_cleanup)
+                self.assertIsNotNone(summary)
+                self.assertTrue(any("KeyboardInterrupt" in item for item in summary["cleanup_errors"]))
+                if parse_failure:
+                    self.assertIsInstance(error, RuntimeError)
+                    self.assertIn("injected parser failure", str(error))
+                else:
+                    self.assertIsInstance(error, KeyboardInterrupt)
 
     def test_sigkill_process_group_race_reaps_and_preserves_status(self):
         error, summary, spy, child = self.run_fake_child(
