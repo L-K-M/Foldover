@@ -4,7 +4,6 @@ mod conflict;
 pub(crate) mod filter;
 mod foreign;
 pub(crate) use foreign::Carried;
-#[cfg(test)]
 mod fingerprint_key;
 mod identity;
 mod lock;
@@ -35,6 +34,7 @@ use foldover_types::{
 #[cfg(target_os = "macos")]
 use foldover_types::{CaseMatching, UnicodeMatching};
 
+use fingerprint_key::FingerprintKey;
 use version::{Attribute, Observed, Payload, capture_for, entry_version, metadata_version};
 
 use crate::observation_cache::{Cache, Comparison, Recycled};
@@ -302,9 +302,9 @@ const REREAD: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// the version unchanged without rereading data, outside the racy window.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Fingerprint {
-    /// A boxed slice, so a captured stat key keeps only its actual bytes
-    /// instead of the capture buffer's spare capacity.
-    key: Box<[u8]>,
+    /// Lossless in-memory storage; persistence and reread jitter use the
+    /// original stat bytes, including every zero and timestamp field.
+    key: FingerprintKey,
     size: u64,
     observed_at: SystemTime,
 }
@@ -319,7 +319,7 @@ impl Fingerprint {
         Self {
             // A realloc shrink may keep the capture's larger malloc size
             // class. Allocate the payload while that buffer is still held.
-            key: Box::from(captured.as_slice()),
+            key: FingerprintKey::new(captured.as_slice()),
             size: metadata.size(),
             observed_at,
         }
@@ -332,7 +332,7 @@ impl Fingerprint {
     /// Store another system's stat; incomplete keys cannot justify version reuse.
     pub(crate) fn from_key(key: Vec<u8>, size: u64, observed_at: SystemTime) -> Self {
         Self {
-            key: Box::from(key.as_slice()),
+            key: FingerprintKey::new(key.as_slice()),
             size,
             observed_at,
         }
@@ -340,7 +340,7 @@ impl Fingerprint {
 
     /// Whether this fingerprint records the stat `key` of `size` bytes.
     pub(crate) fn same_stat(&self, key: &[u8], size: u64) -> bool {
-        &*self.key == key && self.size == size
+        self.key.matches(key) && self.size == size
     }
 
     fn proves_unchanged_by(&self, key: &[u8], modified: SystemTime) -> bool {
@@ -349,13 +349,13 @@ impl Fingerprint {
             .observed_at
             .duration_since(modified)
             .is_ok_and(|age| age >= RACY_WINDOW);
-        settled && key == &*self.key && self.read_within(self.reread_after(), SystemTime::now())
+        settled && self.key.matches(key) && self.read_within(self.reread_after(), SystemTime::now())
     }
 
     /// How long after it was read this version must be read again:
     /// between half of `REREAD` and all of it, fixed by the stat.
     fn reread_after(&self) -> Duration {
-        let hash = blake3::hash(&self.key);
+        let hash = self.key.hash();
         let spread = u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes"));
         let half = (REREAD.as_secs() / 2).max(1);
         Duration::from_secs(half + spread % half)
@@ -377,7 +377,7 @@ impl Fingerprint {
         bytes.extend_from_slice(&since.as_secs().to_le_bytes());
         bytes.extend_from_slice(&since.subsec_nanos().to_le_bytes());
         bytes.extend_from_slice(&self.size.to_le_bytes());
-        bytes.extend_from_slice(&self.key);
+        self.key.append_to(&mut bytes);
         bytes
     }
 
@@ -399,7 +399,7 @@ impl Fingerprint {
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
         let (size, observed_at) = Self::header(bytes)?;
         Some(Self {
-            key: Box::from(bytes.get(FINGERPRINT_HEADER_BYTES..)?),
+            key: FingerprintKey::new(bytes.get(FINGERPRINT_HEADER_BYTES..)?),
             size,
             observed_at,
         })
@@ -410,7 +410,7 @@ impl Fingerprint {
     fn from_owned(bytes: Vec<u8>) -> Option<Self> {
         let (size, observed_at) = Self::header(&bytes)?;
         Some(Self {
-            key: Box::from(&bytes[FINGERPRINT_HEADER_BYTES..]),
+            key: FingerprintKey::new(&bytes[FINGERPRINT_HEADER_BYTES..]),
             size,
             observed_at,
         })
@@ -473,7 +473,7 @@ impl ObservedEntry {
         Self::new(
             version,
             Fingerprint {
-                key: vec![1, 2, 3].into_boxed_slice(),
+                key: FingerprintKey::new(&[1, 2, 3]),
                 size,
                 observed_at: SystemTime::UNIX_EPOCH,
             },
@@ -2468,8 +2468,8 @@ mod tests {
         let owned = ObservedEntry::restore_owned(version, bytes.clone()).unwrap();
 
         assert_eq!(borrowed, owned);
-        assert_eq!(&*borrowed.fingerprint().key, key.as_slice());
-        assert_eq!(&*owned.fingerprint().key, key.as_slice());
+        assert!(borrowed.fingerprint().key.matches(&key));
+        assert!(owned.fingerprint().key.matches(&key));
         assert_eq!(borrowed.fingerprint().size, 4096);
         assert_eq!(borrowed.fingerprint().observed_at, observed_at);
         assert_eq!(borrowed.fingerprint_bytes(), bytes);
@@ -2490,7 +2490,7 @@ mod tests {
         roomy.extend_from_slice(&bytes);
         let shrunk = ObservedEntry::restore_owned(version, roomy).unwrap();
         assert_eq!(shrunk, borrowed);
-        assert_eq!(&*shrunk.fingerprint().key, key.as_slice());
+        assert!(shrunk.fingerprint().key.matches(&key));
     }
 
     /// A pre-epoch observation persists as the epoch, its existing behavior.
@@ -2512,7 +2512,7 @@ mod tests {
 
         let restored = ObservedEntry::restore(version, &bytes).unwrap();
         assert_eq!(restored.fingerprint().observed_at, UNIX_EPOCH);
-        assert_eq!(&*restored.fingerprint().key, &[9, 8, 7, 6]);
+        assert!(restored.fingerprint().key.matches(&[9, 8, 7, 6]));
     }
 
     #[test]
@@ -2531,7 +2531,9 @@ mod tests {
 
         assert!(key.capacity() >= key.len());
         assert_eq!(fingerprint.key.len(), key.len());
-        assert_eq!(std::mem::size_of_val(&*fingerprint.key), key.len());
+        assert!(fingerprint.key.matches(&key));
+        assert!(fingerprint.key.encoded_len() <= key.len() + 1);
+        assert_eq!(&fingerprint.to_bytes()[FINGERPRINT_HEADER_BYTES..], key);
     }
 
     #[test]

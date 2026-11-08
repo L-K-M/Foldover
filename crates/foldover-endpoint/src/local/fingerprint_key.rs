@@ -78,6 +78,7 @@ impl FingerprintKey {
     }
 
     /// Whether the original key is empty.
+    #[cfg(test)]
     pub(super) fn is_empty(&self) -> bool {
         self.storage.is_empty()
     }

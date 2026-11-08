@@ -2,7 +2,7 @@
 
 use std::time::UNIX_EPOCH;
 
-use super::{Fingerprint, ObservedEntry};
+use super::{Fingerprint, FingerprintKey, ObservedEntry};
 use crate::observation_versions::{ObservationOrigin, ObservationVisibility, ObservedVersion};
 
 impl ObservedEntry {
@@ -15,7 +15,7 @@ impl ObservedEntry {
             fingerprint: std::mem::replace(
                 &mut self.fingerprint,
                 Fingerprint {
-                    key: Box::from([]),
+                    key: FingerprintKey::new(&[]),
                     size: 0,
                     observed_at: UNIX_EPOCH,
                 },

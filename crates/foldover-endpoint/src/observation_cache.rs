@@ -48,6 +48,7 @@ pub(crate) struct Recycled {
     additions: Vec<(SyncPath, ObservedEntry)>,
     originals: BTreeMap<usize, Arc<ObservedEntry>>,
     versions: Option<VersionPoolBuilder>,
+    base: Arc<PathMap<BaselineEntry>>,
     side: Side,
     original_len: usize,
 }
@@ -76,7 +77,8 @@ impl Recycled {
             rows,
             additions: Vec::new(),
             originals: BTreeMap::new(),
-            versions: Some(VersionPoolBuilder::new(base)),
+            versions: Some(VersionPoolBuilder::new(Arc::clone(&base))),
+            base,
             side,
             original_len,
         }
@@ -87,7 +89,9 @@ impl Recycled {
     }
 
     fn key(&self, path: &SyncPath) -> Option<SyncPath> {
-        self.index(path).map(|index| self.rows[index].0.clone())
+        self.index(path)
+            .map(|index| self.rows[index].0.clone())
+            .or_else(|| self.base.get_key_value(path).map(|(key, _)| key.clone()))
     }
 
     fn get(&mut self, path: &SyncPath) -> Option<Arc<ObservedEntry>> {
@@ -118,6 +122,13 @@ impl Recycled {
 
     pub(crate) fn record(&mut self, path: SyncPath, mut entry: ObservedEntry) {
         let Some(index) = self.index(&path) else {
+            // Sharing the exact raw key does not reuse its baseline version
+            // or fingerprint: this remains a newly verified snapshot row.
+            let path = self
+                .base
+                .get_key_value(&path)
+                .map(|(key, _)| key.clone())
+                .unwrap_or(path);
             let handle = self
                 .versions
                 .as_mut()
@@ -262,6 +273,34 @@ mod tests {
         let (finished, comparison) = rows.finish();
         assert_eq!(finished.len(), 1);
         assert_eq!(finished[&path(b"new")].version(), entry(2).version());
+        assert_eq!(comparison.original_len, 0);
+    }
+
+    #[test]
+    fn missing_snapshot_rows_share_only_exact_baseline_path_storage() {
+        let stored = path(b"raw/\xff");
+        let pointer = stored.as_bytes().as_ptr();
+        let version = entry(1).version();
+        let base = [(stored, BaselineEntry::new(version, version).unwrap())]
+            .into_iter()
+            .collect();
+        let mut rows = Recycled::new(PathMap::new(), Arc::new(base), Side::Left);
+        let shared = rows
+            .key(&path(b"raw/\xff"))
+            .expect("an exact baseline key can be shared");
+        assert_eq!(shared.as_bytes().as_ptr(), pointer);
+        assert!(rows.key(&path(b"RAW/\xff")).is_none());
+        assert!(
+            rows.get(&path(b"raw/\xff")).is_none(),
+            "baseline sharing is not a cache hit"
+        );
+        rows.record(path(b"raw/\xff"), entry(1));
+        let (finished, comparison) = rows.finish();
+        assert_eq!(finished.keys().next().unwrap().as_bytes().as_ptr(), pointer);
+        assert_eq!(
+            finished.values().next().unwrap().origin(),
+            ObservationOrigin::New
+        );
         assert_eq!(comparison.original_len, 0);
     }
 
