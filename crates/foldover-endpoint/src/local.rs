@@ -4,6 +4,8 @@ mod conflict;
 pub(crate) mod filter;
 mod foreign;
 pub(crate) use foreign::Carried;
+#[cfg(test)]
+mod fingerprint_key;
 mod identity;
 mod lock;
 mod observation_ownership;
