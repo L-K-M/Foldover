@@ -793,9 +793,7 @@ pub struct PairRun {
     right: Observation,
     failures: Vec<Failure>,
     uncertain: Vec<SyncPath>,
-    /// Observations the filters excluded, kept for the next run's cache.
-    left_cache: BTreeMap<SyncPath, ObservedEntry>,
-    right_cache: BTreeMap<SyncPath, ObservedEntry>,
+    /// Whether each effective snapshot differs from its consumed cache.
     snapshot_changed: [bool; 2],
     plan: CandidatePlan,
     /// The base the plan was made against, for the journal's undo records.
@@ -894,16 +892,20 @@ impl PairRun {
                 path: canary.clone(),
             });
         }
-        let observe = |side: Side, control: &mut dyn FnMut() -> ScanControl| {
-            let previous = match side {
-                Side::Left => &left_snapshot,
-                Side::Right => &right_snapshot,
-            };
+        let observe = |side: Side,
+                       previous: PathMap<ObservedEntry>,
+                       control: &mut dyn FnMut() -> ScanControl| {
             endpoints
                 .endpoint(side)
-                .observe_from(policy, &filter, previous, &mut || control(), &mut |step| {
-                    progress.observed(side, step)
-                })
+                .observe_owned(
+                    policy,
+                    &filter,
+                    previous,
+                    Arc::clone(&base),
+                    side,
+                    &mut || control(),
+                    &mut |step| progress.observed(side, step),
+                )
                 .map_err(|source| match source {
                     ScanError::Cancelled => RunError::Cancelled,
                     source => observe_error(side, source),
@@ -911,10 +913,10 @@ impl PairRun {
         };
         progress.measured(RunPhase::Readiness, readiness.elapsed());
         let observed = Instant::now();
-        let mut left = observe(Side::Left, control)?;
+        let mut left = observe(Side::Left, left_snapshot, control)?;
         progress.measured(RunPhase::ObserveLeft, observed.elapsed());
         let observed = Instant::now();
-        let mut right = observe(Side::Right, control)?;
+        let mut right = observe(Side::Right, right_snapshot, control)?;
         progress.measured(RunPhase::ObserveRight, observed.elapsed());
         let aligned = Instant::now();
         let left_names = endpoints.endpoint(Side::Left).name_matching();
@@ -964,7 +966,7 @@ impl PairRun {
             let left_old: BTreeSet<&SyncPath> = left.old().iter().collect();
             let right_old: BTreeSet<&SyncPath> = right.old().iter().collect();
             let old_or_absent = |old: &BTreeSet<&SyncPath>, seen: &Observation, path| {
-                old.contains(path) || !seen.entries().contains_key(*path)
+                old.contains(path) || !seen.entries().contains_key(path)
             };
             // The canary proves the folders however old or large it is.
             left_old
@@ -981,27 +983,17 @@ impl PairRun {
                 .collect()
         };
         let skipped: Vec<SyncPath> = skipped.into_iter().collect();
-        // Excluded entries leave the plan, but unchanged ones should not be
-        // reread every run: their observations stay cached for the next one.
-        let cache = |observation: &Observation| {
-            skipped
-                .iter()
-                .filter_map(|path| observation.entries().get_key_value(path))
-                .map(|(path, entry)| (path.clone(), entry.clone()))
-                .collect()
-        };
-        let left_cache = cache(&left);
-        let right_cache = cache(&right);
+        // Excluded verified entries remain in the same table for the next
+        // snapshot, while the planner sees only included entries.
         left.exclude(&skipped);
         right.exclude(&skipped);
         let snapshot_changed = [
-            !snapshot_entries(&left_cache, &left).eq(left_snapshot.iter()),
-            !snapshot_entries(&right_cache, &right).eq(right_snapshot.iter()),
+            left.finish_snapshot()
+                .expect("owned observation compares its consumed snapshot"),
+            right
+                .finish_snapshot()
+                .expect("owned observation compares its consumed snapshot"),
         ];
-        // Observations own the entries they reused. Release the previous
-        // trees before planning rather than keeping both generations alive.
-        drop(left_snapshot);
-        drop(right_snapshot);
         let planning_base = crate::plan::FilteredBase::new(&base, &skipped);
         let remembers = if planning_base.is_empty() {
             Remembers::Nothing
@@ -1042,8 +1034,6 @@ impl PairRun {
             right,
             failures,
             uncertain,
-            left_cache,
-            right_cache,
             snapshot_changed,
             plan,
             remembers,
@@ -1080,18 +1070,16 @@ impl PairRun {
     }
 
     /// This run's effective observation of one side, lazily in the same
-    /// sorted merged order as [`Self::snapshot`]. Consumers that persist the
+    /// sorted order as [`Self::snapshot`]. Consumers that persist the
     /// rows can stream them without collecting the whole tree first.
     pub fn snapshot_iter(&self, side: Side) -> impl Iterator<Item = SnapshotEntry> + '_ {
-        let cache = match side {
-            Side::Left => &self.left_cache,
-            Side::Right => &self.right_cache,
-        };
-        snapshot_entries(cache, self.observation(side)).map(|(path, entry)| SnapshotEntry {
-            path: path.clone(),
-            fingerprint: entry.fingerprint_bytes(),
-            version: entry.version(),
-        })
+        self.observation(side)
+            .snapshot_entries()
+            .map(|(path, entry)| SnapshotEntry {
+                path: path.clone(),
+                fingerprint: entry.fingerprint_bytes(),
+                version: entry.version(),
+            })
     }
 
     /// This run's observation of one side, filtered entries included, for the
@@ -1650,25 +1638,6 @@ impl PairRun {
             }
         }
     }
-}
-
-/// Merge the excluded-entry cache and current observation in path order.
-/// Current entries win a duplicate, matching the original map overlay.
-fn snapshot_entries<'a>(
-    cache: &'a BTreeMap<SyncPath, ObservedEntry>,
-    observation: &'a Observation,
-) -> impl Iterator<Item = (&'a SyncPath, &'a ObservedEntry)> {
-    let mut cached = cache.iter().peekable();
-    let mut observed = observation.entries().iter().peekable();
-    std::iter::from_fn(move || match (cached.peek(), observed.peek()) {
-        (Some((left, _)), Some((right, _))) if left < right => cached.next(),
-        (Some((left, _)), Some((right, _))) if left == right => {
-            cached.next();
-            observed.next()
-        }
-        (_, Some(_)) => observed.next(),
-        _ => cached.next(),
-    })
 }
 
 /// A failed read of one side, with guidance when access was refused.
@@ -2233,7 +2202,7 @@ fn uncertain_absences(
             .entries()
             .keys()
             .chain(base.keys())
-            .filter(|path| !seen.entries().contains_key(*path))
+            .filter(|path| !seen.entries().contains_key(path))
             .map(|path| (crate::plan::name_key(path.as_bytes(), names), path))
             .filter(|(key, _)| {
                 whole_root

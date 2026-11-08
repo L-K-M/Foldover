@@ -89,3 +89,10 @@ pub(crate) fn test_pair() -> foldover_types::PairId {
     foldover_types::PairId::from_bytes([0x5a; foldover_types::PairId::BYTE_LEN])
         .expect("a test pair is not zero")
 }
+
+#[cfg(unix)]
+mod observation_cache;
+#[cfg(unix)]
+mod observation_entries;
+#[cfg(unix)]
+pub use observation_entries::{ObservationEntries, ObservationIter};

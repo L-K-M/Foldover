@@ -11,8 +11,8 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime};
 
 use foldover_types::{
-    CaseMatching, Durability, EndpointId, EntryVersion, LocalRoot, MetadataPolicy, NameMatching,
-    PairOptions, PairRoot, ScanControl, SyncPath, UnicodeMatching,
+    BaselineEntry, CaseMatching, Durability, EndpointId, EntryVersion, LocalRoot, MetadataPolicy,
+    NameMatching, PairOptions, PairRoot, PathMap, ScanControl, Side, SyncPath, UnicodeMatching,
 };
 
 use crate::lease::LockFile;
@@ -226,6 +226,44 @@ impl Endpoint {
             Self::Peer(endpoint) => endpoint.observe_reporting(policy, filter, control, progress),
             #[cfg(feature = "simulation")]
             Self::Memory(endpoint) => endpoint.observe(policy, filter, control, progress),
+        }
+    }
+
+    /// Consume this root's prior snapshot under the same metadata policy.
+    /// Local and SFTP observations reuse its row allocation. A failed or
+    /// cancelled observation publishes no partially consumed snapshot.
+    #[allow(clippy::too_many_arguments)]
+    pub fn observe_owned(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: PathMap<ObservedEntry>,
+        base: Arc<PathMap<BaselineEntry>>,
+        side: Side,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+    ) -> Result<Observation, ScanError> {
+        match self {
+            Self::Local(endpoint) => {
+                endpoint.observe_owned(policy, filter, previous, base, side, control, progress)
+            }
+            Self::Sftp(endpoint) => {
+                endpoint.observe_owned(policy, filter, previous, base, side, control, progress)
+            }
+            // Peers keep a root-local cache on the serving Mac. Fold their
+            // received observations into the caller's comparison afterward.
+            Self::Peer(endpoint) => {
+                let mut observation =
+                    endpoint.observe_reporting(policy, filter, control, progress)?;
+                observation.recycle_from(previous, base, side);
+                Ok(observation)
+            }
+            #[cfg(feature = "simulation")]
+            Self::Memory(endpoint) => {
+                let mut observation = endpoint.observe(policy, filter, control, progress)?;
+                observation.recycle_from(previous, base, side);
+                Ok(observation)
+            }
         }
     }
 

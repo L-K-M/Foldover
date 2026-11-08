@@ -10,7 +10,7 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use foldover_fs::Resume;
@@ -22,7 +22,7 @@ use foldover_proto::peer::{
 };
 use foldover_types::{
     CaseMatching, Digest, Durability, EntryVersion, LocalRoot, MetadataPolicy, PairOptions,
-    Propagation, ScanControl, SyncPath, UnicodeMatching,
+    Propagation, ScanControl, Side, SyncPath, UnicodeMatching,
 };
 
 use super::wire;
@@ -428,10 +428,12 @@ fn observe(
     let listed = Cell::new(0);
     let checked = Cell::new(0);
     let reported = Cell::new(Instant::now());
-    let observed = endpoint.observe_reporting(
+    let observed = endpoint.observe_owned(
         policy,
         &filter,
-        &previous,
+        previous,
+        Arc::new(foldover_types::PathMap::new()),
+        Side::Left,
         &mut || {
             if gone.get() {
                 return ScanControl::Cancel;
@@ -521,7 +523,7 @@ fn observe(
             })
             .is_ok();
     if sent {
-        cache.keep(root, policy, observation.entries().clone());
+        cache.keep(root, policy, observation.into_snapshot());
     }
 }
 

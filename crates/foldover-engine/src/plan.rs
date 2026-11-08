@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, LazyLock};
 
-use foldover_endpoint::{Observation, ObservedEntry};
+use foldover_endpoint::{Observation, ObservationEntries, ObservedEntry};
 use unicode_normalization::{UnicodeNormalization, is_nfc};
 
 use foldover_types::{
@@ -52,6 +52,19 @@ impl<T> Tree for PathMap<T> {
     }
     fn len(&self) -> usize {
         PathMap::len(self)
+    }
+}
+
+impl Tree for ObservationEntries {
+    type Value = ObservedEntry;
+    fn iter(&self) -> impl Iterator<Item = (&SyncPath, &ObservedEntry)> {
+        ObservationEntries::iter(self)
+    }
+    fn get(&self, path: &SyncPath) -> Option<&ObservedEntry> {
+        ObservationEntries::get(self, path)
+    }
+    fn len(&self) -> usize {
+        ObservationEntries::len(self)
     }
 }
 

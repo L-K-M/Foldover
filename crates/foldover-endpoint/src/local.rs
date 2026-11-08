@@ -6,14 +6,15 @@ mod foreign;
 pub(crate) use foreign::Carried;
 mod identity;
 mod lock;
+mod observation_ownership;
 pub(crate) mod version;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io;
 use std::num::NonZeroUsize;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -34,8 +35,10 @@ use foldover_types::{CaseMatching, UnicodeMatching};
 
 use version::{Attribute, Observed, Payload, capture_for, entry_version, metadata_version};
 
+use crate::observation_cache::{Cache, Comparison, Recycled};
+use crate::observation_entries::ObservationEntries;
 use crate::observation_reads::Reads;
-use crate::observation_versions::{ObservedVersion, VersionPoolBuilder};
+use crate::observation_versions::{ObservationOrigin, ObservedVersion, VersionPoolBuilder};
 use crate::{ListedEntry, ListedKind, ObserveStep};
 
 pub(crate) use apply::Archiving;
@@ -564,10 +567,12 @@ impl PreviousObservation for PathMap<ObservedEntry> {
 }
 
 /// Known entries plus explicit unread subtrees and leftovers to recover.
-#[derive(Debug)]
 pub struct Observation {
-    pub(crate) entries: PathMap<ObservedEntry>,
+    pub(crate) entries: ObservationEntries,
     pending: PathMapBuilder<ObservedEntry>,
+    versions: Option<VersionPoolBuilder>,
+    recycled: Option<Arc<Mutex<Recycled>>>,
+    comparison: Option<Comparison>,
     pub(crate) leftovers: Vec<SyncPath>,
     pub(crate) oversized: Vec<SyncPath>,
     pub(crate) old: Vec<SyncPath>,
@@ -579,8 +584,11 @@ pub struct Observation {
 impl Default for Observation {
     fn default() -> Self {
         Self {
-            entries: PathMap::new(),
+            entries: ObservationEntries::default(),
             pending: PathMapBuilder::new(),
+            versions: Some(VersionPoolBuilder::default()),
+            recycled: None,
+            comparison: None,
             leftovers: Vec::new(),
             oversized: Vec::new(),
             old: Vec::new(),
@@ -588,6 +596,16 @@ impl Default for Observation {
             issues: Vec::new(),
             unstable: Vec::new(),
         }
+    }
+}
+
+impl std::fmt::Debug for Observation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Observation")
+            .field("entries", &self.entries)
+            .field("issues", &self.issues)
+            .field("unavailable", &self.unavailable)
+            .finish()
     }
 }
 
@@ -616,7 +634,7 @@ impl UnavailablePaths {
 
     fn retain_entries(
         &self,
-        entries: &mut PathMap<ObservedEntry>,
+        entries: &mut ObservationEntries,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<(), ScanError> {
         let mut cancelled = false;
@@ -649,12 +667,99 @@ impl UnavailablePaths {
 }
 
 impl Observation {
-    pub(crate) fn record(&mut self, path: SyncPath, entry: ObservedEntry) {
+    pub(crate) fn recycling(
+        previous: PathMap<ObservedEntry>,
+        base: Arc<PathMap<BaselineEntry>>,
+        side: Side,
+    ) -> (Self, Cache<'static>) {
+        let recycled = Arc::new(Mutex::new(Recycled::new(previous, base, side)));
+        let cache = Cache::Owned(Arc::clone(&recycled));
+        (
+            Self {
+                recycled: Some(recycled),
+                versions: None,
+                ..Self::default()
+            },
+            cache,
+        )
+    }
+
+    pub(crate) fn record(&mut self, path: SyncPath, mut entry: ObservedEntry) {
+        if let Some(recycled) = &self.recycled {
+            recycled
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .record(path, entry);
+            return;
+        }
+        let version = self
+            .versions
+            .as_mut()
+            .expect("record precedes finish")
+            .intern(&path, Side::Left, entry.version());
+        entry.set_version(version);
+        entry.set_origin(ObservationOrigin::New);
         self.pending.push(path, entry);
     }
 
     pub(crate) fn finish_entries(&mut self) {
-        self.entries = std::mem::replace(&mut self.pending, PathMapBuilder::new()).freeze();
+        if let Some(recycled) = self.recycled.take() {
+            let (rows, comparison) = recycled
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .finish();
+            self.entries = ObservationEntries::new(rows);
+            self.comparison = Some(comparison);
+            return;
+        }
+        self.versions.take().expect("finish once").freeze();
+        self.entries = ObservationEntries::new(
+            std::mem::replace(&mut self.pending, PathMapBuilder::new()).freeze(),
+        );
+    }
+
+    /// Verified cache rows, including entries excluded from the plan.
+    pub fn snapshot_entries(&self) -> impl Iterator<Item = (&SyncPath, &ObservedEntry)> {
+        self.entries.snapshot()
+    }
+
+    /// Finish exact comparison with the consumed snapshot after alignment
+    /// and filtering. Unseen old rows never reach persistence or planning.
+    pub fn finish_snapshot(&mut self) -> Option<bool> {
+        let comparison = self.comparison.take()?;
+        let mut equal = 0;
+        let mut changed = false;
+        for (_, entry) in self.entries.snapshot() {
+            match entry.origin() {
+                ObservationOrigin::PriorEqual => equal += 1,
+                ObservationOrigin::PriorChanged | ObservationOrigin::New => changed = true,
+                ObservationOrigin::Uncompared => unreachable!("snapshot hides unseen entries"),
+            }
+        }
+        self.entries
+            .retain(|_, entry| entry.origin() != ObservationOrigin::Uncompared);
+        Some(changed || equal != comparison.original_len)
+    }
+
+    pub(crate) fn into_snapshot(self) -> PathMap<ObservedEntry> {
+        self.entries.into_snapshot()
+    }
+
+    /// Reconcile a peer/simulation result with the caller's consumed cache.
+    pub(crate) fn recycle_from(
+        &mut self,
+        previous: PathMap<ObservedEntry>,
+        base: Arc<PathMap<BaselineEntry>>,
+        side: Side,
+    ) {
+        let current = std::mem::take(&mut self.entries).into_snapshot();
+        let (mut replacement, _) = Self::recycling(previous, base, side);
+        self.recycled = replacement.recycled.take();
+        self.versions = None;
+        for (path, entry) in current {
+            self.record(path, entry);
+        }
+        self.finish_entries();
     }
 
     /// Listings that changed while traversed. Read entries remain usable,
@@ -678,7 +783,7 @@ impl Observation {
         self.issues.push(issue);
     }
 
-    pub fn entries(&self) -> &PathMap<ObservedEntry> {
+    pub fn entries(&self) -> &ObservationEntries {
         &self.entries
     }
 
@@ -705,7 +810,14 @@ impl Observation {
     /// Report the entry at `from` under `to`: the same file, spelled as
     /// the pair knows it.
     pub fn respell(&mut self, from: &SyncPath, to: SyncPath) {
-        if let Some(entry) = self.entries.remove(from) {
+        let origin = self
+            .entries
+            .get(from)
+            .map(|entry| self.aligned_origin(&to, entry));
+        if let Some(origin) = origin
+            && let Some(mut entry) = self.entries.remove(from)
+        {
+            entry.set_origin(origin);
             self.entries.insert(to.clone(), entry);
         }
         for listed in self
@@ -744,13 +856,24 @@ impl Observation {
                 *path = to.clone();
             }
         };
-        self.entries = std::mem::replace(&mut self.entries, PathMap::new())
-            .into_iter()
-            .map(|(mut path, entry)| {
-                rename(&mut path);
-                (path, entry)
-            })
-            .collect();
+        // Compare at the final path before changing any keys. Destinations
+        // have no visible observation in the alignment pass, but can retain
+        // an unseen original from the consumed snapshot.
+        for (from, to) in mappings {
+            if let Some(entry) = self.entries.get(from) {
+                let origin = self.aligned_origin(to, entry);
+                self.entries.set_origin(from, origin);
+            }
+        }
+        let mut targets: Vec<_> = mappings.values().collect();
+        targets.sort_unstable();
+        self.entries
+            .retain(|path, _| mappings.contains_key(path) || targets.binary_search(&path).is_err());
+        let mut rows = std::mem::take(&mut self.entries).into_rows();
+        for (path, _) in &mut rows {
+            rename(path);
+        }
+        self.entries = ObservationEntries::new(PathMapBuilder::from_rows(rows).freeze());
         for path in self
             .oversized
             .iter_mut()
@@ -767,13 +890,31 @@ impl Observation {
         }
     }
 
+    fn aligned_origin(&self, path: &SyncPath, entry: &ObservedEntry) -> ObservationOrigin {
+        let Some(comparison) = &self.comparison else {
+            return entry.origin();
+        };
+        let original = comparison.changed.get(path).map(Arc::as_ref).or_else(|| {
+            self.entries.raw().get(path).filter(|entry| {
+                matches!(
+                    entry.origin(),
+                    ObservationOrigin::Uncompared | ObservationOrigin::PriorEqual
+                )
+            })
+        });
+        match original {
+            Some(original) if original == entry => ObservationOrigin::PriorEqual,
+            Some(_) => ObservationOrigin::PriorChanged,
+            None => ObservationOrigin::New,
+        }
+    }
+
     /// Drop paths the other folder skipped, so both skip them.
     pub fn exclude(&mut self, paths: &[SyncPath]) {
         if paths.is_empty() {
             return;
         }
-        let paths: BTreeSet<_> = paths.iter().collect();
-        self.entries.retain(|path, _| !paths.contains(path));
+        self.entries.exclude(paths);
     }
 
     /// The versions the planner compares.
@@ -1353,13 +1494,71 @@ impl LocalEndpoint {
         progress: &mut impl FnMut(ObserveStep),
         workers: NonZeroUsize,
     ) -> Result<Observation, ScanError> {
+        self.observe_cached(
+            policy,
+            filter,
+            &Cache::Borrowed(previous),
+            Observation::default(),
+            control,
+            progress,
+            workers,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn observe_owned(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: PathMap<ObservedEntry>,
+        base: Arc<PathMap<BaselineEntry>>,
+        side: Side,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+    ) -> Result<Observation, ScanError> {
+        let (observation, previous) = Observation::recycling(previous, base, side);
+        self.observe_cached(
+            policy,
+            filter,
+            &previous,
+            observation,
+            control,
+            progress,
+            self.workers(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe_cached(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: &Cache<'_>,
+        observation: Observation,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+        workers: NonZeroUsize,
+    ) -> Result<Observation, ScanError> {
         if control() == ScanControl::Cancel {
             return Err(ScanError::Cancelled);
         }
         if workers == NonZeroUsize::MIN {
-            self.observe_reporting_serial(policy, filter, previous, control, progress)
+            self.observe_reporting_serial(policy, filter, previous, observation, control, progress)
         } else {
-            self.observe_reporting_overlapped(policy, filter, previous, control, progress, workers)
+            let read = |(entry, _observed_at): &(LocalEntry, SystemTime),
+                        asked: &dyn Fn() -> ScanControl| {
+                self.entry_version(entry, policy, &mut || asked())
+            };
+            self.observe_cached_overlapped_with(
+                policy,
+                filter,
+                previous,
+                observation,
+                control,
+                progress,
+                workers,
+                &read,
+            )
         }
     }
 
@@ -1368,11 +1567,11 @@ impl LocalEndpoint {
         &self,
         policy: MetadataPolicy,
         filter: &Filter,
-        previous: &impl PreviousObservation,
+        previous: &Cache<'_>,
+        mut observation: Observation,
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<Observation, ScanError> {
-        let mut observation = Observation::default();
         let mut unavailable = UnavailablePaths::default();
         let mut directories = Vec::new();
         let mut failure = None;
@@ -1422,27 +1621,10 @@ impl LocalEndpoint {
     /// alone asks `control`, reports `progress`, and mutates the observation,
     /// the unavailable index and the stats; a worker only captures one
     /// entry's verified version and checks the shared stop.
-    fn observe_reporting_overlapped(
-        &self,
-        policy: MetadataPolicy,
-        filter: &Filter,
-        previous: &impl PreviousObservation,
-        control: &mut impl FnMut() -> ScanControl,
-        progress: &mut impl FnMut(ObserveStep),
-        workers: NonZeroUsize,
-    ) -> Result<Observation, ScanError> {
-        let read = |(entry, _observed_at): &(LocalEntry, SystemTime),
-                    asked: &dyn Fn() -> ScanControl| {
-            self.entry_version(entry, policy, &mut || asked())
-        };
-        self.observe_reporting_overlapped_with(
-            policy, filter, previous, control, progress, workers, &read,
-        )
-    }
-
     /// The overlapped walk with a chosen read, so a test can substitute a
     /// deterministic helper and observe the driver's own handoff. The
     /// production read calls `entry_version`.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn observe_reporting_overlapped_with<G>(
         &self,
@@ -1461,7 +1643,37 @@ impl LocalEndpoint {
             ) -> Result<EntryVersion, ScanError>
             + Sync,
     {
-        let mut observation = Observation::default();
+        self.observe_cached_overlapped_with(
+            policy,
+            filter,
+            &Cache::Borrowed(previous),
+            Observation::default(),
+            control,
+            progress,
+            workers,
+            read,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe_cached_overlapped_with<G>(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: &Cache<'_>,
+        mut observation: Observation,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+        workers: NonZeroUsize,
+        read: &G,
+    ) -> Result<Observation, ScanError>
+    where
+        G: Fn(
+                &(LocalEntry, SystemTime),
+                &dyn Fn() -> ScanControl,
+            ) -> Result<EntryVersion, ScanError>
+            + Sync,
+    {
         let mut unavailable = UnavailablePaths::default();
         let mut directories = Vec::new();
         let mut failure = None;
@@ -1558,7 +1770,7 @@ impl LocalEndpoint {
     fn finish_observation(
         &self,
         policy: MetadataPolicy,
-        previous: &impl PreviousObservation,
+        previous: &Cache<'_>,
         mut observation: Observation,
         mut unavailable: UnavailablePaths,
         directories: Vec<LocalEntry>,
@@ -1600,7 +1812,7 @@ impl LocalEndpoint {
         &self,
         entry: LocalEntry,
         policy: MetadataPolicy,
-        previous: &impl PreviousObservation,
+        previous: &Cache<'_>,
         observation: &mut Observation,
         unavailable: &mut UnavailablePaths,
         control: &mut impl FnMut() -> ScanControl,
@@ -1620,7 +1832,7 @@ impl LocalEndpoint {
     fn prepare_entry(
         &self,
         mut entry: LocalEntry,
-        previous: &impl PreviousObservation,
+        previous: &Cache<'_>,
         observation: &mut Observation,
         unavailable: &mut UnavailablePaths,
         control: &mut impl FnMut() -> ScanControl,
@@ -1655,13 +1867,13 @@ impl LocalEndpoint {
                 }
             }
         }
-        if let Some((path, _)) = previous.get_key_value(&entry.path) {
-            entry.path = path.clone();
+        if let Some(path) = previous.key(&entry.path) {
+            entry.path = path;
         }
         if let Some(known) = previous.get(&entry.path)
             && known.fingerprint().proves_unchanged(&entry.metadata)
         {
-            observation.record(entry.path, known.clone());
+            observation.record(entry.path, known.as_ref().clone());
             return Ok(None);
         }
         Ok(Some((entry, SystemTime::now())))
@@ -3533,7 +3745,7 @@ mod tests {
             endpoint
                 .prepare_entry(
                     settled,
-                    previous.entries(),
+                    &Cache::Borrowed(previous.entries()),
                     &mut observation,
                     &mut unavailable,
                     &mut control,
@@ -3549,7 +3761,7 @@ mod tests {
             endpoint
                 .prepare_entry(
                     recent,
-                    previous.entries(),
+                    &Cache::Borrowed(previous.entries()),
                     &mut observation,
                     &mut unavailable,
                     &mut control,

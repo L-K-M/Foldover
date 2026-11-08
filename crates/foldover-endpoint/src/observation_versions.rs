@@ -10,8 +10,9 @@
 //! An [`ObservedVersion`] is 16 bytes on 64-bit targets: an
 //! `Arc<VersionPool>` plus a packed `usize` slot. The slot holds a row
 //! index in its low bits, a location in the next two bits and a
-//! transient comparison origin in the top two. The origin is
-//! bookkeeping only and never changes the resolved version.
+//! transient comparison origin in the top two. One additional bit marks
+//! cache-only rows excluded from planning. These per-handle flags never
+//! change the resolved version or the other handles sharing its pool.
 //!
 //! [`VersionPoolBuilder`] stages appended versions and seals them with
 //! [`VersionPoolBuilder::freeze`]. Handles are handed out before the
@@ -28,7 +29,9 @@ const LOCATION_SHIFT: u32 = usize::BITS - 4;
 /// Slot bits reserved for the comparison origin, above the location.
 const ORIGIN_SHIFT: u32 = usize::BITS - 2;
 /// Mask for the row index stored in the low slot bits.
-const INDEX_MASK: usize = usize::MAX >> 4;
+const INDEX_MASK: usize = usize::MAX >> 5;
+/// One per-row visibility bit below location and origin.
+const EXCLUDED_MASK: usize = 1 << (usize::BITS - 5);
 /// Mask for the location stored in the second-highest slot bits.
 const LOCATION_MASK: usize = 0b11 << LOCATION_SHIFT;
 /// Mask for the origin stored in the highest slot bits.
@@ -57,6 +60,13 @@ pub(crate) enum ObservationOrigin {
     PriorChanged,
     /// The path-side has no prior observation.
     New,
+}
+
+/// Whether a verified row participates in planning or only the cache.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ObservationVisibility {
+    Included,
+    Excluded,
 }
 
 /// One immutable version store: baseline rows plus versions appended
@@ -208,9 +218,23 @@ impl ObservedVersion {
 
     /// Sets the transient comparison origin without touching the
     /// location or index.
-    #[cfg(test)]
     pub(crate) fn set_origin(&mut self, origin: ObservationOrigin) {
         self.slot = (self.slot & !ORIGIN_MASK) | ((origin as usize) << ORIGIN_SHIFT);
+    }
+
+    pub(crate) fn visibility(&self) -> ObservationVisibility {
+        if self.slot & EXCLUDED_MASK == 0 {
+            ObservationVisibility::Included
+        } else {
+            ObservationVisibility::Excluded
+        }
+    }
+
+    pub(crate) fn set_visibility(&mut self, visibility: ObservationVisibility) {
+        self.slot = match visibility {
+            ObservationVisibility::Included => self.slot & !EXCLUDED_MASK,
+            ObservationVisibility::Excluded => self.slot | EXCLUDED_MASK,
+        };
     }
 
     fn location(&self) -> VersionLocation {
@@ -300,6 +324,34 @@ mod tests {
         let mut hasher = DefaultHasher::new();
         value.hash(&mut hasher);
         hasher.finish()
+    }
+
+    #[test]
+    fn row_flags_do_not_change_versions_or_other_handles() {
+        let version = file_version(1, 2);
+        let mut entry = ObservedVersion::single(version);
+        let other = entry.clone();
+        for origin in [
+            ObservationOrigin::Uncompared,
+            ObservationOrigin::PriorEqual,
+            ObservationOrigin::PriorChanged,
+            ObservationOrigin::New,
+        ] {
+            for visibility in [
+                ObservationVisibility::Included,
+                ObservationVisibility::Excluded,
+            ] {
+                entry.set_origin(origin);
+                entry.set_visibility(visibility);
+                assert_eq!(entry.origin(), origin);
+                assert_eq!(entry.visibility(), visibility);
+                assert_eq!(entry.version(), version);
+                assert_eq!(entry, other);
+                assert_eq!(hash_of(&entry), hash_of(&other));
+                assert_eq!(other.origin(), ObservationOrigin::Uncompared);
+                assert_eq!(other.visibility(), ObservationVisibility::Included);
+            }
+        }
     }
 
     #[test]

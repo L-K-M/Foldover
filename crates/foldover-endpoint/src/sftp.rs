@@ -470,6 +470,23 @@ impl SftpEndpoint {
 
     /// Reobserve contents and link targets: SFTP stat cannot prove they
     /// stayed unchanged, even when size and modification time match.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn observe_owned(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: foldover_types::PathMap<ObservedEntry>,
+        base: std::sync::Arc<foldover_types::PathMap<foldover_types::BaselineEntry>>,
+        side: foldover_types::Side,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+    ) -> Result<Observation, ScanError> {
+        let mut observation =
+            self.observe_reporting(policy, filter, &previous, control, progress)?;
+        observation.recycle_from(previous, base, side);
+        Ok(observation)
+    }
+
     pub fn observe_from(
         &self,
         policy: MetadataPolicy,
