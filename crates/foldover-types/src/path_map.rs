@@ -405,15 +405,26 @@ impl<T> PathMapBuilder<T> {
     /// permuted in place with cycle swaps, and duplicate rows are dropped
     /// in place. The same payload `Vec` is returned; `shrink_to_fit` may
     /// allocate transiently.
-    pub fn freeze(mut self) -> PathMap<T> {
+    pub fn freeze(self) -> PathMap<T> {
+        let mut map = self.freeze_retaining_capacity();
+        map.shrink_to_fit();
+        map
+    }
+
+    /// Sorts once, resolves duplicates by last insertion, and keeps spare
+    /// row capacity instead of shrinking.
+    ///
+    /// This applies exactly the permutation and last-insertion rule of
+    /// [`freeze`](Self::freeze) but skips the final `shrink_to_fit`, so a
+    /// recycled allocation can absorb a small number of new paths without
+    /// reallocating the payload.
+    pub fn freeze_retaining_capacity(mut self) -> PathMap<T> {
         if self
             .rows
             .windows(2)
             .all(|pair| pair[0].0.as_bytes() < pair[1].0.as_bytes())
         {
-            let mut map = PathMap { rows: self.rows };
-            map.shrink_to_fit();
-            return map;
+            return PathMap { rows: self.rows };
         }
 
         // Permutation p[new] = old. Sorting indices by raw key ascending,
@@ -430,9 +441,7 @@ impl<T> PathMapBuilder<T> {
         });
         apply_permutation(&mut self.rows, &mut permutation);
         self.rows.dedup_by(|left, right| left.0 == right.0);
-        let mut map = PathMap { rows: self.rows };
-        map.shrink_to_fit();
-        map
+        PathMap { rows: self.rows }
     }
 }
 
@@ -839,6 +848,61 @@ mod tests {
         assert_eq!(map.len(), 2);
         assert_eq!(map[&path(b"a")], 1);
         assert_eq!(map[&path(b"b")], 3);
+    }
+
+    #[test]
+    fn freeze_retaining_capacity_keeps_spare_allocation_for_sorted_rows() {
+        let entries = vec![(path(b"a"), 1u32), (path(b"b"), 2), (path(b"c"), 3)];
+        let mut builder = PathMapBuilder::with_capacity(entries.len() + 4);
+        for (key, value) in entries.clone() {
+            builder.push(key, value);
+        }
+        let before = builder.rows.as_ptr();
+        let map = builder.freeze_retaining_capacity();
+        assert!(std::ptr::eq(before, map.rows.as_ptr()));
+        assert_eq!(map.capacity(), entries.len() + 4);
+        assert_eq!(map.len(), entries.len());
+
+        let mut default = PathMapBuilder::with_capacity(entries.len());
+        for (key, value) in entries {
+            default.push(key, value);
+        }
+        let default = default.freeze();
+        assert_eq!(
+            map.iter().collect::<Vec<_>>(),
+            default.iter().collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn freeze_retaining_capacity_sorts_unsorted_rows_without_shrinking() {
+        let entries = vec![(path(b"c"), 3u32), (path(b"a"), 1), (path(b"b"), 2)];
+        let len = entries.len();
+        let mut builder = PathMapBuilder::with_capacity(len + 5);
+        for (key, value) in entries {
+            builder.push(key, value);
+        }
+        let map = builder.freeze_retaining_capacity();
+        assert_eq!(map.capacity(), len + 5);
+        assert_eq!(map.len(), len);
+        assert_eq!(
+            map.keys().map(|key| key.as_bytes()).collect::<Vec<_>>(),
+            [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()],
+        );
+    }
+
+    #[test]
+    fn freeze_retaining_capacity_compacts_duplicates_without_shrinking() {
+        let mut builder = PathMapBuilder::with_capacity(10);
+        builder.push(path(b"b"), 1u32);
+        builder.push(path(b"a"), 2);
+        builder.push(path(b"b"), 3);
+        builder.push(path(b"a"), 4);
+        let map = builder.freeze_retaining_capacity();
+        assert_eq!(map.capacity(), 10);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get(b"a".as_slice()), Some(&4));
+        assert_eq!(map.get(b"b".as_slice()), Some(&3));
     }
 
     #[test]
