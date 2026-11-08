@@ -2,12 +2,11 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use foldover_endpoint::{
-    Endpoint, EndpointPair, Filter, InvalidFilter, LocalEndpoint, ObservedEntry, PairRootError,
-    PeerLink, Reach, RootRelation, ScanError,
+    Endpoint, EndpointPair, Filter, InvalidFilter, LocalEndpoint, PairRootError, PeerLink, Reach,
+    RootRelation, ScanError,
 };
 use foldover_host::{Environment, EnvironmentHold, LowPowerSyncs, NetworkUse};
 use foldover_state::{
@@ -20,7 +19,7 @@ use foldover_types::{
     SyncPath,
 };
 
-use crate::{Commit, RunInputs};
+use crate::{Commit, PendingRunInputs, RunInputs};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -238,28 +237,22 @@ impl Engine {
         &self.state_path
     }
 
-    /// What a run reads from state, for work outside the engine lock.
-    pub fn run_inputs(&self, id: PairId) -> Result<RunInputs, Error> {
-        // Malformed cached fingerprints or versions only cost a reread.
-        let snapshot = |side| -> Result<BTreeMap<_, _>, Error> {
-            Ok(self
-                .pairs
-                .snapshot(id, side)?
-                .into_iter()
-                .filter_map(|entry| {
-                    let observed = ObservedEntry::restore(entry.version, &entry.fingerprint)?;
-                    Some((entry.path, observed))
-                })
-                .collect())
-        };
-        Ok(RunInputs::new(
+    /// Capture a run's inputs under the engine lock, with the stored
+    /// trees still encoded. Decode them with [`PendingRunInputs::decode`]
+    /// after releasing the lock, before endpoints or planning.
+    pub fn capture_run_inputs(&self, id: PairId) -> Result<PendingRunInputs, Error> {
+        Ok(PendingRunInputs::new(
             self.active_pair(id)?,
-            self.pairs.base(id)?,
             self.pairs.identities(id)?,
             self.pairs.resolutions(id)?,
-        )
-        .with_snapshots(snapshot(Side::Left)?, snapshot(Side::Right)?)
-        .with_reach(self.reach.clone()))
+            self.reach.clone(),
+            self.pairs.run_records(id)?,
+        ))
+    }
+
+    /// What a run reads from state, for work outside the engine lock.
+    pub fn run_inputs(&self, id: PairId) -> Result<RunInputs, Error> {
+        self.capture_run_inputs(id)?.decode()
     }
 
     /// Store a fresh observation of one side for the next run to reuse.
