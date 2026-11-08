@@ -24,6 +24,8 @@ use std::sync::{Arc, OnceLock};
 
 use foldover_types::{BaselineEntry, EntryVersion, PathMap, Side, SyncPath};
 
+use crate::observation_hints::ObservationHints;
+
 /// Slot bits reserved for the location, above the row index.
 const LOCATION_SHIFT: u32 = usize::BITS - 4;
 /// Slot bits reserved for the comparison origin, above the location.
@@ -80,27 +82,39 @@ pub(crate) struct VersionPool {
 pub(crate) struct VersionPoolBuilder {
     pool: Arc<VersionPool>,
     owned: Vec<EntryVersion>,
+    hints: ObservationHints,
 }
 
 impl VersionPoolBuilder {
-    /// A builder over `base`. A version matching a baseline row's side
-    /// points at that row; anything else is appended.
+    /// A builder over `base` with no observation hints. A version matching
+    /// a baseline row's side points at that row; anything else is appended.
     pub(crate) fn new(base: Arc<PathMap<BaselineEntry>>) -> Self {
+        Self::with_hints(base, ObservationHints::default())
+    }
+
+    /// A builder over `base` that may reuse `hints`.
+    ///
+    /// A version matching a baseline row's side points at that row. A
+    /// version that a hint has at the same exact raw path points at the
+    /// hint's shared pool. Anything else is appended to this builder.
+    pub(crate) fn with_hints(base: Arc<PathMap<BaselineEntry>>, hints: ObservationHints) -> Self {
         Self {
             pool: Arc::new(VersionPool {
                 base,
                 owned: OnceLock::new(),
             }),
             owned: Vec::new(),
+            hints,
         }
     }
 
     /// Interns `version` for `path` and `side`.
     ///
     /// When the exact raw path is a baseline row and that side's stored
-    /// version equals `version`, the handle points at the row. Otherwise
-    /// the version is appended to the builder's owned list and the
-    /// handle points there.
+    /// version equals `version`, the handle points at the row. Otherwise,
+    /// when a hint holds that exact raw path at the same full version, the
+    /// hint's shared handle is returned. Otherwise the version is appended
+    /// to the builder's owned list and the handle points there.
     pub(crate) fn intern(
         &mut self,
         path: &SyncPath,
@@ -120,6 +134,10 @@ impl VersionPoolBuilder {
                     slot(index, base_location(side)),
                 );
             }
+        }
+
+        if let Some(hinted) = self.hints.matching_version(path, version) {
+            return hinted;
         }
 
         let index = self.owned.len();

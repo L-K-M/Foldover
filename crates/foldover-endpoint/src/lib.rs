@@ -71,6 +71,12 @@ mod observation_versions;
 #[cfg(unix)]
 pub use observation_versions::ObservedVersion;
 
+#[cfg(unix)]
+mod observation_hints;
+
+#[cfg(unix)]
+pub use observation_hints::ObservationHints;
+
 mod lease;
 pub use lease::{HeldLease, LeaseError, LeaseHolder, LeaseTiming, LockFile};
 
