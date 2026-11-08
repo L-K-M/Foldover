@@ -15,9 +15,11 @@ before observation listed it again.
 
 - Known-size file reads request only remaining bytes, retaining a separate
   one-byte end probe. The endpoint still checks exact length, hashes every
-  byte and compares the trailing stat. The end probe reaches its overflow
-  check before any excess byte can reach the consumer. Early EOF still
-  becomes `ScanError::Changed` at the endpoint.
+  byte and compares the trailing stat; no SFTP stat field is trusted as proof
+  a file is unchanged. The transport delivers at most the one probe byte to
+  its sink, then returns the overflow. The endpoint's sink checks the bound
+  first, so the overrun is rejected before any byte reaches the final
+  consumer. Early EOF still becomes `ScanError::Changed` at the endpoint.
 - Control files use the same operation with a maximum length, not an assumed
   exact size. An overflow fails instead of returning a truncated identity,
   lease or ignore file. The existing unknown-length operation remains.
@@ -65,3 +67,7 @@ sink, so callers must check the bound before forwarding data or accepting a
 control file. Startup proves access to the first batch only; errors in later
 batches are reported by observation, with the existing unavailable-subtree
 protection.
+
+- Follow-up: read completion sends CLOSE and the trailing LSTAT in one
+  bounded write, as recorded in
+  [ADR 0051](0051-batched-sftp-read-completion.md).
