@@ -8,6 +8,8 @@ mod automation;
 mod deferred_tests;
 mod history;
 mod peer;
+#[cfg(test)]
+mod performance_tests;
 mod safe_mode;
 mod schedule;
 mod share;

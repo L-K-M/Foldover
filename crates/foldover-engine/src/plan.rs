@@ -863,6 +863,35 @@ pub(crate) fn plan_observations(
     )
 }
 
+fn plan_row_count<B: Tree, T: Tree>(
+    base: &B,
+    left: &T,
+    right: &T,
+    control: &mut impl FnMut() -> ScanControl,
+) -> Result<usize, PlanError> {
+    let mut base = base.iter().peekable();
+    let mut left = left.iter().peekable();
+    let mut right = right.iter().peekable();
+    let mut count = 0usize;
+    loop {
+        check_control(control)?;
+        let Some(path) = [
+            base.peek().map(|(path, _)| *path),
+            left.peek().map(|(path, _)| *path),
+            right.peek().map(|(path, _)| *path),
+        ]
+        .into_iter()
+        .flatten()
+        .min() else {
+            return Ok(count);
+        };
+        base.next_if(|(key, _)| *key == path);
+        left.next_if(|(key, _)| *key == path);
+        right.next_if(|(key, _)| *key == path);
+        count = count.checked_add(1).ok_or(PlanError::CountOverflow)?;
+    }
+}
+
 fn plan_trees<B: Tree<Value = BaselineEntry>, T: Tree>(
     mode: SyncMode,
     base: &B,
@@ -896,10 +925,14 @@ where
         control,
     )?;
 
+    // Count the immutable union without copying its paths. An exact
+    // reservation avoids both growth slack and a near-double allocation
+    // when a small mixture of additions and deletions exceeds one side.
+    let capacity = plan_row_count(base, left, right, control)?;
     let mut base_entries = base.iter().peekable();
     let mut left_entries = left.iter().peekable();
     let mut right_entries = right.iter().peekable();
-    let mut rows: Vec<PlanRow> = Vec::new();
+    let mut rows: Vec<PlanRow> = Vec::with_capacity(capacity);
     let mut directories = BTreeMap::new();
     loop {
         check_control(control)?;
@@ -2650,11 +2683,10 @@ mod tests {
         }
     }
 
-    /// The planner's control-check cadence and row count are unchanged: a
-    /// small two-row plan checks control exactly twelve times and returns
-    /// exactly two rows.
+    /// The count pass checks both paths and its end, in addition to the
+    /// existing twelve validation/build checks. It changes no plan rows.
     #[test]
-    fn control_cadence_and_row_count_are_unchanged() {
+    fn control_checks_cover_counting_and_building_without_changing_rows() {
         let left = tree(&[(b"folder", directory()), (b"folder/file", file(0))]);
         let mut checks = 0;
         let candidate = plan_candidates(
@@ -2669,7 +2701,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(candidate.rows.len(), 2);
-        assert_eq!(checks, 12);
+        assert_eq!(checks, 15);
     }
 
     /// The outermost conflict wins: an inner type conflict under a metadata
@@ -2816,5 +2848,79 @@ mod filtered_base_tests {
                 parent: path(b"a")
             }
         );
+    }
+    #[test]
+    fn matching_trees_reserve_only_the_needed_plan_rows() {
+        let file = version(EntryContent::File(Digest::from_bytes([1; 32])));
+        let entries: BTreeMap<_, _> = (0..1000)
+            .map(|index| (path(format!("p-{index:04}").as_bytes()), file))
+            .collect();
+        let base = entries
+            .iter()
+            .map(|(path, version)| {
+                (
+                    path.clone(),
+                    BaselineEntry::new(*version, *version).unwrap(),
+                )
+            })
+            .collect();
+        let plan = plan_candidates(SyncMode::Sync, &base, &entries, &entries, &mut || {
+            ScanControl::Continue
+        })
+        .unwrap();
+        assert_eq!(plan.rows.len(), entries.len());
+        assert_eq!(
+            plan.rows.capacity(),
+            entries.len(),
+            "matching trees need no growth slack in the plan"
+        );
+    }
+    #[test]
+    fn mixed_replacements_reserve_the_union_without_doubling_the_plan() {
+        let file = version(EntryContent::File(Digest::from_bytes([1; 32])));
+        let original: BTreeMap<_, _> = (0..1000)
+            .map(|index| (path(format!("p-{index:04}").as_bytes()), file))
+            .collect();
+        let base = original
+            .iter()
+            .map(|(path, version)| {
+                (
+                    path.clone(),
+                    BaselineEntry::new(*version, *version).unwrap(),
+                )
+            })
+            .collect();
+        let mut left = original.clone();
+        left.remove(&path(b"p-0000"));
+        left.insert(path(b"q"), file);
+        let plan = plan_candidates(SyncMode::Sync, &base, &left, &original, &mut || {
+            ScanControl::Continue
+        })
+        .unwrap();
+        assert_eq!(plan.rows.len(), 1001);
+        assert_eq!(plan.rows.capacity(), 1001);
+    }
+    #[test]
+    fn plan_row_count_can_be_cancelled_before_rows_are_allocated() {
+        let file = version(EntryContent::File(Digest::from_bytes([1; 32])));
+        let entries = [(path(b"a"), file), (path(b"b"), file), (path(b"c"), file)]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        let mut checks = 0;
+        let result = plan_row_count(
+            &BTreeMap::<SyncPath, BaselineEntry>::new(),
+            &entries,
+            &BTreeMap::new(),
+            &mut || {
+                checks += 1;
+                if checks == 2 {
+                    ScanControl::Cancel
+                } else {
+                    ScanControl::Continue
+                }
+            },
+        );
+        assert_eq!(result, Err(PlanError::Cancelled));
+        assert_eq!(checks, 2);
     }
 }
