@@ -62,12 +62,17 @@ reason as the preparation budget; the criterion bench is the gate.
 
 ## How budgets were set
 
-Each budget is a maximum median in milliseconds, set at roughly 3x
-the median measured on the development machine they were calibrated
-on (2026-10-20, Linux, release profile, short criterion windows). The
-headroom absorbs slower and noisier CI runners, which is where the
-gate runs weekly and on dispatch (`bench.yml`). A budget that fails
-on runners but passes locally was set too tight, not too loose.
+Each budget is a maximum median in milliseconds. The original scan,
+hash, plan and DB limits were calibrated at roughly 3x development medians
+on Linux on 2026-10-20, with release builds and short Criterion windows.
+Later additions record their calibration in the owning PR or the
+[qualification results](qualification-results.md). The new million-query
+prefix limits use about 3x the shared-host Mac measurements; the seventeen
+previous limits remain fixed as their implementations get faster.
+
+The headroom absorbs slower and noisier CI runners, where the gate runs
+weekly and on dispatch (`bench.yml`). Check runner conditions and retained
+samples when investigating a budget failure.
 
 ## Updating
 

@@ -3,7 +3,7 @@
 The worthwhile changes from the [action plan](action-plan.md) are implemented.
 [Qualification results](../../perf/qualification-results.md) record source
 revisions, raw evidence, rejected experiments and remaining validation gaps.
-The benchmark budgets and sync safety policies are unchanged.
+The existing benchmark limits and sync safety policies are unchanged.
 
 | Work | Implementation and evidence |
 |---|---|
@@ -34,7 +34,8 @@ on unchanged main; they are documented with the qualification gaps. Final
 integration CI and review are recorded on the PR.
 
 One 100k LAN no-change run completed cleanly. The attempted paired 100k
-baseline and the million-file LAN diagnostic lost SSH and failed. No
+baseline and both million-file LAN diagnostics lost SSH and failed. A new
+log-only diagnostic build is investigating the transport failure. No
 million-file LAN qualification, complete overnight/device release matrix,
 or beta/release readiness is claimed. Complete those runs with connection diagnostics;
 stat-only SFTP trust, weaker durability, larger commit batches, less frequent

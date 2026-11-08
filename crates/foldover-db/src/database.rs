@@ -631,6 +631,8 @@ pub struct Database {
     _writer: Arc<File>,
     // The opened database's inode, held so a later read-only reopen can
     // prove it resolved to the same file.
+    // Keep this after connection: closing another descriptor can release
+    // this process's POSIX locks on the same inode.
     anchor: File,
     directory: PathBuf,
 }

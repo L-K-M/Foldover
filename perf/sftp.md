@@ -45,8 +45,10 @@ sum their `data_bytes` to check the payload count. Both read modes can return
 the same number of DATA frames despite very different READ counts. The relay
 also records outstanding requests and framed protocol bytes, excluding SSH
 encryption overhead. Keep the target, fixture, rounds and host load with the
-result, and compare at least three paired runs. No run is recorded in this
-revision: this only documents the invocation.
+result, and compare at least three paired runs. Three real SSH pairs of
+100 reads each now confirm 200 bounded versus 3,200 unknown-length READs,
+with equal 819,200-byte DATA payload totals in every run. See the
+[qualification results](qualification-results.md) for the raw evidence and limits.
 
 Run the deterministic request budgets with:
 

@@ -4,7 +4,7 @@ The worthwhile changes in the [action plan](../docs/performance/action-plan.md)
 are implemented. These measurements separate completed runs, failed runs and
 unqualified cases. They do not establish release readiness.
 
-The [evidence bundle](results/qualification-2026-11-08.tar.gz) contains 94 cases:
+The [evidence bundle](results/qualification-2026-11-08.tar.gz) contains 103 cases:
 sanitized JSON summaries, traces, resource reports, samples and provenance.
 The [index](results/index.csv) records revisions, binary hashes, return codes,
 per-iteration timings and kernel peak RSS; the [manifest](results/manifest.json)
@@ -18,7 +18,10 @@ working directory.
 Runs used an Apple M4 Max (Mac16,9, 14 CPU cores, 36 GiB RAM), macOS 27.0.1,
 and Rust 1.99.0. The host was shared, with background work and uncontrolled
 OS caches. No idle-host, cold-cache or network RTT claim is made. The NAS
-hardware and SSH disconnect cause were not established. A later preflight
+hardware was later identified through the read-only API as an eight-core
+i7-9700K running TrueNAS 25.10.7, reporting 67,265,757,184 memory bytes. Its
+observed load averages were about 11 on eight cores. Disk/media/layout and
+the SSH disconnect cause were not established. A later preflight
 recorded Linux `6.12.105-production+truenas`, OpenSSH 9.2p1 on the server and
 OpenSSH 10.3 on the client. These are environment observations, not a cause
 for the earlier disconnects. LAN fixtures used
@@ -29,6 +32,13 @@ RSS is authoritative for the measured process and includes transient peaks;
 it excludes SSH children and the server. Samples may miss short peaks. Raw
 `ps` CPU values are OS reports, not per-phase or instantaneous utilization.
 A zero process return code does not imply that a memory budget passed.
+
+Some older cases record failed `ps` samples; their sampled child/session/CPU
+observations are incomplete. Kernel peak RSS and runner phase durations are
+collected independently of those samples. Earlier runners did not all emit
+`samples.jsonl`; absent files are not reconstructed. Filter failed process
+return codes before comparing complete-run timings. Partial pairs remain as
+failure evidence, with no invented counterpart.
 
 Each paired case uses matched fixtures and saved binaries. Separate experiment
 sets have separate baselines: their speedups must not be added or multiplied.
@@ -146,11 +156,37 @@ SSH broke after roughly 70k remote files and 1,173 seconds. No after sample
 or remaining pairs completed. A separate million-file prepare-only LAN run
 failed after 3,712.8 seconds, around 470k remote files, with a broken SSH
 transport. Its peak was 513.9 MB on the earlier representation. Neither is
-a successful qualification, and the final implementation has no completed
-million-file LAN run. The failed artifacts are retained. A new full run of
-the final implementation is in progress; its result is not included yet.
-The NAS owner reports no known SSH session limits or network interruptions,
-so the earlier disconnects remain unexplained transport failures.
+a successful qualification. The final-code retry also failed after 5,567.5
+seconds near 780k remote entries, with the same SSH broken pipe. Its 314.7 MB
+peak covers that incomplete run, not a completed million-file qualification.
+All failed artifacts are retained. The final implementation still has no
+completed million-file LAN run. A new isolated build adds only per-connection
+SSH client logging; its qualification is in progress and is excluded here.
+
+The owner reports no known SSH session limits or network interruptions.
+Read-only checks found no corresponding Mac sleep event. The API-provided
+SSH log records session closures without a cause; the kernel window contains
+container bridge changes nearby, which do not establish causation. Direct
+journal access was denied, but finite read-only API log jobs succeeded and
+completed. No client/server configuration or power setting was changed.
+
+Three real SSH packet-count pairs each ran 100 reads of the same owned 8 KiB
+file. Every bounded run used 200 READ requests; every unknown-length run used
+3,200. Both delivered 819,200 DATA payload bytes in 100 DATA replies. Maximum
+outstanding requests were one and sixteen respectively, with no undrained
+replies. These are framed protocol counts, excluding SSH overhead; the relay
+adds overhead, so this is not a latency or RTT comparison.
+
+A reverse SFTP-to-local copy completed 10,000 files and ten directories,
+then completed a no-change run. File path/content SHA-256 maps matched the
+owned original corpus. A separate local-to-SFTP case copied sixteen unique
+16 MiB files (256 MiB), followed by a full remote reread with zero changes.
+Initial apply was 33.362 s; the following remote observation was 3.934 s.
+Source inspection found no configured bandwidth limit and an existing write
+window maintained across producer chunks. The local medium reported SSD in
+under one millisecond. The write/read timing gap is not explained by these
+checks; no further transfer default was promoted from this single shared-host
+observation. Raw scripts, counts and results are retained.
 
 ## Rejected and deferred experiments
 

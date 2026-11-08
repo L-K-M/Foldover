@@ -1721,10 +1721,6 @@ impl LocalEndpoint {
         )
     }
 
-    /// The walk on this thread, the reads on bounded workers. This thread
-    /// alone asks `control`, reports `progress`, and mutates the observation,
-    /// the unavailable index and the stats; a worker only captures one
-    /// entry's verified version and checks the shared stop.
     /// The overlapped walk with a chosen read, so a test can substitute a
     /// deterministic helper and observe the driver's own handoff. The
     /// production read calls `entry_version`.
@@ -1759,6 +1755,10 @@ impl LocalEndpoint {
         )
     }
 
+    /// The walk on this thread, the reads on bounded workers. This thread
+    /// alone asks `control`, reports `progress`, and mutates the observation,
+    /// the unavailable index and the stats; a worker only captures one
+    /// entry's verified version and checks the shared stop.
     #[allow(clippy::too_many_arguments)]
     fn observe_cached_overlapped_with<G>(
         &self,
