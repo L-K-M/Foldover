@@ -648,11 +648,11 @@ impl UnavailablePaths {
 
     fn retain_entries(
         &self,
-        entries: &mut ObservationEntries,
+        observation: &mut Observation,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<(), ScanError> {
         let mut cancelled = false;
-        entries.retain(|path, _| {
+        observation.retain_entries(|path, _| {
             if cancelled {
                 return true;
             }
@@ -842,6 +842,9 @@ impl Observation {
             .entries
             .get(from)
             .map(|entry| self.aligned_origin(&to, entry));
+        if origin.is_some() {
+            self.preserve_original(from);
+        }
         if let Some(origin) = origin
             && let Some(mut entry) = self.entries.remove(from)
         {
@@ -901,6 +904,11 @@ impl Observation {
             .filter_map(|((_, to), origin)| origin.is_some().then_some(to))
             .collect();
         for ((from, _), origin) in mappings.iter().zip(&origins) {
+            if origin.is_some() {
+                self.preserve_original(from);
+            }
+        }
+        for ((from, _), origin) in mappings.iter().zip(&origins) {
             if let Some(origin) = origin {
                 self.entries.set_origin(from, *origin);
             }
@@ -942,6 +950,16 @@ impl Observation {
         let Some(comparison) = &self.comparison else {
             return entry.origin();
         };
+        if !comparison.changed.contains_key(path)
+            && let Some(time) = comparison.original_time(path)
+            && let Some(original) = self.entries.raw().get(path)
+        {
+            return if original.equals_at(entry, time) {
+                ObservationOrigin::PriorEqual
+            } else {
+                ObservationOrigin::PriorChanged
+            };
+        }
         let original = comparison.changed.get(path).map(Arc::as_ref).or_else(|| {
             self.entries.raw().get(path).filter(|entry| {
                 matches!(
@@ -955,6 +973,27 @@ impl Observation {
             Some(_) => ObservationOrigin::PriorChanged,
             None => ObservationOrigin::New,
         }
+    }
+
+    fn preserve_original(&mut self, path: &SyncPath) {
+        if let Some(comparison) = &mut self.comparison
+            && let Some(entry) = self.entries.raw().get(path)
+        {
+            comparison.preserve_original(path, entry);
+        }
+    }
+
+    pub(crate) fn retain_entries(
+        &mut self,
+        mut keep: impl FnMut(&SyncPath, &ObservedEntry) -> bool,
+    ) {
+        self.entries.retain(|path, entry| {
+            let retained = keep(path, entry);
+            if !retained && let Some(comparison) = &mut self.comparison {
+                comparison.preserve_original(path, entry);
+            }
+            retained
+        });
     }
 
     /// Drop paths the other folder skipped, so both skip them.
@@ -1849,7 +1888,7 @@ impl LocalEndpoint {
         // A directory can fail after its children were inserted. Suppress
         // those children too, without repeating every failed-root comparison.
         observation.finish_entries();
-        unavailable.retain_entries(&mut observation.entries, control)?;
+        unavailable.retain_entries(&mut observation, control)?;
         observation.unstable.sort();
         observation.unstable.dedup();
         Ok(observation)

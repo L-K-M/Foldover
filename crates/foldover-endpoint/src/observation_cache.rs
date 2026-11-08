@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use foldover_types::{BaselineEntry, PathMap, PathMapBuilder, Side, SyncPath};
 
@@ -47,6 +48,7 @@ pub(crate) struct Recycled {
     rows: Vec<(SyncPath, ObservedEntry)>,
     additions: Vec<(SyncPath, ObservedEntry)>,
     originals: BTreeMap<usize, Arc<ObservedEntry>>,
+    original_times: Option<OriginalTimes>,
     versions: Option<VersionPoolBuilder>,
     base: Arc<PathMap<BaselineEntry>>,
     side: Side,
@@ -58,6 +60,100 @@ pub(crate) struct Recycled {
 pub(crate) struct Comparison {
     pub(crate) original_len: usize,
     pub(crate) changed: BTreeMap<SyncPath, Arc<ObservedEntry>>,
+    original_times: Option<OriginalTimes>,
+}
+
+/// A rehash often changes only the observation time. Keep that exact time
+/// rather than a second version, fingerprint allocation and tree node per
+/// file. Keys can share the baseline index only when every raw key agrees.
+#[derive(Debug)]
+struct OriginalTimes {
+    keys: TimeKeys,
+    // Exact nanoseconds use eight bytes for ordinary observation dates.
+    // Dates before 1970 or beyond the u64-nanosecond range retain their
+    // full SystemTime in the sparse fallback, without rounding or clamping.
+    values: Vec<u64>,
+    wide: BTreeMap<usize, SystemTime>,
+}
+
+#[derive(Debug)]
+enum TimeKeys {
+    Base(Arc<PathMap<BaselineEntry>>),
+    Paths(Vec<SyncPath>),
+}
+
+impl OriginalTimes {
+    fn new(rows: &[(SyncPath, ObservedEntry)], base: &Arc<PathMap<BaselineEntry>>) -> Self {
+        let keys = if rows.len() == base.len() && rows.iter().map(|(path, _)| path).eq(base.keys())
+        {
+            TimeKeys::Base(Arc::clone(base))
+        } else {
+            TimeKeys::Paths(rows.iter().map(|(path, _)| path.clone()).collect())
+        };
+        Self {
+            keys,
+            values: vec![u64::MAX; rows.len()],
+            wide: BTreeMap::new(),
+        }
+    }
+
+    fn at(&self, index: usize) -> Option<SystemTime> {
+        if let Some(time) = self.wide.get(&index) {
+            return Some(*time);
+        }
+        let nanos = self.values[index];
+        (nanos != u64::MAX).then(|| {
+            UNIX_EPOCH
+                .checked_add(Duration::from_nanos(nanos))
+                .expect("the original SystemTime was representable")
+        })
+    }
+
+    fn set(&mut self, index: usize, time: SystemTime) {
+        if let Some(nanos) = time
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| u64::try_from(duration.as_nanos()).ok())
+            .filter(|nanos| *nanos != u64::MAX)
+        {
+            self.values[index] = nanos;
+            self.wide.remove(&index);
+        } else {
+            self.values[index] = u64::MAX;
+            self.wide.insert(index, time);
+        }
+    }
+
+    fn clear(&mut self, index: usize) {
+        self.values[index] = u64::MAX;
+        self.wide.remove(&index);
+    }
+
+    fn get(&self, path: &SyncPath) -> Option<SystemTime> {
+        let index = match &self.keys {
+            TimeKeys::Base(base) => base.index_of(path)?,
+            TimeKeys::Paths(paths) => paths.binary_search(path).ok()?,
+        };
+        self.at(index)
+    }
+}
+
+impl Comparison {
+    pub(crate) fn original_time(&self, path: &SyncPath) -> Option<SystemTime> {
+        self.original_times.as_ref()?.get(path)
+    }
+
+    /// Moving or dropping a refreshed row would lose the stat/version that
+    /// its compact time refers to. Preserve just these exceptional originals.
+    pub(crate) fn preserve_original(&mut self, path: &SyncPath, entry: &ObservedEntry) {
+        if let Some(time) = self.original_time(path)
+            && !self.changed.contains_key(path)
+        {
+            let mut original = entry.clone();
+            original.set_observed_at(time);
+            self.changed.insert(path.clone(), Arc::new(original));
+        }
+    }
 }
 
 impl Recycled {
@@ -82,6 +178,7 @@ impl Recycled {
             rows,
             additions: Vec::new(),
             originals: BTreeMap::new(),
+            original_times: None,
             versions: Some(VersionPoolBuilder::new(Arc::clone(&base))),
             base,
             side,
@@ -101,14 +198,25 @@ impl Recycled {
 
     fn get(&mut self, path: &SyncPath) -> Option<Arc<ObservedEntry>> {
         let index = self.index(path)?;
+        Some(self.original(index))
+    }
+
+    fn original(&mut self, index: usize) -> Arc<ObservedEntry> {
         if let Some(original) = self.originals.get(&index) {
-            return Some(Arc::clone(original));
+            return Arc::clone(original);
         }
         // A prior-equal landed row is the original value. Taking it again
         // handles duplicates arriving after an earlier result has landed.
-        let original = Arc::new(self.rows[index].1.take());
+        let original = if let Some(time) = self.original_times.as_ref().and_then(|t| t.at(index)) {
+            let mut original = self.rows[index].1.clone();
+            original.set_observed_at(time);
+            original
+        } else {
+            self.rows[index].1.take()
+        };
+        let original = Arc::new(original);
         self.originals.insert(index, Arc::clone(&original));
-        Some(original)
+        original
     }
 
     pub(crate) fn reuse(&mut self, path: &SyncPath, known: Arc<ObservedEntry>) {
@@ -123,6 +231,13 @@ impl Recycled {
         let mut entry = Arc::try_unwrap(original).unwrap_or_else(|shared| (*shared).clone());
         entry.set_origin(ObservationOrigin::PriorEqual);
         self.rows[index].1 = entry;
+        self.clear_time(index);
+    }
+
+    fn clear_time(&mut self, index: usize) {
+        if let Some(times) = &mut self.original_times {
+            times.clear(index);
+        }
     }
 
     pub(crate) fn record(&mut self, path: SyncPath, mut entry: ObservedEntry) {
@@ -144,18 +259,29 @@ impl Recycled {
             self.additions.push((path, entry));
             return;
         };
-        let original = self
-            .originals
-            .entry(index)
-            .or_insert_with(|| Arc::new(self.rows[index].1.take()));
+        let original = self.original(index);
         if original.as_ref() == &entry {
             // Usually only this registry still owns it. A duplicate read
             // can retain another Arc; cloning then is bounded by live jobs.
+            drop(original);
             let original = self.originals.remove(&index).expect("original exists");
             let mut reused = Arc::try_unwrap(original).unwrap_or_else(|shared| (*shared).clone());
             reused.set_origin(ObservationOrigin::PriorEqual);
             self.rows[index].1 = reused;
+            self.clear_time(index);
+        } else if original.same_version_and_stat(&entry) {
+            let original_time = original.observed_at();
+            drop(original);
+            let original = self.originals.remove(&index).expect("original exists");
+            let mut reused = Arc::try_unwrap(original).unwrap_or_else(|shared| (*shared).clone());
+            reused.set_observed_at(entry.observed_at());
+            reused.set_origin(ObservationOrigin::PriorChanged);
+            self.rows[index].1 = reused;
+            self.original_times
+                .get_or_insert_with(|| OriginalTimes::new(&self.rows, &self.base))
+                .set(index, original_time);
         } else {
+            self.clear_time(index);
             let handle = self
                 .versions
                 .as_mut()
@@ -200,6 +326,7 @@ impl Recycled {
             Comparison {
                 original_len: self.original_len,
                 changed,
+                original_times: self.original_times.take(),
             },
         )
     }
@@ -212,6 +339,28 @@ mod refresh_tests;
 mod tests {
     use super::*;
     use foldover_types::{Digest, EntryContent, EntryVersion};
+
+    #[test]
+    fn compact_original_times_keep_nanoseconds_and_out_of_range_dates() {
+        let rows = vec![(path(b"a"), entry(1)), (path(b"b"), entry(2))];
+        let mut times = OriginalTimes::new(&rows, &Arc::new(PathMap::new()));
+        assert_eq!(std::mem::size_of_val(times.values.as_slice()), 16);
+        for time in [
+            UNIX_EPOCH,
+            UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_789),
+            UNIX_EPOCH - Duration::from_nanos(1),
+            UNIX_EPOCH + Duration::from_nanos(u64::MAX),
+            UNIX_EPOCH + Duration::from_nanos(u64::MAX) + Duration::from_nanos(1),
+        ] {
+            times.set(1, time);
+            assert_eq!(times.at(0), None);
+            assert_eq!(times.at(1), Some(time));
+            assert_eq!(times.get(&path(b"b")), Some(time));
+            times.clear(1);
+            assert_eq!(times.at(1), None);
+            assert!(times.wide.is_empty());
+        }
+    }
 
     fn path(name: &[u8]) -> SyncPath {
         SyncPath::try_from(name).unwrap()

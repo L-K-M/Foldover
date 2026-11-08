@@ -748,9 +748,7 @@ impl SftpEndpoint {
         unavailable: PathPrefixIndex,
     ) -> Result<Observation, ScanError> {
         observation.finish_entries();
-        observation
-            .entries
-            .retain(|path, _| !unavailable.contains(path));
+        observation.retain_entries(|path, _| !unavailable.contains(path));
         observation
             .issues
             .sort_by(|left, right| left.path.cmp(&right.path));

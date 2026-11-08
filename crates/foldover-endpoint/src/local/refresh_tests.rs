@@ -1,6 +1,6 @@
 //! Timestamp-only refresh allocation and precision invariants.
 
-use super::{Fingerprint, ObservedEntry, Observation};
+use super::{Fingerprint, Observation, ObservedEntry};
 use crate::observation_versions::ObservationOrigin;
 use foldover_types::{Digest, EntryContent, EntryVersion, PathMap, Side, SyncPath};
 use std::sync::Arc;

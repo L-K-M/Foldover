@@ -1,11 +1,29 @@
 //! Private moves and comparison flags for consumed observation snapshots.
 
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{Fingerprint, FingerprintKey, ObservedEntry};
 use crate::observation_versions::{ObservationOrigin, ObservationVisibility, ObservedVersion};
 
 impl ObservedEntry {
+    pub(crate) fn same_version_and_stat(&self, other: &Self) -> bool {
+        self.version() == other.version()
+            && self.fingerprint.key == other.fingerprint.key
+            && self.fingerprint.size == other.fingerprint.size
+    }
+
+    pub(crate) fn observed_at(&self) -> SystemTime {
+        self.fingerprint.observed_at
+    }
+
+    pub(crate) fn set_observed_at(&mut self, time: SystemTime) {
+        self.fingerprint.observed_at = time;
+    }
+
+    pub(crate) fn equals_at(&self, other: &Self, original_time: SystemTime) -> bool {
+        self.same_version_and_stat(other) && other.observed_at() == original_time
+    }
+
     /// Leave a private placeholder while a bounded read owns the original.
     /// No placeholder crosses the endpoint's completed-observation boundary.
     pub(crate) fn take(&mut self) -> Self {

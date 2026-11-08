@@ -86,7 +86,7 @@ fn late_failed_subtrees_remove_previously_observed_children() {
         .skip_error(&mut observation, ScanError::Changed(Some(path(b"a"))))
         .unwrap();
     unavailable
-        .retain_entries(&mut observation.entries, &mut || ScanControl::Continue)
+        .retain_entries(&mut observation, &mut || ScanControl::Continue)
         .unwrap();
 
     assert_eq!(observation.unavailable(), &[path(b"a")]);
@@ -110,10 +110,9 @@ fn cancellation_during_filtering_stops_lookups_and_returns_an_error() {
         observation.record(path(format!("safe/{i:03}").as_bytes()), entry());
     }
     observation.finish_entries();
-    let mut entries = observation.entries;
     let unavailable = UnavailablePaths::from_paths(&[path(b"unread")]);
     let mut checkpoints = 0;
-    let result = unavailable.retain_entries(&mut entries, &mut || {
+    let result = unavailable.retain_entries(&mut observation, &mut || {
         checkpoints += 1;
         if checkpoints == 3 {
             ScanControl::Cancel
