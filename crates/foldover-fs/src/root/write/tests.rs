@@ -784,6 +784,150 @@ fn quarantine_stays_behind_where_a_run_leaves_it_alone() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn quarantine_policy_survives_acl_copying_with_present_or_absent_marks() {
+    const QUARANTINE: &str = "com.apple.quarantine";
+    const SOURCE_MARK: &[u8] = b"0081;6538a6f1;Safari;";
+    const TARGET_MARK: &[u8] = b"0081;6538a6f2;Mail;";
+    let mark = |file: &Path, value: Option<&[u8]>| {
+        let handle = fs::File::open(file).unwrap();
+        match value {
+            Some(value) => {
+                rustix::fs::fsetxattr(&handle, QUARANTINE, value, rustix::fs::XattrFlags::empty())
+                    .unwrap();
+            }
+            None => match rustix::fs::fremovexattr(&handle, QUARANTINE) {
+                Ok(()) | Err(rustix::io::Errno::NOATTR) => {}
+                Err(error) => panic!("cannot clear fixture quarantine: {error}"),
+            },
+        }
+    };
+    let read = |file: &Path| {
+        let handle = fs::File::open(file).unwrap();
+        let mut value = [0; 64];
+        match rustix::fs::fgetxattr(&handle, QUARANTINE, &mut value) {
+            Ok(size) => Some(value[..size].to_vec()),
+            Err(rustix::io::Errno::NOATTR) => None,
+            Err(error) => panic!("cannot read fixture quarantine: {error}"),
+        }
+    };
+    for source_mark in [None, Some(SOURCE_MARK)] {
+        for attributes in [Propagation::Sync, Propagation::Ignore] {
+            for permissions in [Propagation::Sync, Propagation::Ignore] {
+                for quarantine in [Propagation::Sync, Propagation::Ignore] {
+                    let roots = roots();
+                    let source = roots._source_directory.path().join("file");
+                    let target = roots.target_directory.path().join("file");
+                    fs::write(&source, b"data").unwrap();
+                    fs::write(&target, b"data").unwrap();
+                    mark(&source, source_mark);
+                    mark(&target, Some(TARGET_MARK));
+                    let policy = MetadataPolicy::new(Propagation::Sync, attributes, permissions)
+                        .with_quarantine(quarantine);
+                    let options = PairOptions::new(policy, STANDARD);
+                    let file = path(b"file");
+                    let source_observed = roots.source.metadata(&file).unwrap();
+                    let target_observed = roots.target.metadata(&file).unwrap();
+                    roots
+                        .target
+                        .update_metadata(
+                            &file,
+                            &target_observed,
+                            &roots.source,
+                            &source_observed,
+                            &options,
+                        )
+                        .unwrap();
+                    let syncing = policy.quarantine() == Propagation::Sync;
+                    let expected = if syncing {
+                        source_mark
+                    } else {
+                        Some(TARGET_MARK)
+                    };
+                    assert_eq!(read(&target).as_deref(), expected, "existing: {policy:?}");
+                    let staged = roots
+                        .target
+                        .stage_file(
+                            &file,
+                            &roots.source,
+                            &source_observed,
+                            &options,
+                            &mut proceed,
+                        )
+                        .unwrap();
+                    roots
+                        .target
+                        .place(
+                            staged.into_staged(),
+                            &path(b"copy"),
+                            Placement::Create,
+                            STANDARD,
+                        )
+                        .unwrap();
+                    let expected = if syncing { source_mark } else { None };
+                    assert_eq!(
+                        read(&roots.target_directory.path().join("copy")).as_deref(),
+                        expected,
+                        "new: {policy:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn quarantine_is_selected_before_a_restrictive_acl_is_applied() {
+    let roots = roots();
+    let source = roots._source_directory.path().join("file");
+    fs::write(&source, b"data").unwrap();
+    let mark = b"0081;6538a6f1;Safari;";
+    rustix::fs::fsetxattr(
+        fs::File::open(&source).unwrap(),
+        "com.apple.quarantine",
+        mark,
+        rustix::fs::XattrFlags::empty(),
+    )
+    .unwrap();
+    let status = std::process::Command::new("/bin/chmod")
+        .args(["+a", "everyone deny writeextattr"])
+        .arg(&source)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let expected_acl =
+        crate::mac_metadata::access_control(&fs::File::open(&source).unwrap()).unwrap();
+    let file = path(b"file");
+    let observed = roots.source.metadata(&file).unwrap();
+    let copied = roots
+        .target
+        .stage_file(&file, &roots.source, &observed, &ALL, &mut proceed);
+    // Remove the source's restrictive fixture ACL even when the copy failed.
+    assert!(
+        std::process::Command::new("/bin/chmod")
+            .arg("-N")
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let staged = copied.unwrap();
+    roots
+        .target
+        .place(staged.into_staged(), &file, Placement::Create, STANDARD)
+        .unwrap();
+    let handle = fs::File::open(roots.target_directory.path().join("file")).unwrap();
+    let mut value = [0; 64];
+    let size = rustix::fs::fgetxattr(&handle, "com.apple.quarantine", &mut value).unwrap();
+    assert_eq!(&value[..size], mark);
+    assert_eq!(
+        crate::mac_metadata::access_control(&handle).unwrap(),
+        expected_acl
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn forks_always_copy_hidden_follows_attributes_and_locks_stay_behind() {
     let roots = roots();
     let source = roots._source_directory.path().join("file");
@@ -957,13 +1101,18 @@ fn archived_entries_are_restored_without_replacing_anything() {
     fs::write(target.join(".foldover/archive/run/docs/note"), b"old").unwrap();
     let archived = path(b".foldover/archive/run/docs/note");
     let restored = path(b"docs/note");
+    fs::create_dir(target.join("defaults")).unwrap();
 
     roots
         .target
         .restore(&archived, &restored, STANDARD)
         .unwrap();
     assert_eq!(fs::read(target.join("docs/note")).unwrap(), b"old");
-    assert_ne!(mode_of(&target.join("docs")), 0o700);
+    assert_eq!(
+        mode_of(&target.join("docs")),
+        mode_of(&target.join("defaults")),
+        "restored parents use directory defaults, including the process umask"
+    );
 
     fs::write(target.join(".foldover/archive/run/docs/note"), b"older").unwrap();
     assert!(matches!(
@@ -971,6 +1120,26 @@ fn archived_entries_are_restored_without_replacing_anything() {
         Err(WriteError::Exists)
     ));
     assert_eq!(fs::read(target.join("docs/note")).unwrap(), b"old");
+}
+
+#[test]
+fn restored_directory_defaults_honor_permissive_and_restrictive_umasks() {
+    for mask in ["022", "077"] {
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", "umask \"$1\"; exec \"$2\" --exact \"$3\" --nocapture"])
+            .arg("foldover-umask-test")
+            .arg(mask)
+            .arg(std::env::current_exe().unwrap())
+            .arg("root::write::tests::archived_entries_are_restored_without_replacing_anything")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "restore under umask {mask}:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 /// Attributes another Mac sends reach a streamed copy; an update replaces

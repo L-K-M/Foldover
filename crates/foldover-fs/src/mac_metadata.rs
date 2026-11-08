@@ -15,6 +15,8 @@ const RESOURCE_FORK: &CStr = c"com.apple.ResourceFork";
 // sys/acl.h; ACL buffers are private, synchronous and freed with acl_free.
 unsafe extern "C" {
     fn acl_get_fd_np(fd: c_int, kind: c_int) -> *mut c_void;
+    fn acl_init(count: c_int) -> *mut c_void;
+    fn acl_set_fd_np(fd: c_int, acl: *mut c_void, kind: c_int) -> c_int;
     fn acl_size(acl: *mut c_void) -> libc::ssize_t;
     fn acl_copy_ext(buffer: *mut c_void, acl: *mut c_void, size: libc::ssize_t) -> libc::ssize_t;
     fn acl_free(acl: *mut c_void) -> c_int;
@@ -24,7 +26,7 @@ struct Acl(NonNull<c_void>);
 
 impl Drop for Acl {
     fn drop(&mut self) {
-        // SAFETY: this pointer came from acl_get_fd_np and has one private owner.
+        // SAFETY: this pointer came from acl_get_fd_np or acl_init and has one owner.
         // It is freed once, including when sizing/copying returns an error.
         let result = unsafe { acl_free(self.0.as_ptr()) };
         debug_assert_eq!(result, 0);
@@ -79,7 +81,7 @@ pub(super) fn attribute_value(
     checked_count(count)
 }
 
-pub(super) fn access_control(file: &impl AsFd) -> io::Result<Option<Vec<u8>>> {
+fn read_acl(file: &impl AsFd) -> io::Result<Option<Acl>> {
     prevent_materialization()?;
     // SAFETY: the descriptor is borrowed for the call; a successful result is
     // a new ACL allocation, immediately given exactly one RAII owner.
@@ -93,7 +95,13 @@ pub(super) fn access_control(file: &impl AsFd) -> io::Result<Option<Vec<u8>>> {
         }
         return Err(error);
     };
-    let acl = Acl(pointer);
+    Ok(Some(Acl(pointer)))
+}
+
+pub(super) fn access_control(file: &impl AsFd) -> io::Result<Option<Vec<u8>>> {
+    let Some(acl) = read_acl(file)? else {
+        return Ok(None);
+    };
     // SAFETY: acl is a live library-owned ACL, not caller-authored bytes.
     let size = checked_count(unsafe { acl_size(acl.0.as_ptr()) })?;
     if size > MAX_ACL_BYTES {
@@ -124,15 +132,24 @@ pub(super) fn access_control(file: &impl AsFd) -> io::Result<Option<Vec<u8>>> {
 /// Copy only the ACL between open descriptors. Data, xattrs, mode and times
 /// follow the pair's policy elsewhere.
 pub(super) fn copy_access_control(source: &impl AsFd, target: &impl AsFd) -> io::Result<()> {
-    prevent_materialization()?;
-    // SAFETY: both descriptors are live for the call. A null state is the
-    // documented stateless form; fcopyfile retains no pointers afterwards.
+    let acl = match read_acl(source)? {
+        Some(acl) => acl,
+        None => {
+            // SAFETY: zero requests an empty owned ACL. Its sole RAII owner
+            // frees it after the synchronous set, including on error.
+            let pointer = unsafe { acl_init(0) };
+            Acl(NonNull::new(pointer).ok_or_else(io::Error::last_os_error)?)
+        }
+    };
+    // fcopyfile(COPYFILE_ACL) also rewrites quarantine on macOS. Restoring it
+    // afterwards can fail when the new ACL denies extended-attribute writes.
+    // SAFETY: target is borrowed and acl is a live library-owned ACL. The
+    // documented descriptor setter copies it synchronously without ownership.
     let result = unsafe {
-        libc::fcopyfile(
-            source.as_fd().as_raw_fd(),
+        acl_set_fd_np(
             target.as_fd().as_raw_fd(),
-            std::ptr::null_mut(),
-            libc::COPYFILE_ACL,
+            acl.0.as_ptr(),
+            ACL_TYPE_EXTENDED,
         )
     };
     if result != 0 {
@@ -203,6 +220,41 @@ fn checked_count(count: libc::ssize_t) -> io::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copying_an_empty_acl_clears_target_rules_without_rewriting_quarantine() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("source");
+        let target_path = directory.path().join("target");
+        std::fs::write(&source_path, b"source").unwrap();
+        std::fs::write(&target_path, b"target").unwrap();
+        assert!(
+            std::process::Command::new("/bin/chmod")
+                .args(["+a", "everyone allow readextattr"])
+                .arg(&target_path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let source = std::fs::File::open(&source_path).unwrap();
+        let target = std::fs::File::open(&target_path).unwrap();
+        let expected = access_control(&source).unwrap();
+        assert_ne!(access_control(&target).unwrap(), expected);
+        let mark = b"0081;6538a6f2;Mail;";
+        rustix::fs::fsetxattr(
+            &target,
+            "com.apple.quarantine",
+            mark,
+            rustix::fs::XattrFlags::empty(),
+        )
+        .unwrap();
+        copy_access_control(&source, &target).unwrap();
+        assert_eq!(access_control(&target).unwrap(), expected);
+        let mut value = [0; 64];
+        let size = rustix::fs::fgetxattr(&target, "com.apple.quarantine", &mut value).unwrap();
+        assert_eq!(&value[..size], mark);
+        assert_eq!(std::fs::read(target_path).unwrap(), b"target");
+    }
 
     #[test]
     fn acl_type_matches_the_native_sdk() {
