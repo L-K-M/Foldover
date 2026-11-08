@@ -206,6 +206,9 @@ impl Recycled {
 }
 
 #[cfg(test)]
+mod refresh_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use foldover_types::{Digest, EntryContent, EntryVersion};

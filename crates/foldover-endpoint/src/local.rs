@@ -2232,6 +2232,8 @@ fn at_scan<T>(path: &Option<SyncPath>, result: io::Result<T>) -> Result<T, ScanE
 mod churn_tests;
 #[cfg(test)]
 mod filtering_tests;
+#[cfg(test)]
+mod refresh_tests;
 
 /// How long a filesystem may take to show a mutation in an entry's stat
 /// key. `ctime` advances in coarse ticks on several filesystems, so a
