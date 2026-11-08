@@ -1134,6 +1134,12 @@ fn restored_directory_defaults_honor_permissive_and_restrictive_umasks() {
             .output()
             .unwrap();
         assert!(
+            String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"),
+            "restore test did not execute under umask {mask}:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
             output.status.success(),
             "restore under umask {mask}:\n{}\n{}",
             String::from_utf8_lossy(&output.stdout),

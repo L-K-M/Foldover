@@ -257,12 +257,12 @@ mod tests {
     }
 
     #[test]
-    fn acl_type_matches_the_native_sdk() {
+    fn acl_declarations_match_the_native_sdk() {
         let output = std::process::Command::new("/usr/bin/xcrun")
             .args([
                 "swift",
                 "-e",
-                "import Darwin; print(ACL_TYPE_EXTENDED.rawValue)",
+                "import Darwin; let _: (Int32, acl_t?, acl_type_t) -> Int32 = acl_set_fd_np; print(ACL_TYPE_EXTENDED.rawValue)",
             ])
             .stdin(std::process::Stdio::null())
             .output()
