@@ -58,6 +58,7 @@ scripts/build.sh            # everything this host can build, staged in dist/
 scripts/build.sh core       # Rust agent and CLI (macOS or Linux)
 scripts/build.sh app        # macOS app (macOS 27+, Xcode 27+, XcodeGen)
 scripts/build.sh --install  # also install the app into /Applications
+scripts/build.sh app --install --no-open  # install without opening GUI windows
 cargo xtask ci              # the Linux CI gate
 ```
 

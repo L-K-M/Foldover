@@ -455,29 +455,74 @@ fn filtered_capture_skips_oversized_ignored_values_and_unneeded_acls() {
 #[cfg(target_os = "macos")]
 #[test]
 fn changing_resource_forks_cannot_extend_the_observed_work_or_publish_a_digest() {
-    let temporary = tempfile::tempdir().unwrap();
-    let file = fs::File::create(temporary.path().join("file")).unwrap();
-    let root = Root::open(temporary.path()).unwrap();
     let original = vec![b'x'; ATTRIBUTE_BUFFER_BYTES * 2 + 17];
     for replacement in [
         vec![b'y'; ATTRIBUTE_BUFFER_BYTES],
         vec![b'y'; ATTRIBUTE_BUFFER_BYTES * 4],
     ] {
+        // A fresh file per case: macOS does not shrink a resource fork on
+        // rewrite, so a reused file could observe a fork larger than the one
+        // just set.
+        let temporary = tempfile::tempdir().unwrap();
+        let file = fs::File::create(temporary.path().join("file")).unwrap();
+        let root = Root::open(temporary.path()).unwrap();
         set(&file, RESOURCE_FORK, &original);
         let metadata = root.metadata(&path()).unwrap();
         let mut changed = false;
         let mut maximum = 0;
-        let result =
-            root.read_extended_metadata(&path(), &metadata, MetadataCapture::Full, &mut |bytes| {
+        // Observe the fork alone: a `Full` capture also reads system-managed
+        // attributes such as `com.apple.provenance`, which macOS may add, so
+        // its progress total is not the fork's size. Selecting only the
+        // fork keeps the work bound exact without enlarging it.
+        let result = root.read_extended_metadata(
+            &path(),
+            &metadata,
+            MetadataCapture::Values(CaptureRoles::new(&[AttributeRole::ResourceFork])),
+            &mut |bytes| {
                 maximum = maximum.max(bytes);
                 if bytes >= ATTRIBUTE_BUFFER_BYTES as u64 && !changed {
                     set(&file, RESOURCE_FORK, &replacement);
                     changed = true;
                 }
                 ScanControl::Continue
-            });
+            },
+        );
         assert!(changed);
         assert!(matches!(result, Err(MetadataReadError::Changed)));
         assert!(maximum <= original.len() as u64);
     }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn full_capture_progress_is_the_sum_of_every_observed_value() {
+    let temporary = tempfile::tempdir().unwrap();
+    let file = fs::File::create(temporary.path().join("file")).unwrap();
+    let root = Root::open(temporary.path()).unwrap();
+    let value = vec![b'r'; ATTRIBUTE_BUFFER_BYTES * 2 + 17];
+    set(&file, RESOURCE_FORK, &value);
+    let metadata = root.metadata(&path()).unwrap();
+    let mut work = 0;
+    let observed = root
+        .read_extended_metadata(&path(), &metadata, MetadataCapture::Full, &mut |bytes| {
+            work = bytes;
+            ScanControl::Continue
+        })
+        .unwrap();
+    // `Full` reads every attribute, including system-managed ones such as
+    // `com.apple.provenance`, which macOS may add. The progress
+    // total is therefore the sum of all observed value sizes, not just the
+    // fork's; a fork-only capture is what makes a fork-size bound exact.
+    let total: u64 = observed
+        .attributes()
+        .iter()
+        .map(|attribute| attribute.size())
+        .sum();
+    assert_eq!(work, total);
+    assert!(
+        observed
+            .attributes()
+            .iter()
+            .any(|attribute| attribute.name() == RESOURCE_FORK.to_bytes())
+    );
 }

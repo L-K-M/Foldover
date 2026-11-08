@@ -51,7 +51,7 @@ jobs:
       - name: cargo xtask ci
         run: cargo xtask ci
 
-      - name: Agent materialization policy template
+      - name: Agent materialization and resource policy template
         run: python3 scripts/test-materialization-policy.py --check-template
 
   deny:
@@ -178,7 +178,7 @@ jobs:
       - name: Installed-code IPC authentication
         run: python3 scripts/test-installed-identity.py
 
-      - name: Launchd materialization policy
+      - name: Launchd materialization and resource policy
         run: python3 scripts/test-materialization-policy.py
 
       - name: Agent registration across rebuilt apps
