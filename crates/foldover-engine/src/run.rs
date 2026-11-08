@@ -1209,7 +1209,7 @@ impl PairRun {
         }
 
         // Routine runs use the freshly observed plan. Opting into review
-        // requires a matching reviewed plan on every run, including copies.
+        // requires a matching reviewed plan on every run, including workers.
         if options.review_policy() == ReviewPolicy::Required && context != RunContext::Reviewed {
             return Ok(RunOutcome::NeedsApproval(self.preview()));
         }
@@ -1377,8 +1377,9 @@ impl PairRun {
         let reverse = rows.iter().rev().filter(|row| is_archive(row.decision()));
         let writer = executor.writer();
         let stopped = thread::scope(|threads| {
-            let mut copies = Copies::start(threads, writer, self.workers(), &stop);
+            let mut workers = Workers::start(threads, writer, self.workers(), &stop);
             let mut stopped = recovery_cancelled;
+            let mut archiving = false;
             for (index, row) in forward.chain(reverse).enumerate() {
                 if stopped || control() == ScanControl::Cancel {
                     stopped = true;
@@ -1392,38 +1393,42 @@ impl PairRun {
                     && index % COMMIT_BATCH == 0
                     && let Err(error) = self.check_roots(identities)
                 {
-                    copies.finish(&mut executor, control, progress);
+                    workers.finish(&mut executor, control, progress);
                     commit_batch(&mut executor)?;
                     return Err(error);
                 }
-                // Archives go children first, once every copy has landed.
+                // Copies finish before the archive pass. File/link archives
+                // can overlap; every folder waits for outstanding children.
                 if is_archive(row.decision()) {
-                    copies.finish(&mut executor, control, progress);
+                    if !archiving || !executor.parallel_write(row) {
+                        workers.finish(&mut executor, control, progress);
+                    }
+                    archiving = true;
                 }
-                if copies.takes(&executor, row) {
-                    copies.hand(row, &mut executor, control, progress);
+                if workers.takes(&executor, row) {
+                    workers.hand(row, &mut executor, control, progress);
                 } else {
                     executor.apply(row.path(), row.decision(), control);
                     if writes(row.decision()) {
                         progress.applied(executor.copied_bytes(row));
                     }
                 }
-                copies.collect(&mut executor, progress);
+                workers.collect(&mut executor, progress);
                 if executor.pending.len().max(executor.journal.len()) >= COMMIT_BATCH
                     && let Err(error) = commit_batch(&mut executor)
                 {
-                    // Landed copies must be journaled before this run
+                    // Landed writes must be journaled before this run
                     // can fail, as the root check above does. The
                     // retry is best-effort: the run fails either way,
                     // so the first failure is what to report.
-                    copies.finish(&mut executor, control, progress);
+                    workers.finish(&mut executor, control, progress);
                     let _ = commit_batch(&mut executor);
                     return Err(error);
                 }
             }
-            copies.finish(&mut executor, control, progress);
-            // A copy a stop kept from starting leaves the plan undone too.
-            Ok::<_, RunError>(stopped || copies.skipped())
+            workers.finish(&mut executor, control, progress);
+            // A write a stop kept from starting leaves the plan undone too.
+            Ok::<_, RunError>(stopped || workers.skipped())
         })?;
         if stopped {
             executor.report.completion = Completion::Cancelled;
@@ -1868,6 +1873,26 @@ impl Writer<'_> {
         self.propagate(path, source, target, entry(target), *change, control)
     }
 
+    fn archive(
+        &self,
+        row: &PlanRow,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), ApplyError> {
+        let CandidateDecision::Entry(EntryDecision::Archive { on }) = row.decision() else {
+            unreachable!("only planned archives are handed out")
+        };
+        let current = self
+            .run
+            .observation(*on)
+            .entries()
+            .get(row.path())
+            .expect("handed-out archives have an observed entry");
+        self.run
+            .endpoints
+            .endpoint(*on)
+            .remove(row.path(), current, self.scope(*on), control)
+    }
+
     fn propagate(
         &self,
         path: &SyncPath,
@@ -1904,14 +1929,16 @@ impl<'a> Executor<'a> {
         }
     }
 
-    /// Whether `row` is a copy of a file or link a worker may make: its
-    /// folder exists by now, and nothing below it waits on it.
-    fn copies(&self, row: &PlanRow) -> bool {
-        let CandidateDecision::Entry(EntryDecision::Propagate { from, .. }) = row.decision() else {
-            return false;
+    /// Whether an independent file/link write can use a worker. The run
+    /// establishes its copy/archive/folder barriers before handing it out.
+    fn parallel_write(&self, row: &PlanRow) -> bool {
+        let side = match row.decision() {
+            CandidateDecision::Entry(EntryDecision::Propagate { from, .. }) => *from,
+            CandidateDecision::Entry(EntryDecision::Archive { on }) => *on,
+            _ => return false,
         };
-        let source = self.run.observation(*from).entries().get(row.path());
-        source.is_some_and(|source| source.version().kind() != EntryKind::Directory)
+        let entry = self.run.observation(side).entries().get(row.path());
+        entry.is_some_and(|entry| entry.version().kind() != EntryKind::Directory)
             && !self.below_failure(row.path())
     }
 
@@ -1933,7 +1960,30 @@ impl<'a> Executor<'a> {
         }
     }
 
-    /// Data bytes `row` copies.
+    fn landed_archive(&mut self, row: &PlanRow, result: Result<(), ApplyError>) {
+        let CandidateDecision::Entry(EntryDecision::Archive { on }) = row.decision() else {
+            unreachable!("only planned archives are handed out")
+        };
+        let current = self
+            .run
+            .observation(*on)
+            .entries()
+            .get(row.path())
+            .expect("handed-out archives have an observed entry")
+            .version();
+        match result {
+            Ok(()) => self.record_archive(row.path(), *on, current),
+            Err(error) => self.fail(row.path(), &error),
+        }
+    }
+
+    fn record_archive(&mut self, path: &SyncPath, on: Side, version: EntryVersion) {
+        self.report.archived += 1;
+        self.journal(path, on, JournalAction::Archive(version));
+        self.pending.push(BaseUpdate::Forget(path.clone()));
+    }
+
+    /// Data bytes `row` workers.
     fn copied_bytes(&self, row: &PlanRow) -> u64 {
         self.run.copied_bytes(row).map_or(0, |(_, bytes)| bytes)
     }
@@ -1988,11 +2038,7 @@ impl<'a> Executor<'a> {
                     .endpoint(on)
                     .remove(path, current, self.scope(on), control)
                 {
-                    Ok(()) => {
-                        self.report.archived += 1;
-                        self.journal(path, on, JournalAction::Archive(current.version()));
-                        self.pending.push(BaseUpdate::Forget(path.clone()));
-                    }
+                    Ok(()) => self.record_archive(path, on, current.version()),
                     Err(error) => self.fail(path, &error),
                 }
             }
@@ -2114,8 +2160,8 @@ impl<'a> Executor<'a> {
     }
 }
 
-mod copies;
-use copies::Copies;
+mod workers;
+use workers::Workers;
 
 mod undo;
 pub use undo::UndoReport;

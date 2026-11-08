@@ -400,6 +400,16 @@ impl MemoryEndpoint {
         }
     }
 
+    /// Delete an entry and its descendants as a person removing a tree.
+    pub fn delete_tree(&self, path: &[u8]) {
+        let mut folder = self.folder();
+        folder.tick();
+        let prefix = folder.key(path);
+        folder.entries.retain(|key, _| {
+            key != &prefix && !(key.starts_with(&prefix) && key.get(prefix.len()) == Some(&b'/'))
+        });
+    }
+
     /// Move a file as a person would, unless `to` is taken.
     pub fn move_file(&self, from: &[u8], to: &[u8]) -> io::Result<()> {
         let mut folder = self.folder();
