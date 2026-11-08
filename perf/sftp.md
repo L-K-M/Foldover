@@ -16,6 +16,34 @@ For a real network measurement, replace the server command with
 `ssh -o BatchMode=yes -s HOST sftp`. An optional `--delay-ms` delays every
 response frame; that measures per-message sensitivity, not actual network RTT.
 
+## Relay packet counts over SSH
+
+`sftp_probe` can count the SFTP packets a read actually uses. Add
+`--relay RELAY_SCRIPT LOG_PATH` to spawn the relay through `/usr/bin/python3`
+with `Session::spawn`; the relay forwards the same fixed `/usr/bin/ssh`
+transport arguments as `Session::connect` (`BatchMode=yes`,
+`ServerAliveInterval=15`, `ServerAliveCountMax=4`, `ConnectTimeout=60`,
+`-l USER`, `-s -- HOST sftp`) and logs every framed request and response. This
+is a benchmark-only path and does not change `Session::connect` or its trusted
+SSH path.
+
+```sh
+cargo run --locked --release -p foldover-net --example sftp_probe -- \
+  USER@HOST /absolute/foldover-perf/fixture 100 bounded \
+  --relay perf/sftp-relay.py events-bounded.jsonl
+cargo run --locked --release -p foldover-net --example sftp_probe -- \
+  USER@HOST /absolute/foldover-perf/fixture 100 unknown \
+  --relay perf/sftp-relay.py events-unknown.jsonl
+```
+
+The CSV keeps the per-round `*_ns` latency columns and adds `data_bytes`, the
+payload bytes the read delivered. The probe still stats the fixture before and
+after every round and fails if it changed. In each JSONL log, response events
+with `"kind":103` are `SSH_FXP_DATA`; count those per run to compare bounded
+versus unknown read packet counts. Keep the target, fixture, rounds and host
+load with the result, and compare at least three paired runs. No run is
+recorded in this revision: this only documents the invocation.
+
 Run the deterministic request budgets with:
 
 ```sh
