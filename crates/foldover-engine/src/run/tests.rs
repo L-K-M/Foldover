@@ -3494,6 +3494,74 @@ fn a_folder_another_mac_is_syncing_waits_until_its_lease_is_free_or_dead() {
     assert!(!lock.exists());
 }
 
+/// A requested stop during lease acquisition leaves data and the other
+/// holder's lock unchanged, without erasing an earlier scan failure.
+#[test]
+fn cancelling_lease_wait_preserves_failures_without_writing() {
+    struct Waiting(Cell<bool>);
+    impl RunProgress for Waiting {
+        fn observed(&self, _: Side, _: ObserveStep) {}
+        fn planned(&self, _: u64, _: u64) {}
+        fn applied(&self, _: u64) {}
+        fn waiting(&self, holder: Option<&str>) {
+            if holder.is_some() {
+                self.0.set(true);
+            }
+        }
+    }
+
+    for earlier_failure in [None, Some("An earlier scan failure")] {
+        let mut pair = fixture(SyncMode::Sync);
+        pair.leases.wait = Duration::from_secs(1);
+        fs::write(pair.left.path().join("new.txt"), b"new").unwrap();
+        let lock = hold_lease(pair.right.path());
+        let original_lock = fs::read(&lock).unwrap();
+        let mut prepared = pair.prepare();
+        if let Some(message) = earlier_failure {
+            prepared.failures.push(Failure {
+                path: Some(path(b"unreadable")),
+                message: message.to_owned(),
+            });
+        }
+        let expected_failures = prepared.failures.clone();
+        let progress = Waiting(Cell::new(false));
+        let mut commits = 0;
+        let outcome = prepared
+            .execute(
+                Approval::default(),
+                RunContext::Reviewed,
+                STARTED,
+                &mut |_, _| {
+                    commits += 1;
+                    Ok(())
+                },
+                &mut || {
+                    if progress.0.get() {
+                        ScanControl::Cancel
+                    } else {
+                        ScanControl::Continue
+                    }
+                },
+                &progress,
+            )
+            .unwrap();
+        assert!(progress.0.get(), "The run must observe a held lease first");
+        let RunOutcome::Ran(report) = outcome else {
+            panic!("Expected a cancelled run");
+        };
+        assert_eq!(report.completion(), Completion::Cancelled);
+        assert_eq!(report.failures(), expected_failures);
+        assert_eq!(report.copied(), 0);
+        assert_eq!(commits, 0);
+        assert!(pair.base.is_empty());
+        assert!(pair.identities.side(Side::Left).is_none());
+        assert!(pair.identities.side(Side::Right).is_none());
+        assert!(!pair.right.path().join("new.txt").exists());
+        assert!(!pair.left.path().join(".foldover/lock").exists());
+        assert_eq!(fs::read(lock).unwrap(), original_lock);
+    }
+}
+
 /// Only a lease another run kept is worth trying again later; a run
 /// that lost its lease or was stopped needs a person.
 #[test]

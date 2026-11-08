@@ -1315,7 +1315,20 @@ impl PairRun {
         let scopes = [scope_on(Side::Left), scope_on(Side::Right)];
         // PLAN.md §4: a run writes a folder only while it holds the
         // folder's lease, so two Macs never write one at once.
-        let leases = self.take_leases(identities, &name, Leased::Written, control, progress)?;
+        let leases = match self.take_leases(identities, &name, Leased::Written, control, progress) {
+            Ok(leases) => leases,
+            Err(RunError::Lease(LeaseError::Cancelled)) => {
+                // No data was written while acquiring the leases. Keep
+                // scan failures, but report the requested stop normally.
+                return Ok(RunOutcome::Ran(RunReport {
+                    completion: Completion::Cancelled,
+                    archive: name,
+                    failures: self.failures.clone(),
+                    ..RunReport::default()
+                }));
+            }
+            Err(error) => return Err(error),
+        };
         // A stop the run's thread hears reaches the copy workers too.
         let stop = AtomicBool::new(false);
         let mut control = || {

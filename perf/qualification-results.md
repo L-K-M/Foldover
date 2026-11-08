@@ -286,16 +286,23 @@ reservation, including the two new prefix-scaling cases. The seventeen
 existing limits are unchanged. The evidence bundle includes the final gate table.
 The device matrix passed on case-sensitive APFS, HFS+, exFAT and FAT32.
 FFI binding drift/type resolution, layer checks, agent lifecycle smoke and
-focused tests passed locally. The full local CI command still reports three
-native filesystem failures also reproduced on unchanged main: changing
+focused tests passed locally. At this revision, the full local CI command
+reported three native filesystem failures also reproduced on unchanged main: changing
 resource-fork work bounds, quarantine preservation and archive-restoration
 mode expectations. They are not reported as passing. CI/review for the final
 commit is recorded on the [integration](https://github.com/L-K-M/Foldover/pull/268)
 and [agent follow-up](https://github.com/L-K-M/Foldover/pull/269) PRs.
 
-Warm tracked million-file LAN qualification, true cold-cache runs, installed-app
-qualification, the full physical-device/overnight matrix and release/beta
-qualification remain. Wide flat directories, deeper paths, more metadata,
+The follow-up in [PR 271](https://github.com/L-K-M/Foldover/pull/271) fixed the
+quarantine defect and corrected the two native test contracts. All 91 native
+filesystem tests and the full CI gate then passed. The historical failures
+above remain part of this experiment's evidence. See the subsequent
+[installed-app qualification](release-readiness-results.md) for the new
+NAS, metadata, cancellation, memory and peer results and their limits.
+
+At the end of this experiment, warm tracked million-file LAN qualification,
+true cold-cache runs, installed-app qualification, the full physical-device
+and overnight matrix, and release/beta qualification remained. Wide flat directories, deeper paths, more metadata,
 multiple active previews, HDDs and restrictive SSH servers can change time
 and memory. Follow [qualification.md](qualification.md) on isolated data;
 keep the failures and limits alongside any new results.

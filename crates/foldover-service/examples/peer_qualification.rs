@@ -19,11 +19,16 @@
 //! The marker is a fixture convention, not a sandbox against another process
 //! running as the same user. Use a private root that no other process modifies.
 //!
+//! The temporary identity is advertised through Bonjour so the ordinary app
+//! can find its sync endpoint after pairing. A pairing address alone does not
+//! tell the client where the separate sync transport listens. Advertising does
+//! not bypass local-network permission or the expected-device/share checks.
+//!
 //! The operator reads `control/status.json` over authenticated SSH, compares
 //! the six-digit codes on both Macs, and writes `control/confirm.json`.
 //! The fixture confirms only the exact expected pending device and code.
-//! It stops when `control/stop` appears or the TTL expires, then returns
-//! from `main` so `Drop for PeerLink` closes the transport channels. No
+//! It stops when `control/stop` appears or the TTL expires, closes the link,
+//! and drains incoming folder handlers before its runtime exits. No
 //! signal handler is installed: a signal would terminate the process
 //! without running `Drop`.
 
@@ -74,6 +79,21 @@ const MAX_TTL_SECONDS: u64 = 3_600;
 const MAX_PAIRING_WINDOW: Duration = Duration::from_secs(600);
 /// How often the control files are polled and the status refreshed.
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn finish_incoming(host: &Arc<FixtureHost>) -> Result<()> {
+    // After the link is dropped, only this owner and outstanding folder
+    // handlers retain the host. Keep their runtime alive while a closed
+    // receive stream saves its partial; runtime shutdown would panic in
+    // its blocking handler before that cleanup can finish.
+    tokio::time::timeout(SHUTDOWN_TIMEOUT, async {
+        while Arc::strong_count(host) > 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| Failure::new("Incoming folder handlers did not finish during shutdown"))
+}
 
 #[derive(Debug)]
 struct Failure(String);
@@ -776,7 +796,19 @@ fn write_status(
     state: FixtureState,
     error: Option<String>,
 ) -> Result<()> {
-    let status = Status {
+    write_json_atomic(
+        &control.join(STATUS_FILE),
+        &status_snapshot(link, expected, state, error)?,
+    )
+}
+
+fn status_snapshot(
+    link: &PeerLink,
+    expected: DeviceId,
+    state: FixtureState,
+    error: Option<String>,
+) -> Result<Status> {
+    Ok(Status {
         device: link.device().to_string(),
         address: link.address()?.to_string(),
         pairing: link.pairing_address().map(|address| address.to_string()),
@@ -792,8 +824,7 @@ fn write_status(
         paired: link.is_paired(expected),
         shutdown: matches!(state, FixtureState::Shutdown),
         error,
-    };
-    write_json_atomic(&control.join(STATUS_FILE), &status)
+    })
 }
 
 fn now_ms() -> u64 {
@@ -888,9 +919,9 @@ async fn main() -> Result<()> {
         identity,
         LINK_NAME.to_owned(),
         bind,
-        Presence::Unlisted,
+        Presence::Announced,
         paired_device,
-        host,
+        host.clone(),
     )
     .map_err(|error| Failure::new(format!("Starting the peer link failed: {error}")))?;
     let address = link.address()?;
@@ -955,16 +986,14 @@ async fn main() -> Result<()> {
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 
-    // Close the window, report the final state, then return: dropping the
-    // `Arc<PeerLink>` runs its `Drop` and closes the transport channels.
+    for pending in link.pending() {
+        let _ = link.decide(pending.device, Decision::Cancel);
+    }
     link.close_pairing();
-    write_status(
-        &control,
-        &link,
-        expected,
-        FixtureState::Shutdown,
-        last_error,
-    )?;
+    let stopped_status = status_snapshot(&link, expected, FixtureState::Shutdown, last_error)?;
+    drop(link);
+    finish_incoming(&host).await?;
+    write_json_atomic(&control.join(STATUS_FILE), &stopped_status)?;
     println!("stopped: {stopped}");
     Ok(())
 }
@@ -973,6 +1002,40 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn shutdown_waits_for_incoming_folder_handlers() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let (_temporary, root) = prepared_fixture();
+        let host = Arc::new(FixtureHost {
+            expected: DeviceId::from_str(DEVICE).unwrap(),
+            share: SHARE.to_owned(),
+            root: LocalRoot::from_bytes(
+                root.join(SHARED_DIR)
+                    .as_os_str()
+                    .as_encoded_bytes()
+                    .to_vec(),
+            )
+            .unwrap(),
+            control: root.join(CONTROL_DIR),
+            folders: FolderCache::default(),
+            confirmed: AtomicBool::new(false),
+        });
+        let incoming = Arc::clone(&host);
+        let mut finished = Box::pin(finish_incoming(&host));
+        let waited = std::future::poll_fn(|context| {
+            Poll::Ready(finished.as_mut().poll(context).is_pending())
+        })
+        .await;
+        assert!(
+            waited,
+            "Shutdown returned while a folder handler still owned the host"
+        );
+        drop(incoming);
+        finished.await.unwrap();
+    }
 
     const OWNER: &str = "0d3f0d3f-0d3f-4d3f-8d3f-0d3f0d3f0d3f";
     const DEVICE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
