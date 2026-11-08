@@ -23,6 +23,13 @@ and never opens the installed agent's state. It mirrors left to right, keeps
 normal archives/leases and approves its freshly computed synthetic plan. Never
 point it at user data. Failed/conflicting/incomplete runs exit unsuccessfully.
 
+The `foldover-perf` marker is a naming convention on a whole path component,
+not a security sandbox: it does not prove filesystem ownership and does not
+defend against a hostile concurrent rename. `make-corpus.py` resolves the
+physical path before checking the marker and writes only to that resolved
+path; the runner checks state and parsed local/SFTP path components
+lexically, rejects `..`, and never inspects the SFTP user or host.
+
 The tool measures actual endpoint open, readiness, each observation, alignment,
 planning, input load, preview, snapshot export/store, apply, cumulative commit
 time and total duration. `RunProgress::measured` is a default diagnostic hook:
