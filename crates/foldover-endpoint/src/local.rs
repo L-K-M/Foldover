@@ -309,8 +309,11 @@ const FINGERPRINT_HEADER_BYTES: usize = 8 + 4 + 8;
 
 impl Fingerprint {
     fn new(metadata: &EntryMetadata, observed_at: SystemTime) -> Self {
+        let captured = metadata.stat_key();
         Self {
-            key: metadata.stat_key().into_boxed_slice(),
+            // A realloc shrink may keep the capture's larger malloc size
+            // class. Allocate the payload while that buffer is still held.
+            key: Box::from(captured.as_slice()),
             size: metadata.size(),
             observed_at,
         }
@@ -323,7 +326,7 @@ impl Fingerprint {
     /// Store another system's stat; incomplete keys cannot justify version reuse.
     pub(crate) fn from_key(key: Vec<u8>, size: u64, observed_at: SystemTime) -> Self {
         Self {
-            key: key.into_boxed_slice(),
+            key: Box::from(key.as_slice()),
             size,
             observed_at,
         }
@@ -390,23 +393,18 @@ impl Fingerprint {
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
         let (size, observed_at) = Self::header(bytes)?;
         Some(Self {
-            key: bytes
-                .get(FINGERPRINT_HEADER_BYTES..)?
-                .to_vec()
-                .into_boxed_slice(),
+            key: Box::from(bytes.get(FINGERPRINT_HEADER_BYTES..)?),
             size,
             observed_at,
         })
     }
 
-    /// Rebuild from an owned persisted fingerprint. The header is parsed
-    /// first, then the same buffer is shifted down to its key and boxed, so
-    /// the key is never copied into a second retained allocation.
-    fn from_owned(mut bytes: Vec<u8>) -> Option<Self> {
+    /// Consume a stored fingerprint and retain a fresh key allocation.
+    /// Shrinking the original buffer can keep the header's malloc size class.
+    fn from_owned(bytes: Vec<u8>) -> Option<Self> {
         let (size, observed_at) = Self::header(&bytes)?;
-        bytes.drain(..FINGERPRINT_HEADER_BYTES);
         Some(Self {
-            key: bytes.into_boxed_slice(),
+            key: Box::from(&bytes[FINGERPRINT_HEADER_BYTES..]),
             size,
             observed_at,
         })
@@ -471,8 +469,8 @@ impl ObservedEntry {
         Some(Self::new(version, Fingerprint::from_bytes(fingerprint)?))
     }
 
-    /// Rebuild a stored entry from its owned bytes; `None` if they are not a
-    /// fingerprint. The key is moved out of `fingerprint`, not copied.
+    /// Consume a stored fingerprint; `None` if invalid. Only its key payload
+    /// remains allocated after decoding.
     pub fn restore_owned(version: EntryVersion, fingerprint: Vec<u8>) -> Option<Self> {
         Some(Self::new(version, Fingerprint::from_owned(fingerprint)?))
     }
@@ -2021,6 +2019,34 @@ mod tests {
         drop(original);
         assert_eq!(cloned.version(), version);
         assert_eq!(cloned.fingerprint_bytes(), bytes);
+    }
+
+    /// Shrinking a Vec may keep its old malloc size class. A new payload
+    /// allocation avoids retaining the serialized header or capture slack.
+    #[test]
+    fn fingerprint_payload_does_not_retain_its_capture_buffer() {
+        let version = EntryVersion::new(
+            foldover_types::EntryContent::File(Digest::from_bytes([1; Digest::BYTE_LEN])),
+            Digest::from_bytes([2; Digest::BYTE_LEN]),
+        );
+        let mut bytes = vec![0; FINGERPRINT_HEADER_BYTES];
+        bytes.extend_from_slice(&[7; 93]);
+        let original = bytes.as_ptr();
+        let restored = ObservedEntry::restore_owned(version, bytes).unwrap();
+        assert_ne!(
+            restored.fingerprint().key.as_ptr(),
+            original,
+            "a serialized fingerprint allocation must not become the retained stat key"
+        );
+        let mut capture = vec![7; 128];
+        capture.truncate(93);
+        let original = capture.as_ptr();
+        let fingerprint = Fingerprint::from_key(capture, 0, UNIX_EPOCH);
+        assert_ne!(
+            fingerprint.key.as_ptr(),
+            original,
+            "capture spare capacity must not be retained by the key"
+        );
     }
 
     #[test]
