@@ -1063,13 +1063,21 @@ public struct LocalPairConfiguration: Equatable, Hashable {
     public var id: String
     public var revision: UInt64
     public var configuration: LocalPairDraft
+    /**
+     * A person paused the pair's automatic syncs; editing keeps it.
+     */
+    public var paused: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, revision: UInt64, configuration: LocalPairDraft) {
+    public init(id: String, revision: UInt64, configuration: LocalPairDraft, 
+        /**
+         * A person paused the pair's automatic syncs; editing keeps it.
+         */paused: Bool) {
         self.id = id
         self.revision = revision
         self.configuration = configuration
+        self.paused = paused
     }
 
     
@@ -1090,7 +1098,8 @@ public struct FfiConverterTypeLocalPairConfiguration: FfiConverterRustBuffer {
             try LocalPairConfiguration(
                 id: FfiConverterString.read(from: &buf), 
                 revision: FfiConverterUInt64.read(from: &buf), 
-                configuration: FfiConverterTypeLocalPairDraft.read(from: &buf)
+                configuration: FfiConverterTypeLocalPairDraft.read(from: &buf), 
+                paused: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -1098,6 +1107,7 @@ public struct FfiConverterTypeLocalPairConfiguration: FfiConverterRustBuffer {
         FfiConverterString.write(value.id, into: &buf)
         FfiConverterUInt64.write(value.revision, into: &buf)
         FfiConverterTypeLocalPairDraft.write(value.configuration, into: &buf)
+        FfiConverterBool.write(value.paused, into: &buf)
     }
 }
 
@@ -5448,11 +5458,43 @@ public func pairPage(after: String?)async throws  -> PairConfigurationPage  {
             errorHandler: FfiConverterTypeAgentError_lift
         )
 }
+/**
+ * Pause the pair's automatic syncs until `pair_resume`. Manual syncs
+ * still run, and a run in progress continues.
+ */
+public func pairPause(id: String)async throws  -> LocalPairConfiguration  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_pair_pause(FfiConverterString.lower(id)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeLocalPairConfiguration_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
 public func pairRemove(id: String, revision: UInt64)async throws  -> LocalPairConfiguration  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_foldover_ffi_fn_func_pair_remove(FfiConverterString.lower(id),FfiConverterUInt64.lower(revision)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeLocalPairConfiguration_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+public func pairResume(id: String)async throws  -> LocalPairConfiguration  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_pair_resume(FfiConverterString.lower(id)
                 )
             },
             pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
@@ -6036,7 +6078,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_foldover_ffi_checksum_func_pair_page() != 7401) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_foldover_ffi_checksum_func_pair_pause() != 3004) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_foldover_ffi_checksum_func_pair_remove() != 12423) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_pair_resume() != 61566) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_pair_update() != 2038) {

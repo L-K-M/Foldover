@@ -323,6 +323,10 @@ struct PairSyncViewModel {
     /// One or two words for the menu bar.
     var shortStatus: String {
         if isResolving { return String(localized: "Resolving") }
+        // A paused pair says so, unless it works or needs a look.
+        if pair.automation == .paused, !isWorking, activity != .attention {
+            return String(localized: "Paused")
+        }
         return switch state {
         case .idle: String(localized: "Ready")
         case .working(.preview, _, _, _): String(localized: "Comparing…")

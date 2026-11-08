@@ -57,6 +57,9 @@ A pair joins two folders. Each side can be:
   observation; interval schedules and the hourly check cover what events
   miss ([ADR 0002](../adr/0002-change-detection.md),
   [ADR 0022](../adr/0022-scheduled-runs.md)).
+- **A paused pair is still watched.** Pausing holds its automatic syncs,
+  not change detection; changes run after you resume
+  ([ADR 0022](../adr/0022-scheduled-runs.md)).
 - **Another Mac's folder needs pairing.** Pair two Macs in
   Settings › Mac-to-Mac: allow pairing on one, pick the other from the
   Macs found on your network, and confirm the same six-digit code on

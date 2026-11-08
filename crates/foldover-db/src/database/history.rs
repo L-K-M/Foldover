@@ -76,7 +76,8 @@ impl Database {
         let limit = i64::try_from(limit).map_err(|_| Error::InvalidState("history limit"))?;
         let mut statement = self.connection.prepare(
             "SELECT started_ms,finished_ms,trigger,outcome,copied,updated,archived,recovered,conflicts,failures,archive,message,moved
-             FROM run_history WHERE pair_id=?1 ORDER BY started_ms DESC LIMIT ?2",
+             FROM run_history WHERE pair_id=?1 AND pair_id NOT IN (SELECT pair_id FROM pair_removal)
+             ORDER BY started_ms DESC LIMIT ?2",
         )?;
         let rows = statement.query_map(params![pair, limit], |row| {
             Ok(HistoryRow {
@@ -101,7 +102,7 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{location, values};
+    use super::super::tests::{location, remove_and_purge, values};
     use super::*;
 
     fn row(started_ms: i64) -> HistoryRow {
@@ -147,7 +148,7 @@ mod tests {
             Err(Error::PairNotFound)
         ));
 
-        database.remove_pair(&pair.id, pair.revision).unwrap();
+        remove_and_purge(&mut database, &pair.id, pair.revision);
         assert!(database.history(&pair.id, 10).unwrap().is_empty());
     }
 }

@@ -10,6 +10,7 @@ mod history;
 mod peer;
 #[cfg(test)]
 mod performance_tests;
+mod purge;
 mod safe_mode;
 mod schedule;
 mod share;
@@ -27,9 +28,10 @@ use foldover_proto::local::{
 use foldover_proto::local::{
     AgentCapability, DAEMON_RESUME, DAEMON_STATUS, DaemonStatus, Hello, INTERNAL_ERROR,
     INVALID_PARAMS, METHOD_NOT_FOUND, PAIR_CHECK, PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_NOT_FOUND,
-    PAIR_PAGE_SIZE, PAIR_UPDATE, PROTOCOL_VERSION, PairCheck, PairInput, PairKey, PairList,
-    PairPage, PairRecord, PairUpdate, PairWarning, PairWarnings, ROOT_OVERLAP, ROOT_UNAVAILABLE,
-    Request, RpcError, SAFE_MODE, SESSION_HELLO, STALE_REVISION, VERSION_MISMATCH,
+    PAIR_PAGE_SIZE, PAIR_PAUSE, PAIR_RESUME, PAIR_UPDATE, PROTOCOL_VERSION, PairCheck, PairInput,
+    PairKey, PairList, PairPage, PairRecord, PairUpdate, PairWarning, PairWarnings, ROOT_OVERLAP,
+    ROOT_UNAVAILABLE, Request, RpcError, SAFE_MODE, SESSION_HELLO, STALE_REVISION,
+    VERSION_MISMATCH,
 };
 use foldover_proto::local::{
     ConflictKeep, SYNC_CANCEL, SYNC_ITEMS, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS,
@@ -39,7 +41,7 @@ use foldover_proto::local::{
     ENDPOINT_BROWSE, EndpointBrowse, NETWORK_SERVERS, NetworkServer, NetworkServers,
     PEER_UNAVAILABLE, ServerFolderList, ServerFolderRecord,
 };
-use foldover_types::{PairDraft, PairId, PairRoot, ReviewToken, Side};
+use foldover_types::{PairConfig, PairDraft, PairId, PairRoot, ReviewToken, Side};
 use schedule::Scheduler;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -61,6 +63,8 @@ pub struct Service {
     scheduler: Arc<Scheduler>,
     peers: peer::Peers,
     safe_mode: Arc<safe_mode::SafeMode>,
+    /// Wakes the task that deletes removed pairs' rows (ADR 0053).
+    purge: Arc<purge::Purger>,
     /// Cleared at a clean stop without waiting for the engine, which a
     /// sync may hold for seconds while the system waits to stop us.
     run_marker: foldover_engine::RunMarker,
@@ -115,6 +119,7 @@ impl Service {
             scheduler: Arc::new(Scheduler::new(std::time::Instant::now())),
             peers: Arc::default(),
             safe_mode: Arc::default(),
+            purge: Arc::default(),
         }
     }
 
@@ -226,13 +231,14 @@ impl Service {
             return history::handle(&self.engine, &request).await;
         }
         let command = Command::parse(&request)?;
+        let removes = matches!(command, Command::Remove { .. });
         let permit = Arc::clone(&self.commands)
             .acquire_owned()
             .await
             .map_err(|_| RpcError::new(INTERNAL_ERROR, "Configuration worker is unavailable"))?;
         let engine = Arc::clone(&self.engine);
         let jobs = Arc::clone(&self.jobs);
-        tokio::task::spawn_blocking(move || {
+        let answer = tokio::task::spawn_blocking(move || {
             // Retain ownership even if a client disconnects while its command commits.
             let _permit = permit;
             // The reservation and the busy check are one lock acquisition,
@@ -256,7 +262,11 @@ impl Service {
             command.execute(&mut engine, &jobs)
         })
         .await
-        .map_err(|_| RpcError::new(INTERNAL_ERROR, "Configuration worker failed"))?
+        .map_err(|_| RpcError::new(INTERNAL_ERROR, "Configuration worker failed"))?;
+        if removes && answer.is_ok() {
+            self.purge.wake();
+        }
+        answer
     }
 }
 
@@ -348,6 +358,10 @@ enum Command {
         id: PairId,
         revision: u64,
     },
+    /// Hold the pair's automatic syncs until resumed; a running job and
+    /// manual syncs go on, so no reservation is needed.
+    Pause(PairId),
+    Resume(PairId),
 }
 
 impl Command {
@@ -399,6 +413,15 @@ impl Command {
                     revision: expected_revision(params.revision)?,
                 })
             }
+            PAIR_PAUSE | PAIR_RESUME => {
+                let params: PairKey = parameters(request)?;
+                let id = params.id.parse().map_err(invalid)?;
+                Ok(if request.method() == PAIR_PAUSE {
+                    Self::Pause(id)
+                } else {
+                    Self::Resume(id)
+                })
+            }
             _ => Err(RpcError::new(METHOD_NOT_FOUND, "Method not found")),
         }
     }
@@ -407,7 +430,12 @@ impl Command {
     fn mutation_target(&self) -> Option<PairId> {
         match self {
             Self::Update { id, .. } | Self::Remove { id, .. } => Some(*id),
-            Self::List(_) | Self::Get(_) | Self::Create(_) | Self::Check { .. } => None,
+            Self::List(_)
+            | Self::Get(_)
+            | Self::Create(_)
+            | Self::Check { .. }
+            | Self::Pause(_)
+            | Self::Resume(_) => None,
         }
     }
 
@@ -423,12 +451,19 @@ impl Command {
                 } else {
                     None
                 };
+                let paused = engine.paused_pairs().map_err(engine_error)?;
                 encode(PairPage {
-                    pairs: pairs.iter().map(PairRecord::from).collect(),
+                    pairs: pairs
+                        .iter()
+                        .map(|pair| PairRecord {
+                            paused: paused.contains(&pair.id()),
+                            ..PairRecord::from(pair)
+                        })
+                        .collect(),
                     next,
                 })
             }
-            Self::Get(id) => encode(PairRecord::from(&engine.pair(id).map_err(engine_error)?)),
+            Self::Get(id) => encode(record(engine, &engine.pair(id).map_err(engine_error)?)?),
             Self::Create(draft) => encode(PairRecord::from(
                 &engine.create_pair(&draft).map_err(engine_error)?,
             )),
@@ -454,13 +489,32 @@ impl Command {
                     engine.update_pair(id, revision, &configuration)
                 }
                 .map_err(engine_error)?;
-                encode(PairRecord::from(&saved))
+                encode(record(engine, &saved)?)
             }
             Self::Remove { id, revision } => encode(PairRecord::from(
                 &engine.remove_pair(id, revision).map_err(engine_error)?,
             )),
+            Self::Pause(id) => {
+                engine.pause_pair(id).map_err(engine_error)?;
+                encode(record(engine, &engine.pair(id).map_err(engine_error)?)?)
+            }
+            Self::Resume(id) => {
+                engine.resume_pair(id).map_err(engine_error)?;
+                encode(record(engine, &engine.pair(id).map_err(engine_error)?)?)
+            }
         }
     }
+}
+
+/// The wire record of `pair`, with whether a person paused it.
+fn record(engine: &Engine, pair: &PairConfig) -> Result<PairRecord, RpcError> {
+    Ok(PairRecord {
+        paused: engine
+            .paused_pairs()
+            .map_err(engine_error)?
+            .contains(&pair.id()),
+        ..PairRecord::from(pair)
+    })
 }
 
 /// The wire form of an engine readiness warning; English wording lives
@@ -3280,6 +3334,160 @@ mod tests {
                 .unwrap(),
             timed
         );
+    }
+
+    /// A paused pair waits like a held one: its schedule keeps, other
+    /// pairs and manual syncs run, a manual sync does not lift the pause,
+    /// and the pair runs once resumed. Pausing keeps the revision.
+    #[tokio::test]
+    async fn a_paused_pair_waits_until_resumed() {
+        let (directory, service) = fixture();
+        let normal = Environment {
+            power: PowerMode::Normal,
+            network: Some(NetworkCost::Unrestricted),
+        };
+        let mut created = Vec::new();
+        for name in ["Paused", "Running"] {
+            let mut input = input(directory.path(), name);
+            input["options"]["schedule"] = json!({"kind": "every", "minutes": 1});
+            let pair = service
+                .handle(Request::call(1, PAIR_CREATE, Some(input)))
+                .await
+                .unwrap();
+            assert_eq!(pair["paused"], false);
+            first_sync(&service, &json!({"id": pair["id"]})).await;
+            created.push(pair);
+        }
+        let ids: Vec<PairId> = created
+            .iter()
+            .map(|pair| pair["id"].as_str().unwrap().parse().unwrap())
+            .collect();
+        let key = json!({"id": created[0]["id"]});
+        let at = |seconds| service.scheduler.started() + std::time::Duration::from_secs(seconds);
+
+        let paused = service
+            .handle(Request::call(2, PAIR_PAUSE, Some(key.clone())))
+            .await
+            .unwrap();
+        assert_eq!(paused["paused"], true);
+        assert_eq!(paused["revision"], created[0]["revision"]);
+        let listed = service
+            .handle(Request::call(3, PAIR_LIST, None))
+            .await
+            .unwrap();
+        let mut flags: Vec<_> = listed["pairs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|pair| {
+                (
+                    pair["configuration"]["name"].clone(),
+                    pair["paused"].clone(),
+                )
+            })
+            .collect();
+        // Pages are ordered by ID.
+        flags.sort_by_key(|(name, _)| name.to_string());
+        assert_eq!(
+            flags,
+            [
+                (json!("Paused"), json!(true)),
+                (json!("Running"), json!(false))
+            ]
+        );
+        assert_eq!(run_due_started_in(&service, at(61), normal).await, [ids[1]]);
+        settled(&service, &json!({"id": created[1]["id"]})).await;
+
+        // A manual sync runs and leaves the pause in place.
+        service
+            .handle(Request::call(4, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        settled(&service, &key).await;
+        assert_eq!(
+            service
+                .handle(Request::call(5, PAIR_GET, Some(key.clone())))
+                .await
+                .unwrap()["paused"],
+            true
+        );
+        assert!(
+            service
+                .run_due_in(at(122), normal)
+                .iter()
+                .all(|id| *id != ids[0])
+        );
+
+        let resumed = service
+            .handle(Request::call(6, PAIR_RESUME, Some(key.clone())))
+            .await
+            .unwrap();
+        assert_eq!(resumed["paused"], false);
+        assert!(
+            run_due_started_in(&service, at(183), normal)
+                .await
+                .contains(&ids[0])
+        );
+        settled(&service, &key).await;
+
+        let missing = json!({"id": "01010101010101010101010101010101"});
+        for method in [PAIR_PAUSE, PAIR_RESUME] {
+            assert_eq!(
+                service
+                    .handle(Request::call(7, method, Some(missing.clone())))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                PAIR_NOT_FOUND
+            );
+        }
+    }
+
+    /// ADR 0053: removal answers without deleting the pair's rows, which
+    /// held the engine for seconds on a million-file pair; the purge
+    /// deletes them afterwards.
+    #[tokio::test]
+    async fn removal_leaves_the_rows_to_the_purge() {
+        let (directory, service) = fixture();
+        let input = input(directory.path(), "Removed");
+        std::fs::write(directory.path().join("Removed-left/kept.txt"), b"kept").unwrap();
+        let pair = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let key = json!({"id": pair["id"]});
+        first_sync(&service, &key).await;
+        let pending =
+            |service: &Service| service.engine.lock().unwrap().removals_pending().unwrap();
+
+        service
+            .handle(Request::call(
+                2,
+                PAIR_REMOVE,
+                Some(json!({"id": pair["id"], "revision": pair["revision"]})),
+            ))
+            .await
+            .unwrap();
+        for method in [PAIR_GET, SYNC_PREVIEW, PAIR_PAUSE] {
+            assert_eq!(
+                service
+                    .handle(Request::call(3, method, Some(key.clone())))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                PAIR_NOT_FOUND,
+                "{method}"
+            );
+        }
+        assert!(pending(&service));
+
+        // The task the agent starts deletes them.
+        service.start_purge();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while pending(&service) {
+            assert!(std::time::Instant::now() < deadline, "the purge must run");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     /// PLAN.md §3.5: an environment hold keeps a due pair waiting

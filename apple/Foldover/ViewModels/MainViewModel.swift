@@ -95,6 +95,8 @@ struct PairRow: Identifiable, Equatable {
     let canCancel: Bool
     /// When the newest completed sync finished; nil before any success.
     let lastSuccess: Date?
+    /// A person paused its automatic syncs.
+    let automation: PairAutomation
 }
 
 /// The background agent's health as the status bar's dot shows it.
@@ -336,7 +338,7 @@ final class MainViewModel {
                            symbol: pairSync.activeMode.symbol, modeTitle: pairSync.activeMode.title,
                            activity: pairSync.activity, conflicts: pairSync.conflictCount,
                            canSync: pairSync.canSync, canCancel: pairSync.canCancel,
-                           lastSuccess: pairSync.lastSuccess)
+                           lastSuccess: pairSync.lastSuccess, automation: pair.automation)
         }.sorted {
             let order = $0.name.localizedStandardCompare($1.name)
             return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
@@ -455,7 +457,9 @@ final class MainViewModel {
 
     /// What the pair does, in the editor's words.
     func planText(for pair: SyncPair) -> String {
-        PairEditorViewModel.planText(mode: pair.settings.mode, options: pair.settings.options)
+        let plan = PairEditorViewModel.planText(mode: pair.settings.mode, options: pair.settings.options)
+        guard pair.automation == .paused else { return plan }
+        return plan + " " + String(localized: "Automatic syncs are paused until you resume the pair.")
     }
 
     /// The pair's skip rules and limits in a few words, e.g.
@@ -788,6 +792,27 @@ final class MainViewModel {
     }
 
     func cancelRemoval() { removalTarget = nil }
+
+    /// Whether `pair`'s automatic syncs can be paused or resumed now. A
+    /// pair that syncs only when asked has none to pause, but one paused
+    /// before its schedule changed can still be resumed.
+    func canChangeAutomation(of pair: SyncPair) -> Bool {
+        guard canConfigurePairs else { return false }
+        return pair.automation == .paused || pair.settings.options.schedule != .manual
+    }
+
+    /// Pause a running pair or resume a paused one. Manual syncs run
+    /// either way; a failure shows like any other operation's.
+    func toggleAutomation(of pair: SyncPair) async {
+        guard canChangeAutomation(of: pair) else { return }
+        operationError = nil
+        let next: PairAutomation = pair.automation == .paused ? .running : .paused
+        do {
+            try await pairStore.setAutomation(next, of: pair)
+        } catch {
+            operationError = PairStore.message(for: error)
+        }
+    }
 
     func removePair(_ pair: SyncPair) async {
         guard canConfigurePairs else { return }

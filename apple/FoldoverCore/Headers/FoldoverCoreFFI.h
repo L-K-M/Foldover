@@ -282,9 +282,19 @@ uint64_t uniffi_foldover_ffi_fn_func_pair_create(RustBuffer configuration
 uint64_t uniffi_foldover_ffi_fn_func_pair_page(RustBuffer after
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_PAIR_PAUSE
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_PAIR_PAUSE
+uint64_t uniffi_foldover_ffi_fn_func_pair_pause(RustBuffer id
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_PAIR_REMOVE
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_PAIR_REMOVE
 uint64_t uniffi_foldover_ffi_fn_func_pair_remove(RustBuffer id, uint64_t revision
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_PAIR_RESUME
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_PAIR_RESUME
+uint64_t uniffi_foldover_ffi_fn_func_pair_resume(RustBuffer id
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_FN_FUNC_PAIR_UPDATE
@@ -761,9 +771,21 @@ uint16_t uniffi_foldover_ffi_checksum_func_pair_page(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_PAIR_PAUSE
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_PAIR_PAUSE
+uint16_t uniffi_foldover_ffi_checksum_func_pair_pause(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_PAIR_REMOVE
 #define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_PAIR_REMOVE
 uint16_t uniffi_foldover_ffi_checksum_func_pair_remove(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_PAIR_RESUME
+#define UNIFFI_FFIDEF_UNIFFI_FOLDOVER_FFI_CHECKSUM_FUNC_PAIR_RESUME
+uint16_t uniffi_foldover_ffi_checksum_func_pair_resume(void
     
 );
 #endif

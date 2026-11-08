@@ -17,11 +17,14 @@ sync plan stay visible without opening help.
   shows a pair at work, a warning triangle one that needs you, and a badge
   its open conflicts. Control-click a pair for its commands. To remove the
   selected pair, press Delete or choose Pair › Remove Pair…; Foldover asks
-  first, and your folders stay in place. Drop one or two folders on the
-  sidebar to open the New Pair editor with them filled in. The line at the
-  bottom shows the background agent's state, with the one button that
-  fixes it when something is wrong: Turn On, Open Login Items or Resume
-  Syncing.
+  first, and your folders stay in place. The same menu has Pause Pair and
+  Resume Pair: pausing holds that pair's automatic syncs, the sidebar shows
+  Paused, and Preview Changes and Sync Now still run; a running sync
+  continues until you stop it, and changes made while paused run after you
+  resume. Drop one or two folders on the sidebar to open the New Pair editor
+  with them filled in. The line at the bottom shows the background agent's
+  state, with the one button that fixes it when something is wrong: Turn On,
+  Open Login Items or Resume Syncing.
 - **Detail.** The pair's two folders and the sentence that says what a
   sync does, then its status: progress while it works, what the last sync
   did, and Undo Sync or Review Conflicts when they apply. While a job
@@ -95,7 +98,9 @@ button to sync it. While it works, that button stops its job instead.
 Commands stay visible below the list. The extra also has Sync All,
 Pause Automatic Syncs (for an hour, four hours or until you resume),
 Open Foldover, Settings… and Quit Foldover. The Pair menu offers the same
-Sync All and Pause Automatic Syncs.
+Sync All and Pause Automatic Syncs, plus Pause Pair and Resume Pair for the
+selected pair; the global pause holds every pair, while a pair's own pause
+holds only that one.
 
 ## Keyboard shortcuts
 

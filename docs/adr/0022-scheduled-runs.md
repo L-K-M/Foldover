@@ -62,6 +62,13 @@ is skipped until its job ends.
   It survives agent restarts. Changes noticed meanwhile stay recorded and
   run after the pause; manual syncs are unaffected. The menu bar, the CLI
   (`foldover pause [MINUTES]`, `foldover resume`) and Shortcuts set it.
+- **Per-pair pause** (state schema v29): `pair.pause` holds one pair's
+  automatic runs until `pair.resume`. It survives agent restarts, editing
+  the pair keeps it, and removing the pair drops it; pausing does not change
+  the pair's revision. A paused pair keeps being watched, and its changes
+  run after the pause; manual Preview Changes and Sync Now still run and
+  do not lift the pause. The app's sidebar and Pair menu, and the CLI
+  (`foldover pairs pause ID`, `foldover pairs resume ID`), set it.
 - Timing state lives in agent memory; a restart restarts every interval.
 
 ## Consequences

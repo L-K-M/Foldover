@@ -97,9 +97,10 @@ which acts as the hub. AFP is not supported: macOS 27 removed the AFP client.
 
 Manual; file change (FSEvents, debounced 10–20 s, forced after 5 min of
 churn); target appears (drive mounted, share reachable, peer visible);
-interval; calendar schedule. Paused on expensive or constrained networks, and
-in Low Power Mode unless the user opts in. The agent holds a power assertion
-during runs.
+interval; calendar schedule. A person can pause one pair, which holds its
+automatic syncs until resumed; manual syncs still run. Paused on expensive
+or constrained networks, and in Low Power Mode unless the user opts in.
+The agent holds a power assertion during runs.
 
 ### 3.6 Safety defaults
 
@@ -570,7 +571,7 @@ FSEvents is a hint, never the truth.
 - Parallelism per device, not per pair: SSD 4–8 workers, HDD 1–2,
   network 4–8 connections with pipelined requests.
 - A file modified while being copied is detected (stat before and after) and
-  retried next cycle. Bandwidth cap per pair; global pause.
+  retried next cycle. Bandwidth cap per pair; per-pair and global pause.
 
 ### 4.10 Metadata and names
 

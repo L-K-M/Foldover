@@ -295,6 +295,12 @@ deletion ([ADR 0010](../adr/0010-local-metadata-inventory.md)).
   the network is expensive or Low Data Mode is on. Syncs you start
   yourself always run, and held pairs run on the first tick after the
   hold lifts ([ADR 0036](../adr/0036-environment-policy.md)).
+- **A paused pair waits until you resume it.** Pause Pair holds that pair's
+  automatic syncs: interval and calendar schedules, file changes, a folder
+  coming back and catch-up when the agent starts all wait. Preview Changes
+  and Sync Now still run and do not lift the pause; a sync already running
+  continues until you stop it. Changes made while paused are recorded and
+  run after you resume ([ADR 0022](../adr/0022-scheduled-runs.md)).
 - A local folder Foldover once mounted from a share keeps counting as
   network use until a sync observes it on plain disk again
   ([ADR 0036](../adr/0036-environment-policy.md)).

@@ -1,6 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::ffi::OsStrExt;
 
+pub use foldover_db::Purge;
 use foldover_db::{
     BaseChange, BaseRow, Database, PairRow, PairValues, ReadView, ReadViewError, ResolutionRow,
     SnapshotData, SnapshotRow, StateLocation,
@@ -166,12 +167,46 @@ impl PairStore {
         )
     }
 
+    /// Remove a pair at once; `purge_removed` deletes its rows later.
     pub fn remove(&mut self, id: PairId, revision: u64) -> Result<PairConfig, Error> {
         let revision = database_revision(revision)?;
         // Decode before deleting: corrupt domain records must not disappear silently.
         let current = self.pair(id)?.ok_or(Error::PairNotFound)?;
         self.database.remove_pair(id.as_bytes(), revision)?;
         Ok(current)
+    }
+
+    /// Delete up to `limit` rows of removed pairs, in one transaction.
+    pub fn purge_removed(&mut self, limit: usize) -> Result<Purge, Error> {
+        Ok(self.database.purge_removed_pairs(limit)?)
+    }
+
+    /// Whether removed pairs still have rows to purge.
+    pub fn removals_pending(&self) -> Result<bool, Error> {
+        Ok(self.database.has_removed_pairs()?)
+    }
+
+    /// Pause the pair's automatic syncs until it is resumed.
+    pub fn pause_pair(&mut self, id: PairId) -> Result<(), Error> {
+        Ok(self.database.pause_pair(id.as_bytes())?)
+    }
+
+    pub fn resume_pair(&mut self, id: PairId) -> Result<(), Error> {
+        Ok(self.database.resume_pair(id.as_bytes())?)
+    }
+
+    /// Every paused pair.
+    pub fn paused_pairs(&self) -> Result<BTreeSet<PairId>, Error> {
+        self.database
+            .paused_pairs()?
+            .into_iter()
+            .map(|id| {
+                let bytes = id
+                    .try_into()
+                    .map_err(|_| Error::InvalidStored("Paused pair ID"))?;
+                Ok(PairId::from_bytes(bytes)?)
+            })
+            .collect()
     }
 }
 

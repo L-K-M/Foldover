@@ -635,11 +635,19 @@ impl Service {
                     local_time(started).map(|at| (pair.id(), at))
                 })
                 .collect();
-            // Held by Low Power Mode or a costly network: still watched,
-            // so changes meanwhile make them due when the hold lifts.
+            // Paused by a person, or held by Low Power Mode or a costly
+            // network: still watched, so changes meanwhile make them due
+            // when the pause or hold lifts. Unreadable pauses hold every
+            // pair.
+            let paused = engine.paused_pairs().ok();
             let held: HashSet<PairId> = candidates
                 .iter()
-                .filter(|pair| engine.automatic_hold(pair, environment).is_some())
+                .filter(|pair| {
+                    paused
+                        .as_ref()
+                        .is_none_or(|paused| paused.contains(&pair.id()))
+                        || engine.automatic_hold(pair, environment).is_some()
+                })
                 .map(PairConfig::id)
                 .collect();
             (candidates, held, last_run)
