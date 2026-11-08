@@ -40,12 +40,14 @@ Raw version hints are captured before alignment; subsequent planning exclusions
 preserve snapshot values. All 334 endpoint tests, 194 engine tests and workspace
 clippy pass for this follow-up. Its CI and review are recorded on its PR.
 
-One 100k LAN no-change run completed cleanly. The attempted paired 100k
+One 100k LAN no-change run completed cleanly. The earlier paired 100k
 baseline and two million-file LAN diagnostics lost SSH and failed. The log-only
 retry completed a matching-folder million-file baseline in 6,927.1 seconds at
-416.7 MB peak RSS, with zero physical writes. Earlier disconnects remain
-unexplained. Fresh 100k comparisons are running. Warm tracked LAN,
-installed-app, complete overnight/device matrix and beta/release readiness
-remain unqualified. Continue using connection diagnostics;
+416.7 MB peak RSS, with zero copies, updates or archives. Earlier disconnects remain
+unexplained. Three new 100k LAN baseline/current pairs completed with zero
+changes. Median complete time was 1410.2 → 571.0 seconds on the shared host;
+all samples and the alternating pair order are retained. Warm tracked
+million-file LAN, installed-app, complete overnight/device matrix and
+beta/release readiness remain unqualified. Continue using connection diagnostics;
 stat-only SFTP trust, weaker durability, larger commit batches, less frequent
 root checks and the other excluded proposals remain outside this work.

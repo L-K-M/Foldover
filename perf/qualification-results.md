@@ -4,7 +4,7 @@ The worthwhile changes in the [action plan](../docs/performance/action-plan.md)
 are implemented. These measurements separate completed runs, failed runs and
 unqualified cases. They do not establish release readiness.
 
-The [evidence bundle](results/qualification-2026-11-08.tar.gz) contains 108 cases:
+The [evidence bundle](results/qualification-2026-11-08.tar.gz) contains 114 cases:
 sanitized JSON summaries, traces, resource reports, samples and provenance.
 The [index](results/index.csv) records revisions, binary hashes, return codes,
 per-iteration timings and kernel peak RSS; the [manifest](results/manifest.json)
@@ -15,9 +15,9 @@ working directory.
 
 Index schema 2 preserves original build descriptions in `source_label` and
 records a full `source_base_commit` when the explicit commit can be resolved.
-A patched build still requires its label and saved source patch. Process-wide
-`harness_elapsed_s` and kernel RSS repeat across that process's iteration rows;
-the `total_s` duration belongs to the individual iteration.
+Interpret patched builds using their labels, base commits and saved source.
+Process-wide `harness_elapsed_s` and kernel RSS repeat across that process's
+iteration rows; the `total_s` duration belongs to the individual iteration.
 
 ## Conditions and limits
 
@@ -39,12 +39,22 @@ it excludes SSH children and the server. Samples may miss short peaks. Raw
 `ps` CPU values are OS reports, not per-phase or instantaneous utilization.
 A zero process return code does not imply that a memory budget passed.
 
-Some older cases record failed `ps` samples; their sampled child/session/CPU
+Some cases record failed `ps` samples; their sampled child/session/CPU
 observations are incomplete. Kernel peak RSS and runner phase durations are
 collected independently of those samples. Earlier runners did not all emit
 `samples.jsonl`; absent files are not reconstructed. Filter failed process
 return codes before comparing complete-run timings. Partial pairs remain as
 failure evidence, with no invented counterpart.
+
+The bundle records historical source gaps in `provenance/legacy-source-gaps.json`.
+The exact intermediate `service1m-expired` diagnostic source and
+`service1m-tight` planner source were not retained. The tight trial records
+its original planner hash, and its two Service probe files match the saved
+terminal source. The included `state-load.rs` is the terminal capture/decode
+probe; earlier synthetic input-only variants predate that API and are not
+claimed to be byte-identical. These historical rows retain their measured
+values and binary hashes. The final signed-agent cases have verified source
+patches and build hashes.
 
 Each paired case uses matched fixtures and saved binaries. Separate experiment
 sets have separate baselines: their speedups must not be added or multiplied.
@@ -77,7 +87,9 @@ and scaling regression cover that production transaction shape.
 
 ## Million-file memory
 
-These are distinct cases, not one continuous speed comparison. Local fixtures
+The table selects diagnostic and qualification cases; the index retains all
+runs, including additional intermediate memory-budget misses. These are
+distinct cases, not one continuous speed comparison. Local fixtures
 contain one million actual 8 KiB files and 1,000 directories on each populated
 side. The initial matching-folder case executes baseline commits with zero
 file writes. First-copy preparation includes full hashing, snapshot storage
@@ -143,7 +155,7 @@ catalog still held the million-file snapshots. Its 554.6 MB peak is retained
 as a failed fixture trial, not a normal million-file preview result. The cause
 of the missing physical files is unknown. A new persistent owned corpus was
 cloned from the intact original: exactly one million actual 8 KiB files per
-side, aged 30 days, then freshly seeded with zero physical writes. That seed
+side, aged 30 days, then freshly seeded with zero copies, updates or archives. That seed
 peaked at 449.4 MB. Before aging its cache, independent streaming checks verified
 all 2,002,000 snapshot rows, the unchanged stat bytes/nanoseconds/versions, all
 other tables and the source catalog hash. File counts were checked again before
@@ -191,8 +203,8 @@ local observation 1.809 s, remote observation 575.466 s, apply 13.670 s and
 total 591.719 s. The apply cost still includes the unchanged root-check,
 lease, history and retention policies.
 
-The attempted three-pair 100k comparison stopped in its first baseline when
-SSH broke after roughly 70k remote files and 1,173 seconds. No after sample
+The earlier attempted three-pair 100k comparison stopped in its first baseline
+when SSH broke after roughly 70k remote files and 1,173 seconds. No after sample
 or remaining pairs completed. A separate million-file prepare-only LAN run
 failed after 3,712.8 seconds, around 470k remote files, with a broken SSH
 transport. Its peak was 513.9 MB on the earlier representation. Neither is
@@ -207,8 +219,22 @@ This uses a fresh catalog over two already populated matching million-file
 folders; it establishes their baseline, rather than qualifying warm tracked
 input loading. Its binary has the earlier final production core plus logging
 only. The subsequent comparison-lifetime change is qualified by the agent cases.
-Three new 100k baseline/current pairs are running and are excluded from this
-bundle until their results are complete.
+
+The new 100k comparison completed all three baseline/current pairs with
+zero copies, updates or archives. Every sample cloned the same closed
+tracked catalog and used the same unchanged corpus. Pair order was
+before/after, after/before, before/after. The original baseline is
+`6c15c8e`; the optimized production build is `b48dc43`. This compares the
+combined changes, rather than isolating the final lifetime adjustment.
+
+| Phase | Before samples, seconds | After samples, seconds | Median before → after |
+|---|---|---|---|
+| Remote observation | 1365.221, 1396.490, 1392.555 | 554.243, 549.650, 559.371 | 1392.555 → 554.243 |
+| Complete run | 1388.364, 1413.605, 1410.236 | 570.989, 567.723, 574.902 | 1410.236 → 570.989 |
+
+These are shared-host runs with uncontrolled OS caches. All six complete
+samples, their kernel RSS, binary hashes and final comparison checks are
+included in the bundle. Earlier failed comparisons remain in the index.
 
 The owner reports no known SSH session limits or network interruptions.
 Read-only checks found no corresponding Mac sleep event. The API-provided
@@ -240,7 +266,7 @@ observation. Raw scripts, counts and results are retained.
 - The two-write read-finish variant had repeated long outliers. Keep the
   repeatable one-write implementation; the neutral and regressive samples
   remain in the bundle.
-- Thin LTO with one codegen unit produced a 15.3% smaller example binary
+- Thin LTO with one codegen unit produced a 15.2% smaller example binary
   (10,135,184 → 8,590,368 bytes), but three paired local 10k runs showed no
   repeatable runtime gain. Median total was 318.72 → 325.18 ms, with overlapping
   ranges. Keep the release defaults. The default build reused registry
@@ -264,7 +290,8 @@ focused tests passed locally. The full local CI command still reports three
 native filesystem failures also reproduced on unchanged main: changing
 resource-fork work bounds, quarantine preservation and archive-restoration
 mode expectations. They are not reported as passing. CI/review for the final
-commit is recorded on the integration PR.
+commit is recorded on the [integration](https://github.com/L-K-M/Foldover/pull/268)
+and [agent follow-up](https://github.com/L-K-M/Foldover/pull/269) PRs.
 
 Warm tracked million-file LAN qualification, true cold-cache runs, installed-app
 qualification, the full physical-device/overnight matrix and release/beta
