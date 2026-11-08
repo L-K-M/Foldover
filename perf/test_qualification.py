@@ -4,12 +4,15 @@
 import importlib.util
 import json
 import os
+import pathlib
 import signal
+import threading
 import time
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -35,6 +38,58 @@ def process_line():
     return "printf 'process\\t%s\\n' \"$$\"\n"
 
 
+class FakeStdout:
+    def __init__(self, lines, close_error=None):
+        self.lines = lines
+        self.close_error = close_error
+        self.closed = False
+
+    def __iter__(self):
+        return iter(self.lines)
+
+    def close(self):
+        self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
+
+
+class FakeChild:
+    def __init__(self, stdout, wait_results, poll_result=None, pid=4242):
+        self.stdout = stdout
+        self.pid = pid
+        self._wait_results = list(wait_results)
+        self._poll_result = poll_result
+        self.wait_calls = []
+
+    def wait(self, timeout=None):
+        self.wait_calls.append(timeout)
+        result = self._wait_results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    def poll(self):
+        return self._poll_result
+
+
+class ThreadSpy:
+    """Record the harness's Event and Thread objects without global patches."""
+
+    def __init__(self):
+        self.events = []
+        self.threads = []
+
+    def Event(self):
+        event = threading.Event()
+        self.events.append(event)
+        return event
+
+    def Thread(self, target, args=(), kwargs=None):
+        thread = threading.Thread(target=target, args=args, kwargs=kwargs or {})
+        self.threads.append(thread)
+        return thread
+
+
 class HarnessTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -56,6 +111,61 @@ class HarnessTests(unittest.TestCase):
 
     def summary(self, output):
         return json.loads((output / "summary.json").read_text(encoding="utf-8"))
+
+    def run_fake_child(self, lines, *, killpg_side_effect=None, close_error=None,
+                       parse_failure=False, wait_results=(0, 0), poll_result=None):
+        """Run the harness in-process with a fake child, capturing cleanup state."""
+        output = self.root / "out-cleanup"
+        runner = write_runner(self.root, "")
+        fake_stdout = FakeStdout(lines, close_error=close_error)
+        child = FakeChild(fake_stdout, wait_results, poll_result)
+        spy = ThreadSpy()
+        fake_subprocess = types.SimpleNamespace(
+            Popen=mock.Mock(return_value=child),
+            TimeoutExpired=subprocess.TimeoutExpired,
+            run=subprocess.run,
+            DEVNULL=subprocess.DEVNULL,
+            PIPE=subprocess.PIPE,
+            CalledProcessError=subprocess.CalledProcessError,
+            check_output=subprocess.check_output,
+        )
+        arguments = [str(HARNESS), "--runner", str(runner), "--state", "state",
+                     "--left", "left", "--right", "right", "--iterations", "1",
+                     "--label", "cleanup", "--output", str(output),
+                     "--revision", "test-revision"]
+        error = None
+        try:
+            with mock.patch.object(sys, "argv", arguments), \
+                    mock.patch.object(self.harness, "subprocess", fake_subprocess), \
+                    mock.patch.object(self.harness, "threading", spy), \
+                    mock.patch.object(self.harness.os, "killpg",
+                                      side_effect=killpg_side_effect):
+                if parse_failure:
+                    original = self.harness.parse_record
+                    def fail_metric(line, line_number):
+                        if line.startswith("metric"):
+                            raise RuntimeError("injected parser failure")
+                        return original(line, line_number)
+                    with mock.patch.object(self.harness, "parse_record",
+                                          side_effect=fail_metric):
+                        self.harness.main()
+                else:
+                    self.harness.main()
+        except BaseException as caught:
+            error = caught
+        finally:
+            spy.stopped_before_test_cleanup = all(event.is_set() for event in spy.events)
+            spy.joined_before_test_cleanup = all(not thread.is_alive() for thread in spy.threads)
+            for event in spy.events:
+                event.set()
+            for thread in spy.threads:
+                if thread.is_alive():
+                    thread.join(timeout=5)
+        summary_path = output / "summary.json"
+        summary = None
+        if summary_path.exists():
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        return error, summary, spy, child
 
     def test_valid_phase_and_metric_records_succeed(self):
         runner = write_runner(self.root, process_line() +
@@ -204,6 +314,124 @@ class HarnessTests(unittest.TestCase):
                         os.kill(int(path.read_text()), signal.SIGKILL)
                     except ProcessLookupError:
                         pass
+
+    def test_interrupt_during_cleanup_stops_sampling_and_preserves_primary_error(self):
+        for parse_failure in (False, True):
+            with self.subTest(parse_failure=parse_failure):
+                # Each invocation uses a new output directory.
+                self.root = self.root / ("primary" if parse_failure else "interrupt")
+                self.root.mkdir()
+                error, summary, spy, child = self.run_fake_child(
+                    ["process\t4242\n", "metric\t0\tTotal\t1\n"],
+                    killpg_side_effect=KeyboardInterrupt("cleanup interrupted"),
+                    parse_failure=parse_failure,
+                )
+                self.assertTrue(spy.stopped_before_test_cleanup)
+                self.assertTrue(spy.joined_before_test_cleanup)
+                self.assertIsNotNone(summary)
+                self.assertTrue(any("KeyboardInterrupt" in item for item in summary["cleanup_errors"]))
+                if parse_failure:
+                    self.assertIsInstance(error, RuntimeError)
+                    self.assertIn("injected parser failure", str(error))
+                else:
+                    self.assertIsInstance(error, KeyboardInterrupt)
+
+    def test_sigkill_process_group_race_reaps_and_preserves_status(self):
+        error, summary, spy, child = self.run_fake_child(
+            ["process\t4242\n", "metric\t0\tTotal\t1\n"],
+            killpg_side_effect=[None, ProcessLookupError("group already gone")],
+            wait_results=[0, subprocess.TimeoutExpired(cmd="time", timeout=5), 0],
+        )
+        self.assertIsNone(error)
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary["cleanup_errors"], [])
+        self.assertEqual(summary["returncode"], 0)
+        self.assertTrue(spy.events[0].is_set())
+        self.assertTrue(all(not thread.is_alive() for thread in spy.threads))
+
+    def test_killpg_permission_error_records_actionable_error_and_fails(self):
+        error, summary, spy, child = self.run_fake_child(
+            ["process\t4242\n", "metric\t0\tTotal\t1\n"],
+            killpg_side_effect=PermissionError("killpg refused"),
+        )
+        self.assertIsInstance(error, SystemExit)
+        self.assertEqual(error.code, 1)
+        self.assertIsNotNone(summary)
+        self.assertTrue(any("PermissionError" in item and "4242" in item
+                            for item in summary["cleanup_errors"]))
+        self.assertIn("PermissionError", summary["error"])
+        self.assertTrue(spy.events[0].is_set())
+        self.assertTrue(all(not thread.is_alive() for thread in spy.threads))
+
+    def test_stdout_close_failure_records_actionable_error_and_fails(self):
+        error, summary, spy, child = self.run_fake_child(
+            ["process\t4242\n", "metric\t0\tTotal\t1\n"],
+            close_error=OSError("stdout close refused"),
+        )
+        self.assertIsInstance(error, SystemExit)
+        self.assertEqual(error.code, 1)
+        self.assertIsNotNone(summary)
+        self.assertTrue(any("stdout" in item and "OSError" in item
+                            for item in summary["cleanup_errors"]))
+        self.assertIn("stdout", summary["error"])
+        self.assertTrue(spy.events[0].is_set())
+        self.assertTrue(all(not thread.is_alive() for thread in spy.threads))
+
+    def test_cleanup_failure_preserves_primary_parser_exception(self):
+        error, summary, spy, child = self.run_fake_child(
+            ["process\t4242\n", "metric\t0\tTotal\t1\n"],
+            killpg_side_effect=PermissionError("killpg refused"),
+            parse_failure=True,
+        )
+        self.assertIsInstance(error, RuntimeError)
+        self.assertIn("injected parser failure", str(error))
+        self.assertIsNotNone(summary)
+        self.assertIn("injected parser failure", summary["error"])
+        self.assertTrue(summary["cleanup_errors"])
+        self.assertTrue(spy.events[0].is_set())
+        self.assertTrue(all(not thread.is_alive() for thread in spy.threads))
+
+    def test_cleanup_signals_stopped_and_joins_sampler_before_summary_write(self):
+        output = self.root / "out-order"
+        runner = write_runner(self.root, "")
+        fake_stdout = FakeStdout(["process\t4242\n", "metric\t0\tTotal\t1\n"],
+                                 close_error=OSError("stdout close refused"))
+        child = FakeChild(fake_stdout, [0, 0])
+        spy = ThreadSpy()
+        fake_subprocess = types.SimpleNamespace(
+            Popen=mock.Mock(return_value=child),
+            TimeoutExpired=subprocess.TimeoutExpired,
+            run=subprocess.run,
+            DEVNULL=subprocess.DEVNULL,
+            PIPE=subprocess.PIPE,
+            CalledProcessError=subprocess.CalledProcessError,
+            check_output=subprocess.check_output,
+        )
+        arguments = [str(HARNESS), "--runner", str(runner), "--state", "state",
+                     "--left", "left", "--right", "right", "--iterations", "1",
+                     "--label", "order", "--output", str(output),
+                     "--revision", "test-revision"]
+        observed = []
+        original_write_text = pathlib.Path.write_text
+        def spy_write_text(self, data, *args, **kwargs):
+            observed.append((spy.events[0].is_set(),
+                             all(not thread.is_alive() for thread in spy.threads)))
+            return original_write_text(self, data, *args, **kwargs)
+        try:
+            with mock.patch.object(sys, "argv", arguments), \
+                    mock.patch.object(self.harness, "subprocess", fake_subprocess), \
+                    mock.patch.object(self.harness, "threading", spy), \
+                    mock.patch.object(pathlib.Path, "write_text", autospec=True,
+                                      side_effect=spy_write_text):
+                with self.assertRaises(SystemExit):
+                    self.harness.main()
+        finally:
+            for event in spy.events:
+                event.set()
+            for thread in spy.threads:
+                if thread.is_alive():
+                    thread.join(timeout=5)
+        self.assertEqual(observed, [(True, True)])
 
     def test_existing_output_directory_is_preserved(self):
         runner = write_runner(self.root, "printf 'metric\\t0\\tTotal\\t1\\n'\n")

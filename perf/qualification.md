@@ -39,9 +39,11 @@ not contention on the service's mutex. Test concurrent service activity separate
 
 Results retain a TSV trace, `/usr/bin/time` resource report including peak RSS,
 and JSON host/revision/load/phase samples with RSS and CPU readings. Sampling and
-reporting add overhead to total time. Kernel peak RSS covers transient peaks
-between samples. Phases can overlap only when the implementation supports it;
-do not add overlapping phase times to predict total duration.
+reporting add overhead to total time. CPU percentages are point-in-time snapshots
+reported by the OS for the whole process, not per-phase CPU measurements. Kernel
+peak RSS covers transient peaks between samples. Phases can overlap only when
+the implementation supports it; do not add overlapping phase times to predict
+total duration.
 For saved binaries, pass `--revision` with their source commit rather than the
 current checkout's commit. The binary's SHA-256 is recorded independently.
 
