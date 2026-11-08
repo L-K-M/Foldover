@@ -364,6 +364,12 @@ impl<T> PathMapBuilder<T> {
         Self { rows: Vec::new() }
     }
 
+    /// Takes an existing row allocation, including unordered or duplicate
+    /// keys. Freezing applies the usual last-insertion rule in place.
+    pub fn from_rows(rows: Vec<(SyncPath, T)>) -> Self {
+        Self { rows }
+    }
+
     /// An empty builder with room for `capacity` observations.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
@@ -821,6 +827,18 @@ mod tests {
         assert!(std::ptr::eq(before, map.rows.as_ptr()));
         assert_eq!(map.len(), 3);
         assert_eq!(map.capacity(), map.len());
+    }
+
+    #[test]
+    fn builder_accepts_an_existing_row_allocation() {
+        let rows = vec![(path(b"b"), 2), (path(b"a"), 1), (path(b"b"), 3)];
+        let before = rows.as_ptr();
+        let builder = PathMapBuilder::from_rows(rows);
+        assert!(std::ptr::eq(before, builder.rows.as_ptr()));
+        let map = builder.freeze();
+        assert_eq!(map.len(), 2);
+        assert_eq!(map[&path(b"a")], 1);
+        assert_eq!(map[&path(b"b")], 3);
     }
 
     #[test]
