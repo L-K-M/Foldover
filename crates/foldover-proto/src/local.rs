@@ -261,6 +261,18 @@ impl Response {
 mod tests {
     use super::*;
 
+    /// The raw-wire agent smoke test negotiates this version by number;
+    /// a bump that misses it fails only on Linux CI, because macOS refuses
+    /// the unsigned script before negotiating.
+    #[test]
+    fn the_agent_smoke_test_negotiates_this_protocol() {
+        let script = include_str!("../../../scripts/test-agent.py");
+        assert!(
+            script.contains(&format!("\nPROTOCOL_VERSION = {PROTOCOL_VERSION}\n")),
+            "update PROTOCOL_VERSION in scripts/test-agent.py"
+        );
+    }
+
     #[test]
     fn distinguishes_notifications_from_null_ids() {
         let notification =
