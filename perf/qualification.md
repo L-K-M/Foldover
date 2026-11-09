@@ -47,6 +47,12 @@ total duration.
 For saved binaries, pass `--revision` with their source commit rather than the
 current checkout's commit. The binary's SHA-256 is recorded independently.
 
+`--effort gentle` measures a gentle automatic run
+([ADR 0054](../docs/adr/0054-gentle-automatic-syncs.md)): the runner sets
+`FOLDOVER_PERF_EFFORT` for the Rust harness, which lowers its run thread
+and passes the effort to the run. The default, `full`, measures a run a
+person starts.
+
 Use 10k files for development, 100k for comparisons and 1M for qualification.
 Vary `--bytes` (1/8/32 KiB and a separate large-file set) and `--width` for flat
 and nested trees. Corpus bytes are deterministic, unique, incompressible SHAKE

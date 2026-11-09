@@ -9,8 +9,8 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use foldover_engine::{
-    Approval, Completion, Engine, ObserveStep, PairRun, RunContext, RunOutcome, RunPhase,
-    RunProgress, StateLocation,
+    Approval, Completion, Effort, Engine, ObserveStep, PairRun, RunContext, RunOutcome, RunPhase,
+    RunProgress, StateLocation, ThreadEffort,
 };
 use foldover_types::{
     Durability, MetadataPolicy, PairDraft, PairOptions, PairRoot, Propagation, ScanControl, Side,
@@ -121,6 +121,19 @@ fn validate_pair_root(root: &PairRoot) -> Result<(), String> {
     Ok(())
 }
 
+/// `FOLDOVER_PERF_EFFORT=gentle` measures the agent's gentle automatic
+/// runs (ADR 0054); runs are at full effort otherwise.
+fn effort() -> Result<Effort, Box<dyn Error>> {
+    match std::env::var_os("FOLDOVER_PERF_EFFORT")
+        .as_deref()
+        .map(OsStr::as_bytes)
+    {
+        None | Some(b"full") => Ok(Effort::Full),
+        Some(b"gentle") => Ok(Effort::Gentle),
+        Some(_) => Err("FOLDOVER_PERF_EFFORT must be gentle or full".into()),
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     println!("process\t{}", std::process::id());
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -167,6 +180,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         ),
         Durability::Standard,
     ));
+    let effort = effort()?;
+    // As on the agent's job thread: readers and copy workers enter it too.
+    let _effort = ThreadEffort::enter(effort);
     let mut engine = Engine::open(&StateLocation::Directory(PathBuf::from(&args[0])))?;
     let pairs = engine.pairs()?;
     let pair = match pairs.as_slice() {
@@ -183,7 +199,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
         let total = Instant::now();
         let loaded = Instant::now();
-        let inputs = engine.run_inputs(pair.id())?;
+        let inputs = engine.run_inputs(pair.id())?.with_effort(effort);
         metric(iteration, "InputLoad", loaded.elapsed());
         let prepared = Instant::now();
         let run = PairRun::prepare(inputs, &mut || ScanControl::Continue, &progress)?;

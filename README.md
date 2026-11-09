@@ -120,7 +120,8 @@ The suffix selects the source. Options follow the mode:
 lets a `backup-*` target that cannot hold `.foldover` keep nothing: files
 replaced there are deleted, not archived, and Undo is unavailable
 (default `both`). `--schedule` takes
-`manual` (default), `changes` (sync shortly after files change, and hourly)
+`manual` (default), `changes` (sync shortly after files change, and an hour
+after the last sync)
 or a number of minutes between automatic syncs, which start after the first
 sync you run yourself. `--exclude PATTERN` (repeatable) sets gitignore-style
 rules for files to skip in both folders; a `.foldoverignore` file in either
@@ -159,6 +160,7 @@ foldover sync ID --undo          # undo the newest sync that changed anything
 foldover history ID              # finished runs, newest first
 foldover pause [MINUTES]         # hold automatic syncs; `foldover resume` ends it
 foldover pairs pause|resume ID   # hold one pair's automatic syncs, or end it
+foldover automation effort full  # automatic syncs at full speed; `gentle` is the default
 foldover safe-mode off           # sync again after the agent kept crashing
 foldover archive ID left         # archived runs in folder A, newest first
 foldover archive ID left RUN     # items one run archived

@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 use foldover_engine::{
-    ChangePoll, Environment, PairWatcher, PollMode, Polled, Reach, WatchCursor, local_time,
+    ChangePoll, Effort, Environment, PairWatcher, PollMode, Polled, Reach, WatchCursor, local_time,
 };
 use foldover_proto::local::SyncStatus;
 use foldover_types::{LocalDateTime, PairConfig, PairId, PairRoot, Schedule, Side};
@@ -37,7 +37,9 @@ const POLL: Duration = Duration::from_secs(5 * 60);
 /// How often a quiet pair records where its folders' event history
 /// stands, so a restart replays only what came after.
 const CURSOR_SAVE: Duration = Duration::from_secs(60);
-/// On-change pairs are also verified this often.
+/// On-change pairs are also verified this long after their last preview
+/// or sync ended, so a run longer than this is not followed at once by
+/// the next.
 const VERIFY: Duration = Duration::from_secs(60 * 60);
 /// A share that went away is mounted again at most this often.
 const RECONNECT: Duration = Duration::from_secs(5 * 60);
@@ -118,6 +120,9 @@ impl PollSlot {
 pub(crate) struct Scheduler {
     started: Instant,
     last: Mutex<HashMap<PairId, Instant>>,
+    /// The last tick that saw each pair's preview, sync or undo starting
+    /// or running: within a tick of when it ended.
+    busy: Mutex<HashMap<PairId, Instant>>,
     changed: Mutex<HashMap<PairId, Instant>>,
     /// When each pair's folders first changed since its last run.
     churning: Mutex<HashMap<PairId, Instant>>,
@@ -154,6 +159,7 @@ impl Scheduler {
         Self {
             started,
             last: Mutex::default(),
+            busy: Mutex::default(),
             changed: Mutex::default(),
             churning: Mutex::default(),
             watcher: Mutex::default(),
@@ -174,6 +180,13 @@ impl Scheduler {
     #[cfg(test)]
     pub(crate) fn started(&self) -> Instant {
         self.started
+    }
+
+    /// As if a check of the pair's folders had just found both.
+    #[cfg(test)]
+    pub(crate) fn checked(&self, id: PairId) {
+        self.probe_started(id);
+        self.probe_done(id, None);
     }
 
     /// Record a change; the pair runs once changes stop for `QUIET`, or
@@ -228,7 +241,7 @@ impl Scheduler {
                     .copied();
                 changed.is_some_and(|at| now.saturating_duration_since(at) >= QUIET)
                     || first.is_some_and(|at| now.saturating_duration_since(at) >= CHURN)
-                    || since >= VERIFY
+                    || self.since_busy(pair.id(), previous, now) >= VERIFY
             }
             // The latest scheduled moment must be newer than the last
             // run's start: a moment missed while the agent slept or was
@@ -239,6 +252,34 @@ impl Scheduler {
                 None => false,
             },
         }
+    }
+
+    /// Time since the pair's last scheduled start or, when later, the last
+    /// tick that saw any of its jobs working: roughly since it ended.
+    fn since_busy(&self, id: PairId, previous: Instant, now: Instant) -> Duration {
+        let busy = self
+            .busy
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .copied();
+        now.saturating_duration_since(busy.map_or(previous, |busy| busy.max(previous)))
+    }
+
+    /// Note the pairs whose jobs are starting or running at `now`.
+    fn saw_busy(&self, ids: &HashSet<PairId>, now: Instant) {
+        let mut busy = self.busy.lock().unwrap_or_else(PoisonError::into_inner);
+        for id in ids {
+            busy.insert(*id, now);
+        }
+    }
+
+    /// Order `pairs` by how long since each last started here, oldest
+    /// first, never-started first of all: when only one may start, a
+    /// pair that is always due cannot keep the others waiting.
+    fn order_by_wait(&self, pairs: &mut [PairConfig]) {
+        let last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        pairs.sort_by_key(|pair| last.get(&pair.id()).copied());
     }
 
     /// Forget the polls of pairs no longer changing-triggered, and those
@@ -605,7 +646,7 @@ impl Service {
         environment: Environment,
         local_now: Option<LocalDateTime>,
     ) -> Vec<PairId> {
-        let (candidates, held, last_run) = {
+        let (mut candidates, held, last_run, effort) = {
             let Ok(engine) = self.engine.lock() else {
                 return Vec::new();
             };
@@ -650,7 +691,9 @@ impl Service {
                 })
                 .map(PairConfig::id)
                 .collect();
-            (candidates, held, last_run)
+            // An unreadable choice runs automatic syncs gently.
+            let effort = engine.automatic_effort().unwrap_or(Effort::Gentle);
+            (candidates, held, last_run, effort)
         };
         let changing: Vec<_> = candidates
             .iter()
@@ -667,6 +710,16 @@ impl Service {
         self.poll(&changing, &held, &reach, now);
         self.save_cursors(&changing, &held, now);
 
+        let busy = self.jobs.busy();
+        self.scheduler.saw_busy(&busy, now);
+        // Gentle automatic syncs run one at a time, and none beside a
+        // preview or sync a person started (ADR 0054).
+        let mut room = match effort {
+            Effort::Full => usize::MAX,
+            Effort::Gentle if busy.is_empty() => 1,
+            Effort::Gentle => 0,
+        };
+        self.scheduler.order_by_wait(&mut candidates);
         let mut started = Vec::new();
         for pair in candidates {
             if held.contains(&pair.id())
@@ -682,8 +735,16 @@ impl Service {
                     self.jobs.wait_for(pair.id(), side);
                     continue;
                 }
+                Gate::Start if room == 0 => continue,
                 Gate::Start => {}
                 Gate::Probe => {
+                    // When one may start, the pair whose turn it is keeps it
+                    // for this tick while its folders are checked. A check
+                    // slower than a tick gives the turn up, so a dead share
+                    // never holds the others.
+                    if effort == Effort::Gentle {
+                        room = 0;
+                    }
                     self.scheduler.probe_started(pair.id());
                     let service = self.clone();
                     // Folder checks touch disks and networks; a parked or
@@ -706,6 +767,7 @@ impl Service {
             {
                 self.scheduler.started_run(pair.id(), now);
                 started.push(pair.id());
+                room -= 1;
             }
         }
         started

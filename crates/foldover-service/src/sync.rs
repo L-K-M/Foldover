@@ -18,9 +18,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Instant, SystemTime};
 
 use foldover_engine::{
-    Action, Approval, Commit, Completion, DeletionReview, Engine, KeepBothError, ObserveStep,
-    PairRun, Preview, PreviewItem, RunContext, RunError, RunOutcome, RunProgress, RunReport,
-    UndoReport, missing_side, reconnect,
+    Action, Approval, Commit, Completion, DeletionReview, Effort, Engine, KeepBothError,
+    ObserveStep, PairRun, Preview, PreviewItem, RunContext, RunError, RunOutcome, RunProgress,
+    RunReport, ThreadEffort, UndoReport, missing_side, reconnect,
 };
 use foldover_proto::local::RpcError;
 use foldover_proto::local::{
@@ -48,6 +48,16 @@ pub(crate) enum Work {
 }
 
 impl Work {
+    /// How hard this work may run (ADR 0054): what a person asked for runs
+    /// at full effort; automatic syncs follow the person's setting, and an
+    /// unreadable setting runs them gently.
+    fn effort(self, engine: &Engine) -> Effort {
+        match self {
+            Self::Scheduled => engine.automatic_effort().unwrap_or(Effort::Gentle),
+            Self::Preview | Self::Run(..) | Self::Undo => Effort::Full,
+        }
+    }
+
     fn job(self) -> SyncJob {
         match self {
             Self::Preview => SyncJob::Preview,
@@ -524,6 +534,17 @@ impl Jobs {
         }
     }
 
+    /// Pairs with a preview, sync or undo starting or running.
+    pub(crate) fn busy(&self) -> HashSet<PairId> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let working = state
+            .jobs
+            .iter()
+            .filter(|(_, job)| matches!(job.status, SyncStatus::Working { .. }))
+            .map(|(id, _)| *id);
+        state.claiming.keys().copied().chain(working).collect()
+    }
+
     pub(crate) fn cancel(&self, id: PairId) {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(cancel) = state.claiming.get(&id) {
@@ -913,12 +934,18 @@ fn perform(
     progress: &Progress,
 ) -> Done {
     let failed = |message: String| Done::from((SyncStatus::Failed { message }, None));
-    let captured = match engine.lock() {
-        Ok(engine) => engine
-            .capture_run_inputs(id)
-            .and_then(|pending| engine.mounts(id).map(|mounts| (pending, mounts))),
+    let (captured, effort) = match engine.lock() {
+        Ok(engine) => (
+            engine
+                .capture_run_inputs(id)
+                .and_then(|pending| engine.mounts(id).map(|mounts| (pending, mounts))),
+            work.effort(&engine),
+        ),
         Err(_) => return failed("The sync engine failed".into()),
     };
+    // This thread's share of the run: decoding, the walk, planning and
+    // commits. Readers and copy workers enter the effort themselves.
+    let _effort = ThreadEffort::enter(effort);
     let (pending, mounts) = match captured {
         Ok(captured) => captured,
         Err(error) => return failed(error.to_string()),
@@ -926,7 +953,7 @@ fn perform(
     // Decode the captured trees outside the lock, before endpoints,
     // mounts or planning touch anything.
     let inputs = match pending.decode() {
-        Ok(inputs) => inputs.with_skips(skips),
+        Ok(inputs) => inputs.with_skips(skips).with_effort(effort),
         Err(error) => return failed(error.to_string()),
     };
     let journal = match work {
@@ -1355,6 +1382,24 @@ mod tests {
             Arc::new(Mutex::new(engine)),
             Arc::new(Jobs::default()),
         )
+    }
+
+    /// ADR 0054: only automatic syncs follow the effort setting.
+    #[test]
+    fn only_automatic_syncs_follow_the_effort_setting() {
+        let (_directory, engine, _jobs) = fixture();
+        let mut engine = engine.lock().unwrap();
+        for effort in [Effort::Gentle, Effort::Full] {
+            engine.set_automatic_effort(effort).unwrap();
+            assert_eq!(Work::Scheduled.effort(&engine), effort);
+            for work in [
+                Work::Preview,
+                Work::Run(Approval::default(), None),
+                Work::Undo,
+            ] {
+                assert_eq!(work.effort(&engine), Effort::Full, "{work:?}");
+            }
+        }
     }
 
     #[tokio::test]

@@ -31,8 +31,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use foldover_net::sftp::{Attributes, FileKind, Handle, Session, SshTarget};
 use foldover_types::{
-    Digest, Durability, EndpointId, EntryKind, EntryVersion, MetadataPolicy, PathPrefixIndex,
-    ScanControl, SftpRoot, SyncPath,
+    Digest, Durability, Effort, EndpointId, EntryKind, EntryVersion, MetadataPolicy,
+    PathPrefixIndex, ScanControl, SftpRoot, SyncPath,
 };
 
 use crate::lease::{LEASE_LIMIT, LockFile};
@@ -99,6 +99,10 @@ pub struct SftpEndpoint {
     /// in the wrong spelling, a refetch costs one `read_dir`. Indexed
     /// and bounded, so a wide folder costs one lookup, not one scan.
     listings: Mutex<spelling::Listings>,
+    /// The priority the observation's readers take: `Full` until a run
+    /// says. Their number stays: they wait on the server, not the
+    /// processor (ADR 0054).
+    effort: Effort,
 }
 
 impl SftpEndpoint {
@@ -202,7 +206,13 @@ impl SftpEndpoint {
             server: None,
             root,
             listings: Mutex::default(),
+            effort: Effort::Full,
         })
+    }
+
+    /// Observe at `effort` from now on.
+    pub fn set_effort(&mut self, effort: Effort) {
+        self.effort = effort;
     }
 
     /// A session to use alone until it drops. Hold one at a time: a
@@ -607,7 +617,7 @@ impl SftpEndpoint {
             self.observe_entry(path, attributes, previous, policy, &mut || asked())
         };
         let (walked, finish_reads) = thread::scope(|threads| {
-            let mut pending = Reads::start(threads, workers, &stop, &read);
+            let mut pending = Reads::start(threads, workers, self.effort, &stop, &read);
             let walked = self.walk_observation(
                 policy,
                 filter,

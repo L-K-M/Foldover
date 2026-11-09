@@ -11,8 +11,9 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime};
 
 use foldover_types::{
-    BaselineEntry, CaseMatching, Durability, EndpointId, EntryVersion, LocalRoot, MetadataPolicy,
-    NameMatching, PairOptions, PairRoot, PathMap, ScanControl, Side, SyncPath, UnicodeMatching,
+    BaselineEntry, CaseMatching, Durability, Effort, EndpointId, EntryVersion, LocalRoot,
+    MetadataPolicy, NameMatching, PairOptions, PairRoot, PathMap, ScanControl, Side, SyncPath,
+    UnicodeMatching,
 };
 
 use crate::lease::LockFile;
@@ -84,6 +85,16 @@ pub enum ObserveStep {
     Listed,
     /// An entry's version is known, read or reused.
     Checked,
+}
+
+/// What limits a folder's reads and writes, so a gentle run narrows only
+/// work that competes for this Mac's processor (ADR 0054).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Bottleneck {
+    /// A disk of this Mac: reads and copies take processor time.
+    Local,
+    /// A share, a server or another Mac: work mostly waits on the network.
+    Network,
 }
 
 pub enum Endpoint {
@@ -380,6 +391,29 @@ impl Endpoint {
     /// Whether this folder takes moves (`move_entry`).
     pub fn moves(&self) -> bool {
         !matches!(self, Self::Peer(_))
+    }
+
+    /// Observe this folder at `effort` from now on (ADR 0054). Folders on
+    /// other Macs are observed there, so only their copies, which the run
+    /// makes, take an effort.
+    pub fn set_effort(&mut self, effort: Effort) {
+        match self {
+            Self::Local(endpoint) => endpoint.set_effort(effort),
+            Self::Sftp(endpoint) => endpoint.set_effort(effort),
+            Self::Peer(_) => {}
+            #[cfg(feature = "simulation")]
+            Self::Memory(_) => {}
+        }
+    }
+
+    /// What limits this folder's reads and writes.
+    pub fn bottleneck(&self) -> Bottleneck {
+        match self {
+            Self::Local(endpoint) => endpoint.bottleneck(),
+            Self::Sftp(_) | Self::Peer(_) => Bottleneck::Network,
+            #[cfg(feature = "simulation")]
+            Self::Memory(_) => Bottleneck::Local,
+        }
     }
 
     /// How many copies into or out of this folder may run at once (PLAN.md

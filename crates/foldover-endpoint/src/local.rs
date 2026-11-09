@@ -28,8 +28,8 @@ use foldover_fs::{
 use foldover_fs::{DeclaredSupport, FilesystemFeature};
 pub use foldover_types::ScanControl;
 use foldover_types::{
-    BaselineEntry, Digest, EntryVersion, InvalidSyncPath, MetadataPolicy, NameMatching, PathMap,
-    PathMapBuilder, PathPrefixIndex, Side, SyncPath,
+    BaselineEntry, Digest, Effort, EntryVersion, InvalidSyncPath, MetadataPolicy, NameMatching,
+    PathMap, PathMapBuilder, PathPrefixIndex, Side, SyncPath,
 };
 #[cfg(target_os = "macos")]
 use foldover_types::{CaseMatching, UnicodeMatching};
@@ -41,7 +41,7 @@ use crate::observation_cache::{Cache, Comparison, Recycled};
 use crate::observation_entries::ObservationEntries;
 use crate::observation_reads::Reads;
 use crate::observation_versions::{ObservationOrigin, ObservedVersion, VersionPoolBuilder};
-use crate::{ListedEntry, ListedKind, ObservationHints, ObserveStep};
+use crate::{Bottleneck, ListedEntry, ListedKind, ObservationHints, ObserveStep};
 
 pub(crate) use apply::Archiving;
 pub use apply::{ApplyError, Expected, RunScope};
@@ -60,6 +60,8 @@ pub struct LocalEndpoint {
     root: Root,
     identity: FileIdentity,
     state: Option<ProtectedState>,
+    /// How hard observing this folder may work: `Full` until a run says.
+    effort: Effort,
 }
 
 /// Where the agent's own state directory sits under this root. A root may
@@ -1090,7 +1092,13 @@ impl LocalEndpoint {
             root,
             identity,
             state,
+            effort: Effort::Full,
         })
+    }
+
+    /// Observe at `effort` from now on (ADR 0054).
+    pub fn set_effort(&mut self, effort: Effort) {
+        self.effort = effort;
     }
 
     /// `path` is the state directory or inside it.
@@ -1183,6 +1191,28 @@ impl LocalEndpoint {
         match self.root.medium() {
             Ok(Medium::SolidState | Medium::Network) => PARALLEL_COPIES,
             Ok(Medium::Rotational | Medium::Unknown) | Err(_) => NonZeroUsize::MIN,
+        }
+    }
+
+    /// What limits this folder's reads and writes: the network for a
+    /// share, otherwise this Mac's own disk and processor.
+    pub fn bottleneck(&self) -> Bottleneck {
+        match self.root.medium() {
+            Ok(Medium::Network) => Bottleneck::Network,
+            Ok(Medium::SolidState | Medium::Rotational | Medium::Unknown) | Err(_) => {
+                Bottleneck::Local
+            }
+        }
+    }
+
+    /// How many files an observation reads at once. A gentle one reads a
+    /// local disk serially on the run's own thread, so it uses at most
+    /// one core; a share keeps its overlapped reads, which wait on the
+    /// network rather than the processor (ADR 0054).
+    fn readers(&self) -> NonZeroUsize {
+        match (self.effort, self.bottleneck()) {
+            (Effort::Gentle, Bottleneck::Local) => NonZeroUsize::MIN,
+            (Effort::Gentle, Bottleneck::Network) | (Effort::Full, _) => self.workers(),
         }
     }
 
@@ -1581,7 +1611,7 @@ impl LocalEndpoint {
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<Observation, ScanError> {
-        self.observe_reporting_workers(policy, filter, previous, control, progress, self.workers())
+        self.observe_reporting_workers(policy, filter, previous, control, progress, self.readers())
     }
 
     /// `observe_reporting` on a chosen worker count. One worker keeps the
@@ -1628,7 +1658,7 @@ impl LocalEndpoint {
             observation,
             control,
             progress,
-            self.workers(),
+            self.readers(),
         )
     }
 
@@ -1783,7 +1813,7 @@ impl LocalEndpoint {
         let mut failure = None;
         let stop = AtomicBool::new(false);
         let (scanned, finish) = thread::scope(|threads| {
-            let mut pending = Reads::start(threads, workers, &stop, read);
+            let mut pending = Reads::start(threads, workers, self.effort, &stop, read);
             let scanned = self.scan_filtered(filter, &mut |entry| {
                 progress(ObserveStep::Listed);
                 // Directory stats may change during traversal. Refresh those
@@ -2332,6 +2362,20 @@ pub(crate) fn settled_stat(endpoint: &LocalEndpoint, path: &SyncPath, mut mutate
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    /// ADR 0054: a gentle observation reads this Mac's disk serially on the
+    /// run's thread; the copy count narrows in the run, not here.
+    #[test]
+    fn a_gentle_observation_reads_a_local_disk_on_one_thread() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        assert_eq!(endpoint.bottleneck(), Bottleneck::Local);
+        assert_eq!(endpoint.readers(), endpoint.workers());
+        let workers = endpoint.workers();
+        endpoint.set_effort(Effort::Gentle);
+        assert_eq!(endpoint.readers(), NonZeroUsize::MIN);
+        assert_eq!(endpoint.workers(), workers);
+    }
 
     /// PLAN.md §4.8: an unchanged stat stands for a version only until it
     /// is half a week to a week old, so same-size, same-time edits are

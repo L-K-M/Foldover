@@ -9,12 +9,15 @@ N minutes (1 minute to 1 week), or `changes`. Changing it keeps the base.
 
 The agent checks every 5 seconds and starts unattended runs through the same
 job manager as manual runs ([ADR 0021](0021-sync-job-api.md)); a busy pair
-is skipped until its job ends.
+is skipped until its job ends. Gentle automatic syncs, the default, start
+one per check and only while no other preview or sync runs, the
+longest-waiting pair first
+([ADR 0054](0054-gentle-automatic-syncs.md)).
 
 | Schedule | Due |
 |---|---|
 | `every` | One interval after the last scheduled start, or after the agent started |
-| `changes` | 10 seconds after the last change in either folder; at most 5 minutes after the first change since the last run, when changes never stop; and hourly |
+| `changes` | 10 seconds after the last change in either folder; at most 5 minutes after the first change since the last run, when changes never stop; and an hour after the pair's last preview or sync ended, or after its last scheduled start or the agent's start when no job has run since |
 
 - **Change notifications** come from FSEvents on macOS and inotify on
   Linux (the `notify` crate, behind `foldover-watch`). They are hints: a

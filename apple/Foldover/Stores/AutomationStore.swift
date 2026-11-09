@@ -15,6 +15,12 @@ enum LowPowerSyncs: Equatable, Sendable {
     case run
 }
 
+/// How hard automatic syncs may work the Mac (ADR 0054); syncs a person starts always run at full speed.
+enum AutomaticEffort: Equatable, Sendable {
+    case gentle
+    case full
+}
+
 /// Why an automatic sync would wait right now (PLAN.md §3.5).
 enum AutomationHold: Equatable, Sendable {
     case lowPowerMode
@@ -26,6 +32,7 @@ enum AutomationHold: Equatable, Sendable {
 struct AutomationStatus: Equatable, Sendable {
     var state: AutomationState
     var lowPower: LowPowerSyncs = .pause
+    var effort: AutomaticEffort = .gentle
     /// Why an automatic sync would wait now, if one would.
     var heldBy: AutomationHold?
 }
@@ -37,6 +44,8 @@ protocol AutomationClient: Sendable {
     func resume() async throws -> AutomationStatus
     /// Set the choice for automatic syncs in Low Power Mode.
     func setLowPower(_ syncs: LowPowerSyncs) async throws -> AutomationStatus
+    /// Set how hard automatic syncs may work the Mac.
+    func setEffort(_ effort: AutomaticEffort) async throws -> AutomationStatus
 }
 
 // Keep generated async values inside one actor; only native Sendable records leave it.
@@ -56,12 +65,18 @@ private actor CoreAutomationClient: AutomationClient {
         return convert(try await FoldoverCore.setLowPowerSyncs(syncs: syncs))
     }
 
+    func setEffort(_ effort: AutomaticEffort) async throws -> AutomationStatus {
+        let effort: FoldoverCore.AutomaticEffort = effort == .full ? .full : .gentle
+        return convert(try await FoldoverCore.setAutomaticEffort(effort: effort))
+    }
+
     private func convert(_ state: FoldoverCore.AutomationState) -> AutomationStatus {
         AutomationStatus(
             state: state.paused
                 ? .paused(until: state.untilMs.map { Date(timeIntervalSince1970: Double($0) / 1000) })
                 : .running,
             lowPower: state.lowPower == .run ? .run : .pause,
+            effort: state.effort == .full ? .full : .gentle,
             heldBy: state.heldBy.map { held in
                 switch held {
                 case .lowPowerMode: .lowPowerMode
@@ -81,11 +96,15 @@ final class AutomationStore {
     @ObservationIgnored private var mutationTail: Task<Bool, Never>?
     private var mutationSequence = 0
     private var lowPowerSequence = 0
+    private var effortSequence = 0
     private var confirmedLowPower: LowPowerSyncs = .pause
+    private var confirmedEffort: AutomaticEffort = .gentle
     private var desiredLowPower: LowPowerSyncs?
+    private var desiredEffort: AutomaticEffort?
     private(set) var pendingMutations = 0
     private(set) var state: AutomationState = .running
     private(set) var lowPower: LowPowerSyncs = .pause
+    private(set) var effort: AutomaticEffort = .gentle
     /// Why an automatic sync would wait now, if one would.
     private(set) var heldBy: AutomationHold?
     private(set) var error: String?
@@ -130,10 +149,25 @@ final class AutomationStore {
         lowPower = confirmedLowPower
     }
 
+    /// Like `setLowPower`: the newest choice shows at once, and a failed
+    /// newest save returns the last server-confirmed choice.
+    func setEffort(_ effort: AutomaticEffort) async {
+        effortSequence += 1
+        let request = effortSequence
+        desiredEffort = effort
+        self.effort = effort
+        _ = await perform { try await $0.setEffort(effort) }
+        guard effortSequence == request else { return }
+        desiredEffort = nil
+        self.effort = confirmedEffort
+    }
+
     private func apply(_ status: AutomationStatus) {
         state = status.state
         confirmedLowPower = status.lowPower
         lowPower = desiredLowPower ?? confirmedLowPower
+        confirmedEffort = status.effort
+        effort = desiredEffort ?? confirmedEffort
         heldBy = status.heldBy
     }
 

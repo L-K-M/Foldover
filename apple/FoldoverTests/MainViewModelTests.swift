@@ -396,6 +396,7 @@ private actor AutomationProbe: AutomationClient {
     func pause(minutes: UInt32?) async throws -> AutomationStatus { running }
     func resume() async throws -> AutomationStatus { running }
     func setLowPower(_ syncs: LowPowerSyncs) async throws -> AutomationStatus { running }
+    func setEffort(_ effort: AutomaticEffort) async throws -> AutomationStatus { running }
 }
 
 private func monitorPair(_ id: String, _ name: String) -> SyncPair {

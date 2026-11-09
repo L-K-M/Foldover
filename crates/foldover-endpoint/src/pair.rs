@@ -1,4 +1,4 @@
-use foldover_types::{PairRoot, Side};
+use foldover_types::{Effort, PairRoot, Side};
 
 use crate::{Endpoint, Reach, RootRelation, ScanError};
 
@@ -66,6 +66,12 @@ impl EndpointPair {
             Side::Left => &self.left,
             Side::Right => &self.right,
         }
+    }
+
+    /// Observe both folders at `effort` from now on (ADR 0054).
+    pub fn set_effort(&mut self, effort: Effort) {
+        self.left.set_effort(effort);
+        self.right.set_effort(effort);
     }
 }
 

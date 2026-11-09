@@ -17,7 +17,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
-use foldover_types::ScanControl;
+use foldover_os::ThreadEffort;
+use foldover_types::{Effort, ScanControl};
 
 use crate::ScanError;
 
@@ -57,7 +58,7 @@ where
 {
     let stop = AtomicBool::new(false);
     thread::scope(|threads| {
-        let mut pending = Reads::start(threads, workers, &stop, &read);
+        let mut pending = Reads::start(threads, workers, Effort::Full, &stop, &read);
         let mut items = items.into_iter();
         loop {
             pending.make_room(&mut landed, control)?;
@@ -80,9 +81,12 @@ pub(crate) struct Reads<'a, T, R> {
 }
 
 impl<'a, T, R> Reads<'a, T, R> {
+    /// Each reader enters `effort` itself: threads do not inherit the
+    /// priority of the thread that starts them.
     pub(crate) fn start<'scope>(
         threads: &'scope thread::Scope<'scope, '_>,
         workers: NonZeroUsize,
+        effort: Effort,
         stop: &'a AtomicBool,
         read: &'a (impl Fn(&T, &dyn Fn() -> ScanControl) -> R + Sync),
     ) -> Self
@@ -97,7 +101,10 @@ impl<'a, T, R> Reads<'a, T, R> {
         let (results, received) = mpsc::channel();
         for _ in 0..workers.get() {
             let (queue, results) = (Arc::clone(&queue), results.clone());
-            threads.spawn(move || reader(&queue, stop, read, &results));
+            threads.spawn(move || {
+                let _effort = ThreadEffort::enter(effort);
+                reader(&queue, stop, read, &results);
+            });
         }
         drop(results);
         Self {
@@ -349,7 +356,7 @@ mod tests {
         let stop = AtomicBool::new(false);
         let read = |_: &u32, _: &dyn Fn() -> ScanControl| ();
         thread::scope(|threads| {
-            let mut pending = Reads::start(threads, WORKERS, &stop, &read);
+            let mut pending = Reads::start(threads, WORKERS, Effort::Full, &stop, &read);
             let mut refuse = |_: &u32, ()| Err(ScanError::RootMissing);
             let result = pending
                 .submit(0, &mut refuse, &mut proceed)

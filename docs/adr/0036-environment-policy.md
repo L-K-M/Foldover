@@ -45,6 +45,9 @@ defaults the platform manages.
   an automatic sync would get now: the network's cost when any pair uses
   it, else the low-power hold local pairs would get. `automation.settings`
   sets `low_power` and answers the status. Both ride local protocol 12.
+  Protocol 23 adds `effort`, how hard automatic syncs work, to both; each
+  field `automation.settings` carries changes only that choice
+  ([ADR 0054](0054-gentle-automatic-syncs.md)).
 - **Surface:** the menu bar shows the hold under the pause controls, and
   Settings carries "Sync automatically in Low Power Mode" (off is
   pause); `foldover automation` prints the status and

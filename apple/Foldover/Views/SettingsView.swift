@@ -53,6 +53,15 @@ struct SettingsView: View {
                     )
                 )
                 .disabled(automation.mutationPending)
+                NoteToggle(
+                    title: Text("Run automatic syncs at full speed"),
+                    note: Text("When off, automatic syncs run one at a time at low priority, and read and copy one file at a time on this Mac's own disks, so they stay out of your way and use less energy. Turn this on to finish large automatic syncs sooner; they then use as much of the Mac as they can.\n\nSyncs you start yourself always run at full speed."),
+                    isOn: Binding(
+                        get: { automation.effort == .full },
+                        set: { full in Task { await automation.setEffort(full ? .full : .gentle) } }
+                    )
+                )
+                .disabled(automation.mutationPending)
                 if let error = automation.error {
                     ErrorNote(message: error)
                 }

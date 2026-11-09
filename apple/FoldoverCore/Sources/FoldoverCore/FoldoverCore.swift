@@ -992,6 +992,7 @@ public struct AutomationState: Equatable, Hashable {
      */
     public var untilMs: UInt64?
     public var lowPower: LowPowerSyncs
+    public var effort: AutomaticEffort
     /**
      * Why an automatic sync would wait now, if one would.
      */
@@ -1002,13 +1003,14 @@ public struct AutomationState: Equatable, Hashable {
     public init(paused: Bool, 
         /**
          * When a timed pause ends, in milliseconds since the Unix epoch.
-         */untilMs: UInt64?, lowPower: LowPowerSyncs, 
+         */untilMs: UInt64?, lowPower: LowPowerSyncs, effort: AutomaticEffort, 
         /**
          * Why an automatic sync would wait now, if one would.
          */heldBy: AutomationHold?) {
         self.paused = paused
         self.untilMs = untilMs
         self.lowPower = lowPower
+        self.effort = effort
         self.heldBy = heldBy
     }
 
@@ -1031,6 +1033,7 @@ public struct FfiConverterTypeAutomationState: FfiConverterRustBuffer {
                 paused: FfiConverterBool.read(from: &buf), 
                 untilMs: FfiConverterOptionUInt64.read(from: &buf), 
                 lowPower: FfiConverterTypeLowPowerSyncs.read(from: &buf), 
+                effort: FfiConverterTypeAutomaticEffort.read(from: &buf), 
                 heldBy: FfiConverterOptionTypeAutomationHold.read(from: &buf)
         )
     }
@@ -1039,6 +1042,7 @@ public struct FfiConverterTypeAutomationState: FfiConverterRustBuffer {
         FfiConverterBool.write(value.paused, into: &buf)
         FfiConverterOptionUInt64.write(value.untilMs, into: &buf)
         FfiConverterTypeLowPowerSyncs.write(value.lowPower, into: &buf)
+        FfiConverterTypeAutomaticEffort.write(value.effort, into: &buf)
         FfiConverterOptionTypeAutomationHold.write(value.heldBy, into: &buf)
     }
 }
@@ -3111,6 +3115,83 @@ public func FfiConverterTypeAgentError_lift(_ buf: RustBuffer) throws -> AgentEr
 public func FfiConverterTypeAgentError_lower(_ value: AgentError) -> RustBuffer {
     return FfiConverterTypeAgentError.lower(value)
 }
+
+
+/**
+ * How hard automatic syncs may work the Mac (ADR 0054). Manual syncs
+ * always run at full effort.
+ */
+
+public enum AutomaticEffort: Equatable, Hashable {
+    
+    /**
+     * One at a time, at low priority, one file at a time on this Mac's
+     * own disks.
+     */
+    case gentle
+    /**
+     * Every due pair at once, at normal priority, with every worker.
+     */
+    case full
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AutomaticEffort: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAutomaticEffort: FfiConverterRustBuffer {
+    typealias SwiftType = AutomaticEffort
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomaticEffort {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .gentle
+        
+        case 2: return .full
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AutomaticEffort, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .gentle:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .full:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomaticEffort_lift(_ buf: RustBuffer) throws -> AutomaticEffort {
+    return try FfiConverterTypeAutomaticEffort.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomaticEffort_lower(_ value: AutomaticEffort) -> RustBuffer {
+    return FfiConverterTypeAutomaticEffort.lower(value)
+}
+
 
 
 /**
@@ -5630,6 +5711,23 @@ public func resumeAutomation()async throws  -> AutomationState  {
         )
 }
 /**
+ * Set how hard automatic syncs may work the Mac.
+ */
+public func setAutomaticEffort(effort: AutomaticEffort)async throws  -> AutomationState  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_set_automatic_effort(FfiConverterTypeAutomaticEffort_lower(effort)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeAutomationState_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+/**
  * Set the person's choice for automatic syncs in Low Power Mode.
  */
 public func setLowPowerSyncs(syncs: LowPowerSyncs)async throws  -> AutomationState  {
@@ -6109,6 +6207,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_resume_automation() != 13518) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_set_automatic_effort() != 56329) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_set_low_power_syncs() != 45223) {

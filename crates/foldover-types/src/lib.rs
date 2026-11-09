@@ -48,3 +48,14 @@ pub enum ScanControl {
     Continue,
     Cancel,
 }
+
+/// How hard a run may work the Mac (ADR 0054).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Effort {
+    /// Every worker its folders allow, at normal priority: what a person
+    /// waits for.
+    Full,
+    /// Low priority, and one reader or copy at a time where the processor,
+    /// not the network, limits the work: automatic syncs, by default.
+    Gentle,
+}

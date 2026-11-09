@@ -64,11 +64,11 @@ const SNAPSHOT_PAGE: usize = 256;
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary, schedule_time, schedule_days, records, bandwidth_limit, review_policy, removal_protection";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 29] = [
+const MIGRATIONS: [&str; 30] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
     SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, SCHEMA_V15, SCHEMA_V16,
     SCHEMA_V17, SCHEMA_V18, SCHEMA_V19, SCHEMA_V20, SCHEMA_V21, SCHEMA_V22, SCHEMA_V23, SCHEMA_V24,
-    SCHEMA_V25, SCHEMA_V26, SCHEMA_V27, SCHEMA_V28, SCHEMA_V29,
+    SCHEMA_V25, SCHEMA_V26, SCHEMA_V27, SCHEMA_V28, SCHEMA_V29, SCHEMA_V30,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -476,6 +476,12 @@ const SCHEMA_V29: &str = "
 CREATE TABLE pair_pause (
     pair_id BLOB PRIMARY KEY NOT NULL REFERENCES pair(id) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
+";
+
+// How hard automatic syncs may work the Mac (ADR 0054). Older readers
+// ignore the column and run at full effort, so the floor stays.
+const SCHEMA_V30: &str = "
+ALTER TABLE automation_setting ADD COLUMN automatic_effort TEXT NOT NULL DEFAULT 'gentle' CHECK(automatic_effort IN ('gentle','full'));
 ";
 
 #[derive(Debug, thiserror::Error)]

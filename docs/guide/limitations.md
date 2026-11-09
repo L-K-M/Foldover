@@ -295,6 +295,14 @@ deletion ([ADR 0010](../adr/0010-local-metadata-inventory.md)).
   the network is expensive or Low Data Mode is on. Syncs you start
   yourself always run, and held pairs run on the first tick after the
   hold lifts ([ADR 0036](../adr/0036-environment-policy.md)).
+- **Automatic syncs run gently** unless "Run automatic syncs at full
+  speed" is on in Settings. They run one at a time and not beside a sync
+  you started, at low priority, and read and copy one file at a time on
+  this Mac's own disks. Large automatic syncs between local disks take
+  longer, several times longer while other apps use the disk heavily;
+  those over the network keep their parallel transfers. Syncs you
+  start yourself always run at full speed
+  ([ADR 0054](../adr/0054-gentle-automatic-syncs.md)).
 - **A paused pair waits until you resume it.** Pause Pair holds that pair's
   automatic syncs: interval and calendar schedules, file changes, a folder
   coming back and catch-up when the agent starts all wait. Preview Changes

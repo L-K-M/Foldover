@@ -100,7 +100,10 @@ churn); target appears (drive mounted, share reachable, peer visible);
 interval; calendar schedule. A person can pause one pair, which holds its
 automatic syncs until resumed; manual syncs still run. Paused on expensive
 or constrained networks, and in Low Power Mode unless the user opts in.
-The agent holds a power assertion during runs.
+Automatic syncs run gently unless the user chooses full speed: one at a
+time, at low priority, one file at a time on the Mac's own disks
+([ADR 0054](docs/adr/0054-gentle-automatic-syncs.md)). Manual syncs always
+run at full speed. The agent holds a power assertion during runs.
 
 ### 3.6 Safety defaults
 
