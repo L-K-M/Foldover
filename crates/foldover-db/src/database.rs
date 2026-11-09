@@ -16,8 +16,10 @@ mod hold;
 mod journal;
 mod mounts;
 mod pause;
+mod paused;
 mod pending;
 mod read_view;
+mod removal;
 mod settings;
 mod share;
 mod starts;
@@ -28,6 +30,7 @@ pub use journal::{JournalChange, JournalRow};
 pub use mounts::MountRow;
 pub use pause::PauseRow;
 pub use read_view::{BaseBlob, ReadView, ReadViewError, SnapshotBlob};
+pub use removal::Purge;
 pub use settings::AutomationSettingRow;
 pub use share::ShareRow;
 pub use starts::RunMarker;
@@ -61,11 +64,11 @@ const SNAPSHOT_PAGE: usize = 256;
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary, schedule_time, schedule_days, records, bandwidth_limit, review_policy, removal_protection";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 27] = [
+const MIGRATIONS: [&str; 29] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
     SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, SCHEMA_V15, SCHEMA_V16,
     SCHEMA_V17, SCHEMA_V18, SCHEMA_V19, SCHEMA_V20, SCHEMA_V21, SCHEMA_V22, SCHEMA_V23, SCHEMA_V24,
-    SCHEMA_V25, SCHEMA_V26, SCHEMA_V27,
+    SCHEMA_V25, SCHEMA_V26, SCHEMA_V27, SCHEMA_V28, SCHEMA_V29,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -454,6 +457,25 @@ CREATE TABLE pending_pair (
     CHECK(left_root != right_root)
 ) STRICT;
 UPDATE state_meta SET minimum_reader=max(minimum_reader,27) WHERE singleton=1;
+";
+
+// Removed pairs (ADR 0053): removal hides the pair at once, and the agent
+// deletes its rows in short batches afterwards; deleting a million-file
+// pair's rows in one statement held the writer for seconds. Older agents
+// would show and sync a removed pair again, so the floor rises.
+const SCHEMA_V28: &str = "
+CREATE TABLE pair_removal (
+    pair_id BLOB PRIMARY KEY NOT NULL REFERENCES pair(id) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+UPDATE state_meta SET minimum_reader=max(minimum_reader,28) WHERE singleton=1;
+";
+
+// Pairs whose automatic syncs wait until a person resumes them. Older
+// agents ignore the table; V28 already keeps them out.
+const SCHEMA_V29: &str = "
+CREATE TABLE pair_pause (
+    pair_id BLOB PRIMARY KEY NOT NULL REFERENCES pair(id) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
 ";
 
 #[derive(Debug, thiserror::Error)]
@@ -1161,16 +1183,6 @@ impl Database {
         transaction.commit()?;
         Ok(())
     }
-
-    pub fn remove_pair(&mut self, id: &[u8], revision: i64) -> Result<(), Error> {
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        pending::check_revision(&transaction, id, revision)?;
-        transaction.execute("DELETE FROM pair WHERE id=?1", [id])?;
-        transaction.commit()?;
-        Ok(())
-    }
 }
 
 /// Record an incoming row's path and reject a path that does not strictly
@@ -1432,6 +1444,13 @@ pub(super) mod tests {
             .unwrap();
         let location = StateLocation::Directory(directory.path().to_owned());
         (directory, location)
+    }
+
+    /// Remove a pair and purge its rows at once, as the agent does over
+    /// several steps.
+    pub(super) fn remove_and_purge(database: &mut Database, id: &[u8], revision: i64) {
+        database.remove_pair(id, revision).unwrap();
+        while database.purge_removed_pairs(100).unwrap() == Purge::Pending {}
     }
 
     pub(super) fn values() -> PairValues {
@@ -1853,7 +1872,7 @@ pub(super) mod tests {
         database
             .change_base(&pair.id, 3, &[put(b"a", b"1")], JournalChange::None)
             .unwrap();
-        database.remove_pair(&pair.id, 3).unwrap();
+        remove_and_purge(&mut database, &pair.id, 3);
         let orphans: i64 = database
             .connection
             .query_row("SELECT count(*) FROM base_entry", [], |row| row.get(0))
@@ -2095,9 +2114,9 @@ pub(super) mod tests {
         assert_eq!(minimum_reader(&legacy.connection), legacy_reader);
         drop(legacy);
 
-        // v27 raised the floor last: older readers cannot honor deferred edits.
+        // v28 raised the floor last: older readers would show removed pairs.
         let mut database = Database::open(&location).unwrap();
-        assert_eq!(minimum_reader(&database.connection), 27);
+        assert_eq!(minimum_reader(&database.connection), 28);
         assert_eq!(
             database
                 .connection
@@ -2189,7 +2208,7 @@ pub(super) mod tests {
             input.left_root = invalid.to_vec();
             assert!(database.create_pair(&input).is_err(), "{invalid:?}");
         }
-        database.remove_pair(&pair.id, pair.revision).unwrap();
+        remove_and_purge(&mut database, &pair.id, pair.revision);
         for table in ["base_entry", "resolution", "snapshot_entry", "run_history"] {
             assert!(
                 stored_rows(&database.connection, table).is_empty(),
@@ -3013,7 +3032,7 @@ pub(super) mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!((schema, minimum), (27, 27));
+        assert_eq!((schema, minimum), (SCHEMA_VERSION, 28));
         assert!(minimum > 25, "a shipping reader must refuse these policies");
         assert_eq!(database.pair(&id).unwrap().unwrap().revision, 2);
     }

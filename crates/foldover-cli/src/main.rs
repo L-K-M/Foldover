@@ -2,10 +2,9 @@
 //! `status`). Depends on foldover-client. See PLAN.md §4.4.
 
 use foldover_client::{
-    DailySchedule, Durability, Filters, FolderRecords, MetadataPolicy, PairConfig, PairDraft,
-    PairId, PairOptions, PairRoot, Propagation, RemovalProtection, ReviewPolicy, ReviewToken,
-    Schedule, ScheduleInterval, Side, SocketLocation, SyncMode, SyncPath, TimeOfDay, Weekday,
-    Weekdays,
+    DailySchedule, Durability, Filters, FolderRecords, MetadataPolicy, PairDraft, PairId,
+    PairOptions, PairRoot, Propagation, RemovalProtection, ReviewPolicy, ReviewToken, Schedule,
+    ScheduleInterval, Side, SocketLocation, SyncMode, SyncPath, TimeOfDay, Weekday, Weekdays,
 };
 use foldover_client::{DeviceId, PeerStatus, ShareId, SyncItemKind, SyncStatus};
 use foldover_proto::local::PairRecord;
@@ -47,6 +46,7 @@ const USAGE: &str = "usage: foldover --version
        foldover pairs check NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]
        foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]
        foldover pairs remove ID REVISION [--socket PATH]
+       foldover pairs pause|resume ID [--socket PATH]
        foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN | --changes [copies | updates | archives | conflicts | blocked | kept | moves]] [--progress] [--socket PATH]
        foldover sync --all [--socket PATH]
        foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]
@@ -194,6 +194,9 @@ enum PairCommand {
         id: PairId,
         revision: u64,
     },
+    /// Hold the pair's automatic syncs until resumed.
+    Pause(PairId),
+    Resume(PairId),
 }
 
 /// Pair options named on the command line; the rest keep a base value.
@@ -511,6 +514,10 @@ fn pair_command(args: &[OsString]) -> Option<PairCommand> {
     match args {
         [] => Some(PairCommand::List),
         [command, id] if command == "show" => Some(PairCommand::Show(id.to_str()?.parse().ok()?)),
+        [command, id] if command == "pause" => Some(PairCommand::Pause(id.to_str()?.parse().ok()?)),
+        [command, id] if command == "resume" => {
+            Some(PairCommand::Resume(id.to_str()?.parse().ok()?))
+        }
         [command, id, revision] if command == "remove" => Some(PairCommand::Remove {
             id: id.to_str()?.parse().ok()?,
             revision: revision
@@ -896,14 +903,17 @@ async fn pairs(
             options,
         } => {
             // A stale read is harmless: the revision check rejects the update.
-            let current = foldover_client::pair(location, id).await?;
+            let current = foldover_client::pair(location, id).await?.config;
             let draft = draft.with_options(options.apply(current.draft().options().clone()));
             warn_sftp([draft.left(), draft.right()]);
             print_pair(&foldover_client::update_pair(location, id, revision, &draft).await?)
         }
-        PairCommand::Remove { id, revision } => {
-            print_pair(&foldover_client::remove_pair(location, id, revision).await?)
-        }
+        PairCommand::Remove { id, revision } => print_pair(&foldover_client::PairState {
+            config: foldover_client::remove_pair(location, id, revision).await?,
+            automation: foldover_client::Automation::Running,
+        }),
+        PairCommand::Pause(id) => print_pair(&foldover_client::pause_pair(location, id).await?),
+        PairCommand::Resume(id) => print_pair(&foldover_client::resume_pair(location, id).await?),
     }
 }
 
@@ -918,7 +928,7 @@ async fn sync(
     // Cancellation must keep bypassing the configuration queue, even when
     // another request is waiting on a disconnected server.
     if !matches!(&command, SyncCommand::Cancel) {
-        let pair = foldover_client::pair(location, id).await?;
+        let pair = foldover_client::pair(location, id).await?.config;
         warn_sftp([pair.draft().left(), pair.draft().right()]);
     }
     if let SyncCommand::Changes(kind) = command {
@@ -1084,7 +1094,7 @@ async fn sync_all(location: &SocketLocation) -> Result<ExitCode, foldover_client
     let mut after = None;
     loop {
         let page = foldover_client::pairs(location, after).await?;
-        pairs.extend(page.pairs);
+        pairs.extend(page.pairs.into_iter().map(|pair| pair.config));
         let Some(next) = page.next else {
             break;
         };
@@ -1249,7 +1259,7 @@ async fn archive(
     side: Side,
     command: ArchiveCommand,
 ) -> Result<ExitCode, foldover_client::Error> {
-    let pair = foldover_client::pair(location, id).await?;
+    let pair = foldover_client::pair(location, id).await?.config;
     let revision = pair.revision();
     if matches!(
         &command,
@@ -1401,9 +1411,13 @@ fn print_peers(status: &PeerStatus) -> Result<(), foldover_client::Error> {
     Ok(())
 }
 
-fn print_pair(pair: &PairConfig) -> Result<(), foldover_client::Error> {
+fn print_pair(pair: &foldover_client::PairState) -> Result<(), foldover_client::Error> {
     // JSON lines preserve raw path bytes and escape terminal control characters.
-    println!("{}", serde_json::to_string(&PairRecord::from(pair))?);
+    let record = PairRecord {
+        paused: pair.automation == foldover_client::Automation::Paused,
+        ..PairRecord::from(&pair.config)
+    };
+    println!("{}", serde_json::to_string(&record)?);
     Ok(())
 }
 
@@ -1880,8 +1894,19 @@ mod tests {
             ]),
             Request::Pairs(_, PairCommand::Check(_))
         ));
+        assert!(matches!(
+            req(&["pairs", "pause", id]),
+            Request::Pairs(_, PairCommand::Pause(_))
+        ));
+        assert!(matches!(
+            req(&["pairs", "resume", id, "--socket", "/tmp/s"]),
+            Request::Pairs(_, PairCommand::Resume(_))
+        ));
         for args in [
             vec!["pairs", "show", "bad"],
+            vec!["pairs", "pause", "bad"],
+            vec!["pairs", "pause", id, "1"],
+            vec!["pairs", "resume"],
             vec!["pairs", "check", "Photos", "relative", "/b", "sync"],
             vec!["pairs", "check", "Photos", "/a", "/b"],
             vec!["pairs", "add", "Photos", "relative", "/b", "sync"],

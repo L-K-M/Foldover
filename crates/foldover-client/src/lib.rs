@@ -32,8 +32,8 @@ use foldover_proto::local::{
 use foldover_proto::local::{ENDPOINT_BROWSE, EndpointBrowse, NETWORK_SERVERS, NetworkServers};
 pub use foldover_proto::local::{NetworkServer, ServerFolderList, ServerFolderRecord};
 use foldover_proto::local::{
-    PAIR_CHECK, PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_UPDATE, PairCheck,
-    PairInput, PairKey, PairList, PairRecord, PairUpdate, PairWarnings,
+    PAIR_CHECK, PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_PAUSE, PAIR_RESUME,
+    PAIR_UPDATE, PairCheck, PairInput, PairKey, PairList, PairRecord, PairUpdate, PairWarnings,
 };
 use foldover_proto::local::{
     PEER_CANCEL, PEER_CONFIRM, PEER_PAIR, PEER_PAIRING_CLOSE, PEER_PAIRING_OPEN, PEER_REVOKE,
@@ -340,8 +340,23 @@ async fn sync_call(
 }
 
 pub struct PairPage {
-    pub pairs: Vec<PairConfig>,
+    pub pairs: Vec<PairState>,
     pub next: Option<PairId>,
+}
+
+/// A pair as the agent reports it: its configuration, and whether its
+/// automatic syncs run.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PairState {
+    pub config: PairConfig,
+    pub automation: Automation,
+}
+
+/// Whether a pair's automatic syncs run, or wait for `resume_pair`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Automation {
+    Running,
+    Paused,
 }
 
 pub async fn pairs(location: &SocketLocation, after: Option<PairId>) -> Result<PairPage, Error> {
@@ -356,7 +371,7 @@ pub async fn pairs(location: &SocketLocation, after: Option<PairId>) -> Result<P
     decode_page(page, after)
 }
 
-pub async fn pair(location: &SocketLocation, id: PairId) -> Result<PairConfig, Error> {
+pub async fn pair(location: &SocketLocation, id: PairId) -> Result<PairState, Error> {
     decode_pair(
         call(
             location,
@@ -367,10 +382,7 @@ pub async fn pair(location: &SocketLocation, id: PairId) -> Result<PairConfig, E
     )
 }
 
-pub async fn create_pair(
-    location: &SocketLocation,
-    draft: &PairDraft,
-) -> Result<PairConfig, Error> {
+pub async fn create_pair(location: &SocketLocation, draft: &PairDraft) -> Result<PairState, Error> {
     decode_pair(
         call(
             location,
@@ -405,7 +417,7 @@ pub async fn update_pair(
     id: PairId,
     revision: u64,
     draft: &PairDraft,
-) -> Result<PairConfig, Error> {
+) -> Result<PairState, Error> {
     decode_pair(
         call(
             location,
@@ -435,13 +447,47 @@ pub async fn remove_pair(
             })?),
         )
         .await?,
-    )?;
+    )?
+    .config;
     if removed.id() != id || removed.revision() != revision {
         return Err(Error::Protocol(
             "Removed pair does not match the requested revision",
         ));
     }
     Ok(removed)
+}
+
+/// Pause the pair's automatic syncs until `resume_pair`. Manual syncs
+/// still run, and a run in progress continues.
+pub async fn pause_pair(location: &SocketLocation, id: PairId) -> Result<PairState, Error> {
+    set_automation(location, id, Automation::Paused).await
+}
+
+pub async fn resume_pair(location: &SocketLocation, id: PairId) -> Result<PairState, Error> {
+    set_automation(location, id, Automation::Running).await
+}
+
+async fn set_automation(
+    location: &SocketLocation,
+    id: PairId,
+    automation: Automation,
+) -> Result<PairState, Error> {
+    let method = match automation {
+        Automation::Paused => PAIR_PAUSE,
+        Automation::Running => PAIR_RESUME,
+    };
+    let pair = decode_pair(
+        call(
+            location,
+            method,
+            Some(serde_json::to_value(PairKey { id: id.to_string() })?),
+        )
+        .await?,
+    )?;
+    if pair.config.id() != id || pair.automation != automation {
+        return Err(Error::Protocol("The agent answered for another pair state"));
+    }
+    Ok(pair)
 }
 
 /// SMB file servers seen on the local network (PLAN.md §3.8); waits
@@ -596,11 +642,21 @@ async fn peer_call(
     )?)
 }
 
-fn decode_pair(value: Value) -> Result<PairConfig, Error> {
-    let record: PairRecord = serde_json::from_value(value)?;
-    record
-        .try_into()
-        .map_err(|_| Error::Protocol("Invalid pair configuration from agent"))
+fn decode_pair(value: Value) -> Result<PairState, Error> {
+    decode_record(serde_json::from_value(value)?)
+        .ok_or(Error::Protocol("Invalid pair configuration from agent"))
+}
+
+fn decode_record(record: PairRecord) -> Option<PairState> {
+    let automation = if record.paused {
+        Automation::Paused
+    } else {
+        Automation::Running
+    };
+    Some(PairState {
+        config: record.try_into().ok()?,
+        automation,
+    })
 }
 
 fn decode_page(value: Value, after: Option<PairId>) -> Result<PairPage, Error> {
@@ -612,11 +668,11 @@ fn decode_page(value: Value, after: Option<PairId>) -> Result<PairPage, Error> {
     let mut previous = after;
     let mut pairs = Vec::with_capacity(page.pairs.len());
     for record in page.pairs {
-        let pair: PairConfig = record.try_into().map_err(|_| invalid())?;
-        if previous.is_some_and(|previous| pair.id() <= previous) {
+        let pair = decode_record(record).ok_or_else(invalid)?;
+        if previous.is_some_and(|previous| pair.config.id() <= previous) {
             return Err(invalid());
         }
-        previous = Some(pair.id());
+        previous = Some(pair.config.id());
         pairs.push(pair);
     }
     let next = page
@@ -719,7 +775,25 @@ mod tests {
         let pair = PairConfig::from_stored(id, 1, draft).unwrap();
         let record = serde_json::to_value(PairRecord::from(&pair)).unwrap();
         let page = json!({"pairs":[record.clone()], "next":null});
-        assert_eq!(decode_page(page.clone(), None).unwrap().pairs, vec![pair]);
+        let running = PairState {
+            config: pair.clone(),
+            automation: Automation::Running,
+        };
+        assert_eq!(
+            decode_page(page.clone(), None).unwrap().pairs,
+            vec![running]
+        );
+        let mut paused = record.clone();
+        paused["paused"] = json!(true);
+        assert_eq!(
+            decode_page(json!({"pairs":[paused], "next":null}), None)
+                .unwrap()
+                .pairs,
+            vec![PairState {
+                config: pair,
+                automation: Automation::Paused,
+            }]
+        );
         assert!(decode_page(page, Some(id)).is_err());
         assert!(
             decode_page(

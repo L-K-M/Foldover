@@ -131,12 +131,15 @@ preserve them. Changing roots or metadata options resets the pair's sync history
 `pairs show ID` reads one pair;
 `pairs update ID REVISION NAME LEFT RIGHT MODE [OPTIONS]` requires its current
 revision and keeps options you do not name.
-`pairs remove ID REVISION` removes settings, including for an offline pair;
-your folders stay in place. The app offers the same **Remove Pair** action.
-Commands output JSON lines with exact root-byte arrays. Lists are paged by
-identity and are not an atomic catalog snapshot. Refresh after concurrent edits.
-If a command times out, inspect the catalog before retrying: a disconnected
-client does not cancel a committing configuration change.
+`pairs remove ID REVISION` marks the pair removed, including for an offline
+pair; the pair disappears at once from every list and lookup, and the agent
+deletes its rows in the background. Your folders stay in place. The app
+offers the same **Remove Pair** action. Commands output JSON lines with exact
+root-byte arrays. Lists are paged by identity and are not an atomic catalog
+snapshot. Refresh after concurrent edits. If a command times out, inspect the
+catalog before retrying: a disconnected client does not cancel a committing
+configuration change. `pairs remove` answers at once; it does not wait for
+the background delete.
 
 ### Sync
 
@@ -155,6 +158,7 @@ foldover sync ID --skip PATH --review TOKEN        # leave a reviewed change for
 foldover sync ID --undo          # undo the newest sync that changed anything
 foldover history ID              # finished runs, newest first
 foldover pause [MINUTES]         # hold automatic syncs; `foldover resume` ends it
+foldover pairs pause|resume ID   # hold one pair's automatic syncs, or end it
 foldover safe-mode off           # sync again after the agent kept crashing
 foldover archive ID left         # archived runs in folder A, newest first
 foldover archive ID left RUN     # items one run archived

@@ -60,6 +60,9 @@ private actor WindowCatalog: PairClient {
         throw WindowFixtureError.unexpected
     }
     func remove(_ pair: SyncPair) async throws -> SyncPair { throw WindowFixtureError.unexpected }
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair {
+        SyncPair(id: pair.id, revision: pair.revision, settings: pair.settings, automation: automation)
+    }
     func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { [] }
     func servers() async throws -> [NearbyServer] { [] }
     func browse(_ locator: String) async throws -> ServerListing {
@@ -292,7 +295,7 @@ func pairRowsSayHowEachPairReadsAtAGlance() async {
                                symbol: "arrow.right.to.line.compact", modeTitle: "Back up A to B",
                                activity: .idle,
                                conflicts: 0, canSync: true, canCancel: false,
-                               lastSuccess: lastSuccess))
+                               lastSuccess: lastSuccess, automation: .running))
     #expect(viewModel.canSyncAll)
     #expect(viewModel.pairsLoaded)
     #expect(viewModel.agentState == .connected)

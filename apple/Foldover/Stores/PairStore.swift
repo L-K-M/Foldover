@@ -127,10 +127,19 @@ struct PairSettings: Equatable, Sendable {
     }
 }
 
+/// Whether a pair's automatic syncs run, or wait until a person resumes
+/// them. Manual syncs run either way.
+enum PairAutomation: Equatable, Sendable {
+    case running
+    case paused
+}
+
 struct SyncPair: Identifiable, Equatable, Sendable {
     let id: String
     let revision: UInt64
     let settings: PairSettings
+    /// Not a setting: pausing keeps the revision, and editing keeps the pause.
+    var automation: PairAutomation = .running
 }
 
 struct PairCatalogPage: Sendable {
@@ -198,6 +207,8 @@ protocol PairClient: Sendable {
     func create(_ settings: PairSettings) async throws -> SyncPair
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair
     func remove(_ pair: SyncPair) async throws -> SyncPair
+    /// Pause or resume the pair's automatic syncs.
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair
     /// `editing` is the pair the settings would replace, or nil for a
     /// new pair; its own folders never count as overlaps.
     func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning]
@@ -226,6 +237,13 @@ private actor CorePairClient: PairClient {
 
     func remove(_ pair: SyncPair) async throws -> SyncPair {
         self.pair(try await FoldoverCore.pairRemove(id: pair.id, revision: pair.revision))
+    }
+
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair {
+        switch automation {
+        case .paused: self.pair(try await FoldoverCore.pairPause(id: pair.id))
+        case .running: self.pair(try await FoldoverCore.pairResume(id: pair.id))
+        }
     }
 
     func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] {
@@ -274,7 +292,7 @@ private actor CorePairClient: PairClient {
             name: draft.name, left: SelectedFolder(bytes: draft.leftRoot),
             right: SelectedFolder(bytes: draft.rightRoot), mode: mode(draft.mode),
             options: pairOptions(draft.options)
-        ))
+        ), automation: pair.paused ? .paused : .running)
     }
 
     private func coreMode(_ mode: PairMode) -> FoldoverCore.PairMode {
@@ -599,6 +617,21 @@ final class PairStore {
         let removed = try await client.remove(pair)
         guard removed.id == pair.id, removed.revision == pair.revision else { throw PairStoreError.invalidPage }
         pairs.removeAll { $0.id == pair.id }
+    }
+
+    /// Pause or resume the pair's automatic syncs. Its settings and
+    /// revision stay, so an open editor stays current.
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws {
+        guard !isSaving else { throw PairStoreError.saving }
+        generation += 1
+        isLoading = false
+        isSaving = true
+        defer { isSaving = false }
+        let changed = try await client.setAutomation(automation, of: pair)
+        guard changed.id == pair.id, changed.automation == automation else { throw PairStoreError.invalidPage }
+        if let index = pairs.firstIndex(where: { $0.id == pair.id }) {
+            pairs[index] = changed
+        }
     }
 
     static func message(for error: Error) -> String {

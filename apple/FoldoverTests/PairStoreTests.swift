@@ -58,6 +58,10 @@ private actor PairFixtureClient: PairClient {
         return pair
     }
 
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair {
+        SyncPair(id: pair.id, revision: pair.revision, settings: pair.settings, automation: automation)
+    }
+
     func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] {
         checks.append((editing, settings.mode))
         return warnings
@@ -114,6 +118,10 @@ private actor DeferredPairClient: PairClient {
     func create(_ settings: PairSettings) async throws -> SyncPair { pairFixture() }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { pair }
     func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair {
+        SyncPair(id: pair.id, revision: pair.revision, settings: pair.settings, automation: automation)
+    }
+
     func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { [] }
     func servers() async throws -> [NearbyServer] { [] }
     func browse(_ locator: String) async throws -> ServerListing { throw PairFixtureError.changedElsewhere }
@@ -142,6 +150,10 @@ private actor FailingPairPageClient: PairClient {
     func create(_ settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func remove(_ pair: SyncPair) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair {
+        throw PairFixtureError.changedElsewhere
+    }
+
     func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { throw PairFixtureError.changedElsewhere }
     func servers() async throws -> [NearbyServer] { throw PairFixtureError.changedElsewhere }
     func browse(_ locator: String) async throws -> ServerListing { throw PairFixtureError.changedElsewhere }
@@ -524,6 +536,10 @@ private actor WarningOnAttributesClient: PairClient {
     func create(_ settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func remove(_ pair: SyncPair) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair {
+        SyncPair(id: pair.id, revision: pair.revision, settings: pair.settings, automation: automation)
+    }
+
     func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] {
         settings.options.syncExtendedAttributes ? [warning] : []
     }
@@ -585,6 +601,10 @@ private actor RecordsRefusingClient: PairClient {
     func create(_ settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func remove(_ pair: SyncPair) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair {
+        SyncPair(id: pair.id, revision: pair.revision, settings: pair.settings, automation: automation)
+    }
+
     func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] {
         let spared = settings.mode == .backupLeft && settings.options.records == .sourceOnly
         return spared ? [] : [PairReadinessWarning(side: .b, kind: .recordsUnsupported)]
@@ -618,6 +638,10 @@ private actor SharedSourceClient: PairClient {
     func create(_ settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func remove(_ pair: SyncPair) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair {
+        SyncPair(id: pair.id, revision: pair.revision, settings: pair.settings, automation: automation)
+    }
+
     func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] {
         settings.mode == .backupLeft ? [] : [PairReadinessWarning(side: .a, kind: .overlap(pairName: "Photos"))]
     }
@@ -1182,4 +1206,49 @@ func aFolderHasOneVolumeReadOutAtATime() async {
     #expect(await reads.count == 2)
     await reads.finish()
     #expect(await second.value?.availableBytes == 40)
+}
+
+/// Pausing changes only the pair's automation: its settings and revision
+/// stay. An answer for another state is refused.
+@MainActor
+@Test
+func pausingAPairKeepsItsSettingsAndRevision() async throws {
+    let pair = pairFixture()
+    let store = PairStore(client: PairFixtureClient(catalog: [pair]))
+    await store.refresh()
+
+    try await store.setAutomation(.paused, of: pair)
+    #expect(store.pairs == [SyncPair(id: pair.id, revision: pair.revision, settings: pair.settings,
+                                     automation: .paused)])
+    #expect(!store.isSaving)
+
+    try await store.setAutomation(.running, of: store.pairs[0])
+    #expect(store.pairs == [pair])
+
+    let unchanged = PairStore(client: UnpausablePairClient(pair: pair))
+    await unchanged.refresh()
+    await #expect(throws: (any Error).self) {
+        try await unchanged.setAutomation(.paused, of: pair)
+    }
+    #expect(unchanged.pairs == [pair])
+}
+
+/// Answers every pause with the pair unchanged.
+private actor UnpausablePairClient: PairClient {
+    let pair: SyncPair
+
+    init(pair: SyncPair) { self.pair = pair }
+
+    func page(after: String?) async throws -> PairCatalogPage {
+        PairCatalogPage(pairs: after == nil ? [pair] : [], next: nil)
+    }
+    func create(_ settings: PairSettings) async throws -> SyncPair { pair }
+    func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { pair }
+    func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair { self.pair }
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { [] }
+    func servers() async throws -> [NearbyServer] { [] }
+    func browse(_ locator: String) async throws -> ServerListing {
+        ServerListing(locator: locator, parent: nil, folders: [])
+    }
 }

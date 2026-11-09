@@ -46,14 +46,14 @@ pub use sync::{
 
 mod pair;
 pub use pair::{
-    PAIR_CHECK, PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_REMOVE, PAIR_UPDATE,
-    PairCheck, PairDay, PairDurability, PairInput, PairKey, PairList, PairMode, PairPage,
-    PairPropagation, PairRecord, PairRemovalProtection, PairReviewPolicy, PairRevision,
-    PairSchedule, PairSettings, PairSide, PairUpdate, PairWarning, PairWarnings,
+    PAIR_CHECK, PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_PAGE_SIZE, PAIR_PAUSE, PAIR_REMOVE,
+    PAIR_RESUME, PAIR_UPDATE, PairCheck, PairDay, PairDurability, PairInput, PairKey, PairList,
+    PairMode, PairPage, PairPropagation, PairRecord, PairRemovalProtection, PairReviewPolicy,
+    PairRevision, PairSchedule, PairSettings, PairSide, PairUpdate, PairWarning, PairWarnings,
 };
 
 pub const JSON_RPC_VERSION: &str = "2.0";
-pub const PROTOCOL_VERSION: u32 = 21;
+pub const PROTOCOL_VERSION: u32 = 22;
 pub const SESSION_HELLO: &str = "session.hello";
 pub const DAEMON_STATUS: &str = "daemon.status";
 /// Leave crash-loop safe mode and sync again.
@@ -260,6 +260,18 @@ impl Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The raw-wire agent smoke test negotiates this version by number;
+    /// a bump that misses it fails only on Linux CI, because macOS refuses
+    /// the unsigned script before negotiating.
+    #[test]
+    fn the_agent_smoke_test_negotiates_this_protocol() {
+        let script = include_str!("../../../scripts/test-agent.py");
+        assert!(
+            script.contains(&format!("\nPROTOCOL_VERSION = {PROTOCOL_VERSION}\n")),
+            "update PROTOCOL_VERSION in scripts/test-agent.py"
+        );
+    }
 
     #[test]
     fn distinguishes_notifications_from_null_ids() {

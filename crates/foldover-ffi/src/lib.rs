@@ -467,14 +467,17 @@ pub struct LocalPairConfiguration {
     pub id: String,
     pub revision: u64,
     pub configuration: LocalPairDraft,
+    /// A person paused the pair's automatic syncs; editing keeps it.
+    pub paused: bool,
 }
 
-impl From<foldover_client::PairConfig> for LocalPairConfiguration {
-    fn from(pair: foldover_client::PairConfig) -> Self {
+impl From<foldover_client::PairState> for LocalPairConfiguration {
+    fn from(pair: foldover_client::PairState) -> Self {
         Self {
-            id: pair.id().to_string(),
-            revision: pair.revision(),
-            configuration: pair.draft().into(),
+            id: pair.config.id().to_string(),
+            revision: pair.config.revision(),
+            configuration: pair.config.draft().into(),
+            paused: pair.automation == foldover_client::Automation::Paused,
         }
     }
 }
@@ -635,8 +638,35 @@ pub async fn check_pair(
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn pair_remove(id: String, revision: u64) -> Result<LocalPairConfiguration, AgentError> {
     let id = id.parse().map_err(invalid_configuration)?;
-    Ok(
+    let config =
         foldover_client::remove_pair(&foldover_client::SocketLocation::Default, id, revision)
+            .await
+            .map_err(AgentError::from)?;
+    Ok(foldover_client::PairState {
+        config,
+        automation: foldover_client::Automation::Running,
+    }
+    .into())
+}
+
+/// Pause the pair's automatic syncs until `pair_resume`. Manual syncs
+/// still run, and a run in progress continues.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn pair_pause(id: String) -> Result<LocalPairConfiguration, AgentError> {
+    let id = id.parse().map_err(invalid_configuration)?;
+    Ok(
+        foldover_client::pause_pair(&foldover_client::SocketLocation::Default, id)
+            .await
+            .map_err(AgentError::from)?
+            .into(),
+    )
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn pair_resume(id: String) -> Result<LocalPairConfiguration, AgentError> {
+    let id = id.parse().map_err(invalid_configuration)?;
+    Ok(
+        foldover_client::resume_pair(&foldover_client::SocketLocation::Default, id)
             .await
             .map_err(AgentError::from)?
             .into(),

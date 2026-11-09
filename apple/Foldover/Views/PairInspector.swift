@@ -54,6 +54,15 @@ struct PairInspector: View {
                 folderRow("Folder B", folder: sync.activeRight)
                 LabeledContent(sync.usesPreviousSettings ? "Schedule (Next Run)" : "Schedule",
                                value: PairEditorViewModel.scheduleTitle(pair.settings.options.schedule))
+                if pair.automation == .paused {
+                    LabeledContent("Automatic Syncs") {
+                        HStack(spacing: 6) {
+                            Text("Paused")
+                            Button("Resume") { Task { await viewModel.toggleAutomation(of: pair) } }
+                                .disabled(!viewModel.canChangeAutomation(of: pair))
+                        }
+                    }
+                }
                 LabeledContent(sync.usesPreviousSettings ? "Skips (Next Run)" : "Skips",
                                value: viewModel.skipSummary(for: pair))
                 HStack {

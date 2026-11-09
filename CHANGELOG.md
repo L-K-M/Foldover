@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Removing a pair answers at once, however many files it tracks. It used
+  to time out on large pairs and grey out Edit Pair and Remove Pair; the
+  agent now deletes the pair's records in the background (ADR 0053).
 - A sync's time left counts a part second as a whole one, so the folded
   sheet and the status text no longer say "about 0 s left" while data is
   still copying.
@@ -108,6 +111,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Pause Pair and Resume Pair, in the sidebar's menu and the Pair menu, and
+  `foldover pairs pause|resume ID`: a paused pair's automatic syncs wait
+  until you resume it, while Sync Now still works.
 - New home-folder Backups start with editable cache exclusions. Trash,
   logs, Xcode DerivedData and developer download caches can be added
   explicitly; existing pairs keep their current rules.

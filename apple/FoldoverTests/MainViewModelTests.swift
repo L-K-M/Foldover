@@ -32,6 +32,9 @@ private actor OnePairClient: PairClient {
     func create(_ settings: PairSettings) async throws -> SyncPair { pair }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { pair }
     func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair {
+        SyncPair(id: pair.id, revision: pair.revision, settings: pair.settings, automation: automation)
+    }
     func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { [] }
     func servers() async throws -> [NearbyServer] { [] }
     func browse(_ locator: String) async throws -> ServerListing {
@@ -151,6 +154,9 @@ private actor ThreePairClient: PairClient {
     func create(_ settings: PairSettings) async throws -> SyncPair { pairs[0] }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { pair }
     func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair {
+        SyncPair(id: pair.id, revision: pair.revision, settings: pair.settings, automation: automation)
+    }
     func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { [] }
     func servers() async throws -> [NearbyServer] { [] }
     func browse(_ locator: String) async throws -> ServerListing {
@@ -188,6 +194,9 @@ private actor EmptyCatalogClient: PairClient {
     }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { pair }
     func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair {
+        SyncPair(id: pair.id, revision: pair.revision, settings: pair.settings, automation: automation)
+    }
     func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { [] }
     func servers() async throws -> [NearbyServer] { [] }
     func browse(_ locator: String) async throws -> ServerListing {
@@ -335,6 +344,9 @@ private actor CatalogProbe: PairClient {
     }
     func remove(_ pair: SyncPair) async throws -> SyncPair {
         throw MonitorFixtureError.unreachable
+    }
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair {
+        SyncPair(id: pair.id, revision: pair.revision, settings: pair.settings, automation: automation)
     }
     func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { [] }
     func servers() async throws -> [NearbyServer] { [] }
@@ -545,4 +557,80 @@ func droppingOneFolderFillsOnlyFolderAAndFilesOpenNothing() async throws {
     )
     #expect(!offline.newPair(dropping: [fixture.first]))
     #expect(offline.editor == nil)
+}
+
+/// One pair with `schedule`, which pauses and resumes as the agent does.
+private actor ScheduledPairClient: PairClient {
+    private var pair: SyncPair
+
+    init(schedule: SyncSchedule) {
+        var options = PairOptions.defaults
+        options.schedule = schedule
+        pair = SyncPair(id: docsID, revision: 3, settings: PairSettings(
+            name: "Docs", left: SelectedFolder(bytes: Data("/a".utf8)),
+            right: SelectedFolder(bytes: Data("/b".utf8)), mode: .sync, options: options
+        ))
+    }
+
+    func page(after: String?) async throws -> PairCatalogPage {
+        PairCatalogPage(pairs: after == nil ? [pair] : [], next: nil)
+    }
+    func create(_ settings: PairSettings) async throws -> SyncPair { pair }
+    func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { pair }
+    func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair {
+        self.pair.automation = automation
+        return self.pair
+    }
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { [] }
+    func servers() async throws -> [NearbyServer] { [] }
+    func browse(_ locator: String) async throws -> ServerListing {
+        ServerListing(locator: locator, parent: nil, folders: [])
+    }
+}
+
+/// Pause Pair: the row and the plan say so until the pair is resumed,
+/// and the revision stays, so an open editor stays current.
+@MainActor
+@Test
+func aPausedPairSaysSoUntilResumed() async throws {
+    let viewModel = MainViewModel(
+        appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { AgentReport(version: "1.0") }),
+        pairs: PairStore(client: ScheduledPairClient(schedule: .every(minutes: 60))),
+        sync: SyncStore(client: FinishingSyncClient())
+    )
+    await viewModel.refreshAgent()
+    let pair = try #require(viewModel.pairs.first)
+    #expect(viewModel.canChangeAutomation(of: pair))
+    #expect(viewModel.pairRows.first?.status == "Ready")
+
+    await viewModel.toggleAutomation(of: pair)
+    let paused = try #require(viewModel.pairs.first)
+    #expect(viewModel.operationError == nil)
+    #expect(paused.automation == .paused)
+    #expect(paused.revision == pair.revision)
+    #expect(viewModel.pairRows.first?.status == "Paused")
+    #expect(viewModel.pairRows.first?.automation == .paused)
+    #expect(viewModel.planText(for: paused).hasSuffix("Automatic syncs are paused until you resume the pair."))
+
+    await viewModel.toggleAutomation(of: paused)
+    #expect(viewModel.pairs.first?.automation == .running)
+    #expect(viewModel.pairRows.first?.status == "Ready")
+}
+
+/// A pair that syncs only when asked has no automatic syncs to pause.
+@MainActor
+@Test
+func aManualPairHasNothingToPause() async throws {
+    let viewModel = MainViewModel(
+        appInfo: AppInfoStore(), agent: AgentStore(statusRequest: { AgentReport(version: "1.0") }),
+        pairs: PairStore(client: ScheduledPairClient(schedule: .manual)),
+        sync: SyncStore(client: FinishingSyncClient())
+    )
+    await viewModel.refreshAgent()
+    let pair = try #require(viewModel.pairs.first)
+    #expect(!viewModel.canChangeAutomation(of: pair))
+    var paused = pair
+    paused.automation = .paused
+    #expect(viewModel.canChangeAutomation(of: paused))
 }

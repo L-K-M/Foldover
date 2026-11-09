@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -10,7 +11,7 @@ use foldover_endpoint::{
 };
 use foldover_host::{Environment, EnvironmentHold, LowPowerSyncs, NetworkUse};
 use foldover_state::{
-    Device, HistoryEntry, Journal, JournalUpdate, MountSources, PairStore, Pause, Share,
+    Device, HistoryEntry, Journal, JournalUpdate, MountSources, PairStore, Pause, Purge, Share,
     SnapshotEntry, StateLocation, WatchCursor,
 };
 use foldover_types::{
@@ -574,9 +575,37 @@ impl Engine {
         environment.hold(self.uses_network(pair), low_power)
     }
 
+    /// Remove a pair; it is gone for every reader at once, and
+    /// `purge_removed` deletes its rows afterwards (ADR 0053).
     pub fn remove_pair(&mut self, id: PairId, revision: u64) -> Result<PairConfig, Error> {
         // The caller reserves this pair against active or starting jobs.
         Ok(self.pairs.remove(id, revision)?)
+    }
+
+    /// Delete up to `limit` rows of removed pairs in one short
+    /// transaction; call again while it returns `Purge::Pending`.
+    pub fn purge_removed(&mut self, limit: usize) -> Result<Purge, Error> {
+        Ok(self.pairs.purge_removed(limit)?)
+    }
+
+    /// Whether removed pairs still have rows to purge.
+    pub fn removals_pending(&self) -> Result<bool, Error> {
+        Ok(self.pairs.removals_pending()?)
+    }
+
+    /// Pause the pair's automatic syncs until it is resumed. Manual syncs
+    /// still run, and a run in progress continues.
+    pub fn pause_pair(&mut self, id: PairId) -> Result<(), Error> {
+        Ok(self.pairs.pause_pair(id)?)
+    }
+
+    pub fn resume_pair(&mut self, id: PairId) -> Result<(), Error> {
+        Ok(self.pairs.resume_pair(id)?)
+    }
+
+    /// The pairs whose automatic syncs a person paused.
+    pub fn paused_pairs(&self) -> Result<BTreeSet<PairId>, Error> {
+        Ok(self.pairs.paused_pairs()?)
     }
 
     fn validate_roots(&self, draft: &PairDraft, replacing: Option<PairId>) -> Result<(), Error> {

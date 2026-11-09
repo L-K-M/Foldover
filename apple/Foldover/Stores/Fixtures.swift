@@ -326,7 +326,9 @@ actor FixturePairClient: PairClient {
 
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair {
         guard let index = pairs.firstIndex(where: { $0.id == pair.id }) else { throw FixtureError.missingPair }
-        let updated = SyncPair(id: pair.id, revision: pairs[index].revision + 1, settings: settings)
+        // Editing keeps a pause, as the agent does.
+        let updated = SyncPair(id: pair.id, revision: pairs[index].revision + 1, settings: settings,
+                               automation: pairs[index].automation)
         pairs[index] = updated
         return updated
     }
@@ -334,6 +336,12 @@ actor FixturePairClient: PairClient {
     func remove(_ pair: SyncPair) async throws -> SyncPair {
         pairs.removeAll { $0.id == pair.id }
         return pair
+    }
+
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair {
+        guard let index = pairs.firstIndex(where: { $0.id == pair.id }) else { throw FixtureError.missingPair }
+        pairs[index].automation = automation
+        return pairs[index]
     }
 
     func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { [] }

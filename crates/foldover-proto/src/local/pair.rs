@@ -11,6 +11,9 @@ pub const PAIR_CREATE: &str = "pair.create";
 pub const PAIR_UPDATE: &str = "pair.update";
 pub const PAIR_REMOVE: &str = "pair.remove";
 pub const PAIR_CHECK: &str = "pair.check";
+/// Pause a pair's automatic syncs until `pair.resume`; manual syncs run.
+pub const PAIR_PAUSE: &str = "pair.pause";
+pub const PAIR_RESUME: &str = "pair.resume";
 // Even maximum-length names and raw roots fit below the 1 MiB IPC frame limit.
 pub const PAIR_PAGE_SIZE: usize = 16;
 
@@ -404,14 +407,20 @@ pub struct PairRecord {
     pub id: String,
     pub revision: u64,
     pub configuration: PairInput,
+    /// A person paused the pair's automatic syncs. Not part of the
+    /// configuration: pausing keeps the revision.
+    #[serde(default)]
+    pub paused: bool,
 }
 
 impl From<&PairConfig> for PairRecord {
+    /// The record of a pair that is not paused.
     fn from(pair: &PairConfig) -> Self {
         Self {
             id: pair.id().to_string(),
             revision: pair.revision(),
             configuration: pair.draft().into(),
+            paused: false,
         }
     }
 }
