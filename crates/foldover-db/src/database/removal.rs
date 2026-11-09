@@ -76,7 +76,10 @@ impl Database {
             )?;
             left -= i64::try_from(deleted).unwrap_or(left);
         }
-        // Only a batch that ran out before its limit emptied every table.
+        // Each key is the rest of its table's primary key, so a delete
+        // takes at most `left` rows, and only a step that ran out before
+        // its limit emptied every table. The pair row's cascade takes the
+        // small tables, and would take any row this missed.
         if left > 0 {
             transaction.execute("DELETE FROM pair WHERE id=?1", [&id])?;
         }

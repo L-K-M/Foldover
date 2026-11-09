@@ -20,6 +20,10 @@ const BATCH_ROWS: usize = 10_000;
 /// for it go first.
 const BREATHER: Duration = Duration::from_millis(5);
 
+/// After a failed pass, the task tries again this much later, or at the
+/// next removal, whichever comes first.
+const RETRY: Duration = Duration::from_secs(5 * 60);
+
 /// Wakes the purge task. A wake while it runs is kept, so a removal that
 /// lands during a pass gets another pass.
 #[derive(Default)]
@@ -35,17 +39,21 @@ impl Purger {
 
 impl Service {
     /// Delete removed pairs' rows: now, for removals an earlier run left
-    /// unfinished, and after every removal.
+    /// unfinished, and after every removal. Call once, at start, like
+    /// `start_scheduler`.
     pub fn start_purge(&self) {
         let (engine, purger) = (Arc::clone(&self.engine), Arc::clone(&self.purge));
         tokio::spawn(async move {
             loop {
-                if let Err(error) = purge(&engine).await {
-                    // The rows stay hidden; the next removal or start
-                    // tries again.
-                    eprintln!("foldoverd: removed pairs' records stay for now: {error}");
+                match purge(&engine).await {
+                    Ok(()) => purger.wake.notified().await,
+                    Err(error) => {
+                        // The rows stay hidden meanwhile.
+                        eprintln!("foldoverd: removed pairs' records stay for now: {error}");
+                        // Woken by a removal, or timed out: either way, try again.
+                        let _ = tokio::time::timeout(RETRY, purger.wake.notified()).await;
+                    }
                 }
-                purger.wake.notified().await;
             }
         });
     }

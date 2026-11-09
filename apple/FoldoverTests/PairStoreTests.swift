@@ -151,7 +151,7 @@ private actor FailingPairPageClient: PairClient {
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func remove(_ pair: SyncPair) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair {
-        SyncPair(id: pair.id, revision: pair.revision, settings: pair.settings, automation: automation)
+        throw PairFixtureError.changedElsewhere
     }
 
     func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { throw PairFixtureError.changedElsewhere }

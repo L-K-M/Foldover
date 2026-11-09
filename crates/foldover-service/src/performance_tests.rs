@@ -244,10 +244,10 @@ async fn million_file_service_removal() {
 
     let purging = Instant::now();
     let engine = Arc::clone(&service.engine);
-    let purge = tokio::spawn(async move { purge::purge(&engine).await });
+    let task = tokio::spawn(async move { purge::purge(&engine).await });
     let mut slowest_list = Duration::ZERO;
     let mut lists = 0_u32;
-    while !purge.is_finished() {
+    while !task.is_finished() {
         let listed = Instant::now();
         service
             .handle(Request::call(2, PAIR_LIST, None))
@@ -257,7 +257,7 @@ async fn million_file_service_removal() {
         lists += 1;
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    purge.await.unwrap().unwrap();
+    task.await.unwrap().unwrap();
     println!("purge_ns\t{}", purging.elapsed().as_nanos());
     println!("lists\t{lists}");
     println!("slowest_list_ns\t{}", slowest_list.as_nanos());

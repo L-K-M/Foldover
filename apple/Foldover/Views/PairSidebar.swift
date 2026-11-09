@@ -64,6 +64,7 @@ struct PairSidebar: View {
             if pair.automation == .paused {
                 Button("Resume Pair") { Task { await viewModel.toggleAutomation(of: pair) } }
                     .disabled(!viewModel.canChangeAutomation(of: pair))
+                    .help("Automatic syncs run on the pair's schedule again.")
             } else {
                 Button("Pause Pair") { Task { await viewModel.toggleAutomation(of: pair) } }
                     .disabled(!viewModel.canChangeAutomation(of: pair))

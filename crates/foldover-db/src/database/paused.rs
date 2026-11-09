@@ -55,6 +55,9 @@ mod tests {
 
         database.pause_pair(&pair.id).unwrap();
         database.pause_pair(&pair.id).unwrap();
+        // A pause is state, not memory: it holds after the agent restarts.
+        drop(database);
+        let mut database = Database::open(&location).unwrap();
         assert_eq!(
             database.paused_pairs().unwrap(),
             std::slice::from_ref(&pair.id)

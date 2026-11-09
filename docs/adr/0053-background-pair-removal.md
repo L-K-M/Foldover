@@ -42,7 +42,8 @@ count, so a home folder on a laptop exceeds five seconds.
   requests go first.
 - The task starts with the agent, which finishes removals an earlier run
   left, and wakes after every removal. A step that fails stops the pass;
-  the rows stay hidden until the next removal or start retries.
+  the rows stay hidden, and the task tries again five minutes later or at
+  the next removal, whichever comes first.
 - v28 raises the minimum reader to 28: an older agent would show, and
   could sync, a marked pair again.
 
