@@ -874,6 +874,33 @@ func alertTextsNameTheProblem() {
                                 conflicts: 2, failures: [], failureCount: 0, archive: "run")
     #expect(SyncStore.alert(for: pair(), state: .finished(conflicted))?.body.contains("2") == true)
     #expect(SyncStore.alert(for: pair(), state: .idle) == nil)
+
+    // One alert per run: a run that left both names both.
+    let failure = RunFailure(path: Data("a".utf8), message: "Permission denied")
+    let mixed = RunSummary(cancelled: false, copied: 0, updated: 0, archived: 0, recovered: 0,
+                           conflicts: 2, failures: [failure], failureCount: 3, archive: "run")
+    #expect(SyncStore.alert(for: pair(), state: .finished(mixed))?.body
+        == "2 conflicts need your decision, and 3 items could not be synced.")
+    let failed = RunSummary(cancelled: false, copied: 0, updated: 0, archived: 0, recovered: 0,
+                            conflicts: 0, failures: [failure], failureCount: 3, archive: "run")
+    #expect(SyncStore.alert(for: pair(), state: .finished(failed))?.body
+        == "3 items could not be synced. They will be retried.")
+}
+
+/// Counts and rows arrive in separate fields. A total below its rows
+/// reads as nothing hidden; subtracting used to end the app.
+@MainActor
+@Test
+func inconsistentTotalsHideNothing() async {
+    let failure = RunFailure(path: Data("a".utf8), message: "Permission denied")
+    let short = RunSummary(cancelled: false, copied: 0, updated: 0, archived: 0, recovered: 0,
+                           conflicts: 0, failures: [failure, failure], failureCount: 1, archive: "run")
+    let client = ScriptedSyncClient([.finished(short)])
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
+    await viewModel.sync()
+    #expect(store.state(for: pair().id) == .finished(short))
+    #expect(viewModel.hiddenRowsText == nil)
 }
 
 @MainActor

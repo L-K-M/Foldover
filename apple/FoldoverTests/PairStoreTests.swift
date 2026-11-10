@@ -327,9 +327,35 @@ func dailyScheduleIsEditableInPlace() {
     #expect(editor.dailyWarning != nil)
     #expect(!editor.canSave)
 
-    #expect(PairEditorViewModel.scheduleTitle(.daily(minutes: 150, days: Set(SyncDay.allCases))) == "Every day at 02:30")
-    #expect(PairEditorViewModel.scheduleTitle(.daily(minutes: 18 * 60, days: [.monday, .tuesday, .wednesday, .thursday, .friday])) == "Weekdays at 18:00")
-    #expect(PairEditorViewModel.scheduleTitle(.daily(minutes: 7 * 60 + 15, days: [.monday, .wednesday, .friday])) == "Mon, Wed, Fri at 07:15")
+    let british = Locale(identifier: "en_GB")
+    #expect(PairEditorViewModel.scheduleTitle(.daily(minutes: 150, days: Set(SyncDay.allCases)), locale: british) == "Every day at 02:30")
+    #expect(PairEditorViewModel.scheduleTitle(.daily(minutes: 18 * 60, days: [.monday, .tuesday, .wednesday, .thursday, .friday]), locale: british) == "Weekdays at 18:00")
+    #expect(PairEditorViewModel.scheduleTitle(.daily(minutes: 7 * 60 + 15, days: [.monday, .wednesday, .friday]), locale: british) == "Mon, Wed, Fri at 07:15")
+}
+
+/// The summary reads like the time picker beside it, which follows the
+/// Mac's clock format: a 12-hour Mac must not be told "18:00".
+@MainActor
+@Test
+func scheduleTimesFollowTheLocalesClock() {
+    let american = Locale(identifier: "en_US")
+    // Releases of the system differ in the space before AM and PM.
+    let plain = { (text: String) in
+        text.replacingOccurrences(of: "\u{202F}", with: " ").replacingOccurrences(of: "\u{00A0}", with: " ")
+    }
+    let weekdays: Set<SyncDay> = [.monday, .tuesday, .wednesday, .thursday, .friday]
+    #expect(plain(PairEditorViewModel.scheduleTitle(.daily(minutes: 18 * 60, days: weekdays), locale: american)) == "Weekdays at 6:00 PM")
+    #expect(plain(PairEditorViewModel.scheduleTitle(.daily(minutes: 150, days: Set(SyncDay.allCases)), locale: american)) == "Every day at 2:30 AM")
+    #expect(plain(PairEditorViewModel.scheduleTitle(.daily(minutes: 0, days: Set(SyncDay.allCases)), locale: american)) == "Every day at 12:00 AM")
+    #expect(PairEditorViewModel.scheduleTitle(.daily(minutes: 1439, days: Set(SyncDay.allCases)), locale: Locale(identifier: "de_CH")) == "Every day at 23:59")
+
+    var options = PairOptions.defaults
+    options.schedule = .daily(minutes: 18 * 60, days: weekdays)
+    #expect(plain(PairEditorViewModel.planText(mode: .sync, options: options, locale: american)).hasSuffix("Syncs weekdays at 6:00 PM."))
+    options.schedule = .daily(minutes: 18 * 60, days: [])
+    #expect(plain(PairEditorViewModel.planText(mode: .sync, options: options, locale: american)).hasSuffix("Syncs at 6:00 PM once you choose weekdays."))
+    // Schedules without a time of day read the same everywhere.
+    #expect(PairEditorViewModel.scheduleTitle(.every(minutes: 60), locale: american) == "Every hour")
 }
 
 @MainActor
@@ -776,6 +802,27 @@ func pairEditorWalksServerFoldersAndChoosesOne() async throws {
     #expect(editor.useServerFolder(side: .right))
     #expect(editor.right == SelectedFolder(bytes: Data("sftp://nas/home/alice/Photos".utf8)))
 
+    // A highlighted row wins over the folder being browsed: the
+    // enclosing folder here, a listed folder below. A locator the
+    // listing does not offer is ignored.
+    #expect(editor.useServerFolder(side: .right, highlighted: home.locator))
+    #expect(editor.right == SelectedFolder(bytes: Data("sftp://nas/home/alice".utf8)))
+    await editor.openServerFolder("sftp://nas/~")
+    #expect(editor.serverListing == home)
+    #expect(editor.useServerFolder(side: .right, highlighted: photos.locator))
+    #expect(editor.right == SelectedFolder(bytes: Data("sftp://nas/home/alice/Photos".utf8)))
+    await editor.openServerFolder(photos.locator)
+    #expect(editor.useServerFolder(side: .right, highlighted: "sftp://elsewhere/x"))
+    #expect(editor.right == SelectedFolder(bytes: Data("sftp://nas/home/alice/Photos".utf8)))
+
+    // A highlighted row needs no text in the field: the button stays
+    // available, and the row is used.
+    editor.serverLocator = ""
+    #expect(!editor.canUseServerFolder(highlighted: nil))
+    #expect(editor.canUseServerFolder(highlighted: home.locator))
+    #expect(editor.useServerFolder(side: .right, highlighted: home.locator))
+    #expect(editor.right == SelectedFolder(bytes: Data("sftp://nas/home/alice".utf8)))
+
     // A server that does not answer leaves the last listing up.
     await editor.openServerFolder("sftp://nas/gone")
     #expect(editor.serverBrowseError != nil)
@@ -895,20 +942,22 @@ func planSentenceSaysWhatThePairWillDo() {
     editor.options.schedule = .onChange
     #expect(editor.planText == "Changes in either folder go to the other. A file deleted in one folder is archived in the other. Syncs when files change.")
 
+    // Times of day follow the Mac's clock format; pin a 24-hour one.
+    let plan = { PairEditorViewModel.planText(mode: editor.mode, options: editor.options, locale: Locale(identifier: "en_GB")) }
     editor.mode = .backupLeft
     editor.options.schedule = .daily(minutes: 120, days: Set(SyncDay.allCases))
-    #expect(editor.planText == "Folder A is copied to Folder B. Files you delete in A stay in B. Syncs every day at 02:00.")
+    #expect(plan() == "Folder A is copied to Folder B. Files you delete in A stay in B. Syncs every day at 02:00.")
 
     editor.mode = .mirrorLeft
-    #expect(editor.planText == "Folder B is made identical to A. Files you delete in A are archived in B, never deleted. Syncs every day at 02:00.")
+    #expect(plan() == "Folder B is made identical to A. Files you delete in A are archived in B, never deleted. Syncs every day at 02:00.")
 
     editor.mode = .mirrorRight
     editor.options.schedule = .daily(minutes: 18 * 60, days: [.monday, .tuesday, .wednesday, .thursday, .friday])
-    #expect(editor.planText == "Folder A is made identical to B. Files you delete in B are archived in A, never deleted. Syncs weekdays at 18:00.")
+    #expect(plan() == "Folder A is made identical to B. Files you delete in B are archived in A, never deleted. Syncs weekdays at 18:00.")
 
     editor.mode = .backupRight
     editor.options.schedule = .daily(minutes: 7 * 60 + 15, days: [.monday, .wednesday, .friday])
-    #expect(editor.planText == "Folder B is copied to Folder A. Files you delete in B stay in A. Syncs Mon, Wed, Fri at 07:15.")
+    #expect(plan() == "Folder B is copied to Folder A. Files you delete in B stay in A. Syncs Mon, Wed, Fri at 07:15.")
 
     editor.options.schedule = .every(minutes: 15)
     #expect(editor.planText.hasSuffix("Syncs every 15 minutes."))

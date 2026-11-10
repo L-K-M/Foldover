@@ -714,7 +714,7 @@ final class MainViewModel {
         )
         let syncStep = SetupStep(
             id: 3, title: String(localized: "Preview, then sync"),
-            detail: String(localized: "Nothing changes until you sync. Replaced and removed files stay in each folder's archive for 30 days."),
+            detail: String(localized: "Without a schedule, nothing changes until you sync; a pair with a schedule starts by itself. Replaced and removed files stay in each folder's archive for 30 days."),
             progress: .upcoming, action: nil
         )
         return [agentStep, pairStep, syncStep]
