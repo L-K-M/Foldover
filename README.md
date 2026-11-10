@@ -21,6 +21,16 @@ The macOS app requires macOS 27 and Apple silicon.
 > source of truth for scope and design; the research behind it lives in
 > [`docs/research`](docs/research/README.md).
 
+## Screenshots
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/preview-dark.png">
+  <img src="docs/screenshots/preview-light.png" alt="Foldover previewing folder changes side by side, with a selected conflict and options to keep either version or both." width="1000">
+</picture>
+
+Preview changes and resolve conflicts before syncing. Shown with demo data;
+the screenshot follows your light or dark appearance.
+
 ## Guides
 
 - [Using the app](docs/guide/using-the-app.md): the window, menus,
