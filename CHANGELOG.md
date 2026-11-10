@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A daily schedule's time reads as your Mac's clock shows it, such as
+  "Weekdays at 6:00 PM", in the pair editor, the inspector and the pair's
+  summary. It was always written as "18:00", beside a time picker that
+  followed the Mac's 12-hour clock.
 - The limitations guide and the README no longer say that a pair's first
   sync always waits for your review. It has run like any other since
   Require approval before syncing became a setting; both now say so and
