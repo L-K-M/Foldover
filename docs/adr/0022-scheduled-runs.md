@@ -16,7 +16,7 @@ longest-waiting pair first
 
 | Schedule | Due |
 |---|---|
-| `every` | One interval after the last scheduled start, or after the agent started |
+| `every` | One interval after the last scheduled start, or after the agent started, in awake time; or once the wall clock shows one interval since that start, since the last recorded run's start when the pair has not started under this agent yet, or since the agent's start when it has no recorded run |
 | `changes` | 10 seconds after the last change in either folder; at most 5 minutes after the first change since the last run, when changes never stop; and an hour after the pair's last preview, sync or undo ended, or after its last scheduled start or the agent's start when no job has run since |
 
 - **Change notifications** come from FSEvents on macOS and inotify on
@@ -72,7 +72,23 @@ longest-waiting pair first
   run after the pause; manual Preview Changes and Sync Now still run and
   do not lift the pause. The app's sidebar and Pair menu, and the CLI
   (`foldover pairs pause ID`, `foldover pairs resume ID`), set it.
-- Timing state lives in agent memory; a restart restarts every interval.
+- **Intervals across sleep and restarts:** awake time is counted with
+  `Instant`, which cannot be set back but stops while the Mac sleeps
+  and starts over with the agent. Alone it made an "Every day" pair on
+  a Mac that sleeps at night wait for a day of use, and wait forever on
+  one that restarts daily. An interval pair is therefore also due once
+  the wall clock shows a full interval since its last scheduled start
+  or, before its first start under this agent, since the start of its
+  last recorded run, manual or scheduled. Once it has started under
+  this agent only its scheduled starts count, as before: a manual sync
+  does not put off the next automatic one. A missed interval runs once
+  when the Mac wakes or the agent starts, like a missed daily moment
+  ([ADR 0039](0039-calendar-schedules.md)). A wall clock set back never
+  holds a pair, since awake time still counts; one set forward costs a
+  single early run.
+- Other timing state lives in agent memory: a restart restarts the
+  hourly check of `changes` pairs and the interval of a pair that has
+  never run.
 
 ## Consequences
 

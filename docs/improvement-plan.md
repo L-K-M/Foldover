@@ -132,6 +132,27 @@ in the README, and state the current phase in PLAN.md.
 Plan for R5: format schedule times with the Mac's locale. Acceptance:
 view-model tests for a 12-hour and a 24-hour locale.
 
+### Q1: when should a new pair's first automatic sync start?
+
+Found while fixing R1, and left as it is. A daily pair with no recorded
+run is due at the first check after it is saved: `Scheduler::due` treats
+every past moment as missed, which was safe while a first-sync gate held
+never-run pairs and stopped being so with PR 188. An interval pair
+counts from the agent's start, so it too usually starts at once. A pair
+saved at 14:00 as "Every day at 02:00" therefore syncs at 14:00,
+unattended unless it requires approval. The pair editor does say a
+scheduled pair can start by itself, and PR 188's message names "the
+first scheduled tick", so this may be intended.
+
+This pass corrects ADR 0039, which still claimed the gate, adds the
+behavior to limitations.md, which said nothing, and pins it in
+`daily_pairs_catch_up_a_missed_moment_once_at_the_next_tick`
+(`crates/foldover-service/src/lib.rs`), whose first assertion passed
+only because a folder check was still pending.
+Whether the first run should wait for the schedule is the owner's call:
+it trades a surprise at save time against a backup that does not exist
+until the first scheduled moment.
+
 ## Order of work
 
 1. R2, R3, R4, R6 and R7 in one pull request with this plan: tests,

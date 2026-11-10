@@ -22,11 +22,14 @@ recent selected weekday whose time is not after it.
 
 A daily pair is due when the latest scheduled moment at or before the
 current local date-time is later than the last run's start, read from
-run history (none yet: the pair has never run, which the first-sync
-gate already excludes). A scheduled moment is therefore covered
+run history. A pair with no recorded run is due at once: routine
+review is off by default since
+[ADR 0020](0020-run-execution.md)'s review policy, so no first-sync
+gate holds it. A scheduled moment is therefore covered
 exactly once: waking at 18:05 for an 18:00 schedule runs one sync, and
 the recorded run start then covers it for every later tick. Interval
-schedules keep their monotonic `Instant` comparison.
+schedules compare awake time and, across sleep and restarts, the wall
+clock ([ADR 0022](0022-scheduled-runs.md)).
 
 Local wall-clock time comes from `foldover-os::local_time`, a small
 audited `localtime_r` binding that works on macOS and Linux, re-exposed
@@ -52,7 +55,9 @@ at 18:00" or a day list.
   the wall-clock time, which is what "at 18:00" means; an ambiguous or
   skipped local time under a DST transition is resolved by
   `localtime_r`'s reading of the system zone.
-- Automatic syncs still start only after a first sync run by hand, so a
-  new daily pair never fires unattended before its first preview.
+- A new daily pair's first sync starts at the first check after it is
+  saved, not at its first scheduled moment, unless the pair requires
+  approval: with no recorded run every past moment counts as missed.
+  The pair editor says that a scheduled pair can start by itself.
 - Older agents cannot open a database that stores a daily pair; readers
   at schema 21 or newer can.

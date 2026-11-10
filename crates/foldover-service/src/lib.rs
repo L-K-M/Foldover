@@ -1616,6 +1616,38 @@ mod tests {
         settled(&service, &key).await;
     }
 
+    /// ADR 0022: an interval that passed on the wall clock while the Mac
+    /// slept or the agent was off is due, though the agent has been awake
+    /// for seconds. Here the recorded run stands in for the last sync
+    /// before a restart.
+    #[tokio::test]
+    async fn an_interval_missed_while_asleep_or_off_runs_once() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Notes");
+        input["options"]["schedule"] = json!({"kind": "every", "minutes": 24 * 60});
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        let start = service.scheduler.started();
+        let at = |seconds| start + std::time::Duration::from_secs(seconds);
+        assert_eq!(first_sync(&service, &key).await["state"], "finished");
+
+        // The same day: nothing is due.
+        assert!(run_due_started(&service, at(30)).await.is_empty());
+
+        // The next day on the wall clock, a minute of awake time later.
+        let tomorrow = SystemTime::now() + std::time::Duration::from_secs(25 * 60 * 60);
+        service.scheduler.set_wall(move || tomorrow);
+        assert_eq!(run_due_started(&service, at(60)).await, [id]);
+        assert_eq!(settled(&service, &key).await["state"], "finished");
+
+        // That start covers the interval.
+        assert!(run_due_started(&service, at(90)).await.is_empty());
+    }
+
     #[tokio::test]
     async fn daily_pairs_catch_up_a_missed_moment_once_at_the_next_tick() {
         let (directory, service) = fixture();
@@ -1634,14 +1666,15 @@ mod tests {
         let at = |seconds| start + std::time::Duration::from_secs(seconds);
         let local_now = || local_time(SystemTime::now());
 
-        // A first run is always reviewed by a person; the pair cannot
-        // become due before it, nor while the local clock is missing.
-        assert!(
-            service
-                .run_due_at(at(10), Environment::now(), local_now())
-                .is_empty()
+        // Routine review is off by default (ADR 0020), so nothing holds a
+        // pair without a recorded run: every past moment counts as missed
+        // and its first sync starts at the first check (ADR 0039).
+        assert_eq!(
+            run_due_started_at(&service, at(10), local_now()).await,
+            [id]
         );
-        assert_eq!(first_sync(&service, &key).await["state"], "finished");
+        assert_eq!(settled(&service, &key).await["state"], "finished");
+        // Nothing is due while the local clock is missing.
         assert!(
             service
                 .run_due_at(at(15), Environment::now(), None)
