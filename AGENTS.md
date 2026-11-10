@@ -116,6 +116,11 @@ both (the engine bumps the spec; `sync-cargo-version.sh` follows with
 Cargo). Internal path dependencies carry no version requirement, so a bump
 never breaks the build.
 
+Describe every user-visible change under `## [Unreleased]` in
+`CHANGELOG.md`. A release moves those entries under its version
+(`scripts/roll-changelog.py`), and the GitHub release publishes that
+section; a release with nothing under Unreleased is refused.
+
 ## Footguns
 
 - UniFFI is pinned to `=0.32.2` in `foldover-ffi` and `foldover-bindgen`,

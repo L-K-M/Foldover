@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- The limitations guide and the README no longer say that a pair's first
+  sync always waits for your review. It has run like any other since
+  Require approval before syncing became a setting; both now say so and
+  describe that setting and Stop unusually large removals.
+- Release notes list the release's changes: releasing moves the
+  changelog's Unreleased entries under the new version. The 0.2.0 notes
+  said only "See CHANGELOG.md."
 - A "When files change" pair whose sync takes longer than an hour no
   longer starts its hourly check again the moment that sync ends. The
   hour now counts from when the pair's last preview or sync ended
@@ -15,6 +22,31 @@ All notable changes to this project are documented here. The format follows
 - Removing a pair answers at once, however many files it tracks. It used
   to time out on large pairs and grey out Edit Pair and Remove Pair; the
   agent now deletes the pair's records in the background (ADR 0053).
+
+### Changed
+
+- Automatic syncs run gently by default: on this Mac's own disks they use
+  at most one processor core, instead of keeping several busy for minutes
+  and setting off macOS's CPU warning for foldoverd. They run one at a time
+  and wait while a sync you started runs. They run at low priority, and read
+  and copy one file at a time on this Mac's own disks. Syncs over the
+  network keep their parallel transfers. Large automatic syncs between
+  local disks take longer, several times longer while other apps use the
+  disk heavily; turn on "Run automatic syncs at full speed" in
+  Settings, or run `foldover automation effort full`, to use the whole
+  Mac. Syncs you start yourself always run at full speed (local protocol
+  23, ADR 0054).
+
+### Added
+
+- Pause Pair and Resume Pair, in the sidebar's menu and the Pair menu, and
+  `foldover pairs pause|resume ID`: a paused pair's automatic syncs wait
+  until you resume it, while Sync Now still works.
+
+## [0.2.0] - 2026-11-06
+
+### Fixed
+
 - A sync's time left counts a part second as a whole one, so the folded
   sheet and the status text no longer say "about 0 s left" while data is
   still copying.
@@ -27,9 +59,9 @@ All notable changes to this project are documented here. The format follows
   when its scan finishes before the first one.
 - Pair edits save during a preview or sync and apply to subsequent runs.
   The current job keeps its original settings and finishes normally.
-- An aborted first sync still requires review on retry. Editing a pair's
-  folders re-subscribes its change watchers. Peer scan counters cannot
-  claim unbounded work in a scan, however many reports they send.
+- Editing a pair's folders re-subscribes its change watchers. Peer scan
+  counters cannot claim unbounded work in a scan, however many reports
+  they send.
 - Put Back All reserves the archive through its reload and shows recovery
   activity. Periodic health probes keep pair commands enabled.
 - Unicode spelling preparation counts aliases once, and preview rows are
@@ -55,18 +87,6 @@ All notable changes to this project are documented here. The format follows
   are skipped in both folders, preserving existing copies.
 
 ### Changed
-
-- Automatic syncs run gently by default: on this Mac's own disks they use
-  at most one processor core, instead of keeping several busy for minutes
-  and setting off macOS's CPU warning for foldoverd. They run one at a time
-  and wait while a sync you started runs. They run at low priority, and read
-  and copy one file at a time on this Mac's own disks. Syncs over the
-  network keep their parallel transfers. Large automatic syncs between
-  local disks take longer, several times longer while other apps use the
-  disk heavily; turn on "Run automatic syncs at full speed" in
-  Settings, or run `foldover automation effort full`, to use the whole
-  Mac. Syncs you start yourself always run at full speed (local protocol
-  23, ADR 0054).
 
 - A sync's progress on the folded sheet names its stage: Comparing,
   Syncing, Waiting or Stopping. While comparing it counts the items
@@ -127,9 +147,6 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- Pause Pair and Resume Pair, in the sidebar's menu and the Pair menu, and
-  `foldover pairs pause|resume ID`: a paused pair's automatic syncs wait
-  until you resume it, while Sync Now still works.
 - New home-folder Backups start with editable cache exclusions. Trash,
   logs, Xcode DerivedData and developer download caches can be added
   explicitly; existing pairs keep their current rules.
@@ -266,8 +283,14 @@ All notable changes to this project are documented here. The format follows
   replaced or archived comes back. Anything changed since is left as it is
   and listed. Automatic syncs then wait until you sync again.
 
-- A pair's first sync always shows its preview first; nothing is written
-  until you approve that plan.
+- Require approval before syncing, a pair setting that is off by default
+  (`--review required`): with it on, every sync, a pair's first and its
+  scheduled ones included, shows its preview and writes nothing until
+  you approve that plan. Without it, a pair's first sync runs like any
+  other, and a scheduled pair can start it by itself.
+- Stop unusually large removals, a pair setting that is on by default
+  (`--removal-protection`): it holds the deletion limits and the
+  suddenly-empty-folder stop, and turning it off removes both.
 - A folder that is suddenly empty no longer empties its partner without
   review, however few files it held.
 - A sync stops at once when a folder's disk or share goes away or is

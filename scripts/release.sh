@@ -2,8 +2,9 @@
 #
 # Cuts a release: bumps MARKETING_VERSION in apple/project.yml (the
 # generated .xcodeproj follows the spec), syncs the Cargo workspace
-# version through RELEASE_POST_BUMP, commits, tags "v<version>", and
-# with --push pushes branch + tag.
+# version and cuts the changelog's release section through
+# RELEASE_POST_BUMP, commits, tags "v<version>", and with --push pushes
+# branch + tag.
 #
 # Usage: scripts/release.sh [X.Y.Z] [--push]
 # Shared engine: https://github.com/L-K-M/release-tool (this stub only
@@ -20,7 +21,13 @@ export RELEASE_XCODE_SCHEME="Foldover"
 export RELEASE_XCODEGEN_YML="apple/project.yml"
 export RELEASE_INVOKED_AS="scripts/release.sh"
 export RELEASE_CI_NOTE="Pushing <tag> runs .github/workflows/release.yml, which publishes the ad-hoc-signed app zip as a GitHub release."
-export RELEASE_POST_BUMP="scripts/sync-cargo-version.sh"
+# After the Cargo version follows, the changelog's Unreleased entries
+# move under the new version; the bump commit carries both, and
+# release-notes.py publishes that section with the release.
+export RELEASE_POST_BUMP="scripts/sync-cargo-version.sh && python3 scripts/roll-changelog.py"
+# Tagging a version that was bumped by hand skips the post-bump step:
+# refuse the tag until the changelog names that version too.
+export RELEASE_PRE_TAG="python3 scripts/roll-changelog.py --check"
 # Cargo needs all three components, so X.Y (which the xcode kind would
 # accept) is rejected up front instead of failing inside cargo. The
 # optional -suffix carries pre-releases (semver order), which the
