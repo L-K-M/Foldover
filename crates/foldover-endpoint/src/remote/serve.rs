@@ -26,7 +26,7 @@ use foldover_types::{
 };
 
 use super::wire;
-use crate::lease::LockFile;
+use crate::lease::{LEASE_LIMIT, LockFile};
 use crate::link::Answer;
 use crate::local::Carried;
 use crate::{
@@ -543,6 +543,17 @@ fn lease(
             .map(|()| PeerReply::Done)
             .map_err(|error| wire::apply_failure(&error))
     };
+    // Reads stop at `LEASE_LIMIT`: a longer record would leave this
+    // folder's lease unreadable to every Mac, this one included.
+    if let LeaseAction::Create { content } | LeaseAction::Replace { content } = &action
+        && content.len() > LEASE_LIMIT
+    {
+        return Err(FolderError {
+            kind: FolderErrorKind::Invalid,
+            path: None,
+            message: "A lease record is too large".into(),
+        });
+    }
     match action {
         LeaseAction::Read => endpoint
             .read_lock_file(file)
@@ -846,6 +857,49 @@ mod tests {
         assert_eq!(
             shared_retention(MIN_SHARED_RETENTION.as_secs() * 2),
             MIN_SHARED_RETENTION * 2
+        );
+    }
+
+    /// A paired Mac writes lease records here. One longer than a read
+    /// accepts is refused before it reaches the disk.
+    #[test]
+    fn a_lease_record_longer_than_a_read_accepts_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        let long = vec![b'x'; LEASE_LIMIT + 1];
+        let fits = vec![b'x'; LEASE_LIMIT];
+
+        for action in [
+            LeaseAction::Create {
+                content: long.clone(),
+            },
+            LeaseAction::Replace { content: long },
+        ] {
+            let error = lease(&endpoint, LeaseFile::Lock, action).unwrap_err();
+            assert_eq!(error.kind, FolderErrorKind::Invalid);
+        }
+        assert_eq!(
+            lease(&endpoint, LeaseFile::Lock, LeaseAction::Read).unwrap(),
+            PeerReply::LeaseRead { content: None }
+        );
+
+        // The longest record a read accepts still goes through.
+        assert_eq!(
+            lease(
+                &endpoint,
+                LeaseFile::Lock,
+                LeaseAction::Create {
+                    content: fits.clone()
+                }
+            )
+            .unwrap(),
+            PeerReply::LeaseCreated { created: true }
+        );
+        assert_eq!(
+            lease(&endpoint, LeaseFile::Lock, LeaseAction::Read).unwrap(),
+            PeerReply::LeaseRead {
+                content: Some(fits)
+            }
         );
     }
 
