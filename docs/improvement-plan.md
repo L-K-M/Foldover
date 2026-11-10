@@ -15,18 +15,29 @@ from a fresh review and from the standing backlog in
 - **Documents against code.** The README, the guides, the changelog and
   the release scripts, read against what the code and the release
   actually do.
-- **Static review by area**, under way when this plan was first
-  committed: the Swift app, the agent-side crates (service, engine,
-  state, IPC, client, CLI), and the driver crates (endpoint, fs, net, db,
-  os, watch). A finding enters the table below only once it is confirmed
-  in the code.
-- **Backlog audit**, also under way: every `bugs`, `general issues` and
-  `performance` entry of ANALYSIS.md, and the small usability entries,
-  checked against the current code. Two results so far: MIMO-01 does not
-  hold, because the FSEvents header defines `HistoryDone` as a sentinel
-  event of its own whose path is ignored, never a flag on a real change;
-  and the panic MIMO-06 describes has no trigger, because `SyncPath` has
-  no byte limit that a lower-cased name could exceed.
+- **Static review by area**, by helper models reading the code: the
+  Swift app's state layer, the agent's service layer and CLI, and the
+  driver crates (endpoint, net, fs, db, watch). A finding counted only
+  once it was confirmed in the code. The service review found nothing
+  beyond the backlog. The Swift review reported one item, which was
+  declined: asking for more preview rows clears the pair's shown error,
+  as every other command in that store does. The driver review found
+  nothing beyond the backlog either; it read the write, receive, frame
+  and SFTP paths and the journal, and did not reach the watch crate or
+  the rest of the database crate in depth.
+- **Backlog audit**: every `bugs`, `general issues` and `performance`
+  entry of ANALYSIS.md, and the small usability entries, checked
+  against the current code. Four entries left the backlog without a
+  change. Three were already fixed: MIMO-14a (commit `cc6f6382` takes
+  only plain host names from server adverts), MIMO-21 (`6c048991`
+  added the per-pair pause) and NATIVE-01 (`e07cccdb` keeps the
+  quarantine value while copying ACLs). MIMO-01 does not hold, because
+  the FSEvents header defines `HistoryDone` as a sentinel event of its
+  own whose path is ignored, never a flag on a real change. The panic
+  MIMO-06 describes has no trigger (noted on the entry); its claim
+  about `Beside` reporting was not checked. Eight entries were small,
+  confirmed and fixed (see Outcome); the rest still stand, SOL-11,
+  SOL-23 and MIMO-26h in part.
 
 Hardware behavior, VoiceOver, frame times and physical NAS runs were not
 reviewed; they stay with the owner's release qualification
@@ -168,8 +179,26 @@ until the first scheduled moment.
 Each pull request goes through CI and the automated review under the
 rules in AGENTS.md before the next one starts from the new main.
 
+## Outcome
+
+| Work | Pull request |
+|---|---|
+| R2, R3, R4, R6, R7 and this plan | 277 |
+| R1 | 278 |
+| R5 and four app entries from the backlog (SOL-26, MIMO-07a, MIMO-07c, SOL26-19) | 279 |
+| Three agent entries from the backlog (MIMO-12a, MIMO-13a, MIMO-13e) | 280 |
+
+SOL26-05 was fixed by R4. Q1 stays open for the owner. Two backlog
+entries were looked at and left: SOL2-18, because refusing an unknown
+pair needs a pair lookup that must not wait behind queued configuration
+changes, which is a design change; and SOL2-37, because its fix cannot
+be checked without VoiceOver.
+
 ## Not in this pass
 
+- **The watch crate and most of the database crate**: the driver
+  review did not reach them in depth (see above). They still need a
+  read.
 - **Hardware and accessibility qualification** (ANALYSIS.md SOL-11,
   SOL-12, MUSE-05e, SOL26-17): needs devices, displays and VoiceOver.
 - **Protocol or schema features** (SOL-04 server-side search, SOL-08
