@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A sync that leaves both conflicts and failed items says so in one
+  notification. It used to mention only the conflicts.
+- Use This Folder in the SFTP folder browser takes the highlighted row
+  when that row is Enclosing Folder, as it does for a listed folder.
+- The setup guide no longer says nothing changes until you sync: a pair
+  with a schedule starts by itself.
+- A result whose total is smaller than the rows it lists can no longer
+  quit the app.
 - A daily schedule's time reads as your Mac's clock shows it, such as
   "Weekdays at 6:00 PM", in the pair editor, the inspector and the pair's
   summary. It was always written as "18:00", beside a time picker that

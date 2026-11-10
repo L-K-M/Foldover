@@ -761,8 +761,14 @@ final class PairEditorViewModel: Identifiable {
     }
 
     /// Use `serverLocator` for `side`; false, with the reason shown, when
-    /// it does not name a folder on a server.
-    func useServerFolder(side: PairFolderSide) -> Bool {
+    /// it does not name a folder on a server. Like an open panel, a row
+    /// highlighted in the listing wins over the folder being browsed: a
+    /// listed folder, or the enclosing folder.
+    func useServerFolder(side: PairFolderSide, highlighted: String? = nil) -> Bool {
+        if let highlighted, let listing = serverListing,
+           highlighted == listing.parent || listing.folders.contains(where: { $0.locator == highlighted }) {
+            serverLocator = highlighted
+        }
         let locator = serverLocator.trimmingCharacters(in: .whitespacesAndNewlines)
         guard Self.isServerLocator(locator) else {
             serverBrowseError = Self.serverLocatorHelp

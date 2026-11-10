@@ -800,6 +800,19 @@ func pairEditorWalksServerFoldersAndChoosesOne() async throws {
     #expect(editor.useServerFolder(side: .right))
     #expect(editor.right == SelectedFolder(bytes: Data("sftp://nas/home/alice/Photos".utf8)))
 
+    // A highlighted row wins over the folder being browsed: the
+    // enclosing folder here, a listed folder below. A locator the
+    // listing does not offer is ignored.
+    #expect(editor.useServerFolder(side: .right, highlighted: home.locator))
+    #expect(editor.right == SelectedFolder(bytes: Data("sftp://nas/home/alice".utf8)))
+    await editor.openServerFolder("sftp://nas/~")
+    #expect(editor.serverListing == home)
+    #expect(editor.useServerFolder(side: .right, highlighted: photos.locator))
+    #expect(editor.right == SelectedFolder(bytes: Data("sftp://nas/home/alice/Photos".utf8)))
+    await editor.openServerFolder(photos.locator)
+    #expect(editor.useServerFolder(side: .right, highlighted: "sftp://elsewhere/x"))
+    #expect(editor.right == SelectedFolder(bytes: Data("sftp://nas/home/alice/Photos".utf8)))
+
     // A server that does not answer leaves the last listing up.
     await editor.openServerFolder("sftp://nas/gone")
     #expect(editor.serverBrowseError != nil)

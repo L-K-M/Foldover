@@ -628,6 +628,9 @@ final class SyncStore {
             body = String(localized: "An automatic sync stopped before archiving \(preview.archives) items. Open Foldover to review and approve it.")
         case .failed(let message):
             body = String(localized: "An automatic sync stopped: \(message)")
+        case .finished(let result) where result.conflicts > 0 && result.failureCount > 0:
+            // One alert per run: it must not hide the failures behind the conflicts.
+            body = String(localized: "\(result.conflicts) conflicts need your decision, and \(result.failureCount) items could not be synced.")
         case .finished(let result) where result.conflicts > 0:
             body = String(localized: "\(result.conflicts) conflicts need your decision.")
         case .finished(let result) where result.failureCount > 0:

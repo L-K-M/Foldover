@@ -304,24 +304,6 @@ Merged SOL26-07: Current source: `crates/foldover-engine/src/plan.rs:320` scans 
 
 Partial delivery: PR 185 indexes unavailable subtrees during local observation, and d5fa08f reduces protected-state ancestor traversal. Retain this finding for remaining per-row skip, failed-path and Undo normalization work; do not reimplement the shipped local observation index.
 
-### SOL-26: The SFTP chooser ignores a selected enclosing folder
-
-bugs — important
-
-Evidence: `apple/Foldover/Views/PairEditorView.swift:586-593`
-accepts a highlighted child only when it is in `folders`, but the
-Enclosing Folder row is represented separately by `parent`.
-
-Impact: Highlighting Enclosing Folder and choosing Use This Folder
-silently selects the currently browsed folder instead.
-
-Suggested fix: Validate highlighted selection against both parent and child
-entries before committing the locator. Keep the visible path and
-effective chosen root consistent.
-
-Acceptance: Tests for parent, child, no selection and stale
-selection; a UI tour verifies the saved root bytes match the selection.
-
 ### SOL-27: Deleted pairs keep their loaded preview state in memory
 
 general issues — important
@@ -867,22 +849,6 @@ performance problems, stuttering, and jank — nice-to-have
 Historical evidence: `crates/foldover-fs/src/root/content.rs` uses a 64 KiB `HASH_BUFFER_BYTES`; Mimo also identified resume-prefix hashing through `io::copy`'s smaller buffer in `root/write/partial.rs:83`. Larger buffers may reduce system calls on huge files; the original review expected this path to remain I/O-bound.
 
 Suggested fix: benchmark 256 KiB to 1 MiB buffers and reuse the content-hash buffer policy for resume prefixes only if measurements justify it.
-
-### MIMO-07a: Guard preview count subtraction
-
-bugs — nice-to-have
-
-`apple/Foldover/ViewModels/PairSyncViewModel.swift:656-660` subtracts the number of returned changes or failures from unsigned totals. The scan-error count already has a zero floor; the remaining subtractions rely on internally consistent agent data.
-
-Suggested fix: floor inconsistent totals at zero or use checked subtraction. Acceptance: malformed totals do not trap and valid hidden-row counts remain unchanged.
-
-### MIMO-07c: Mixed outcomes notify only conflicts
-
-usability — nice-to-have
-
-Historical evidence: `apple/Foldover/Stores/SyncStore.swift` selects a conflict alert before reporting failures from the same finished run. The user can miss the failure count when both outcomes occur.
-
-Suggested fix: include both conflicts and failures in the existing actionable notification. Acceptance: one mixed-result alert retains both counts.
 
 ### MIMO-07d: Sync while approval is pending re-prompts
 
@@ -1526,18 +1492,6 @@ state.
 Suggested fix: expose the disabled accessibility state whenever `canFold` is
 false and omit the action in that state, while retaining the explanatory hint.
 Add an accessibility regression for both available and unavailable folds.
-
-### SOL26-19: Onboarding copy obscures automatic first runs
-
-usability — nice-to-have
-
-File and line: `apple/Foldover/ViewModels/MainViewModel.swift:694; apple/Foldover/Views/PairEditorView.swift:53`
-
-Impact: The guide says nothing changes until you sync, while the editor explains schedules can start after saving. First-time users get inconsistent guidance.
-
-Suggested fix: Explain manual and automatic starts together and point to required approval.
-
-Effort: one hour
 
 ### SOL26-21: Copy a local sync receipt
 
