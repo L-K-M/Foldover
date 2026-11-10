@@ -3801,8 +3801,13 @@ mod tests {
         release.send(()).unwrap();
         settled(&service, &key(ids[0])).await;
 
+        // Hold the one that starts: were it to finish between the
+        // helper's two ticks, the second would rightly start the other.
+        let (reached, release) = service.jobs.gate_job();
         let started = run_due_started(&service, at(62)).await;
         assert_eq!(started.len(), 1, "{started:?}");
+        job_reached(reached).await;
+        release.send(()).unwrap();
         settled(&service, &key(started[0])).await;
     }
 

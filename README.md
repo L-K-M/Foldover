@@ -32,10 +32,11 @@ The macOS app requires macOS 27 and Apple silicon.
 - [Limitations](docs/guide/limitations.md): current limits and what is
   not implemented yet.
 
-## Planned highlights
+## Highlights
 
-- **Preview first.** Every change is listed before it runs, with per-item
-  overrides.
+- **Preview first.** Preview any sync before it runs, with per-item
+  overrides; turn on **Require approval before syncing** and every run,
+  scheduled ones included, waits for your approval.
 - **Nothing lost quietly.** Replaced and deleted files go to an archive;
   conflicts wait for you instead of being silently resolved.
 - **Mac to Mac, built in.** Other Macs appear on the network; pair with a
@@ -71,8 +72,9 @@ background agent; if macOS requests approval, open Login Items and allow
 Foldover, then refresh.
 The agent configures and syncs pairs, and keeps syncing with the window closed.
 Choose **New Pair**, select both folders and a mode, then save. Select the pair
-and choose **Preview** to see every change, then **Sync Now**. Saving never
-starts a sync; set a schedule to sync automatically after the first one. The
+and choose **Preview** to see every change, then **Sync Now**. A pair with a
+schedule can start its first sync by itself after you save it; turn on
+**Require approval before syncing** to make every sync wait for you. The
 menu bar shows each pair's status.
 
 For development, run these in separate terminals:
@@ -121,13 +123,23 @@ lets a `backup-*` target that cannot hold `.foldover` keep nothing: files
 replaced there are deleted, not archived, and Undo is unavailable
 (default `both`). `--schedule` takes
 `manual` (default), `changes` (sync shortly after files change, and an hour
-after the last preview or sync ends)
-or a number of minutes between automatic syncs, which start after the first
-sync you run yourself. `--exclude PATTERN` (repeatable) sets gitignore-style
-rules for files to skip in both folders; a `.foldoverignore` file in either
-folder adds more. `--max-size MEGABYTES` skips larger files in both folders
-and `--max-age DAYS` files unchanged for longer in both (`none` removes
-either limit). Resource forks are content; SFTP copies fail when they cannot
+after the last preview or sync ends), a number of minutes between automatic
+syncs, or `daily@HH:MM[:DAYS]` for a local time of day, with days as a
+comma list or range such as `mon-fri` (every day when omitted). A scheduled
+pair's first sync can start by itself. `--exclude PATTERN` (repeatable) sets
+gitignore-style rules for files to skip in both folders; a `.foldoverignore`
+file in either folder adds more. `--max-size MEGABYTES` skips larger files in
+both folders and `--max-age DAYS` files unchanged for longer in both (`none`
+removes either limit). `--bandwidth-limit MEGABYTES` caps the pair's copying
+at that many megabytes per second (`none` removes it;
+[ADR 0044](docs/adr/0044-bandwidth-limit.md)). `--canary PATH` names a file
+inside the folders that must be present and unchanged in both before a sync
+writes anything (`none` removes it;
+[ADR 0033](docs/adr/0033-canary-file.md)). `--review required` makes every
+sync, scheduled ones included, stop until you approve its plan (default
+`automatic`). `--removal-protection disabled` turns off the stops for
+unusually large removals and for a suddenly empty folder (default
+`enabled`; [ADR 0020](docs/adr/0020-run-execution.md)). Resource forks are content; SFTP copies fail when they cannot
 preserve them. Changing roots or metadata options resets the pair's sync history.
 `pairs show ID` reads one pair;
 `pairs update ID REVISION NAME LEFT RIGHT MODE [OPTIONS]` requires its current
@@ -182,9 +194,10 @@ status 4; failures exit with status 1 even when conflicts also remain,
 and invalid command usage with status 2. A partial
 `--put-back-all` also exits with status 1 and prints its full restore report;
 failed items remain archived. Clean runs exit with status 0. A run
-stops before writing, exiting with status 3, when it is the pair's first
-run, when it would delete more than the automatic limits allow, or when
-one folder is suddenly empty; rerun with `--approve` and the preview's
+stops before writing, exiting with status 3, when the pair requires
+approval (`--review required`), when it would delete more than the
+automatic limits allow, or when one folder is suddenly empty (the last two
+unless `--removal-protection disabled`); rerun with `--approve` and the preview's
 `review_token` as `--review TOKEN`. Choices also echo that token. A changed plan
 or configuration requires a fresh review. Replaced and removed
 files go to `.foldover/archive/<run>/` inside the folder where they were

@@ -1477,18 +1477,6 @@ Effort: one hour
 
 Fifth-pass evidence: ArchiveViewModel.putBack uses one linear store.items.first lookup per selected row. This is O(selection × loaded items); a native pause has not been measured, so retain it as a profiling/implementation proposal.
 
-### SOL26-05: The plan reports an obsolete project stage
-
-general issues — nice-to-have
-
-File and line: `PLAN.md:3; AGENTS.md:12`
-
-Impact: PLAN says P1 while the repository reports P6. Contributors receive conflicting status.
-
-Suggested fix: Update the status and retain explicit qualification gaps.
-
-Effort: 15 minutes
-
 ### SOL26-10: Held reviews retain two item representations
 
 performance problems, stuttering, and jank — nice-to-have
