@@ -1229,7 +1229,11 @@ mod tests {
         let start = Instant::now();
         let (scheduler, clock) = scheduler_with_clock(start);
         *clock.lock().unwrap() += 7 * 24 * HOUR;
-        for schedule in [Schedule::Manual, Schedule::OnChange] {
+        let daily = DailySchedule::new(
+            TimeOfDay::from_minutes(18 * 60).unwrap(),
+            Weekdays::MONDAY_TO_FRIDAY,
+        );
+        for schedule in [Schedule::Manual, Schedule::OnChange, Schedule::Daily(daily)] {
             let pair = scheduled_pair(directory.path(), 4, schedule);
             assert!(!scheduler.interval_passed(&pair, None));
         }

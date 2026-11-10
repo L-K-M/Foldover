@@ -366,25 +366,6 @@ Acceptance: A regression test shows a job-level transition (idle →
 working, waiting → copying) is observable and a pure counter tick is
 not.
 
-### MIMO-01: The FSEvents history sentinel can swallow a change
-
-bugs — important
-
-Evidence: `crates/foldover-watch/src/history/fsevents.rs:217`.
-macOS ORs `HistoryDone` onto the last replayed event, which can
-itself be a real change; the early `Ok(false)` skips `relevant(&path)`
-for that event and everything queued behind it in the batch.
-
-Impact: A change riding with the replay sentinel is not noticed
-until the periodic verification run, the pair looks current while a
-real edit waits an hour. macOS-only; reported by scan, not reproduced.
-
-Suggested fix: Evaluate `relevant(&path)` before honoring the sentinel, and
-drain already-queued post-replay events before returning.
-
-Acceptance: Force a replay whose last event is a user change and
-observe it reported; a sentinel alone still reports nothing.
-
 ### MIMO-06: Undo can panic on edge-case and corrupt entries
 
 bugs — important
@@ -404,6 +385,11 @@ Suggested fix: Return the existing soft errors instead of panicking; count
 
 Acceptance: Journal entries near the name limit and with bad bytes
 produce skipped rows in `not_undone`, never a panic.
+
+Review 2026-11-10: no trigger was found for the panic. `SyncPath` has no
+byte limit, journal rows are validated into `SyncPath` when read, and
+`name_key` (lower-casing and NFC) cannot produce a separator, a NUL or
+a `.` or `..` component. The `Beside` reporting claim was not checked.
 
 ### MIMO-08: Per-file fsyncs dominate many-small-file runs
 
@@ -461,30 +447,6 @@ cadence while it copies; an idle app polls no pair more than once a
 minute.
 
 Partial delivery: PR 195 makes catalog-wide status reads concurrent. Polling transport, idle wakeups and the time before an agent-started job is first noticed remain distinct work. Confirm the current follow-up polling behavior before retaining the historical claim that a working job only updates every 15 seconds.
-
-### NATIVE-01: ACL copying rewrites propagated quarantine metadata
-
-bugs — important
-
-Discovered during Phase 3 validation, after the original four important Sol
-findings had open PRs. `crates/foldover-fs/src/root/write/tests.rs:670`
-(`quarantine_stays_behind_where_a_run_leaves_it_alone`) fails on macOS 27.0.1 (26A434):
-the copied quarantine value differs from the explicitly requested source value.
-`root/write/metadata.rs:52-64` writes extended attributes before permissions;
-its `copy_access_control` path at lines 329-335 leaves the Sync policy without
-a saved value to restore after the native ACL copier in
-`crates/foldover-fs/src/mac_metadata.rs:126-142`. Standalone ctypes OS calls
-reproduce `fcopyfile(..., COPYFILE_ACL)` returning success while rewriting
-the target quarantine timestamp/agent; the source value stays unchanged.
-This affects exact quarantine propagation on local Mac copies. The native
-behavior predates the feature PRs; no file-content loss was established.
-
-Suggested fix: preserve or reapply the requested quarantine value after ACL
-copying, removing a synthetic target mark when the source has none. Ignore
-must preserve the target's existing value and keep source quarantine from
-being introduced. Verify propagate, ignore, source-absent and network-exclusion
-policies with the native regression before changing the driver. This remains backlog;
-Phase 2 did not expand into driver changes.
 
 ### SOL2-17: Run history collides at millisecond resolution
 
@@ -932,14 +894,6 @@ Historical evidence: local and SFTP conflict-copy naming interpolate a `from` la
 
 Suggested fix: validate labels at the common naming boundary if untrusted callers are added. Keep this classified as hardening, not a demonstrated path escape.
 
-### MIMO-14a: Validate discovered SMB host URLs
-
-general issues — nice-to-have
-
-Historical evidence: `PairEditorViewModel.serverURL` interpolates a discovered host into `smb://host`; malformed `:` or `@` components could change the URL Finder opens. Verify the discovery driver's accepted host shapes before claiming an exploitable input path.
-
-Suggested fix: construct the URL from validated host and port components; reject credentials or unexpected URL components.
-
 ### MIMO-14b: Typed numeric limits differ from stepper bounds
 
 usability — nice-to-have
@@ -1021,16 +975,6 @@ returning the pair's status line ("In sync", "3 conflicts need you")
 completes the set and makes automations and Siri genuinely useful.
 
 Suggested fix: add a read-only Status intent using the existing pair-state presentation boundary.
-
-### MIMO-21: Pause one pair
-
-missing features — nice-to-have
-
-`PauseLength` pauses automatic syncs globally. A per-pair pause (a
-"hold" on one noisy pair without stopping the rest) fits the existing
-`Environment`/pause machinery and the schedule model.
-
-Suggested fix: offer an explicit per-pair automatic-sync hold alongside the existing global pause; preserve other pairs' schedules.
 
 ### MIMO-22: Optional notification when a long sync finishes
 
