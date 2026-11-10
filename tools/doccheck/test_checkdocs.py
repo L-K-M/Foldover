@@ -24,7 +24,7 @@ def check(files):
 class CheckDocs(unittest.TestCase):
     def test_clean_documents_pass(self):
         result = check({
-            'a.md': '# Title\n\n[b](docs/b.md#part-two)\n\n| x | y |\n|---|---|\n| `a|b` | c \\| d |\n',
+            'a.md': '# Title\n\n[b](docs/b.md#part-two)\n\n| x | y |\n|---|---|\n| `a|b` | c \\| d |\n| ``a|`b`` | e |\n',
             'docs/b.md': '# B\n\n## Part two\n\n```\n[not a link](missing.md)\n```\n',
         })
         self.assertEqual(result.returncode, 0, result.stdout)

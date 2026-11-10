@@ -21,7 +21,7 @@ def markdown_files(root):
     return found
 def cells(line):
     """How many cells a table row has; escaped pipes and code spans do not split."""
-    row = re.sub(r'`[^`]*`', '', line.strip()).replace('\\|', '')
+    row = re.sub(r'(`+).*?\1', '', line.strip()).replace('\\|', '')
     return row.strip('|').count('|') + 1
 files = sorted(markdown_files(root))
 def slug(h):

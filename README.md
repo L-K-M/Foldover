@@ -34,8 +34,9 @@ The macOS app requires macOS 27 and Apple silicon.
 
 ## Highlights
 
-- **Preview first.** Every change is listed before it runs, with per-item
-  overrides.
+- **Preview first.** Preview any sync before it runs, with per-item
+  overrides; turn on **Require approval before syncing** and every run,
+  scheduled ones included, waits for your approval.
 - **Nothing lost quietly.** Replaced and deleted files go to an archive;
   conflicts wait for you instead of being silently resolved.
 - **Mac to Mac, built in.** Other Macs appear on the network; pair with a

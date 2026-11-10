@@ -46,4 +46,6 @@ for (const f of files) {
   }
 }
 console.log(`${bad} invalid of ${total} diagrams`);
-process.exit(bad ? 1 : 0);
+// Not process.exit(): it can end the process before the lines above
+// reach a pipe.
+process.exitCode = bad ? 1 : 0;
