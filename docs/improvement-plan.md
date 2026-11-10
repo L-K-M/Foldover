@@ -28,13 +28,16 @@ from a fresh review and from the standing backlog in
 - **Backlog audit**: every `bugs`, `general issues` and `performance`
   entry of ANALYSIS.md, and the small usability entries, checked
   against the current code. Four entries left the backlog without a
-  change: MIMO-14a, MIMO-21 and NATIVE-01 were already fixed, and
-  MIMO-01 does not hold, because the FSEvents header defines
-  `HistoryDone` as a sentinel event of its own whose path is ignored,
-  never a flag on a real change. The panic MIMO-06 describes has no
-  trigger (noted on the entry). Eight entries were small, confirmed and
-  fixed (see Outcome); the rest still stand, SOL-11, SOL-23 and
-  MIMO-26h in part.
+  change. Three were already fixed: MIMO-14a (commit `cc6f6382` takes
+  only plain host names from server adverts), MIMO-21 (`6c048991`
+  added the per-pair pause) and NATIVE-01 (`e07cccdb` keeps the
+  quarantine value while copying ACLs). MIMO-01 does not hold, because
+  the FSEvents header defines `HistoryDone` as a sentinel event of its
+  own whose path is ignored, never a flag on a real change. The panic
+  MIMO-06 describes has no trigger (noted on the entry); its claim
+  about `Beside` reporting was not checked. Eight entries were small,
+  confirmed and fixed (see Outcome); the rest still stand, SOL-11,
+  SOL-23 and MIMO-26h in part.
 
 Hardware behavior, VoiceOver, frame times and physical NAS runs were not
 reviewed; they stay with the owner's release qualification
@@ -193,6 +196,9 @@ be checked without VoiceOver.
 
 ## Not in this pass
 
+- **The watch crate and most of the database crate**: the driver
+  review did not reach them in depth (see above). They still need a
+  read.
 - **Hardware and accessibility qualification** (ANALYSIS.md SOL-11,
   SOL-12, MUSE-05e, SOL26-17): needs devices, displays and VoiceOver.
 - **Protocol or schema features** (SOL-04 server-side search, SOL-08
