@@ -291,8 +291,20 @@ deletion ([ADR 0010](../adr/0010-local-metadata-inventory.md)).
   hourly check; with an interval schedule, by the next sync. SMB
   notification behavior is unverified
   ([ADR 0002](../adr/0002-change-detection.md)).
-- Schedule timers live in agent memory; restarting the agent restarts
-  every interval ([ADR 0022](../adr/0022-scheduled-runs.md)).
+- **Interval schedules.** "Every hour" or "Every day" counts from the
+  pair's last automatic sync. An interval that ends while the Mac
+  sleeps or the agent is off runs once when they are back, counted
+  from the pair's last sync of either kind after a restart. The hourly
+  check of "When files change" pairs starts over when the agent
+  restarts ([ADR 0022](../adr/0022-scheduled-runs.md)).
+- **A new scheduled pair can start within seconds of saving it.** A
+  daily pair's first sync does not wait for its first scheduled time.
+  An interval pair's starts once the agent has been running for one
+  interval, and a "When files change" pair's once it has been running
+  for an hour, which it usually has. Turn on Require approval before
+  syncing to hold it
+  ([ADR 0022](../adr/0022-scheduled-runs.md),
+  [ADR 0039](../adr/0039-calendar-schedules.md)).
 - A disk that comes back is noticed within 5 seconds for "When files
   change" pairs and within 30 seconds for a scheduled pair that is due
   ([ADR 0002](../adr/0002-change-detection.md)).

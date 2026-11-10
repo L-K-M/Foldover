@@ -1,5 +1,7 @@
 //! Unattended runs. `Every` pairs are due one interval after their last
-//! scheduled start, or after the agent started. `OnChange` pairs are due
+//! scheduled start, or after the agent started; the interval also counts
+//! on the wall clock, from that start or from the last recorded run, so
+//! time asleep and time the agent was off count too. `OnChange` pairs are due
 //! once their folders have been quiet briefly after a change, after five
 //! minutes of changes that never settle, and hourly, because change
 //! notifications can be missed. When the agent starts, a folder whose
@@ -20,7 +22,9 @@ use foldover_engine::{
     ChangePoll, Effort, Environment, PairWatcher, PollMode, Polled, Reach, WatchCursor, local_time,
 };
 use foldover_proto::local::SyncStatus;
-use foldover_types::{LocalDateTime, PairConfig, PairId, PairRoot, Schedule, Side};
+use foldover_types::{
+    LocalDateTime, PairConfig, PairId, PairRoot, Schedule, ScheduleInterval, Side,
+};
 
 use crate::Service;
 use crate::sync::Work;
@@ -47,6 +51,10 @@ const RECONNECT: Duration = Duration::from_secs(5 * 60);
 pub(crate) const PROBE: Duration = Duration::from_secs(30);
 const SECONDS_PER_MINUTE: u64 = 60;
 
+fn interval_length(interval: ScheduleInterval) -> Duration {
+    Duration::from_secs(u64::from(interval.minutes()) * SECONDS_PER_MINUTE)
+}
+
 /// A due pair's folder check: at most one runs at a time and results
 /// expire after `PROBE`, so a dead server is not hammered and a parked
 /// check cannot hold the pairs behind it.
@@ -61,6 +69,17 @@ enum Probe {
     Ready { at: Instant },
     /// A folder was missing at `at`.
     Missing { side: Side, at: Instant },
+}
+
+/// The wall clock, `SystemTime::now` by default.
+type WallClock = dyn Fn() -> SystemTime + Send + Sync;
+
+/// When a pair's unattended run last started here, on both clocks:
+/// `Instant` cannot be set back but stops while the Mac sleeps.
+#[derive(Clone, Copy)]
+struct Start {
+    at: Instant,
+    wall: SystemTime,
 }
 
 /// The folder presence check probes run, `missing_side` by default.
@@ -119,7 +138,9 @@ impl PollSlot {
 
 pub(crate) struct Scheduler {
     started: Instant,
-    last: Mutex<HashMap<PairId, Instant>>,
+    /// The wall clock when the agent started.
+    started_wall: SystemTime,
+    last: Mutex<HashMap<PairId, Start>>,
     /// The last tick that saw each pair's preview, sync or undo starting
     /// or running: within a tick of when it ended.
     busy: Mutex<HashMap<PairId, Instant>>,
@@ -152,12 +173,15 @@ pub(crate) struct Scheduler {
     away: Mutex<Arc<AwayCheck>>,
     /// The folder check probes run; tests replace it.
     probe: Mutex<Arc<FolderCheck>>,
+    /// The wall clock interval pairs are judged against; tests replace it.
+    wall: Mutex<Arc<WallClock>>,
 }
 
 impl Scheduler {
     pub(crate) fn new(started: Instant) -> Self {
         Self {
             started,
+            started_wall: SystemTime::now(),
             last: Mutex::default(),
             busy: Mutex::default(),
             changed: Mutex::default(),
@@ -174,6 +198,7 @@ impl Scheduler {
             tick_event: Mutex::default(),
             away: Mutex::new(Arc::new(foldover_engine::changed_while_away)),
             probe: Mutex::new(Arc::new(foldover_engine::missing_side)),
+            wall: Mutex::new(Arc::new(SystemTime::now)),
         }
     }
 
@@ -218,14 +243,11 @@ impl Scheduler {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&pair.id())
-            .copied()
-            .unwrap_or(self.started);
+            .map_or(self.started, |start| start.at);
         let since = now.saturating_duration_since(previous);
         match pair.draft().options().schedule() {
             Schedule::Manual => false,
-            Schedule::Every(interval) => {
-                since >= Duration::from_secs(u64::from(interval.minutes()) * SECONDS_PER_MINUTE)
-            }
+            Schedule::Every(interval) => since >= interval_length(interval),
             Schedule::OnChange => {
                 let changed = self
                     .changed
@@ -266,6 +288,55 @@ impl Scheduler {
         now.saturating_duration_since(busy.map_or(previous, |busy| busy.max(previous)))
     }
 
+    /// Whether an interval pair's interval has passed on the wall clock.
+    /// `due` counts awake time since the agent started: `Instant` stops
+    /// while the Mac sleeps and starts over with the agent, so by that
+    /// rule alone an "Every day" pair on a Mac that sleeps at night
+    /// waits for a day of awake time, and forever on one that restarts
+    /// daily (ADR 0022). Counted from the pair's last scheduled start
+    /// here; before one, from `recorded`, the start of its last recorded
+    /// run, or from the agent's start when it has none. A wall clock set
+    /// back answers no, which leaves the awake-time rule in charge; one
+    /// set forward costs a single early run.
+    fn interval_passed(&self, pair: &PairConfig, recorded: Option<SystemTime>) -> bool {
+        let Schedule::Every(interval) = pair.draft().options().schedule() else {
+            return false;
+        };
+        let started = self
+            .last
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&pair.id())
+            .map(|start| start.wall);
+        let previous = started.or(recorded).unwrap_or(self.started_wall);
+        self.wall_now()
+            .duration_since(previous)
+            .is_ok_and(|since| since >= interval_length(interval))
+    }
+
+    /// Whether the pair's unattended run has started here since the agent
+    /// did; until then its run history says when it last ran.
+    fn started_here(&self, id: PairId) -> bool {
+        self.last
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains_key(&id)
+    }
+
+    fn wall_now(&self) -> SystemTime {
+        let wall = self
+            .wall
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        wall()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_wall(&self, wall: impl Fn() -> SystemTime + Send + Sync + 'static) {
+        *self.wall.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(wall);
+    }
+
     /// Note the pairs whose jobs are starting or running at `now`.
     fn saw_busy(&self, ids: &HashSet<PairId>, now: Instant) {
         let mut busy = self.busy.lock().unwrap_or_else(PoisonError::into_inner);
@@ -279,7 +350,7 @@ impl Scheduler {
     /// pair that is always due cannot keep the others waiting.
     fn order_by_wait(&self, pairs: &mut [PairConfig]) {
         let last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
-        pairs.sort_by_key(|pair| last.get(&pair.id()).copied());
+        pairs.sort_by_key(|pair| last.get(&pair.id()).map(|start| start.at));
     }
 
     /// Forget the polls of pairs no longer changing-triggered, and those
@@ -356,10 +427,11 @@ impl Scheduler {
     }
 
     fn started_run(&self, id: PairId, now: Instant) {
+        let wall = self.wall_now();
         self.last
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(id, now);
+            .insert(id, Start { at: now, wall });
         // Later events, including this run's own writes, start another run.
         self.changed
             .lock()
@@ -667,13 +739,19 @@ impl Service {
                 .filter(|pair| !engine.automation_held(pair.id()).unwrap_or(true))
                 .collect::<Vec<_>>();
             // The last run start lives in run history, so daily pairs
-            // stay correct across agent restarts and sleep.
-            let last_run: HashMap<PairId, LocalDateTime> = candidates
+            // stay correct across agent restarts and sleep. Interval
+            // pairs read it until they first start here; from then on
+            // the scheduler's own record is newer.
+            let last_run: HashMap<PairId, SystemTime> = candidates
                 .iter()
-                .filter(|pair| matches!(pair.draft().options().schedule(), Schedule::Daily(_)))
+                .filter(|pair| match pair.draft().options().schedule() {
+                    Schedule::Daily(_) => true,
+                    Schedule::Every(_) => !self.scheduler.started_here(pair.id()),
+                    Schedule::Manual | Schedule::OnChange => false,
+                })
                 .filter_map(|pair| {
                     let started = engine.history(pair.id(), 1).ok()?.first()?.started;
-                    local_time(started).map(|at| (pair.id(), at))
+                    Some((pair.id(), started))
                 })
                 .collect();
             // Paused by a person, or held by Low Power Mode or a costly
@@ -722,11 +800,12 @@ impl Service {
         self.scheduler.order_by_wait(&mut candidates);
         let mut started = Vec::new();
         for pair in candidates {
-            if held.contains(&pair.id())
-                || !self
-                    .scheduler
-                    .due(&pair, now, local_now, last_run.get(&pair.id()).copied())
-            {
+            let recorded = last_run.get(&pair.id()).copied();
+            let due = self
+                .scheduler
+                .due(&pair, now, local_now, recorded.and_then(local_time))
+                || self.scheduler.interval_passed(&pair, recorded);
+            if held.contains(&pair.id()) || !due {
                 continue;
             }
             match self.scheduler.gate(pair.id(), now) {
@@ -1037,12 +1116,17 @@ mod tests {
 
     /// A Sync pair over two folders in `directory`, both present.
     fn changing_pair(directory: &Path, id: u8) -> PairConfig {
+        scheduled_pair(directory, id, Schedule::OnChange)
+    }
+
+    /// `changing_pair` on any schedule.
+    fn scheduled_pair(directory: &Path, id: u8, schedule: Schedule) -> PairConfig {
         let (left, right) = (directory.join("left"), directory.join("right"));
         fs::create_dir_all(&left).unwrap();
         fs::create_dir_all(&right).unwrap();
         let root =
             |path: &Path| LocalRoot::from_bytes(path.as_os_str().as_bytes().to_vec()).unwrap();
-        let options = PairOptions::default().with_schedule(Schedule::OnChange);
+        let options = PairOptions::default().with_schedule(schedule);
         let draft = PairDraft::new("Live".into(), root(&left), root(&right), SyncMode::Sync)
             .unwrap()
             .with_options(options);
@@ -1052,6 +1136,103 @@ mod tests {
             draft,
         )
         .unwrap()
+    }
+
+    /// A scheduler whose wall clock the returned handle sets.
+    fn scheduler_with_clock(start: Instant) -> (Scheduler, Arc<Mutex<SystemTime>>) {
+        let scheduler = Scheduler::new(start);
+        let clock = Arc::new(Mutex::new(scheduler.started_wall));
+        let read = Arc::clone(&clock);
+        scheduler.set_wall(move || *read.lock().unwrap());
+        (scheduler, clock)
+    }
+
+    const HOUR: Duration = Duration::from_secs(60 * 60);
+
+    fn daily_interval() -> Schedule {
+        Schedule::Every(ScheduleInterval::from_minutes(24 * 60).unwrap())
+    }
+
+    /// `Instant` stops while the Mac sleeps, so awake time alone makes an
+    /// "Every day" pair wait for a day of use. The wall clock counts the
+    /// night too.
+    #[test]
+    fn an_interval_counts_time_asleep() {
+        let directory = tempfile::tempdir().unwrap();
+        let pair = scheduled_pair(directory.path(), 4, daily_interval());
+        let start = Instant::now();
+        let (scheduler, clock) = scheduler_with_clock(start);
+        let at = |seconds| start + Duration::from_secs(seconds);
+        scheduler.started_run(pair.id(), at(0));
+
+        // A minute awake while 23 hours pass: neither clock says a day.
+        *clock.lock().unwrap() += 23 * HOUR;
+        assert!(!scheduler.due(&pair, at(60), None, None));
+        assert!(!scheduler.interval_passed(&pair, None));
+
+        // A day on the wall clock, nearly all of it asleep.
+        *clock.lock().unwrap() += HOUR;
+        assert!(!scheduler.due(&pair, at(120), None, None));
+        assert!(scheduler.interval_passed(&pair, None));
+
+        // The start it leads to covers the interval.
+        scheduler.started_run(pair.id(), at(120));
+        assert!(!scheduler.interval_passed(&pair, None));
+    }
+
+    /// A wall clock set back cannot hold a pair: awake time still counts.
+    #[test]
+    fn a_clock_set_back_leaves_awake_time_in_charge() {
+        let directory = tempfile::tempdir().unwrap();
+        let pair = scheduled_pair(directory.path(), 4, daily_interval());
+        let start = Instant::now();
+        let (scheduler, clock) = scheduler_with_clock(start);
+        scheduler.started_run(pair.id(), start);
+
+        *clock.lock().unwrap() -= 48 * HOUR;
+        assert!(!scheduler.interval_passed(&pair, None));
+        assert!(!scheduler.due(&pair, start + 23 * HOUR, None, None));
+        assert!(scheduler.due(&pair, start + 24 * HOUR, None, None));
+    }
+
+    /// The agent's memory starts over with it. Until a pair starts here,
+    /// its interval counts from its last recorded run, and from the
+    /// agent's start when it has none.
+    #[test]
+    fn an_interval_counts_from_the_recorded_run_until_the_pair_starts_here() {
+        let directory = tempfile::tempdir().unwrap();
+        let pair = scheduled_pair(directory.path(), 4, daily_interval());
+        let start = Instant::now();
+        let (scheduler, clock) = scheduler_with_clock(start);
+        let now = *clock.lock().unwrap();
+
+        assert!(scheduler.interval_passed(&pair, Some(now - 25 * HOUR)));
+        assert!(!scheduler.interval_passed(&pair, Some(now - 23 * HOUR)));
+        // A run recorded in the future, as after the clock was set back.
+        assert!(!scheduler.interval_passed(&pair, Some(now + HOUR)));
+        assert!(!scheduler.interval_passed(&pair, None));
+        *clock.lock().unwrap() += 24 * HOUR;
+        assert!(scheduler.interval_passed(&pair, None));
+
+        // Its own start is newer than any record.
+        assert!(!scheduler.started_here(pair.id()));
+        scheduler.started_run(pair.id(), start);
+        assert!(scheduler.started_here(pair.id()));
+        assert!(!scheduler.interval_passed(&pair, Some(now - 25 * HOUR)));
+    }
+
+    /// Only interval schedules count this way: daily ones compare
+    /// calendar moments, and the others are not timed.
+    #[test]
+    fn only_interval_schedules_count_on_the_wall_clock() {
+        let directory = tempfile::tempdir().unwrap();
+        let start = Instant::now();
+        let (scheduler, clock) = scheduler_with_clock(start);
+        *clock.lock().unwrap() += 7 * 24 * HOUR;
+        for schedule in [Schedule::Manual, Schedule::OnChange] {
+            let pair = scheduled_pair(directory.path(), 4, schedule);
+            assert!(!scheduler.interval_passed(&pair, None));
+        }
     }
 
     /// A pair edited onto other folders re-subscribes its watcher

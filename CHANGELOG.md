@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- "Every hour", "Every day" and other interval schedules count time the
+  Mac spends asleep and time the background agent is off. An interval
+  used to count only awake time and start over whenever the agent
+  restarted, so an "Every day" pair on a Mac that sleeps at night ran
+  about every third day, and never on one restarted daily. A missed
+  interval now runs once when the Mac wakes or the agent starts.
 - The limitations guide and the README no longer say that a pair's first
   sync always waits for your review. It has run like any other since
   Require approval before syncing became a setting; both now say so and
