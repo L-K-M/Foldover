@@ -340,7 +340,9 @@ func dailyScheduleIsEditableInPlace() {
 func scheduleTimesFollowTheLocalesClock() {
     let american = Locale(identifier: "en_US")
     // Releases of the system differ in the space before AM and PM.
-    let plain = { (text: String) in text.replacingOccurrences(of: "\u{202F}", with: " ") }
+    let plain = { (text: String) in
+        text.replacingOccurrences(of: "\u{202F}", with: " ").replacingOccurrences(of: "\u{00A0}", with: " ")
+    }
     let weekdays: Set<SyncDay> = [.monday, .tuesday, .wednesday, .thursday, .friday]
     #expect(plain(PairEditorViewModel.scheduleTitle(.daily(minutes: 18 * 60, days: weekdays), locale: american)) == "Weekdays at 6:00 PM")
     #expect(plain(PairEditorViewModel.scheduleTitle(.daily(minutes: 150, days: Set(SyncDay.allCases)), locale: american)) == "Every day at 2:30 AM")
@@ -812,6 +814,14 @@ func pairEditorWalksServerFoldersAndChoosesOne() async throws {
     await editor.openServerFolder(photos.locator)
     #expect(editor.useServerFolder(side: .right, highlighted: "sftp://elsewhere/x"))
     #expect(editor.right == SelectedFolder(bytes: Data("sftp://nas/home/alice/Photos".utf8)))
+
+    // A highlighted row needs no text in the field: the button stays
+    // available, and the row is used.
+    editor.serverLocator = ""
+    #expect(!editor.canUseServerFolder(highlighted: nil))
+    #expect(editor.canUseServerFolder(highlighted: home.locator))
+    #expect(editor.useServerFolder(side: .right, highlighted: home.locator))
+    #expect(editor.right == SelectedFolder(bytes: Data("sftp://nas/home/alice".utf8)))
 
     // A server that does not answer leaves the last listing up.
     await editor.openServerFolder("sftp://nas/gone")

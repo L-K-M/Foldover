@@ -643,7 +643,7 @@ private struct ServerFolderPicker: View {
                     if viewModel.useServerFolder(side: side, highlighted: selection) { dismiss() }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(viewModel.serverLocator.isEmpty)
+                .disabled(!viewModel.canUseServerFolder(highlighted: selection))
             }
             .padding(16)
         }

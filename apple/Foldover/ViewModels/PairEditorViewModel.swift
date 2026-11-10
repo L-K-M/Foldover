@@ -760,6 +760,12 @@ final class PairEditorViewModel: Identifiable {
         isBrowsingServer = false
     }
 
+    /// Whether "Use This Folder" has a folder to try: a typed locator or a
+    /// highlighted row, which needs no text in the field.
+    func canUseServerFolder(highlighted: String?) -> Bool {
+        highlighted != nil || !serverLocator.isEmpty
+    }
+
     /// Use `serverLocator` for `side`; false, with the reason shown, when
     /// it does not name a folder on a server. Like an open panel, a row
     /// highlighted in the listing wins over the folder being browsed: a
