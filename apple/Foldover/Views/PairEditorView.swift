@@ -189,6 +189,12 @@ struct PairEditorView: View {
             if let warning = viewModel.recordsWarning {
                 WarningLabel(text: warning)
             }
+            if let warning = viewModel.overlapWarning {
+                WarningLabel(text: warning)
+            }
+            if let warning = viewModel.uncheckedWarning {
+                WarningLabel(text: warning)
+            }
             if viewModel.offersKeepingNothing {
                 HStack {
                     Toggle(viewModel.keepingNothingTitle, isOn: $viewModel.keepsNothingInTarget)
@@ -634,16 +640,10 @@ private struct ServerFolderPicker: View {
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
                 Button("Use This Folder") {
-                    // Like an open panel: a highlighted listed folder wins
-                    // over the folder being browsed.
-                    if let selection,
-                       viewModel.serverListing?.folders.contains(where: { $0.locator == selection }) == true {
-                        viewModel.serverLocator = selection
-                    }
-                    if viewModel.useServerFolder(side: side) { dismiss() }
+                    if viewModel.useServerFolder(side: side, highlighted: selection) { dismiss() }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(viewModel.serverLocator.isEmpty)
+                .disabled(!viewModel.canUseServerFolder(highlighted: selection))
             }
             .padding(16)
         }

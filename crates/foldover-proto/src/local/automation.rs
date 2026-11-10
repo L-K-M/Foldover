@@ -1,5 +1,6 @@
-//! Pausing automatic syncs for every pair, and the environment policy
-//! (ADR 0036). Manual syncs still run.
+//! Pausing automatic syncs for every pair, the environment policy
+//! (ADR 0036) and how hard automatic syncs work (ADR 0054). Manual syncs
+//! still run, at full effort.
 
 use serde::{Deserialize, Serialize};
 
@@ -26,11 +27,27 @@ pub enum LowPowerSyncs {
     Run,
 }
 
-/// The person's automation choices, set with `automation.settings`.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+/// How hard automatic syncs may work the Mac (ADR 0054).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomaticEffort {
+    /// One at a time and at low priority, reading and copying one file at
+    /// a time where this Mac's own disks limit the work.
+    #[default]
+    Gentle,
+    /// Every due pair at once, at normal priority, with every worker.
+    Full,
+}
+
+/// The person's automation choices, set with `automation.settings`. Each
+/// field present changes that choice; at least one must be.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AutomationSettings {
-    pub low_power: LowPowerSyncs,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_power: Option<LowPowerSyncs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<AutomaticEffort>,
 }
 
 /// Why automatic syncs wait right now (PLAN.md §3.5).
@@ -49,6 +66,7 @@ pub struct AutomationStatus {
     /// When a timed pause ends, in milliseconds since the Unix epoch.
     pub until_ms: Option<u64>,
     pub low_power: LowPowerSyncs,
+    pub effort: AutomaticEffort,
     /// Why an automatic sync would wait now, if one would.
     pub held_by: Option<AutomationHold>,
 }

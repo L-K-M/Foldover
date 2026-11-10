@@ -79,7 +79,15 @@ enum Fixtures {
         SelectedFolder(bytes: Data(locator.utf8))
     }
 
-    static func pairs() -> [SyncPair] {
+    /// The disks the tour's local folders are on, the same on every Mac:
+    /// the backup disk for its folders, this Mac's own disk for the rest.
+    static func volume(_ url: URL) async -> FolderVolume? {
+        url.path(percentEncoded: false).contains("/Backup SSD/")
+            ? FolderVolume(name: "Backup SSD", totalBytes: 2_000_000_000_000, availableBytes: 812_400_000_000)
+            : FolderVolume(name: "Macintosh HD", totalBytes: 994_700_000_000, availableBytes: 412_300_000_000)
+    }
+
+    static func pairs(_ scenario: FixtureScenario? = nil) -> [SyncPair] {
         var photos = PairOptions.defaults
         photos.schedule = .daily(minutes: 18 * 60, days: Set(SyncDay.allCases))
         photos.filters = ["*.tmp", ".cache/"]
@@ -93,9 +101,14 @@ enum Fixtures {
             SyncPair(id: photosID, revision: 1, settings: PairSettings(
                 name: "Photos", left: local("Photos"), right: remote("sftp://mynas.local/~/Photos"),
                 mode: .sync, options: photos)),
-            SyncPair(id: projectsID, revision: 1, settings: PairSettings(
-                name: "Projects", left: local("Projects"), right: local("Backup SSD/Projects"),
-                mode: .backupLeft, options: projects)),
+            // Backed up the other way round, from B to A, in its own scenario.
+            scenario == .syncingBackupRight
+                ? SyncPair(id: projectsID, revision: 1, settings: PairSettings(
+                    name: "Projects", left: local("Backup SSD/Projects"), right: local("Projects"),
+                    mode: .backupRight, options: projects))
+                : SyncPair(id: projectsID, revision: 1, settings: PairSettings(
+                    name: "Projects", left: local("Projects"), right: local("Backup SSD/Projects"),
+                    mode: .backupLeft, options: projects)),
             SyncPair(id: documentsID, revision: 1, settings: PairSettings(
                 name: "Documents", left: local("Documents"), right: remote("peer://studio/share-1"),
                 mode: .sync, options: documents)),
@@ -103,6 +116,11 @@ enum Fixtures {
                 name: "Music", left: local("Music"), right: remote("/Volumes/Media/Music"),
                 mode: .mirrorLeft, options: music)),
         ]
+    }
+
+    static func runningPair(_ id: String, scenario: FixtureScenario? = nil) -> RunningPair {
+        let catalog = pairs(scenario)
+        return RunningPair(catalog.first { $0.id == id } ?? catalog[0])
     }
 
     static func change(_ path: String, _ action: ChangeAction, bytes: UInt64 = 0,
@@ -218,9 +236,19 @@ enum FixtureScenario: String {
     case manyPairs = "many-pairs"
     /// The catalog cannot load.
     case pairsFail = "pairs-fail"
-    /// A background sync keeps running after the main window closes.
+    /// A background sync keeps running after the main window closes,
+    /// still comparing a large folder: the window opens on it mid-run,
+    /// with nothing previewed on the sheet.
     case syncing
     case syncingReduced = "syncing-reduced"
+    /// A sync waits while another Mac syncs the same folders.
+    case syncingWaiting = "syncing-waiting"
+    /// A one-way backup to a local disk, copying its plan: the window
+    /// opens on it mid-run, with nothing previewed on the sheet.
+    case syncingBackup = "syncing-backup"
+    /// The same backup made the other way round, from B to A: the leaf
+    /// folds from the right.
+    case syncingBackupRight = "syncing-backup-right"
     case failedRun = "failed-run"
     case foldApproval = "fold-approval"
 
@@ -237,7 +265,8 @@ enum FixtureScenario: String {
             return AgentReport(version: "0.1.0", safeModeStops: 3)
         case .agentFailed:
             throw FixtureError.agentUnavailable
-        case .noPairs, .manyPairs, .pairsFail, .syncing, .syncingReduced, .failedRun, .foldApproval:
+        case .noPairs, .manyPairs, .pairsFail, .syncing, .syncingReduced, .syncingWaiting, .syncingBackup,
+             .syncingBackupRight, .failedRun, .foldApproval:
             return AgentReport(version: "0.1.0")
         }
     }
@@ -265,7 +294,7 @@ actor FixturePairClient: PairClient {
 
     init(scenario: FixtureScenario? = nil) {
         self.scenario = scenario
-        pairs = scenario == .noPairs ? [] : Fixtures.pairs()
+        pairs = scenario == .noPairs ? [] : Fixtures.pairs(scenario)
         if scenario == .manyPairs {
             pairs += (1...40).map { index in
                 SyncPair(id: "tour-menu-\(index)", revision: 1, settings: PairSettings(
@@ -277,6 +306,11 @@ actor FixturePairClient: PairClient {
 
     func revision(of id: String) -> UInt64 {
         pairs.first { $0.id == id }?.revision ?? 0
+    }
+
+    func runningPair(of id: String) throws -> RunningPair {
+        guard let pair = pairs.first(where: { $0.id == id }) else { throw FixtureError.missingPair }
+        return RunningPair(pair)
     }
 
     func page(after: String?) async throws -> PairCatalogPage {
@@ -292,7 +326,9 @@ actor FixturePairClient: PairClient {
 
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair {
         guard let index = pairs.firstIndex(where: { $0.id == pair.id }) else { throw FixtureError.missingPair }
-        let updated = SyncPair(id: pair.id, revision: pairs[index].revision + 1, settings: settings)
+        // Editing keeps a pause, as the agent does.
+        let updated = SyncPair(id: pair.id, revision: pairs[index].revision + 1, settings: settings,
+                               automation: pairs[index].automation)
         pairs[index] = updated
         return updated
     }
@@ -302,7 +338,13 @@ actor FixturePairClient: PairClient {
         return pair
     }
 
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { [] }
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair {
+        guard let index = pairs.firstIndex(where: { $0.id == pair.id }) else { throw FixtureError.missingPair }
+        pairs[index].automation = automation
+        return pairs[index]
+    }
+
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { [] }
 
     func servers() async throws -> [NearbyServer] {
         [NearbyServer(name: "MyNAS", host: "mynas.local", port: 445)]
@@ -340,7 +382,7 @@ actor FixtureSyncClient: SyncClient {
     /// Choices made on previewed changes, by path: what the next preview
     /// plans instead.
     private var turned: [String: [Data: ChangeAction]] = [:]
-    private var jobs: [String: (job: Job, polls: Int)] = [:]
+    private var jobs: [String: (job: Job, polls: Int, pair: RunningPair)] = [:]
     private var tokens = 0
     /// Runs finished so far; each names its own archive folder, as the
     /// engine's millisecond run names do.
@@ -355,7 +397,21 @@ actor FixtureSyncClient: SyncClient {
     init(pairs: FixturePairClient, scenario: FixtureScenario? = nil) {
         self.pairs = pairs
         if scenario == .syncing || scenario == .syncingReduced {
-            states[Fixtures.photosID] = .working(.run, cancelling: false)
+            states[Fixtures.photosID] = .working(.run, cancelling: false,
+                                                 progress: WorkProgress(listed: 6_810_813, checked: 371_762),
+                                                 pair: Fixtures.runningPair(Fixtures.photosID, scenario: scenario))
+        }
+        if scenario == .syncingWaiting {
+            // The engine waits after comparing, before it plans.
+            states[Fixtures.photosID] = .working(.run, cancelling: false, progress: WorkProgress(
+                listed: 48_211, checked: 48_211, waitingFor: "Mac Studio"),
+                pair: Fixtures.runningPair(Fixtures.photosID, scenario: scenario))
+        }
+        if scenario == .syncingBackup || scenario == .syncingBackupRight {
+            states[Fixtures.projectsID] = .working(.run, cancelling: false, progress: WorkProgress(
+                listed: 2_400, checked: 2_400, changes: 5_320, applied: 1_204,
+                bytes: 40_000_000_000, copied: 16_800_000_000, rate: 85_000_000),
+                pair: Fixtures.runningPair(Fixtures.projectsID, scenario: scenario))
         }
         if scenario == .failedRun {
             states[Fixtures.photosID] = .finished(RunSummary(
@@ -412,26 +468,38 @@ actor FixtureSyncClient: SyncClient {
         case .preview:
             return WorkProgress(listed: 48_211, checked: 48_211 * done / steps)
         case .run:
+            // A run compares before it knows its plan, as the engine's do:
+            // its first third counts items checked, then the plan applies.
+            let comparing = max(1, steps / 3)
+            guard done >= comparing else {
+                return WorkProgress(listed: 48_211, checked: 48_211 * done / comparing)
+            }
             let total = UInt64(Fixtures.changes(for: id).count)
-            return WorkProgress(listed: 48_211, checked: 48_211, changes: total, applied: total * done / steps,
-                                bytes: 120_600_000, copied: 120_600_000 * done / steps,
-                                rate: done == 0 ? 0 : 26_000_000)
+            let applied = done - comparing
+            let span = max(1, steps - comparing)
+            return WorkProgress(listed: 48_211, checked: 48_211, changes: total, applied: total * applied / span,
+                                bytes: 120_600_000, copied: 120_600_000 * applied / span,
+                                rate: applied == 0 ? 0 : 26_000_000)
         }
     }
 
     func preview(_ id: String) async throws -> PairSyncState {
-        jobs[id] = (.preview, Self.polls(.preview))
+        let pair = try await pairs.runningPair(of: id)
+        jobs[id] = (.preview, Self.polls(.preview), pair)
         let state = PairSyncState.working(.preview, cancelling: false,
-                                          progress: progress(.preview, polls: Self.polls(.preview), for: id))
+                                          progress: progress(.preview, polls: Self.polls(.preview), for: id),
+                                          pair: pair)
         states[id] = state
         return state
     }
 
     func run(_ id: String, approvedA: UInt64, approvedB: UInt64,
              reviewToken: String?) async throws -> PairSyncState {
-        jobs[id] = (.run, Self.polls(.run))
+        let pair = try await pairs.runningPair(of: id)
+        jobs[id] = (.run, Self.polls(.run), pair)
         let state = PairSyncState.working(.run, cancelling: false,
-                                          progress: progress(.run, polls: Self.polls(.run), for: id))
+                                          progress: progress(.run, polls: Self.polls(.run), for: id),
+                                          pair: pair)
         states[id] = state
         return state
     }
@@ -441,9 +509,10 @@ actor FixtureSyncClient: SyncClient {
         let job = current.job
         let polls = current.polls
         if polls > 1 {
-            jobs[id] = (job, polls - 1)
+            jobs[id] = (job, polls - 1, current.pair)
             let state = PairSyncState.working(job == .preview ? .preview : .run, cancelling: false,
-                                              progress: progress(job, polls: polls - 1, for: id))
+                                              progress: progress(job, polls: polls - 1, for: id),
+                                              pair: current.pair)
             states[id] = state
             return state
         }
@@ -481,7 +550,7 @@ actor FixtureSyncClient: SyncClient {
 
     func cancel(_ id: String) async throws -> PairSyncState {
         // Launch-time working fixtures have no countdown job to remove.
-        if jobs[id] == nil, case .working(.run, _, _) = states[id] {
+        if jobs[id] == nil, case .working(.run, _, _, _) = states[id] {
             states[id] = .finished(finish(id, cancelled: true))
             return states[id] ?? .idle
         }
@@ -543,7 +612,7 @@ actor FixtureSyncClient: SyncClient {
 actor FixtureArchiveClient: ArchiveClient {
     private var restored: Set<Data> = []
 
-    func runs(_ id: String, side: FolderSide) async throws -> ArchiveRuns {
+    func runs(_ id: String, revision: UInt64, side: FolderSide) async throws -> ArchiveRuns {
         guard side == .b else { return ArchiveRuns(runs: [], more: false) }
         return ArchiveRuns(runs: [
             ArchiveRun(name: "2026-10-21T18-00-03Z", started: Date(timeIntervalSinceNow: -20 * 3600)),
@@ -551,7 +620,8 @@ actor FixtureArchiveClient: ArchiveClient {
         ], more: true)
     }
 
-    func items(_ id: String, side: FolderSide, run: String, after: Data?) async throws -> ArchivePage {
+    func items(_ id: String, revision: UInt64, side: FolderSide, run: String,
+               after: Data?) async throws -> ArchivePage {
         guard after == nil else { return ArchivePage(items: [], more: false) }
         let items = [
             ArchiveItem(path: Data("2024/drafts/old-banner.psd".utf8), size: 66_000_000),
@@ -562,12 +632,14 @@ actor FixtureArchiveClient: ArchiveClient {
         return ArchivePage(items: items.filter { !restored.contains($0.path) }, more: false)
     }
 
-    func putBack(_ id: String, side: FolderSide, run: String, path: Data) async throws -> Data {
+    func putBack(_ id: String, revision: UInt64, side: FolderSide, run: String,
+                 path: Data) async throws -> Data {
         restored.insert(path)
         return path
     }
 
-    func putBackAll(_ id: String, side: FolderSide, run: String) async throws -> RunRestore {
+    func putBackAll(_ id: String, revision: UInt64, side: FolderSide,
+                    run: String) async throws -> RunRestore {
         RunRestore(restored: 3, beside: 1, failures: 0)
     }
 }
@@ -589,6 +661,11 @@ actor FixtureAutomationClient: AutomationClient {
 
     func setLowPower(_ syncs: LowPowerSyncs) async throws -> AutomationStatus {
         status.lowPower = syncs
+        return status
+    }
+
+    func setEffort(_ effort: AutomaticEffort) async throws -> AutomationStatus {
+        status.effort = effort
         return status
     }
 }

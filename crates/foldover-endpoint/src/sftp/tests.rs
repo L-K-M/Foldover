@@ -4,6 +4,7 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use foldover_net::sftp::Session;
 use foldover_types::{CaseMatching, Durability, NameMatching, PairOptions, UnicodeMatching};
@@ -45,6 +46,166 @@ fn sftp(directory: &Path) -> Option<SftpEndpoint> {
         Endpoint::Sftp(endpoint) => Some(endpoint),
         _ => unreachable!(),
     }
+}
+
+fn counted(directory: &Path, log: &Path) -> Option<SftpEndpoint> {
+    let server = server()?;
+    let relay = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../perf/sftp-relay.py");
+    Some(
+        SftpEndpoint::spawn(
+            Path::new("python3"),
+            &[
+                OsStr::new("-u"),
+                relay.as_os_str(),
+                OsStr::new("--log"),
+                log.as_os_str(),
+                OsStr::new("--"),
+                server.as_os_str(),
+                OsStr::new("-d"),
+                OsStr::new("/"),
+            ],
+            directory.as_os_str().as_encoded_bytes(),
+        )
+        .unwrap(),
+    )
+}
+
+fn requests(log: &Path, kind: u64) -> usize {
+    fs::read_to_string(log)
+        .unwrap()
+        .lines()
+        .filter(|line| {
+            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+            event["event"] == "request" && event["kind"] == kind
+        })
+        .count()
+}
+
+#[test]
+fn unchanged_staged_metadata_uses_one_stat() {
+    use foldover_types::Propagation::Ignore;
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("packets");
+    let Some(remote) = counted(directory.path(), &log) else {
+        return;
+    };
+    fs::write(directory.path().join("staged"), b"bytes").unwrap();
+    let mut session = remote.session();
+    let stored = remote.remote(b"staged");
+    let metadata = SftpEndpoint::foreign_metadata(&session.lstat(&stored).unwrap());
+    let before = requests(&log, 7);
+    let policy = MetadataPolicy::new(Ignore, Ignore, Ignore);
+    remote
+        .set_file_metadata_on(
+            &mut session,
+            &stored,
+            Digest::from_bytes([0; 32]),
+            metadata,
+            policy,
+        )
+        .unwrap();
+    assert_eq!(requests(&log, 7) - before, 1);
+}
+
+#[test]
+fn archive_parent_reuse_keeps_component_checks_without_mkdir_refusals() {
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("packets");
+    let Some(remote) = counted(directory.path(), &log) else {
+        return;
+    };
+    let parent = b".foldover/archive/run/parent";
+    remote.make_directories(parent, PRIVATE_DIRECTORY).unwrap();
+    let before = requests(&log, 14); // SSH_FXP_MKDIR
+    remote.make_directories(parent, PRIVATE_DIRECTORY).unwrap();
+    assert_eq!(requests(&log, 14), before);
+    // Reuse cannot turn an external substitution into a trusted directory.
+    fs::remove_dir(directory.path().join(".foldover/archive/run/parent")).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(
+        outside.path(),
+        directory.path().join(".foldover/archive/run/parent"),
+    )
+    .unwrap();
+    assert!(
+        remote
+            .make_directories(b".foldover/archive/run/parent/child", PRIVATE_DIRECTORY)
+            .is_err()
+    );
+    assert!(!outside.path().join("child").exists());
+}
+
+/// Some v3 servers report a missing path as generic FAILURE rather than
+/// NO_SUCH_FILE. The stat-first optimization must still attempt creation.
+#[test]
+fn archive_parents_allow_generic_failure_for_missing_paths() {
+    const GENERIC_MISSING: &str = r#"
+import os, struct, subprocess, sys, threading
+child = subprocess.Popen(sys.argv[1:], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+def requests():
+    while chunk := os.read(0, 65536):
+        child.stdin.write(chunk)
+        child.stdin.flush()
+    child.stdin.close()
+threading.Thread(target=requests, daemon=True).start()
+while head := child.stdout.read(4):
+    length = struct.unpack(">I", head)[0]
+    body = child.stdout.read(length)
+    if body[0] == 101 and body[5:9] == struct.pack(">I", 2):
+        body = body[:5] + struct.pack(">I", 4) + body[9:]
+    sys.stdout.buffer.write(head + body)
+    sys.stdout.buffer.flush()
+child.wait()
+"#;
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = proxy(directory.path(), GENERIC_MISSING, "generic missing status") else {
+        return;
+    };
+    let missing = remote
+        .session()
+        .lstat(&remote.remote(b"missing"))
+        .unwrap_err();
+    assert_ne!(missing.kind(), io::ErrorKind::NotFound);
+    remote
+        .make_directories(b".foldover/archive/run/parent", PRIVATE_DIRECTORY)
+        .unwrap();
+    assert!(
+        directory
+            .path()
+            .join(".foldover/archive/run/parent")
+            .is_dir()
+    );
+}
+
+#[test]
+fn changed_staged_metadata_reads_back_the_final_state() {
+    use foldover_types::Propagation::Sync;
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("packets");
+    let Some(remote) = counted(directory.path(), &log) else {
+        return;
+    };
+    fs::write(directory.path().join("staged"), b"bytes").unwrap();
+    let stored = remote.remote(b"staged");
+    let metadata = crate::ForeignMetadata {
+        permissions: 0o750,
+        modified: UNIX_EPOCH + Duration::from_secs(10),
+    };
+    let mut session = remote.session();
+    let policy = MetadataPolicy::new(Sync, Sync, Sync);
+    let before = requests(&log, 7);
+    let digest = Digest::from_bytes([0; 32]);
+    let version = remote
+        .set_file_metadata_on(&mut session, &stored, digest, metadata, policy)
+        .unwrap();
+    assert_eq!(requests(&log, 7) - before, 2);
+    assert_eq!(requests(&log, 9), 1); // SSH_FXP_SETSTAT
+    assert_eq!(
+        version,
+        remote
+            .staged_version_on(&mut session, &stored, digest, policy)
+            .unwrap()
+    );
 }
 
 /// The real `sftp-server` behind a filter that drops `fsync@openssh.com`
@@ -99,9 +260,241 @@ while True:
 child.wait()
 "#;
 
-/// An endpoint whose server speaks SFTP v3 but not the fsync extension,
-/// or `None` without `python3` and an `sftp-server`.
-fn without_fsync(directory: &Path) -> Option<SftpEndpoint> {
+/// A proxy for a server whose ordinary v3 rename replaces its target.
+/// It rewrites `SSH_FXP_RENAME` to OpenSSH's atomic replacing extension.
+const REPLACING_RENAME_PROXY: &str = r#"
+import struct, subprocess, sys, threading, time
+
+child = subprocess.Popen(
+    sys.argv[1:], stdin=subprocess.PIPE, stdout=subprocess.PIPE
+)
+closing = set()
+closing_lock = threading.Lock()
+
+
+def packet(stream):
+    head = stream.read(4)
+    if len(head) < 4:
+        return None
+    (length,) = struct.unpack(">I", head)
+    body = stream.read(length)
+    if len(body) < length:
+        return None
+    return body
+
+
+def requests():
+    while True:
+        body = packet(sys.stdin.buffer)
+        if body is None:
+            break
+        if body[0] == 18:  # SSH_FXP_RENAME
+            extension = b"posix-rename@openssh.com"
+            original = body
+            body = bytes([200]) + body[1:5]
+            body += struct.pack(">I", len(extension)) + extension
+            body += original[5:]
+        elif body[0] == 4:  # SSH_FXP_CLOSE
+            with closing_lock:
+                closing.add(struct.unpack(">I", body[1:5])[0])
+        child.stdin.write(struct.pack(">I", len(body)) + body)
+        child.stdin.flush()
+    child.stdin.close()
+
+
+threading.Thread(target=requests, daemon=True).start()
+
+while True:
+    body = packet(child.stdout)
+    if body is None:
+        break
+    if body[0] == 101:  # SSH_FXP_STATUS
+        request = struct.unpack(">I", body[1:5])[0]
+        with closing_lock:
+            delayed = request in closing
+            closing.discard(request)
+        if delayed:
+            # Let tests replace a just-written path before its creator sees
+            # CLOSE complete and verifies the final bytes.
+            time.sleep(0.5)
+    sys.stdout.buffer.write(struct.pack(">I", len(body)) + body)
+    sys.stdout.buffer.flush()
+
+child.wait()
+"#;
+
+/// A proxy that loses the answer to the first `SSH_FXP_RENAME`: the
+/// request reaches the server and its answer comes back, but the proxy
+/// forwards neither, so the client sees a connection closed mid-answer.
+const LOST_RENAME_PROXY: &str = r#"
+import os, struct, subprocess, sys, threading, time
+
+child = subprocess.Popen(
+    sys.argv[1:], stdin=subprocess.PIPE, stdout=subprocess.PIPE
+)
+
+state = {"armed": False, "rename_id": None}
+lock = threading.Lock()
+
+
+def packet(stream):
+    head = stream.read(4)
+    if len(head) < 4:
+        return None
+    (length,) = struct.unpack(">I", head)
+    body = stream.read(length)
+    if len(body) < length:
+        return None
+    return head + body
+
+
+def forward_input():
+    while True:
+        frame = packet(sys.stdin.buffer)
+        if frame is None:
+            break
+        if frame[4] == 18 and len(frame) >= 9:  # SSH_FXP_RENAME
+            with lock:
+                state["armed"] = True
+                state["rename_id"] = struct.unpack(">I", frame[5:9])[0]
+        try:
+            child.stdin.write(frame)
+            child.stdin.flush()
+        except (BrokenPipeError, OSError):
+            break
+    try:
+        child.stdin.close()
+    except OSError:
+        pass
+
+
+threading.Thread(target=forward_input, daemon=True).start()
+
+while True:
+    frame = packet(child.stdout)
+    if frame is None:
+        break
+    with lock:
+        armed = state["armed"]
+        rename_id = state["rename_id"]
+    if (
+        armed
+        and frame[4] == 101  # SSH_FXP_STATUS
+        and len(frame) >= 9
+        and struct.unpack(">I", frame[5:9])[0] == rename_id
+    ):
+        # The rename landed; its answer is what the client never sees.
+        break
+    sys.stdout.buffer.write(frame)
+    sys.stdout.buffer.flush()
+
+# Let the server settle, then close without forwarding the answer.
+time.sleep(0.2)
+child.terminate()
+sys.exit(0)
+"#;
+
+/// A proxy that lists every root entry twice and fails the second listing
+/// of `parent`, so the folder's children are hashed before its late listing
+/// failure covers them. The final unavailable-prefix retain must drop them.
+const LATE_LISTING_PROXY: &str = r#"
+import struct, subprocess, sys, threading
+
+child = subprocess.Popen(sys.argv[1:], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+lock = threading.Lock()
+opened = {}
+handles = {}
+listing = {}
+counts = {}
+root = [None]
+
+
+def packet(stream):
+    head = stream.read(4)
+    if len(head) < 4:
+        return None
+    (length,) = struct.unpack(">I", head)
+    body = stream.read(length)
+    if len(body) < length:
+        return None
+    return head + body
+
+
+def string(body, offset):
+    (count,) = struct.unpack(">I", body[offset : offset + 4])
+    return bytes(body[offset + 4 : offset + 4 + count]), offset + 4 + count
+
+
+def requests():
+    while True:
+        frame = packet(sys.stdin.buffer)
+        if frame is None:
+            break
+        body = frame[4:]
+        kind = body[0]
+        request = struct.unpack(">I", body[1:5])[0]
+        if kind == 11:  # SSH_FXP_OPENDIR
+            path, _ = string(body, 5)
+            with lock:
+                opened[request] = path
+                if root[0] is None:
+                    root[0] = path
+                counts[path] = counts.get(path, 0) + 1
+                late = path.endswith(b"/parent") and counts[path] > 1
+            if late:
+                status = (
+                    bytes([101])
+                    + struct.pack(">I", request)
+                    + struct.pack(">I", 4)
+                    + struct.pack(">I", 4)
+                    + b"late"
+                    + struct.pack(">I", 0)
+                )
+                sys.stdout.buffer.write(struct.pack(">I", len(status)) + status)
+                sys.stdout.buffer.flush()
+                continue
+        elif kind == 12:  # SSH_FXP_READDIR
+            handle, _ = string(body, 5)
+            with lock:
+                path = handles.get(handle)
+                if path is not None:
+                    listing[request] = path
+        child.stdin.write(frame)
+        child.stdin.flush()
+    child.stdin.close()
+
+
+threading.Thread(target=requests, daemon=True).start()
+
+while True:
+    frame = packet(child.stdout)
+    if frame is None:
+        break
+    body = frame[4:]
+    kind = body[0]
+    if kind == 102:  # SSH_FXP_HANDLE
+        request = struct.unpack(">I", body[1:5])[0]
+        handle, _ = string(body, 5)
+        with lock:
+            path = opened.pop(request, None)
+            if path is not None:
+                handles[handle] = path
+    elif kind == 104:  # SSH_FXP_NAME
+        request = struct.unpack(">I", body[1:5])[0]
+        with lock:
+            duplicate = listing.get(request) is not None and listing.get(request) == root[0]
+        if duplicate:
+            (count,) = struct.unpack(">I", body[5:9])
+            entries = body[9:]
+            body = body[:5] + struct.pack(">I", count * 2) + entries + entries
+            frame = struct.pack(">I", len(body)) + body
+    sys.stdout.buffer.write(frame)
+    sys.stdout.buffer.flush()
+
+child.wait()
+"#;
+
+fn proxy(directory: &Path, script: &str, description: &str) -> Option<SftpEndpoint> {
     let python = std::process::Command::new("python3")
         .arg("--version")
         .status()
@@ -109,12 +502,12 @@ fn without_fsync(directory: &Path) -> Option<SftpEndpoint> {
         .filter(|status| status.success())
         .map(|_| PathBuf::from("python3"));
     let (Some(python), Some(server)) = (python, server()) else {
-        eprintln!("python3 or sftp-server missing; no-fsync fixture skipped");
+        eprintln!("python3 or sftp-server missing; {description} fixture skipped");
         return None;
     };
     let arguments = [
         OsStr::new("-c"),
-        OsStr::new(NO_FSYNC_PROXY),
+        OsStr::new(script),
         server.as_os_str(),
         OsStr::new("-d"),
         OsStr::new("/"),
@@ -123,8 +516,128 @@ fn without_fsync(directory: &Path) -> Option<SftpEndpoint> {
     Some(SftpEndpoint::spawn(&python, &arguments, root).unwrap())
 }
 
+/// An endpoint whose server speaks SFTP v3 but not the fsync extension,
+/// or `None` without `python3` and an `sftp-server`.
+fn without_fsync(directory: &Path) -> Option<SftpEndpoint> {
+    proxy(directory, NO_FSYNC_PROXY, "no-fsync")
+}
+
+fn replacing_rename(directory: &Path) -> Option<SftpEndpoint> {
+    proxy(directory, REPLACING_RENAME_PROXY, "replacing-rename")
+}
+
+fn lost_rename(directory: &Path) -> Option<SftpEndpoint> {
+    proxy(directory, LOST_RENAME_PROXY, "lost-rename")
+}
+
 fn proceed() -> ScanControl {
     ScanControl::Continue
+}
+
+#[test]
+fn cancelling_a_directory_listing_does_not_process_its_remaining_rows() {
+    use std::cell::Cell;
+    for parallel in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..32 {
+            fs::create_dir(directory.path().join(format!("d-{index:03}"))).unwrap();
+        }
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let remote = if parallel {
+            pooled(directory.path(), log.path())
+        } else {
+            sftp(directory.path())
+        };
+        let Some(remote) = remote else { return };
+        let listed = Cell::new(0);
+        let result = remote.observe_reporting(
+            PairOptions::default().metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut || {
+                if listed.get() == 0 {
+                    ScanControl::Continue
+                } else {
+                    ScanControl::Cancel
+                }
+            },
+            &mut |step| {
+                if step == ObserveStep::Listed {
+                    listed.set(listed.get() + 1);
+                }
+            },
+        );
+        assert!(matches!(result, Err(ScanError::Cancelled)));
+        assert_eq!(
+            listed.get(),
+            1,
+            "directory rows must honor the caller's stop"
+        );
+    }
+}
+
+#[test]
+fn owned_observations_preserve_exact_cache_values_and_report_real_changes() {
+    for parallel in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("folder")).unwrap();
+        for index in 0..40 {
+            fs::write(
+                directory.path().join(format!("folder/{index:03}")),
+                b"content",
+            )
+            .unwrap();
+        }
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let remote = if parallel {
+            pooled(directory.path(), log.path())
+        } else {
+            sftp(directory.path())
+        };
+        let Some(remote) = remote else { return };
+        let policy = PairOptions::default().metadata();
+        let previous = remote
+            .observe_from(policy, &Filter::none(), &BTreeMap::new(), &mut proceed)
+            .unwrap()
+            .into_snapshot();
+        let expected = previous.clone();
+        let mut observed = remote
+            .observe_owned(
+                policy,
+                &Filter::none(),
+                previous,
+                Arc::new(foldover_types::PathMap::new()),
+                foldover_types::Side::Right,
+                crate::ObservationHints::default(),
+                &mut proceed,
+                &mut |_| {},
+            )
+            .unwrap();
+        assert!(observed.snapshot_entries().eq(expected.iter()));
+        assert_eq!(observed.finish_snapshot(), Some(false));
+
+        fs::write(directory.path().join("folder/000"), b"changed").unwrap();
+        fs::remove_file(directory.path().join("folder/001")).unwrap();
+        let previous = observed.into_snapshot();
+        let borrowed = remote
+            .observe_from(policy, &Filter::none(), &previous, &mut proceed)
+            .unwrap();
+        let mut owned = remote
+            .observe_owned(
+                policy,
+                &Filter::none(),
+                previous,
+                Arc::new(foldover_types::PathMap::new()),
+                foldover_types::Side::Right,
+                crate::ObservationHints::default(),
+                &mut proceed,
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(owned.versions(), borrowed.versions());
+        assert_eq!(owned.finish_snapshot(), Some(true));
+        assert!(!owned.entries().contains_key(&path(b"folder/001")));
+    }
 }
 
 fn path(bytes: &[u8]) -> SyncPath {
@@ -172,9 +685,16 @@ fn archived_runs_are_only_directories_named_like_runs() {
     };
     let archive = directory.path().join(".foldover/archive");
     let run = crate::local::archive::archive_name(UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+    let pair: foldover_types::PairId = "0123456789abcdef0123456789abcdef".parse().unwrap();
+    let tied =
+        crate::local::archive::run_name(UNIX_EPOCH + Duration::from_secs(1_700_000_000), pair);
+    let tied_first = format!("{tied}_00000000000000000000000000000001");
+    let tied_second = format!("{tied}_00000000000000000000000000000002");
     let file = crate::local::archive::archive_name(UNIX_EPOCH + Duration::from_secs(1_700_000_001));
     let link = crate::local::archive::archive_name(UNIX_EPOCH + Duration::from_secs(1_700_000_002));
     fs::create_dir_all(archive.join(&run)).unwrap();
+    fs::create_dir_all(archive.join(&tied_first)).unwrap();
+    fs::create_dir_all(archive.join(&tied_second)).unwrap();
     fs::write(archive.join(&file), b"not a run").unwrap();
     std::os::unix::fs::symlink(&run, archive.join(&link)).unwrap();
     fs::create_dir(archive.join("kept by the user")).unwrap();
@@ -185,34 +705,197 @@ fn archived_runs_are_only_directories_named_like_runs() {
         .iter()
         .map(|run| run.name().to_owned())
         .collect();
-    assert_eq!(runs, [run]);
+    assert_eq!(runs, [tied_second, tied_first, run]);
 }
 
-/// Review: each entry was listed and checked back to back, so the
-/// comparison read nearly complete from the first file.
+/// The walk streams checks as it lists, so a nested tree of more than the
+/// reader queue is not fully listed before its first check lands. A
+/// whole-tree inventory checked only after listing every entry.
 #[test]
-fn the_whole_tree_is_listed_before_any_entry_is_checked() {
-    let directory = tempfile::tempdir().unwrap();
-    let Some(remote) = sftp(directory.path()) else {
+fn checks_land_while_a_nested_tree_is_still_being_listed() {
+    const FOLDERS: usize = 8;
+    const FILES_PER_FOLDER: usize = 4;
+    let (directory, logs) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let Some(remote) = pooled(directory.path(), &logs.path().join("sessions")) else {
         return;
     };
-    fs::create_dir(directory.path().join("folder")).unwrap();
-    for name in ["a", "b", "folder/c", "folder/d"] {
-        fs::write(directory.path().join(name), name).unwrap();
+    for folder in 0..FOLDERS {
+        let folder = directory.path().join(format!("folder-{folder}"));
+        fs::create_dir(&folder).unwrap();
+        for file in 0..FILES_PER_FOLDER {
+            fs::write(folder.join(format!("{file}.txt")), b"payload").unwrap();
+        }
     }
-    let mut steps = Vec::new();
-    remote
+    let total = FOLDERS * (FILES_PER_FOLDER + 1);
+    let mut listed = 0;
+    let mut checked = 0;
+    let mut first_checked = None;
+    let observation = remote
         .observe_reporting(
             PairOptions::default().metadata(),
             &Filter::none(),
-            &std::collections::BTreeMap::new(),
+            &BTreeMap::new(),
             &mut proceed,
-            &mut |step| steps.push(step),
+            &mut |step| match step {
+                ObserveStep::Listed => listed += 1,
+                ObserveStep::Checked => {
+                    checked += 1;
+                    first_checked.get_or_insert(listed);
+                }
+            },
         )
         .unwrap();
-    let listed = vec![ObserveStep::Listed; 5];
-    let checked = vec![ObserveStep::Checked; 5];
-    assert_eq!(steps, [listed, checked].concat());
+    assert_eq!(listed, total);
+    assert_eq!(checked, total);
+    assert_eq!(observation.entries().len(), total);
+    let first_checked = first_checked.expect("every entry is checked");
+    assert!(
+        first_checked <= 2 * PARALLEL_READS.get() + 1,
+        "the first check landed at {first_checked}, past the reader queue"
+    );
+    assert!(
+        first_checked < total,
+        "the first check landed at {first_checked}, after the whole walk"
+    );
+}
+
+/// A folder listed once to hash its children and listed again to failure
+/// covers those children: the final unavailable-prefix retain drops them,
+/// as the streamed local walk does.
+#[test]
+fn a_late_parent_listing_failure_suppresses_its_hashed_children() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::create_dir(directory.path().join("parent")).unwrap();
+    fs::write(directory.path().join("parent/child"), b"payload").unwrap();
+    let Some(remote) = proxy(directory.path(), LATE_LISTING_PROXY, "late listing") else {
+        return;
+    };
+    let observed = remote
+        .observe_from(
+            PairOptions::default().metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+        )
+        .unwrap();
+    assert_eq!(observed.unavailable(), &[path(b"parent")]);
+    assert!(!observed.entries().contains_key(&path(b"parent")));
+    assert!(!observed.entries().contains_key(&path(b"parent/child")));
+}
+
+/// Workers only capture versions; the caller's control and progress run on
+/// the walk's thread, so a cancellation or a progress callback cannot race
+/// the observation it describes.
+#[test]
+fn control_and_progress_stay_on_the_run_thread() {
+    let (directory, logs) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let Some(remote) = pooled(directory.path(), &logs.path().join("sessions")) else {
+        return;
+    };
+    for index in 0..8 {
+        fs::write(directory.path().join(format!("file-{index}")), b"payload").unwrap();
+    }
+    let caller = std::thread::current().id();
+    let mut control_thread = None;
+    let mut progress_thread = None;
+    let observation = remote
+        .observe_reporting(
+            PairOptions::default().metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut || {
+                control_thread.get_or_insert(std::thread::current().id());
+                ScanControl::Continue
+            },
+            &mut |_| {
+                progress_thread.get_or_insert(std::thread::current().id());
+            },
+        )
+        .unwrap();
+    assert_eq!(observation.entries().len(), 8);
+    assert_eq!(control_thread, Some(caller));
+    assert_eq!(progress_thread, Some(caller));
+}
+
+/// A cancellation callback that returns Cancel once and then Continue must
+/// still stop the readers: the shared stop is terminal, and the failed call
+/// publishes nothing.
+#[test]
+fn a_one_shot_cancellation_is_terminal() {
+    const FILES: usize = 64;
+    let (directory, logs) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let Some(remote) = pooled(directory.path(), &logs.path().join("sessions")) else {
+        return;
+    };
+    for file in 0..FILES {
+        fs::write(directory.path().join(format!("{file}.txt")), b"payload").unwrap();
+    }
+    let mut calls = 0;
+    let result = remote.observe_from(
+        PairOptions::default().metadata(),
+        &Filter::none(),
+        &BTreeMap::new(),
+        &mut || {
+            calls += 1;
+            if calls == 5 {
+                ScanControl::Cancel
+            } else {
+                ScanControl::Continue
+            }
+        },
+    );
+    assert!(matches!(result, Err(ScanError::Cancelled)), "{result:?}");
+    assert!(calls >= 5);
+
+    let observed = remote
+        .observe_from(
+            PairOptions::default().metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+        )
+        .unwrap();
+    assert_eq!(observed.entries().len(), FILES);
+}
+
+/// Cancelling stops the readers and winds them down; the failed call
+/// publishes no partial observation, and the endpoint observes again.
+#[test]
+fn cancelling_an_overlapped_observation_leaves_no_partial_result() {
+    const FILES: usize = 64;
+    let (directory, logs) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let Some(remote) = pooled(directory.path(), &logs.path().join("sessions")) else {
+        return;
+    };
+    for file in 0..FILES {
+        fs::write(directory.path().join(format!("{file}.txt")), b"payload").unwrap();
+    }
+    let checked = std::cell::Cell::new(0);
+    let result = remote.observe_reporting(
+        PairOptions::default().metadata(),
+        &Filter::none(),
+        &BTreeMap::new(),
+        &mut || match checked.get() {
+            0 => ScanControl::Continue,
+            _ => ScanControl::Cancel,
+        },
+        &mut |step| {
+            if step == ObserveStep::Checked {
+                checked.set(checked.get() + 1);
+            }
+        },
+    );
+    assert!(matches!(result, Err(ScanError::Cancelled)), "{result:?}");
+
+    let observation = remote
+        .observe_from(
+            PairOptions::default().metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+        )
+        .unwrap();
+    assert_eq!(observation.entries().len(), FILES);
 }
 
 /// An endpoint that can open more sessions, each started through a shell
@@ -366,6 +1049,143 @@ fn cancelling_stops_an_observation_on_several_sessions() {
     assert_eq!(observed.unwrap().entries().len(), FILES);
 }
 
+#[test]
+fn cancelling_a_mutation_stops_while_every_session_is_busy() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
+    let directory = tempfile::tempdir().unwrap();
+    let Some(mut remote) = sftp(directory.path()) else {
+        return;
+    };
+    let file = directory.path().join("victim");
+    fs::write(&file, b"keep me").unwrap();
+    let options = PairOptions::default();
+    let observed = remote
+        .observe_from(
+            options.metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+        )
+        .unwrap();
+    let name = path(b"victim");
+    let current = observed.entries()[&name].clone();
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), options);
+
+    let (attempted, reconnecting) = mpsc::channel();
+    remote.connect = Some(Box::new(move || {
+        let _ = attempted.send(());
+        Err(io::Error::new(
+            io::ErrorKind::NotConnected,
+            "server unavailable",
+        ))
+    }));
+    let held = remote.session();
+    let stopped = Arc::new(AtomicBool::new(false));
+
+    let result = std::thread::scope(|scope| {
+        let stopping = Arc::clone(&stopped);
+        let (finished, answer) = mpsc::sync_channel(1);
+        let (endpoint, victim, expected, scope_run) = (&remote, &name, &current, &run);
+        let worker = scope.spawn(move || {
+            let result = endpoint.remove(victim, expected, scope_run, &mut || {
+                if stopping.load(Ordering::SeqCst) {
+                    ScanControl::Cancel
+                } else {
+                    ScanControl::Continue
+                }
+            });
+            let _ = finished.send(result);
+        });
+
+        reconnecting
+            .recv_timeout(Duration::from_secs(3))
+            .expect("the mutation never waited for a session");
+        stopped.store(true, Ordering::SeqCst);
+        let result = answer.recv_timeout(Duration::from_secs(3));
+        drop(held);
+        if result.is_err() {
+            let _ = answer.recv_timeout(Duration::from_secs(3));
+        }
+        worker.join().unwrap();
+        result.expect("cancellation did not interrupt the session wait")
+    });
+
+    assert!(
+        matches!(result, Err(ApplyError::Scan(ScanError::Cancelled))),
+        "{result:?}"
+    );
+    assert_eq!(fs::read(file).unwrap(), b"keep me");
+}
+
+#[test]
+fn cancelling_archive_pruning_stops_while_every_session_is_busy() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, mpsc};
+
+    let directory = tempfile::tempdir().unwrap();
+    let archive = directory
+        .path()
+        .join(".foldover/archive/1970-01-01T00-00-00.000Z");
+    fs::create_dir_all(&archive).unwrap();
+    fs::write(archive.join("kept"), b"keep me").unwrap();
+    let Some(mut remote) = sftp(directory.path()) else {
+        return;
+    };
+
+    let (attempted, reconnecting) = mpsc::channel();
+    remote.connect = Some(Box::new(move || {
+        let _ = attempted.send(());
+        Err(io::Error::new(
+            io::ErrorKind::NotConnected,
+            "server unavailable",
+        ))
+    }));
+    let held = remote.session();
+    let stopped = Arc::new(AtomicBool::new(false));
+
+    let result = std::thread::scope(|scope| {
+        let stopping = Arc::clone(&stopped);
+        let (finished, answer) = mpsc::sync_channel(1);
+        let endpoint = &remote;
+        let worker = scope.spawn(move || {
+            let result = endpoint.prune_archive(
+                Duration::from_secs(1),
+                UNIX_EPOCH + Duration::from_secs(2),
+                crate::Pruning::Everyone,
+                &mut || {
+                    if stopping.load(Ordering::SeqCst) {
+                        ScanControl::Cancel
+                    } else {
+                        ScanControl::Continue
+                    }
+                },
+            );
+            let _ = finished.send(result);
+        });
+
+        reconnecting
+            .recv_timeout(Duration::from_secs(3))
+            .expect("archive pruning never waited for a session");
+        stopped.store(true, Ordering::SeqCst);
+        let result = answer.recv_timeout(Duration::from_secs(3));
+        drop(held);
+        if result.is_err() {
+            let _ = answer.recv_timeout(Duration::from_secs(3));
+        }
+        worker.join().unwrap();
+        result.expect("cancellation did not interrupt archive pruning")
+    });
+
+    assert!(
+        matches!(result, Err(ApplyError::Scan(ScanError::Cancelled))),
+        "{result:?}"
+    );
+    assert_eq!(fs::read(archive.join("kept")).unwrap(), b"keep me");
+}
+
 /// Storing a snapshot writes only what differs, so an entry read again and
 /// found the same must keep its exact stored observation.
 #[test]
@@ -511,6 +1331,76 @@ fn oversized_sidecars_are_excluded_before_classification() {
     assert_eq!(observed.issues()[0].path(), &path(b"._tiny"));
 }
 
+/// An unavailable folder covers its own path and descendants, never a
+/// sibling whose name shares its bytes.
+#[test]
+fn unavailable_directories_suppress_only_their_own_subtrees() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    let private = directory.path().join("d");
+    fs::create_dir(&private).unwrap();
+    fs::write(private.join("child"), b"hidden").unwrap();
+    for name in ["d-b", "d.txt", "d0"] {
+        let folder = directory.path().join(name);
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("keep"), b"keep").unwrap();
+    }
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o0)).unwrap();
+    let observed = remote
+        .observe_from(
+            PairOptions::default().metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+        )
+        .unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(observed.unavailable(), &[path(b"d")]);
+    assert!(!observed.entries().contains_key(&path(b"d")));
+    assert!(!observed.entries().contains_key(&path(b"d/child")));
+    for name in [b"d-b/keep".as_slice(), b"d.txt/keep", b"d0/keep"] {
+        assert!(observed.entries().contains_key(&path(name)), "{name:?}");
+    }
+}
+
+/// A file that cannot be read suppresses its own path, not names that
+/// merely start with the same bytes.
+#[test]
+fn unavailable_files_suppress_only_their_own_path() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    let unreadable = directory.path().join("f");
+    fs::write(&unreadable, b"hidden").unwrap();
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o0)).unwrap();
+    for name in ["f-b", "f.txt", "f0"] {
+        let folder = directory.path().join(name);
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("keep"), b"keep").unwrap();
+    }
+    let observed = remote
+        .observe_from(
+            PairOptions::default().metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+        )
+        .unwrap();
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(observed.unavailable(), &[path(b"f")]);
+    assert!(!observed.entries().contains_key(&path(b"f")));
+    for name in [b"f-b/keep".as_slice(), b"f.txt/keep", b"f0/keep"] {
+        assert!(observed.entries().contains_key(&path(name)), "{name:?}");
+    }
+}
+
 #[test]
 fn unchanged_sftp_attributes_cannot_hide_a_content_change() {
     let directory = tempfile::tempdir().unwrap();
@@ -534,7 +1424,7 @@ fn unchanged_sftp_attributes_cannot_hide_a_content_change() {
         .observe_from(
             options.metadata(),
             &Filter::none(),
-            &Default::default(),
+            &BTreeMap::new(),
             &mut proceed,
         )
         .unwrap();
@@ -558,7 +1448,7 @@ fn unchanged_sftp_attributes_cannot_hide_a_content_change() {
         first.versions()[&key].content(),
         second.versions()[&key].content()
     );
-    let run = RunScope::new(UNIX_EPOCH, options);
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), options);
     assert!(matches!(
         remote.remove(&key, &first.entries()[&key], &run, &mut proceed),
         Err(ApplyError::DestinationChanged(_))
@@ -597,6 +1487,35 @@ fn reads_stop_at_the_observed_length_and_refuse_a_changed_file() {
     fs::write(directory.path().join("data"), vec![3; 40]).unwrap();
     let read = remote.read_file(&name, &before, &mut proceed, &mut |_| Ok(()));
     assert!(matches!(read, Err(ScanError::Changed(_))), "{read:?}");
+}
+
+#[test]
+fn bounded_control_reads_reject_overflow_instead_of_truncating() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    let stored = remote.remote(b"control");
+    for data in [b"".as_slice(), b"a", b"four"] {
+        fs::write(directory.path().join("control"), data).unwrap();
+        assert_eq!(
+            read_small_on(&mut remote.session(), &stored, 4).unwrap(),
+            Some(data.to_vec())
+        );
+    }
+    fs::write(directory.path().join("control"), b"four!").unwrap();
+    assert_eq!(
+        read_small_on(&mut remote.session(), &stored, 4)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidData
+    );
+    // Overflow drains the wire, so the next control read still works.
+    fs::write(directory.path().join("control"), b"ok").unwrap();
+    assert_eq!(
+        read_small_on(&mut remote.session(), &stored, 4).unwrap(),
+        Some(b"ok".to_vec())
+    );
 }
 
 #[test]
@@ -689,7 +1608,7 @@ fn copies_from_several_threads_use_their_own_sessions() {
     let local = Endpoint::Local(LocalEndpoint::open(local_directory.path()).unwrap());
     let back = Endpoint::Local(LocalEndpoint::open(back_directory.path()).unwrap());
     let options = PairOptions::default();
-    let run = RunScope::new(UNIX_EPOCH, options.clone());
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), options.clone());
     let content = |index: usize| format!("file {index} ").repeat(4_000).into_bytes();
     for index in 0..FILES {
         fs::write(
@@ -757,7 +1676,7 @@ fn copies_both_ways_keep_content_and_archive_what_they_replace() {
     let local = Endpoint::Local(LocalEndpoint::open(local_directory.path()).unwrap());
     let options = PairOptions::default();
     let policy = options.metadata();
-    let run = RunScope::new(UNIX_EPOCH, options.clone());
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), options.clone());
 
     fs::create_dir(local_directory.path().join("docs")).unwrap();
     fs::write(local_directory.path().join("docs/a.txt"), b"local data").unwrap();
@@ -895,7 +1814,7 @@ fn decomposed_names_are_written_composed_and_found_in_either_spelling() {
     let local = Endpoint::Local(LocalEndpoint::open(local_directory.path()).unwrap());
     let options = PairOptions::default();
     let policy = options.metadata();
-    let run = RunScope::new(UNIX_EPOCH, options.clone());
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), options.clone());
     let observe = |endpoint: &Endpoint| {
         endpoint
             .observe_from(
@@ -966,7 +1885,11 @@ fn decomposed_names_are_written_composed_and_found_in_either_spelling() {
     );
     let there = observe(&remote);
     let stored = &there.entries()[&path(composed_file.as_bytes())];
-    let later = RunScope::new(UNIX_EPOCH + Duration::from_secs(1), options.clone());
+    let later = RunScope::new(
+        UNIX_EPOCH + Duration::from_secs(1),
+        crate::test_pair(),
+        options.clone(),
+    );
     remote.remove(&name, stored, &later, &mut proceed).unwrap();
     assert!(names(&remote_directory.path().join("caf\u{e9}")).is_empty());
 
@@ -1002,7 +1925,7 @@ fn identities_removals_and_pruning_follow_the_local_rules() {
     fs::write(directory.path().join("gone"), b"bye").unwrap();
     fs::create_dir(directory.path().join("empty")).unwrap();
     let options = PairOptions::default();
-    let run = RunScope::new(UNIX_EPOCH, options.clone());
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), options.clone());
     let observed = remote
         .observe_from(
             options.metadata(),
@@ -1028,7 +1951,12 @@ fn identities_removals_and_pruning_follow_the_local_rules() {
     assert_eq!(fs::read(directory.path().join("gone")).unwrap(), b"bye");
 
     let pruned = remote
-        .prune_archive(Duration::from_secs(1), SystemTime::now())
+        .prune_archive(
+            Duration::from_secs(1),
+            SystemTime::now(),
+            crate::Pruning::Everyone,
+            &mut proceed,
+        )
         .unwrap();
     assert_eq!(pruned, 1);
     assert!(remote.archived_runs().unwrap().is_empty());
@@ -1157,7 +2085,7 @@ fn put_back_finds_an_archived_name_in_either_spelling() {
         return;
     };
     let options = PairOptions::default();
-    let run = RunScope::new(SystemTime::now(), options.clone());
+    let run = RunScope::new(SystemTime::now(), crate::test_pair(), options.clone());
     let (decomposed, composed) = ("cafe\u{301}.txt", "caf\u{e9}.txt");
     fs::write(directory.path().join(decomposed), b"kept").unwrap();
     let observed = remote
@@ -1191,7 +2119,7 @@ fn put_back_remakes_a_missing_folder_inside_the_stored_spelling() {
         return;
     };
     let options = PairOptions::default();
-    let run = RunScope::new(SystemTime::now(), options.clone());
+    let run = RunScope::new(SystemTime::now(), crate::test_pair(), options.clone());
     let decomposed = "cafe\u{301}";
     fs::create_dir_all(directory.path().join(decomposed).join("jobs")).unwrap();
     fs::write(
@@ -1277,7 +2205,7 @@ fn a_move_into_a_folder_with_another_spelling_lands_inside_it() {
         return;
     };
     let options = PairOptions::default();
-    let run = RunScope::new(SystemTime::now(), options.clone());
+    let run = RunScope::new(SystemTime::now(), crate::test_pair(), options.clone());
     let decomposed = "cafe\u{301}";
     fs::create_dir(directory.path().join(decomposed)).unwrap();
     fs::write(directory.path().join("menu.txt"), b"soup").unwrap();
@@ -1331,6 +2259,48 @@ fn a_replaced_entry_keeps_the_spelling_its_folder_lists() {
     let stored = sftp.remote(composed.as_bytes());
     assert_eq!(sftp.listed(&asked), stored);
     assert_eq!(sftp.listed(&stored), stored);
+}
+
+/// Ignored: how long a cached spelling lookup takes on folders of
+/// 1k, 10k and 100k names. Three samples each, so a comparison keeps
+/// the run's variance in view. Local subprocess timings against
+/// `sftp-server`, not a LAN measurement.
+#[test]
+#[ignore]
+fn cached_spelling_lookup_bench() {
+    use std::time::Instant;
+
+    const SAMPLES: usize = 3;
+    const ITERATIONS: usize = 200;
+    for &files in &[1_000usize, 10_000, 100_000] {
+        let directory = tempfile::tempdir().unwrap();
+        for file in 0..files {
+            fs::write(directory.path().join(format!("file-{file:06}.txt")), b"").unwrap();
+        }
+        // One composed Unicode name keeps the folder's cache honest about
+        // normalization even though almost every name is ASCII.
+        fs::write(directory.path().join("caf\u{e9}.txt"), b"").unwrap();
+        // An ask in another spelling that is absent, so the lookup walks
+        // the whole cache before giving up.
+        let asked = "/cafe\u{301}.missing";
+        for sample in 0..SAMPLES {
+            let Some(sftp) = sftp(directory.path()) else {
+                return;
+            };
+            let asked = sftp.remote(asked.as_bytes());
+            assert_eq!(sftp.listed(&asked), asked);
+            let start = Instant::now();
+            for _ in 0..ITERATIONS {
+                std::hint::black_box(sftp.listed(&asked));
+            }
+            let elapsed = start.elapsed();
+            eprintln!(
+                "cached_spelling_lookup_bench files={files} sample={sample} \
+                 total={elapsed:?} per_lookup={:?}",
+                elapsed / ITERATIONS as u32,
+            );
+        }
+    }
 }
 
 /// A renamed folder keeps its children on the server, so listings the
@@ -1399,6 +2369,183 @@ fn a_replacing_rename_drops_the_targets_cached_listings() {
     assert_eq!(sftp.listed(&stored), stored);
 }
 
+/// The run's own add, remove and move keep the cached listing exact,
+/// so a decomposed ask resolves through them.
+#[test]
+fn note_added_removed_and_moved_update_the_cached_spelling() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(sftp) = sftp(directory.path()) else {
+        return;
+    };
+    let (decomposed, composed) = ("cafe\u{301}.txt", "caf\u{e9}.txt");
+    let asked = sftp.remote(decomposed.as_bytes());
+    let stored = sftp.remote(composed.as_bytes());
+
+    // Nothing is cached yet, so the decomposed ask does not resolve.
+    assert_eq!(sftp.listed(&asked), asked);
+
+    // A tracked add resolves it; a tracked move uncovers it again.
+    sftp.note_added(&stored);
+    assert_eq!(sftp.listed(&asked), stored);
+    sftp.note_moved(&stored, &sftp.remote(b"plain.txt"));
+    assert_eq!(sftp.listed(&asked), asked);
+
+    // A tracked remove drops the name for good.
+    sftp.note_added(&stored);
+    assert_eq!(sftp.listed(&asked), stored);
+    sftp.note_removed(&stored);
+    assert_eq!(sftp.listed(&asked), asked);
+}
+
+/// A cached spelling lookup composes the asked name once, not every
+/// name in the folder. This is the failing-before test: the linear scan
+/// this index replaced composed all 10k cached names before finding the
+/// match at the end.
+#[test]
+fn a_cached_spelling_lookup_normalizes_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(sftp) = sftp(directory.path()) else {
+        return;
+    };
+    let (decomposed, composed) = ("cafe\u{301}.txt", "caf\u{e9}.txt");
+    let asked = sftp.remote(decomposed.as_bytes());
+    let stored = sftp.remote(composed.as_bytes());
+    // Prime the folder's cache empty, then fill it. The match is last,
+    // so the scan this index replaced walked the whole folder.
+    assert_eq!(sftp.listed(&asked), asked);
+    for file in 0..10_000 {
+        let name = format!("file-{file:05}.txt");
+        sftp.note_added(&sftp.remote(name.as_bytes()));
+    }
+    sftp.note_added(&stored);
+
+    super::spelling::reset_compose_calls();
+    assert_eq!(sftp.listed(&asked), stored);
+    assert!(
+        super::spelling::compose_call_count() <= 2,
+        "the cached lookup composed {} names",
+        super::spelling::compose_call_count()
+    );
+}
+
+/// A view marked Dirty answers nothing until a fresh listing: an entry
+/// that appeared behind the cache's back resolves after a refetch.
+#[test]
+fn a_dirty_view_refetches() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(sftp) = sftp(directory.path()) else {
+        return;
+    };
+    let (decomposed, composed) = ("cafe\u{301}.txt", "caf\u{e9}.txt");
+    let asked = sftp.remote(decomposed.as_bytes());
+    let stored = sftp.remote(composed.as_bytes());
+
+    // Prime: an empty folder, so the ask does not resolve.
+    assert_eq!(sftp.listed(&asked), asked);
+
+    // The file appears behind the cache's back; forgetting its parent
+    // forces the next ask to refetch.
+    fs::write(directory.path().join(composed), b"x").unwrap();
+    sftp.forget_parent(&stored);
+    assert_eq!(sftp.listed(&asked), stored);
+}
+
+/// A mutation while a listing is in flight leaves the folder Dirty, so
+/// the snapshot the fetch returns cannot be stored.
+#[test]
+fn a_mutation_during_a_fetch_leaves_the_folder_dirty() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(sftp) = sftp(directory.path()) else {
+        return;
+    };
+    // A read in flight: the root's view is Fetching.
+    let root = sftp.path().to_vec();
+    sftp.listings.lock().unwrap().fetching(&root);
+    sftp.note_added(&sftp.remote(b"arrived"));
+    assert!(sftp.listings.lock().unwrap().is_dirty(&root));
+}
+
+/// A rename whose answer never arrives may have landed, so every view
+/// it could have touched must stop answering until a fresh listing.
+#[test]
+fn a_lost_rename_answer_drops_the_views() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(sftp) = lost_rename(directory.path()) else {
+        return;
+    };
+    let (decomposed, composed) = ("cafe\u{301}.txt", "caf\u{e9}.txt");
+    fs::create_dir(directory.path().join("old")).unwrap();
+    fs::write(directory.path().join("old").join(composed), b"x").unwrap();
+
+    // Fill the cache: the decomposed ask resolves through old/'s listing.
+    let asked_old = sftp.remote(format!("old/{decomposed}").as_bytes());
+    let stored_old = sftp.remote(format!("old/{composed}").as_bytes());
+    assert_eq!(sftp.listed(&asked_old), stored_old);
+
+    // The rename lands, but its answer never arrives.
+    let error = sftp
+        .renamed(&sftp.remote(b"old"), &sftp.remote(b"new"))
+        .unwrap_err();
+    assert!(!SftpEndpoint::answered(&error), "{error:?}");
+
+    // The lost answer dropped the views, so the next ask refetches: the
+    // old folder is gone and the new one resolves.
+    assert_eq!(sftp.listed(&asked_old), asked_old);
+    let asked_new = sftp.remote(format!("new/{decomposed}").as_bytes());
+    let stored_new = sftp.remote(format!("new/{composed}").as_bytes());
+    assert_eq!(sftp.listed(&asked_new), stored_new);
+}
+
+/// Concurrent lookups and mutations on one folder stay consistent: a
+/// name resolves exactly while it is cached.
+#[test]
+fn concurrent_cached_lookups_and_mutations_stay_consistent() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(sftp) = sftp(directory.path()) else {
+        return;
+    };
+    let sftp = Arc::new(sftp);
+    // Prime the root listing, empty, so the cache holds it.
+    let asked = sftp.remote("cafe\u{301}.txt".as_bytes());
+    assert_eq!(sftp.listed(&asked), asked);
+
+    const THREADS: usize = 4;
+    const STEPS: usize = 100;
+    let mut threads = Vec::new();
+    for thread in 0..THREADS {
+        let sftp = Arc::clone(&sftp);
+        threads.push(std::thread::spawn(move || {
+            for step in 0..STEPS {
+                let name = format!("caf\u{e9}-{thread}-{step:03}.txt");
+                let stored = sftp.remote(name.as_bytes());
+                let asked = sftp.remote(format!("cafe\u{301}-{thread}-{step:03}.txt").as_bytes());
+                sftp.note_added(&stored);
+                assert_eq!(sftp.listed(&asked), stored);
+                if step % 2 == 0 {
+                    sftp.note_removed(&stored);
+                    assert_eq!(sftp.listed(&asked), asked, "{name} should be gone");
+                }
+            }
+        }));
+    }
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    // Every surviving name resolves; every removed one does not.
+    for thread in 0..THREADS {
+        for step in 0..STEPS {
+            let name = format!("caf\u{e9}-{thread}-{step:03}.txt");
+            let stored = sftp.remote(name.as_bytes());
+            let asked = sftp.remote(format!("cafe\u{301}-{thread}-{step:03}.txt").as_bytes());
+            if step % 2 == 0 {
+                assert_eq!(sftp.listed(&asked), asked, "{name} should be gone");
+            } else {
+                assert_eq!(sftp.listed(&asked), stored, "{name}");
+            }
+        }
+    }
+}
+
 /// `Durability::Full` cannot be promised over SFTP at all: namespace
 /// changes have no protocol flush. Every mutating entry point must
 /// reject it before touching the server, whatever the server offers.
@@ -1419,7 +2566,7 @@ fn full_durability_is_rejected_before_any_write() {
 fn full_durability_is_rejected(remote: &Endpoint, root: &Path) {
     let policy = MetadataPolicy::default();
     let full = PairOptions::new(policy, Durability::Full);
-    let run = RunScope::new(UNIX_EPOCH, full.clone());
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), full.clone());
 
     // The identity write refuses before `.foldover` is created.
     let error = remote.ensure_identity(Durability::Full).unwrap_err();
@@ -1499,7 +2646,7 @@ fn full_durability_is_rejected(remote: &Endpoint, root: &Path) {
     let leftover = path(b".foldover-tmp-deadbeef");
     fs::write(root.join(".foldover-tmp-deadbeef"), b"half").unwrap();
     assert!(matches!(
-        remote.recover_leftover(&leftover, &run),
+        remote.recover_leftover(&leftover, &run, &mut proceed),
         Err(ApplyError::DurabilityUnsupported(_))
     ));
 
@@ -1514,7 +2661,7 @@ fn full_durability_is_rejected(remote: &Endpoint, root: &Path) {
 
     // Standard writes all still work on the same server.
     let standard = PairOptions::new(policy, Durability::Standard);
-    let run = RunScope::new(UNIX_EPOCH, standard.clone());
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), standard.clone());
     fs::remove_file(root.join(".foldover-tmp-deadbeef")).unwrap();
     let identity = remote.ensure_identity(Durability::Standard).unwrap();
     assert_eq!(remote.identity().unwrap(), Some(identity));
@@ -1554,7 +2701,6 @@ fn lock_files_are_created_exclusively_and_replaced_by_a_promoted_claim() {
         Some(&b"first"[..])
     );
 
-    remote.replace_lock_file(LockFile::Lock, b"beat").unwrap();
     assert!(remote.create_lock_file(LockFile::Claim, b"claim").unwrap());
     remote.promote_claim().unwrap();
     assert_eq!(
@@ -1567,6 +2713,67 @@ fn lock_files_are_created_exclusively_and_replaced_by_a_promoted_claim() {
     remote.remove_lock_file(LockFile::Lock).unwrap();
     let left = fs::read_dir(directory.path().join(".foldover")).unwrap();
     assert_eq!(left.count(), 0, "temporary files were left behind");
+}
+
+/// Lease creation uses SFTP's exclusive open rather than relying on an
+/// ordinary rename refusing replacement, which is not universal.
+#[test]
+fn exclusive_lock_creation_does_not_depend_on_rename_refusing_replacement() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = replacing_rename(directory.path()) else {
+        return;
+    };
+
+    // Prove the fixture's ordinary rename really does replace its target.
+    let source = directory.path().join("rename-source");
+    let target = directory.path().join("rename-target");
+    fs::write(&source, b"replacement").unwrap();
+    fs::write(&target, b"old").unwrap();
+    remote
+        .renamed(
+            &remote.remote(b"rename-source"),
+            &remote.remote(b"rename-target"),
+        )
+        .unwrap();
+    assert!(!source.exists());
+    assert_eq!(fs::read(target).unwrap(), b"replacement");
+
+    assert!(remote.create_lock_file(LockFile::Lock, b"first").unwrap());
+    assert!(!remote.create_lock_file(LockFile::Lock, b"second").unwrap());
+    assert_eq!(
+        remote.read_lock_file(LockFile::Lock).unwrap().as_deref(),
+        Some(&b"first"[..])
+    );
+}
+
+/// A creator delayed after writing must not claim a successor's replacement
+/// as its own lock when its CLOSE reply finally arrives.
+#[test]
+fn exclusive_lock_creation_verifies_the_final_record() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = replacing_rename(directory.path()) else {
+        return;
+    };
+    let lock = directory.path().join(".foldover/lock");
+    let replacement = directory.path().join("successor-lock");
+
+    let created = std::thread::scope(|scope| {
+        let creator = scope.spawn(|| remote.create_lock_file(LockFile::Lock, b"first"));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while fs::read(&lock).ok().as_deref() != Some(&b"first"[..]) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "lock was never written"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        fs::write(&replacement, b"successor").unwrap();
+        fs::rename(&replacement, &lock).unwrap();
+        creator.join().unwrap().unwrap()
+    });
+
+    assert!(!created);
+    assert_eq!(fs::read(lock).unwrap(), b"successor");
 }
 
 /// Review of bandwidth: a cancel that came while a streamed copy waited
@@ -1594,7 +2801,7 @@ fn a_cancel_during_a_bandwidth_wait_cancels_the_copy() {
             &mut |_| {},
         )
         .unwrap();
-    let run = RunScope::new(UNIX_EPOCH, options);
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), options);
     let name = path(b"big.bin");
 
     // The first chunk's wait outlasts the cancel.
@@ -1614,4 +2821,19 @@ fn a_cancel_during_a_bandwidth_wait_cancels_the_copy() {
         matches!(copied, Err(ApplyError::Scan(ScanError::Cancelled))),
         "{copied:?}"
     );
+}
+
+#[test]
+fn cached_spelling_writes_cannot_exceed_the_byte_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("café"), b"data").unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    let _ = remote.listed(&remote.remote("café".as_bytes()));
+    for index in 0..50_000 {
+        let name = format!("{index:06}{}", "x".repeat(240));
+        remote.note_added(&remote.remote(name.as_bytes()));
+        assert!(remote.listings.lock().unwrap().retained_bytes() <= 32 * 1024 * 1024);
+    }
 }

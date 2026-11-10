@@ -20,7 +20,12 @@ discarded with the base. Version 8 adds filter rules
 ([ADR 0022](0022-scheduled-runs.md)). Version 12 adds each side's network
 mount source ([ADR 0027](0027-share-reconnect.md)). Version 13 adds the
 age limit ([ADR 0024](0024-filters.md)). Version 14 permits SFTP locator bytes
-alongside absolute local roots ([ADR 0028](0028-sftp-endpoints.md)). Secrets are not stored yet.
+alongside absolute local roots ([ADR 0028](0028-sftp-endpoints.md)). Version 28
+adds `pair_removal`, which marks a removed pair and raises the minimum reader
+to 28; the agent purges the marked pair's rows in the background
+([ADR 0053](0053-background-pair-removal.md)). Version 29 adds `pair_pause`,
+which holds one pair's automatic syncs; older agents ignore it
+([ADR 0022](0022-scheduled-runs.md)). Secrets are not stored yet.
 Configuration does not establish endpoint identity, overlap safety,
 permissions or readiness to sync.
 
@@ -74,16 +79,19 @@ adds Unicode-aware name checks and preserves all five mode/direction forms.
 
 Updates require the expected revision. A stale request leaves the new
 configuration unchanged. Missing pairs and invalid stored values are errors,
-never silently omitted rows. Removal requires the current revision and leaves
-endpoint data in place; its API scope is in [ADR 0011](0011-pair-configuration-api.md).
+never silently omitted rows. Removal requires the current revision, marks the
+pair in `pair_removal` and leaves endpoint data in place; the agent purges
+the marked pair's rows in the background
+([ADR 0053](0053-background-pair-removal.md)). Its API scope is in
+[ADR 0011](0011-pair-configuration-api.md).
 
 ## Base
 
 `base_entry` holds one row per pair and path: raw path bytes and each
 side's 65-byte version (kind, content digest, metadata digest). Removing a
-pair cascades to its base. Changing either root or any metadata category
-deletes the base in the same transaction; renames, mode and durability
-changes keep it. Base updates are
+pair marks it, and the agent's background purge then deletes its base in
+batches. Changing either root or any metadata category deletes the base in
+the same transaction; renames, mode and durability changes keep it. Base updates are
 atomic and require the pair's current revision, so a run planned for other
 roots or another mode cannot commit. Stored rows whose sides disagree on
 content, or whose kind or length is invalid, are errors.

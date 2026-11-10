@@ -18,6 +18,9 @@ pub use peer_identity::{PeerIdentityError, load_peer_identity};
 mod pair;
 
 #[cfg(unix)]
+mod observation_reads;
+
+#[cfg(unix)]
 mod sftp;
 
 #[cfg(unix)]
@@ -32,8 +35,8 @@ pub use watch::{RootWatcher, changed_since_event, event_history, event_now};
 #[cfg(unix)]
 pub use local::{
     ApplyError, ArchivedItem, ArchivedRun, Expected, Filter, InvalidFilter, LocalEndpoint,
-    LocalEntry, Observation, ObservedEntry, RunScope, ScanControl, ScanError, ScanIssue, ScanStats,
-    archive_name,
+    LocalEntry, Observation, ObservedEntry, PreviousObservation, Pruning, RunScope, ScanControl,
+    ScanError, ScanIssue, ScanStats, SnapshotBuilder, archive_name, run_name, run_owner,
 };
 
 #[cfg(unix)]
@@ -44,7 +47,7 @@ pub use foldover_fs::{
 };
 
 #[cfg(unix)]
-pub use endpoint::{Endpoint, ListedEntry, ListedKind, ObserveStep, Reach};
+pub use endpoint::{Bottleneck, Endpoint, ListedEntry, ListedKind, ObserveStep, Reach};
 
 #[cfg(feature = "simulation")]
 mod memory;
@@ -62,6 +65,18 @@ pub use link::{
 
 mod pace;
 
+#[cfg(unix)]
+mod observation_versions;
+
+#[cfg(unix)]
+pub use observation_versions::ObservedVersion;
+
+#[cfg(unix)]
+mod observation_hints;
+
+#[cfg(unix)]
+pub use observation_hints::ObservationHints;
+
 mod lease;
 pub use lease::{HeldLease, LeaseError, LeaseHolder, LeaseTiming, LockFile};
 
@@ -73,3 +88,17 @@ pub use pair::{EndpointPair, PairRootError, access_denied};
 
 #[cfg(unix)]
 pub use sftp::SftpEndpoint;
+
+/// The pair tests' runs belong to.
+#[cfg(test)]
+pub(crate) fn test_pair() -> foldover_types::PairId {
+    foldover_types::PairId::from_bytes([0x5a; foldover_types::PairId::BYTE_LEN])
+        .expect("a test pair is not zero")
+}
+
+#[cfg(unix)]
+mod observation_cache;
+#[cfg(unix)]
+mod observation_entries;
+#[cfg(unix)]
+pub use observation_entries::{ObservationEntries, ObservationIter};

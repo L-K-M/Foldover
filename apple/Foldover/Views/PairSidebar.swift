@@ -61,6 +61,15 @@ struct PairSidebar: View {
                 .disabled(!sync.canSync)
             Button("Stop") { Task { await sync.cancel() } }
                 .disabled(!sync.canCancel)
+            if pair.automation == .paused {
+                Button("Resume Pair") { Task { await viewModel.toggleAutomation(of: pair) } }
+                    .disabled(!viewModel.canChangeAutomation(of: pair))
+                    .help("Automatic syncs run on the pair's schedule again.")
+            } else {
+                Button("Pause Pair") { Task { await viewModel.toggleAutomation(of: pair) } }
+                    .disabled(!viewModel.canChangeAutomation(of: pair))
+                    .help("Automatic syncs wait until you resume the pair. Sync Now still works.")
+            }
             Divider()
             Button("Edit Pair…") {
                 viewModel.selectedPairID = pairID
@@ -71,14 +80,14 @@ struct PairSidebar: View {
             Divider()
             Button("Show Folder A in Finder") {
                 viewModel.selectedPairID = pairID
-                viewModel.reveal(.a)
+                viewModel.reveal(sync.activeLeft)
             }
-            .disabled(viewModel.localURL(pair.settings.left) == nil)
+            .disabled(!viewModel.canReveal(sync.activeLeft))
             Button("Show Folder B in Finder") {
                 viewModel.selectedPairID = pairID
-                viewModel.reveal(.b)
+                viewModel.reveal(sync.activeRight)
             }
-            .disabled(viewModel.localURL(pair.settings.right) == nil)
+            .disabled(!viewModel.canReveal(sync.activeRight))
             Divider()
             Button("Remove Pair…") {
                 viewModel.selectedPairID = pairID
@@ -125,7 +134,11 @@ private struct SidebarPairRow: View {
                     .foregroundStyle(.orange)
                     .accessibilityLabel("Needs Attention")
             case .idle, .waiting:
-                EmptyView()
+                if row.automation == .paused {
+                    Image(systemName: "pause.circle")
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("Paused")
+                }
             }
         }
         .badge(row.conflicts)

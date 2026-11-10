@@ -9,12 +9,15 @@ N minutes (1 minute to 1 week), or `changes`. Changing it keeps the base.
 
 The agent checks every 5 seconds and starts unattended runs through the same
 job manager as manual runs ([ADR 0021](0021-sync-job-api.md)); a busy pair
-is skipped until its job ends.
+is skipped until its job ends. Gentle automatic syncs, the default, start
+one per check and only while no other preview, sync or undo runs, the
+longest-waiting pair first
+([ADR 0054](0054-gentle-automatic-syncs.md)).
 
 | Schedule | Due |
 |---|---|
-| `every` | One interval after the last scheduled start, or after the agent started |
-| `changes` | 10 seconds after the last change in either folder; at most 5 minutes after the first change since the last run, when changes never stop; and hourly |
+| `every` | One interval after the last scheduled start, or after the agent started, in awake time; or once the wall clock shows one interval since that start, since the last recorded run's start when the pair has not started under this agent yet, or since the agent's start when it has no recorded run |
+| `changes` | 10 seconds after the last change in either folder; at most 5 minutes after the first change since the last run, when changes never stop; and an hour after the pair's last preview, sync or undo ended, or after its last scheduled start or the agent's start when no job has run since |
 
 - **Change notifications** come from FSEvents on macOS and inotify on
   Linux (the `notify` crate, behind `foldover-watch`). They are hints: a
@@ -62,12 +65,37 @@ is skipped until its job ends.
   It survives agent restarts. Changes noticed meanwhile stay recorded and
   run after the pause; manual syncs are unaffected. The menu bar, the CLI
   (`foldover pause [MINUTES]`, `foldover resume`) and Shortcuts set it.
-- Timing state lives in agent memory; a restart restarts every interval.
+- **Per-pair pause** (state schema v29): `pair.pause` holds one pair's
+  automatic runs until `pair.resume`. It survives agent restarts, editing
+  the pair keeps it, and removing the pair drops it; pausing does not change
+  the pair's revision. A paused pair keeps being watched, and its changes
+  run after the pause; manual Preview Changes and Sync Now still run and
+  do not lift the pause. The app's sidebar and Pair menu, and the CLI
+  (`foldover pairs pause ID`, `foldover pairs resume ID`), set it.
+- **Intervals across sleep and restarts:** awake time is counted with
+  `Instant`, which cannot be set back but stops while the Mac sleeps
+  and starts over with the agent. Alone it made an "Every day" pair on
+  a Mac that sleeps at night wait for a day of use, and wait forever on
+  one that restarts daily. An interval pair is therefore also due once
+  the wall clock shows a full interval since its last scheduled start
+  or, before its first start under this agent, since the start of its
+  last recorded run, manual or scheduled. Once it has started under
+  this agent only its scheduled starts count, as before: a manual sync
+  does not put off the next automatic one. A missed interval runs once
+  when the Mac wakes or the agent starts, like a missed daily moment
+  ([ADR 0039](0039-calendar-schedules.md)). A wall clock set back never
+  holds a pair, since awake time still counts; one set forward costs a
+  single early run.
+- Other timing state lives in agent memory: a restart restarts the
+  hourly check of `changes` pairs and the interval of a pair that has
+  never run.
 
 ## Consequences
 
 - An unattended run that stops for approval stays stopped until someone
-  syncs manually; there are no notifications yet.
+  syncs manually; there are no notifications yet. A run that found a
+  folder busy with another run is tried again when the schedule next
+  comes due ([ADR 0047](0047-shared-one-way-sources.md)).
 - Watching uses the configured root paths, resolved once; a folder moved
   while watched is noticed by the next hourly run, which then fails on its
   identity check or path.

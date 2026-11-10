@@ -1,4 +1,5 @@
-//! Pausing automatic syncs, and the environment policy, for Swift.
+//! Pausing automatic syncs, the environment policy and how hard
+//! automatic syncs work, for Swift.
 
 use foldover_client::{AutomationStatus, SocketLocation};
 
@@ -9,6 +10,17 @@ use crate::AgentError;
 pub enum LowPowerSyncs {
     Pause,
     Run,
+}
+
+/// How hard automatic syncs may work the Mac (ADR 0054). Manual syncs
+/// always run at full effort.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum AutomaticEffort {
+    /// One at a time, at low priority, one file at a time on this Mac's
+    /// own disks.
+    Gentle,
+    /// Every due pair at once, at normal priority, with every worker.
+    Full,
 }
 
 /// Why automatic syncs wait right now (PLAN.md §3.5).
@@ -25,6 +37,7 @@ pub struct AutomationState {
     /// When a timed pause ends, in milliseconds since the Unix epoch.
     pub until_ms: Option<u64>,
     pub low_power: LowPowerSyncs,
+    pub effort: AutomaticEffort,
     /// Why an automatic sync would wait now, if one would.
     pub held_by: Option<AutomationHold>,
 }
@@ -70,6 +83,22 @@ pub async fn set_low_power_syncs(syncs: LowPowerSyncs) -> Result<AutomationState
     )
 }
 
+/// Set how hard automatic syncs may work the Mac.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn set_automatic_effort(effort: AutomaticEffort) -> Result<AutomationState, AgentError> {
+    state(
+        foldover_client::set_automatic_effort(
+            &SocketLocation::Default,
+            match effort {
+                AutomaticEffort::Gentle => foldover_client::AutomaticEffort::Gentle,
+                AutomaticEffort::Full => foldover_client::AutomaticEffort::Full,
+            },
+        )
+        .await,
+        AgentError::from,
+    )
+}
+
 fn state(
     status: Result<AutomationStatus, foldover_client::Error>,
     error: impl FnOnce(foldover_client::Error) -> AgentError,
@@ -81,6 +110,10 @@ fn state(
         low_power: match status.low_power {
             foldover_client::LowPowerSyncs::Pause => LowPowerSyncs::Pause,
             foldover_client::LowPowerSyncs::Run => LowPowerSyncs::Run,
+        },
+        effort: match status.effort {
+            foldover_client::AutomaticEffort::Gentle => AutomaticEffort::Gentle,
+            foldover_client::AutomaticEffort::Full => AutomaticEffort::Full,
         },
         held_by: status.held_by.map(|held| match held {
             foldover_client::AutomationHold::LowPowerMode => AutomationHold::LowPowerMode,

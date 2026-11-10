@@ -8,6 +8,9 @@ mod automation;
 mod deferred_tests;
 mod history;
 mod peer;
+#[cfg(test)]
+mod performance_tests;
+mod purge;
 mod safe_mode;
 mod schedule;
 mod share;
@@ -25,9 +28,10 @@ use foldover_proto::local::{
 use foldover_proto::local::{
     AgentCapability, DAEMON_RESUME, DAEMON_STATUS, DaemonStatus, Hello, INTERNAL_ERROR,
     INVALID_PARAMS, METHOD_NOT_FOUND, PAIR_CHECK, PAIR_CREATE, PAIR_GET, PAIR_LIST, PAIR_NOT_FOUND,
-    PAIR_PAGE_SIZE, PAIR_UPDATE, PROTOCOL_VERSION, PairInput, PairKey, PairList, PairPage,
-    PairRecord, PairUpdate, PairWarning, PairWarnings, ROOT_OVERLAP, ROOT_UNAVAILABLE, Request,
-    RpcError, SAFE_MODE, SESSION_HELLO, STALE_REVISION, VERSION_MISMATCH,
+    PAIR_PAGE_SIZE, PAIR_PAUSE, PAIR_RESUME, PAIR_UPDATE, PROTOCOL_VERSION, PairCheck, PairInput,
+    PairKey, PairList, PairPage, PairRecord, PairUpdate, PairWarning, PairWarnings, ROOT_OVERLAP,
+    ROOT_UNAVAILABLE, Request, RpcError, SAFE_MODE, SESSION_HELLO, STALE_REVISION,
+    VERSION_MISMATCH,
 };
 use foldover_proto::local::{
     ConflictKeep, SYNC_CANCEL, SYNC_ITEMS, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS,
@@ -37,7 +41,7 @@ use foldover_proto::local::{
     ENDPOINT_BROWSE, EndpointBrowse, NETWORK_SERVERS, NetworkServer, NetworkServers,
     PEER_UNAVAILABLE, ServerFolderList, ServerFolderRecord,
 };
-use foldover_types::{PairDraft, PairId, PairRoot, ReviewToken, Side};
+use foldover_types::{PairConfig, PairDraft, PairId, PairRoot, ReviewToken, Side};
 use schedule::Scheduler;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -59,6 +63,8 @@ pub struct Service {
     scheduler: Arc<Scheduler>,
     peers: peer::Peers,
     safe_mode: Arc<safe_mode::SafeMode>,
+    /// Wakes the task that deletes removed pairs' rows (ADR 0053).
+    purge: Arc<purge::Purger>,
     /// Cleared at a clean stop without waiting for the engine, which a
     /// sync may hold for seconds while the system waits to stop us.
     run_marker: foldover_engine::RunMarker,
@@ -113,6 +119,7 @@ impl Service {
             scheduler: Arc::new(Scheduler::new(std::time::Instant::now())),
             peers: Arc::default(),
             safe_mode: Arc::default(),
+            purge: Arc::default(),
         }
     }
 
@@ -224,13 +231,14 @@ impl Service {
             return history::handle(&self.engine, &request).await;
         }
         let command = Command::parse(&request)?;
+        let removes = matches!(command, Command::Remove { .. });
         let permit = Arc::clone(&self.commands)
             .acquire_owned()
             .await
             .map_err(|_| RpcError::new(INTERNAL_ERROR, "Configuration worker is unavailable"))?;
         let engine = Arc::clone(&self.engine);
         let jobs = Arc::clone(&self.jobs);
-        tokio::task::spawn_blocking(move || {
+        let answer = tokio::task::spawn_blocking(move || {
             // Retain ownership even if a client disconnects while its command commits.
             let _permit = permit;
             // The reservation and the busy check are one lock acquisition,
@@ -254,7 +262,11 @@ impl Service {
             command.execute(&mut engine, &jobs)
         })
         .await
-        .map_err(|_| RpcError::new(INTERNAL_ERROR, "Configuration worker failed"))?
+        .map_err(|_| RpcError::new(INTERNAL_ERROR, "Configuration worker failed"))?;
+        if removes && answer.is_ok() {
+            self.purge.wake();
+        }
+        answer
     }
 }
 
@@ -331,8 +343,12 @@ enum Command {
     Get(PairId),
     Create(PairDraft),
     /// Readiness warnings for a draft that has not been saved (PLAN.md
-    /// §3.6); touches disks like creation but mutates nothing.
-    Check(PairDraft),
+    /// §3.6); touches disks like creation but mutates nothing. `editing`
+    /// is the pair the draft would replace.
+    Check {
+        configuration: PairDraft,
+        editing: Option<PairId>,
+    },
     Update {
         id: PairId,
         revision: u64,
@@ -342,6 +358,10 @@ enum Command {
         id: PairId,
         revision: u64,
     },
+    /// Hold the pair's automatic syncs until resumed; a running job and
+    /// manual syncs go on, so no reservation is needed.
+    Pause(PairId),
+    Resume(PairId),
 }
 
 impl Command {
@@ -368,8 +388,15 @@ impl Command {
                 Ok(Self::Create(params.try_into().map_err(invalid)?))
             }
             PAIR_CHECK => {
-                let params: PairInput = parameters(request)?;
-                Ok(Self::Check(params.try_into().map_err(invalid)?))
+                let params: PairCheck = parameters(request)?;
+                Ok(Self::Check {
+                    configuration: params.configuration.try_into().map_err(invalid)?,
+                    editing: params
+                        .id
+                        .map(|id| id.parse())
+                        .transpose()
+                        .map_err(invalid)?,
+                })
             }
             PAIR_UPDATE => {
                 let params: PairUpdate = parameters(request)?;
@@ -386,6 +413,15 @@ impl Command {
                     revision: expected_revision(params.revision)?,
                 })
             }
+            PAIR_PAUSE | PAIR_RESUME => {
+                let params: PairKey = parameters(request)?;
+                let id = params.id.parse().map_err(invalid)?;
+                Ok(if request.method() == PAIR_PAUSE {
+                    Self::Pause(id)
+                } else {
+                    Self::Resume(id)
+                })
+            }
             _ => Err(RpcError::new(METHOD_NOT_FOUND, "Method not found")),
         }
     }
@@ -394,7 +430,12 @@ impl Command {
     fn mutation_target(&self) -> Option<PairId> {
         match self {
             Self::Update { id, .. } | Self::Remove { id, .. } => Some(*id),
-            Self::List(_) | Self::Get(_) | Self::Create(_) | Self::Check(_) => None,
+            Self::List(_)
+            | Self::Get(_)
+            | Self::Create(_)
+            | Self::Check { .. }
+            | Self::Pause(_)
+            | Self::Resume(_) => None,
         }
     }
 
@@ -410,17 +451,29 @@ impl Command {
                 } else {
                     None
                 };
+                let paused = engine.paused_pairs().map_err(engine_error)?;
                 encode(PairPage {
-                    pairs: pairs.iter().map(PairRecord::from).collect(),
+                    pairs: pairs
+                        .iter()
+                        .map(|pair| PairRecord {
+                            paused: paused.contains(&pair.id()),
+                            ..PairRecord::from(pair)
+                        })
+                        .collect(),
                     next,
                 })
             }
-            Self::Get(id) => encode(PairRecord::from(&engine.pair(id).map_err(engine_error)?)),
+            Self::Get(id) => encode(record(engine, &engine.pair(id).map_err(engine_error)?)?),
             Self::Create(draft) => encode(PairRecord::from(
                 &engine.create_pair(&draft).map_err(engine_error)?,
             )),
-            Self::Check(draft) => {
-                let warnings = engine.check_pair(&draft).map_err(engine_error)?;
+            Self::Check {
+                configuration,
+                editing,
+            } => {
+                let warnings = engine
+                    .check_pair(&configuration, editing)
+                    .map_err(engine_error)?;
                 encode(PairWarnings {
                     warnings: warnings.into_iter().map(readiness_warning).collect(),
                 })
@@ -436,13 +489,32 @@ impl Command {
                     engine.update_pair(id, revision, &configuration)
                 }
                 .map_err(engine_error)?;
-                encode(PairRecord::from(&saved))
+                encode(record(engine, &saved)?)
             }
             Self::Remove { id, revision } => encode(PairRecord::from(
                 &engine.remove_pair(id, revision).map_err(engine_error)?,
             )),
+            Self::Pause(id) => {
+                engine.pause_pair(id).map_err(engine_error)?;
+                encode(record(engine, &engine.pair(id).map_err(engine_error)?)?)
+            }
+            Self::Resume(id) => {
+                engine.resume_pair(id).map_err(engine_error)?;
+                encode(record(engine, &engine.pair(id).map_err(engine_error)?)?)
+            }
         }
     }
+}
+
+/// The wire record of `pair`, with whether a person paused it.
+fn record(engine: &Engine, pair: &PairConfig) -> Result<PairRecord, RpcError> {
+    Ok(PairRecord {
+        paused: engine
+            .paused_pairs()
+            .map_err(engine_error)?
+            .contains(&pair.id()),
+        ..PairRecord::from(pair)
+    })
 }
 
 /// The wire form of an engine readiness warning; English wording lives
@@ -461,10 +533,18 @@ fn readiness_warning(warning: foldover_engine::ReadinessWarning) -> PairWarning 
         Warning::RecordsUnsupported { side } => {
             PairWarning::RecordsUnsupported { side: side.into() }
         }
+        Warning::Overlap { side, name, .. } => PairWarning::Overlap {
+            side: side.into(),
+            pair_name: name,
+        },
+        Warning::Unverified { side, name, .. } => PairWarning::Unverified {
+            side: side.into(),
+            pair_name: name,
+        },
     }
 }
 
-fn expected_revision(revision: u64) -> Result<u64, RpcError> {
+pub(crate) fn expected_revision(revision: u64) -> Result<u64, RpcError> {
     if revision == 0 || revision > i64::MAX as u64 {
         return Err(RpcError::new(
             INVALID_PARAMS,
@@ -652,7 +732,7 @@ mod tests {
     use foldover_proto::local::{
         SyncCounts, SyncDeletions, SyncJob, SyncPreview, SyncResult, SyncStatus,
     };
-    use foldover_proto::local::{SyncProgress, UndoResult};
+    use foldover_proto::local::{SyncPairContext, SyncProgress, UndoResult};
     use foldover_types::LocalDateTime;
     use serde_json::json;
     use std::{fs, os::unix::ffi::OsStrExt, path::Path, time::SystemTime};
@@ -662,6 +742,11 @@ mod tests {
         let engine =
             Engine::open(&StateLocation::Directory(directory.path().join("state"))).unwrap();
         (directory, Service::new(engine))
+    }
+
+    fn pair_context(service: &Service, id: PairId) -> SyncPairContext {
+        let pair = service.engine.lock().unwrap().active_pair(id).unwrap();
+        SyncPairContext::from(&pair)
     }
 
     fn input(directory: &Path, name: &str) -> Value {
@@ -725,8 +810,9 @@ mod tests {
     async fn pair_check_warns_without_saving_and_never_blocks() {
         let (directory, service) = fixture();
         let input = input(directory.path(), "Photos");
+        let check = |configuration: &Value| json!({ "configuration": configuration });
         let checked = service
-            .handle(Request::call(1, PAIR_CHECK, Some(input.clone())))
+            .handle(Request::call(1, PAIR_CHECK, Some(check(&input))))
             .await
             .unwrap();
         // Ordinary local folders warn about nothing on CI's filesystems.
@@ -735,7 +821,7 @@ mod tests {
         let mut missing = input.clone();
         missing["left_root"] = json!(directory.path().join("missing").as_os_str().as_bytes());
         let checked = service
-            .handle(Request::call(2, PAIR_CHECK, Some(missing)))
+            .handle(Request::call(2, PAIR_CHECK, Some(check(&missing))))
             .await
             .unwrap();
         assert_eq!(checked, json!({"warnings":[]}));
@@ -746,16 +832,40 @@ mod tests {
             .unwrap();
         assert_eq!(page["pairs"], json!([]));
         // It validates like creation.
-        let mut unknown_field = input;
+        let mut unknown_field = input.clone();
         unknown_field["run_now"] = json!(true);
         assert_eq!(
             service
-                .handle(Request::call(4, PAIR_CHECK, Some(unknown_field)))
+                .handle(Request::call(4, PAIR_CHECK, Some(check(&unknown_field))))
                 .await
                 .unwrap_err()
                 .code(),
             INVALID_PARAMS
         );
+
+        // Folders another pair writes are named, so the editor can say
+        // which pair before saving refuses them; the edited pair is not.
+        let saved = service
+            .handle(Request::call(5, PAIR_CREATE, Some(input.clone())))
+            .await
+            .unwrap();
+        let checked = service
+            .handle(Request::call(6, PAIR_CHECK, Some(check(&input))))
+            .await
+            .unwrap();
+        assert_eq!(
+            checked,
+            json!({"warnings":[
+                {"kind":"overlap","side":"left","pairName":"Photos"},
+                {"kind":"overlap","side":"right","pairName":"Photos"},
+            ]})
+        );
+        let editing = json!({ "id": saved["id"], "configuration": input });
+        let checked = service
+            .handle(Request::call(7, PAIR_CHECK, Some(editing)))
+            .await
+            .unwrap();
+        assert_eq!(checked, json!({"warnings":[]}));
     }
 
     #[tokio::test]
@@ -1127,16 +1237,21 @@ mod tests {
         started
     }
 
-    /// `run_due_started` with the local wall clock injected.
+    /// Start a batch with the local wall clock injected.
     async fn run_due_started_at(
         service: &Service,
         at: std::time::Instant,
         local: Option<LocalDateTime>,
     ) -> Vec<PairId> {
-        let mut started = service.run_due_at(at, Environment::now(), local);
+        let started = service.run_due_at(at, Environment::now(), local);
+        // The worker records real wall-clock time, not the injected future.
+        // Once it starts, another synthetic tick could start it twice if
+        // the first job already finished while this helper awaited probes.
+        if !started.is_empty() {
+            return started;
+        }
         probes_idle(service).await;
-        started.extend(service.run_due_at(at, Environment::now(), local));
-        started
+        service.run_due_at(at, Environment::now(), local)
     }
 
     /// `run_due_started` with the environment injected.
@@ -1460,12 +1575,14 @@ mod tests {
             );
         }
         let missing = json!({"id": "01010101010101010101010101010101"});
-        service
-            .handle(Request::call(2, SYNC_PREVIEW, Some(missing.clone())))
-            .await
-            .unwrap();
-        let failed = settled(&service, &missing).await;
-        assert_eq!(failed["state"], "failed");
+        assert_eq!(
+            service
+                .handle(Request::call(2, SYNC_PREVIEW, Some(missing)))
+                .await
+                .unwrap_err()
+                .code(),
+            PAIR_NOT_FOUND
+        );
     }
 
     #[tokio::test]
@@ -1497,6 +1614,38 @@ mod tests {
         assert!(service.run_due(at(90)).is_empty());
         assert_eq!(run_due_started(&service, at(122)).await.len(), 1);
         settled(&service, &key).await;
+    }
+
+    /// ADR 0022: an interval that passed on the wall clock while the Mac
+    /// slept or the agent was off is due, though the agent has been awake
+    /// for seconds. Here the recorded run stands in for the last sync
+    /// before a restart.
+    #[tokio::test]
+    async fn an_interval_missed_while_asleep_or_off_runs_once() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Notes");
+        input["options"]["schedule"] = json!({"kind": "every", "minutes": 24 * 60});
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        let start = service.scheduler.started();
+        let at = |seconds| start + std::time::Duration::from_secs(seconds);
+        assert_eq!(first_sync(&service, &key).await["state"], "finished");
+
+        // The same day: nothing is due.
+        assert!(run_due_started(&service, at(30)).await.is_empty());
+
+        // The next day on the wall clock, a minute of awake time later.
+        let tomorrow = SystemTime::now() + std::time::Duration::from_secs(25 * 60 * 60);
+        service.scheduler.set_wall(move || tomorrow);
+        assert_eq!(run_due_started(&service, at(60)).await, [id]);
+        assert_eq!(settled(&service, &key).await["state"], "finished");
+
+        // That start covers the interval.
+        assert!(run_due_started(&service, at(90)).await.is_empty());
     }
 
     #[tokio::test]
@@ -1548,14 +1697,15 @@ mod tests {
         let at = |seconds| start + std::time::Duration::from_secs(seconds);
         let local_now = || local_time(SystemTime::now());
 
-        // A first run is always reviewed by a person; the pair cannot
-        // become due before it, nor while the local clock is missing.
-        assert!(
-            service
-                .run_due_at(at(10), Environment::now(), local_now())
-                .is_empty()
+        // Routine review is off by default (ADR 0020), so nothing holds a
+        // pair without a recorded run: every past moment counts as missed
+        // and its first sync starts at the first check (ADR 0039).
+        assert_eq!(
+            run_due_started_at(&service, at(10), local_now()).await,
+            [id]
         );
-        assert_eq!(first_sync(&service, &key).await["state"], "finished");
+        assert_eq!(settled(&service, &key).await["state"], "finished");
+        // Nothing is due while the local clock is missing.
         assert!(
             service
                 .run_due_at(at(15), Environment::now(), None)
@@ -1824,21 +1974,37 @@ mod tests {
             .unwrap();
         assert_eq!(settled(&service, &key).await["result"]["archived"], 1);
 
-        let side = json!({"id": created["id"], "side": "right"});
+        let side = json!({
+            "id": created["id"],
+            "revision": created["revision"],
+            "side": "right"
+        });
         let runs = service
             .handle(Request::call(4, ARCHIVE_RUNS, Some(side)))
             .await
             .unwrap();
         assert_eq!(runs["more"], false);
         let name = runs["runs"][0]["name"].clone();
-        let query = json!({"id": created["id"], "side": "right", "run": name, "after": null});
+        let query = json!({
+            "id": created["id"],
+            "revision": created["revision"],
+            "side": "right",
+            "run": name,
+            "after": null
+        });
         let items = service
             .handle(Request::call(5, ARCHIVE_ITEMS, Some(query)))
             .await
             .unwrap();
         assert_eq!(items["items"], json!([{"path": b"file", "size": 4}]));
 
-        let put_back = json!({"id": created["id"], "side": "right", "run": name, "path": b"file"});
+        let put_back = json!({
+            "id": created["id"],
+            "revision": created["revision"],
+            "side": "right",
+            "run": name,
+            "path": b"file"
+        });
         let placed = service
             .handle(Request::call(6, ARCHIVE_PUT_BACK, Some(put_back.clone())))
             .await
@@ -1884,7 +2050,7 @@ mod tests {
         for index in 0..count {
             fs::write(run.join(archived_name(index)), b"data").unwrap();
         }
-        (directory, service, created["id"].clone(), run)
+        (directory, service, created, run)
     }
 
     fn archived_name(index: usize) -> String {
@@ -1894,11 +2060,17 @@ mod tests {
     /// The page after item `after`, as item names, and whether more follow.
     async fn archive_page(
         service: &Service,
-        id: &Value,
+        pair: &Value,
         after: Option<usize>,
     ) -> (Vec<String>, bool) {
         let after = after.map(|index| archived_name(index).into_bytes());
-        let query = json!({"id": id, "side": "right", "run": ARCHIVED_RUN, "after": after});
+        let query = json!({
+            "id": pair["id"],
+            "revision": pair["revision"],
+            "side": "right",
+            "run": ARCHIVED_RUN,
+            "after": after
+        });
         let page = service
             .handle(Request::call(5, ARCHIVE_ITEMS, Some(query)))
             .await
@@ -1918,12 +2090,12 @@ mod tests {
     #[tokio::test]
     async fn an_archived_run_pages_whole_across_read_aheads() {
         const ITEMS: usize = 1_050;
-        let (_directory, service, id, _run) = archived_pair(ITEMS).await;
+        let (_directory, service, pair, _run) = archived_pair(ITEMS).await;
 
         let mut listed = Vec::new();
         loop {
             let after = listed.len().checked_sub(1);
-            let (names, more) = archive_page(&service, &id, after).await;
+            let (names, more) = archive_page(&service, &pair, after).await;
             listed.extend(names.iter().cloned());
             if !more {
                 assert_eq!(
@@ -1940,35 +2112,40 @@ mod tests {
 
     #[tokio::test]
     async fn pages_reuse_what_the_first_read_and_the_first_page_reads_again() {
-        let (_directory, service, id, run) = archived_pair(250).await;
-        archive_page(&service, &id, None).await;
+        let (_directory, service, pair, run) = archived_pair(250).await;
+        archive_page(&service, &pair, None).await;
 
         // Only a page answered from memory can still name this item.
         fs::remove_file(run.join(archived_name(150))).unwrap();
-        let (names, _) = archive_page(&service, &id, Some(99)).await;
+        let (names, _) = archive_page(&service, &pair, Some(99)).await;
         assert!(names.contains(&archived_name(150)));
 
         // Opening the run shows what it holds now.
-        archive_page(&service, &id, None).await;
-        let (names, _) = archive_page(&service, &id, Some(99)).await;
+        archive_page(&service, &pair, None).await;
+        let (names, _) = archive_page(&service, &pair, Some(99)).await;
         assert!(!names.contains(&archived_name(150)));
     }
 
     #[tokio::test]
     async fn putting_back_forgets_what_was_read() {
-        let (directory, service, id, _run) = archived_pair(250).await;
-        archive_page(&service, &id, None).await;
+        let (directory, service, pair, _run) = archived_pair(250).await;
+        archive_page(&service, &pair, None).await;
 
         let name = archived_name(150);
-        let put_back =
-            json!({"id": id, "side": "right", "run": ARCHIVED_RUN, "path": name.as_bytes()});
+        let put_back = json!({
+            "id": pair["id"],
+            "revision": pair["revision"],
+            "side": "right",
+            "run": ARCHIVED_RUN,
+            "path": name.as_bytes()
+        });
         service
             .handle(Request::call(6, ARCHIVE_PUT_BACK, Some(put_back)))
             .await
             .unwrap();
         assert!(directory.path().join("Docs-right").join(&name).exists());
 
-        let (names, _) = archive_page(&service, &id, Some(99)).await;
+        let (names, _) = archive_page(&service, &pair, Some(99)).await;
         assert!(!names.contains(&name));
     }
 
@@ -1976,12 +2153,12 @@ mod tests {
     /// dropped, and so is what a listing keeps while it runs.
     #[tokio::test]
     async fn a_job_forgets_what_was_read_when_it_starts_and_when_it_ends() {
-        let (_directory, service, id, run) = archived_pair(250).await;
-        archive_page(&service, &id, None).await;
+        let (_directory, service, pair, run) = archived_pair(250).await;
+        archive_page(&service, &pair, None).await;
         fs::remove_file(run.join(archived_name(150))).unwrap();
 
         let (reached, release) = service.jobs.gate_job();
-        let key = json!({"id": id});
+        let key = json!({"id": pair["id"]});
         service
             .handle(Request::call(3, SYNC_PREVIEW, Some(key.clone())))
             .await
@@ -1994,17 +2171,17 @@ mod tests {
         .await
         .unwrap();
 
-        let (names, _) = archive_page(&service, &id, Some(99)).await;
+        let (names, _) = archive_page(&service, &pair, Some(99)).await;
         assert!(!names.contains(&archived_name(150)));
 
         // What that page kept stops answering once the job ends.
         fs::remove_file(run.join(archived_name(160))).unwrap();
-        let (names, _) = archive_page(&service, &id, Some(99)).await;
+        let (names, _) = archive_page(&service, &pair, Some(99)).await;
         assert!(names.contains(&archived_name(160)));
 
         release.send(()).unwrap();
         settled(&service, &key).await;
-        let (names, _) = archive_page(&service, &id, Some(99)).await;
+        let (names, _) = archive_page(&service, &pair, Some(99)).await;
         assert!(!names.contains(&archived_name(160)));
     }
 
@@ -3223,6 +3400,196 @@ mod tests {
         );
     }
 
+    /// A paused pair waits like a held one: its schedule keeps, other
+    /// pairs and manual syncs run, a manual sync does not lift the pause,
+    /// and the pair runs once resumed. Pausing keeps the revision.
+    #[tokio::test]
+    async fn a_paused_pair_waits_until_resumed() {
+        let (directory, service) = fixture();
+        let normal = Environment {
+            power: PowerMode::Normal,
+            network: Some(NetworkCost::Unrestricted),
+        };
+        let mut created = Vec::new();
+        for name in ["Paused", "Running"] {
+            let mut input = input(directory.path(), name);
+            input["options"]["schedule"] = json!({"kind": "every", "minutes": 1});
+            let pair = service
+                .handle(Request::call(1, PAIR_CREATE, Some(input)))
+                .await
+                .unwrap();
+            assert_eq!(pair["paused"], false);
+            first_sync(&service, &json!({"id": pair["id"]})).await;
+            created.push(pair);
+        }
+        let ids: Vec<PairId> = created
+            .iter()
+            .map(|pair| pair["id"].as_str().unwrap().parse().unwrap())
+            .collect();
+        let key = json!({"id": created[0]["id"]});
+        let at = |seconds| service.scheduler.started() + std::time::Duration::from_secs(seconds);
+
+        let paused = service
+            .handle(Request::call(2, PAIR_PAUSE, Some(key.clone())))
+            .await
+            .unwrap();
+        assert_eq!(paused["paused"], true);
+        assert_eq!(paused["revision"], created[0]["revision"]);
+        let listed = service
+            .handle(Request::call(3, PAIR_LIST, None))
+            .await
+            .unwrap();
+        let mut flags: Vec<_> = listed["pairs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|pair| {
+                (
+                    pair["configuration"]["name"].clone(),
+                    pair["paused"].clone(),
+                )
+            })
+            .collect();
+        // Pages are ordered by ID.
+        flags.sort_by_key(|(name, _)| name.to_string());
+        assert_eq!(
+            flags,
+            [
+                (json!("Paused"), json!(true)),
+                (json!("Running"), json!(false))
+            ]
+        );
+        assert_eq!(run_due_started_in(&service, at(61), normal).await, [ids[1]]);
+        settled(&service, &json!({"id": created[1]["id"]})).await;
+
+        // A manual sync runs and leaves the pause in place.
+        service
+            .handle(Request::call(4, SYNC_PREVIEW, Some(key.clone())))
+            .await
+            .unwrap();
+        settled(&service, &key).await;
+        assert_eq!(
+            service
+                .handle(Request::call(5, PAIR_GET, Some(key.clone())))
+                .await
+                .unwrap()["paused"],
+            true
+        );
+        assert!(
+            service
+                .run_due_in(at(122), normal)
+                .iter()
+                .all(|id| *id != ids[0])
+        );
+
+        let resumed = service
+            .handle(Request::call(6, PAIR_RESUME, Some(key.clone())))
+            .await
+            .unwrap();
+        assert_eq!(resumed["paused"], false);
+        assert!(
+            run_due_started_in(&service, at(183), normal)
+                .await
+                .contains(&ids[0])
+        );
+        settled(&service, &key).await;
+
+        let missing = json!({"id": "01010101010101010101010101010101"});
+        for method in [PAIR_PAUSE, PAIR_RESUME] {
+            assert_eq!(
+                service
+                    .handle(Request::call(7, method, Some(missing.clone())))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                PAIR_NOT_FOUND
+            );
+        }
+    }
+
+    /// ADR 0053: removal answers without deleting the pair's rows, which
+    /// held the engine for seconds on a million-file pair; the purge
+    /// deletes them afterwards.
+    #[tokio::test]
+    async fn removal_leaves_the_rows_to_the_purge() {
+        let (directory, service) = fixture();
+        let input = input(directory.path(), "Removed");
+        std::fs::write(directory.path().join("Removed-left/kept.txt"), b"kept").unwrap();
+        let pair = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let key = json!({"id": pair["id"]});
+        first_sync(&service, &key).await;
+        let pending =
+            |service: &Service| service.engine.lock().unwrap().removals_pending().unwrap();
+
+        service
+            .handle(Request::call(
+                2,
+                PAIR_REMOVE,
+                Some(json!({"id": pair["id"], "revision": pair["revision"]})),
+            ))
+            .await
+            .unwrap();
+        for method in [PAIR_GET, SYNC_PREVIEW, PAIR_PAUSE] {
+            assert_eq!(
+                service
+                    .handle(Request::call(3, method, Some(key.clone())))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                PAIR_NOT_FOUND,
+                "{method}"
+            );
+        }
+        assert!(pending(&service));
+
+        // The task the agent starts deletes them.
+        service.start_purge();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while pending(&service) {
+            assert!(std::time::Instant::now() < deadline, "the purge must run");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// The purge task the agent starts wakes for a removal made after
+    /// its first pass, so a wake is never lost.
+    #[tokio::test]
+    async fn a_removal_wakes_the_running_purge() {
+        let (directory, service) = fixture();
+        service.start_purge();
+        let pending =
+            |service: &Service| service.engine.lock().unwrap().removals_pending().unwrap();
+        for name in ["First", "Second"] {
+            let pair = service
+                .handle(Request::call(
+                    1,
+                    PAIR_CREATE,
+                    Some(input(directory.path(), name)),
+                ))
+                .await
+                .unwrap();
+            service
+                .handle(Request::call(
+                    2,
+                    PAIR_REMOVE,
+                    Some(json!({"id": pair["id"], "revision": pair["revision"]})),
+                ))
+                .await
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while pending(&service) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{name}: the purge must wake"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    }
+
     /// PLAN.md §3.5: an environment hold keeps a due pair waiting
     /// without consuming its schedule; the pair runs once it lifts.
     /// Manual starts and the pause are untouched.
@@ -3347,6 +3714,231 @@ mod tests {
         );
     }
 
+    /// ADR 0054: automatic syncs run gently unless the person chooses full
+    /// effort; each setting changes only itself.
+    #[tokio::test]
+    async fn automatic_effort_defaults_to_gentle_and_changes_alone() {
+        let (_directory, service) = fixture();
+        let status = service
+            .handle(Request::call(1, AUTOMATION_STATUS, None))
+            .await
+            .unwrap();
+        assert_eq!(status["effort"], "gentle");
+
+        for params in [json!({"effort": "fast"}), json!({"effort": null})] {
+            assert_eq!(
+                service
+                    .handle(Request::call(2, AUTOMATION_SETTINGS, Some(params)))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                INVALID_PARAMS
+            );
+        }
+
+        let set = service
+            .handle(Request::call(
+                3,
+                AUTOMATION_SETTINGS,
+                Some(json!({"effort": "full"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            (&set["effort"], &set["low_power"]),
+            (&json!("full"), &json!("pause"))
+        );
+        let set = service
+            .handle(Request::call(
+                4,
+                AUTOMATION_SETTINGS,
+                Some(json!({"low_power": "run"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            (&set["effort"], &set["low_power"]),
+            (&json!("full"), &json!("run"))
+        );
+        let set = service
+            .handle(Request::call(
+                5,
+                AUTOMATION_SETTINGS,
+                Some(json!({"low_power": "pause", "effort": "gentle"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            (&set["effort"], &set["low_power"]),
+            (&json!("gentle"), &json!("pause"))
+        );
+    }
+
+    /// Two pairs on a one-minute schedule, each synced once by hand.
+    async fn two_scheduled_pairs(directory: &Path, service: &Service) -> [PairId; 2] {
+        let mut ids = Vec::new();
+        for name in ["First", "Second"] {
+            let mut input = input(directory, name);
+            input["options"]["schedule"] = json!({"kind": "every", "minutes": 1});
+            let pair = service
+                .handle(Request::call(1, PAIR_CREATE, Some(input)))
+                .await
+                .unwrap();
+            first_sync(service, &json!({"id": pair["id"]})).await;
+            ids.push(pair["id"].as_str().unwrap().parse().unwrap());
+        }
+        ids.try_into().unwrap()
+    }
+
+    async fn job_reached(reached: std::sync::mpsc::Receiver<()>) {
+        tokio::task::spawn_blocking(move || {
+            reached
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("the gated job to reach the gate within 10s")
+        })
+        .await
+        .unwrap();
+    }
+
+    /// ADR 0054: gentle automatic syncs start one at a time, and the pair
+    /// that waited goes next.
+    #[tokio::test]
+    async fn gentle_automatic_syncs_start_one_at_a_time_and_take_turns() {
+        let (directory, service) = fixture();
+        let ids = two_scheduled_pairs(directory.path(), &service).await;
+        let at = |seconds| service.scheduler.started() + std::time::Duration::from_secs(seconds);
+        let key = |id: PairId| json!({"id": id.to_string()});
+
+        let (reached, release) = service.jobs.gate_job();
+        let first = run_due_started(&service, at(61)).await;
+        assert_eq!(first.len(), 1, "{first:?}");
+        job_reached(reached).await;
+        // Both are due, but one is still syncing.
+        assert!(service.run_due(at(62)).is_empty());
+        release.send(()).unwrap();
+        settled(&service, &key(first[0])).await;
+
+        // Both are due again: the pair that waited goes first, whatever
+        // the catalog order.
+        let other = if first[0] == ids[0] { ids[1] } else { ids[0] };
+        assert_eq!(run_due_started(&service, at(122)).await, [other]);
+        settled(&service, &key(other)).await;
+    }
+
+    /// The pair whose turn it is keeps it while its folders are checked,
+    /// even when another due pair's check is fresher.
+    #[tokio::test]
+    async fn the_waiting_pair_keeps_its_turn_while_its_folders_are_checked() {
+        let (directory, service) = fixture();
+        let ids = two_scheduled_pairs(directory.path(), &service).await;
+        let at = |seconds| service.scheduler.started() + std::time::Duration::from_secs(seconds);
+        let key = |id: PairId| json!({"id": id.to_string()});
+
+        let first = run_due_started(&service, at(61)).await;
+        assert_eq!(first.len(), 1, "{first:?}");
+        settled(&service, &key(first[0])).await;
+        let other = if first[0] == ids[0] { ids[1] } else { ids[0] };
+
+        // Both are due; only the pair that ran has fresh folder checks.
+        service.scheduler.checked(first[0]);
+        assert!(service.run_due(at(122)).is_empty());
+        probes_idle(&service).await;
+        assert_eq!(service.run_due(at(122)), [other]);
+        settled(&service, &key(other)).await;
+    }
+
+    /// A gentle automatic sync also waits for one a person started.
+    #[tokio::test]
+    async fn a_gentle_automatic_sync_waits_for_a_manual_one() {
+        let (directory, service) = fixture();
+        let ids = two_scheduled_pairs(directory.path(), &service).await;
+        let at = |seconds| service.scheduler.started() + std::time::Duration::from_secs(seconds);
+        let key = |id: PairId| json!({"id": id.to_string()});
+
+        let (reached, release) = service.jobs.gate_job();
+        service
+            .handle(Request::call(2, SYNC_PREVIEW, Some(key(ids[0]))))
+            .await
+            .unwrap();
+        job_reached(reached).await;
+        assert!(run_due_started(&service, at(61)).await.is_empty());
+        release.send(()).unwrap();
+        settled(&service, &key(ids[0])).await;
+
+        // Hold the one that starts: were it to finish between the
+        // helper's two ticks, the second would rightly start the other.
+        let (reached, release) = service.jobs.gate_job();
+        let started = run_due_started(&service, at(62)).await;
+        assert_eq!(started.len(), 1, "{started:?}");
+        job_reached(reached).await;
+        release.send(()).unwrap();
+        settled(&service, &key(started[0])).await;
+    }
+
+    /// Full effort keeps the old behavior: every due pair starts at once.
+    #[tokio::test]
+    async fn full_effort_starts_every_due_pair_together() {
+        let (directory, service) = fixture();
+        let ids = two_scheduled_pairs(directory.path(), &service).await;
+        service
+            .handle(Request::call(
+                2,
+                AUTOMATION_SETTINGS,
+                Some(json!({"effort": "full"})),
+            ))
+            .await
+            .unwrap();
+        let at = |seconds| service.scheduler.started() + std::time::Duration::from_secs(seconds);
+
+        let mut started = run_due_started(&service, at(61)).await;
+        started.sort();
+        let mut expected = ids.to_vec();
+        expected.sort();
+        assert_eq!(started, expected);
+        for id in ids {
+            settled(&service, &json!({"id": id.to_string()})).await;
+        }
+    }
+
+    /// ADR 0054: the hourly check counts from when the last run ended, so
+    /// a run longer than an hour is not followed at once by another.
+    #[tokio::test]
+    async fn the_hourly_check_counts_from_the_end_of_the_last_run() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Long");
+        input["options"]["schedule"] = json!({"kind": "onChange"});
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        let key = json!({"id": created["id"]});
+        first_sync(&service, &key).await;
+        service.scheduler.set_away(|_, _, _| false);
+        let at = |seconds| service.scheduler.started() + std::time::Duration::from_secs(seconds);
+        assert!(service.run_due(at(10)).is_empty());
+        caught_up(&service).await;
+
+        let (reached, release) = service.jobs.gate_job();
+        assert_eq!(run_due_started(&service, at(3_600)).await, [id]);
+        job_reached(reached).await;
+        // Still running two hours on.
+        assert!(service.run_due(at(3_600 + 7_200)).is_empty());
+        release.send(()).unwrap();
+        settled(&service, &key).await;
+
+        assert!(
+            run_due_started(&service, at(3_600 + 7_205))
+                .await
+                .is_empty()
+        );
+        assert_eq!(
+            run_due_started(&service, at(3_600 + 7_200 + 3_600)).await,
+            [id]
+        );
+        settled(&service, &key).await;
+    }
+
     fn sync_preview() -> SyncPreview {
         let deletions = || SyncDeletions {
             deletions: 0,
@@ -3419,6 +4011,7 @@ mod tests {
                 job: SyncJob::Run,
                 cancelling: false,
                 progress: SyncProgress::default(),
+                pair: pair_context(&service, id),
             },
         ] {
             service.jobs.force_status(id, status.clone());
@@ -3426,8 +4019,16 @@ mod tests {
             assert_eq!(service.jobs.status(id), status);
         }
 
+        // A folder another run kept busy needs nobody: the schedule tries
+        // again when it next comes due (ADR 0032).
+        service
+            .jobs
+            .force_busy_failure(id, "Studio is syncing this folder");
+        assert_eq!(run_due_started(&service, at(120)).await, [id]);
+        settled(&service, &key).await;
+
         // Finished runs, cancelled or not, keep the schedule recurring.
-        for (completion, later) in [(Completion::Finished, 120), (Completion::Cancelled, 240)] {
+        for (completion, later) in [(Completion::Finished, 240), (Completion::Cancelled, 360)] {
             service.jobs.force_status(id, sync_finished(completion));
             assert_eq!(
                 run_due_started(&service, at(later)).await,
@@ -4057,6 +4658,7 @@ mod tests {
                 job: SyncJob::Run,
                 cancelling: false,
                 progress: SyncProgress::default(),
+                pair: pair_context(&service, id),
             },
         );
         assert_eq!(
@@ -4157,6 +4759,7 @@ mod tests {
                 job: SyncJob::Run,
                 cancelling: false,
                 progress: SyncProgress::default(),
+                pair: pair_context(&service, id),
             },
         );
         let saved = service.handle(update()).await.unwrap();
@@ -4373,6 +4976,7 @@ mod tests {
                 job: SyncJob::Run,
                 cancelling: false,
                 progress: SyncProgress::default(),
+                pair: pair_context(&service, id),
             },
         ] {
             service.jobs.force_status(id, status.clone());
@@ -4438,7 +5042,11 @@ mod tests {
             .handle(Request::call(
                 4,
                 ARCHIVE_RUNS,
-                Some(json!({"id": created["id"], "side": "right"})),
+                Some(json!({
+                    "id": created["id"],
+                    "revision": created["revision"],
+                    "side": "right"
+                })),
             ))
             .await
             .unwrap();
@@ -4457,8 +5065,13 @@ mod tests {
             .await
             .unwrap();
         let run_name = archived_run(directory.path(), &service, &created, "Docs").await;
-        let put_back =
-            json!({"id": created["id"], "side": "right", "run": run_name, "path": b"file"});
+        let put_back = json!({
+            "id": created["id"],
+            "revision": created["revision"],
+            "side": "right",
+            "run": run_name,
+            "path": b"file"
+        });
 
         let (reached, release) = service.jobs.gate_mutation();
         let restoring = service.clone();
@@ -4541,16 +5154,60 @@ mod tests {
             .handle(Request::call(
                 6,
                 ARCHIVE_PUT_BACK,
-                Some(
-                    json!({"id": created["id"], "side": "right", "run": run_name, "path": b"file"}),
-                ),
+                Some(json!({
+                    "id": created["id"],
+                    "revision": created["revision"],
+                    "side": "right",
+                    "run": run_name,
+                    "path": b"file"
+                })),
             ))
             .await;
         release.send(()).unwrap();
-        update.await.unwrap().unwrap();
+        let updated = update.await.unwrap().unwrap();
         assert_eq!(
             put_back.unwrap_err().code(),
             foldover_proto::local::SYNC_BUSY
+        );
+
+        // The archive window listed the old configuration. Once that edit
+        // lands, recovery must not silently follow the pair to its new roots.
+        let stale = service
+            .handle(Request::call(
+                7,
+                ARCHIVE_PUT_BACK,
+                Some(json!({
+                    "id": created["id"],
+                    "revision": created["revision"],
+                    "side": "right",
+                    "run": run_name,
+                    "path": b"file"
+                })),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(stale.code(), foldover_proto::local::STALE_REVISION);
+        assert!(!directory.path().join("Docs-right/file").exists());
+
+        // Refreshing the pair revision makes the same deliberate recovery
+        // valid again.
+        service
+            .handle(Request::call(
+                8,
+                ARCHIVE_PUT_BACK,
+                Some(json!({
+                    "id": updated["id"],
+                    "revision": updated["revision"],
+                    "side": "right",
+                    "run": run_name,
+                    "path": b"file"
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read(directory.path().join("Docs-right/file")).unwrap(),
+            b"data"
         );
     }
 

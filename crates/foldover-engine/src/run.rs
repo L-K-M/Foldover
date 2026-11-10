@@ -18,34 +18,41 @@
 //! A crash loses at most an uncommitted batch. The next run then finds both
 //! sides equal and records them, or a leftover temporary and archives it.
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use foldover_endpoint::{
-    ApplyError, Endpoint, EndpointPair, Expected, Filter, HeldLease, InvalidFilter, LeaseError,
-    LeaseHolder, LeaseTiming, Observation, ObserveStep, ObservedEntry, PairRootError, Reach,
-    RunScope, ScanError, access_denied,
+    ApplyError, Bottleneck, Endpoint, EndpointPair, Expected, Filter, HeldLease, InvalidFilter,
+    LeaseError, LeaseHolder, LeaseTiming, Observation, ObservationHints, ObserveStep,
+    ObservedEntry, ObservedVersion, PairRootError, Pruning, Reach, RunScope, ScanError,
+    SnapshotBuilder, access_denied,
 };
 use foldover_host::RunAwake;
 use foldover_state::{
-    BaseUpdate, JournalAction, JournalEntry, MountSources, RecordedIdentities, SnapshotEntry,
+    BaseUpdate, JournalAction, JournalEntry, MountSources, RecordedIdentities, RunRecords,
+    SnapshotEntry,
 };
+pub use foldover_types::Effort;
 use foldover_types::{
     BaselineEntry, ChangeKind, ConflictKind, Durability, EndpointId, EntryContent, EntryDecision,
-    EntryKind, EntryVersion, NameMatching, PairConfig, PairId, PairOptions, Propagation,
-    RemovalProtection, Resolution, ReviewPolicy, ReviewToken, ScanControl, Side, Skip, SyncPath,
-    UnicodeMatching,
+    EntryKind, EntryVersion, FolderRole, NameMatching, PairConfig, PairId, PairOptions, PathMap,
+    PathMapBuilder, PathPrefixIndex, Propagation, RemovalProtection, Resolution, ReviewPolicy,
+    ReviewToken, ScanControl, Side, Skip, SyncPath, UnicodeMatching,
 };
-use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::{UnicodeNormalization, is_nfc};
+
+use crate::plan::Tree;
 
 use crate::{
     CandidateDecision, CandidatePlan, Choices, DeletionCounts, DeletionReview, Moves, PlanError,
-    PlanRow, RunContext, plan_resolved,
+    PlanRow, RunContext,
 };
 
 /// Base updates per commit: bounds the work a crash can make the next run redo.
@@ -155,6 +162,15 @@ pub enum RunError {
     Lease(#[from] LeaseError),
 }
 
+impl RunError {
+    /// Whether the run wrote nothing because another run, of another
+    /// pair or Mac, kept one of its folders' leases past the wait
+    /// (ADR 0032): trying again later is all it needs.
+    pub fn folder_busy(&self) -> bool {
+        matches!(self, Self::Lease(LeaseError::Busy { .. }))
+    }
+}
+
 /// This agent among others leasing the same folders; one per process.
 fn agent_instance() -> &'static str {
     static INSTANCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -191,6 +207,9 @@ pub enum Commit<'a> {
 /// works. Calls come from the run's own thread; implementations keep
 /// counters other threads read.
 pub trait RunProgress {
+    /// Diagnostic phase timing, on the run's thread. Normal UI consumers can
+    /// ignore it; qualification harnesses use the production boundaries.
+    fn measured(&self, _phase: RunPhase, _elapsed: Duration) {}
     fn observed(&self, side: Side, step: ObserveStep);
     /// The plan is ready: the changes to make and the bytes they copy.
     fn planned(&self, changes: u64, bytes: u64);
@@ -199,6 +218,16 @@ pub trait RunProgress {
     /// The run waits for another Mac's sync of a folder, shown by its
     /// name, e.g. "Studio"; `None` once it goes on.
     fn waiting(&self, holder: Option<&str>);
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunPhase {
+    OpenEndpoints,
+    Readiness,
+    ObserveLeft,
+    ObserveRight,
+    AlignAndFilter,
+    Plan,
 }
 
 /// For callers that show no progress.
@@ -211,7 +240,19 @@ impl RunProgress for NoProgress {
     fn waiting(&self, _: Option<&str>) {}
 }
 
-/// A run's leases on both folders, renewed as it checks for cancellation.
+/// Which of a pair's folders a job leases (PLAN.md §4, ADR 0032).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Leased {
+    /// Every folder that keeps records: an undo may write either.
+    Recorded,
+    /// The folders a run writes. A Mirror's or Backup's source is read,
+    /// so pairs sharing it never wait for each other (ADR 0047); it is
+    /// leased only when a person's choice copies a change back into it,
+    /// or to recover what an interrupted write left there.
+    Written,
+}
+
+/// A run's leases on its folders, renewed as it checks for cancellation.
 struct HeldLeases<'a> {
     leases: Vec<HeldLease<'a>>,
     /// The first renewal that failed, e.g. after another Mac took over;
@@ -293,15 +334,26 @@ pub enum Action {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct PreviewItem {
     path: SyncPath,
     action: Action,
-    left: Option<EntryVersion>,
-    right: Option<EntryVersion>,
+    left: Option<ObservedVersion>,
+    right: Option<ObservedVersion>,
     bytes: u64,
     moved_from: Option<SyncPath>,
 }
+
+impl PartialEq for PreviewItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+            && self.action == other.action
+            && self.versions() == other.versions()
+            && self.bytes == other.bytes
+            && self.moved_from == other.moved_from
+    }
+}
+impl Eq for PreviewItem {}
 
 impl PreviewItem {
     pub fn path(&self) -> &SyncPath {
@@ -314,7 +366,10 @@ impl PreviewItem {
 
     /// What each side held when previewed; a resolution is bound to these.
     pub fn versions(&self) -> (Option<EntryVersion>, Option<EntryVersion>) {
-        (self.left, self.right)
+        (
+            self.left.as_ref().map(ObservedVersion::version),
+            self.right.as_ref().map(ObservedVersion::version),
+        )
     }
 
     /// File data the item copies; 0 for everything else.
@@ -454,8 +509,9 @@ impl Preview {
                 hasher.update(&(from.as_bytes().len() as u64).to_le_bytes());
                 hasher.update(from.as_bytes());
             }
-            version(&mut hasher, item.left);
-            version(&mut hasher, item.right);
+            let (left, right) = item.versions();
+            version(&mut hasher, left);
+            version(&mut hasher, right);
             hasher.update(&item.bytes.to_le_bytes());
         }
         for failure in &self.failures {
@@ -556,14 +612,15 @@ pub enum RunOutcome {
 /// Everything a run reads from the state store, taken under the engine lock.
 pub struct RunInputs {
     pair: PairConfig,
-    base: BTreeMap<SyncPath, BaselineEntry>,
+    base: Arc<PathMap<BaselineEntry>>,
     identities: RecordedIdentities,
     resolutions: BTreeMap<SyncPath, Resolution>,
     skips: BTreeMap<SyncPath, Skip>,
-    left_snapshot: BTreeMap<SyncPath, ObservedEntry>,
-    right_snapshot: BTreeMap<SyncPath, ObservedEntry>,
+    left_snapshot: PathMap<ObservedEntry>,
+    right_snapshot: PathMap<ObservedEntry>,
     reach: Reach,
     lease_timing: LeaseTiming,
+    effort: Effort,
 }
 
 impl RunInputs {
@@ -578,16 +635,31 @@ impl RunInputs {
         identities: RecordedIdentities,
         resolutions: BTreeMap<SyncPath, Resolution>,
     ) -> Self {
+        Self::with_base(
+            pair,
+            Arc::new(base.into_iter().collect()),
+            identities,
+            resolutions,
+        )
+    }
+
+    fn with_base(
+        pair: PairConfig,
+        base: Arc<PathMap<BaselineEntry>>,
+        identities: RecordedIdentities,
+        resolutions: BTreeMap<SyncPath, Resolution>,
+    ) -> Self {
         Self {
             pair,
             base,
             identities,
             resolutions,
             skips: BTreeMap::new(),
-            left_snapshot: BTreeMap::new(),
-            right_snapshot: BTreeMap::new(),
+            left_snapshot: PathMap::new(),
+            right_snapshot: PathMap::new(),
             reach: Reach::default(),
             lease_timing: LeaseTiming::STANDARD,
+            effort: Effort::Full,
         }
     }
 
@@ -613,6 +685,11 @@ impl RunInputs {
         Self { skips, ..self }
     }
 
+    /// Run at `effort` (ADR 0054); `Full` unless set.
+    pub fn with_effort(self, effort: Effort) -> Self {
+        Self { effort, ..self }
+    }
+
     /// Previous observations, whose versions are reused for entries with an
     /// unchanged stat. They must come from the same roots and policy.
     pub fn with_snapshots(
@@ -620,11 +697,99 @@ impl RunInputs {
         left: BTreeMap<SyncPath, ObservedEntry>,
         right: BTreeMap<SyncPath, ObservedEntry>,
     ) -> Self {
+        self.with_snapshot_tables(left.into_iter().collect(), right.into_iter().collect())
+    }
+
+    fn with_snapshot_tables(
+        self,
+        left: PathMap<ObservedEntry>,
+        right: PathMap<ObservedEntry>,
+    ) -> Self {
         Self {
             left_snapshot: left,
             right_snapshot: right,
             ..self
         }
+    }
+}
+
+/// A run's inputs captured under the engine lock, with the stored trees
+/// still encoded. The service decodes them after releasing that lock,
+/// before opening endpoints or planning.
+pub struct PendingRunInputs {
+    pair: PairConfig,
+    identities: RecordedIdentities,
+    resolutions: BTreeMap<SyncPath, Resolution>,
+    reach: Reach,
+    records: RunRecords,
+}
+
+impl PendingRunInputs {
+    pub(crate) fn new(
+        pair: PairConfig,
+        identities: RecordedIdentities,
+        resolutions: BTreeMap<SyncPath, Resolution>,
+        reach: Reach,
+        records: RunRecords,
+    ) -> Self {
+        Self {
+            pair,
+            identities,
+            resolutions,
+            reach,
+            records,
+        }
+    }
+
+    /// The immutable configuration captured for this job.
+    pub fn configuration(&self) -> &PairConfig {
+        &self.pair
+    }
+
+    /// Decode the captured trees outside the engine lock, streaming each
+    /// side into its map. Malformed snapshot cache versions are cache
+    /// misses, and unreadable fingerprints are skipped, as before.
+    pub fn decode(self) -> Result<RunInputs, crate::Error> {
+        let Self {
+            pair,
+            identities,
+            resolutions,
+            reach,
+            records,
+        } = self;
+        let mut base = PathMapBuilder::with_capacity(records.base_len()?);
+        records.visit_base(|path, entry| {
+            base.push(path, entry);
+        })?;
+        let base = Arc::new(base.freeze());
+        let mut left_builder = SnapshotBuilder::new(
+            Arc::clone(&base),
+            Side::Left,
+            records.snapshot_len(Side::Left)?,
+        );
+        records.visit_snapshot(Side::Left, |mut entry| {
+            if let Some((path, _)) = base.get_key_value(&entry.path) {
+                entry.path = path.clone();
+            }
+            left_builder.insert(entry.path, entry.version, &entry.fingerprint);
+        })?;
+        let left_snapshot = left_builder.freeze();
+        let mut right_builder = SnapshotBuilder::new(
+            Arc::clone(&base),
+            Side::Right,
+            records.snapshot_len(Side::Right)?,
+        );
+        records.visit_snapshot(Side::Right, |mut entry| {
+            if let Some((path, _)) = base.get_key_value(&entry.path) {
+                entry.path = path.clone();
+            } else if let Some((path, _)) = left_snapshot.get_key_value(&entry.path) {
+                entry.path = path.clone();
+            }
+            right_builder.insert(entry.path, entry.version, &entry.fingerprint);
+        })?;
+        Ok(RunInputs::with_base(pair, base, identities, resolutions)
+            .with_snapshot_tables(left_snapshot, right_builder.freeze())
+            .with_reach(reach))
     }
 }
 
@@ -637,17 +802,17 @@ pub struct PairRun {
     right: Observation,
     failures: Vec<Failure>,
     uncertain: Vec<SyncPath>,
-    /// Observations the filters excluded, kept for the next run's cache.
-    left_cache: BTreeMap<SyncPath, ObservedEntry>,
-    right_cache: BTreeMap<SyncPath, ObservedEntry>,
+    /// Whether each effective snapshot differs from its consumed cache.
+    snapshot_changed: [bool; 2],
     plan: CandidatePlan,
     /// The base the plan was made against, for the journal's undo records.
-    base: BTreeMap<SyncPath, BaselineEntry>,
+    base: Arc<PathMap<BaselineEntry>>,
     /// Whether the base remembered any entry the filters still include.
     remembers: Remembers,
     lease_timing: LeaseTiming,
     /// The pair's options as this run applies them: see `run_options`.
     options: PairOptions,
+    effort: Effort,
     _awake: RunAwake,
 }
 
@@ -667,17 +832,20 @@ impl PairRun {
         progress: &dyn RunProgress,
     ) -> Result<Self, RunError> {
         let draft = inputs.pair.draft();
+        let opened = Instant::now();
         let endpoints = EndpointPair::open(draft.left(), draft.right(), &inputs.reach)?;
+        progress.measured(RunPhase::OpenEndpoints, opened.elapsed());
         Self::prepare_on(inputs, endpoints, control, progress)
     }
 
     /// `prepare` on endpoints opened elsewhere.
     pub(crate) fn prepare_on(
         inputs: RunInputs,
-        endpoints: EndpointPair,
+        mut endpoints: EndpointPair,
         control: &mut impl FnMut() -> ScanControl,
         progress: &dyn RunProgress,
     ) -> Result<Self, RunError> {
+        let readiness = Instant::now();
         let RunInputs {
             pair,
             base,
@@ -688,7 +856,9 @@ impl PairRun {
             right_snapshot,
             reach: _,
             lease_timing,
+            effort,
         } = inputs;
+        endpoints.set_effort(effort);
         let draft = pair.draft();
         // PLAN.md §3.5: idle sleep would stop a long scan or copy midway.
         let awake = foldover_host::keep_awake(draft.name()).map_err(RunError::KeepAwake)?;
@@ -734,26 +904,54 @@ impl PairRun {
                 path: canary.clone(),
             });
         }
-        let observe = |side: Side, control: &mut dyn FnMut() -> ScanControl| {
-            let previous = match side {
-                Side::Left => &left_snapshot,
-                Side::Right => &right_snapshot,
-            };
+        let observe = |side: Side,
+                       previous: PathMap<ObservedEntry>,
+                       hints: ObservationHints,
+                       control: &mut dyn FnMut() -> ScanControl| {
             endpoints
                 .endpoint(side)
-                .observe_from(policy, &filter, previous, &mut || control(), &mut |step| {
-                    progress.observed(side, step)
-                })
+                .observe_owned(
+                    policy,
+                    &filter,
+                    previous,
+                    Arc::clone(&base),
+                    side,
+                    hints,
+                    &mut || control(),
+                    &mut |step| progress.observed(side, step),
+                )
                 .map_err(|source| match source {
                     ScanError::Cancelled => RunError::Cancelled,
                     source => observe_error(side, source),
                 })
         };
-        let mut left = observe(Side::Left, control)?;
-        let mut right = observe(Side::Right, control)?;
+        progress.measured(RunPhase::Readiness, readiness.elapsed());
+        let observed = Instant::now();
+        let mut left = observe(
+            Side::Left,
+            left_snapshot,
+            ObservationHints::default(),
+            control,
+        )?;
+        progress.measured(RunPhase::ObserveLeft, observed.elapsed());
         let left_names = endpoints.endpoint(Side::Left).name_matching();
         let right_names = endpoints.endpoint(Side::Right).name_matching();
+        // Hints keep the observed raw spellings even when alignment renames
+        // the left rows. Finish that side's exact comparison now, releasing
+        // its old entries and timestamp column before observing the right.
+        // Later exclusions affect planning visibility only; verified cache
+        // rows still participate in the snapshot with the same values.
+        let hints = ObservationHints::from_observation(&left, &base, Side::Right);
+        let aligned = Instant::now();
         align_spellings(&mut left, &base, left_names);
+        let left_snapshot_changed = left
+            .finish_snapshot()
+            .expect("owned observation compares its consumed snapshot");
+        let left_alignment = aligned.elapsed();
+        let observed = Instant::now();
+        let mut right = observe(Side::Right, right_snapshot, hints, control)?;
+        progress.measured(RunPhase::ObserveRight, observed.elapsed());
+        let aligned = Instant::now();
         align_spellings(&mut right, &base, right_names);
         let mut failures = Vec::new();
         for (side, observation) in [(Side::Left, &left), (Side::Right, &right)] {
@@ -798,7 +996,7 @@ impl PairRun {
             let left_old: BTreeSet<&SyncPath> = left.old().iter().collect();
             let right_old: BTreeSet<&SyncPath> = right.old().iter().collect();
             let old_or_absent = |old: &BTreeSet<&SyncPath>, seen: &Observation, path| {
-                old.contains(path) || !seen.entries().contains_key(*path)
+                old.contains(path) || !seen.entries().contains_key(path)
             };
             // The canary proves the folders however old or large it is.
             left_old
@@ -815,23 +1013,22 @@ impl PairRun {
                 .collect()
         };
         let skipped: Vec<SyncPath> = skipped.into_iter().collect();
-        // Excluded entries leave the plan, but unchanged ones should not be
-        // reread every run: their observations stay cached for the next one.
-        let cache = |observation: &Observation| {
-            skipped
-                .iter()
-                .filter_map(|path| observation.entries().get_key_value(path))
-                .map(|(path, entry)| (path.clone(), entry.clone()))
-                .collect()
-        };
-        let left_cache = cache(&left);
-        let right_cache = cache(&right);
+        // Excluded verified entries remain in the same table for the next
+        // snapshot, while the planner sees only included entries.
         left.exclude(&skipped);
         right.exclude(&skipped);
-        let mut base = base;
-        for path in &skipped {
-            base.remove(path);
-        }
+        let snapshot_changed = [
+            left_snapshot_changed,
+            right
+                .finish_snapshot()
+                .expect("owned observation compares its consumed snapshot"),
+        ];
+        let planning_base = crate::plan::FilteredBase::new(&base, &skipped);
+        let remembers = if planning_base.is_empty() {
+            Remembers::Nothing
+        } else {
+            Remembers::Entries
+        };
         let choices = Choices {
             resolutions: &resolutions,
             skips: &skips,
@@ -840,11 +1037,13 @@ impl PairRun {
             left_moves: moves(endpoints.endpoint(Side::Left)),
             right_moves: moves(endpoints.endpoint(Side::Right)),
         };
-        let mut plan = plan_resolved(
+        progress.measured(RunPhase::AlignAndFilter, left_alignment + aligned.elapsed());
+        let planned = Instant::now();
+        let mut plan = crate::plan::plan_observations(
             draft.mode(),
-            &base,
-            &left.versions(),
-            &right.versions(),
+            &planning_base,
+            &left,
+            &right,
             &choices,
             control,
         )
@@ -855,6 +1054,7 @@ impl PairRun {
         let protected: Vec<_> = unavailable.iter().chain(&uncertain).cloned().collect();
         plan.protect_unavailable(&protected, left_names.either(right_names))?;
         plan.protect_uncertain_absences(&uncertain, left_names.either(right_names))?;
+        progress.measured(RunPhase::Plan, planned.elapsed());
         Ok(Self {
             pair,
             identities,
@@ -863,17 +1063,13 @@ impl PairRun {
             right,
             failures,
             uncertain,
-            left_cache,
-            right_cache,
+            snapshot_changed,
             plan,
-            remembers: if base.is_empty() {
-                Remembers::Nothing
-            } else {
-                Remembers::Entries
-            },
+            remembers,
             base,
             lease_timing,
             options,
+            effort,
             _awake: awake,
         })
     }
@@ -898,26 +1094,28 @@ impl PairRun {
         }
     }
 
-    /// This run's observation of one side, for the next run to reuse,
-    /// filtered entries included: skipping them in the plan must not make
-    /// the next run reread unchanged data.
-    pub fn snapshot(&self, side: Side) -> Vec<SnapshotEntry> {
-        let cache = match side {
-            Side::Left => &self.left_cache,
-            Side::Right => &self.right_cache,
-        };
-        let entries: BTreeMap<_, _> = cache
-            .iter()
-            .chain(self.observation(side).entries())
-            .collect();
-        entries
-            .into_iter()
+    /// Whether storing this effective observation would change the cache.
+    pub fn snapshot_changed(&self, side: Side) -> bool {
+        self.snapshot_changed[side as usize]
+    }
+
+    /// This run's effective observation of one side, lazily in the same
+    /// sorted order as [`Self::snapshot`]. Consumers that persist the
+    /// rows can stream them without collecting the whole tree first.
+    pub fn snapshot_iter(&self, side: Side) -> impl Iterator<Item = SnapshotEntry> + '_ {
+        self.observation(side)
+            .snapshot_entries()
             .map(|(path, entry)| SnapshotEntry {
                 path: path.clone(),
                 fingerprint: entry.fingerprint_bytes(),
                 version: entry.version(),
             })
-            .collect()
+    }
+
+    /// This run's observation of one side, filtered entries included, for the
+    /// next run to reuse. Persistence can use [`Self::snapshot_iter`] instead.
+    pub fn snapshot(&self, side: Side) -> Vec<SnapshotEntry> {
+        self.snapshot_iter(side).collect()
     }
 
     pub fn preview(&self) -> Preview {
@@ -948,7 +1146,7 @@ impl PairRun {
                     self.observation(side)
                         .entries()
                         .get(row.path())
-                        .map(ObservedEntry::version)
+                        .map(ObservedEntry::observed_version)
                 };
                 Some(PreviewItem {
                     path: row.path().clone(),
@@ -1032,7 +1230,7 @@ impl PairRun {
         }
 
         // Routine runs use the freshly observed plan. Opting into review
-        // requires a matching reviewed plan on every run, including copies.
+        // requires a matching reviewed plan on every run, including workers.
         if options.review_policy() == ReviewPolicy::Required && context != RunContext::Reviewed {
             return Ok(RunOutcome::NeedsApproval(self.preview()));
         }
@@ -1118,7 +1316,7 @@ impl PairRun {
             }
         };
 
-        let scope = RunScope::new(started, options.clone());
+        let scope = RunScope::new(started, self.pair.id(), options.clone());
         let name = scope.name().to_owned();
         // A folder without records keeps no archive: what the run replaces
         // there is deleted.
@@ -1129,7 +1327,20 @@ impl PairRun {
         let scopes = [scope_on(Side::Left), scope_on(Side::Right)];
         // PLAN.md §4: a run writes a folder only while it holds the
         // folder's lease, so two Macs never write one at once.
-        let leases = self.take_leases(identities, &name, control, progress)?;
+        let leases = match self.take_leases(identities, &name, Leased::Written, control, progress) {
+            Ok(leases) => leases,
+            Err(RunError::Lease(LeaseError::Cancelled)) => {
+                // No data was written while acquiring the leases. Keep
+                // scan failures, but report the requested stop normally.
+                return Ok(RunOutcome::Ran(RunReport {
+                    completion: Completion::Cancelled,
+                    archive: name,
+                    failures: self.failures.clone(),
+                    ..RunReport::default()
+                }));
+            }
+            Err(error) => return Err(error),
+        };
         // A stop the run's thread hears reaches the copy workers too.
         let stop = AtomicBool::new(false);
         let mut control = || {
@@ -1151,7 +1362,7 @@ impl PairRun {
             pending: Vec::new(),
             journal: Vec::new(),
             written: 0,
-            failed: Vec::new(),
+            failed: PathPrefixIndex::new(),
         };
         let mut commit_batch = |executor: &mut Executor<'_>| {
             let updates = Commit::Base {
@@ -1165,15 +1376,25 @@ impl PairRun {
             Ok::<_, RunError>(())
         };
 
-        for side in [Side::Left, Side::Right] {
+        // A source the run does not write is not leased, and there the
+        // temporaries may be another pair's or Mac's live writes.
+        let mut recovery_cancelled = false;
+        'leftovers: for side in [Side::Left, Side::Right] {
+            if !self.writes(side) {
+                continue;
+            }
             let observation = self.observation(side);
             for leftover in observation.leftovers() {
-                match self
-                    .endpoints
-                    .endpoint(side)
-                    .recover_leftover(leftover, executor.scope(side))
-                {
+                match self.endpoints.endpoint(side).recover_leftover(
+                    leftover,
+                    executor.scope(side),
+                    control,
+                ) {
                     Ok(()) => executor.report.recovered += 1,
+                    Err(ApplyError::Scan(ScanError::Cancelled)) => {
+                        recovery_cancelled = true;
+                        break 'leftovers;
+                    }
                     Err(error) => executor.fail(leftover, &error),
                 }
             }
@@ -1190,10 +1411,14 @@ impl PairRun {
         let reverse = rows.iter().rev().filter(|row| is_archive(row.decision()));
         let writer = executor.writer();
         let stopped = thread::scope(|threads| {
-            let mut copies = Copies::start(threads, writer, self.workers(), &stop);
-            let mut stopped = false;
+            let mut workers = Workers::start(threads, writer, self.workers(), self.effort, &stop);
+            let mut stopped = recovery_cancelled;
+            let mut archiving = false;
             for (index, row) in forward.chain(reverse).enumerate() {
-                if control() == ScanControl::Cancel {
+                if stopped
+                    || executor.report.completion == Completion::Cancelled
+                    || control() == ScanControl::Cancel
+                {
                     stopped = true;
                     break;
                 }
@@ -1205,38 +1430,42 @@ impl PairRun {
                     && index % COMMIT_BATCH == 0
                     && let Err(error) = self.check_roots(identities)
                 {
-                    copies.finish(&mut executor, control, progress);
+                    workers.finish(&mut executor, control, progress);
                     commit_batch(&mut executor)?;
                     return Err(error);
                 }
-                // Archives go children first, once every copy has landed.
+                // Copies finish before the archive pass. File/link archives
+                // can overlap; every folder waits for outstanding children.
                 if is_archive(row.decision()) {
-                    copies.finish(&mut executor, control, progress);
+                    if !archiving || !executor.parallel_write(row) {
+                        workers.finish(&mut executor, control, progress);
+                    }
+                    archiving = true;
                 }
-                if copies.takes(&executor, row) {
-                    copies.hand(row, &mut executor, control, progress);
+                if workers.takes(&executor, row) {
+                    workers.hand(row, &mut executor, control, progress);
                 } else {
                     executor.apply(row.path(), row.decision(), control);
                     if writes(row.decision()) {
                         progress.applied(executor.copied_bytes(row));
                     }
                 }
-                copies.collect(&mut executor, progress);
+                workers.collect(&mut executor, progress);
                 if executor.pending.len().max(executor.journal.len()) >= COMMIT_BATCH
                     && let Err(error) = commit_batch(&mut executor)
                 {
-                    // Landed copies must be journaled before this run
+                    // Landed writes must be journaled before this run
                     // can fail, as the root check above does. The
                     // retry is best-effort: the run fails either way,
                     // so the first failure is what to report.
-                    copies.finish(&mut executor, control, progress);
+                    workers.finish(&mut executor, control, progress);
                     let _ = commit_batch(&mut executor);
                     return Err(error);
                 }
             }
-            copies.finish(&mut executor, control, progress);
-            // A copy a stop kept from starting leaves the plan undone too.
-            Ok::<_, RunError>(stopped || copies.skipped())
+            workers.finish(&mut executor, control, progress);
+            // A write a stop kept from starting leaves the plan undone too.
+            Ok::<_, RunError>(stopped || workers.skipped())
         })?;
         if stopped {
             executor.report.completion = Completion::Cancelled;
@@ -1266,12 +1495,25 @@ impl PairRun {
         // Keep retention bounded even when a path fails every run.
         if executor.report.completion == Completion::Finished {
             for side in [Side::Left, Side::Right] {
-                if unrecorded == Some(side) {
+                if unrecorded == Some(side) || !self.writes(side) {
                     continue;
                 }
+                // Retention is post-sync maintenance: the base and a first
+                // run's identities are already committed. A stop skips the
+                // remaining pruning without turning that completed sync into
+                // a cancelled run or reporting cancellation as a failure.
+                if control() == ScanControl::Cancel {
+                    break;
+                }
                 let endpoint = self.endpoints.endpoint(side);
-                match endpoint.prune_archive(ARCHIVE_RETENTION, started) {
+                match endpoint.prune_archive(
+                    ARCHIVE_RETENTION,
+                    started,
+                    Pruning::Pair(self.pair.id()),
+                    control,
+                ) {
                     Ok(pruned) => executor.report.pruned += pruned,
+                    Err(ApplyError::Scan(ScanError::Cancelled)) => break,
                     Err(error) => executor.fail_message(
                         &SyncPath::try_from(b".foldover/archive".as_slice())
                             .expect("the archive path is valid"),
@@ -1283,12 +1525,14 @@ impl PairRun {
         Ok(RunOutcome::Ran(executor.report))
     }
 
-    /// Both roots' leases for the run named `run`, taken in identity order
-    /// so two Macs syncing the same two folders cannot each hold one.
+    /// The `leased` folders' leases for the run named `run`, taken in
+    /// identity order so two Macs syncing the same two folders cannot each
+    /// hold one.
     fn take_leases(
         &self,
         identities: [EndpointId; 2],
         run: &str,
+        leased: Leased,
         control: &mut impl FnMut() -> ScanControl,
         progress: &dyn RunProgress,
     ) -> Result<HeldLeases<'_>, RunError> {
@@ -1305,9 +1549,7 @@ impl PairRun {
         };
         let mut leases = Vec::new();
         for (_, side) in sides {
-            // A folder without records holds no lease: another Mac could
-            // write it meanwhile (PLAN.md §3.6).
-            if self.pair.draft().unrecorded() == Some(side) {
+            if !self.leases(side, leased) {
                 continue;
             }
             let endpoint = self.endpoints.endpoint(side);
@@ -1382,9 +1624,19 @@ impl PairRun {
     /// Copies the run makes at once: as many as the slower folder takes.
     /// A copy between two servers holds a session on each, so two in
     /// opposite directions could each wait for the other's server once a
-    /// server refuses more sessions: such pairs copy one at a time.
+    /// server refuses more sessions: such pairs copy one at a time. A
+    /// gentle run between two of this Mac's disks copies one at a time on
+    /// its own thread; with a share, server or Mac on either side the
+    /// copies wait on the network and keep their number (ADR 0054).
     fn workers(&self) -> NonZeroUsize {
         let endpoint = |side| self.endpoints.endpoint(side);
+        if self.effort == Effort::Gentle
+            && [Side::Left, Side::Right]
+                .into_iter()
+                .all(|side| endpoint(side).bottleneck() == Bottleneck::Local)
+        {
+            return NonZeroUsize::MIN;
+        }
         if matches!(
             (endpoint(Side::Left), endpoint(Side::Right)),
             (Endpoint::Sftp(_), Endpoint::Sftp(_))
@@ -1416,6 +1668,37 @@ impl PairRun {
             Side::Right => &self.right,
         }
     }
+
+    /// Whether a job that leases `leased` holds `side`'s lease.
+    fn leases(&self, side: Side, leased: Leased) -> bool {
+        // A folder without records holds no lease: another Mac could
+        // write it meanwhile (PLAN.md §3.6).
+        if self.pair.draft().unrecorded() == Some(side) {
+            return false;
+        }
+        match leased {
+            Leased::Recorded => true,
+            Leased::Written => self.writes(side),
+        }
+    }
+
+    /// Whether the run writes `side`'s folder: always a target or a
+    /// two-way folder; a Mirror's or Backup's source only when a person's
+    /// choice copies a change back into it, or to recover what an
+    /// interrupted write left there.
+    fn writes(&self, side: Side) -> bool {
+        match self.pair.draft().role(side) {
+            FolderRole::Target | FolderRole::TwoWay => true,
+            FolderRole::Source => {
+                !self.observation(side).leftovers().is_empty()
+                    || self
+                        .plan
+                        .rows()
+                        .iter()
+                        .any(|row| writes_into(row.decision(), side))
+            }
+        }
+    }
 }
 
 /// A failed read of one side, with guidance when access was refused.
@@ -1435,40 +1718,94 @@ fn observe_error(side: Side, source: ScanError) -> RunError {
 /// is a person's, and syncs as one (ADR 0030).
 fn align_spellings(
     observation: &mut Observation,
-    base: &BTreeMap<SyncPath, BaselineEntry>,
+    base: &impl Tree<Value = BaselineEntry>,
     names: NameMatching,
 ) {
     if names.unicode() != UnicodeMatching::Normalized {
         return;
     }
-    let composed = |path: &SyncPath| -> Option<String> {
+    // ASCII needs no composition; neither does text already in NFC.
+    fn composed(path: &SyncPath) -> Option<Cow<'_, str>> {
         let text = std::str::from_utf8(path.as_bytes()).ok()?;
-        Some(text.nfc().collect())
-    };
-    // Base spellings this folder no longer shows, by composed form; two
-    // that compose alike are ambiguous and left alone.
-    let mut missing: BTreeMap<String, Option<&SyncPath>> = BTreeMap::new();
-    for path in base.keys() {
-        if observation.entries().contains_key(path) {
-            continue;
-        }
-        if let Some(key) = composed(path) {
-            missing
-                .entry(key)
-                .and_modify(|known| *known = None)
-                .or_insert(Some(path));
+        if text.is_ascii() || is_nfc(text) {
+            Some(Cow::Borrowed(text))
+        } else {
+            Some(Cow::Owned(text.nfc().collect()))
         }
     }
+    // Base spellings this folder no longer shows, by composed form; two
+    // that compose alike are ambiguous and left alone. Both trees are in
+    // raw path order, so one merge finds the base spellings the observation
+    // lacks and the observed names the base never knew, without a lookup
+    // for every unchanged path.
+    let mut missing: BTreeMap<Cow<'_, str>, Option<&SyncPath>> = BTreeMap::new();
+    let mut observed: Vec<&SyncPath> = Vec::new();
+    let mut base_paths = base.keys().peekable();
+    let mut observed_paths = observation.entries().keys().peekable();
+    loop {
+        match (base_paths.peek().copied(), observed_paths.peek().copied()) {
+            (None, None) => break,
+            (Some(base_path), None) => {
+                base_paths.next();
+                if let Some(key) = composed(base_path) {
+                    missing
+                        .entry(key)
+                        .and_modify(|known| *known = None)
+                        .or_insert(Some(base_path));
+                }
+            }
+            (None, Some(observed_path)) => {
+                observed_paths.next();
+                observed.push(observed_path);
+            }
+            (Some(base_path), Some(observed_path)) => match base_path.cmp(observed_path) {
+                std::cmp::Ordering::Less => {
+                    base_paths.next();
+                    if let Some(key) = composed(base_path) {
+                        missing
+                            .entry(key)
+                            .and_modify(|known| *known = None)
+                            .or_insert(Some(base_path));
+                    }
+                }
+                std::cmp::Ordering::Greater => {
+                    observed_paths.next();
+                    observed.push(observed_path);
+                }
+                std::cmp::Ordering::Equal => {
+                    base_paths.next();
+                    observed_paths.next();
+                }
+            },
+        }
+    }
+    // Unavailable roots are recorded as they arrive, so sort their paths
+    // once and merge them against the base too.
+    let mut unavailable: Vec<&SyncPath> = observation.unavailable().iter().collect();
+    unavailable.sort_unstable();
+    let mut base_paths = base.keys();
+    let mut base_path = base_paths.next();
+    for unavailable_path in unavailable {
+        while let Some(path) = base_path {
+            if path < unavailable_path {
+                base_path = base_paths.next();
+            } else {
+                break;
+            }
+        }
+        if base_path != Some(unavailable_path) {
+            observed.push(unavailable_path);
+        }
+    }
+
+    drop(observed_paths);
     if missing.is_empty() {
         return;
     }
-    let respelled: Vec<(SyncPath, SyncPath)> = observation
-        .entries()
-        .keys()
-        .chain(observation.unavailable())
-        .filter(|path| !base.contains_key(*path))
+    let respelled: Vec<(SyncPath, SyncPath)> = observed
+        .into_iter()
         .filter_map(|path| {
-            let known = missing.get(&composed(path)?)?.as_ref()?;
+            let known = missing.get(composed(path)?.as_ref())?.as_ref()?;
             Some((path.clone(), (*known).clone()))
         })
         .collect();
@@ -1480,11 +1817,12 @@ fn align_spellings(
         *destinations.entry(to).or_default() += 1;
     }
 
-    for (from, to) in &respelled {
-        if destinations.get(to) == Some(&1) {
-            observation.respell(from, to.clone());
-        }
-    }
+    let mappings = respelled
+        .iter()
+        .filter(|(_, to)| destinations.get(to) == Some(&1))
+        .cloned()
+        .collect();
+    observation.respell_all(&mappings);
 }
 
 fn require_space(side: Side, needed: u64, available: u64) -> Result<(), RunError> {
@@ -1511,6 +1849,26 @@ fn writes(decision: &CandidateDecision) -> bool {
     )
 }
 
+/// Whether `decision` writes `side`'s folder.
+fn writes_into(decision: &CandidateDecision, side: Side) -> bool {
+    match decision {
+        CandidateDecision::Entry(EntryDecision::Propagate { from, .. }) => from.other() == side,
+        CandidateDecision::Entry(
+            EntryDecision::Archive { on }
+            | EntryDecision::Move { on }
+            | EntryDecision::MovedAway { on },
+        ) => *on == side,
+        CandidateDecision::Entry(
+            EntryDecision::Unchanged
+            | EntryDecision::RecordBase
+            | EntryDecision::ForgetBase
+            | EntryDecision::KeepTarget
+            | EntryDecision::Conflict(_),
+        )
+        | CandidateDecision::BlockedByAncestor(_) => false,
+    }
+}
+
 fn is_archive(decision: &CandidateDecision) -> bool {
     matches!(
         decision,
@@ -1529,7 +1887,7 @@ struct Executor<'a> {
     /// Writes journaled so far: the next entry's sequence number.
     written: u64,
     /// Paths whose change failed; their descendants are skipped.
-    failed: Vec<SyncPath>,
+    failed: PathPrefixIndex,
 }
 
 /// What a write needs from the run, shared by the run's thread and the
@@ -1560,6 +1918,26 @@ impl Writer<'_> {
         let source = entry(*from).expect("handed-out copies have a source");
         let target = from.other();
         self.propagate(path, source, target, entry(target), *change, control)
+    }
+
+    fn archive(
+        &self,
+        row: &PlanRow,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), ApplyError> {
+        let CandidateDecision::Entry(EntryDecision::Archive { on }) = row.decision() else {
+            unreachable!("only planned archives are handed out")
+        };
+        let current = self
+            .run
+            .observation(*on)
+            .entries()
+            .get(row.path())
+            .expect("handed-out archives have an observed entry");
+        self.run
+            .endpoints
+            .endpoint(*on)
+            .remove(row.path(), current, self.scope(*on), control)
     }
 
     fn propagate(
@@ -1598,19 +1976,21 @@ impl<'a> Executor<'a> {
         }
     }
 
-    /// Whether `row` is a copy of a file or link a worker may make: its
-    /// folder exists by now, and nothing below it waits on it.
-    fn copies(&self, row: &PlanRow) -> bool {
-        let CandidateDecision::Entry(EntryDecision::Propagate { from, .. }) = row.decision() else {
-            return false;
+    /// Whether an independent file/link write can use a worker. The run
+    /// establishes its copy/archive/folder barriers before handing it out.
+    fn parallel_write(&self, row: &PlanRow) -> bool {
+        let side = match row.decision() {
+            CandidateDecision::Entry(EntryDecision::Propagate { from, .. }) => *from,
+            CandidateDecision::Entry(EntryDecision::Archive { on }) => *on,
+            _ => return false,
         };
-        let source = self.run.observation(*from).entries().get(row.path());
-        source.is_some_and(|source| source.version().kind() != EntryKind::Directory)
+        let entry = self.run.observation(side).entries().get(row.path());
+        entry.is_some_and(|entry| entry.version().kind() != EntryKind::Directory)
             && !self.below_failure(row.path())
     }
 
     fn below_failure(&self, path: &SyncPath) -> bool {
-        self.failed.iter().any(|failed| failed.is_ancestor_of(path))
+        self.failed.contains_ancestor(path)
     }
 
     /// Record the copy a worker made for `row`.
@@ -1627,7 +2007,30 @@ impl<'a> Executor<'a> {
         }
     }
 
-    /// Data bytes `row` copies.
+    fn landed_archive(&mut self, row: &PlanRow, result: Result<(), ApplyError>) {
+        let CandidateDecision::Entry(EntryDecision::Archive { on }) = row.decision() else {
+            unreachable!("only planned archives are handed out")
+        };
+        let current = self
+            .run
+            .observation(*on)
+            .entries()
+            .get(row.path())
+            .expect("handed-out archives have an observed entry")
+            .version();
+        match result {
+            Ok(()) => self.record_archive(row.path(), *on, current),
+            Err(error) => self.fail(row.path(), &error),
+        }
+    }
+
+    fn record_archive(&mut self, path: &SyncPath, on: Side, version: EntryVersion) {
+        self.report.archived += 1;
+        self.journal(path, on, JournalAction::Archive(version));
+        self.pending.push(BaseUpdate::Forget(path.clone()));
+    }
+
+    /// Data bytes `row` workers.
     fn copied_bytes(&self, row: &PlanRow) -> u64 {
         self.run.copied_bytes(row).map_or(0, |(_, bytes)| bytes)
     }
@@ -1682,11 +2085,7 @@ impl<'a> Executor<'a> {
                     .endpoint(on)
                     .remove(path, current, self.scope(on), control)
                 {
-                    Ok(()) => {
-                        self.report.archived += 1;
-                        self.journal(path, on, JournalAction::Archive(current.version()));
-                        self.pending.push(BaseUpdate::Forget(path.clone()));
-                    }
+                    Ok(()) => self.record_archive(path, on, current.version()),
                     Err(error) => self.fail(path, &error),
                 }
             }
@@ -1704,7 +2103,7 @@ impl<'a> Executor<'a> {
         let Some(from) = run.plan.moved_from(to) else {
             return self.fail_message(to, "Planned move has no source");
         };
-        if self.failed.iter().any(|failed| failed.is_ancestor_of(from)) {
+        if self.failed.contains_ancestor(from) {
             return;
         }
         let (Some(current), Some(source)) = (
@@ -1796,6 +2195,10 @@ impl<'a> Executor<'a> {
     }
 
     fn fail(&mut self, path: &SyncPath, error: &ApplyError) {
+        if matches!(error, ApplyError::Scan(ScanError::Cancelled)) {
+            self.report.completion = Completion::Cancelled;
+            return;
+        }
         self.fail_message(path, &error.to_string());
     }
 
@@ -1804,12 +2207,12 @@ impl<'a> Executor<'a> {
             path: Some(path.clone()),
             message: message.to_owned(),
         });
-        self.failed.push(path.clone());
+        self.failed.insert(path);
     }
 }
 
-mod copies;
-use copies::Copies;
+mod workers;
+use workers::Workers;
 
 mod undo;
 pub use undo::UndoReport;
@@ -1849,11 +2252,11 @@ fn run_options(options: &PairOptions, endpoints: &EndpointPair) -> Result<PairOp
 fn unavailable<'a>(
     left: &'a Observation,
     right: &'a Observation,
-    base: &'a BTreeMap<SyncPath, BaselineEntry>,
+    base: &'a impl Tree<Value = BaselineEntry>,
     names: NameMatching,
 ) -> impl Iterator<Item = &'a SyncPath> {
     // Match as the planner does, so another spelling cannot become a deletion.
-    let roots: BTreeSet<Vec<u8>> = left
+    let roots: BTreeSet<Cow<'_, [u8]>> = left
         .unavailable()
         .iter()
         .chain(right.unavailable())
@@ -1864,7 +2267,7 @@ fn unavailable<'a>(
             return false;
         }
         let key = crate::plan::name_key(path.as_bytes(), names);
-        roots.contains(&key)
+        roots.contains(key.as_ref())
             || key
                 .iter()
                 .enumerate()
@@ -1884,7 +2287,7 @@ fn unavailable<'a>(
 fn uncertain_absences(
     left: &Observation,
     right: &Observation,
-    base: &BTreeMap<SyncPath, BaselineEntry>,
+    base: &impl Tree<Value = BaselineEntry>,
     names: NameMatching,
 ) -> Vec<SyncPath> {
     let mut paths = BTreeMap::new();
@@ -1894,22 +2297,22 @@ fn uncertain_absences(
             continue;
         }
         let whole_root = unstable.iter().any(Option::is_none);
-        let directories: BTreeSet<_> = unstable
+        let directories: BTreeSet<Cow<'_, [u8]>> = unstable
             .iter()
             .flatten()
             .map(|path| crate::plan::name_key(path.as_bytes(), names))
             .collect();
         // Consider only missing counterparts and base rows. A first backup
         // with an empty target needs no second index of its source tree.
-        let mut missing: BTreeMap<_, _> = other
+        let mut missing: BTreeMap<Cow<'_, [u8]>, _> = other
             .entries()
             .keys()
             .chain(base.keys())
-            .filter(|path| !seen.entries().contains_key(*path))
+            .filter(|path| !seen.entries().contains_key(path))
             .map(|path| (crate::plan::name_key(path.as_bytes(), names), path))
             .filter(|(key, _)| {
                 whole_root
-                    || directories.contains(key)
+                    || directories.contains(key.as_ref())
                     || key
                         .iter()
                         .enumerate()
@@ -1922,7 +2325,7 @@ fn uncertain_absences(
         // Both folders may spell an observed entry differently. A case or
         // Unicode alias still proves presence and must remain usable.
         for path in seen.entries().keys() {
-            missing.remove(&crate::plan::name_key(path.as_bytes(), names));
+            missing.remove(crate::plan::name_key(path.as_bytes(), names).as_ref());
         }
         paths.extend(missing);
     }

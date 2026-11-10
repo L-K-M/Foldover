@@ -4,9 +4,16 @@ What you need to know before trusting a pair with your data.
 
 ## Safety nets
 
-- **The first run always needs you.** Every pair's first run stops with
-  its preview until you review it; automatic schedules only start after
-  that ([ADR 0020](../adr/0020-run-execution.md),
+- **The first run does not wait for you unless you ask.** A new pair's
+  first sync runs its plan like any other, whether you start it or its
+  schedule does. A first Sync or Backup run infers no deletions, because
+  nothing records what either folder held before; a first Mirror run
+  archives what only its target holds, within the deletion fuse. To see
+  the plan first, choose Preview Changes before syncing, or turn on
+  **Require approval before syncing** in the pair editor
+  (`--review required`): then every run, scheduled ones included, stops
+  until you approve its plan
+  ([ADR 0020](../adr/0020-run-execution.md),
   [ADR 0022](../adr/0022-scheduled-runs.md)).
 - **Deletion fuse.** An interactive run stops when a target would lose
   both more than 50 paths and more than 1% of its paths; an unattended
@@ -17,6 +24,11 @@ What you need to know before trusting a pair with your data.
 - **A suddenly empty folder pauses the run.** If one side holds nothing
   while Foldover remembers content there, archiving on the other side
   waits for your review ([ADR 0020](../adr/0020-run-execution.md)).
+- **You can switch those two off.** The deletion fuse and the empty-folder
+  stop belong to **Stop unusually large removals** in the pair editor
+  (`--removal-protection`), on by default. Turning it off removes both;
+  the identity, canary, free-space and lease checks stay
+  ([ADR 0020](../adr/0020-run-execution.md)).
 - **Identity check.** The first sync writes `.foldover/id` in each
   folder. A missing or different file stops the run, which is how an
   unmounted disk does not look like a mass deletion
@@ -42,13 +54,13 @@ What you need to know before trusting a pair with your data.
 - **Time Machine skips Foldover's state.** A restored, older state could
   read changes in your folders as deletions to carry over, so it is
   never backed up. A Mac set up from a backup starts without pairs; add
-  them again, and each first sync shows its preview
+  them again, and preview each one before its first sync
   ([ADR 0009](../adr/0009-pair-state-storage.md)).
 
 ## Readiness warnings
 
 While you edit a pair, Foldover warns about sides that will not work as
-you might expect. Only the last one below blocks saving
+you might expect. Only the last three below block saving
 ([ADR 0037](../adr/0037-readiness-warnings.md)):
 
 - A folder another sync engine manages: iCloud Drive, Desktop &
@@ -63,25 +75,42 @@ you might expect. Only the last one below blocks saving
   replaced files are deleted, not archived, Undo is unavailable, and
   another Mac backing up to it is not noticed
   ([ADR 0040](../adr/0040-backup-targets-without-records.md)).
+- A folder that is, holds or sits inside a folder another pair uses.
+  Pairs share folders only as the source of a Mirror or Backup, so you
+  can back up one folder to several targets, or a folder and one inside
+  it separately; a folder any pair writes stays its own
+  ([ADR 0047](../adr/0047-shared-one-way-sources.md)). A folder of
+  another pair on a disk that is not connected is compared by where it
+  would be, and by its identity file should it be mounted elsewhere
+  ([ADR 0048](../adr/0048-missing-folders-in-catalog-checks.md)).
+- Another pair's folder that is there but cannot be read, say because
+  Foldover may not access it: the folders you chose cannot be checked
+  against it until it can be read
+  ([ADR 0048](../adr/0048-missing-folders-in-catalog-checks.md)).
 
 ## Several Macs on one folder
 
 - **One sync at a time.** Every run holds a lease, the file
-  `.foldover/lock` inside each folder, from before its first write until
-  it ends, so two Macs never write the same folder at once. Undo takes
-  the same leases ([ADR 0032](../adr/0032-root-leases.md)).
+  `.foldover/lock` inside each folder it writes, from before its first
+  write until it ends, so two Macs never write the same folder at once.
+  Undo takes the same leases ([ADR 0032](../adr/0032-root-leases.md)).
+- **Sources are read freely.** A Mirror or Backup leases its source only
+  when it writes there: when you copy a change back into it, or to
+  recover what an interrupted write left. Backups of one folder, or of a
+  folder another Mac syncs, run at the same time
+  ([ADR 0047](../adr/0047-shared-one-way-sources.md)).
 - **Waiting, then takeover.** A run that finds another Mac's live lease
   waits with "Waiting for <Mac> to finish syncing these folders…" and
   fails with "<Mac> is syncing this folder" after 150 seconds;
-  scheduled runs retry on their cadence. A Mac that crashed or slept
+  scheduled runs try again when they next come due, and you are
+  notified once
+  ([ADR 0047](../adr/0047-shared-one-way-sources.md)). A Mac that crashed or slept
   mid-sync holds its folders for up to two minutes; the next run waits
   that out and takes over ([ADR 0032](../adr/0032-root-leases.md)).
 - After a takeover the old holder may still write for up to one beat,
   15 seconds, before it stops; staged writes and archived replacements
   keep that window recoverable ([ADR 0032](../adr/0032-root-leases.md)).
-- A run on an SFTP folder opens a second SSH connection for its leases,
-  and an SFTP server whose rename replaces an existing file breaks the
-  exclusive create: two Macs could both take a free lease
+- A run on an SFTP folder opens a second SSH connection for its leases
   ([ADR 0032](../adr/0032-root-leases.md)).
 
 ## Moves
@@ -156,6 +185,13 @@ you might expect. Only the last one below blocks saving
   `.foldover/archive/<run>/` inside each folder for 30 days, then are
   deleted permanently. That pruning is the only path that deletes data
   ([ADR 0020](../adr/0020-run-execution.md)).
+- **Each pair sees its own runs.** A run's folder is named after its
+  start time and its pair. Pairs sharing a folder, on this Mac or
+  others, each list theirs; another pair's runs there go after 60 days.
+  Paired Macs need this version on both; a Mac with an older Foldover
+  syncing the same share or server folder neither lists nor prunes the
+  new runs until it is updated
+  ([ADR 0047](../adr/0047-shared-one-way-sources.md)).
 - **Put Back never replaces.** A restored item goes beside an occupied
   path as `name (restored).ext`, then `(restored 2)`; the next sync
   copies it to the other folder like any new entry
@@ -255,8 +291,21 @@ deletion ([ADR 0010](../adr/0010-local-metadata-inventory.md)).
   hourly check; with an interval schedule, by the next sync. SMB
   notification behavior is unverified
   ([ADR 0002](../adr/0002-change-detection.md)).
-- Schedule timers live in agent memory; restarting the agent restarts
-  every interval ([ADR 0022](../adr/0022-scheduled-runs.md)).
+- **Interval schedules.** "Every hour" or "Every day" counts from the
+  pair's last automatic sync. An interval that ends while the Mac
+  sleeps or the agent is off runs once when they are back, counted
+  from the pair's last sync of either kind after a restart. The hourly
+  check of "When files change" pairs starts over when the agent
+  restarts ([ADR 0022](../adr/0022-scheduled-runs.md)).
+- **A new scheduled pair can start within seconds of saving it.** A
+  daily pair's first sync does not wait for its first scheduled time.
+  An interval pair's first sync starts once the agent has been running
+  for one interval, and a "When files change" pair's first sync once it
+  has been running for an hour. The agent usually has; right after it
+  restarts, a new interval pair can wait most of an interval. Turn on
+  Require approval before syncing to hold the first sync
+  ([ADR 0022](../adr/0022-scheduled-runs.md),
+  [ADR 0039](../adr/0039-calendar-schedules.md)).
 - A disk that comes back is noticed within 5 seconds for "When files
   change" pairs and within 30 seconds for a scheduled pair that is due
   ([ADR 0002](../adr/0002-change-detection.md)).
@@ -271,6 +320,20 @@ deletion ([ADR 0010](../adr/0010-local-metadata-inventory.md)).
   the network is expensive or Low Data Mode is on. Syncs you start
   yourself always run, and held pairs run on the first tick after the
   hold lifts ([ADR 0036](../adr/0036-environment-policy.md)).
+- **Automatic syncs run gently** unless "Run automatic syncs at full
+  speed" is on in Settings. They run one at a time and not beside a sync
+  you started, at low priority, and read and copy one file at a time on
+  this Mac's own disks. Large automatic syncs between local disks take
+  longer, several times longer while other apps use the disk heavily;
+  those over the network keep their parallel transfers. Syncs you
+  start yourself always run at full speed
+  ([ADR 0054](../adr/0054-gentle-automatic-syncs.md)).
+- **A paused pair waits until you resume it.** Pause Pair holds that pair's
+  automatic syncs: interval and calendar schedules, file changes, a folder
+  coming back and catch-up when the agent starts all wait. Preview Changes
+  and Sync Now still run and do not lift the pause; a sync already running
+  continues until you stop it. Changes made while paused are recorded and
+  run after you resume ([ADR 0022](../adr/0022-scheduled-runs.md)).
 - A local folder Foldover once mounted from a share keeps counting as
   network use until a sync observes it on plain disk again
   ([ADR 0036](../adr/0036-environment-policy.md)).

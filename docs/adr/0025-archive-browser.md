@@ -11,9 +11,12 @@ an item back, or everything a run archived. Requests go through the agent
 clients never touch `.foldover`.
 
 ```text
-.foldover/archive/2026-10-18T09-30-00.000Z/docs/report.txt
-                  └ run (start time, UTC) ┘└ original path ┘
+.foldover/archive/2026-10-18T09-30-00.000Z_<pair id>_<run id>/docs/report.txt
+                  └ run (start time, UTC, pair, unique ID) ─┘└ original path ┘
 ```
+
+A pair lists its own runs and those from before runs named their pair
+([ADR 0047](0047-shared-one-way-sources.md)).
 
 **Put back never replaces.** The item moves with a no-replace rename to its
 original path, creating missing parent folders. When that path is taken,

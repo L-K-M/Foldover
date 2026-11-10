@@ -3,7 +3,7 @@
 > [!IMPORTANT]
 > LLM disclosure: This codebase was written with substantial help from large language models: AI coding agents working from the [`AGENTS.md`](AGENTS.md) brief in this repo.
 
-**Source version:** v<!-- version -->0.1.0<!-- /version --> · [Releases](https://github.com/L-K-M/Foldover/releases)
+**Source version:** v<!-- version -->0.2.0<!-- /version --> · [Releases](https://github.com/L-K-M/Foldover/releases)
 
 [![CI](https://github.com/L-K-M/Foldover/actions/workflows/ci.yml/badge.svg)](https://github.com/L-K-M/Foldover/actions/workflows/ci.yml)
 
@@ -21,6 +21,16 @@ The macOS app requires macOS 27 and Apple silicon.
 > source of truth for scope and design; the research behind it lives in
 > [`docs/research`](docs/research/README.md).
 
+## Screenshots
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/preview-dark.png">
+  <img src="docs/screenshots/preview-light.png" alt="Foldover previewing folder changes side by side, with a selected conflict and options to keep either version or both." width="1000">
+</picture>
+
+Preview changes and resolve conflicts before syncing. Shown with demo data;
+the screenshot follows your light or dark appearance.
+
 ## Guides
 
 - [Using the app](docs/guide/using-the-app.md): the window, menus,
@@ -32,10 +42,11 @@ The macOS app requires macOS 27 and Apple silicon.
 - [Limitations](docs/guide/limitations.md): current limits and what is
   not implemented yet.
 
-## Planned highlights
+## Highlights
 
-- **Preview first.** Every change is listed before it runs, with per-item
-  overrides.
+- **Preview first.** Preview any sync before it runs, with per-item
+  overrides; turn on **Require approval before syncing** and every run,
+  scheduled ones included, waits for your approval.
 - **Nothing lost quietly.** Replaced and deleted files go to an archive;
   conflicts wait for you instead of being silently resolved.
 - **Mac to Mac, built in.** Other Macs appear on the network; pair with a
@@ -58,6 +69,7 @@ scripts/build.sh            # everything this host can build, staged in dist/
 scripts/build.sh core       # Rust agent and CLI (macOS or Linux)
 scripts/build.sh app        # macOS app (macOS 27+, Xcode 27+, XcodeGen)
 scripts/build.sh --install  # also install the app into /Applications
+scripts/build.sh app --install --no-open  # install without opening GUI windows
 cargo xtask ci              # the Linux CI gate
 ```
 
@@ -70,8 +82,9 @@ background agent; if macOS requests approval, open Login Items and allow
 Foldover, then refresh.
 The agent configures and syncs pairs, and keeps syncing with the window closed.
 Choose **New Pair**, select both folders and a mode, then save. Select the pair
-and choose **Preview** to see every change, then **Sync Now**. Saving never
-starts a sync; set a schedule to sync automatically after the first one. The
+and choose **Preview** to see every change, then **Sync Now**. A pair with a
+schedule can start its first sync by itself after you save it; turn on
+**Require approval before syncing** to make every sync wait for you. The
 menu bar shows each pair's status.
 
 For development, run these in separate terminals:
@@ -119,23 +132,37 @@ The suffix selects the source. Options follow the mode:
 lets a `backup-*` target that cannot hold `.foldover` keep nothing: files
 replaced there are deleted, not archived, and Undo is unavailable
 (default `both`). `--schedule` takes
-`manual` (default), `changes` (sync shortly after files change, and hourly)
-or a number of minutes between automatic syncs, which start after the first
-sync you run yourself. `--exclude PATTERN` (repeatable) sets gitignore-style
-rules for files to skip in both folders; a `.foldoverignore` file in either
-folder adds more. `--max-size MEGABYTES` skips larger files in both folders
-and `--max-age DAYS` files unchanged for longer in both (`none` removes
-either limit). Resource forks are content; SFTP copies fail when they cannot
+`manual` (default), `changes` (sync shortly after files change, and an hour
+after the last preview or sync ends), a number of minutes between automatic
+syncs, or `daily@HH:MM[:DAYS]` for a local time of day, with days as a
+comma list or range such as `mon-fri` (every day when omitted). A scheduled
+pair's first sync can start by itself. `--exclude PATTERN` (repeatable) sets
+gitignore-style rules for files to skip in both folders; a `.foldoverignore`
+file in either folder adds more. `--max-size MEGABYTES` skips larger files in
+both folders and `--max-age DAYS` files unchanged for longer in both (`none`
+removes either limit). `--bandwidth-limit MEGABYTES` caps the pair's copying
+at that many megabytes per second (`none` removes it;
+[ADR 0044](docs/adr/0044-bandwidth-limit.md)). `--canary PATH` names a file
+inside the folders that must be present and unchanged in both before a sync
+writes anything (`none` removes it;
+[ADR 0033](docs/adr/0033-canary-file.md)). `--review required` makes every
+sync, scheduled ones included, stop until you approve its plan (default
+`automatic`). `--removal-protection disabled` turns off the stops for
+unusually large removals and for a suddenly empty folder (default
+`enabled`; [ADR 0020](docs/adr/0020-run-execution.md)). Resource forks are content; SFTP copies fail when they cannot
 preserve them. Changing roots or metadata options resets the pair's sync history.
 `pairs show ID` reads one pair;
 `pairs update ID REVISION NAME LEFT RIGHT MODE [OPTIONS]` requires its current
 revision and keeps options you do not name.
-`pairs remove ID REVISION` removes settings, including for an offline pair;
-your folders stay in place. The app offers the same **Remove Pair** action.
-Commands output JSON lines with exact root-byte arrays. Lists are paged by
-identity and are not an atomic catalog snapshot. Refresh after concurrent edits.
-If a command times out, inspect the catalog before retrying: a disconnected
-client does not cancel a committing configuration change.
+`pairs remove ID REVISION` marks the pair removed, including for an offline
+pair; the pair disappears at once from every list and lookup, and the agent
+deletes its rows in the background. Your folders stay in place. The app
+offers the same **Remove Pair** action. Commands output JSON lines with exact
+root-byte arrays. Lists are paged by identity and are not an atomic catalog
+snapshot. Refresh after concurrent edits. If a command times out, inspect the
+catalog before retrying: a disconnected client does not cancel a committing
+configuration change. `pairs remove` answers at once; it does not wait for
+the background delete.
 
 ### Sync
 
@@ -154,6 +181,8 @@ foldover sync ID --skip PATH --review TOKEN        # leave a reviewed change for
 foldover sync ID --undo          # undo the newest sync that changed anything
 foldover history ID              # finished runs, newest first
 foldover pause [MINUTES]         # hold automatic syncs; `foldover resume` ends it
+foldover pairs pause|resume ID   # hold one pair's automatic syncs, or end it
+foldover automation effort full  # automatic syncs at full speed; `gentle` is the default
 foldover safe-mode off           # sync again after the agent kept crashing
 foldover archive ID left         # archived runs in folder A, newest first
 foldover archive ID left RUN     # items one run archived
@@ -175,9 +204,10 @@ status 4; failures exit with status 1 even when conflicts also remain,
 and invalid command usage with status 2. A partial
 `--put-back-all` also exits with status 1 and prints its full restore report;
 failed items remain archived. Clean runs exit with status 0. A run
-stops before writing, exiting with status 3, when it is the pair's first
-run, when it would delete more than the automatic limits allow, or when
-one folder is suddenly empty; rerun with `--approve` and the preview's
+stops before writing, exiting with status 3, when the pair requires
+approval (`--review required`), when it would delete more than the
+automatic limits allow, or when one folder is suddenly empty (the last two
+unless `--removal-protection disabled`); rerun with `--approve` and the preview's
 `review_token` as `--review TOKEN`. Choices also echo that token. A changed plan
 or configuration requires a fresh review. Replaced and removed
 files go to `.foldover/archive/<run>/` inside the folder where they were

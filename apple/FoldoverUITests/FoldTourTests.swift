@@ -1,7 +1,8 @@
 // The fold in motion, in slow motion: a line turned with the keyboard,
 // the leaf let go short of upright and falling back, the leaf folded
 // past upright, pressing, opening on the run's imprint, and the imprint
-// lifted by Undo. Each stretch of motion keeps a run of frames.
+// lifted by Undo. Each stretch of motion keeps a run of frames. Runs
+// with nothing previewed on the sheet fold a whole page too.
 
 import XCTest
 
@@ -27,6 +28,157 @@ final class FoldTourTests: XCTestCase {
         tour.key(.upArrow)
         XCTAssertTrue(app.windows.staticTexts["Permission denied."].firstMatch.waitForExistence(timeout: 5),
                       "Keyboard selection must work on completed failures")
+    }
+
+    /// A window opened on a run already under way, as after a schedule
+    /// or the menu bar started it: nothing was previewed, so nothing is
+    /// listed. The leaf still lies over a whole page, its back reading
+    /// out the run's stage. Each folder stays named on its own side: a
+    /// two-way sync's Folder A on the bare desk, under two arrows passing,
+    /// and its server, which has no disk to read, on the leaf.
+    @MainActor
+    func testARunOpenedMidwayCoversThePage() {
+        continueAfterFailure = true
+        for appearance in [TourAppearance.light, .dark] {
+            for (scenario, stage) in [("syncing", "Comparing"), ("syncing-waiting", "Waiting")] {
+                let tour = Tour(self, appearance: appearance, scenario: scenario)
+                tour.launch()
+                tour.click(tour.app.outlines.firstMatch.staticTexts["Photos"].firstMatch, "Photos in the sidebar")
+                checkPlate(tour, reads: stage)
+                checkFolders(tour, desk: "Folder A: ", leaf: "Folder B: sftp://mynas.local/~/Photos",
+                             direction: "Sync both ways")
+                tour.snap("fold-midway-\(stage.lowercased())")
+                tour.app.terminate()
+            }
+        }
+    }
+
+    /// A backup to a disk opened mid-run reads left to right: the folder
+    /// it is copied from on the bare desk, an arrow toward the leaf, and
+    /// on the leaf the folder it is copied to, with that disk's free space
+    /// and what is still to copy there.
+    @MainActor
+    func testABackupOpenedMidwayNamesBothFoldersAndTheDisk() {
+        continueAfterFailure = true
+        for appearance in [TourAppearance.light, .dark] {
+            let tour = Tour(self, appearance: appearance, scenario: "syncing-backup")
+            tour.launch()
+            tour.click(tour.app.outlines.firstMatch.staticTexts["Projects"].firstMatch, "Projects in the sidebar")
+            checkPlate(tour, reads: "Syncing")
+            checkFolders(tour, desk: "From Folder A: ", leaf: "To Folder B: ", direction: "Back up A to B")
+            let plate = tour.app.windows.descendants(matching: .any)["fold-plate"].firstMatch
+            let disk = plate.descendants(matching: .any)["fold-disk"].firstMatch
+            XCTAssertTrue(disk.waitForExistence(timeout: 10), "The leaf should read out the backup disk")
+            XCTAssertEqual(disk.label, "Backup SSD, 812.4 GB free of 2 TB, 23.2 GB still to copy")
+            tour.snap("fold-midway-backup")
+            Stress(tour: tour, scenario: "syncing-backup").narrowToMinimum()
+            tour.pause(1)
+            // At the minimum with both side panes, the sheet may drop
+            // storage to keep sync progress readable. Give it room again.
+            XCTAssertTrue(plate.descendants(matching: .any)["fold-readout"].firstMatch.exists)
+            tour.snap("fold-midway-backup-narrow")
+            tour.key("i", [.command, .control])
+            XCTAssertTrue(disk.waitForExistence(timeout: 5), "Storage should return when the inspector is hidden")
+            XCTAssertTrue(plate.frame.insetBy(dx: -1, dy: -1).contains(disk.frame),
+                          "The storage readout should stay inside the leaf: \(disk.frame) in \(plate.frame)")
+            tour.snap("fold-midway-backup-narrow-storage")
+            tour.app.terminate()
+        }
+    }
+
+    /// The same backup made from B to A folds from the right: the bare
+    /// desk on the right names Folder B with its arrow pointing left, and
+    /// the leaf on the left names Folder A and its disk.
+    @MainActor
+    func testABackupFromBToAReadsRightToLeft() {
+        continueAfterFailure = true
+        let tour = Tour(self, appearance: .light, scenario: "syncing-backup-right")
+        tour.launch()
+        defer { tour.app.terminate() }
+        tour.click(tour.app.outlines.firstMatch.staticTexts["Projects"].firstMatch, "Projects in the sidebar")
+        checkPlate(tour, reads: "Syncing")
+        checkFolders(tour, desk: "From Folder B: ", leaf: "To Folder A: ", direction: "Back up B to A",
+                     deskSide: .right)
+        let plate = tour.app.windows.descendants(matching: .any)["fold-plate"].firstMatch
+        XCTAssertTrue(plate.descendants(matching: .any)["fold-disk"].firstMatch.waitForExistence(timeout: 10),
+                      "The leaf should read out the disk it lies on")
+        tour.snap("fold-midway-backup-right")
+    }
+
+    /// Which half the bare desk is: the half the leaf lifted off.
+    private enum DeskSide { case left, right }
+
+    /// Each folder is named on its own side while the leaf lies folded:
+    /// the bare desk names the folder that lifted off, with the arrow for
+    /// which way the data goes, and the leaf's plate the folder it lies
+    /// on. The desk's words keep to its page, clear of the plate.
+    @MainActor
+    private func checkFolders(_ tour: Tour, desk: String, leaf: String, direction: String,
+                              deskSide: DeskSide = .left) {
+        let window = tour.app.windows.firstMatch
+        let plate = window.descendants(matching: .any)["fold-plate"].firstMatch
+        let note = window.descendants(matching: .any)["fold-desk"].firstMatch
+        guard note.waitForExistence(timeout: 5) else { return XCTFail("Missing: the bare desk's note") }
+        let lifted = note.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", desk))
+        XCTAssertTrue(lifted.firstMatch.exists, "The bare desk should name the folder that lifted off, \(desk)")
+        let arrow = note.descendants(matching: .any)["fold-direction"].firstMatch
+        XCTAssertEqual(arrow.exists ? arrow.label : nil, direction, "The desk's arrow should say the sync's kind")
+        let under = plate.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", leaf))
+        XCTAssertTrue(under.firstMatch.exists, "The leaf should name the folder it lies on, \(leaf)")
+        switch deskSide {
+        case .left:
+            XCTAssertLessThanOrEqual(note.frame.maxX, plate.frame.minX + 1,
+                                     "The bare desk's words should stay off the plate: \(note.frame), \(plate.frame)")
+        case .right:
+            XCTAssertGreaterThanOrEqual(note.frame.minX, plate.frame.maxX - 1,
+                                        "The bare desk's words should stay off the plate: \(note.frame), \(plate.frame)")
+        }
+    }
+
+    /// Sync Now before any preview folds a blank half; its back reads
+    /// the run comparing, then syncing, and the leaf opens on the imprint.
+    /// In slow motion the leaf lands about 3 s into the run's 8 s of
+    /// comparing, so the first check has room to see it.
+    @MainActor
+    func testSyncBeforeAnyPreviewCoversThePage() {
+        continueAfterFailure = true
+        let tour = Tour(self, appearance: .light, slowFold: Self.slowMotion)
+        let app = tour.app
+        tour.launch()
+        defer { app.terminate() }
+        tour.click(app.outlines.firstMatch.staticTexts["Photos"].firstMatch, "Photos in the sidebar")
+        tour.key("s", .command)
+        checkPlate(tour, reads: "Comparing")
+        tour.snap("fold-unpreviewed-comparing")
+        checkPlate(tour, reads: "Syncing", timeout: 20)
+        // The count dissolves into the share as the stage changes.
+        tour.pause(1)
+        tour.snap("fold-unpreviewed-syncing")
+        XCTAssertTrue(app.buttons["Undo Sync"].waitForExistence(timeout: 60), "The run should end on its imprint")
+        // In slow motion the peel takes about 3.4 s and the stamp 1.8 s.
+        tour.pause(6)
+        tour.snap("fold-unpreviewed-imprint")
+    }
+
+    /// The plate on the folded leaf's back covers its page and reads out
+    /// `stage`. With nothing listed, the sheet once shrank to its folder
+    /// labels, leaving the plate a card at the top of a bare field.
+    @MainActor
+    private func checkPlate(_ tour: Tour, reads stage: String, timeout: TimeInterval = 10) {
+        let app = tour.app
+        let plate = app.windows.descendants(matching: .any)["fold-plate"].firstMatch
+        let readout = plate.descendants(matching: .any)["fold-readout"].firstMatch
+        guard readout.waitForExistence(timeout: timeout) else { return XCTFail("Missing: the leaf's readout") }
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        var label = readout.label
+        while !label.hasPrefix(stage), Date() < deadline {
+            tour.pause(0.25)
+            label = readout.label
+        }
+        XCTAssertTrue(label.hasPrefix(stage), "The leaf should read \(stage): \(label)")
+        let window = app.windows.firstMatch.frame
+        XCTAssertGreaterThan(plate.frame.height, window.height * 0.6,
+                             "The plate should cover its page while \(stage): \(plate.frame) in \(window)")
     }
 
     @MainActor

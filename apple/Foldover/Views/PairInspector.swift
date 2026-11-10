@@ -39,17 +39,32 @@ struct PairInspector: View {
             }
 
             Section("Pair") {
+                if let notice = sync.previousSettingsNotice {
+                    Text(notice)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
                 LabeledContent("Mode") {
                     HStack(spacing: 6) {
-                        Text(pair.settings.mode.title)
-                        InfoButton(title: Text("Sync Mode"), message: Text(pair.settings.mode.explanation))
+                        Text(sync.activeMode.title)
+                        InfoButton(title: Text("Sync Mode"), message: Text(sync.activeMode.explanation))
                     }
                 }
-                folderRow("Folder A", folder: pair.settings.left, side: .a)
-                folderRow("Folder B", folder: pair.settings.right, side: .b)
-                LabeledContent("Schedule",
+                folderRow("Folder A", folder: sync.activeLeft)
+                folderRow("Folder B", folder: sync.activeRight)
+                LabeledContent(sync.usesPreviousSettings ? "Schedule (Next Run)" : "Schedule",
                                value: PairEditorViewModel.scheduleTitle(pair.settings.options.schedule))
-                LabeledContent("Skips", value: viewModel.skipSummary(for: pair))
+                if pair.automation == .paused {
+                    LabeledContent("Automatic Syncs") {
+                        HStack(spacing: 6) {
+                            Text("Paused")
+                            Button("Resume") { Task { await viewModel.toggleAutomation(of: pair) } }
+                                .disabled(!viewModel.canChangeAutomation(of: pair))
+                        }
+                    }
+                }
+                LabeledContent(sync.usesPreviousSettings ? "Skips (Next Run)" : "Skips",
+                               value: viewModel.skipSummary(for: pair))
                 HStack {
                     Button("Edit Pair…") { viewModel.editPair() }
                         .disabled(!viewModel.canConfigurePairs)
@@ -80,8 +95,7 @@ struct PairInspector: View {
 
     /// A folder's location, with a button that shows it in Finder when
     /// it is on this Mac.
-    private func folderRow(_ title: LocalizedStringKey, folder: SelectedFolder,
-                           side: FolderSide) -> some View {
+    private func folderRow(_ title: LocalizedStringKey, folder: SelectedFolder) -> some View {
         let text = viewModel.folderText(folder)
         return LabeledContent(title) {
             HStack(spacing: 4) {
@@ -89,9 +103,9 @@ struct PairInspector: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .help(text)
-                if viewModel.canReveal(side) {
+                if viewModel.canReveal(folder) {
                     Button("Show in Finder", systemImage: "arrow.forward.circle.fill") {
-                        viewModel.reveal(side)
+                        viewModel.reveal(folder)
                     }
                     .labelStyle(.iconOnly)
                     .buttonStyle(.borderless)

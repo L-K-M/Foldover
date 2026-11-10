@@ -23,6 +23,14 @@ uuid = { version = "1", features = ["v4"] }
 name = "plan"
 harness = false
 
+[[bench]]
+name = "run_inputs"
+harness = false
+
+[[bench]]
+name = "path_prefix_index"
+harness = false
+
 [dev-dependencies]
 # In-memory folders for the simulation (ADR 0038).
 foldover-sim = { path = "../foldover-sim" }

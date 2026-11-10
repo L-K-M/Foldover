@@ -12,9 +12,10 @@ use foldover_endpoint::{
     Reach, current_cloud_provider, mount_share,
 };
 use foldover_types::{
-    CaseMatching, NameMatching, PairConfig, PairDraft, PairRoot, Propagation, Side,
+    CaseMatching, NameMatching, PairConfig, PairDraft, PairId, PairRoot, Propagation, Side,
 };
 
+use crate::configuration::{CatalogOverlap, Offline, OverlapKind};
 use crate::{Engine, Error};
 
 /// Mount `side`'s share again from `source`, its recorded mount source;
@@ -33,7 +34,8 @@ pub fn missing_side(pair: &PairConfig, reach: &Reach) -> Option<Side> {
 }
 
 /// What will not work as a person might expect with the folders they
-/// picked (PLAN.md §3.6). A warning never blocks saving.
+/// picked (PLAN.md §3.6). Only `Overlap` and `Unverified` name something
+/// saving would refuse; the others never block it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReadinessWarning {
     /// Another sync engine manages this side's folder.
@@ -46,25 +48,50 @@ pub enum ReadinessWarning {
     /// This side's folder cannot hold Foldover's `.foldover` records, so
     /// it can only be a Backup target that keeps none there.
     RecordsUnsupported { side: Side },
+    /// This side's folder is, holds or sits inside a folder of another
+    /// pair, named `name`, and the two may not share it: only Mirror and
+    /// Backup sources do (ADR 0047). Saving refuses it.
+    Overlap {
+        side: Side,
+        pair: PairId,
+        name: String,
+    },
+    /// A folder of the pair named `name` is there but cannot be read, so
+    /// this side cannot be checked against it. Saving refuses it until
+    /// the folder can be read (ADR 0048).
+    Unverified {
+        side: Side,
+        pair: PairId,
+        name: String,
+    },
 }
 
 impl Engine {
     /// What will not work as a person might expect with `draft`'s
-    /// folders. A root that cannot be opened yields no warnings for its
-    /// side: saving reports that itself.
-    pub fn check_pair(&self, draft: &PairDraft) -> Result<Vec<ReadinessWarning>, Error> {
-        self.check_pair_with(draft, current_cloud_provider)
+    /// folders; `editing` names the pair the draft would replace, whose
+    /// own folders never overlap it. A root that cannot be opened yields
+    /// no warnings for its side: saving reports that itself. An existing
+    /// pair's folder that is missing is compared by where it would be;
+    /// one that cannot be read is reported as `Unverified`.
+    pub fn check_pair(
+        &self,
+        draft: &PairDraft,
+        editing: Option<PairId>,
+    ) -> Result<Vec<ReadinessWarning>, Error> {
+        self.check_pair_with(draft, editing, current_cloud_provider)
     }
 
     /// `check_pair` with the home-directory lookup injectable for tests.
     fn check_pair_with(
         &self,
         draft: &PairDraft,
+        editing: Option<PairId>,
         cloud: impl Fn(&Path) -> Option<CloudProvider>,
     ) -> Result<Vec<ReadinessWarning>, Error> {
         let reach = self.reach();
         let mut warnings = Vec::new();
         let mut matching = [None, None];
+        let mut opened = [None, None];
         for side in [Side::Left, Side::Right] {
             let root = match side {
                 Side::Left => draft.left(),
@@ -90,12 +117,32 @@ impl Engine {
                 warnings.push(ReadinessWarning::RecordsUnsupported { side });
             }
             matching[side as usize] = Some(endpoint.name_matching());
+            opened[side as usize] = Some(endpoint);
         }
         if let [Some(left), Some(right)] = matching
             && let Some(side) = case_differs(left, right)
         {
             warnings.push(ReadinessWarning::NamesDiffer { side });
         }
+        let [left, right] = &opened;
+        let overlaps = self.catalog_overlaps(
+            draft,
+            [left.as_ref(), right.as_ref()],
+            editing,
+            Offline::Report,
+        )?;
+        warnings.extend(overlaps.into_iter().map(|overlap| {
+            let CatalogOverlap {
+                side,
+                pair,
+                name,
+                kind,
+            } = overlap;
+            match kind {
+                OverlapKind::Overlaps => ReadinessWarning::Overlap { side, pair, name },
+                OverlapKind::Unverified => ReadinessWarning::Unverified { side, pair, name },
+            }
+        }));
         Ok(warnings)
     }
 }
@@ -157,7 +204,7 @@ mod tests {
         let draft =
             PairDraft::new("Pair".into(), root(&left), root(&right), SyncMode::Sync).unwrap();
         let warnings = engine
-            .check_pair_with(&draft, |path| cloud_provider(home.path(), path))
+            .check_pair_with(&draft, None, |path| cloud_provider(home.path(), path))
             .unwrap();
         assert_eq!(
             warnings,
@@ -177,7 +224,7 @@ mod tests {
         for (left, right) in [(&missing, &present), (&present, &missing)] {
             let draft =
                 PairDraft::new("Pair".into(), root(left), root(right), SyncMode::Sync).unwrap();
-            assert_eq!(engine.check_pair(&draft).unwrap(), []);
+            assert_eq!(engine.check_pair(&draft, None).unwrap(), []);
         }
     }
 
@@ -190,7 +237,7 @@ mod tests {
         fs::create_dir(&right).unwrap();
         let draft =
             PairDraft::new("Pair".into(), root(&left), root(&right), SyncMode::Sync).unwrap();
-        assert_eq!(engine.check_pair(&draft).unwrap(), []);
+        assert_eq!(engine.check_pair(&draft, None).unwrap(), []);
     }
 
     #[test]
@@ -206,14 +253,93 @@ mod tests {
         let backup = SyncMode::Backup { source: Side::Left };
         let draft = PairDraft::new("Pair".into(), root(&left), root(&right), backup).unwrap();
         assert_eq!(
-            engine.check_pair(&draft).unwrap(),
+            engine.check_pair(&draft, None).unwrap(),
             [ReadinessWarning::RecordsUnsupported { side: Side::Right }]
         );
 
         let options = PairOptions::default().with_records(FolderRecords::SourceOnly);
         let spared = draft.with_options(options);
-        assert_eq!(engine.check_pair(&spared).unwrap(), []);
+        assert_eq!(engine.check_pair(&spared, None).unwrap(), []);
         assert!(!left.join(".foldover").exists());
+    }
+
+    /// The editor hears about an overlap saving would refuse, named by
+    /// the other pair, and never about the pair it edits.
+    #[test]
+    fn an_overlapping_folder_names_the_pair_that_uses_it() {
+        let (temporary, mut engine) = engine();
+        let [source, first, second, third] =
+            ["source", "first", "second", "third"].map(|name| temporary.path().join(name));
+        for path in [&source, &first, &second, &third] {
+            fs::create_dir(path).unwrap();
+        }
+        let backup = SyncMode::Backup { source: Side::Left };
+        let draft = |left: &Path, right: &Path, mode| {
+            PairDraft::new("Photos".into(), root(left), root(right), mode).unwrap()
+        };
+        let existing = engine.create_pair(&draft(&source, &first, backup)).unwrap();
+
+        // A second Backup of the same source shares it.
+        assert_eq!(
+            engine
+                .check_pair(&draft(&source, &second, backup), None)
+                .unwrap(),
+            []
+        );
+        // A two-way pair over it, or another pair writing its target, may not.
+        assert_eq!(
+            engine
+                .check_pair(&draft(&second, &first, SyncMode::Sync), None)
+                .unwrap(),
+            [ReadinessWarning::Overlap {
+                side: Side::Right,
+                pair: existing.id(),
+                name: "Photos".into(),
+            }]
+        );
+        // Editing the pair itself overlaps nothing.
+        assert_eq!(
+            engine
+                .check_pair(&draft(&source, &first, SyncMode::Sync), Some(existing.id()))
+                .unwrap(),
+            []
+        );
+        // An existing pair whose folder is gone is left to saving.
+        fs::remove_dir(&first).unwrap();
+        assert_eq!(
+            engine
+                .check_pair(&draft(&third, &second, SyncMode::Sync), None)
+                .unwrap(),
+            []
+        );
+    }
+
+    /// A folder of another pair that is there but cannot be read keeps
+    /// both sides from being checked; the editor names the pair.
+    #[test]
+    fn an_unreadable_folder_of_another_pair_leaves_both_sides_unverified() {
+        use std::os::unix::fs::PermissionsExt;
+        let (temporary, mut engine) = engine();
+        let paths = ["a", "b", "c", "d"].map(|name| temporary.path().join(name));
+        for path in &paths {
+            fs::create_dir(path).unwrap();
+        }
+        let draft = |left: &Path, right: &Path| {
+            PairDraft::new("Photos".into(), root(left), root(right), SyncMode::Sync).unwrap()
+        };
+        let existing = engine.create_pair(&draft(&paths[0], &paths[1])).unwrap();
+        fs::set_permissions(&paths[0], fs::Permissions::from_mode(0o000)).unwrap();
+        let warnings = engine.check_pair(&draft(&paths[2], &paths[3]), None);
+        fs::set_permissions(&paths[0], fs::Permissions::from_mode(0o755)).unwrap();
+        let unverified = |side| ReadinessWarning::Unverified {
+            side,
+            pair: existing.id(),
+            name: "Photos".into(),
+        };
+        assert_eq!(
+            warnings.unwrap(),
+            [unverified(Side::Left), unverified(Side::Right)]
+        );
     }
 
     #[test]

@@ -23,16 +23,24 @@ time.
   | Solid-state disk | 4 |
   | Mounted share (SMB, NFS, AFP, WebDAV) | 4 |
   | Spinning disk, or one that does not say | 1 |
-  | SFTP server | 4, on up to five sessions (one per worker and the run's thread) and one for lease beats; 1 when Foldover cannot open more |
-  | Two SFTP servers in one pair | 1: a copy holds a session on each, and copies in opposite directions could wait on each other once a server refuses more sessions |
+  | SFTP server | 4; observation reads use up to eight sessions from a pool capped at nine (eight readers and the run's thread), plus a separate lease session, so at most ten; 1 when Foldover cannot open more |
+  | Two SFTP servers in one pair | 1 copy: a copy holds a session on each, and copies in opposite directions could wait on each other once a server refuses more sessions. Observations stay sequential, one root at a time, each on its own endpoint's pool |
   | Another Mac | 4, one link stream each; a link takes 64 streams, so change reports and lease beats always find one |
+
+  Observation reads on an SFTP folder do not use this copy count: they read
+  on up to eight pooled sessions, while copies still take the smaller of the
+  two folders' counts.
 
 - **One recorder.** The run's thread keeps planning order, the journal,
   the base, commits, progress and the control (cancel, lease beats). It
   hands copies of files and links to workers and records each as it
-  lands. Folders, moves and archives stay on the run's thread, so a copy
-  is handed out only after its folder was made, and archives start once
-  every copy has landed. While copies run, the thread asks the control
+  lands. Folders and moves stay on the run's thread, so a copy is
+  handed out only after its folder was made. Independent file and link
+  archives may use the same bounded workers after every copy has landed.
+  Before removing any folder, the run drains all outstanding archives;
+  reverse path order still puts children before their parent. The thread
+  alone records archive results, including failures and base updates.
+  While workers run, the thread asks the control
   every 100 ms; a cancel or a lost lease stops copies in progress and
   those not started, and the run ends cancelled.
 - **Unchanged with one worker.** A run whose folders take one copy at a
@@ -46,13 +54,30 @@ time.
 - Copies of many small files to a solid-state disk or a share overlap.
 - A crash can leave up to one batch of copies done but unrecorded, as
   before: the next run finds them equal on both sides and records them.
-- A worker's panic stops the other copies and fails the run as a
-  serial panic did.
+- A worker's panic stops the other writes and fails the run as a
+  serial panic did. Cancellation and commit failures drain completed
+  archives through the same recorder as completed copies.
 - In-memory folders can take several workers; a simulation over them
   runs on threads and a failing seed may not replay exactly.
 - **SFTP sessions.** A server's sessions are pooled: a borrower takes
   an idle one, opens another below the limit, or waits for one to come
   back, and holds one at a time, so a handle stays on the session that
-  opened it. A server that refuses another session is shared by the
-  ones it took.
+  opened it. Observation reads use a pool capped at nine (eight readers and
+  the run's thread); the lease beats on a separate session, so an endpoint
+  opens at most ten. A server that refuses another session is shared by the
+  ones it took, and refusals clamp the pool to what the server took.
 - Follow-up: a budget shared by pairs on the same device.
+
+## Archive extension qualification
+
+The deletion-heavy LAN diagnostic archived 1,000 files among 10,000 tracked
+files in 95.9 seconds of apply time, out of 154.5 seconds overall. This uses
+separate synthetic local/NAS folders on a shared host and establishes that
+the serial archive phase is material; it is not a paired speedup claim.
+Three paired LAN samples completed with exactly 1,000 archives each: median
+apply time fell from 93.014 to 29.644 seconds, and total time from 148.290
+to 87.825 seconds. Overlap, copy and folder barriers, failure, cancellation,
+worker panic and native undo regressions pass. The extension is promoted.
+See [qualification results](../../perf/qualification-results.md) for raw
+evidence and conditions. Single-worker runs and two-SFTP pairs keep their existing
+serial behavior. Root-check cadence, commit size and durability stay fixed.

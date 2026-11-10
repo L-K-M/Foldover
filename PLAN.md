@@ -1,6 +1,6 @@
 # Foldover — Plan
 
-Status: P1 implementation, 2026-10-17. Evidence: [docs/research](docs/research/README.md)
+Status: P2–P5 implemented, P6 (beta to 1.0) in progress, 2026-11-10. Evidence: [docs/research](docs/research/README.md)
 (competitor review: [competitors.md](docs/research/competitors.md)).
 
 ## 1. Summary
@@ -97,9 +97,13 @@ which acts as the hub. AFP is not supported: macOS 27 removed the AFP client.
 
 Manual; file change (FSEvents, debounced 10–20 s, forced after 5 min of
 churn); target appears (drive mounted, share reachable, peer visible);
-interval; calendar schedule. Paused on expensive or constrained networks, and
-in Low Power Mode unless the user opts in. The agent holds a power assertion
-during runs.
+interval; calendar schedule. A person can pause one pair, which holds its
+automatic syncs until resumed; manual syncs still run. Paused on expensive
+or constrained networks, and in Low Power Mode unless the user opts in.
+Automatic syncs run gently unless the user chooses full speed: one at a
+time, at low priority, one file at a time on the Mac's own disks
+([ADR 0054](docs/adr/0054-gentle-automatic-syncs.md)). Manual syncs always
+run at full speed. The agent holds a power assertion during runs.
 
 ### 3.6 Safety defaults
 
@@ -129,7 +133,9 @@ during runs.
   - a root inside a cloud-managed folder (iCloud Drive, Desktop & Documents,
     a File Provider domain) gets a warning that another sync engine manages
     it;
-  - roots that overlap another pair's root are blocked;
+  - roots that overlap another pair's root are blocked, unless both pairs
+    only read them as Mirror or Backup sources, so one folder can be backed
+    up to several targets ([ADR 0047](docs/adr/0047-shared-one-way-sources.md));
   - a root inside the agent's state directory is blocked, but a root that
     holds it — such as the home folder — is allowed: the state subtree is
     left out of scans, refused to reads, writes and peers, and its own
@@ -448,11 +454,15 @@ Endpoint-layer rules, not filters:
 
 **Each endpoint root** gets one hidden `.foldover/` folder. Unlike GoodSync's
 `_gsdata_`, it holds no sync database:
-- **`archive/`:** retention-pruned; with several Macs on one share, each
-  prunes only what it archived.
+- **`archive/`:** one folder per run, named by its start time, pair and a
+  unique run ID;
+  each pair lists and prunes its own runs, and another pair's only at
+  twice the retention ([ADR 0047](docs/adr/0047-shared-one-way-sources.md)).
 - **`id`:** lets Foldover notice a different disk mounted at the same path.
 - **`lock`:** a lease with holder device, run ID and a heartbeat counter
-  ([ADR 0032](docs/adr/0032-root-leases.md)).
+  ([ADR 0032](docs/adr/0032-root-leases.md)). A Mirror or Backup takes its
+  source's lease only when it writes there
+  ([ADR 0047](docs/adr/0047-shared-one-way-sources.md)).
   - **Reclaim:** a lease is dead when its counter hasn't moved across two
     reads one TTL apart, timed on the reclaimer's own clock. Taking it over
     is an exclusive-create claim file, then the lock swap, so two Macs can't
@@ -564,7 +574,7 @@ FSEvents is a hint, never the truth.
 - Parallelism per device, not per pair: SSD 4–8 workers, HDD 1–2,
   network 4–8 connections with pipelined requests.
 - A file modified while being copied is detected (stat before and after) and
-  retried next cycle. Bandwidth cap per pair; global pause.
+  retried next cycle. Bandwidth cap per pair; per-pair and global pause.
 
 ### 4.10 Metadata and names
 

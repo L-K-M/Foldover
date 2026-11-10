@@ -12,7 +12,6 @@
 //! - `Durability::Full` is refused, not downgraded: namespace changes
 //!   have no protocol flush.
 
-mod readers;
 mod sessions;
 mod spelling;
 mod transfer;
@@ -21,26 +20,31 @@ pub(crate) use transfer::{copy, update_metadata};
 
 use sessions::{Borrowed, Connect, Sessions};
 
-use std::collections::{BTreeMap, HashMap};
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::io;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use foldover_net::sftp::{Attributes, FileKind, Handle, Session, SshTarget};
 use foldover_types::{
-    Digest, Durability, EndpointId, EntryKind, EntryVersion, MetadataPolicy, ScanControl, SftpRoot,
-    SyncPath,
+    Digest, Durability, Effort, EndpointId, EntryKind, EntryVersion, MetadataPolicy,
+    PathPrefixIndex, ScanControl, SftpRoot, SyncPath,
 };
 
 use crate::lease::{LEASE_LIMIT, LockFile};
 use crate::local::Archiving;
 use crate::local::archive::{
-    ARCHIVE_ROOT, Found, archive_time, archived_page, date_name, sibling_name,
+    ARCHIVE_ROOT, Found, Pruning, archive_time, archived_page, date_name, parse_run, sibling_name,
 };
 use crate::local::filter::{IGNORE_FILE, IGNORE_FILE_LIMIT, parse_ignore_file};
 use crate::local::version::{Observed, Payload, entry_version, metadata_version};
 use crate::local::{Fingerprint, TEMPORARY_PREFIX, child_path, protected, temporary};
+use crate::observation_cache::Cache;
+use crate::observation_reads::Reads;
 use crate::{
     ApplyError, ArchivedItem, ArchivedRun, Filter, ListedEntry, ListedKind, NodeKind, Observation,
     ObserveStep, ObservedEntry, RunScope, ScanError,
@@ -66,8 +70,11 @@ const SSH_PORT: u16 = 22;
 /// Copies a server takes at once when Foldover can open more sessions
 /// to it (PLAN.md §4.9).
 const PARALLEL_COPIES: NonZeroUsize = NonZeroUsize::new(4).expect("four is not zero");
-/// Sessions per server: one per copy worker, and the run's own thread.
-const SESSIONS: usize = PARALLEL_COPIES.get() + 1;
+/// Observation reads are independent of the other endpoint's copy limit.
+const PARALLEL_READS: NonZeroUsize = NonZeroUsize::new(8).expect("eight is not zero");
+/// Data workers plus a reserve for the run's own thread; leases use a
+/// separate session. Refusing servers still clamp the existing pool.
+const SESSIONS: usize = PARALLEL_READS.get() + 1;
 
 pub struct SftpEndpoint {
     sessions: Sessions,
@@ -89,8 +96,13 @@ pub struct SftpEndpoint {
     /// per respellable name. Updating a hit in place is exact because
     /// only the names matter; a mutation that cannot be tracked exactly
     /// marks the folder Dirty instead — a stale hit could write a path
-    /// in the wrong spelling, a refetch costs one `read_dir`.
-    listings: Mutex<HashMap<Vec<u8>, spelling::FolderView>>,
+    /// in the wrong spelling, a refetch costs one `read_dir`. Indexed
+    /// and bounded, so a wide folder costs one lookup, not one scan.
+    listings: Mutex<spelling::Listings>,
+    /// The priority the observation's readers take: `Full` until a run
+    /// says. Their number stays: they wait on the server, not the
+    /// processor (ADR 0054).
+    effort: Effort,
 }
 
 impl SftpEndpoint {
@@ -194,7 +206,13 @@ impl SftpEndpoint {
             server: None,
             root,
             listings: Mutex::default(),
+            effort: Effort::Full,
         })
+    }
+
+    /// Observe at `effort` from now on.
+    pub fn set_effort(&mut self, effort: Effort) {
+        self.effort = effort;
     }
 
     /// A session to use alone until it drops. Hold one at a time: a
@@ -259,10 +277,7 @@ impl SftpEndpoint {
 
     /// Read the root's listing: permissions refuse listings, not opening.
     pub fn probe_access(&self) -> Result<(), ScanError> {
-        self.session()
-            .read_dir(&self.root)
-            .map(|_| ())
-            .map_err(io_error)
+        self.session().probe_directory(&self.root).map_err(io_error)
     }
 
     /// One directory's entries for a quick change check; `None` once the
@@ -383,8 +398,8 @@ impl SftpEndpoint {
             .map_err(io_error)
     }
 
-    /// Write `file` unless it exists; whether it was written. A plain SFTP
-    /// rename refuses an existing target, which makes the create exclusive.
+    /// Write `file` unless it exists; whether it was written. The final path
+    /// is opened exclusively, independent of the server's rename semantics.
     pub(crate) fn create_lock_file(
         &self,
         file: LockFile,
@@ -392,28 +407,39 @@ impl SftpEndpoint {
     ) -> Result<bool, ApplyError> {
         let remote = self.remote(file.path());
         self.on_lease_session(|session| {
-            let temporary = self.stage_lock(session, file, content)?;
-            let Err(error) = self.renamed_on(session, &temporary, &remote) else {
-                return Ok(true);
+            self.make_directories_on(session, INTERNAL_DIRECTORY, PRIVATE_DIRECTORY)?;
+            let handle = match session.create_new(&remote, PRIVATE_FILE) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    if !Self::answered(&error) {
+                        self.forget_parent(&remote);
+                    }
+                    return match read_small_on(session, &remote, LEASE_LIMIT) {
+                        Ok(Some(_)) => {
+                            self.note_added(&remote);
+                            Ok(false)
+                        }
+                        Ok(None) => Err(error),
+                        Err(read_error) => Err(read_error),
+                    };
+                }
             };
-            let _ = self.removed_file_on(session, &temporary);
-            match read_small_on(session, &remote, LEASE_LIMIT)? {
-                Some(_) => Ok(false),
-                None => Err(error),
+            self.note_added(&remote);
+            let written = session.write_chunks(&handle, |sink| sink(content));
+            let closed = session.close(handle);
+            match written.and(closed) {
+                Ok(()) => match read_small_on(session, &remote, LEASE_LIMIT) {
+                    Ok(Some(written)) if written == content => Ok(true),
+                    // A reclaimer may have replaced an incomplete file while
+                    // this write was delayed. Never claim its record as ours.
+                    Ok(_) => Ok(false),
+                    Err(error) => Err(error),
+                },
+                // A conditional remove is unavailable. Leave a partial or
+                // uncertain record for TTL recovery: deleting by name could
+                // remove a successor that reclaimed it while this call hung.
+                Err(error) => Err(error),
             }
-        })
-        .map_err(|source| write_error(&lock_path(file), source))
-    }
-
-    pub(crate) fn replace_lock_file(
-        &self,
-        file: LockFile,
-        content: &[u8],
-    ) -> Result<(), ApplyError> {
-        let remote = self.remote(file.path());
-        self.on_lease_session(|session| {
-            let temporary = self.stage_lock(session, file, content)?;
-            self.rename_replacing_on(session, &temporary, &remote)
         })
         .map_err(|source| write_error(&lock_path(file), source))
     }
@@ -437,30 +463,6 @@ impl SftpEndpoint {
             .map_err(|source| write_error(&lock_path(LockFile::Lock), source))
     }
 
-    /// `content` in a fresh temporary beside `file`, over `session`.
-    fn stage_lock(
-        &self,
-        session: &mut Session,
-        file: LockFile,
-        content: &[u8],
-    ) -> io::Result<Vec<u8>> {
-        self.make_directories_on(session, INTERNAL_DIRECTORY, PRIVATE_DIRECTORY)?;
-        let temporary = self.beside(file.path());
-        match write_new(session, temporary.clone(), PRIVATE_FILE, |sink| {
-            sink(content)
-        }) {
-            Ok(written) => {
-                self.note_added(&written);
-                Ok(written)
-            }
-            // A failed write may have left a partial file behind.
-            Err(error) => {
-                self.forget_parent(&temporary);
-                Err(error)
-            }
-        }
-    }
-
     pub fn ignore_rules(&self) -> Result<Vec<String>, ScanError> {
         match self.read_small(IGNORE_FILE, IGNORE_FILE_LIMIT as usize)? {
             Some(content) => parse_ignore_file(content),
@@ -480,32 +482,206 @@ impl SftpEndpoint {
 
     /// Reobserve contents and link targets: SFTP stat cannot prove they
     /// stayed unchanged, even when size and modification time match.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn observe_owned(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: foldover_types::PathMap<ObservedEntry>,
+        base: std::sync::Arc<foldover_types::PathMap<foldover_types::BaselineEntry>>,
+        side: foldover_types::Side,
+        hints: crate::ObservationHints,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+    ) -> Result<Observation, ScanError> {
+        let (observation, previous) =
+            Observation::recycling_with_hints(previous, base, side, hints);
+        self.observe_cached(policy, filter, &previous, observation, control, progress)
+    }
+
     pub fn observe_from(
         &self,
         policy: MetadataPolicy,
         filter: &Filter,
-        previous: &BTreeMap<SyncPath, ObservedEntry>,
+        previous: &impl crate::PreviousObservation,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<Observation, ScanError> {
         self.observe_reporting(policy, filter, previous, control, &mut |_| {})
     }
 
     /// `observe_from`, reporting each entry as it is found and again once
-    /// its version is known.
+    /// its version is known. The walk lists one directory at a time and
+    /// streams its file jobs to one bounded reader pool. Each folder's
+    /// listing is released before the walk reaches the next. A single wide
+    /// flat folder is still materialized by `Session::read_dir`, which
+    /// returns the whole folder as one `Vec`; only the walk's own inventory
+    /// is bounded, not the server's per-folder reply.
     pub fn observe_reporting(
         &self,
         policy: MetadataPolicy,
         filter: &Filter,
-        previous: &BTreeMap<SyncPath, ObservedEntry>,
+        previous: &impl crate::PreviousObservation,
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<Observation, ScanError> {
-        let mut observation = Observation::default();
-        // Listing the whole tree first, as local roots do, makes checked
-        // over listed a fair measure of how far the comparison is.
-        let mut listed = Vec::new();
-        let mut pending: Vec<Option<SyncPath>> = vec![None];
-        while let Some(directory) = pending.pop() {
+        self.observe_cached(
+            policy,
+            filter,
+            &Cache::Borrowed(previous),
+            Observation::default(),
+            control,
+            progress,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe_cached(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: &Cache<'_>,
+        observation: Observation,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+    ) -> Result<Observation, ScanError> {
+        let workers = match self.connect {
+            Some(_) => PARALLEL_READS,
+            None => NonZeroUsize::MIN,
+        };
+        if workers == NonZeroUsize::MIN {
+            self.observe_reporting_serial(policy, filter, previous, observation, control, progress)
+        } else {
+            self.observe_reporting_overlapped(
+                policy,
+                filter,
+                previous,
+                observation,
+                control,
+                progress,
+                workers,
+            )
+        }
+    }
+
+    /// The walk and its reads on this thread, one entry at a time.
+    fn observe_reporting_serial(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: &Cache<'_>,
+        mut observation: Observation,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+    ) -> Result<Observation, ScanError> {
+        let mut unavailable = PathPrefixIndex::default();
+        self.walk_observation(
+            policy,
+            filter,
+            previous,
+            &mut observation,
+            &mut unavailable,
+            control,
+            progress,
+            |path, attributes, observation, unavailable, progress, mut control| {
+                let entry = self.observe_entry(&path, &attributes, previous, policy, &mut control);
+                record(observation, unavailable, &path, entry)?;
+                progress(ObserveStep::Checked);
+                Ok(())
+            },
+        )?;
+        if control() == ScanControl::Cancel {
+            return Err(ScanError::Cancelled);
+        }
+        Self::finish_observation(observation, unavailable)
+    }
+
+    /// The walk on this thread, the reads on one bounded pool scoped to the
+    /// whole walk. This thread alone asks `control`, reports `progress`, and
+    /// mutates the observation and the unavailable index; a worker only
+    /// captures one entry's verified version and checks the shared stop.
+    #[allow(clippy::too_many_arguments)] // Mirrors the serial walk plus the pool its jobs use.
+    fn observe_reporting_overlapped(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: &Cache<'_>,
+        mut observation: Observation,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+        workers: NonZeroUsize,
+    ) -> Result<Observation, ScanError> {
+        let mut unavailable = PathPrefixIndex::default();
+        let stop = AtomicBool::new(false);
+        let read = |(path, attributes): &(SyncPath, Attributes),
+                    asked: &dyn Fn() -> ScanControl| {
+            self.observe_entry(path, attributes, previous, policy, &mut || asked())
+        };
+        let (walked, finish_reads) = thread::scope(|threads| {
+            let mut pending = Reads::start(threads, workers, self.effort, &stop, &read);
+            let walked = self.walk_observation(
+                policy,
+                filter,
+                previous,
+                &mut observation,
+                &mut unavailable,
+                control,
+                progress,
+                |path, attributes, observation, unavailable, progress, mut control| {
+                    pending.submit(
+                        (path, attributes),
+                        &mut |(path, _), entry| {
+                            record(observation, unavailable, path, entry)?;
+                            progress(ObserveStep::Checked);
+                            Ok(())
+                        },
+                        &mut control,
+                    )
+                },
+            );
+            if walked.is_err() {
+                // A producer failure is terminal even when a caller's
+                // cancellation callback returns Continue on its next call.
+                stop.store(true, Ordering::Relaxed);
+            }
+            let finish_reads = pending.finish(
+                &mut |(path, _), entry| {
+                    record(&mut observation, &mut unavailable, path, entry)?;
+                    progress(ObserveStep::Checked);
+                    Ok(())
+                },
+                control,
+            );
+            (walked, finish_reads)
+        });
+        walked?;
+        finish_reads?;
+        Self::finish_observation(observation, unavailable)
+    }
+
+    /// Walk the tree, streaming one listing batch at a time. `submit`
+    /// verifies a listed file on this thread or on the reader pool; a
+    /// directory settles here, needing no server request.
+    #[allow(clippy::too_many_arguments)] // One walk, one handoff, one settle.
+    fn walk_observation(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: &Cache<'_>,
+        observation: &mut Observation,
+        unavailable: &mut PathPrefixIndex,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+        mut submit: impl FnMut(
+            SyncPath,
+            Attributes,
+            &mut Observation,
+            &mut PathPrefixIndex,
+            &mut dyn FnMut(ObserveStep),
+            &mut dyn FnMut() -> ScanControl,
+        ) -> Result<(), ScanError>,
+    ) -> Result<(), ScanError> {
+        let mut directories: Vec<Option<SyncPath>> = vec![None];
+        while let Some(directory) = directories.pop() {
             if control() == ScanControl::Cancel {
                 return Err(ScanError::Cancelled);
             }
@@ -513,139 +689,89 @@ impl SftpEndpoint {
                 None => self.root.clone(),
                 Some(path) => self.remote(path.as_bytes()),
             };
-            let listing = self.session_unless_cancelled(control)?.read_dir(&remote);
-            let entries = match listing {
-                Ok(entries) => entries,
-                Err(source) => {
-                    observation.skip_error(at(directory.as_ref(), source))?;
-                    continue;
+            // A directory's whole listing is one batch. The session is
+            // released before any queue handoff, so a full queue never
+            // waits on a held session. A wide flat folder is still
+            // materialized here by `Session::read_dir`, which returns its
+            // entries as one `Vec`; only the walk's own inventory is
+            // bounded, not the server's per-folder reply.
+            let entries = {
+                let mut session = self.session_unless_cancelled(control)?;
+                match session.read_dir(&remote) {
+                    Ok(entries) => entries,
+                    Err(source) => {
+                        let issue = at(directory.as_ref(), source).into_issue()?;
+                        unavailable.insert(&issue.path);
+                        observation.skip_issue(issue);
+                        continue;
+                    }
                 }
             };
             for (name, attributes) in entries {
-                let path = child_path(directory.as_ref(), &name)?;
-                if protected(&name) {
-                    if temporary(&name) {
-                        observation.leftovers.push(path);
-                    }
-                    continue;
-                }
-                let kind = attributes.kind();
-                if filter.excludes(&path, kind == FileKind::Directory) {
-                    continue;
-                }
-                // Size and age exclusions come before sidecar
-                // classification, as in local roots.
-                if kind == FileKind::File {
-                    if filter.too_large(attributes.size.unwrap_or(0)) {
-                        observation.oversized.push(path);
-                        continue;
-                    }
-                    if filter.is_old(modified(&attributes)) {
-                        observation.old.push(path.clone());
-                    }
-                }
-                if name.starts_with(b"._") {
-                    observation.skip_error(ScanError::UnclassifiedSidecar(path))?;
-                    continue;
-                }
-                if kind == FileKind::Directory {
-                    pending.push(Some(path.clone()));
-                }
-                progress(ObserveStep::Listed);
-                listed.push((path, attributes));
-            }
-        }
-        // Folders read nothing, and one that fails rules out what is below
-        // it, so they settle before any read starts.
-        let mut reads = Vec::new();
-        for (path, attributes) in listed {
-            if attributes.kind() != FileKind::Directory {
-                reads.push((path, attributes));
-                continue;
-            }
-            if control() == ScanControl::Cancel {
-                return Err(ScanError::Cancelled);
-            }
-            if !unavailable(&observation, &path) {
-                let entry = self.observe_entry(&path, &attributes, previous, policy, control);
-                record(&mut observation, &path, entry)?;
-            }
-            progress(ObserveStep::Checked);
-        }
-        reads.retain(|(path, _)| {
-            let skipped = unavailable(&observation, path);
-            if skipped {
-                progress(ObserveStep::Checked);
-            }
-            !skipped
-        });
-        self.observe_reads(
-            &reads,
-            previous,
-            policy,
-            &mut observation,
-            control,
-            progress,
-        )?;
-        let unavailable = &observation.unavailable;
-        observation.entries.retain(|path, _| {
-            !unavailable
-                .iter()
-                .any(|root| root == path || root.is_ancestor_of(path))
-        });
-        Ok(observation)
-    }
-
-    /// Observe `reads`, on as many sessions as the server takes. One at a
-    /// time on the calling thread when only one can run, in listed order.
-    fn observe_reads(
-        &self,
-        reads: &[(SyncPath, Attributes)],
-        previous: &BTreeMap<SyncPath, ObservedEntry>,
-        policy: MetadataPolicy,
-        observation: &mut Observation,
-        control: &mut impl FnMut() -> ScanControl,
-        progress: &mut impl FnMut(ObserveStep),
-    ) -> Result<(), ScanError> {
-        let workers = self.workers();
-        if workers == NonZeroUsize::MIN || reads.len() < 2 {
-            for (path, attributes) in reads {
                 if control() == ScanControl::Cancel {
                     return Err(ScanError::Cancelled);
                 }
-                let entry = self.observe_entry(path, attributes, previous, policy, control);
-                record(observation, path, entry)?;
-                progress(ObserveStep::Checked);
-            }
-        } else {
-            readers::read_each(
-                reads,
-                workers,
-                |(path, attributes), asked| {
-                    self.observe_entry(path, attributes, previous, policy, &mut || asked())
-                },
-                |(path, _), entry| {
-                    record(observation, path, entry)?;
+                let Some((path, attributes)) = classify_listing_entry(
+                    directory.as_ref(),
+                    &name,
+                    attributes,
+                    filter,
+                    previous,
+                    observation,
+                )?
+                else {
+                    continue;
+                };
+                progress(ObserveStep::Listed);
+                // A folder that failed after its children were listed
+                // covers them too; skip their reads but keep the count.
+                if unavailable.contains(&path) {
                     progress(ObserveStep::Checked);
-                    Ok(())
-                },
-                control,
-            )?;
+                    continue;
+                }
+                if attributes.kind() == FileKind::Directory {
+                    if control() == ScanControl::Cancel {
+                        return Err(ScanError::Cancelled);
+                    }
+                    let entry = self.observe_entry(&path, &attributes, previous, policy, control);
+                    record(observation, unavailable, &path, entry)?;
+                    progress(ObserveStep::Checked);
+                    directories.push(Some(path));
+                } else {
+                    submit(
+                        path,
+                        attributes,
+                        &mut *observation,
+                        &mut *unavailable,
+                        &mut *progress,
+                        &mut *control,
+                    )?;
+                }
+            }
         }
+        Ok(())
+    }
 
-        // Reads land in any order, and folders come first; what a run
-        // reports should depend on neither, nor on how many sessions read.
+    /// Freeze the recorded rows, drop what a late failure covers, and sort
+    /// the issues once: reads land in any order and folders settle among
+    /// them, so what a run reports depends on neither.
+    fn finish_observation(
+        mut observation: Observation,
+        unavailable: PathPrefixIndex,
+    ) -> Result<Observation, ScanError> {
+        observation.finish_entries();
+        observation.retain_entries(|path, _| !unavailable.contains(path));
         observation
             .issues
             .sort_by(|left, right| left.path.cmp(&right.path));
-        Ok(())
+        Ok(observation)
     }
 
     fn observe_entry(
         &self,
         path: &SyncPath,
         attributes: &Attributes,
-        previous: &BTreeMap<SyncPath, ObservedEntry>,
+        previous: &Cache<'_>,
         policy: MetadataPolicy,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<ObservedEntry, ScanError> {
@@ -658,16 +784,16 @@ impl SftpEndpoint {
         // the snapshot has nothing to rewrite for this entry. The older
         // time misleads nobody, since SFTP versions are never reused unread.
         if let Some(known) = previous.get(path)
-            && known.version == version
-            && known.fingerprint.same_stat(&key, size)
+            && known.version() == version
+            && known.fingerprint().same_stat(&key, size)
         {
-            return Ok(known.clone());
+            return Ok(known.as_ref().clone());
         }
 
-        Ok(ObservedEntry {
+        Ok(ObservedEntry::new(
             version,
-            fingerprint: Fingerprint::from_key(key, size, observed_at),
-        })
+            Fingerprint::from_key(key, size, observed_at),
+        ))
     }
 
     /// An entry's version from its attributes, reading its data or link.
@@ -680,15 +806,36 @@ impl SftpEndpoint {
     ) -> Result<EntryVersion, ScanError> {
         let observed = observed(attributes)?;
         match attributes.kind() {
+            // These versions need no server request, so directory-heavy
+            // scans should not spend a pooled session on them.
+            FileKind::Directory => Ok(entry_version(Payload::Directory, &observed, policy)),
+            FileKind::Other => Err(ScanError::UnsupportedEntry(path.clone())),
+            FileKind::File | FileKind::Symlink => {
+                let mut session = self.session_unless_cancelled(control)?;
+                self.version_on(&mut session, path, attributes, policy, control)
+            }
+        }
+    }
+
+    fn version_on(
+        &self,
+        session: &mut Session,
+        path: &SyncPath,
+        attributes: &Attributes,
+        policy: MetadataPolicy,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<EntryVersion, ScanError> {
+        let observed = observed(attributes)?;
+        match attributes.kind() {
             FileKind::File => {
-                let digest = self.read_file(path, attributes, control, &mut |_| Ok(()))?;
+                let digest =
+                    self.read_range_on(session, path, attributes, 0, control, &mut |_| Ok(()))?;
                 Ok(entry_version(Payload::File(digest), &observed, policy))
             }
             FileKind::Directory => Ok(entry_version(Payload::Directory, &observed, policy)),
             FileKind::Symlink => {
-                let mut session = self.session_unless_cancelled(control)?;
                 let target = self
-                    .on_stored_with(&mut session, path.as_bytes(), |session, remote| {
+                    .on_stored_with(session, path.as_bytes(), |session, remote| {
                         session.read_link(remote)
                     })
                     .map_err(|source| at(Some(path), source))?;
@@ -700,6 +847,7 @@ impl SftpEndpoint {
 
     /// Push a file's data to `sink` and return its digest. The file must
     /// keep `expected`'s stat throughout.
+    #[cfg(test)]
     pub(crate) fn read_file(
         &self,
         path: &SyncPath,
@@ -735,8 +883,23 @@ impl SftpEndpoint {
     ) -> Result<Digest, ScanError> {
         // The handle is valid only on the session that opened it.
         let mut session = self.session_unless_cancelled(control)?;
+        self.read_range_on(&mut session, path, expected, from, control, sink)
+    }
+
+    fn read_range_on(
+        &self,
+        session: &mut Session,
+        path: &SyncPath,
+        expected: &Attributes,
+        from: u64,
+        control: &mut impl FnMut() -> ScanControl,
+        sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    ) -> Result<Digest, ScanError> {
+        if expected.size.is_some_and(|size| from > size) {
+            return Err(ScanError::Changed(Some(path.clone())));
+        }
         let (handle, remote) = self
-            .on_stored_with(&mut session, path.as_bytes(), |session, remote| {
+            .on_stored_with(session, path.as_bytes(), |session, remote| {
                 session
                     .open_read(remote)
                     .map(|handle| (handle, remote.to_vec()))
@@ -746,7 +909,7 @@ impl SftpEndpoint {
         let mut taken = from;
         let mut cancelled = false;
         let mut overrun = false;
-        let read = session.read_from(&handle, from, &mut |chunk| {
+        let mut consume = |chunk: &[u8]| {
             if control() == ScanControl::Cancel {
                 cancelled = true;
                 return Err(io::Error::other("cancelled"));
@@ -760,8 +923,21 @@ impl SftpEndpoint {
             }
             hasher.update(chunk);
             sink(chunk)
-        });
-        let _ = session.close(handle);
+        };
+        let read = match expected.size {
+            Some(size) => session.read_from_bounded(&handle, from, size - from, &mut consume),
+            None => session.read_from(&handle, from, &mut consume),
+        };
+        let complete = read.is_ok()
+            && !cancelled
+            && !overrun
+            && expected.size.is_none_or(|size| taken == size);
+        let after = if complete {
+            Some(session.close_read_and_lstat(handle, &remote))
+        } else {
+            let _ = session.close(handle);
+            None
+        };
         if cancelled {
             return Err(ScanError::Cancelled);
         }
@@ -773,8 +949,8 @@ impl SftpEndpoint {
         if expected.size.is_some_and(|size| taken != size) {
             return Err(ScanError::Changed(Some(path.clone())));
         }
-        let after = session
-            .lstat(&remote)
+        let after = after
+            .expect("a complete read closes and re-stats its source")
             .map_err(|source| at(Some(path), source))?;
         if stat_key(&after) != stat_key(expected) {
             return Err(ScanError::Changed(Some(path.clone())));
@@ -787,56 +963,68 @@ impl SftpEndpoint {
         Ok(self.lookup(path)?.map(|(_, attributes)| attributes))
     }
 
-    /// Prove `path` still holds `expected` and return its attributes.
-    pub(crate) fn verified(
+    fn attributes_on(
         &self,
+        session: &mut Session,
         path: &SyncPath,
-        expected: &ObservedEntry,
-        policy: MetadataPolicy,
-        control: &mut impl FnMut() -> ScanControl,
-    ) -> Result<Attributes, ApplyError> {
-        self.verified_at(path, expected, policy, control)
-            .map(|(_, attributes)| attributes)
+    ) -> Result<Option<Attributes>, ScanError> {
+        Ok(self
+            .lookup_on(session, path)?
+            .map(|(_, attributes)| attributes))
     }
 
-    /// `verified`, with where the entry is stored.
-    fn verified_at(
+    /// Prove `path` still holds `expected`, returning where it is stored
+    /// and its attributes without borrowing another session.
+    fn verified_at_on(
         &self,
+        session: &mut Session,
         path: &SyncPath,
         expected: &ObservedEntry,
         policy: MetadataPolicy,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<(Vec<u8>, Attributes), ApplyError> {
         let changed = || ApplyError::DestinationChanged(path.clone());
-        let (stored, attributes) = self.lookup(path)?.ok_or_else(changed)?;
-        if self.version(path, &attributes, policy, control)? != expected.version {
+        let (stored, attributes) = self.lookup_on(session, path)?.ok_or_else(changed)?;
+        if self.version_on(session, path, &attributes, policy, control)? != expected.version() {
             return Err(changed());
         }
         Ok((stored, attributes))
     }
 
-    pub(crate) fn read_link(&self, path: &SyncPath) -> Result<Vec<u8>, ScanError> {
-        self.on_stored(path.as_bytes(), |remote| self.session().read_link(remote))
-            .map_err(|source| at(Some(path), source))
+    pub(crate) fn read_link(
+        &self,
+        path: &SyncPath,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<Vec<u8>, ScanError> {
+        let mut session = self.session_unless_cancelled(control)?;
+        self.read_link_on(&mut session, path)
+    }
+
+    fn read_link_on(&self, session: &mut Session, path: &SyncPath) -> Result<Vec<u8>, ScanError> {
+        self.on_stored_with(session, path.as_bytes(), |session, remote| {
+            session.read_link(remote)
+        })
+        .map_err(|source| at(Some(path), source))
     }
 
     /// The version stored at `path` now, reading data only for links and
     /// directories; files take `content` from the copy just made.
-    pub(crate) fn placed_version(
+    fn placed_version_on(
         &self,
+        session: &mut Session,
         path: &SyncPath,
         content: Option<Digest>,
         policy: MetadataPolicy,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<EntryVersion, ApplyError> {
         let attributes = self
-            .attributes(path)?
+            .attributes_on(session, path)?
             .ok_or_else(|| ApplyError::DestinationChanged(path.clone()))?;
         Ok(match (attributes.kind(), content) {
             (FileKind::File, Some(digest)) => {
                 entry_version(Payload::File(digest), &observed(&attributes)?, policy)
             }
-            _ => self.version(path, &attributes, policy, control)?,
+            _ => self.version_on(session, path, &attributes, policy, control)?,
         })
     }
 
@@ -844,6 +1032,17 @@ impl SftpEndpoint {
     /// root) and return the temporary's server path.
     pub(crate) fn upload(
         &self,
+        path: &[u8],
+        permissions: u32,
+        durability: Durability,
+        produce: impl FnOnce(foldover_net::sftp::Chunks<'_>) -> io::Result<()>,
+    ) -> io::Result<Vec<u8>> {
+        self.upload_on(&mut self.session(), path, permissions, durability, produce)
+    }
+
+    fn upload_on(
+        &self,
+        session: &mut Session,
         path: &[u8],
         permissions: u32,
         durability: Durability,
@@ -857,9 +1056,8 @@ impl SftpEndpoint {
                 "SFTP cannot guarantee full durability",
             ));
         }
-        let temporary = self.beside(path);
-        let mut session = self.session();
-        match write_new(&mut session, temporary.clone(), permissions, produce) {
+        let temporary = self.beside_on(session, path);
+        match write_new(session, temporary.clone(), permissions, produce) {
             // A written temporary joined its parent's listing.
             Ok(written) => {
                 self.note_added(&written);
@@ -875,32 +1073,54 @@ impl SftpEndpoint {
 
     /// The version a staged file will have, from its attributes and the
     /// digest of the data written.
-    pub(crate) fn staged_version(
+    fn staged_version_on(
         &self,
+        session: &mut Session,
         remote: &[u8],
         digest: Digest,
         policy: MetadataPolicy,
     ) -> io::Result<EntryVersion> {
-        let attributes = self.session().lstat(remote)?;
+        let attributes = session.lstat(remote)?;
         let observed =
             observed(&attributes).map_err(|error| io::Error::other(error.to_string()))?;
         Ok(entry_version(Payload::File(digest), &observed, policy))
     }
 
-    /// Remove an unplaced temporary; a leftover only costs space.
-    pub(crate) fn discard(&self, remote: &[u8]) {
-        let _ = self.removed_file(remote);
+    fn set_file_metadata_on(
+        &self,
+        session: &mut Session,
+        remote: &[u8],
+        digest: Digest,
+        metadata: crate::ForeignMetadata,
+        policy: MetadataPolicy,
+    ) -> io::Result<EntryVersion> {
+        match self.set_metadata_on(session, remote, EntryKind::File, metadata, policy)? {
+            Some(attributes) => {
+                let observed =
+                    observed(&attributes).map_err(|error| io::Error::other(error.to_string()))?;
+                Ok(entry_version(Payload::File(digest), &observed, policy))
+            }
+            // A successful SETSTAT contains no attributes. Read the final
+            // stored state instead of assuming the server kept our values.
+            None => self.staged_version_on(session, remote, digest, policy),
+        }
     }
 
-    /// Give a staged or existing entry the synced part of `metadata`.
-    pub(crate) fn set_metadata(
+    /// Remove an unplaced temporary; a leftover only costs space.
+    fn discard_on(&self, session: &mut Session, remote: &[u8]) {
+        let _ = self.removed_file_on(session, remote);
+    }
+
+    /// Give an entry the synced part of `metadata`. Return the authoritative
+    /// attributes only when nothing changed after their read.
+    fn set_metadata_on(
         &self,
+        session: &mut Session,
         remote: &[u8],
         kind: EntryKind,
         metadata: crate::ForeignMetadata,
         policy: MetadataPolicy,
-    ) -> io::Result<()> {
-        let mut session = self.session();
+    ) -> io::Result<Option<Attributes>> {
         let current = session.lstat(remote)?;
         let mode = current.permissions.unwrap_or(0) & PERMISSION_BITS;
         let wanted = match policy.permissions() {
@@ -921,7 +1141,7 @@ impl SftpEndpoint {
                 (seconds, seconds)
             });
         if wanted == mode && times.is_none() {
-            return Ok(());
+            return Ok(Some(current));
         }
         session.set_attributes(
             remote,
@@ -930,20 +1150,26 @@ impl SftpEndpoint {
                 times,
                 ..Attributes::default()
             },
-        )
+        )?;
+        Ok(None)
     }
 
     /// Create a folder at `path` with `permissions`, named composed.
-    pub(crate) fn make_directory(&self, path: &SyncPath, permissions: u32) -> io::Result<()> {
-        let remote = self.fresh(path.as_bytes());
-        let made = self.session().make_directory(&remote, permissions);
+    fn make_directory_on(
+        &self,
+        session: &mut Session,
+        path: &SyncPath,
+        permissions: u32,
+    ) -> io::Result<()> {
+        let remote = self.fresh_on(session, path.as_bytes());
+        let made = session.make_directory(&remote, permissions);
         match &made {
             Ok(()) => self.note_added(&remote),
             Err(error) => {
                 // SFTP reports an existing folder as a generic failure,
                 // so a refusal is only definitive once lstat says the
                 // folder really is absent.
-                match self.session().lstat(&remote) {
+                match session.lstat(&remote) {
                     // It is there after all; its spelling belongs in
                     // the view now.
                     Ok(existing) if existing.kind() == FileKind::Directory => {
@@ -959,9 +1185,14 @@ impl SftpEndpoint {
     }
 
     /// Create a link beside `path` and return its server path.
-    pub(crate) fn stage_link(&self, path: &[u8], target: &[u8]) -> io::Result<Vec<u8>> {
-        let temporary = self.beside(path);
-        let made = self.session().symlink(target, &temporary);
+    fn stage_link_on(
+        &self,
+        session: &mut Session,
+        path: &[u8],
+        target: &[u8],
+    ) -> io::Result<Vec<u8>> {
+        let temporary = self.beside_on(session, path);
+        let made = session.symlink(target, &temporary);
         match &made {
             Ok(()) => self.note_added(&temporary),
             // A lost response may mean the link exists after all; a
@@ -977,8 +1208,9 @@ impl SftpEndpoint {
     /// names the entry composed beside the temporary; a replacement first
     /// sets the current entry aside and takes its spelling, as its folder
     /// lists it.
-    pub(crate) fn place(
+    fn place_on(
         &self,
+        session: &mut Session,
         temporary: &[u8],
         path: &SyncPath,
         replacing: Option<&Attributes>,
@@ -986,16 +1218,16 @@ impl SftpEndpoint {
     ) -> Result<(), ApplyError> {
         let target = match replacing {
             Some(expected) => {
-                let current = self.lookup(path)?;
+                let current = self.lookup_on(session, path)?;
                 let Some((stored, _)) =
                     current.filter(|(_, current)| stat_key(current) == stat_key(expected))
                 else {
-                    let _ = self.removed_file(temporary);
+                    let _ = self.removed_file_on(session, temporary);
                     return Err(ApplyError::DestinationChanged(path.clone()));
                 };
-                let target = self.listed(&stored);
-                if let Err(error) = self.set_aside(&stored, path, run) {
-                    let _ = self.removed_file(temporary);
+                let target = self.listed_on(session, &stored);
+                if let Err(error) = self.set_aside_on(session, &stored, path, run) {
+                    let _ = self.removed_file_on(session, temporary);
                     return Err(error);
                 }
                 target
@@ -1009,10 +1241,10 @@ impl SftpEndpoint {
                 [folder, b"/".as_slice(), &spelling::compose(name)].concat()
             }
         };
-        let placed = self.renamed(temporary, &target);
+        let placed = self.renamed_on(session, temporary, &target);
         if let Err(source) = placed {
-            let _ = self.removed_file(temporary);
-            return Err(match self.attributes(path) {
+            let _ = self.removed_file_on(session, temporary);
+            return Err(match self.attributes_on(session, path) {
                 Ok(Some(_)) => ApplyError::DestinationChanged(path.clone()),
                 _ => write_error(path, source),
             });
@@ -1025,18 +1257,24 @@ impl SftpEndpoint {
     /// files and links come here: `remove` takes folders when empty, and
     /// `place` never replaces a folder, since a file meeting one is a type
     /// conflict.
-    fn set_aside(&self, stored: &[u8], path: &SyncPath, run: &RunScope) -> Result<(), ApplyError> {
+    fn set_aside_on(
+        &self,
+        session: &mut Session,
+        stored: &[u8],
+        path: &SyncPath,
+        run: &RunScope,
+    ) -> Result<(), ApplyError> {
         if run.archiving() == Archiving::Off {
             return self
-                .removed_file(stored)
+                .removed_file_on(session, stored)
                 .map_err(|source| write_error(path, source));
         }
         let archived = run.archive_path(path)?;
         if let Some(parent) = archived.parent() {
-            self.make_directories(parent.as_bytes(), PRIVATE_DIRECTORY)
+            self.make_directories_on(session, parent.as_bytes(), PRIVATE_DIRECTORY)
                 .map_err(|source| write_error(path, source))?;
         }
-        self.renamed(stored, &self.remote(archived.as_bytes()))
+        self.renamed_on(session, stored, &self.remote(archived.as_bytes()))
             .map_err(|source| write_error(path, source))
     }
 
@@ -1052,8 +1290,15 @@ impl SftpEndpoint {
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<(), ApplyError> {
         check_durability(run.options().durability(), from)?;
+        let mut session = self.session_unless_cancelled(control)?;
         let (stored, attributes) = self
-            .verified_at(from, current, run.options().metadata(), control)
+            .verified_at_on(
+                &mut session,
+                from,
+                current,
+                run.options().metadata(),
+                control,
+            )
             .map_err(|error| match error {
                 ApplyError::Scan(ScanError::Changed(_)) => {
                     ApplyError::DestinationChanged(from.clone())
@@ -1066,25 +1311,26 @@ impl SftpEndpoint {
         // Missing folders come composed, inside those that remain in the
         // spelling they have.
         if let Some(parent) = to.parent()
-            && self.attributes(&parent)?.is_none()
+            && self.attributes_on(&mut session, &parent)?.is_none()
         {
-            let folders = self.creatable(parent.as_bytes());
-            self.make_directories(&folders, DEFAULT_DIRECTORY)
+            let folders = self.creatable_on(&mut session, parent.as_bytes());
+            self.make_directories_on(&mut session, &folders, DEFAULT_DIRECTORY)
                 .map_err(|source| write_error(to, source))?;
         }
         // Making folders took round trips: the entry must still be the one
         // verified, or the move would take a replacement.
         let still = self
-            .lookup(from)?
+            .lookup_on(&mut session, from)?
             .is_some_and(|(_, now)| stat_key(&now) == stat_key(&attributes));
         if !still {
             return Err(ApplyError::DestinationChanged(from.clone()));
         }
-        // Found before the session is held: finding it may use it.
-        let target = self.fresh(to.as_bytes());
-        let moved = self.renamed(&stored, &target);
+        // Resolve the target spelling on the same session that verified
+        // the source, so the move never waits for another pooled guard.
+        let target = self.fresh_on(&mut session, to.as_bytes());
+        let moved = self.renamed_on(&mut session, &stored, &target);
         if let Err(source) = moved {
-            return Err(match self.attributes(to) {
+            return Err(match self.attributes_on(&mut session, to) {
                 Ok(Some(_)) => ApplyError::DestinationChanged(to.clone()),
                 _ => write_error(from, source),
             });
@@ -1102,8 +1348,15 @@ impl SftpEndpoint {
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<(), ApplyError> {
         check_durability(run.options().durability(), path)?;
+        let mut session = self.session_unless_cancelled(control)?;
         let (remote, attributes) = self
-            .verified_at(path, current, run.options().metadata(), control)
+            .verified_at_on(
+                &mut session,
+                path,
+                current,
+                run.options().metadata(),
+                control,
+            )
             .map_err(|error| match error {
                 ApplyError::Scan(ScanError::Changed(_)) => {
                     ApplyError::DestinationChanged(path.clone())
@@ -1111,9 +1364,8 @@ impl SftpEndpoint {
                 error => error,
             })?;
         if attributes.kind() != FileKind::Directory {
-            return self.set_aside(&remote, path, run);
+            return self.set_aside_on(&mut session, &remote, path, run);
         }
-        let mut session = self.session();
         match session.remove_directory(&remote) {
             Ok(()) => {
                 self.note_gone(&remote);
@@ -1134,22 +1386,35 @@ impl SftpEndpoint {
 
     /// Archive a temporary an interrupted write left behind, or delete it
     /// where the run keeps no archive.
-    pub fn recover_leftover(&self, leftover: &SyncPath, run: &RunScope) -> Result<(), ApplyError> {
+    pub fn recover_leftover(
+        &self,
+        leftover: &SyncPath,
+        run: &RunScope,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), ApplyError> {
         check_durability(run.options().durability(), leftover)?;
-        self.set_aside(&self.remote(leftover.as_bytes()), leftover, run)
+        let mut session = self.session_unless_cancelled(control)?;
+        self.set_aside_on(
+            &mut session,
+            &self.remote(leftover.as_bytes()),
+            leftover,
+            run,
+        )
     }
 
     /// Give `path` new synced metadata; the content stays.
-    pub(crate) fn update_metadata(
+    fn update_metadata_on(
         &self,
+        session: &mut Session,
         path: &SyncPath,
         kind: EntryKind,
         metadata: crate::ForeignMetadata,
         policy: MetadataPolicy,
     ) -> Result<(), ApplyError> {
-        self.on_stored(path.as_bytes(), |remote| {
-            self.set_metadata(remote, kind, metadata, policy)
+        self.on_stored_with(session, path.as_bytes(), |session, remote| {
+            self.set_metadata_on(session, remote, kind, metadata, policy)
         })
+        .map(|_| ())
         .map_err(|source| write_error(path, source))
     }
 
@@ -1163,53 +1428,83 @@ impl SftpEndpoint {
 
     /// The version of an entry whose content is unchanged, from its
     /// current attributes.
-    pub(crate) fn metadata_version(
+    fn metadata_version_on(
         &self,
+        session: &mut Session,
         path: &SyncPath,
         content: foldover_types::EntryContent,
         policy: MetadataPolicy,
     ) -> Result<EntryVersion, ApplyError> {
         let attributes = self
-            .attributes(path)?
+            .attributes_on(session, path)?
             .ok_or_else(|| ApplyError::DestinationChanged(path.clone()))?;
         Ok(metadata_version(content, &observed(&attributes)?, policy))
     }
 
-    /// Permanently delete archived runs older than `retention`.
-    pub fn prune_archive(&self, retention: Duration, now: SystemTime) -> Result<u64, ApplyError> {
+    /// Permanently delete archived runs older than their expiry:
+    /// `retention`, or longer for another pair's runs (`Pruning`).
+    pub fn prune_archive(
+        &self,
+        retention: Duration,
+        now: SystemTime,
+        pruning: Pruning,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<u64, ApplyError> {
+        if control() == ScanControl::Cancel {
+            return Err(ScanError::Cancelled.into());
+        }
+        let mut session = self.session_unless_cancelled(control)?;
         let archive = self.remote(ARCHIVE_ROOT);
-        let runs = match self.session().read_dir(&archive) {
+        let runs = match session.read_dir(&archive) {
             Ok(runs) => runs,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
             Err(error) => return Err(io_error(error).into()),
         };
         let mut pruned = 0;
         for (name, attributes) in runs {
-            let expired = archive_time(&name).is_some_and(|started| {
-                now.duration_since(started).is_ok_and(|age| age > retention)
+            let expired = parse_run(&name).is_some_and(|(started, owner)| {
+                let expiry = pruning.expiry(owner, retention);
+                now.duration_since(started).is_ok_and(|age| age > expiry)
             });
             if !expired || attributes.kind() != FileKind::Directory {
                 continue;
             }
-            self.remove_tree(&[archive.as_slice(), b"/", &name].concat())
-                .map_err(|source| ApplyError::Scan(io_error(source)))?;
+            self.remove_tree_on(
+                &mut session,
+                &[archive.as_slice(), b"/", &name].concat(),
+                control,
+            )?;
             pruned += 1;
         }
         Ok(pruned)
     }
 
-    fn remove_tree(&self, remote: &[u8]) -> io::Result<()> {
+    fn remove_tree_on(
+        &self,
+        session: &mut Session,
+        remote: &[u8],
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), ScanError> {
         let removed = (|| {
-            let entries = self.session().read_dir(remote)?;
+            if control() == ScanControl::Cancel {
+                return Err(ScanError::Cancelled);
+            }
+            let entries = session.read_dir(remote).map_err(io_error)?;
             for (name, attributes) in entries {
                 let child = [remote, b"/", &name].concat();
                 if attributes.kind() == FileKind::Directory {
-                    self.remove_tree(&child)?;
+                    self.remove_tree_on(session, &child, control)?;
                 } else {
-                    self.session().remove_file(&child)?;
+                    if control() == ScanControl::Cancel {
+                        return Err(ScanError::Cancelled);
+                    }
+                    session.remove_file(&child).map_err(io_error)?;
                 }
             }
-            self.session().remove_directory(remote)
+            if control() == ScanControl::Cancel {
+                return Err(ScanError::Cancelled);
+            }
+            session.remove_directory(remote).map_err(io_error)
         })();
         match &removed {
             // A partial removal dropped every view it could have
@@ -1231,7 +1526,7 @@ impl SftpEndpoint {
             .into_iter()
             .filter_map(|(name, attributes)| {
                 // Only directories are runs; a file or link carrying a
-                // run's timestamp name is unrelated content.
+                // run's canonical name is unrelated content.
                 if attributes.kind() != FileKind::Directory {
                     return None;
                 }
@@ -1239,7 +1534,12 @@ impl SftpEndpoint {
                 Some(ArchivedRun::new(String::from_utf8(name).ok()?, started))
             })
             .collect();
-        runs.sort_by_key(|run| std::cmp::Reverse(run.started()));
+        runs.sort_by(|left, right| {
+            right
+                .started()
+                .cmp(&left.started())
+                .then_with(|| right.name().cmp(left.name()))
+        });
         Ok(runs)
     }
 
@@ -1322,16 +1622,19 @@ impl SftpEndpoint {
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<SyncPath, ApplyError> {
         check_durability(options.durability(), path)?;
+        let mut session = self.session_unless_cancelled(control)?;
         let changed = || ApplyError::SourceChanged(path.clone());
-        let attributes = self.attributes(path)?.ok_or_else(changed)?;
-        if self.version(path, &attributes, options.metadata(), control)? != expected {
+        let (_, attributes) = self.lookup_on(&mut session, path)?.ok_or_else(changed)?;
+        if self.version_on(&mut session, path, &attributes, options.metadata(), control)?
+            != expected
+        {
             return Err(changed());
         }
         let label = format!("from {from}, {}", date_name(modified(&attributes)));
         let mut free = None;
         for attempt in 1..=PUT_BACK_ATTEMPTS {
             let candidate = sibling_name(path, &label, attempt)?;
-            if self.attributes(&candidate)?.is_none() {
+            if self.attributes_on(&mut session, &candidate)?.is_none() {
                 free = Some(candidate);
                 break;
             }
@@ -1342,21 +1645,29 @@ impl SftpEndpoint {
                 // SFTP has no server-side copy, but the session can move
                 // bounded chunks read-to-write: staging this way never
                 // holds the whole file, however large it is.
-                self.stage_copy(path, expected, &attributes, &copy, options, control)?
+                self.stage_copy_on(
+                    &mut session,
+                    path,
+                    expected,
+                    &attributes,
+                    &copy,
+                    options,
+                    control,
+                )?
             }
             FileKind::Symlink => {
-                let target = self.read_link(path)?;
-                self.stage_link(copy.as_bytes(), &target)
+                let target = self.read_link_on(&mut session, path)?;
+                self.stage_link_on(&mut session, copy.as_bytes(), &target)
                     .map_err(|source| write_error(&copy, source))?
             }
             FileKind::Directory | FileKind::Other => {
                 return Err(ApplyError::Unsupported(path.clone()));
             }
         };
-        let target = self.fresh(copy.as_bytes());
-        let placed = self.renamed(&temporary, &target);
+        let target = self.fresh_on(&mut session, copy.as_bytes());
+        let placed = self.renamed_on(&mut session, &temporary, &target);
         if let Err(source) = placed {
-            let _ = self.removed_file(&temporary);
+            let _ = self.removed_file_on(&mut session, &temporary);
             return Err(write_error(&copy, source));
         }
         Ok(copy)
@@ -1368,8 +1679,10 @@ impl SftpEndpoint {
     /// the observer hashes each chunk and can cancel. The temporary is
     /// removed and every handle closed on any failure, and the source is
     /// re-stat'ed before the staged file is allowed to be published.
-    fn stage_copy(
+    #[allow(clippy::too_many_arguments)]
+    fn stage_copy_on(
         &self,
+        session: &mut Session,
         path: &SyncPath,
         expected: EntryVersion,
         attributes: &Attributes,
@@ -1384,14 +1697,13 @@ impl SftpEndpoint {
             .size
             .ok_or_else(|| ApplyError::Unsupported(path.clone()))?;
         let (source_remote, _) = self
-            .lookup(path)?
+            .lookup_on(session, path)?
             .ok_or_else(|| ApplyError::SourceChanged(path.clone()))?;
-        let temporary = self.beside(copy.as_bytes());
+        let temporary = self.beside_on(session, copy.as_bytes());
         let permissions = attributes.permissions.unwrap_or(DEFAULT_FILE) & PERMISSION_BITS;
         let mut hasher = blake3::Hasher::new();
         let mut cancelled = false;
         let copied = {
-            let mut session = self.session();
             let source = match session.open_read(&source_remote) {
                 Ok(handle) => handle,
                 Err(error) => return Err(at(Some(path), error).into()),
@@ -1426,7 +1738,7 @@ impl SftpEndpoint {
         };
         let (bytes, after) = match copied {
             Err(source) => {
-                self.discard(&temporary);
+                self.discard_on(session, &temporary);
                 return Err(if cancelled {
                     ScanError::Cancelled.into()
                 } else {
@@ -1436,28 +1748,29 @@ impl SftpEndpoint {
             Ok(pair) => pair,
         };
         if bytes != size || stat_key(&after) != stat_key(attributes) {
-            self.discard(&temporary);
+            self.discard_on(session, &temporary);
             return Err(ApplyError::SourceChanged(path.clone()));
         }
         let digest = Digest::from_bytes(*hasher.finalize().as_bytes());
         let stored = self
-            .staged_version(&temporary, digest, options.metadata())
+            .staged_version_on(session, &temporary, digest, options.metadata())
             .map_err(|source| {
-                self.discard(&temporary);
+                self.discard_on(session, &temporary);
                 write_error(copy, source)
             })?;
         if stored.content() != expected.content() {
-            self.discard(&temporary);
+            self.discard_on(session, &temporary);
             return Err(ApplyError::SourceChanged(path.clone()));
         }
-        self.set_metadata(
+        self.set_metadata_on(
+            session,
             &temporary,
             EntryKind::File,
             Self::foreign_metadata(attributes),
             options.metadata(),
         )
         .map_err(|source| {
-            self.discard(&temporary);
+            self.discard_on(session, &temporary);
             write_error(copy, source)
         })?;
         Ok(temporary)
@@ -1474,6 +1787,10 @@ impl SftpEndpoint {
         path: &[u8],
         permissions: u32,
     ) -> io::Result<()> {
+        let archive_parent = path == ARCHIVE_ROOT
+            || path
+                .strip_prefix(ARCHIVE_ROOT)
+                .is_some_and(|suffix| suffix.first() == Some(&b'/'));
         let mut prefix = Vec::new();
         for component in path.split(|byte| *byte == b'/') {
             if !prefix.is_empty() {
@@ -1481,6 +1798,24 @@ impl SftpEndpoint {
             }
             prefix.extend_from_slice(component);
             let remote = self.remote(&prefix);
+            // Archive parents usually already exist for the preceding sibling.
+            // Stat first saves a refused MKDIR for each component, retaining
+            // the path checks that a cached existence claim would omit.
+            if archive_parent {
+                match session.lstat(&remote) {
+                    Ok(existing) if existing.kind() == FileKind::Directory => continue,
+                    Ok(_) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::NotADirectory,
+                            "Archive parent is not a directory",
+                        ));
+                    }
+                    // Missing paths can be reported as generic FAILURE.
+                    // Let MKDIR and its existing verification decide; a
+                    // broken transport remains poisoned and cannot write.
+                    Err(_) => {}
+                }
+            }
             if let Err(error) = session.make_directory(&remote, permissions) {
                 // SFTP reports an existing folder as a generic failure.
                 match session.lstat(&remote) {
@@ -1521,7 +1856,7 @@ fn read_small_on(
         Err(error) => return Err(error),
     };
     let mut content = Vec::new();
-    let read = session.read_all(&handle, &mut |chunk| {
+    let read = session.read_from_bounded(&handle, 0, limit as u64, &mut |chunk| {
         content.extend_from_slice(chunk);
         if content.len() > limit {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "File too large"));
@@ -1573,27 +1908,66 @@ fn temporary_name() -> Vec<u8> {
     .concat()
 }
 
-/// Available stat fields, useful as observations but not unchanged-data proof.
-/// Whether `path` is, or lies below, what the observation could not read.
-fn unavailable(observation: &Observation, path: &SyncPath) -> bool {
-    observation
-        .unavailable
-        .iter()
-        .any(|root| root == path || root.is_ancestor_of(path))
+/// Classify one listing entry, recording exclusions. `Some` for an entry
+/// that joins the observation, `None` for a protected, filtered, oversized
+/// or unclassified name.
+fn classify_listing_entry(
+    directory: Option<&SyncPath>,
+    name: &[u8],
+    attributes: Attributes,
+    filter: &Filter,
+    previous: &Cache<'_>,
+    observation: &mut Observation,
+) -> Result<Option<(SyncPath, Attributes)>, ScanError> {
+    let path = child_path(directory, name)?;
+    let path = previous.key(&path).unwrap_or(path);
+    if protected(name) {
+        if temporary(name) {
+            observation.leftovers.push(path);
+        }
+        return Ok(None);
+    }
+    let kind = attributes.kind();
+    if filter.excludes(&path, kind == FileKind::Directory) {
+        return Ok(None);
+    }
+    // Size and age exclusions come before sidecar classification, as in
+    // local roots.
+    if kind == FileKind::File {
+        if filter.too_large(attributes.size.unwrap_or(0)) {
+            observation.oversized.push(path);
+            return Ok(None);
+        }
+        if filter.is_old(modified(&attributes)) {
+            observation.old.push(path.clone());
+        }
+    }
+    if name.starts_with(b"._") {
+        observation.skip_error(ScanError::UnclassifiedSidecar(path))?;
+        return Ok(None);
+    }
+    Ok(Some((path, attributes)))
 }
 
 /// Keep what observing `path` found, or skip it when its error allows.
+/// A skip also enters `unavailable`, so later paths below it are not read.
 fn record(
     observation: &mut Observation,
+    unavailable: &mut PathPrefixIndex,
     path: &SyncPath,
     entry: Result<ObservedEntry, ScanError>,
 ) -> Result<(), ScanError> {
     match entry {
         Ok(entry) => {
-            observation.entries.insert(path.clone(), entry);
+            observation.record(path.clone(), entry);
             Ok(())
         }
-        Err(error) => observation.skip_error(error),
+        Err(error) => {
+            let issue = error.into_issue()?;
+            unavailable.insert(&issue.path);
+            observation.skip_issue(issue);
+            Ok(())
+        }
     }
 }
 

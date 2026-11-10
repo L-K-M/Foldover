@@ -21,6 +21,7 @@ BUILD_SECONDS = 120
 REPORT_SECONDS = 20
 RETRY_SECONDS = 0.05
 EXPECTED_WORKER_SAMPLES = 5
+MINIMUM_FILE_DESCRIPTORS = 1024
 
 
 class Materialization(Enum):
@@ -35,11 +36,28 @@ def command(arguments, timeout=COMMAND_SECONDS):
     return result
 
 
-def check_template():
+def load_template():
     with TEMPLATE.open("rb") as stream:
-        template = plistlib.load(stream)
+        return plistlib.load(stream)
+
+
+def check_template():
+    template = load_template()
     if template.get("MaterializeDatalessFiles") is not False:
         raise RuntimeError("Packaged agent must explicitly disable dataless materialization")
+
+
+def check_template_file_budget():
+    template = load_template()
+    limits = template.get("SoftResourceLimits")
+    if not isinstance(limits, dict):
+        raise RuntimeError("Packaged agent must declare SoftResourceLimits")
+    budget = limits.get("NumberOfFiles")
+    if isinstance(budget, bool) or not isinstance(budget, int) or budget < MINIMUM_FILE_DESCRIPTORS:
+        raise RuntimeError(
+            "Packaged agent SoftResourceLimits NumberOfFiles must be an integer >= "
+            f"{MINIMUM_FILE_DESCRIPTORS} (found {budget!r})"
+        )
 
 
 def run_case(root, executable, policy):
@@ -47,6 +65,7 @@ def run_case(root, executable, policy):
     domain = f"gui/{os.getuid()}"
     service = f"{domain}/{label}"
     report = root / f"{policy.name}.json"
+    template = load_template()
     definition = {
         "Label": label,
         "ProgramArguments": [str(executable), str(report)],
@@ -54,6 +73,9 @@ def run_case(root, executable, policy):
         "MaterializeDatalessFiles": policy.value,
         "StandardErrorPath": str(root / f"{policy.name}.stderr"),
     }
+    limits = template.get("SoftResourceLimits")
+    if isinstance(limits, dict):
+        definition["SoftResourceLimits"] = dict(limits)
     plist = root / f"{policy.name}.plist"
     with plist.open("wb") as stream:
         plistlib.dump(definition, stream)
@@ -67,6 +89,7 @@ def run_case(root, executable, policy):
                 raise RuntimeError(f"Policy probe timed out: {status}\n{error.read_text() if error.exists() else ''}")
             time.sleep(RETRY_SECONDS)
         result = json.loads(report.read_text())
+        print(f"{policy.name}: {json.dumps(result, sort_keys=True)}")
         expected = result["off"] if policy is Materialization.DISABLED else result["on"]
         samples = result["samples"]
         if len(samples) != EXPECTED_WORKER_SAMPLES:
@@ -76,7 +99,22 @@ def run_case(root, executable, policy):
         for observed in [*samples, result["child"]]:
             if observed["process"] != expected or observed["thread"] not in (result["systemDefault"], expected):
                 raise RuntimeError(f"Unexpected {policy.name} process/thread policy: {result}")
-        print(f"{policy.name}: {json.dumps(result, sort_keys=True)}")
+        parent_limit = result["limit"]["soft"]
+        child_limit = result["child"]["limit"]["soft"]
+        for role, limit, pressure in (
+            ("parent", parent_limit, result["descriptors"]),
+            ("child", child_limit, result["child"]["descriptors"]),
+        ):
+            if pressure["held"] < MINIMUM_FILE_DESCRIPTORS or pressure["failures"]:
+                raise RuntimeError(
+                    f"{role} held {pressure['held']}/{pressure['requested']} descriptors under soft limit "
+                    f"{limit}: {pressure['failures']}"
+                )
+        if parent_limit < MINIMUM_FILE_DESCRIPTORS or child_limit < MINIMUM_FILE_DESCRIPTORS:
+            raise RuntimeError(
+                f"Insufficient inherited soft file limit: parent {parent_limit}, child {child_limit} "
+                f"(required >= {MINIMUM_FILE_DESCRIPTORS})"
+            )
     finally:
         # Also clean up an uncertain bootstrap; never leave a test job loaded.
         cleanup = subprocess.run(["/bin/launchctl", "bootout", service],
@@ -93,6 +131,7 @@ def main():
     options = parser.parse_args()
     check_template()
     if options.check_template:
+        check_template_file_budget()
         print("Agent materialization policy template passed")
         return
     if sys.platform != "darwin":

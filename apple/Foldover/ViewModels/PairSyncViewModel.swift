@@ -156,6 +156,29 @@ struct PairSyncViewModel {
 
     private var state: PairSyncState { store.state(for: pair.id) }
 
+    private var runningPair: RunningPair? {
+        guard case .working(_, _, _, let pair) = state else { return nil }
+        return pair
+    }
+
+    /// Presentation values always come from the claimed job while it works,
+    /// even when the saved revision happens to match.
+    var activeRevision: UInt64 { runningPair?.revision ?? pair.revision }
+    var activeName: String { runningPair?.name ?? pair.settings.name }
+    var activeMode: PairMode { runningPair?.mode ?? pair.settings.mode }
+    var activeLeft: SelectedFolder { runningPair?.left ?? pair.settings.left }
+    var activeRight: SelectedFolder { runningPair?.right ?? pair.settings.right }
+    func activeFolder(_ side: FolderSide) -> SelectedFolder {
+        side == .a ? activeLeft : activeRight
+    }
+    var usesPreviousSettings: Bool {
+        runningPair.map { $0.revision != pair.revision } ?? false
+    }
+    var previousSettingsNotice: String? {
+        guard usesPreviousSettings else { return nil }
+        return String(localized: "This sync is finishing with the previous settings. Saved settings apply next run.")
+    }
+
     /// The shown plan still describes this pair's configuration. An
     /// older preview is information, not something to review: its folder
     /// labels and review tokens would act on roots that changed since.
@@ -201,7 +224,7 @@ struct PairSyncViewModel {
         return result
     }
     var canCancel: Bool {
-        if case .working(_, let cancelling, _) = state { return !cancelling }
+        if case .working(_, let cancelling, _, _) = state { return !cancelling }
         return false
     }
     var requestError: String? { store.requestError(for: pair.id) }
@@ -300,11 +323,15 @@ struct PairSyncViewModel {
     /// One or two words for the menu bar.
     var shortStatus: String {
         if isResolving { return String(localized: "Resolving") }
+        // A paused pair says so, unless it works or needs a look.
+        if pair.automation == .paused, !isWorking, activity != .attention {
+            return String(localized: "Paused")
+        }
         return switch state {
         case .idle: String(localized: "Ready")
-        case .working(.preview, _, _): String(localized: "Comparing…")
-        case .working(.run, _, _): String(localized: "Syncing…")
-        case .working(.undo, _, _): String(localized: "Undoing…")
+        case .working(.preview, _, _, _): String(localized: "Comparing…")
+        case .working(.run, _, _, _): String(localized: "Syncing…")
+        case .working(.undo, _, _, _): String(localized: "Undoing…")
         case .previewed(let preview):
             reviewable == nil ? String(localized: "Preview again")
                 : preview.failureCount > 0 ? String(localized: "\(preview.total) changes, \(preview.failureCount) skipped")
@@ -328,17 +355,17 @@ struct PairSyncViewModel {
         switch state {
         case .idle:
             return String(localized: "Preview to see what a sync would change. Nothing is written until you sync.")
-        case .working(_, cancelling: true, _):
+        case .working(_, cancelling: true, _, _):
             return String(localized: "Stopping…")
-        case .working(_, _, let progress) where progress.waitingFor != nil:
+        case .working(_, _, let progress, _) where progress.waitingFor != nil:
             return String(localized: "Waiting for “\(progress.waitingFor ?? "")” to finish syncing these folders…")
-        case .working(.preview, _, let progress):
+        case .working(.preview, _, let progress, _):
             return Self.comparing(progress)
-        case .working(.run, _, let progress) where progress.changes > 0:
+        case .working(.run, _, let progress, _) where progress.changes > 0:
             return Self.applying(progress)
-        case .working(.run, _, let progress):
+        case .working(.run, _, let progress, _):
             return Self.comparing(progress)
-        case .working(.undo, _, _):
+        case .working(.undo, _, _, _):
             return String(localized: "Undoing the last sync…")
         case .previewed(let preview):
             guard reviewable != nil else { return Self.outdated }
@@ -361,19 +388,19 @@ struct PairSyncViewModel {
         }
     }
 
-    /// How far a running job is, from 0 to 1, once there is something to
-    /// measure: bytes when the plan copies any, else changes; while
-    /// comparing, entries checked of those found so far.
-    var progressFraction: Double? {
-        guard case .working(_, _, let progress) = state, progress.waitingFor == nil else { return nil }
-        if progress.bytes > 0 {
-            return Double(progress.copied) / Double(progress.bytes)
-        }
-        if progress.changes > 0 {
-            return Double(progress.applied) / Double(progress.changes)
-        }
-        guard progress.listed > 0 else { return nil }
-        return Double(progress.checked) / Double(progress.listed)
+    /// What the working job reads out: the items it has checked while it
+    /// compares, then the share of its plan done; nil when no job works.
+    var readout: FoldReadout? {
+        guard case .working(_, let cancelling, let progress, _) = state else { return nil }
+        return FoldReadout(progress: progress, cancelling: cancelling)
+    }
+
+    /// The plan's data a sync under way has yet to copy; nil while it
+    /// compares, waits for another Mac or stops, when no copying counts.
+    var bytesLeft: UInt64? {
+        guard case .working(.run, cancelling: false, let progress, _) = state,
+              progress.changes > 0, progress.waitingFor == nil else { return nil }
+        return progress.bytes - min(progress.copied, progress.bytes)
     }
 
     static func comparing(_ progress: WorkProgress) -> String {
@@ -391,15 +418,27 @@ struct PairSyncViewModel {
         // would decay and its ETA balloon — hide both during the stall.
         if progress.rate > 0, progress.waitingFor == nil {
             text += " · " + throughputText(progress.rate)
-            if progress.bytes > progress.copied {
-                text += " · " + String(localized: "about \(timeText((progress.bytes - progress.copied) / progress.rate)) left")
+            if let seconds = secondsLeft(progress) {
+                text += " · " + String(localized: "about \(timeText(seconds)) left")
             }
         }
         return text
     }
 
+    /// The seconds the data still to copy takes at the speed so far,
+    /// rounded up, so the time left never reads "0 s" while bytes remain.
+    /// Nil before the first copy lands, when the agent reports no rate,
+    /// and once all the data is copied.
+    nonisolated static func secondsLeft(_ progress: WorkProgress) -> UInt64? {
+        guard progress.rate > 0, progress.bytes > progress.copied else { return nil }
+        let remaining = progress.bytes - progress.copied
+        // A part second counts as one; `(remaining + rate - 1) / rate`
+        // would round up too, but can overflow.
+        return remaining / progress.rate + (remaining % progress.rate == 0 ? 0 : 1)
+    }
+
     /// Promote rounded unit boundaries instead of showing "1000 kB/s".
-    static func throughputText(_ bytesPerSecond: UInt64) -> String {
+    nonisolated static func throughputText(_ bytesPerSecond: UInt64) -> String {
         let kilobyte = 1_000.0
         let megabyte = kilobyte * kilobyte
         let gigabyte = megabyte * kilobyte
@@ -418,7 +457,7 @@ struct PairSyncViewModel {
         return String(format: "%.0f B/s", locale: locale, rate)
     }
 
-    static func timeText(_ seconds: UInt64) -> String {
+    nonisolated static func timeText(_ seconds: UInt64) -> String {
         let secondsPerMinute: UInt64 = 60
         let secondsPerHour = 60 * secondsPerMinute
         if seconds >= secondsPerHour {
@@ -474,7 +513,7 @@ struct PairSyncViewModel {
 
     /// The job the agent works on for this pair; nil when it works on none.
     var job: SyncJob? {
-        if case .working(let job, _, _) = state { return job }
+        if case .working(let job, _, _, _) = state { return job }
         return nil
     }
 
@@ -635,7 +674,17 @@ struct PairSyncViewModel {
     /// (the completion card's Review).
     func reviewConflicts() async {
         await store.preview(pair.id)
+        await store.waitWhileWorking(pair.id)
         await store.showChanges(pair.id, filter: .conflicts)
+    }
+
+    /// How many of `total` lie beyond the `shown` rows. The agent sends
+    /// counts and rows in separate fields: a total below the rows it came
+    /// with reads as nothing hidden, where a plain subtraction would end
+    /// the app.
+    private static func beyond(_ total: UInt64, shown: Int) -> UInt64 {
+        let shown = UInt64(shown)
+        return total > shown ? total - shown : 0
     }
 
     /// Rows not shown because responses carry only the first changes.
@@ -652,11 +701,11 @@ struct PairSyncViewModel {
         }
         let hidden: UInt64
         if let preview = reviewable {
-            hidden = preview.total - UInt64(preview.changes.count)
+            hidden = Self.beyond(preview.total, shown: preview.changes.count)
         } else if case .finished(let result) = state {
-            hidden = result.failureCount - UInt64(result.failures.count)
+            hidden = Self.beyond(result.failureCount, shown: result.failures.count)
         } else if case .undone(let result) = state {
-            hidden = result.notUndoneCount - UInt64(result.notUndone.count)
+            hidden = Self.beyond(result.notUndoneCount, shown: result.notUndone.count)
         } else {
             hidden = 0
         }
@@ -946,7 +995,7 @@ struct PairSyncViewModel {
         }
     }
 
-    static func byteText(_ bytes: UInt64) -> String {
+    nonisolated static func byteText(_ bytes: UInt64) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(clamping: bytes), countStyle: .file)
     }
 

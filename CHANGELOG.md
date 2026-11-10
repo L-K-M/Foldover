@@ -8,17 +8,93 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- "Every hour", "Every day" and other interval schedules count time the
+  Mac spends asleep and time the background agent is off. An interval
+  used to count only awake time and start over whenever the agent
+  restarted, so an "Every day" pair on a Mac that sleeps at night ran
+  about every third day, and never on one restarted daily. A missed
+  interval now runs once when the Mac wakes or the agent starts.
+- The limitations guide and the README no longer say that a pair's first
+  sync always waits for your review. It has run like any other since
+  Require approval before syncing became a setting; both now say so and
+  describe that setting and Stop unusually large removals.
+- Release notes list the release's changes: releasing moves the
+  changelog's Unreleased entries under the new version. The 0.2.0 notes
+  said only "See CHANGELOG.md."
+- A sync that leaves both conflicts and failed items says so in one
+  notification. It used to mention only the conflicts.
+- Use This Folder in the SFTP folder browser takes the highlighted row
+  when that row is Enclosing Folder, as it does for a listed folder.
+- The setup guide no longer says nothing changes until you sync: a pair
+  with a schedule starts by itself.
+- A result whose total is smaller than the rows it lists can no longer
+  quit the app.
+- A daily schedule's time reads as your Mac's clock shows it, such as
+  "Weekdays at 6:00 PM", in the pair editor, the inspector and the pair's
+  summary. It was always written as "18:00", beside a time picker that
+  followed the Mac's 12-hour clock.
+- A "When files change" pair whose sync takes longer than an hour no
+  longer starts its hourly check again the moment that sync ends. The
+  hour now counts from when the pair's last preview or sync ended
+  (ADR 0054).
+- Removing a pair answers at once, however many files it tracks. It used
+  to time out on large pairs and grey out Edit Pair and Remove Pair; the
+  agent now deletes the pair's records in the background (ADR 0053).
+- A paired Mac can no longer leave a shared folder's lock unreadable by
+  writing an oversized lease record; the sharing Mac refuses it.
+- An agent reply too large for one message answers its request with that
+  reason. The app and the CLI used to see only "Agent closed before its
+  response".
+- A Mac advertising pairing on port 0 is ignored instead of being listed
+  as open for pairing.
+
+### Changed
+
+- Automatic syncs run gently by default: on this Mac's own disks they use
+  at most one processor core, instead of keeping several busy for minutes
+  and setting off macOS's CPU warning for foldoverd. They run one at a time
+  and wait while a sync you started runs. They run at low priority, and read
+  and copy one file at a time on this Mac's own disks. Syncs over the
+  network keep their parallel transfers. Large automatic syncs between
+  local disks take longer, several times longer while other apps use the
+  disk heavily; turn on "Run automatic syncs at full speed" in
+  Settings, or run `foldover automation effort full`, to use the whole
+  Mac. Syncs you start yourself always run at full speed (local protocol
+  23, ADR 0054).
+
+### Added
+
+- Pause Pair and Resume Pair, in the sidebar's menu and the Pair menu, and
+  `foldover pairs pause|resume ID`: a paused pair's automatic syncs wait
+  until you resume it, while Sync Now still works.
+
+## [0.2.0] - 2026-11-06
+
+### Fixed
+
+- A sync's time left counts a part second as a whole one, so the folded
+  sheet and the status text no longer say "about 0 s left" while data is
+  still copying.
+- A sync with nothing previewed on the sheet now folds a whole page:
+  one started by a schedule, the menu bar or Sync Now, or one under way
+  when the window opens. The sheet no longer shrinks to its folder
+  labels, with the progress in a card at the top of a bare field.
+- Comparing a folder on another Mac ends on its full count of items. The
+  count no longer stops at that Mac's last progress update, or at zero
+  when its scan finishes before the first one.
 - Pair edits save during a preview or sync and apply to subsequent runs.
   The current job keeps its original settings and finishes normally.
-- An aborted first sync still requires review on retry. Editing a pair's
-  folders re-subscribes its change watchers. Peer scan counters cannot
-  claim unbounded work in one progress report.
+- Editing a pair's folders re-subscribes its change watchers. Peer scan
+  counters cannot claim unbounded work in a scan, however many reports
+  they send.
 - Put Back All reserves the archive through its reload and shows recovery
   activity. Periodic health probes keep pair commands enabled.
 - Unicode spelling preparation counts aliases once, and preview rows are
   cached across renders and searches.
 - Remote requests, including archive listings, get longer client timeouts.
   Read timeouts invite retry; saves retain the uncertain-commit warning.
+- A comparison another Mac refuses, for example because it paused syncing,
+  says why instead of reporting that the Mac answered out of order.
 - The menu-bar pair list scrolls while commands remain reachable. Its
   error captions are bounded and selectable, and busy pairs offer Stop.
 
@@ -36,6 +112,16 @@ All notable changes to this project are documented here. The format follows
   are skipped in both folders, preserving existing copies.
 
 ### Changed
+
+- A sync's progress on the folded sheet names its stage: Comparing,
+  Syncing, Waiting or Stopping. While comparing it counts the items
+  checked, instead of a percentage that fell back when Folder B was
+  listed and restarted at 0% when copying began; the percentage appears
+  once the plan is known, with the changes made, data copied, speed and
+  time left on separate lines; a spinner, not a bar, shows the count is
+  still climbing. A wait for another Mac shows an hourglass instead of
+  the word "Pressing". A preview with nothing listed on the sheet counts
+  the same way while comparing.
 
 - Home-folder comparisons avoid repeatedly reopening the same ancestors
   while protecting Foldover's state directory.
@@ -222,8 +308,14 @@ All notable changes to this project are documented here. The format follows
   replaced or archived comes back. Anything changed since is left as it is
   and listed. Automatic syncs then wait until you sync again.
 
-- A pair's first sync always shows its preview first; nothing is written
-  until you approve that plan.
+- Require approval before syncing, a pair setting that is off by default
+  (`--review required`): with it on, every sync, a pair's first and its
+  scheduled ones included, shows its preview and writes nothing until
+  you approve that plan. Without it, a pair's first sync runs like any
+  other, and a scheduled pair can start it by itself.
+- Stop unusually large removals, a pair setting that is on by default
+  (`--removal-protection`): it holds the deletion limits and the
+  suddenly-empty-folder stop, and turning it off removes both.
 - A folder that is suddenly empty no longer empties its partner without
   review, however few files it held.
 - A sync stops at once when a folder's disk or share goes away or is

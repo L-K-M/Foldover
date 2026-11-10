@@ -992,6 +992,7 @@ public struct AutomationState: Equatable, Hashable {
      */
     public var untilMs: UInt64?
     public var lowPower: LowPowerSyncs
+    public var effort: AutomaticEffort
     /**
      * Why an automatic sync would wait now, if one would.
      */
@@ -1002,13 +1003,14 @@ public struct AutomationState: Equatable, Hashable {
     public init(paused: Bool, 
         /**
          * When a timed pause ends, in milliseconds since the Unix epoch.
-         */untilMs: UInt64?, lowPower: LowPowerSyncs, 
+         */untilMs: UInt64?, lowPower: LowPowerSyncs, effort: AutomaticEffort, 
         /**
          * Why an automatic sync would wait now, if one would.
          */heldBy: AutomationHold?) {
         self.paused = paused
         self.untilMs = untilMs
         self.lowPower = lowPower
+        self.effort = effort
         self.heldBy = heldBy
     }
 
@@ -1031,6 +1033,7 @@ public struct FfiConverterTypeAutomationState: FfiConverterRustBuffer {
                 paused: FfiConverterBool.read(from: &buf), 
                 untilMs: FfiConverterOptionUInt64.read(from: &buf), 
                 lowPower: FfiConverterTypeLowPowerSyncs.read(from: &buf), 
+                effort: FfiConverterTypeAutomaticEffort.read(from: &buf), 
                 heldBy: FfiConverterOptionTypeAutomationHold.read(from: &buf)
         )
     }
@@ -1039,6 +1042,7 @@ public struct FfiConverterTypeAutomationState: FfiConverterRustBuffer {
         FfiConverterBool.write(value.paused, into: &buf)
         FfiConverterOptionUInt64.write(value.untilMs, into: &buf)
         FfiConverterTypeLowPowerSyncs.write(value.lowPower, into: &buf)
+        FfiConverterTypeAutomaticEffort.write(value.effort, into: &buf)
         FfiConverterOptionTypeAutomationHold.write(value.heldBy, into: &buf)
     }
 }
@@ -1063,13 +1067,21 @@ public struct LocalPairConfiguration: Equatable, Hashable {
     public var id: String
     public var revision: UInt64
     public var configuration: LocalPairDraft
+    /**
+     * A person paused the pair's automatic syncs; editing keeps it.
+     */
+    public var paused: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, revision: UInt64, configuration: LocalPairDraft) {
+    public init(id: String, revision: UInt64, configuration: LocalPairDraft, 
+        /**
+         * A person paused the pair's automatic syncs; editing keeps it.
+         */paused: Bool) {
         self.id = id
         self.revision = revision
         self.configuration = configuration
+        self.paused = paused
     }
 
     
@@ -1090,7 +1102,8 @@ public struct FfiConverterTypeLocalPairConfiguration: FfiConverterRustBuffer {
             try LocalPairConfiguration(
                 id: FfiConverterString.read(from: &buf), 
                 revision: FfiConverterUInt64.read(from: &buf), 
-                configuration: FfiConverterTypeLocalPairDraft.read(from: &buf)
+                configuration: FfiConverterTypeLocalPairDraft.read(from: &buf), 
+                paused: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -1098,6 +1111,7 @@ public struct FfiConverterTypeLocalPairConfiguration: FfiConverterRustBuffer {
         FfiConverterString.write(value.id, into: &buf)
         FfiConverterUInt64.write(value.revision, into: &buf)
         FfiConverterTypeLocalPairDraft.write(value.configuration, into: &buf)
+        FfiConverterBool.write(value.paused, into: &buf)
     }
 }
 
@@ -1806,16 +1820,24 @@ public struct ReadinessWarning: Equatable, Hashable {
      * The other sync engine's name, for `CloudManaged` only.
      */
     public var provider: String?
+    /**
+     * The other pair's name, for `Overlap` and `Unverified` only.
+     */
+    public var pairName: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(side: SyncSide, kind: ReadinessWarningKind, 
         /**
          * The other sync engine's name, for `CloudManaged` only.
-         */provider: String?) {
+         */provider: String?, 
+        /**
+         * The other pair's name, for `Overlap` and `Unverified` only.
+         */pairName: String?) {
         self.side = side
         self.kind = kind
         self.provider = provider
+        self.pairName = pairName
     }
 
     
@@ -1836,7 +1858,8 @@ public struct FfiConverterTypeReadinessWarning: FfiConverterRustBuffer {
             try ReadinessWarning(
                 side: FfiConverterTypeSyncSide.read(from: &buf), 
                 kind: FfiConverterTypeReadinessWarningKind.read(from: &buf), 
-                provider: FfiConverterOptionString.read(from: &buf)
+                provider: FfiConverterOptionString.read(from: &buf), 
+                pairName: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -1844,6 +1867,7 @@ public struct FfiConverterTypeReadinessWarning: FfiConverterRustBuffer {
         FfiConverterTypeSyncSide.write(value.side, into: &buf)
         FfiConverterTypeReadinessWarningKind.write(value.kind, into: &buf)
         FfiConverterOptionString.write(value.provider, into: &buf)
+        FfiConverterOptionString.write(value.pairName, into: &buf)
     }
 }
 
@@ -1976,6 +2000,75 @@ public func FfiConverterTypeRunHistoryEntry_lift(_ buf: RustBuffer) throws -> Ru
 #endif
 public func FfiConverterTypeRunHistoryEntry_lower(_ value: RunHistoryEntry) -> RustBuffer {
     return FfiConverterTypeRunHistoryEntry.lower(value)
+}
+
+
+/**
+ * The compact pair presentation captured when a working job starts.
+ */
+public struct RunningPairSnapshot: Equatable, Hashable {
+    public var revision: UInt64
+    public var name: String
+    public var leftRoot: Data
+    public var rightRoot: Data
+    public var mode: PairMode
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(revision: UInt64, name: String, leftRoot: Data, rightRoot: Data, mode: PairMode) {
+        self.revision = revision
+        self.name = name
+        self.leftRoot = leftRoot
+        self.rightRoot = rightRoot
+        self.mode = mode
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension RunningPairSnapshot: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRunningPairSnapshot: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RunningPairSnapshot {
+        return
+            try RunningPairSnapshot(
+                revision: FfiConverterUInt64.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                leftRoot: FfiConverterData.read(from: &buf), 
+                rightRoot: FfiConverterData.read(from: &buf), 
+                mode: FfiConverterTypePairMode.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RunningPairSnapshot, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.revision, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterData.write(value.leftRoot, into: &buf)
+        FfiConverterData.write(value.rightRoot, into: &buf)
+        FfiConverterTypePairMode.write(value.mode, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRunningPairSnapshot_lift(_ buf: RustBuffer) throws -> RunningPairSnapshot {
+    return try FfiConverterTypeRunningPairSnapshot.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRunningPairSnapshot_lower(_ value: RunningPairSnapshot) -> RustBuffer {
+    return FfiConverterTypeRunningPairSnapshot.lower(value)
 }
 
 
@@ -3025,6 +3118,83 @@ public func FfiConverterTypeAgentError_lower(_ value: AgentError) -> RustBuffer 
 
 
 /**
+ * How hard automatic syncs may work the Mac (ADR 0054). Manual syncs
+ * always run at full effort.
+ */
+
+public enum AutomaticEffort: Equatable, Hashable {
+    
+    /**
+     * One at a time, at low priority, one file at a time on this Mac's
+     * own disks.
+     */
+    case gentle
+    /**
+     * Every due pair at once, at normal priority, with every worker.
+     */
+    case full
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AutomaticEffort: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAutomaticEffort: FfiConverterRustBuffer {
+    typealias SwiftType = AutomaticEffort
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomaticEffort {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .gentle
+        
+        case 2: return .full
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AutomaticEffort, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .gentle:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .full:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomaticEffort_lift(_ buf: RustBuffer) throws -> AutomaticEffort {
+    return try FfiConverterTypeAutomaticEffort.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomaticEffort_lower(_ value: AutomaticEffort) -> RustBuffer {
+    return FfiConverterTypeAutomaticEffort.lower(value)
+}
+
+
+
+/**
  * Why automatic syncs wait right now (PLAN.md §3.5).
  */
 
@@ -3583,6 +3753,17 @@ public enum ReadinessWarningKind: Equatable, Hashable {
      * only be a Backup target that keeps none.
      */
     case recordsUnsupported
+    /**
+     * This folder is, holds or sits inside a folder of the pair named
+     * `pair_name`; only Mirror and Backup sources may share one, so
+     * saving would refuse it.
+     */
+    case overlap
+    /**
+     * A folder of the pair named `pair_name` is there but cannot be read,
+     * so this folder cannot be checked against it; saving would refuse.
+     */
+    case unverified
 
 
 
@@ -3612,6 +3793,10 @@ public struct FfiConverterTypeReadinessWarningKind: FfiConverterRustBuffer {
         
         case 4: return .recordsUnsupported
         
+        case 5: return .overlap
+        
+        case 6: return .unverified
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -3634,6 +3819,14 @@ public struct FfiConverterTypeReadinessWarningKind: FfiConverterRustBuffer {
         
         case .recordsUnsupported:
             writeInt(&buf, Int32(4))
+        
+        
+        case .overlap:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .unverified:
+            writeInt(&buf, Int32(6))
         
         }
     }
@@ -4307,7 +4500,7 @@ public func FfiConverterTypeSyncJobKind_lower(_ value: SyncJobKind) -> RustBuffe
 public enum SyncJobState: Equatable, Hashable {
     
     case idle
-    case working(job: SyncJobKind, cancelling: Bool, progress: SyncWorkProgress
+    case working(job: SyncJobKind, cancelling: Bool, progress: SyncWorkProgress, pair: RunningPairSnapshot
     )
     case previewed(preview: SyncPreviewSummary
     )
@@ -4353,7 +4546,7 @@ public struct FfiConverterTypeSyncJobState: FfiConverterRustBuffer {
         
         case 1: return .idle
         
-        case 2: return .working(job: try FfiConverterTypeSyncJobKind.read(from: &buf), cancelling: try FfiConverterBool.read(from: &buf), progress: try FfiConverterTypeSyncWorkProgress.read(from: &buf)
+        case 2: return .working(job: try FfiConverterTypeSyncJobKind.read(from: &buf), cancelling: try FfiConverterBool.read(from: &buf), progress: try FfiConverterTypeSyncWorkProgress.read(from: &buf), pair: try FfiConverterTypeRunningPairSnapshot.read(from: &buf)
         )
         
         case 3: return .previewed(preview: try FfiConverterTypeSyncPreviewSummary.read(from: &buf)
@@ -4386,11 +4579,12 @@ public struct FfiConverterTypeSyncJobState: FfiConverterRustBuffer {
             writeInt(&buf, Int32(1))
         
         
-        case let .working(job,cancelling,progress):
+        case let .working(job,cancelling,progress,pair):
             writeInt(&buf, Int32(2))
             FfiConverterTypeSyncJobKind.write(job, into: &buf)
             FfiConverterBool.write(cancelling, into: &buf)
             FfiConverterTypeSyncWorkProgress.write(progress, into: &buf)
+            FfiConverterTypeRunningPairSnapshot.write(pair, into: &buf)
             
         
         case let .previewed(preview):
@@ -5262,13 +5456,15 @@ public func agentStatus()async throws  -> AgentHealth  {
 }
 /**
  * What will not work as a person might expect with `configuration`'s
- * folders (PLAN.md §3.6). Warnings never block saving.
+ * folders (PLAN.md §3.6); `editing` is the pair the draft would
+ * replace. Only an overlap, or a folder that cannot be checked, names
+ * something saving would refuse.
  */
-public func checkPair(configuration: LocalPairDraft)async throws  -> [ReadinessWarning]  {
+public func checkPair(configuration: LocalPairDraft, editing: String?)async throws  -> [ReadinessWarning]  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_foldover_ffi_fn_func_check_pair(FfiConverterTypeLocalPairDraft_lower(configuration)
+                uniffi_foldover_ffi_fn_func_check_pair(FfiConverterTypeLocalPairDraft_lower(configuration),FfiConverterOptionString.lower(editing)
                 )
             },
             pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
@@ -5343,11 +5539,43 @@ public func pairPage(after: String?)async throws  -> PairConfigurationPage  {
             errorHandler: FfiConverterTypeAgentError_lift
         )
 }
+/**
+ * Pause the pair's automatic syncs until `pair_resume`. Manual syncs
+ * still run, and a run in progress continues.
+ */
+public func pairPause(id: String)async throws  -> LocalPairConfiguration  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_pair_pause(FfiConverterString.lower(id)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeLocalPairConfiguration_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
 public func pairRemove(id: String, revision: UInt64)async throws  -> LocalPairConfiguration  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_foldover_ffi_fn_func_pair_remove(FfiConverterString.lower(id),FfiConverterUInt64.lower(revision)
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeLocalPairConfiguration_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+public func pairResume(id: String)async throws  -> LocalPairConfiguration  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_pair_resume(FfiConverterString.lower(id)
                 )
             },
             pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
@@ -5374,11 +5602,11 @@ public func pairUpdate(id: String, revision: UInt64, configuration: LocalPairDra
 /**
  * A page of a run's items after `after`, the last path of the previous page.
  */
-public func archiveItems(id: String, side: SyncSide, run: String, after: Data?)async throws  -> ArchivedItemPage  {
+public func archiveItems(id: String, revision: UInt64, side: SyncSide, run: String, after: Data?)async throws  -> ArchivedItemPage  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_foldover_ffi_fn_func_archive_items(FfiConverterString.lower(id),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run),FfiConverterOptionData.lower(after)
+                uniffi_foldover_ffi_fn_func_archive_items(FfiConverterString.lower(id),FfiConverterUInt64.lower(revision),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run),FfiConverterOptionData.lower(after)
                 )
             },
             pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
@@ -5392,11 +5620,11 @@ public func archiveItems(id: String, side: SyncSide, run: String, after: Data?)a
  * Put an item back; returns its path, which gains ` (restored)` when the
  * original path is taken.
  */
-public func archivePutBack(id: String, side: SyncSide, run: String, path: Data)async throws  -> Data  {
+public func archivePutBack(id: String, revision: UInt64, side: SyncSide, run: String, path: Data)async throws  -> Data  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_foldover_ffi_fn_func_archive_put_back(FfiConverterString.lower(id),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run),FfiConverterData.lower(path)
+                uniffi_foldover_ffi_fn_func_archive_put_back(FfiConverterString.lower(id),FfiConverterUInt64.lower(revision),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run),FfiConverterData.lower(path)
                 )
             },
             pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
@@ -5409,11 +5637,11 @@ public func archivePutBack(id: String, side: SyncSide, run: String, path: Data)a
 /**
  * Put back everything one run archived on one side.
  */
-public func archivePutBackAll(id: String, side: SyncSide, run: String)async throws  -> ArchiveRestoreSummary  {
+public func archivePutBackAll(id: String, revision: UInt64, side: SyncSide, run: String)async throws  -> ArchiveRestoreSummary  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_foldover_ffi_fn_func_archive_put_back_all(FfiConverterString.lower(id),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run)
+                uniffi_foldover_ffi_fn_func_archive_put_back_all(FfiConverterString.lower(id),FfiConverterUInt64.lower(revision),FfiConverterTypeSyncSide_lower(side),FfiConverterString.lower(run)
                 )
             },
             pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
@@ -5423,11 +5651,11 @@ public func archivePutBackAll(id: String, side: SyncSide, run: String)async thro
             errorHandler: FfiConverterTypeAgentError_lift
         )
 }
-public func archiveRuns(id: String, side: SyncSide)async throws  -> ArchivedRunList  {
+public func archiveRuns(id: String, revision: UInt64, side: SyncSide)async throws  -> ArchivedRunList  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_foldover_ffi_fn_func_archive_runs(FfiConverterString.lower(id),FfiConverterTypeSyncSide_lower(side)
+                uniffi_foldover_ffi_fn_func_archive_runs(FfiConverterString.lower(id),FfiConverterUInt64.lower(revision),FfiConverterTypeSyncSide_lower(side)
                 )
             },
             pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
@@ -5473,6 +5701,23 @@ public func resumeAutomation()async throws  -> AutomationState  {
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_foldover_ffi_fn_func_resume_automation(
+                )
+            },
+            pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_foldover_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_foldover_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeAutomationState_lift,
+            errorHandler: FfiConverterTypeAgentError_lift
+        )
+}
+/**
+ * Set how hard automatic syncs may work the Mac.
+ */
+public func setAutomaticEffort(effort: AutomaticEffort)async throws  -> AutomationState  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_foldover_ffi_fn_func_set_automatic_effort(FfiConverterTypeAutomaticEffort_lower(effort)
                 )
             },
             pollFunc: ffi_foldover_ffi_rust_future_poll_rust_buffer,
@@ -5913,7 +6158,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_foldover_ffi_checksum_func_agent_status() != 7308) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_foldover_ffi_checksum_func_check_pair() != 41529) {
+    if (uniffi_foldover_ffi_checksum_func_check_pair() != 11016) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_core_version() != 27554) {
@@ -5931,22 +6176,28 @@ private let initializationResult: InitializationResult = {
     if (uniffi_foldover_ffi_checksum_func_pair_page() != 7401) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_foldover_ffi_checksum_func_pair_pause() != 3004) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_foldover_ffi_checksum_func_pair_remove() != 12423) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_pair_resume() != 61566) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_pair_update() != 2038) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_foldover_ffi_checksum_func_archive_items() != 55648) {
+    if (uniffi_foldover_ffi_checksum_func_archive_items() != 34936) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_foldover_ffi_checksum_func_archive_put_back() != 6455) {
+    if (uniffi_foldover_ffi_checksum_func_archive_put_back() != 17827) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_foldover_ffi_checksum_func_archive_put_back_all() != 35866) {
+    if (uniffi_foldover_ffi_checksum_func_archive_put_back_all() != 10555) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_foldover_ffi_checksum_func_archive_runs() != 43046) {
+    if (uniffi_foldover_ffi_checksum_func_archive_runs() != 44682) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_automation_state() != 127) {
@@ -5956,6 +6207,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_resume_automation() != 13518) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_foldover_ffi_checksum_func_set_automatic_effort() != 56329) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_foldover_ffi_checksum_func_set_low_power_syncs() != 45223) {

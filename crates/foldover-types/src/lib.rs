@@ -8,6 +8,8 @@ mod metadata_policy;
 mod names;
 mod options;
 mod pair;
+mod path_map;
+mod prefix_index;
 mod reconcile;
 mod review;
 mod root;
@@ -15,9 +17,10 @@ mod share;
 mod sync_path;
 
 pub use pair::{
-    InvalidPair, LocalRoot, MAX_LOCAL_ROOT_BYTES, MAX_PAIR_NAME_BYTES, PairConfig, PairDraft,
-    PairId,
+    FolderRole, InvalidPair, LocalRoot, MAX_LOCAL_ROOT_BYTES, MAX_PAIR_NAME_BYTES, PairConfig,
+    PairDraft, PairId,
 };
+pub use prefix_index::PathPrefixIndex;
 
 pub use device::{DeviceId, InvalidDeviceId};
 pub use endpoint_id::EndpointId;
@@ -28,6 +31,7 @@ pub use options::{
     PairOptions, RemovalProtection, ReviewPolicy, Schedule, ScheduleInterval, TimeOfDay, Weekday,
     Weekdays,
 };
+pub use path_map::{InvalidSortedPathMap, PathMap, PathMapBuilder, PathMapIter};
 pub use review::{InvalidReviewToken, ReviewToken};
 pub use root::{PairRoot, PeerRoot, SftpRoot};
 pub use share::{InvalidShareId, ShareId};
@@ -43,4 +47,15 @@ pub use sync_path::{InvalidSyncPath, SyncPath};
 pub enum ScanControl {
     Continue,
     Cancel,
+}
+
+/// How hard a run may work the Mac (ADR 0054).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Effort {
+    /// Every worker its folders allow, at normal priority: what a person
+    /// waits for.
+    Full,
+    /// Low priority, and one reader or copy at a time where the processor,
+    /// not the network, limits the work: automatic syncs, by default.
+    Gentle,
 }

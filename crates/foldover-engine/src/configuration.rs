@@ -1,25 +1,26 @@
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use foldover_endpoint::{
-    Endpoint, EndpointPair, Filter, InvalidFilter, LocalEndpoint, ObservedEntry, PairRootError,
-    PeerLink, Reach, RootRelation, ScanError,
+    Endpoint, EndpointPair, Filter, InvalidFilter, LocalEndpoint, PairRootError, PeerLink, Reach,
+    RootRelation, ScanError,
 };
 use foldover_host::{Environment, EnvironmentHold, LowPowerSyncs, NetworkUse};
 use foldover_state::{
-    Device, HistoryEntry, Journal, JournalUpdate, MountSources, PairStore, Pause, Share,
+    Device, HistoryEntry, Journal, JournalUpdate, MountSources, PairStore, Pause, Purge, Share,
     SnapshotEntry, StateLocation, WatchCursor,
 };
 use foldover_types::{
-    DeviceId, Durability, FolderRecords, LocalRoot, MAX_PAIR_NAME_BYTES, PairConfig, PairDraft,
-    PairId, PairRoot, Resolution, ShareId, Side, SyncPath,
+    DeviceId, Durability, Effort, EndpointId, FolderRecords, FolderRole, LocalRoot,
+    MAX_PAIR_NAME_BYTES, PairConfig, PairDraft, PairId, PairRoot, PeerRoot, Resolution, SftpRoot,
+    ShareId, Side, SyncPath,
 };
 
-use crate::{Commit, RunInputs};
+use crate::{Commit, PendingRunInputs, RunInputs};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -33,10 +34,19 @@ pub enum Error {
     PairNotFound,
     #[error("Pair configuration changed; refresh before updating it")]
     StaleRevision,
-    #[error("Selected root overlaps pair {0}")]
-    CatalogOverlap(PairId),
-    #[error("Reconnect the roots of pair {pair} before changing the catalog: {source}")]
-    CatalogUnavailable { pair: PairId, source: PairRootError },
+    #[error(
+        "A chosen folder is, holds or sits inside a folder of “{name}”; pairs share folders only as Mirror or Backup sources"
+    )]
+    CatalogOverlap { pair: PairId, name: String },
+    #[error(
+        "Can't check the chosen folders against “{name}”, whose folder {folder} can't be read: {source}"
+    )]
+    CatalogUnavailable {
+        pair: PairId,
+        name: String,
+        folder: String,
+        source: PairRootError,
+    },
     #[error(
         "Selected root is inside the agent's state directory; a folder may hold it, but never be it or below it"
     )]
@@ -78,7 +88,7 @@ impl Error {
             Self::PairNotFound | Self::DeviceNotPaired => ErrorKind::NotFound,
             Self::StaleRevision => ErrorKind::Changed,
             Self::Roots(PairRootError::Overlap(_))
-            | Self::CatalogOverlap(_)
+            | Self::CatalogOverlap { .. }
             | Self::StateOverlap
             | Self::ShareOverlap => ErrorKind::Overlap,
             Self::Filter(_)
@@ -228,28 +238,22 @@ impl Engine {
         &self.state_path
     }
 
-    /// What a run reads from state, for work outside the engine lock.
-    pub fn run_inputs(&self, id: PairId) -> Result<RunInputs, Error> {
-        // Malformed cached fingerprints or versions only cost a reread.
-        let snapshot = |side| -> Result<BTreeMap<_, _>, Error> {
-            Ok(self
-                .pairs
-                .snapshot(id, side)?
-                .into_iter()
-                .filter_map(|entry| {
-                    let observed = ObservedEntry::restore(entry.version, &entry.fingerprint)?;
-                    Some((entry.path, observed))
-                })
-                .collect())
-        };
-        Ok(RunInputs::new(
+    /// Capture a run's inputs under the engine lock, with the stored
+    /// trees still encoded. Decode them with [`PendingRunInputs::decode`]
+    /// after releasing the lock, before endpoints or planning.
+    pub fn capture_run_inputs(&self, id: PairId) -> Result<PendingRunInputs, Error> {
+        Ok(PendingRunInputs::new(
             self.active_pair(id)?,
-            self.pairs.base(id)?,
             self.pairs.identities(id)?,
             self.pairs.resolutions(id)?,
-        )
-        .with_snapshots(snapshot(Side::Left)?, snapshot(Side::Right)?)
-        .with_reach(self.reach.clone()))
+            self.reach.clone(),
+            self.pairs.run_records(id)?,
+        ))
+    }
+
+    /// What a run reads from state, for work outside the engine lock.
+    pub fn run_inputs(&self, id: PairId) -> Result<RunInputs, Error> {
+        self.capture_run_inputs(id)?.decode()
     }
 
     /// Store a fresh observation of one side for the next run to reuse.
@@ -261,6 +265,24 @@ impl Engine {
         entries: &[SnapshotEntry],
     ) -> Result<(), Error> {
         Ok(self.pairs.replace_snapshot(id, revision, side, entries)?)
+    }
+
+    /// Store a fresh observation from rows already sorted by path with no
+    /// duplicates, as a run's [`crate::PairRun::snapshot_iter`] yields them.
+    /// The rows reach the database without an intermediate whole-tree vector.
+    pub fn store_snapshot_iter<I>(
+        &mut self,
+        id: PairId,
+        revision: u64,
+        side: Side,
+        entries: I,
+    ) -> Result<(), Error>
+    where
+        I: IntoIterator<Item = SnapshotEntry>,
+    {
+        Ok(self
+            .pairs
+            .replace_snapshot_iter(id, revision, side, entries)?)
     }
 
     /// Store a person's conflict choice for the pair revision they previewed.
@@ -526,6 +548,16 @@ impl Engine {
         })?)
     }
 
+    /// How hard automatic syncs may work the Mac (ADR 0054); manual syncs
+    /// always run at full effort.
+    pub fn automatic_effort(&self) -> Result<Effort, Error> {
+        Ok(self.pairs.automatic_effort()?)
+    }
+
+    pub fn set_automatic_effort(&mut self, effort: Effort) -> Result<(), Error> {
+        Ok(self.pairs.set_automatic_effort(effort)?)
+    }
+
     /// Whether the pair's syncs go over the network: an SFTP or paired
     /// Mac root, or a local root Foldover last saw on a mounted share.
     /// An unreadable mount record counts as network: automation fails
@@ -553,9 +585,37 @@ impl Engine {
         environment.hold(self.uses_network(pair), low_power)
     }
 
+    /// Remove a pair; it is gone for every reader at once, and
+    /// `purge_removed` deletes its rows afterwards (ADR 0053).
     pub fn remove_pair(&mut self, id: PairId, revision: u64) -> Result<PairConfig, Error> {
         // The caller reserves this pair against active or starting jobs.
         Ok(self.pairs.remove(id, revision)?)
+    }
+
+    /// Delete up to `limit` rows of removed pairs in one short
+    /// transaction; call again while it returns `Purge::Pending`.
+    pub fn purge_removed(&mut self, limit: usize) -> Result<Purge, Error> {
+        Ok(self.pairs.purge_removed(limit)?)
+    }
+
+    /// Whether removed pairs still have rows to purge.
+    pub fn removals_pending(&self) -> Result<bool, Error> {
+        Ok(self.pairs.removals_pending()?)
+    }
+
+    /// Pause the pair's automatic syncs until it is resumed. Manual syncs
+    /// still run, and a run in progress continues.
+    pub fn pause_pair(&mut self, id: PairId) -> Result<(), Error> {
+        Ok(self.pairs.pause_pair(id)?)
+    }
+
+    pub fn resume_pair(&mut self, id: PairId) -> Result<(), Error> {
+        Ok(self.pairs.resume_pair(id)?)
+    }
+
+    /// The pairs whose automatic syncs a person paused.
+    pub fn paused_pairs(&self) -> Result<BTreeSet<PairId>, Error> {
+        Ok(self.pairs.paused_pairs()?)
     }
 
     fn validate_roots(&self, draft: &PairDraft, replacing: Option<PairId>) -> Result<(), Error> {
@@ -571,13 +631,54 @@ impl Engine {
                 return Err(Error::StateOverlap);
             }
         }
+        let selected = [
+            Some(selected.endpoint(Side::Left)),
+            Some(selected.endpoint(Side::Right)),
+        ];
+        // Refusing, the check returns an unreadable folder as an error,
+        // so every finding is an overlap.
+        match self
+            .catalog_overlaps(draft, selected, replacing, Offline::Refuse)?
+            .into_iter()
+            .next()
+        {
+            Some(overlap) => Err(Error::CatalogOverlap {
+                pair: overlap.pair,
+                name: overlap.name,
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// For each side of `draft`, the first configured pair one of whose
+    /// folders is, holds or sits inside that side's folder, where the two
+    /// pairs may not share it. `selected` holds the draft's opened
+    /// folders; a side that did not open is not compared.
+    ///
+    /// Only Mirror and Backup sources may be shared: runs only read them,
+    /// and write one only when a person copies a change back into it,
+    /// under its lease (PLAN.md §3.6, ADR 0047). A folder another pair
+    /// writes would take two writers' plans, archives and leftovers.
+    ///
+    /// A configured folder that is missing, say on a disk not mounted, is
+    /// compared by where it would be and by its identity file (ADR 0048).
+    /// One that is there but cannot be read is refused or reported, as
+    /// `offline` says.
+    pub(crate) fn catalog_overlaps(
+        &self,
+        draft: &PairDraft,
+        selected: [Option<&Endpoint>; 2],
+        replacing: Option<PairId>,
+        offline: Offline,
+    ) -> Result<Vec<CatalogOverlap>, Error> {
+        let mut found: [Option<CatalogOverlap>; 2] = [None, None];
         // Page the catalog to bound memory even when many pairs are configured.
         let mut after = None;
         const CATALOG_BATCH: usize = 32;
         loop {
             let page = self.pairs.pairs_after(after, CATALOG_BATCH)?;
             if page.is_empty() {
-                return Ok(());
+                break;
             }
             for pair in page {
                 after = Some(pair.id());
@@ -586,55 +687,192 @@ impl Engine {
                 }
                 // Saved roots reserve their next run, while the active
                 // roots remain reserved for a job finishing the old one.
-                let active = self.pairs.active_pair(pair.id())?.filter(|active| {
-                    active.draft().left() != pair.draft().left()
-                        || active.draft().right() != pair.draft().right()
-                });
-                let roots = [pair.draft().left(), pair.draft().right()]
+                let active = self
+                    .pairs
+                    .active_pair(pair.id())?
+                    .filter(|active| active.draft() != pair.draft());
+                let roots = [Side::Left, Side::Right]
                     .into_iter()
-                    .chain(
-                        active
-                            .iter()
-                            .flat_map(|active| [active.draft().left(), active.draft().right()]),
-                    );
-                // Local roots are compared on disk; SFTP and paired Macs'
-                // roots by locator, so changing the catalog never waits on a
-                // server or another Mac.
-                for existing in roots {
-                    let overlapping = match existing {
-                        PairRoot::Local(_) => {
-                            let existing =
-                                Endpoint::open(existing, &self.reach).map_err(|source| {
-                                Error::CatalogUnavailable {
-                                    pair: pair.id(),
-                                    source: PairRootError::Endpoint(source),
-                                }
-                            })?;
-                            let mut overlapping = false;
-                            for side in [Side::Left, Side::Right] {
-                                overlapping |= selected.endpoint(side).relation_to(&existing)?
-                                    != RootRelation::Disjoint;
-                            }
-                            overlapping
-                        }
-                        PairRoot::Sftp(existing) => {
-                            [draft.left(), draft.right()]
-                                .into_iter()
-                                .any(|selected| match selected {
-                                    PairRoot::Sftp(selected) => selected.overlaps(existing),
-                                    PairRoot::Local(_) | PairRoot::Peer(_) => false,
-                                })
-                        }
-                        PairRoot::Peer(existing) => [draft.left(), draft.right()]
-                            .into_iter()
-                            .any(|selected| matches!(selected, PairRoot::Peer(selected) if selected == existing)),
+                    .map(|side| (pair.draft(), side))
+                    .chain(active.iter().flat_map(|active| {
+                        [Side::Left, Side::Right].map(|side| (active.draft(), side))
+                    }));
+                let name = pair.draft().name();
+                for (owner, owner_side) in roots {
+                    let sides: Vec<Side> = [Side::Left, Side::Right]
+                        .into_iter()
+                        .filter(|&side| {
+                            found[side as usize].is_none()
+                                && selected[side as usize].is_some()
+                                && !shareable(draft.role(side), owner.role(owner_side))
+                        })
+                        .collect();
+                    if sides.is_empty() {
+                        continue;
+                    }
+                    let finding = |side, kind| CatalogOverlap {
+                        side,
+                        pair: pair.id(),
+                        name: name.to_owned(),
+                        kind,
                     };
-                    if overlapping {
-                        return Err(Error::CatalogOverlap(pair.id()));
+                    let unreadable = |path: &LocalRoot, source| Error::CatalogUnavailable {
+                        pair: pair.id(),
+                        name: name.to_owned(),
+                        folder: String::from_utf8_lossy(path.as_bytes()).into_owned(),
+                        source: PairRootError::Endpoint(source),
+                    };
+                    let existing = match root(owner, owner_side) {
+                        local @ PairRoot::Local(path) => match Endpoint::open(local, &self.reach) {
+                            Ok(endpoint) => Existing::Local(Box::new(endpoint)),
+                            Err(ScanError::RootMissing) => Existing::Missing {
+                                path,
+                                identity: self.pairs.identities(pair.id())?.side(owner_side),
+                            },
+                            Err(source) => match offline {
+                                Offline::Refuse => return Err(unreadable(path, source)),
+                                Offline::Report => {
+                                    for &side in &sides {
+                                        found[side as usize] =
+                                            Some(finding(side, OverlapKind::Unverified));
+                                    }
+                                    continue;
+                                }
+                            },
+                        },
+                        PairRoot::Sftp(root) => Existing::Sftp(root),
+                        PairRoot::Peer(root) => Existing::Peer(root),
+                    };
+                    let overlapping = match overlapping(draft, &selected, &sides, &existing) {
+                        Ok(overlapping) => overlapping,
+                        Err(source) => match (offline, root(owner, owner_side)) {
+                            // Only local folders are compared on disk.
+                            (Offline::Refuse, PairRoot::Local(path)) => {
+                                return Err(unreadable(path, source));
+                            }
+                            (Offline::Refuse, PairRoot::Sftp(_) | PairRoot::Peer(_)) => {
+                                return Err(source.into());
+                            }
+                            (Offline::Report, _) => {
+                                for &side in &sides {
+                                    found[side as usize] =
+                                        Some(finding(side, OverlapKind::Unverified));
+                                }
+                                continue;
+                            }
+                        },
+                    };
+                    for side in overlapping {
+                        found[side as usize] = Some(finding(side, OverlapKind::Overlaps));
                     }
                 }
             }
+            if found.iter().all(Option::is_some) {
+                break;
+            }
         }
+        Ok(found.into_iter().flatten().collect())
+    }
+}
+
+/// A configured pair that keeps one side of a draft from being saved.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CatalogOverlap {
+    pub(crate) side: Side,
+    pub(crate) pair: PairId,
+    pub(crate) name: String,
+    pub(crate) kind: OverlapKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OverlapKind {
+    /// One of the pair's folders is, holds or sits inside this side's.
+    Overlaps,
+    /// One of the pair's folders is there but cannot be read, so this
+    /// side cannot be checked against it.
+    Unverified,
+}
+
+/// What a catalog check does with a configured pair's folder that is
+/// there but cannot be read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Offline {
+    /// Refuse: saving needs every existing folder verified (ADR 0011).
+    Refuse,
+    /// Report it as `OverlapKind::Unverified`: a readiness check tells
+    /// the person what saving would refuse.
+    Report,
+}
+
+/// A configured pair's folder: opened when it is local and there, else
+/// where it would be.
+enum Existing<'a> {
+    Local(Box<Endpoint>),
+    /// Nothing is at the path, e.g. its disk is not mounted. `identity`
+    /// is the one the pair recorded there, if it synced.
+    Missing {
+        path: &'a LocalRoot,
+        identity: Option<EndpointId>,
+    },
+    Sftp(&'a SftpRoot),
+    Peer(&'a PeerRoot),
+}
+
+/// Which of `sides` of `draft` are, hold or sit inside `existing`.
+/// Local roots are compared on disk; SFTP and paired Macs' roots by
+/// locator, so changing the catalog never waits on a server or another
+/// Mac.
+fn overlapping(
+    draft: &PairDraft,
+    selected: &[Option<&Endpoint>; 2],
+    sides: &[Side],
+    existing: &Existing<'_>,
+) -> Result<Vec<Side>, ScanError> {
+    let mut overlapping = Vec::new();
+    for &side in sides {
+        let overlaps = match existing {
+            Existing::Local(existing) => match selected[side as usize] {
+                Some(endpoint) => endpoint.relation_to(existing)? != RootRelation::Disjoint,
+                None => false,
+            },
+            // The folder would be inside this side's, or this side is that
+            // folder, carrying its identity, at another path: the disk
+            // mounted elsewhere, or the folder moved.
+            Existing::Missing { path, identity } => match selected[side as usize] {
+                // An identity file that cannot be read cannot clear it.
+                Some(endpoint) => {
+                    endpoint.relation_to_missing(path)? != RootRelation::Disjoint
+                        || match identity {
+                            Some(identity) => endpoint.identity()? == Some(*identity),
+                            None => false,
+                        }
+                }
+                None => false,
+            },
+            Existing::Sftp(existing) => {
+                matches!(root(draft, side), PairRoot::Sftp(selected) if selected.overlaps(existing))
+            }
+            Existing::Peer(existing) => {
+                matches!(root(draft, side), PairRoot::Peer(selected) if selected == *existing)
+            }
+        };
+        if overlaps {
+            overlapping.push(side);
+        }
+    }
+    Ok(overlapping)
+}
+
+/// Whether two pairs may both use one folder, each in its role: only as
+/// Mirror or Backup sources.
+fn shareable(selected: FolderRole, existing: FolderRole) -> bool {
+    selected == FolderRole::Source && existing == FolderRole::Source
+}
+
+fn root(draft: &PairDraft, side: Side) -> &PairRoot {
+    match side {
+        Side::Left => draft.left(),
+        Side::Right => draft.right(),
     }
 }
 
@@ -694,7 +932,9 @@ mod tests {
     use foldover_host::{NetworkCost, PowerMode};
     use foldover_types::{LocalRoot, SyncMode};
     use std::fs;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    use crate::ReadinessWarning;
 
     fn draft(left: &Path, right: &Path) -> PairDraft {
         PairDraft::new("Pair".into(), root(left), root(right), SyncMode::Sync).unwrap()
@@ -720,7 +960,7 @@ mod tests {
         symlink(&left, &alias).unwrap();
         for overlap in [&left, &alias, &left.join("child")] {
             assert!(
-                matches!(engine.create_pair(&draft(overlap, &third)), Err(Error::CatalogOverlap(id)) if id == pair.id())
+                matches!(engine.create_pair(&draft(overlap, &third)), Err(Error::CatalogOverlap { pair: id, .. }) if id == pair.id())
             );
         }
         assert!(matches!(
@@ -795,7 +1035,7 @@ mod tests {
     }
 
     #[test]
-    fn updates_are_revision_checked_and_offline_catalog_fails_closed() {
+    fn updates_are_revision_checked_and_unreadable_catalog_fails_closed() {
         let temporary = tempfile::tempdir().unwrap();
         let location = StateLocation::Directory(temporary.path().join("state"));
         let mut engine = Engine::open(&location).unwrap();
@@ -810,18 +1050,199 @@ mod tests {
             .update_pair(saved.id(), saved.revision(), saved.draft())
             .unwrap();
         assert_eq!(updated.revision(), saved.revision() + 1);
-        fs::remove_dir(&paths[0]).unwrap();
         assert!(matches!(
             engine.update_pair(saved.id(), saved.revision(), saved.draft()),
             Err(Error::StaleRevision)
         ));
-        assert!(matches!(
-            engine.create_pair(&draft(&paths[2], &paths[3])),
-            Err(Error::CatalogUnavailable { .. })
-        ));
+        // A folder that is there but cannot be read cannot be checked.
+        fs::set_permissions(&paths[0], fs::Permissions::from_mode(0o000)).unwrap();
+        let refused = engine.create_pair(&draft(&paths[2], &paths[3]));
+        fs::set_permissions(&paths[0], fs::Permissions::from_mode(0o755)).unwrap();
+        let error = refused.unwrap_err();
+        assert!(
+            matches!(&error, Error::CatalogUnavailable { pair, name, .. }
+                if *pair == saved.id() && name == "Pair"),
+            "{error:?}"
+        );
+        let message = error.to_string();
+        assert!(message.contains("“Pair”"), "{message}");
+        assert!(message.contains(&*paths[0].to_string_lossy()), "{message}");
         drop(engine);
         let engine = Engine::open(&location).unwrap();
         assert_eq!(engine.pair(saved.id()).unwrap(), updated);
+    }
+
+    /// ADR 0048: a folder on a disk that is not mounted no longer holds up
+    /// every change. It is compared by where it would be, and by the
+    /// identity file it carries, should it be mounted elsewhere.
+    #[test]
+    fn a_missing_folder_is_compared_by_where_it_would_be_and_its_identity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let base = temporary.path().canonicalize().unwrap();
+        let mut engine = Engine::open(&StateLocation::Directory(base.join("state"))).unwrap();
+        let [volume, other] = ["volume", "other"].map(|name| base.join(name));
+        let [missing, target, free, beside, moved] = [
+            volume.join("disk/photos"),
+            base.join("target"),
+            other.join("free"),
+            other.join("beside"),
+            other.join("moved"),
+        ];
+        for path in [&missing, &target, &free, &beside, &moved] {
+            fs::create_dir_all(path).unwrap();
+        }
+        let saved = engine.create_pair(&draft(&missing, &target)).unwrap();
+        let reach = Reach::default();
+        let identity = |path: &Path| {
+            Endpoint::open(&PairRoot::Local(root(path)), &reach)
+                .unwrap()
+                .ensure_identity(Durability::Standard)
+                .unwrap()
+        };
+        let (left, right) = (identity(&missing), identity(&target));
+        engine
+            .commit_run(
+                saved.id(),
+                saved.revision(),
+                Commit::Identities { left, right },
+            )
+            .unwrap();
+        // The disk goes away, and the folder moves along with it.
+        fs::rename(&missing, moved.join("photos")).unwrap();
+        fs::remove_dir(volume.join("disk")).unwrap();
+
+        // Beside where it would be: saved, though it cannot be opened.
+        let elsewhere = engine.create_pair(&draft(&free, &beside)).unwrap();
+        engine
+            .remove_pair(elsewhere.id(), elsewhere.revision())
+            .unwrap();
+        // Holding where it would be, or being it at another path: refused.
+        let carried = moved.join("photos");
+        for (refused, holds) in [(&volume, "holds"), (&carried, "is")] {
+            let error = engine.create_pair(&draft(&free, refused)).unwrap_err();
+            assert!(
+                matches!(&error, Error::CatalogOverlap { pair, .. } if *pair == saved.id()),
+                "{holds}: {error:?}"
+            );
+            assert_eq!(
+                engine.check_pair(&draft(&free, refused), None).unwrap(),
+                [ReadinessWarning::Overlap {
+                    side: Side::Right,
+                    pair: saved.id(),
+                    name: "Pair".into(),
+                }],
+                "{holds}"
+            );
+        }
+
+        // Unreadable, the identity file cannot clear the folder.
+        let id_file = carried.join(".foldover/id");
+        fs::set_permissions(&id_file, fs::Permissions::from_mode(0o000)).unwrap();
+        let refused = engine.create_pair(&draft(&free, &carried));
+        fs::set_permissions(&id_file, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            matches!(&refused, Err(Error::CatalogUnavailable { pair, .. }) if *pair == saved.id()),
+            "{refused:?}"
+        );
+    }
+
+    /// A missing folder whose nearest existing folder cannot be read
+    /// cannot be placed: saving names the pair, and the check reports it.
+    #[test]
+    fn a_missing_folder_behind_an_unreadable_one_cannot_be_checked() {
+        let temporary = tempfile::tempdir().unwrap();
+        let base = temporary.path().canonicalize().unwrap();
+        let mut engine = Engine::open(&StateLocation::Directory(base.join("state"))).unwrap();
+        let [locked, target, free, other] =
+            ["locked", "target", "free", "other"].map(|name| base.join(name));
+        let missing = locked.join("disk/photos");
+        for path in [&missing, &target, &free, &other] {
+            fs::create_dir_all(path).unwrap();
+        }
+        let saved = engine.create_pair(&draft(&missing, &target)).unwrap();
+        fs::remove_dir_all(locked.join("disk")).unwrap();
+        // Searchable, so the missing folder is missing, but not listable.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o100)).unwrap();
+        let refused = engine.create_pair(&draft(&free, &other));
+        let checked = engine.check_pair(&draft(&free, &other), None);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = refused.unwrap_err();
+        assert!(
+            matches!(&error, Error::CatalogUnavailable { pair, .. } if *pair == saved.id()),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("“Pair”"), "{error}");
+        let unverified = |side| ReadinessWarning::Unverified {
+            side,
+            pair: saved.id(),
+            name: "Pair".into(),
+        };
+        assert_eq!(
+            checked.unwrap(),
+            [unverified(Side::Left), unverified(Side::Right)]
+        );
+    }
+
+    fn one_way(left: &Path, right: &Path, mode: SyncMode) -> PairDraft {
+        PairDraft::new("Pair".into(), root(left), root(right), mode).unwrap()
+    }
+
+    /// One folder backed up to two targets, or a folder and one inside
+    /// it backed up separately: only Mirror and Backup sources share.
+    #[test]
+    fn only_one_way_sources_share_or_nest() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut engine =
+            Engine::open(&StateLocation::Directory(temporary.path().join("state"))).unwrap();
+        let paths = ["source/inner", "a", "b", "c", "d"].map(|name| temporary.path().join(name));
+        for path in &paths {
+            fs::create_dir_all(path).unwrap();
+        }
+        let source = temporary.path().join("source");
+        let inner = &paths[0];
+        let backup = SyncMode::Backup { source: Side::Left };
+        let mirror = SyncMode::Mirror {
+            source: Side::Right,
+        };
+        let first = engine
+            .create_pair(&one_way(&source, &paths[1], backup))
+            .unwrap();
+        // The same source, and a folder inside it, as another source.
+        engine
+            .create_pair(&one_way(&source, &paths[2], backup))
+            .unwrap();
+        engine
+            .create_pair(&one_way(&paths[3], inner, mirror))
+            .unwrap();
+
+        // Anything that would write the shared source, or another pair's
+        // target, still overlaps; the error names the pair.
+        for refused in [
+            one_way(&source, &paths[4], SyncMode::Sync),
+            one_way(&paths[4], &source, backup),
+            one_way(
+                &paths[4],
+                &paths[1],
+                SyncMode::Mirror { source: Side::Left },
+            ),
+            one_way(&paths[1], &paths[4], backup),
+        ] {
+            let error = engine.create_pair(&refused).unwrap_err();
+            assert!(
+                matches!(&error, Error::CatalogOverlap { name, .. } if name == "Pair"),
+                "{error:?}"
+            );
+            assert!(error.to_string().contains("“Pair”"), "{error}");
+        }
+        // Turning a sharing source into a two-way folder is refused too.
+        assert!(matches!(
+            engine.update_pair(
+                first.id(),
+                first.revision(),
+                &one_way(&source, &paths[1], SyncMode::Sync)
+            ),
+            Err(Error::CatalogOverlap { .. })
+        ));
     }
 
     #[test]
@@ -844,7 +1265,7 @@ mod tests {
         );
         for reserved in [&paths[0], &paths[2]] {
             assert!(
-                matches!(engine.create_pair(&draft(reserved, &paths[4])), Err(Error::CatalogOverlap(id)) if id == original.id())
+                matches!(engine.create_pair(&draft(reserved, &paths[4])), Err(Error::CatalogOverlap { pair: id, .. }) if id == original.id())
             );
         }
         drop(engine);
@@ -855,6 +1276,33 @@ mod tests {
         );
         // Restart recovered the saved roots, so the old roots are free.
         engine.create_pair(&draft(&paths[0], &paths[4])).unwrap();
+    }
+
+    /// A job finishing a two-way configuration still writes both folders,
+    /// so its source cannot be shared before the edit to a Backup lands.
+    #[test]
+    fn a_pending_one_way_edit_shares_nothing_until_it_is_active() {
+        let temporary = tempfile::tempdir().unwrap();
+        let location = StateLocation::Directory(temporary.path().join("state"));
+        let mut engine = Engine::open(&location).unwrap();
+        let paths = ["a", "b", "c"].map(|name| temporary.path().join(name));
+        for path in &paths {
+            fs::create_dir(path).unwrap();
+        }
+        let backup = SyncMode::Backup { source: Side::Left };
+        let original = engine.create_pair(&draft(&paths[0], &paths[1])).unwrap();
+        engine
+            .defer_pair_update(original.id(), 1, &one_way(&paths[0], &paths[1], backup))
+            .unwrap();
+        assert!(matches!(
+            engine.create_pair(&one_way(&paths[0], &paths[2], backup)),
+            Err(Error::CatalogOverlap { pair, .. }) if pair == original.id()
+        ));
+        drop(engine);
+        let mut engine = Engine::open(&location).unwrap();
+        engine
+            .create_pair(&one_way(&paths[0], &paths[2], backup))
+            .unwrap();
     }
 
     /// Full durability cannot be promised on SFTP: the check precedes
@@ -1071,6 +1519,11 @@ mod tests {
         );
         engine.set_low_power_syncs(LowPowerSyncs::Run).unwrap();
         assert_eq!(engine.low_power_syncs().unwrap(), LowPowerSyncs::Run);
+        assert_eq!(engine.automatic_hold(&local, low), None);
+        // Effort never holds a pair; it only changes how a run works.
+        assert_eq!(engine.automatic_effort().unwrap(), Effort::Gentle);
+        engine.set_automatic_effort(Effort::Full).unwrap();
+        assert_eq!(engine.automatic_effort().unwrap(), Effort::Full);
         assert_eq!(engine.automatic_hold(&local, low), None);
         // The network hold is unaffected by the low-power choice.
         assert_eq!(

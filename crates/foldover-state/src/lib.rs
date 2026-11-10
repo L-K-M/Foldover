@@ -9,6 +9,7 @@ pub use base::BaseUpdate;
 pub use foldover_db::StateLocation;
 pub use pairs::{
     Device, Error, HISTORY_LIMIT, HistoryEntry, HistoryOutcome, Journal, JournalAction,
-    JournalEntry, JournalUpdate, LowPowerSyncs, MountSources, PairStore, Pause, RecordedIdentities,
-    RunMarker, RunTrigger, Share, SnapshotEntry, WatchCursor,
+    JournalEntry, JournalUpdate, LowPowerSyncs, MountSources, PairStore, Pause, Purge,
+    RecordedIdentities, RunMarker, RunRecordInputs, RunRecords, RunTrigger, Share, SnapshotEntry,
+    WatchCursor,
 };

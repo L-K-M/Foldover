@@ -150,6 +150,79 @@ paper only if it behaves like a printed spread:
 - **A click on a line only selects it.** Marks still stage turns when
   clicked, but a line's middle is now the empty gutter, not a mark.
 
+## When nothing is listed
+
+Most runs start with no preview on the sheet: a schedule, the menu
+bar, Shortcuts, Sync Now before previewing, or a window opened while a
+run is under way. The leaf folds all the same, a blank half carrying
+only its folder's label, and the sheet keeps its height with nothing
+listed: the folded back covers its whole page, and the navy field
+fills the detail behind it. An earlier build let the page shrink to
+its labels, leaving the back a card at the top of a bare field.
+
+## Both folders stay named, each on its side
+
+While the leaf lies folded, neither page label can be read: one is
+printed on the face that turned down, the other is under the leaf. An
+earlier build named neither for the whole run and left the half the
+leaf lifted off as bare navy, half the detail with nothing on it. Now
+each folder is named in white at the head of its own half, at the same
+height on both, so the spread still reads the way it did open: A on
+the left, B on the right, and a one-way run from its source to its
+destination.
+
+- **The bare desk names the folder that lifted off**: "From Folder A"
+  in a one-way mode, "Folder A" in a two-way sync, then the folder's
+  name and where it is. Under it, level with the readout, an arrow
+  points across to the leaf, folded like the icon's: an ivory tail and
+  a cerulean head in two facets, lit from the top left. A Backup's
+  arrow meets a paper edge, since its destination keeps what the
+  source deletes; a Mirror's flies on; a two-way Sync's are two arrows
+  passing. The mode's name is set under it.
+- **The back names the folder it lies on**: "To Folder B", or "Folder
+  B" in a two-way sync, over the readout. Under the readout, a local
+  folder's disk: its name, a bar of what it holds and, in a one-way
+  mode, of the data the run has yet to copy there, its free space, and
+  a warning when more is left to copy than is free. A server or another
+  Mac shows its name alone: there is no disk here to read.
+
+The arrow keeps to the desk's page; nothing crosses the gutter but the
+crease. Free space is read off the main thread every few seconds, one
+read per folder at a time, since a network share's file system calls
+can stall while its server is silent. On a short window the back
+drops the disk first, then where its folder is, then its name, before
+the readout; the desk drops its arrow before its name.
+
+## What the back reads
+
+The plate on the folded back says which stage the run is in, above a
+figure that never runs backward:
+
+- **Comparing.** A run finds the folders' items as it goes: it lists
+  and checks Folder A, then lists and checks Folder B, then makes its
+  plan. A share of the items found would climb to 100%, fall back as B's
+  listing begins, and start again from 0% once the plan is made. So
+  while comparing, the figure counts the items checked, which only
+  grows, over a spinner and the items found so far. A bar with no end
+  would not do: Reduce Motion holds its moving segment still, and a
+  still segment reads as a share.
+- **Syncing.** Once the plan says how much there is to do, the figure
+  is the share done: of the data to copy, or of the changes when
+  nothing is copied, rounded down so it reads 100% only once all of it
+  is done: all the data copied, or every change made. The bar fills,
+  and short lines give the changes made, the data copied, the speed and
+  the time left.
+- **Waiting.** While another Mac syncs the same folders, an hourglass
+  stands in for the figure and there is no bar: nothing moves here.
+- **Stopping.** After Stop the stage says so, the figure and the counts
+  hold, and the speed and time left go.
+
+Once the plan is known the figure counts something else, so the share
+replaces the count rather than rolling on from it. While a preview
+compares on a sheet with nothing listed, the same readout is printed in
+umber on the page a message keeps to; a preview over listed lines dims
+them instead.
+
 ## What I deliberately did not do
 
 - **No claims about lines after a run.** A routine sync plans afresh, so

@@ -3,7 +3,6 @@
 //! keep their native path (clones, resource forks, ACLs); every other
 //! combination streams data and carries mode and modification time.
 
-use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::num::NonZeroUsize;
 use std::os::unix::ffi::OsStrExt;
@@ -12,8 +11,9 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime};
 
 use foldover_types::{
-    CaseMatching, Durability, EndpointId, EntryVersion, MetadataPolicy, NameMatching, PairOptions,
-    PairRoot, ScanControl, SyncPath, UnicodeMatching,
+    BaselineEntry, CaseMatching, Durability, Effort, EndpointId, EntryVersion, LocalRoot,
+    MetadataPolicy, NameMatching, PairOptions, PairRoot, PathMap, ScanControl, Side, SyncPath,
+    UnicodeMatching,
 };
 
 use crate::lease::LockFile;
@@ -22,7 +22,7 @@ use crate::remote::PeerEndpoint;
 use crate::sftp::SftpEndpoint;
 use crate::{
     ApplyError, ArchivedItem, ArchivedRun, Expected, Filter, LocalEndpoint, Observation,
-    ObservedEntry, RootRelation, RunScope, ScanError,
+    ObservationHints, ObservedEntry, Pruning, RootRelation, RunScope, ScanError,
 };
 
 /// Copies another Mac's folder takes at once.
@@ -85,6 +85,16 @@ pub enum ObserveStep {
     Listed,
     /// An entry's version is known, read or reused.
     Checked,
+}
+
+/// What limits a folder's reads and writes, so a gentle run narrows only
+/// work that competes for this Mac's processor (ADR 0054).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Bottleneck {
+    /// A disk of this Mac: reads and copies take processor time.
+    Local,
+    /// A share, a server or another Mac: work mostly waits on the network.
+    Network,
 }
 
 pub enum Endpoint {
@@ -212,7 +222,7 @@ impl Endpoint {
         &self,
         policy: MetadataPolicy,
         filter: &Filter,
-        previous: &BTreeMap<SyncPath, ObservedEntry>,
+        previous: &impl crate::PreviousObservation,
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<Observation, ScanError> {
@@ -227,6 +237,45 @@ impl Endpoint {
             Self::Peer(endpoint) => endpoint.observe_reporting(policy, filter, control, progress),
             #[cfg(feature = "simulation")]
             Self::Memory(endpoint) => endpoint.observe(policy, filter, control, progress),
+        }
+    }
+
+    /// Consume this root's prior snapshot under the same metadata policy.
+    /// Local and SFTP observations reuse its row allocation. A failed or
+    /// cancelled observation publishes no partially consumed snapshot.
+    #[allow(clippy::too_many_arguments)]
+    pub fn observe_owned(
+        &self,
+        policy: MetadataPolicy,
+        filter: &Filter,
+        previous: PathMap<ObservedEntry>,
+        base: Arc<PathMap<BaselineEntry>>,
+        side: Side,
+        hints: ObservationHints,
+        control: &mut impl FnMut() -> ScanControl,
+        progress: &mut impl FnMut(ObserveStep),
+    ) -> Result<Observation, ScanError> {
+        match self {
+            Self::Local(endpoint) => endpoint.observe_owned(
+                policy, filter, previous, base, side, hints, control, progress,
+            ),
+            Self::Sftp(endpoint) => endpoint.observe_owned(
+                policy, filter, previous, base, side, hints, control, progress,
+            ),
+            // Peers keep a root-local cache on the serving Mac. Fold their
+            // received observations into the caller's comparison afterward.
+            Self::Peer(endpoint) => {
+                let mut observation =
+                    endpoint.observe_reporting(policy, filter, control, progress)?;
+                observation.recycle_from(previous, base, side, hints);
+                Ok(observation)
+            }
+            #[cfg(feature = "simulation")]
+            Self::Memory(endpoint) => {
+                let mut observation = endpoint.observe(policy, filter, control, progress)?;
+                observation.recycle_from(previous, base, side, hints);
+                Ok(observation)
+            }
         }
     }
 
@@ -298,10 +347,21 @@ impl Endpoint {
         }
     }
 
-    pub fn recover_leftover(&self, leftover: &SyncPath, run: &RunScope) -> Result<(), ApplyError> {
+    pub fn recover_leftover(
+        &self,
+        leftover: &SyncPath,
+        run: &RunScope,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), ApplyError> {
+        // Recovery is the run's first mutation. An already-requested stop
+        // must leave every temporary for the next run, including on endpoint
+        // kinds whose recovery primitive does not otherwise take control.
+        if control() == ScanControl::Cancel {
+            return Err(ScanError::Cancelled.into());
+        }
         match self {
             Self::Local(endpoint) => endpoint.recover_leftover(leftover, run),
-            Self::Sftp(endpoint) => endpoint.recover_leftover(leftover, run),
+            Self::Sftp(endpoint) => endpoint.recover_leftover(leftover, run, control),
             Self::Peer(endpoint) => endpoint.recover_leftover(leftover, run),
             #[cfg(feature = "simulation")]
             Self::Memory(endpoint) => endpoint.recover_leftover(leftover, run),
@@ -333,6 +393,29 @@ impl Endpoint {
         !matches!(self, Self::Peer(_))
     }
 
+    /// Observe this folder at `effort` from now on (ADR 0054). Folders on
+    /// other Macs are observed there, so only their copies, which the run
+    /// makes, take an effort.
+    pub fn set_effort(&mut self, effort: Effort) {
+        match self {
+            Self::Local(endpoint) => endpoint.set_effort(effort),
+            Self::Sftp(endpoint) => endpoint.set_effort(effort),
+            Self::Peer(_) => {}
+            #[cfg(feature = "simulation")]
+            Self::Memory(_) => {}
+        }
+    }
+
+    /// What limits this folder's reads and writes.
+    pub fn bottleneck(&self) -> Bottleneck {
+        match self {
+            Self::Local(endpoint) => endpoint.bottleneck(),
+            Self::Sftp(_) | Self::Peer(_) => Bottleneck::Network,
+            #[cfg(feature = "simulation")]
+            Self::Memory(_) => Bottleneck::Local,
+        }
+    }
+
     /// How many copies into or out of this folder may run at once (PLAN.md
     /// §4.9). Each copy to or from another Mac is one stream on its link.
     pub fn workers(&self) -> NonZeroUsize {
@@ -355,7 +438,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.remove(path, current, run, control),
             Self::Sftp(endpoint) => endpoint.remove(path, current, run, control),
-            Self::Peer(endpoint) => endpoint.remove(path, current, run),
+            Self::Peer(endpoint) => endpoint.remove(path, current, run, control),
             #[cfg(feature = "simulation")]
             Self::Memory(endpoint) => endpoint.remove(path, current, run),
         }
@@ -413,13 +496,24 @@ impl Endpoint {
         }
     }
 
-    pub fn prune_archive(&self, retention: Duration, now: SystemTime) -> Result<u64, ApplyError> {
+    /// Delete archived runs past their expiry (`Pruning`). Another Mac's
+    /// folder is pruned by that Mac, for everyone, by its own clock.
+    pub fn prune_archive(
+        &self,
+        retention: Duration,
+        now: SystemTime,
+        pruning: Pruning,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<u64, ApplyError> {
+        if control() == ScanControl::Cancel {
+            return Err(ScanError::Cancelled.into());
+        }
         match self {
-            Self::Local(endpoint) => endpoint.prune_archive(retention, now),
-            Self::Sftp(endpoint) => endpoint.prune_archive(retention, now),
-            Self::Peer(endpoint) => endpoint.prune_archive(retention, now),
+            Self::Local(endpoint) => endpoint.prune_archive(retention, now, pruning, control),
+            Self::Sftp(endpoint) => endpoint.prune_archive(retention, now, pruning, control),
+            Self::Peer(endpoint) => endpoint.prune_archive(retention, now, control),
             #[cfg(feature = "simulation")]
-            Self::Memory(endpoint) => endpoint.prune_archive(retention, now),
+            Self::Memory(endpoint) => endpoint.prune_archive(retention, now, pruning),
         }
     }
 
@@ -474,7 +568,7 @@ impl Endpoint {
         match self {
             Self::Local(endpoint) => endpoint.keep_copy(path, expected, from, options, control),
             Self::Sftp(endpoint) => endpoint.keep_copy(path, expected, from, options, control),
-            Self::Peer(endpoint) => endpoint.keep_copy(path, expected, from, options),
+            Self::Peer(endpoint) => endpoint.keep_copy(path, expected, from, options, control),
             #[cfg(feature = "simulation")]
             Self::Memory(_) => Err(ApplyError::Unsupported(path.clone())),
         }
@@ -505,20 +599,6 @@ impl Endpoint {
         }
     }
 
-    pub(crate) fn replace_lock_file(
-        &self,
-        file: LockFile,
-        content: &[u8],
-    ) -> Result<(), ApplyError> {
-        match self {
-            Self::Local(endpoint) => endpoint.replace_lock_file(file, content),
-            Self::Sftp(endpoint) => endpoint.replace_lock_file(file, content),
-            Self::Peer(endpoint) => endpoint.replace_lock_file(file, content),
-            #[cfg(feature = "simulation")]
-            Self::Memory(endpoint) => endpoint.replace_lock_file(file, content),
-        }
-    }
-
     pub(crate) fn remove_lock_file(&self, file: LockFile) -> Result<(), ApplyError> {
         match self {
             Self::Local(endpoint) => endpoint.remove_lock_file(file),
@@ -536,6 +616,17 @@ impl Endpoint {
             Self::Peer(endpoint) => endpoint.promote_claim(),
             #[cfg(feature = "simulation")]
             Self::Memory(endpoint) => endpoint.promote_claim(),
+        }
+    }
+
+    /// How this root nests with a local folder that is missing, e.g. on a
+    /// disk that is not mounted. Only a local root can hold it.
+    pub fn relation_to_missing(&self, missing: &LocalRoot) -> Result<RootRelation, ScanError> {
+        match self {
+            Self::Local(endpoint) => {
+                endpoint.relation_to_missing(Path::new(OsStr::from_bytes(missing.as_bytes())))
+            }
+            _ => Ok(RootRelation::Disjoint),
         }
     }
 

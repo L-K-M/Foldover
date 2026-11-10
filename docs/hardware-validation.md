@@ -10,6 +10,103 @@ A check that fails is a release blocker, except rows that record a
 finding instead (§A.6); a row you cannot run is a known gap — record
 either under the run's date, do not silently skip.
 
+## Release-candidate run sheet
+
+Copy this section once per release candidate and fill it in. It records
+what a run actually covered; a row left `NOT RUN` is a known gap, not a
+pass. Filling it in creates no release candidate and asserts no result.
+Sections A and B are the owner checklists; this sheet holds the per-run
+evidence and the remaining qualification in one place. Prior
+measurements and their limits are in
+[perf/qualification-results.md](../perf/qualification-results.md).
+
+### Run identity
+
+| Field | Record |
+|---|---|
+| Date, operator, RC label | |
+| Version (`CFBundleShortVersionString`), source revision, `foldover --version` | |
+| Bundle SHA-256 (app, `foldoverd`, `foldover` CLI) and signing (`codesign --verify --deep --strict`, `Signature=adhoc`, no Team ID) | |
+| Hardware, OS, filesystems, protocols (NAS model/firmware, Mac models, macOS, media; APFS/HFS+/exFAT/FAT32; SMB/NFS/SFTP/peer) | |
+| Cache state and load (cold/warm OS caches, aged catalog, NAS load average, RTT) | |
+| Scope: installed app / agent+CLI / engine harness / service test | |
+
+Record the installed bundle with:
+
+```sh
+/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Foldover.app/Contents/Info.plist
+shasum -a 256 Foldover.app/Contents/MacOS/Foldover \
+  Foldover.app/Contents/Library/LaunchServices/foldoverd \
+  Foldover.app/Contents/Library/LaunchServices/foldover
+codesign --verify --deep --strict --verbose=2 Foldover.app
+codesign -d --verbose=4 Foldover.app 2>&1 | grep -E 'Identifier|Signature|TeamIdentifier'
+```
+
+### Results
+
+One row per check. Scope is `installed app`, `agent/CLI`, `engine
+harness` or `service test`; a check that mixes scopes is two rows. Result
+is `PASS` (evidence attached), `FAIL` (blocker, with repro) or `NOT RUN`.
+Engine-harness and service-test rows do not qualify the installed app.
+Budgets are
+[PLAN.md §5.3](../PLAN.md#53-performance-budgets-initial-calibrated-by-the-spikes);
+harness commands are in [perf/qualification.md](../perf/qualification.md).
+
+| # | Check | Scope | Result | Evidence and limitations |
+|---|---|---|---|---|
+| RC-1 | Initial 1M NAS baseline, phases timed | installed app | NOT RUN | Distinguish an empty-target copy from matching pre-generated folders; keep separate from warm runs. |
+| RC-2 | Warm tracked 1M NAS no-change run, zero copies/updates/archives | installed app | NOT RUN | Record observation, apply and total; label warm tracked. |
+| RC-3 | App process cold start to cached view < 300 ms | installed app | NOT RUN | Warm storage cache; repeat and record the median. |
+| RC-4 | Cold storage cache preview vs warm | installed app | NOT RUN | State the cache condition; separate from RC-3. |
+| RC-5 | Two or more concurrent held previews; status latency | installed app | NOT RUN | Record max handler and poll latency. |
+| RC-6 | Agent peak RSS at 1M tracked files ≤ 500,000,000 bytes | agent/CLI | NOT RUN | Strict decimal; kernel peak RSS is authoritative. |
+| RC-7 | Deep and Unicode paths copy byte-exact; no rename loop | installed app | NOT RUN | Composed and decomposed names, case-only renames. |
+| RC-8 | NAS metadata fidelity: tags, comments, resource forks, ACLs | installed app | NOT RUN | Update [guide/nas-and-sftp.md](guide/nas-and-sftp.md) with what survives. |
+| RC-9 | Cancel mid-run; undo newest run; no partial success | installed app | NOT RUN | Check cancellation and undo separately; verify content, archives and metadata outcomes. |
+| RC-10 | Disconnect/reconnect: share drop or SSH loss, then next run | installed app | NOT RUN | Scheduled pair waits; no history entry while waiting. |
+| RC-11 | SSH stall observation during the NAS runs | installed app | NOT RUN | Phase, duration, cause; retain failed artifacts. |
+| RC-12 | Upload throughput ≥ 100 MB/s on 1 GbE, large files | installed app | NOT RUN | Record MB/s, file set and conditions. |
+| RC-13 | Owner only: sleep/wake, Wi-Fi off/on, VPN or network move | owner | NOT RUN | Section B.3; agents do not simulate these. |
+| RC-14 | Owner only: VoiceOver pass | owner | NOT RUN | [PLAN.md §10](../PLAN.md#10-decisions-for-the-owner). |
+
+### Nightly and simulation evidence
+
+| Field | Record |
+|---|---|
+| Nightly run links for the RC window: fuzz, simulate, peer chaos, devices matrix | |
+| Simulation case counts and seeds (`FOLDOVER_SIMULATION_CASES`, `FOLDOVER_MEMORY_SIMULATION_CASES`) | |
+| 1.0 gate: consecutive nights ≥100k seeded runs each, zero invariant violations | |
+| Crash observation coverage: journal-transition kills and peer chaos runs ([ADR 0038](adr/0038-simulation.md)) | |
+| Violations, seeds and repros | |
+
+### Second Mac and cleanup
+
+Install the same build on both Macs. A run where one Mac has an older
+build is a compatibility result only; label it as such and do not count it
+as RC qualification. A separate local account is optional; the existing
+second Mac account may be used with dedicated synthetic folders, without
+replacing its app or catalog, running its personal saved pairs, or
+altering its personal schedules.
+
+Before the run, record the exact owned fixture paths, the pair, share and
+device IDs this run creates, and a read-only baseline of existing pair configurations, schedules,
+shares, pins and relevant preferences. Keep that baseline private; do
+not copy a live SQLite database without its consistency mechanism.
+After the run, remove exactly what this run created:
+
+- `foldover peers revoke <DEVICE>` for the test pairing.
+- `foldover shares remove <ID>` for test shares.
+- `foldover pairs remove <ID> <REVISION>` for test pairs.
+- The Keychain item `ch.lkmc.foldover.peer-identity` / `local-device`,
+  only if this run created it and nothing personal needs it.
+- Only the exact fixture directories and test share listed above.
+
+Verify the owner's pairs, schedules, shares and preferences are
+unchanged, and investigate any unexpected change before attempting recovery.
+Do not replace an existing catalog or restore an old whole-catalog
+backup over newer activity. Never delete a pre-existing identity, pair,
+share or schedule.
+
 ## A. Real NAS over SMB
 
 Setup: mount the share in Finder (`smb://nas.local/…`), save the

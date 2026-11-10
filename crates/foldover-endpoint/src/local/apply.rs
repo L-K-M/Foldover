@@ -13,10 +13,10 @@ use std::time::SystemTime;
 
 use foldover_fs::{Displaced, Placement, WriteError};
 use foldover_types::{
-    EntryContent, EntryKind, EntryVersion, InvalidSyncPath, PairOptions, SyncPath,
+    EntryContent, EntryKind, EntryVersion, InvalidSyncPath, PairId, PairOptions, SyncPath,
 };
 
-use super::archive::{ARCHIVE_ROOT, archive_name};
+use super::archive::{ARCHIVE_ROOT, unique_run_name};
 use super::{
     LocalEndpoint, LocalEntry, NodeKind, ObservedEntry, Payload, ScanControl, ScanError,
     entry_version, metadata_version, observed,
@@ -52,9 +52,11 @@ pub struct RunScope {
 }
 
 impl RunScope {
-    /// The archive folder is named after `started`.
-    pub fn new(started: SystemTime, options: PairOptions) -> Self {
-        let name = archive_name(started);
+    /// A run of `pair`; the archive folder is named after `started`,
+    /// the pair and a fresh unique ID, so pairs sharing a folder keep
+    /// their runs apart and runs sharing a millisecond stay distinct.
+    pub fn new(started: SystemTime, pair: PairId, options: PairOptions) -> Self {
+        let name = unique_run_name(started, pair);
         let mut archive = ARCHIVE_ROOT.to_vec();
         archive.push(b'/');
         archive.extend_from_slice(name.as_bytes());
@@ -184,7 +186,7 @@ impl LocalEndpoint {
             ),
         };
 
-        let (staged, version) = match from.version.kind() {
+        let (staged, version) = match from.version().kind() {
             EntryKind::Directory => {
                 if destination.is_some() {
                     return Err(ApplyError::Unsupported(path.clone()));
@@ -220,6 +222,9 @@ impl LocalEndpoint {
                         &mut checkpoint,
                     )
                     .map_err(|error| match error {
+                        WriteError::Source(foldover_fs::HashError::Cancelled) => {
+                            ApplyError::Scan(ScanError::Cancelled)
+                        }
                         WriteError::Source(_) => ApplyError::SourceChanged(path.clone()),
                         error => write_error(path, error),
                     })?;
@@ -248,7 +253,7 @@ impl LocalEndpoint {
             }
         };
         if let Some(version) = version
-            && version.content() != from.version.content()
+            && version.content() != from.version().content()
         {
             return Err(ApplyError::ContentNotStored(path.clone()));
         }
@@ -303,7 +308,7 @@ impl LocalEndpoint {
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<EntryVersion, ApplyError> {
         self.guarded(path)?;
-        if from.version.content() != current.version.content() {
+        if from.version().content() != current.version().content() {
             return Err(ApplyError::Unsupported(path.clone()));
         }
         let source_entry = source
@@ -314,7 +319,7 @@ impl LocalEndpoint {
             .map_err(|error| changed_as(error, ApplyError::DestinationChanged(path.clone())))?;
         if destination.metadata.kind() == NodeKind::Symlink {
             // Link metadata is not copied; the content already matches.
-            return Ok(current.version);
+            return Ok(current.version());
         }
         self.root
             .update_metadata(
@@ -332,9 +337,10 @@ impl LocalEndpoint {
             .entry_at(path)?
             .ok_or_else(|| ApplyError::DestinationChanged(path.clone()))?;
         let mut checkpoint = |_| control();
-        let extended = self.optional_extended_metadata(&updated, &mut checkpoint)?;
+        let extended =
+            self.optional_extended_metadata(&updated, run.options.metadata(), &mut checkpoint)?;
         Ok(metadata_version(
-            current.version.content(),
+            current.version().content(),
             &observed(&updated.metadata, extended.as_ref()),
             run.options.metadata(),
         ))
@@ -380,7 +386,7 @@ impl LocalEndpoint {
             .verified(path, current, run, control)
             .map_err(|error| changed_as(error, ApplyError::DestinationChanged(path.clone())))?;
         let durability = run.options.durability();
-        let result = match current.version.content() {
+        let result = match current.version().content() {
             EntryContent::Directory => {
                 self.root
                     .remove_directory(path, entry.metadata(), durability)
@@ -456,10 +462,10 @@ impl LocalEndpoint {
     ) -> Result<LocalEntry, ApplyError> {
         let changed = || ApplyError::DestinationChanged(path.clone());
         let entry = self.entry_at(path)?.ok_or_else(changed)?;
-        if expected.fingerprint.proves_unchanged(&entry.metadata) {
+        if expected.fingerprint().proves_unchanged(&entry.metadata) {
             return Ok(entry);
         }
-        if self.entry_version(&entry, run.options.metadata(), control)? != expected.version {
+        if self.entry_version(&entry, run.options.metadata(), control)? != expected.version() {
             return Err(changed());
         }
         Ok(entry)

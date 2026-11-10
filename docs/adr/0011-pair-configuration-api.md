@@ -28,8 +28,17 @@ bundle. Process smoke inspects signed app/helper entitlements before private cal
   `sync`/`ignore`; durability `standard`/`full`). Version 3 added options.
 - `pair.get`: an existing pair ID.
 - `pair.update`: ID, expected positive revision and replacement configuration.
-- `pair.remove`: ID and expected revision; returns the removed configuration.
+- `pair.remove`: ID and expected revision; marks the pair removed and
+  returns its configuration. The agent purges its rows in the background.
+- `pair.pause`: `{"id": ...}`; holds the pair's automatic syncs until
+  `pair.resume` and answers with the pair record.
+- `pair.resume`: `{"id": ...}`; ends the pair's pause and answers with the
+  pair record.
 - `pair.list`: optional exclusive `after` ID; at most 16 records and a next ID.
+
+Every pair record (`pair.list`, `pair.get`, `pair.create`, `pair.update`,
+`pair.pause`, `pair.resume`) carries `paused`, a boolean that is not part
+of the configuration. Local protocol version is 22.
 
 IDs are 32 lowercase hex digits, excluding all zero. Roots use byte arrays,
 not lossy strings. Names allow at most 1024 UTF-8 bytes; roots at most 4096
@@ -46,8 +55,11 @@ Changing roots or any metadata category discards the pair's base
 ([ADR 0009](0009-pair-state-storage.md)): stored versions describe those
 roots under those categories. Durability, name and mode changes keep it.
 
-Removal changes only configuration and performs no endpoint probes or deletion.
-This permits removal of an offline pair that otherwise blocks catalog checks.
+Removal changes only configuration and performs no endpoint probes. It marks
+the pair in `pair_removal`, and the agent purges the marked pair's rows in the
+background ([ADR 0053](0053-background-pair-removal.md)). This permits removal
+of an offline pair that otherwise blocks catalog checks. Removal still
+requires an idle pair, so no preview or sync can write rows after the mark.
 Stored domain values are decoded before deletion; corrupt records are retained
 as explicit errors. Future run/journal state must enforce idle/recovery guards
 before removal, rather than cascading active work away.
@@ -60,7 +72,8 @@ batches are not transactions, so refresh state before retrying.
 
 Before creation or update, the engine opens both selected roots and compares
 held identities and ancestry. It rejects equal/nested/aliased roots, overlap
-with any other configured pair, and a root that is or sits inside its state
+with any other configured pair (unless both use the folder as a Mirror or
+Backup source, [ADR 0047](0047-shared-one-way-sources.md)), and a root that is or sits inside its state
 directory. A root that *holds* the state directory — the home folder is the
 case that matters — is allowed: the endpoint protects that subtree instead.
 Scans and listings leave it out, path-level reads and writes are refused, an
@@ -72,8 +85,11 @@ from catalog comparison. The current revision
 is checked before filesystem probes, then checked again by the storage driver.
 
 Catalog checks page through existing pairs and fail closed if any existing
-root cannot be verified. This deliberately requires reconnecting offline roots
-before catalog changes. It prevents guessing about physical aliases until
+root cannot be verified. Since [ADR 0048](0048-missing-folders-in-catalog-checks.md)
+a missing folder, such as one on a disk not mounted, is compared by where it
+would be and by its identity file; only one that is there but cannot be read
+still blocks. As first written, this deliberately required reconnecting offline roots
+before catalog changes. It prevented guessing about physical aliases until
 persistent volume and endpoint identities are implemented.
 
 These are selection-time checks. They do not establish mount continuity,
@@ -150,7 +166,8 @@ through an agent crash. macOS CI requires private denial for standalone clients
 and successful configuration through the signed embedded release helpers.
 
 If a request times out, its accepted command may still commit. Refresh before
-retrying. A catalog overlap prevents duplicate creation over the same roots.
+retrying. `pair.pause` and `pair.resume` use the normal five-second request
+budget. A catalog overlap prevents duplicate creation over the same roots.
 Native store tests cover paged publication, stale refreshes, failed saves,
 direction, raw paths and post-save selection. Native build/tests require macOS
 CI; interactive first-pair timing, VoiceOver and permission/update flows remain

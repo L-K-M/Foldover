@@ -2,9 +2,44 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use foldover_types::{LocalRoot, PairDraft, PairId, SyncMode};
+use foldover_types::{Digest, LocalRoot, PairDraft, PairId, SyncMode};
 
 use super::*;
+
+/// ADR 0054: a gentle run copies one at a time between this Mac's disks,
+/// keeps its copies to a server, and syncs the same either way.
+#[test]
+fn a_gentle_run_narrows_only_local_copies_and_syncs_the_same() {
+    for right_kind in [RightKind::Local, RightKind::Sftp] {
+        if right_kind == RightKind::Sftp && sftp_server().is_none() {
+            continue;
+        }
+        let mut pair = fixture(SyncMode::Sync);
+        pair.right_kind = right_kind;
+        for index in 0..20 {
+            fs::write(
+                pair.left.path().join(format!("file-{index}")),
+                index.to_string(),
+            )
+            .unwrap();
+        }
+        let full = pair.prepare().workers();
+        pair.effort = Effort::Gentle;
+        let gentle = pair.prepare().workers();
+        match right_kind {
+            RightKind::Local => assert_eq!(gentle, NonZeroUsize::MIN),
+            RightKind::Sftp => assert_eq!(gentle, full),
+        }
+        let report = pair.sync();
+        assert_eq!(report.completion(), Completion::Finished);
+        for index in 0..20 {
+            assert_eq!(
+                fs::read(pair.right.path().join(format!("file-{index}"))).unwrap(),
+                index.to_string().as_bytes()
+            );
+        }
+    }
+}
 
 #[test]
 fn new_folders_with_sidecars_still_copy_readable_children() {
@@ -196,6 +231,7 @@ struct Fixture {
     /// In-memory folders that replace both temporary directories.
     memory: Option<[foldover_sim::MemoryEndpoint; 2]>,
     leases: LeaseTiming,
+    effort: Effort,
 }
 
 /// How the fixture reaches its right folder.
@@ -221,6 +257,11 @@ fn sftp_server() -> Option<std::path::PathBuf> {
         .find(|path| path.exists())
 }
 
+/// The pair the fixture's runs belong to.
+fn fixture_pair() -> PairId {
+    PairId::from_bytes([1; 16]).unwrap()
+}
+
 fn fixture(mode: SyncMode) -> Fixture {
     Fixture {
         left: tempfile::tempdir().unwrap(),
@@ -244,6 +285,7 @@ fn fixture(mode: SyncMode) -> Fixture {
         journal: None,
         memory: None,
         leases: TEST_LEASES,
+        effort: Effort::Full,
     }
 }
 
@@ -361,9 +403,7 @@ impl Fixture {
             .with_review_policy(self.review_policy)
             .with_removal_protection(self.removal_protection),
         );
-        let pair =
-            PairConfig::from_stored(PairId::from_bytes([1; 16]).unwrap(), self.revision, draft)
-                .unwrap();
+        let pair = PairConfig::from_stored(fixture_pair(), self.revision, draft).unwrap();
         RunInputs::new(
             pair,
             self.base.clone(),
@@ -372,6 +412,7 @@ impl Fixture {
         )
         .with_skips(self.skips.clone())
         .with_lease_timing(self.leases)
+        .with_effort(self.effort)
     }
 
     fn try_prepare(&self) -> Result<PairRun, RunError> {
@@ -796,6 +837,250 @@ fn ambiguous_unicode_respellings_preserve_every_observed_entry() {
     );
 }
 
+/// The merge walks both trees in raw byte order: exact spellings are
+/// preferred, a respelling is found between interleaved names, and a
+/// case-only rename is never respelled.
+#[test]
+fn alignment_merges_interleaved_raw_names_and_prefers_exact_spellings() {
+    let names = NameMatching::new(
+        foldover_types::CaseMatching::Exact,
+        UnicodeMatching::Normalized,
+    );
+    let memory = foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default());
+    for name in ["Report", "a", "a-b", "a.txt", "a0", "caf\u{e9}", "report"] {
+        memory.put_file(name.as_bytes(), name.as_bytes()).unwrap();
+    }
+    let endpoint = Endpoint::Memory(memory);
+    let mut observation = endpoint
+        .observe_from(
+            foldover_types::MetadataPolicy::default(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+            &mut |_| {},
+        )
+        .unwrap();
+    // The base knows the decomposed alias and the other names, but not
+    // the composed spelling the folder shows.
+    let mut base = BTreeMap::new();
+    for name in ["Report", "a", "a-b", "a.txt", "a0"] {
+        let version = observation.entries()[&path(name.as_bytes())].version();
+        base.insert(
+            path(name.as_bytes()),
+            BaselineEntry::new(version, version).unwrap(),
+        );
+    }
+    let alias = observation.entries()[&path("caf\u{e9}".as_bytes())].version();
+    base.insert(
+        path("cafe\u{301}".as_bytes()),
+        BaselineEntry::new(alias, alias).unwrap(),
+    );
+
+    align_spellings(&mut observation, &base, names);
+
+    // The composed alias maps back to the base's decomposed spelling.
+    assert!(
+        observation
+            .entries()
+            .contains_key(&path("cafe\u{301}".as_bytes()))
+    );
+    assert!(
+        !observation
+            .entries()
+            .contains_key(&path("caf\u{e9}".as_bytes()))
+    );
+    // A case-only rename is a person's, not a respelling.
+    for name in ["report", "Report"] {
+        assert!(observation.entries().contains_key(&path(name.as_bytes())));
+    }
+    // Exact spellings stay exactly as observed.
+    for name in ["a", "a-b", "a.txt", "a0"] {
+        assert!(observation.entries().contains_key(&path(name.as_bytes())));
+    }
+
+    // An exact match wins: the base's other spelling is not used to
+    // respell a name the folder already shows as the base knows it.
+    let memory = foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default());
+    memory.put_file("caf\u{e9}".as_bytes(), b"data").unwrap();
+    let endpoint = Endpoint::Memory(memory);
+    let mut observation = endpoint
+        .observe_from(
+            foldover_types::MetadataPolicy::default(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+            &mut |_| {},
+        )
+        .unwrap();
+    let version = observation.entries()[&path("caf\u{e9}".as_bytes())].version();
+    let base = BTreeMap::from([
+        (
+            path("caf\u{e9}".as_bytes()),
+            BaselineEntry::new(version, version).unwrap(),
+        ),
+        (
+            path("cafe\u{301}".as_bytes()),
+            BaselineEntry::new(version, version).unwrap(),
+        ),
+    ]);
+    align_spellings(&mut observation, &base, names);
+    assert!(
+        observation
+            .entries()
+            .contains_key(&path("caf\u{e9}".as_bytes()))
+    );
+    assert_eq!(observation.entries().len(), 1);
+}
+
+/// The lookup-based alignment rule the sorted merge replaced, kept as an
+/// equivalence oracle.
+fn align_spellings_reference(
+    observation: &mut Observation,
+    base: &BTreeMap<SyncPath, BaselineEntry>,
+    names: NameMatching,
+) {
+    if names.unicode() != UnicodeMatching::Normalized {
+        return;
+    }
+    let composed = |path: &SyncPath| -> Option<String> {
+        let text = std::str::from_utf8(path.as_bytes()).ok()?;
+        Some(text.nfc().collect())
+    };
+    let mut missing: BTreeMap<String, Option<&SyncPath>> = BTreeMap::new();
+    for path in base.keys() {
+        if observation.entries().contains_key(path) {
+            continue;
+        }
+        if let Some(key) = composed(path) {
+            missing
+                .entry(key)
+                .and_modify(|known| *known = None)
+                .or_insert(Some(path));
+        }
+    }
+    if missing.is_empty() {
+        return;
+    }
+    let respelled: Vec<(SyncPath, SyncPath)> = observation
+        .entries()
+        .keys()
+        .chain(observation.unavailable())
+        .filter(|path| !base.contains_key(*path))
+        .filter_map(|path| {
+            let known = missing.get(&composed(path)?)?.as_ref()?;
+            Some((path.clone(), (*known).clone()))
+        })
+        .collect();
+    let mut destinations: BTreeMap<&SyncPath, usize> = BTreeMap::new();
+    for (_, to) in &respelled {
+        *destinations.entry(to).or_default() += 1;
+    }
+    for (from, to) in &respelled {
+        if destinations.get(to) == Some(&1) {
+            observation.respell(from, to.clone());
+        }
+    }
+}
+
+/// The sorted merge must decide exactly what the original lookup rule
+/// decided, including an unavailable alias, an ambiguous composed pair
+/// and an exact match beside a respelling.
+#[test]
+fn alignment_merge_matches_the_lookup_rule_with_unavailable_names() {
+    let names = NameMatching::new(
+        foldover_types::CaseMatching::Exact,
+        UnicodeMatching::Normalized,
+    );
+    let files = [
+        "a",
+        "a-b",
+        "a.txt",
+        "a0",
+        "plain",
+        "other/deep",
+        "caf\u{e9}",
+        "s\u{323}\u{307}",
+        "\u{1e63}\u{307}",
+        "Report",
+        "report",
+        "unavail\u{e9}",
+    ];
+    let observe = || {
+        let memory = foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default());
+        for name in files {
+            memory.put_file(name.as_bytes(), name.as_bytes()).unwrap();
+        }
+        memory.evict("unavail\u{e9}".as_bytes());
+        Endpoint::Memory(memory)
+            .observe_from(
+                foldover_types::MetadataPolicy::default(),
+                &Filter::none(),
+                &BTreeMap::new(),
+                &mut proceed,
+                &mut |_| {},
+            )
+            .unwrap()
+    };
+    let first = observe();
+    let mut merged = observe();
+    let mut expected = observe();
+    let version =
+        |observation: &Observation, name: &[u8]| observation.entries()[&path(name)].version();
+    let mut base = BTreeMap::new();
+    for name in ["a", "a-b", "a.txt", "a0", "plain", "other/deep", "Report"] {
+        let entry = version(&first, name.as_bytes());
+        base.insert(
+            path(name.as_bytes()),
+            BaselineEntry::new(entry, entry).unwrap(),
+        );
+    }
+    let filler = version(&first, b"a");
+    for name in ["cafe\u{301}", "\u{1e69}", "unavaile\u{301}"] {
+        base.insert(
+            path(name.as_bytes()),
+            BaselineEntry::new(filler, filler).unwrap(),
+        );
+    }
+
+    align_spellings(&mut merged, &base, names);
+    align_spellings_reference(&mut expected, &base, names);
+
+    let summarized = |observation: &Observation| {
+        (
+            observation
+                .entries()
+                .iter()
+                .map(|(path, entry)| (path.clone(), entry.version()))
+                .collect::<BTreeMap<_, _>>(),
+            observation.unavailable().to_vec(),
+        )
+    };
+    assert_eq!(summarized(&merged), summarized(&expected));
+    // The scenario respells the unique alias, including an unavailable
+    // one, and leaves the ambiguous pair alone.
+    assert!(
+        merged
+            .entries()
+            .contains_key(&path("cafe\u{301}".as_bytes()))
+    );
+    assert!(
+        merged
+            .unavailable()
+            .contains(&path("unavaile\u{301}".as_bytes()))
+    );
+    assert!(
+        merged
+            .entries()
+            .contains_key(&path("s\u{323}\u{307}".as_bytes()))
+    );
+    assert!(
+        merged
+            .entries()
+            .contains_key(&path("\u{1e63}\u{307}".as_bytes()))
+    );
+    assert!(!merged.entries().contains_key(&path("\u{1e69}".as_bytes())));
+}
+
 /// PLAN.md §5.3 allows five seconds for planning 500k paths after a scan.
 /// This narrower phase must fit that budget even for 50k respelled names.
 #[test]
@@ -1017,7 +1302,9 @@ fn edits_replace_and_archive_and_deletions_propagate_to_the_archive() {
         fs::read(
             pair.right
                 .path()
-                .join(".foldover/archive/1970-01-01T00-00-00.000Z/edit")
+                .join(".foldover/archive")
+                .join(report.archive())
+                .join("edit")
         )
         .unwrap(),
         b"v1"
@@ -1027,13 +1314,51 @@ fn edits_replace_and_archive_and_deletions_propagate_to_the_archive() {
         fs::read(
             pair.left
                 .path()
-                .join(".foldover/archive/1970-01-01T00-00-00.000Z/delete")
+                .join(".foldover/archive")
+                .join(report.archive())
+                .join("delete")
         )
         .unwrap(),
         b"d"
     );
     assert!(!pair.base.contains_key(&path(b"delete")));
     assert!(pair.prepare().preview().items().is_empty());
+}
+
+#[test]
+fn runs_started_together_keep_separate_archives() {
+    let mut pair = fixture(SyncMode::Sync);
+    fs::write(pair.left.path().join("file"), b"v1").unwrap();
+    pair.sync();
+
+    fs::write(pair.left.path().join("file"), b"v2").unwrap();
+    let first = pair.sync();
+    fs::write(pair.left.path().join("file"), b"v3").unwrap();
+    let second = pair.sync();
+
+    assert_ne!(first.archive(), second.archive());
+    assert_eq!(
+        fs::read(
+            pair.right
+                .path()
+                .join(".foldover/archive")
+                .join(first.archive())
+                .join("file")
+        )
+        .unwrap(),
+        b"v1"
+    );
+    assert_eq!(
+        fs::read(
+            pair.right
+                .path()
+                .join(".foldover/archive")
+                .join(second.archive())
+                .join("file")
+        )
+        .unwrap(),
+        b"v2"
+    );
 }
 
 #[test]
@@ -1220,6 +1545,358 @@ fn batched_first_runs_reopen_safely_before_the_identity_commit() {
 }
 
 #[test]
+fn captured_run_inputs_decode_like_the_wrapper() {
+    let directory = tempfile::tempdir().unwrap();
+    let left = directory.path().join("left");
+    let right = directory.path().join("right");
+    fs::create_dir(&left).unwrap();
+    fs::create_dir(&right).unwrap();
+    let location = foldover_state::StateLocation::Directory(directory.path().join("state"));
+    let mut engine = crate::Engine::open(&location).unwrap();
+    let pair = engine
+        .create_pair(
+            &PairDraft::new("Captured".into(), root(&left), root(&right), SyncMode::Sync).unwrap(),
+        )
+        .unwrap();
+
+    let version = EntryVersion::new(
+        EntryContent::File(Digest::from_bytes([3; Digest::BYTE_LEN])),
+        Digest::from_bytes([4; Digest::BYTE_LEN]),
+    );
+    let base_path = path(b"file");
+    engine
+        .commit_run(
+            pair.id(),
+            pair.revision(),
+            Commit::Base {
+                run: "run",
+                updates: &[BaseUpdate::Record(
+                    base_path.clone(),
+                    BaselineEntry::new(version, version).unwrap(),
+                )],
+                journal: &[],
+            },
+        )
+        .unwrap();
+    let left_entry = SnapshotEntry {
+        path: path(b"left"),
+        fingerprint: [0; 20].to_vec(),
+        version,
+    };
+    let right_entry = SnapshotEntry {
+        path: path(b"right"),
+        fingerprint: [0; 20].to_vec(),
+        version,
+    };
+    engine
+        .store_snapshot(
+            pair.id(),
+            pair.revision(),
+            Side::Left,
+            std::slice::from_ref(&left_entry),
+        )
+        .unwrap();
+    engine
+        .store_snapshot(
+            pair.id(),
+            pair.revision(),
+            Side::Right,
+            std::slice::from_ref(&right_entry),
+        )
+        .unwrap();
+    let resolution = Resolution::new(Side::Right, Some(version), None);
+    engine
+        .record_resolution(pair.id(), pair.revision(), &path(b"conflict"), resolution)
+        .unwrap();
+
+    let wrapper = engine.run_inputs(pair.id()).unwrap();
+    let pending = engine.capture_run_inputs(pair.id()).unwrap();
+    assert_eq!(pending.configuration(), wrapper.configuration());
+    let decoded = pending.decode().unwrap();
+    assert_eq!(decoded.pair, wrapper.pair);
+    assert_eq!(decoded.base, wrapper.base);
+    assert_eq!(decoded.identities, wrapper.identities);
+    assert_eq!(decoded.resolutions, wrapper.resolutions);
+    assert_eq!(decoded.left_snapshot, wrapper.left_snapshot);
+    assert_eq!(decoded.right_snapshot, wrapper.right_snapshot);
+    assert_eq!(decoded.reach.state(), wrapper.reach.state());
+    assert_eq!(decoded.skips, wrapper.skips);
+    let observed = ObservedEntry::restore(version, &[0; 20]).unwrap();
+    assert_eq!(decoded.left_snapshot[&path(b"left")], observed);
+    assert_eq!(decoded.right_snapshot[&path(b"right")], observed);
+}
+
+#[test]
+fn captured_inputs_stay_at_their_revision_when_the_config_moves() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = ["a", "b", "c"].map(|name| directory.path().join(name));
+    for path in &paths {
+        fs::create_dir(path).unwrap();
+    }
+    let location = foldover_state::StateLocation::Directory(directory.path().join("state"));
+    let mut engine = crate::Engine::open(&location).unwrap();
+    let pair = engine
+        .create_pair(
+            &PairDraft::new(
+                "Captured".into(),
+                root(&paths[0]),
+                root(&paths[1]),
+                SyncMode::Sync,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let version = EntryVersion::new(
+        EntryContent::Directory,
+        Digest::from_bytes([5; Digest::BYTE_LEN]),
+    );
+    let base_path = path(b"file");
+    engine
+        .commit_run(
+            pair.id(),
+            pair.revision(),
+            Commit::Base {
+                run: "run",
+                updates: &[BaseUpdate::Record(
+                    base_path.clone(),
+                    BaselineEntry::new(version, version).unwrap(),
+                )],
+                journal: &[],
+            },
+        )
+        .unwrap();
+    let pending = engine.capture_run_inputs(pair.id()).unwrap();
+
+    // A new revision lands between capture and decode.
+    let moved = PairDraft::new(
+        "Moved".into(),
+        root(&paths[2]),
+        root(&paths[1]),
+        SyncMode::Sync,
+    )
+    .unwrap();
+    let updated = engine
+        .update_pair(pair.id(), pair.revision(), &moved)
+        .unwrap();
+    assert_eq!(updated.revision(), pair.revision() + 1);
+
+    // The decoded run still reads its captured configuration and base.
+    let decoded = pending.decode().unwrap();
+    assert_eq!(decoded.pair, pair);
+    assert_eq!(decoded.base.len(), 1);
+    assert_eq!(
+        decoded.base[&base_path],
+        BaselineEntry::new(version, version).unwrap()
+    );
+    // Committing the captured run against the new revision is stale.
+    assert!(matches!(
+        engine.commit_run(
+            pair.id(),
+            pair.revision(),
+            Commit::Base {
+                run: "run",
+                updates: &[],
+                journal: &[],
+            },
+        ),
+        Err(crate::Error::StaleRevision)
+    ));
+    assert_eq!(engine.run_inputs(pair.id()).unwrap().pair, updated);
+}
+
+#[test]
+fn captured_inputs_survive_pair_removal() {
+    let directory = tempfile::tempdir().unwrap();
+    let left = directory.path().join("left");
+    let right = directory.path().join("right");
+    fs::create_dir(&left).unwrap();
+    fs::create_dir(&right).unwrap();
+    let location = foldover_state::StateLocation::Directory(directory.path().join("state"));
+    let mut engine = crate::Engine::open(&location).unwrap();
+    let pair = engine
+        .create_pair(
+            &PairDraft::new("Captured".into(), root(&left), root(&right), SyncMode::Sync).unwrap(),
+        )
+        .unwrap();
+    let version = EntryVersion::new(
+        EntryContent::Directory,
+        Digest::from_bytes([5; Digest::BYTE_LEN]),
+    );
+    let base_path = path(b"file");
+    engine
+        .commit_run(
+            pair.id(),
+            pair.revision(),
+            Commit::Base {
+                run: "run",
+                updates: &[BaseUpdate::Record(
+                    base_path.clone(),
+                    BaselineEntry::new(version, version).unwrap(),
+                )],
+                journal: &[],
+            },
+        )
+        .unwrap();
+    let entry = SnapshotEntry {
+        path: path(b"left"),
+        fingerprint: [0; 20].to_vec(),
+        version,
+    };
+    engine
+        .store_snapshot(
+            pair.id(),
+            pair.revision(),
+            Side::Left,
+            std::slice::from_ref(&entry),
+        )
+        .unwrap();
+    let pending = engine.capture_run_inputs(pair.id()).unwrap();
+
+    // The primary removes the pair after the inputs were captured.
+    engine.remove_pair(pair.id(), pair.revision()).unwrap();
+
+    let decoded = pending.decode().unwrap();
+    assert_eq!(decoded.pair, pair);
+    assert_eq!(
+        decoded.base[&base_path],
+        BaselineEntry::new(version, version).unwrap()
+    );
+    assert_eq!(decoded.left_snapshot.len(), 1);
+    assert!(decoded.left_snapshot.contains_key(&path(b"left")));
+}
+
+#[test]
+fn captured_snapshots_skip_unreadable_fingerprints() {
+    let directory = tempfile::tempdir().unwrap();
+    let left = directory.path().join("left");
+    let right = directory.path().join("right");
+    fs::create_dir(&left).unwrap();
+    fs::create_dir(&right).unwrap();
+    let location = foldover_state::StateLocation::Directory(directory.path().join("state"));
+    let mut engine = crate::Engine::open(&location).unwrap();
+    let pair = engine
+        .create_pair(
+            &PairDraft::new("Captured".into(), root(&left), root(&right), SyncMode::Sync).unwrap(),
+        )
+        .unwrap();
+    let version = EntryVersion::new(
+        EntryContent::Directory,
+        Digest::from_bytes([6; Digest::BYTE_LEN]),
+    );
+    let entries = [
+        SnapshotEntry {
+            path: path(b"kept"),
+            fingerprint: [0; 20].to_vec(),
+            version,
+        },
+        SnapshotEntry {
+            path: path(b"malformed"),
+            fingerprint: Vec::new(),
+            version,
+        },
+    ];
+    engine
+        .store_snapshot(pair.id(), pair.revision(), Side::Left, &entries)
+        .unwrap();
+
+    let decoded = engine
+        .capture_run_inputs(pair.id())
+        .unwrap()
+        .decode()
+        .unwrap();
+    assert_eq!(decoded.left_snapshot.len(), 1);
+    assert!(decoded.left_snapshot.contains_key(&path(b"kept")));
+    assert_eq!(
+        decoded.left_snapshot,
+        engine.run_inputs(pair.id()).unwrap().left_snapshot
+    );
+}
+
+#[test]
+fn snapshot_iter_streams_sorted_rows_and_store_snapshot_iter_persists_a_prefix() {
+    let directory = tempfile::tempdir().unwrap();
+    let left = directory.path().join("left");
+    let right = directory.path().join("right");
+    fs::create_dir(&left).unwrap();
+    fs::create_dir(&right).unwrap();
+    for index in 0..600 {
+        fs::write(left.join(format!("file-{index:04}")), b"content").unwrap();
+        fs::write(right.join(format!("file-{index:04}")), b"content").unwrap();
+    }
+    let location = foldover_state::StateLocation::Directory(directory.path().join("state"));
+    let mut engine = crate::Engine::open(&location).unwrap();
+    let pair = engine
+        .create_pair(
+            &PairDraft::new("Streamed".into(), root(&left), root(&right), SyncMode::Sync).unwrap(),
+        )
+        .unwrap();
+    let prepared = PairRun::prepare(
+        engine.run_inputs(pair.id()).unwrap(),
+        &mut proceed,
+        &NoProgress,
+    )
+    .unwrap();
+
+    // The lazy iterator is the same sorted, unique effective observation as
+    // the collecting wrapper.
+    let expected = prepared.snapshot(Side::Left);
+    assert_eq!(expected.len(), 600);
+    let streamed: Vec<_> = prepared.snapshot_iter(Side::Left).collect();
+    assert_eq!(expected, streamed);
+    assert!(expected.windows(2).all(|rows| rows[0].path < rows[1].path));
+
+    // Only the taken prefix reaches the table through the engine and store.
+    engine
+        .store_snapshot_iter(
+            pair.id(),
+            pair.revision(),
+            Side::Left,
+            prepared.snapshot_iter(Side::Left).take(5),
+        )
+        .unwrap();
+    let decoded = engine.run_inputs(pair.id()).unwrap();
+    assert_eq!(decoded.left_snapshot.len(), 5);
+    assert_eq!(
+        decoded.left_snapshot.keys().cloned().collect::<Vec<_>>(),
+        expected[..5]
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>()
+    );
+
+    // The full iterator round-trips through the store.
+    engine
+        .store_snapshot_iter(
+            pair.id(),
+            pair.revision(),
+            Side::Right,
+            prepared.snapshot_iter(Side::Right),
+        )
+        .unwrap();
+    let decoded = engine.run_inputs(pair.id()).unwrap();
+    let right_paths = prepared
+        .snapshot(Side::Right)
+        .iter()
+        .map(|entry| entry.path.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        decoded.right_snapshot.keys().cloned().collect::<Vec<_>>(),
+        right_paths
+    );
+
+    // Unsorted iterator input is rejected and leaves the stored side alone.
+    let mut reversed = expected.clone();
+    reversed.reverse();
+    assert!(
+        engine
+            .store_snapshot_iter(pair.id(), pair.revision(), Side::Left, reversed)
+            .is_err()
+    );
+    let decoded = engine.run_inputs(pair.id()).unwrap();
+    assert_eq!(decoded.left_snapshot.len(), 5);
+}
+
+#[test]
 fn mass_deletions_need_approval_and_unattended_runs_stop() {
     let mut pair = fixture(SyncMode::Sync);
     // One file stays, so the emptied-folder gate does not decide this.
@@ -1274,7 +1951,9 @@ fn mirror_archives_target_extras_and_backup_keeps_them() {
         mirror
             .right
             .path()
-            .join(".foldover/archive/1970-01-01T00-00-00.000Z/extra")
+            .join(".foldover/archive")
+            .join(report.archive())
+            .join("extra")
             .exists()
     );
 
@@ -1359,11 +2038,84 @@ fn failed_folders_skip_their_contents_and_later_runs_recover_leftovers() {
         fs::read(
             pair.right
                 .path()
-                .join(".foldover/archive/1970-01-01T00-00-00.000Z/.foldover-tmp-left")
+                .join(".foldover/archive")
+                .join(report.archive())
+                .join(".foldover-tmp-left")
         )
         .unwrap(),
         b"displaced"
     );
+}
+
+/// A failed write suppresses its own subtree, at component boundaries only:
+/// `a/x` waits for another run, while `a-b`, `a.txt` and `a0` sync.
+#[test]
+fn failed_writes_skip_only_their_own_subtrees() {
+    let pair = fixture(SyncMode::Backup { source: Side::Left });
+    let left = pair.left.path().to_owned();
+    let right = pair.right.path().to_owned();
+    fs::create_dir(left.join("a")).unwrap();
+    fs::write(left.join("a/x"), b"x").unwrap();
+    for (folder, file) in [("a-b", "y"), ("a.txt", "z"), ("a0", "w")] {
+        fs::create_dir(left.join(folder)).unwrap();
+        fs::write(left.join(folder).join(file), b"keep").unwrap();
+    }
+    // Prepare, then occupy the new folder's path so its creation fails.
+    let prepared = pair.prepare();
+    fs::write(right.join("a"), b"blocker").unwrap();
+    let outcome = prepared
+        .execute(
+            Approval::default(),
+            RunContext::Reviewed,
+            STARTED,
+            &mut |_, _| Ok(()),
+            &mut proceed,
+            &NoProgress,
+        )
+        .unwrap();
+    let RunOutcome::Ran(report) = outcome else {
+        panic!("expected a run");
+    };
+    assert_eq!(report.failures().len(), 1, "{:?}", report.failures());
+    assert_eq!(report.failures()[0].path(), Some(&path(b"a")));
+    // The three sibling folders and their files copy; `a/x` waits.
+    assert_eq!(report.copied(), 6, "{:?}", report.failures());
+    assert!(!right.join("a/x").exists());
+    for (folder, file) in [("a-b", "y"), ("a.txt", "z"), ("a0", "w")] {
+        assert_eq!(
+            fs::read(right.join(folder).join(file)).unwrap(),
+            b"keep",
+            "{folder}/{file}"
+        );
+    }
+}
+
+#[test]
+fn an_immediate_stop_leaves_leftovers_for_the_next_run() {
+    let mut pair = fixture(SyncMode::Sync);
+    let leftover = pair.left.path().join(".foldover-tmp-interrupted");
+    fs::write(&leftover, b"unfinished").unwrap();
+    let prepared = pair.prepare();
+    let mut store = pair.store();
+    let outcome = prepared
+        .execute(
+            Approval::default(),
+            RunContext::Reviewed,
+            STARTED,
+            &mut |revision, commit| store.apply(revision, commit),
+            &mut || ScanControl::Cancel,
+            &NoProgress,
+        )
+        .unwrap();
+    let RunOutcome::Ran(report) = outcome else {
+        panic!("a stopped run reports itself, not an approval request")
+    };
+
+    assert_eq!(report.completion(), Completion::Cancelled);
+    assert_eq!(report.recovered(), 0);
+    assert!(report.failures().is_empty());
+    assert_eq!(fs::read(leftover).unwrap(), b"unfinished");
+    assert!(!pair.left.path().join(".foldover/archive").exists());
 }
 
 #[test]
@@ -1419,7 +2171,9 @@ fn completed_runs_name_their_archive_and_prune_expired_runs() {
     else {
         panic!("expected a run");
     };
-    assert_eq!(report.archive(), foldover_endpoint::archive_name(started));
+    let archive_prefix = format!("{}_", foldover_endpoint::run_name(started, fixture_pair()));
+    assert!(report.archive().starts_with(&archive_prefix));
+    assert_eq!(report.archive().len(), archive_prefix.len() + 32);
     assert_eq!(report.pruned(), 1);
     assert!(
         !archive
@@ -1435,6 +2189,49 @@ fn completed_runs_name_their_archive_and_prune_expired_runs() {
             ))
             .exists()
     );
+}
+
+#[test]
+fn a_stop_after_the_sync_commit_skips_retention_but_the_run_stays_finished() {
+    let mut pair = fixture(SyncMode::Sync);
+    pair.sync();
+    let expired = pair
+        .left
+        .path()
+        .join(".foldover/archive/1970-01-01T00-00-00.000Z");
+    fs::create_dir_all(&expired).unwrap();
+    fs::write(expired.join("kept"), b"keep me").unwrap();
+
+    let prepared = pair.prepare();
+    let stop = std::cell::Cell::new(false);
+    let mut store = pair.store();
+    let outcome = prepared
+        .execute(
+            Approval::default(),
+            RunContext::Interactive,
+            STARTED + ARCHIVE_RETENTION + Duration::from_secs(1),
+            &mut |revision, commit| {
+                let synced = matches!(commit, Commit::Base { .. });
+                store.apply(revision, commit)?;
+                if synced {
+                    stop.set(true);
+                }
+                Ok(())
+            },
+            &mut || match stop.get() {
+                true => ScanControl::Cancel,
+                false => ScanControl::Continue,
+            },
+            &NoProgress,
+        )
+        .unwrap();
+    let RunOutcome::Ran(report) = outcome else {
+        panic!("a completed sync reports itself")
+    };
+
+    assert_eq!(report.completion(), Completion::Finished);
+    assert_eq!(report.pruned(), 0);
+    assert_eq!(fs::read(expired.join("kept")).unwrap(), b"keep me");
 }
 
 #[test]
@@ -1504,7 +2301,8 @@ fn resolved_conflicts_keep_the_chosen_side_until_either_side_changes() {
     let archive = pair
         .left
         .path()
-        .join(".foldover/archive/1970-01-01T00-00-00.000Z");
+        .join(".foldover/archive")
+        .join(report.archive());
     assert_eq!(fs::read(archive.join("file")).unwrap(), b"left");
     assert!(!pair.right.path().join("gone").exists());
 
@@ -1566,7 +2364,9 @@ fn a_folder_choice_settles_the_whole_folder() {
                 let archive = pair
                     .left
                     .path()
-                    .join(".foldover/archive/1970-01-01T00-00-00.000Z/photos");
+                    .join(".foldover/archive")
+                    .join(report.archive())
+                    .join("photos");
                 assert_eq!(fs::read(archive.join("a.jpg")).unwrap(), b"edited");
                 assert_eq!(fs::read(archive.join("b.jpg")).unwrap(), b"b");
             }
@@ -1616,8 +2416,45 @@ fn earlier_snapshots_supply_versions_for_settled_unchanged_entries() {
     let inputs = RunInputs::new(config, BTreeMap::new(), pair.identities, BTreeMap::new())
         .with_snapshots(left, BTreeMap::new());
     let second = PairRun::prepare(inputs, &mut proceed, &NoProgress).unwrap();
+    assert!(!second.snapshot_changed(Side::Left));
+    assert!(!second.snapshot_changed(Side::Right));
     let preview = second.preview();
     assert_eq!(preview.items()[0].versions().0, Some(stored));
+}
+
+#[test]
+fn preparation_timings_stay_on_the_run_thread() {
+    struct Timings {
+        thread: std::thread::ThreadId,
+        phases: RefCell<Vec<RunPhase>>,
+    }
+    impl RunProgress for Timings {
+        fn measured(&self, phase: RunPhase, _elapsed: Duration) {
+            assert_eq!(std::thread::current().id(), self.thread);
+            self.phases.borrow_mut().push(phase);
+        }
+        fn observed(&self, _side: Side, _step: ObserveStep) {}
+        fn planned(&self, _changes: u64, _bytes: u64) {}
+        fn applied(&self, _bytes: u64) {}
+        fn waiting(&self, _holder: Option<&str>) {}
+    }
+    let pair = fixture(SyncMode::Sync);
+    let timings = Timings {
+        thread: std::thread::current().id(),
+        phases: RefCell::new(Vec::new()),
+    };
+    PairRun::prepare(pair.inputs(), &mut proceed, &timings).unwrap();
+    assert_eq!(
+        *timings.phases.borrow(),
+        [
+            RunPhase::OpenEndpoints,
+            RunPhase::Readiness,
+            RunPhase::ObserveLeft,
+            RunPhase::ObserveRight,
+            RunPhase::AlignAndFilter,
+            RunPhase::Plan
+        ]
+    );
 }
 
 #[test]
@@ -1791,6 +2628,8 @@ fn age_excluded_files_stay_in_the_snapshot_cache_for_reuse() {
     .collect();
     let inputs = pair.inputs().with_snapshots(left, BTreeMap::new());
     let second = PairRun::prepare(inputs, &mut proceed, &NoProgress).unwrap();
+    assert!(!second.snapshot_changed(Side::Left));
+    assert!(!second.snapshot_changed(Side::Right));
     assert!(second.preview().items().is_empty());
     assert_eq!(
         second
@@ -1799,6 +2638,61 @@ fn age_excluded_files_stay_in_the_snapshot_cache_for_reuse() {
             .find(|entry| entry.path == path(b"old"))
             .map(|entry| entry.version),
         Some(stored)
+    );
+}
+
+#[test]
+fn snapshot_changes_include_edits_additions_and_removals() {
+    let pair = fixture(SyncMode::Sync);
+    fs::write(pair.left.path().join("a"), b"first").unwrap();
+    let first = pair.prepare();
+    assert!(first.snapshot_changed(Side::Left));
+    let previous: BTreeMap<_, _> = first
+        .snapshot(Side::Left)
+        .into_iter()
+        .map(|entry| {
+            (
+                entry.path,
+                ObservedEntry::restore(entry.version, &entry.fingerprint).unwrap(),
+            )
+        })
+        .collect();
+    fs::write(pair.left.path().join("a"), b"edited with another size").unwrap();
+    fs::write(pair.left.path().join("a-b"), b"added").unwrap();
+    let edited = PairRun::prepare(
+        pair.inputs().with_snapshots(previous, BTreeMap::new()),
+        &mut proceed,
+        &NoProgress,
+    )
+    .unwrap();
+    assert!(edited.snapshot_changed(Side::Left));
+    assert!(!edited.snapshot_changed(Side::Right));
+    let previous: BTreeMap<_, _> = edited
+        .snapshot(Side::Left)
+        .into_iter()
+        .map(|entry| {
+            (
+                entry.path,
+                ObservedEntry::restore(entry.version, &entry.fingerprint).unwrap(),
+            )
+        })
+        .collect();
+    fs::remove_file(pair.left.path().join("a")).unwrap();
+    let removed = PairRun::prepare(
+        pair.inputs().with_snapshots(previous, BTreeMap::new()),
+        &mut proceed,
+        &NoProgress,
+    )
+    .unwrap();
+    assert!(removed.snapshot_changed(Side::Left));
+    assert!(!removed.snapshot_changed(Side::Right));
+    assert_eq!(
+        removed
+            .snapshot(Side::Left)
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>(),
+        [path(b"a-b")]
     );
 }
 
@@ -1839,6 +2733,127 @@ fn staged_bytes(folder: &Path) -> u64 {
         .sum()
 }
 
+/// Cancelling the last in-flight copy must not become a failed, finished
+/// run just because there is no next row at which to notice the stop.
+#[test]
+fn an_inflight_copy_cancels_without_becoming_a_failure() {
+    for (left_kind, right_kind) in [
+        (RightKind::Local, RightKind::Local),
+        (RightKind::Local, RightKind::Sftp),
+        (RightKind::Sftp, RightKind::Sftp),
+    ] {
+        if (left_kind == RightKind::Sftp || right_kind == RightKind::Sftp)
+            && sftp_server().is_none()
+        {
+            eprintln!("sftp-server not found; skipping streamed cancellation cases");
+            continue;
+        }
+        let mut pair = fixture(SyncMode::Sync);
+        pair.bandwidth_limit = Some(MIB as u64);
+        let data = vec![37; 4 * MIB];
+        fs::write(pair.left.path().join("big.bin"), &data).unwrap();
+        let endpoint = |folder: &Path, kind| {
+            if kind == RightKind::Sftp {
+                foldover_endpoint::Endpoint::Sftp(
+                    foldover_endpoint::SftpEndpoint::spawn(
+                        &sftp_server().unwrap(),
+                        &[std::ffi::OsStr::new("-d"), std::ffi::OsStr::new("/")],
+                        folder.as_os_str().as_bytes(),
+                    )
+                    .unwrap(),
+                )
+            } else {
+                foldover_endpoint::Endpoint::Local(
+                    foldover_endpoint::LocalEndpoint::open(folder).unwrap(),
+                )
+            }
+        };
+        let endpoints = foldover_endpoint::EndpointPair::new(
+            endpoint(pair.left.path(), left_kind),
+            endpoint(pair.right.path(), right_kind),
+        );
+        let prepared =
+            PairRun::prepare_on(pair.inputs(), endpoints, &mut proceed, &NoProgress).unwrap();
+        let right = pair.right.path().to_owned();
+        let mut store = pair.store();
+        let cancelled = std::cell::Cell::new(false);
+        let outcome = prepared
+            .execute(
+                Approval::default(),
+                RunContext::Reviewed,
+                STARTED,
+                &mut |revision, commit| store.apply(revision, commit),
+                &mut || match staged_bytes(&right) >= MIB as u64 / 4 {
+                    true => {
+                        cancelled.set(true);
+                        ScanControl::Cancel
+                    }
+                    false => ScanControl::Continue,
+                },
+                &NoProgress,
+            )
+            .unwrap();
+        assert!(cancelled.get(), "the control must cancel an in-flight copy");
+        let RunOutcome::Ran(report) = outcome else {
+            panic!("expected a cancelled run");
+        };
+        assert_eq!(
+            report.completion(),
+            Completion::Cancelled,
+            "{:?}; copied {}",
+            report.failures(),
+            report.copied()
+        );
+        assert!(report.failures().is_empty(), "{:?}", report.failures());
+        assert_eq!(report.copied(), 0);
+        assert!(!right.join("big.bin").exists());
+        assert!(pair.base.is_empty());
+        assert!(pair.identities.side(Side::Right).is_none());
+        pair.bandwidth_limit = None;
+        pair.right_kind = right_kind;
+        let report = pair.sync();
+        assert_eq!(report.completion(), Completion::Finished);
+        assert!(report.failures().is_empty(), "{:?}", report.failures());
+        assert_eq!(fs::read(right.join("big.bin")).unwrap(), data);
+    }
+}
+
+#[test]
+fn cancelling_a_copy_preserves_another_entries_failure() {
+    let mut pair = fixture(SyncMode::Sync);
+    pair.bandwidth_limit = Some(MIB as u64);
+    fs::write(pair.left.path().join("a"), b"planned").unwrap();
+    fs::write(pair.left.path().join("b"), vec![37; 4 * MIB]).unwrap();
+    let prepared = pair.prepare();
+    let right = pair.right.path().to_owned();
+    // This copy must fail, independently of the later stop of `b`.
+    fs::write(right.join("a"), b"unreviewed change").unwrap();
+    let mut store = pair.store();
+    let outcome = prepared
+        .execute(
+            Approval::default(),
+            RunContext::Reviewed,
+            STARTED,
+            &mut |revision, commit| store.apply(revision, commit),
+            &mut || match staged_bytes(&right) >= MIB as u64 / 4 {
+                true => ScanControl::Cancel,
+                false => ScanControl::Continue,
+            },
+            &NoProgress,
+        )
+        .unwrap();
+    let RunOutcome::Ran(report) = outcome else {
+        panic!("expected a cancelled run");
+    };
+    assert_eq!(report.completion(), Completion::Cancelled);
+    assert_eq!(report.failures().len(), 1, "{:?}", report.failures());
+    assert_eq!(report.failures()[0].path(), Some(&path(b"a")));
+    assert_eq!(fs::read(right.join("a")).unwrap(), b"unreviewed change");
+    assert!(!right.join("b").exists());
+    assert!(pair.base.is_empty());
+    assert!(pair.identities.side(Side::Right).is_none());
+}
+
 /// Run a paced copy into the left folder, cancel it once `BREAK_OFF_AT`
 /// arrived, then lift the pace; returns the partial it kept.
 fn break_off(pair: &mut Fixture) -> std::path::PathBuf {
@@ -1864,6 +2879,8 @@ fn break_off(pair: &mut Fixture) -> std::path::PathBuf {
         panic!("unexpected approval request");
     };
     assert_eq!(report.copied(), 0);
+    assert_eq!(report.completion(), Completion::Cancelled);
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
     let mut kept = fs::read_dir(pair.left.path().join(".foldover/partial"))
         .unwrap()
         .map(|entry| entry.unwrap().path());
@@ -2467,10 +3484,11 @@ fn a_root_whose_identity_changes_mid_run_stops_at_the_next_batch() {
 
 const HOUR: std::time::Duration = std::time::Duration::from_secs(3_600);
 
-/// Leases that give up on a busy folder at once and count a still one as
-/// dead quickly.
+/// Give up on a busy folder at once, but leave claim promotion enough
+/// time for ordinary local and SFTP I/O stalls on shared CI hosts. These
+/// run fixtures do not test TTL expiry; lease-specific tests do that.
 const TEST_LEASES: LeaseTiming = LeaseTiming {
-    ttl: std::time::Duration::from_millis(200),
+    ttl: std::time::Duration::from_secs(3),
     beat: std::time::Duration::from_millis(50),
     poll: std::time::Duration::from_millis(20),
     wait: std::time::Duration::ZERO,
@@ -2512,6 +3530,203 @@ fn a_folder_another_mac_is_syncing_waits_until_its_lease_is_free_or_dead() {
     pair.ran(Approval::default(), at(2));
     assert_eq!(fs::read(right.join("new.txt")).unwrap(), b"n");
     assert!(!lock.exists());
+}
+
+/// A requested stop during lease acquisition leaves data and the other
+/// holder's lock unchanged, without erasing an earlier scan failure.
+#[test]
+fn cancelling_lease_wait_preserves_failures_without_writing() {
+    struct Waiting(Cell<bool>);
+    impl RunProgress for Waiting {
+        fn observed(&self, _: Side, _: ObserveStep) {}
+        fn planned(&self, _: u64, _: u64) {}
+        fn applied(&self, _: u64) {}
+        fn waiting(&self, holder: Option<&str>) {
+            if holder.is_some() {
+                self.0.set(true);
+            }
+        }
+    }
+
+    for earlier_failure in [None, Some("An earlier scan failure")] {
+        let mut pair = fixture(SyncMode::Sync);
+        pair.leases.wait = Duration::from_secs(1);
+        fs::write(pair.left.path().join("new.txt"), b"new").unwrap();
+        let lock = hold_lease(pair.right.path());
+        let original_lock = fs::read(&lock).unwrap();
+        let mut prepared = pair.prepare();
+        if let Some(message) = earlier_failure {
+            prepared.failures.push(Failure {
+                path: Some(path(b"unreadable")),
+                message: message.to_owned(),
+            });
+        }
+        let expected_failures = prepared.failures.clone();
+        let progress = Waiting(Cell::new(false));
+        let mut commits = 0;
+        let outcome = prepared
+            .execute(
+                Approval::default(),
+                RunContext::Reviewed,
+                STARTED,
+                &mut |_, _| {
+                    commits += 1;
+                    Ok(())
+                },
+                &mut || {
+                    if progress.0.get() {
+                        ScanControl::Cancel
+                    } else {
+                        ScanControl::Continue
+                    }
+                },
+                &progress,
+            )
+            .unwrap();
+        assert!(progress.0.get(), "The run must observe a held lease first");
+        let RunOutcome::Ran(report) = outcome else {
+            panic!("Expected a cancelled run");
+        };
+        assert_eq!(report.completion(), Completion::Cancelled);
+        assert_eq!(report.failures(), expected_failures);
+        assert_eq!(report.copied(), 0);
+        assert_eq!(commits, 0);
+        assert!(pair.base.is_empty());
+        assert!(pair.identities.side(Side::Left).is_none());
+        assert!(pair.identities.side(Side::Right).is_none());
+        assert!(!pair.right.path().join("new.txt").exists());
+        assert!(!pair.left.path().join(".foldover/lock").exists());
+        assert_eq!(fs::read(lock).unwrap(), original_lock);
+    }
+}
+
+/// Only a lease another run kept is worth trying again later; a run
+/// that lost its lease or was stopped needs a person.
+#[test]
+fn only_a_busy_folder_is_retried_unattended() {
+    let busy = RunError::Lease(LeaseError::Busy {
+        label: "Studio".into(),
+    });
+    assert!(busy.folder_busy());
+    for error in [
+        RunError::Lease(LeaseError::Lost),
+        RunError::Lease(LeaseError::Cancelled),
+        RunError::Cancelled,
+    ] {
+        assert!(!error.folder_busy(), "{error:?}");
+    }
+}
+
+/// A live lease another run holds on `folder`.
+fn hold_lease(folder: &std::path::Path) -> std::path::PathBuf {
+    let lock = folder.join(".foldover/lock");
+    fs::create_dir_all(folder.join(".foldover")).unwrap();
+    fs::write(
+        &lock,
+        "foldover-lease 1\nholder other/run\nlabel Studio\nbeat 1\n",
+    )
+    .unwrap();
+    lock
+}
+
+/// ADR 0047: a Backup only reads its source, so it takes no lease there
+/// and never waits for another pair or Mac using the same folder. The
+/// other run's lease and temporaries stay as they are.
+#[test]
+fn a_backup_reads_its_source_without_waiting_for_its_lease() {
+    for mode in [
+        SyncMode::Backup { source: Side::Left },
+        SyncMode::Mirror { source: Side::Left },
+    ] {
+        let mut pair = fixture(mode);
+        pair.leases = TEST_LEASES;
+        let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+        fs::write(left.join("file"), b"v1").unwrap();
+        let lock = hold_lease(&left);
+        let report = pair.ran(Approval::default(), at(1));
+        assert_eq!(report.copied(), 1);
+        assert_eq!(fs::read(right.join("file")).unwrap(), b"v1");
+        // The other run still holds the source; this one released the
+        // target it wrote.
+        assert!(lock.exists());
+        assert!(!right.join(".foldover/lock").exists());
+
+        // A two-way pair writes both folders, so it waits for the lease.
+        let mut two_way = fixture(SyncMode::Sync);
+        two_way.leases = TEST_LEASES;
+        fs::write(two_way.left.path().join("file"), b"v1").unwrap();
+        hold_lease(two_way.left.path());
+        let prepared = two_way.prepare();
+        let mut store = two_way.store();
+        let busy = prepared.execute(
+            Approval::default(),
+            RunContext::Interactive,
+            at(1),
+            &mut |planned, commit| store.apply(planned, commit),
+            &mut proceed,
+            &NoProgress,
+        );
+        assert!(
+            matches!(&busy, Err(RunError::Lease(LeaseError::Busy { .. }))),
+            "{busy:?}"
+        );
+    }
+}
+
+/// A person's choice to copy a change back into a Backup's source, or a
+/// temporary an interrupted write left there, makes the run write the
+/// source: then it takes the source's lease like any writer.
+#[test]
+fn a_backup_leases_its_source_when_it_writes_there() {
+    let busy = |pair: &mut Fixture| {
+        let prepared = pair.prepare();
+        let mut store = pair.store();
+        prepared.execute(
+            Approval::default(),
+            RunContext::Interactive,
+            at(2),
+            &mut |planned, commit| store.apply(planned, commit),
+            &mut proceed,
+            &NoProgress,
+        )
+    };
+
+    let mut pair = fixture(SyncMode::Backup { source: Side::Left });
+    pair.leases = TEST_LEASES;
+    let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+    fs::write(left.join("file"), b"v1").unwrap();
+    pair.sync();
+    fs::write(right.join("file"), b"edited on the target").unwrap();
+    fs::write(left.join("file"), b"v2").unwrap();
+    pair.keep(Side::Right, b"file");
+    let lock = hold_lease(&left);
+    let refused = busy(&mut pair);
+    assert!(
+        matches!(&refused, Err(RunError::Lease(LeaseError::Busy { .. }))),
+        "{refused:?}"
+    );
+    assert_eq!(fs::read(left.join("file")).unwrap(), b"v2");
+    fs::remove_file(&lock).unwrap();
+    pair.ran(Approval::default(), at(3));
+    assert_eq!(
+        fs::read(left.join("file")).unwrap(),
+        b"edited on the target"
+    );
+
+    let mut pair = fixture(SyncMode::Backup { source: Side::Left });
+    pair.leases = TEST_LEASES;
+    let left = pair.left.path().to_owned();
+    fs::write(left.join(".foldover-tmp-left"), b"interrupted").unwrap();
+    let lock = hold_lease(&left);
+    assert!(matches!(
+        busy(&mut pair),
+        Err(RunError::Lease(LeaseError::Busy { .. }))
+    ));
+    assert!(left.join(".foldover-tmp-left").exists());
+    fs::remove_file(&lock).unwrap();
+    let report = pair.ran(Approval::default(), at(3));
+    assert_eq!(report.recovered(), 1);
+    assert!(!left.join(".foldover-tmp-left").exists());
 }
 
 /// Runs `hours` after the first, so each gets its own archive folder.
@@ -3037,7 +4252,7 @@ fn keeping_the_target_side_copies_a_change_the_other_way() {
     assert_eq!(fs::read(left.join("deleted")).unwrap(), b"d");
     // B's version wins in A; A's edit is in A's archive.
     assert_eq!(fs::read(left.join("edited")).unwrap(), b"v1");
-    let archive = left.join(".foldover/archive/1970-01-01T00-00-00.000Z");
+    let archive = left.join(".foldover/archive").join(report.archive());
     assert_eq!(fs::read(archive.join("edited")).unwrap(), b"version 2");
     assert_eq!(fs::read(right.join("edited")).unwrap(), b"v1");
     assert!(pair.prepare().preview().items().is_empty());
@@ -3261,5 +4476,65 @@ fn a_canary_left_out_by_an_ignore_file_says_so() {
     assert!(
         matches!(&error, RunError::CanaryExcluded { path } if *path == super::tests::path(b"canary")),
         "{error:?}"
+    );
+}
+
+/// Preview binding depends on verified versions, never cache timestamps or
+/// stat keys. Sharing observations must preserve this equality contract.
+#[test]
+fn shared_preview_observations_keep_version_only_equality() {
+    let version = EntryVersion::new(
+        EntryContent::File(Digest::from_bytes([1; Digest::BYTE_LEN])),
+        Digest::from_bytes([2; Digest::BYTE_LEN]),
+    );
+    let first = ObservedEntry::restore(version, &[0; 21]).unwrap();
+    let mut changed_key = vec![0; 21];
+    changed_key[20] = 1;
+    let second = ObservedEntry::restore(version, &changed_key).unwrap();
+    assert_ne!(first, second);
+    let item = |version| PreviewItem {
+        path: path(b"file"),
+        action: Action::Copy {
+            to: Side::Right,
+            change: ChangeKind::Create,
+        },
+        left: Some(version),
+        right: None,
+        bytes: 0,
+        moved_from: None,
+    };
+    let preview = |item| Preview {
+        pair: fixture_pair(),
+        revision: 1,
+        items: vec![item],
+        left_deletions: DeletionCounts::new(1, 0).unwrap(),
+        right_deletions: DeletionCounts::new(0, 0).unwrap(),
+        removal_protection: RemovalProtection::Enabled,
+        failures: Vec::new(),
+    };
+    let left = preview(item(first.observed_version()));
+    let right = preview(item(second.observed_version()));
+    assert_eq!(left, right);
+    assert_eq!(left.token(), right.token());
+    assert_eq!(left.items()[0].versions(), (Some(version), None));
+}
+
+#[test]
+fn a_preview_outlives_its_prepared_run() {
+    let fixture = fixture(SyncMode::Sync);
+    fs::write(fixture.left.path().join("file"), b"kept").unwrap();
+    let run = fixture.prepare();
+    let preview = run.preview();
+    let token = preview.token();
+    let versions: Vec<_> = preview.items().iter().map(PreviewItem::versions).collect();
+    drop(run);
+    assert_eq!(preview.token(), token);
+    assert_eq!(
+        preview
+            .items()
+            .iter()
+            .map(PreviewItem::versions)
+            .collect::<Vec<_>>(),
+        versions
     );
 }

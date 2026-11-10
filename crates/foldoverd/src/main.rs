@@ -53,6 +53,8 @@ async fn run(location: foldover_ipc::SocketLocation) -> Result<(), Box<dyn std::
     let listener = foldover_ipc::bind(&location)?;
     let service = foldover_service::Service::open()?;
     service.start_scheduler();
+    // Finish deleting the rows of pairs removed before a stop.
+    service.start_purge();
     // Folder sync works without other Macs.
     if let Err(error) = service.start_peers().await {
         eprintln!("foldoverd: Mac-to-Mac is unavailable: {}", error.message());

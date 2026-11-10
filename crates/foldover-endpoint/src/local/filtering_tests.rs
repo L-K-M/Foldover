@@ -78,14 +78,15 @@ fn late_failed_subtrees_remove_previously_observed_children() {
         b"a/child/grandchild",
         b"a!/safe",
     ] {
-        observation.entries.insert(path(bytes), entry());
+        observation.record(path(bytes), entry());
     }
+    observation.finish_entries();
     let mut unavailable = UnavailablePaths::default();
     unavailable
         .skip_error(&mut observation, ScanError::Changed(Some(path(b"a"))))
         .unwrap();
     unavailable
-        .retain_entries(&mut observation.entries, &mut || ScanControl::Continue)
+        .retain_entries(&mut observation, &mut || ScanControl::Continue)
         .unwrap();
 
     assert_eq!(observation.unavailable(), &[path(b"a")]);
@@ -104,12 +105,14 @@ fn late_failed_subtrees_remove_previously_observed_children() {
 
 #[test]
 fn cancellation_during_filtering_stops_lookups_and_returns_an_error() {
-    let mut entries = (0..100)
-        .map(|i| (path(format!("safe/{i:03}").as_bytes()), entry()))
-        .collect();
+    let mut observation = Observation::default();
+    for i in 0..100 {
+        observation.record(path(format!("safe/{i:03}").as_bytes()), entry());
+    }
+    observation.finish_entries();
     let unavailable = UnavailablePaths::from_paths(&[path(b"unread")]);
     let mut checkpoints = 0;
-    let result = unavailable.retain_entries(&mut entries, &mut || {
+    let result = unavailable.retain_entries(&mut observation, &mut || {
         checkpoints += 1;
         if checkpoints == 3 {
             ScanControl::Cancel

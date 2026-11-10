@@ -22,6 +22,7 @@ private actor PairFixtureClient: PairClient {
     private(set) var updatedRevision: UInt64?
     private(set) var savedSettings: PairSettings?
     private(set) var removedRevision: UInt64?
+    private(set) var checks: [(editing: String?, mode: PairMode)] = []
 
     init(catalog: [SyncPair] = [], outcome: SaveOutcome = .succeeds,
          warnings: [PairReadinessWarning] = [], servers: [NearbyServer] = [],
@@ -57,7 +58,14 @@ private actor PairFixtureClient: PairClient {
         return pair
     }
 
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { warnings }
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair {
+        SyncPair(id: pair.id, revision: pair.revision, settings: pair.settings, automation: automation)
+    }
+
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] {
+        checks.append((editing, settings.mode))
+        return warnings
+    }
 
     func servers() async throws -> [NearbyServer] { servers }
 
@@ -110,7 +118,11 @@ private actor DeferredPairClient: PairClient {
     func create(_ settings: PairSettings) async throws -> SyncPair { pairFixture() }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { pair }
     func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { [] }
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair {
+        SyncPair(id: pair.id, revision: pair.revision, settings: pair.settings, automation: automation)
+    }
+
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { [] }
     func servers() async throws -> [NearbyServer] { [] }
     func browse(_ locator: String) async throws -> ServerListing { throw PairFixtureError.changedElsewhere }
 }
@@ -138,7 +150,11 @@ private actor FailingPairPageClient: PairClient {
     func create(_ settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func remove(_ pair: SyncPair) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] { throw PairFixtureError.changedElsewhere }
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair {
+        throw PairFixtureError.changedElsewhere
+    }
+
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { throw PairFixtureError.changedElsewhere }
     func servers() async throws -> [NearbyServer] { throw PairFixtureError.changedElsewhere }
     func browse(_ locator: String) async throws -> ServerListing { throw PairFixtureError.changedElsewhere }
 }
@@ -311,9 +327,35 @@ func dailyScheduleIsEditableInPlace() {
     #expect(editor.dailyWarning != nil)
     #expect(!editor.canSave)
 
-    #expect(PairEditorViewModel.scheduleTitle(.daily(minutes: 150, days: Set(SyncDay.allCases))) == "Every day at 02:30")
-    #expect(PairEditorViewModel.scheduleTitle(.daily(minutes: 18 * 60, days: [.monday, .tuesday, .wednesday, .thursday, .friday])) == "Weekdays at 18:00")
-    #expect(PairEditorViewModel.scheduleTitle(.daily(minutes: 7 * 60 + 15, days: [.monday, .wednesday, .friday])) == "Mon, Wed, Fri at 07:15")
+    let british = Locale(identifier: "en_GB")
+    #expect(PairEditorViewModel.scheduleTitle(.daily(minutes: 150, days: Set(SyncDay.allCases)), locale: british) == "Every day at 02:30")
+    #expect(PairEditorViewModel.scheduleTitle(.daily(minutes: 18 * 60, days: [.monday, .tuesday, .wednesday, .thursday, .friday]), locale: british) == "Weekdays at 18:00")
+    #expect(PairEditorViewModel.scheduleTitle(.daily(minutes: 7 * 60 + 15, days: [.monday, .wednesday, .friday]), locale: british) == "Mon, Wed, Fri at 07:15")
+}
+
+/// The summary reads like the time picker beside it, which follows the
+/// Mac's clock format: a 12-hour Mac must not be told "18:00".
+@MainActor
+@Test
+func scheduleTimesFollowTheLocalesClock() {
+    let american = Locale(identifier: "en_US")
+    // Releases of the system differ in the space before AM and PM.
+    let plain = { (text: String) in
+        text.replacingOccurrences(of: "\u{202F}", with: " ").replacingOccurrences(of: "\u{00A0}", with: " ")
+    }
+    let weekdays: Set<SyncDay> = [.monday, .tuesday, .wednesday, .thursday, .friday]
+    #expect(plain(PairEditorViewModel.scheduleTitle(.daily(minutes: 18 * 60, days: weekdays), locale: american)) == "Weekdays at 6:00 PM")
+    #expect(plain(PairEditorViewModel.scheduleTitle(.daily(minutes: 150, days: Set(SyncDay.allCases)), locale: american)) == "Every day at 2:30 AM")
+    #expect(plain(PairEditorViewModel.scheduleTitle(.daily(minutes: 0, days: Set(SyncDay.allCases)), locale: american)) == "Every day at 12:00 AM")
+    #expect(PairEditorViewModel.scheduleTitle(.daily(minutes: 1439, days: Set(SyncDay.allCases)), locale: Locale(identifier: "de_CH")) == "Every day at 23:59")
+
+    var options = PairOptions.defaults
+    options.schedule = .daily(minutes: 18 * 60, days: weekdays)
+    #expect(plain(PairEditorViewModel.planText(mode: .sync, options: options, locale: american)).hasSuffix("Syncs weekdays at 6:00 PM."))
+    options.schedule = .daily(minutes: 18 * 60, days: [])
+    #expect(plain(PairEditorViewModel.planText(mode: .sync, options: options, locale: american)).hasSuffix("Syncs at 6:00 PM once you choose weekdays."))
+    // Schedules without a time of day read the same everywhere.
+    #expect(PairEditorViewModel.scheduleTitle(.every(minutes: 60), locale: american) == "Every hour")
 }
 
 @MainActor
@@ -520,7 +562,11 @@ private actor WarningOnAttributesClient: PairClient {
     func create(_ settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func remove(_ pair: SyncPair) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] {
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair {
+        SyncPair(id: pair.id, revision: pair.revision, settings: pair.settings, automation: automation)
+    }
+
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] {
         settings.options.syncExtendedAttributes ? [warning] : []
     }
     func servers() async throws -> [NearbyServer] { [] }
@@ -581,12 +627,121 @@ private actor RecordsRefusingClient: PairClient {
     func create(_ settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
     func remove(_ pair: SyncPair) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] {
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair {
+        SyncPair(id: pair.id, revision: pair.revision, settings: pair.settings, automation: automation)
+    }
+
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] {
         let spared = settings.mode == .backupLeft && settings.options.records == .sourceOnly
         return spared ? [] : [PairReadinessWarning(side: .b, kind: .recordsUnsupported)]
     }
     func servers() async throws -> [NearbyServer] { [] }
     func browse(_ locator: String) async throws -> ServerListing { throw PairFixtureError.changedElsewhere }
+}
+
+@MainActor
+@Test
+func anOverlappingFolderNamesThePairAndBlocksSaving() async {
+    let client = PairFixtureClient(warnings: [
+        PairReadinessWarning(side: .a, kind: .overlap(pairName: "Photos")),
+        PairReadinessWarning(side: .b, kind: .overlap(pairName: "Media")),
+    ])
+    let editor = PairEditorViewModel(store: PairStore(client: client))
+    editor.name = "Archive"
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/a")]), side: .left)
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/b")]), side: .right)
+    await editor.awaitReadinessCheck()
+    #expect(editor.readinessWarnings.isEmpty)
+    #expect(editor.overlapWarning == "Folder A overlaps a folder of “Photos”. Folder B overlaps a folder of “Media”. Pairs can share a folder only as the source of a Mirror or Backup.")
+    #expect(!editor.canSave)
+    #expect(await editor.save() == false)
+}
+
+/// Like the engine, finds Folder A shared with "Photos" unless both pairs
+/// read it: here, unless this pair backs up from Folder A.
+private actor SharedSourceClient: PairClient {
+    func page(after: String?) async throws -> PairCatalogPage { PairCatalogPage(pairs: [], next: nil) }
+    func create(_ settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
+    func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
+    func remove(_ pair: SyncPair) async throws -> SyncPair { throw PairFixtureError.changedElsewhere }
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair {
+        SyncPair(id: pair.id, revision: pair.revision, settings: pair.settings, automation: automation)
+    }
+
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] {
+        settings.mode == .backupLeft ? [] : [PairReadinessWarning(side: .a, kind: .overlap(pairName: "Photos"))]
+    }
+    func servers() async throws -> [NearbyServer] { [] }
+    func browse(_ locator: String) async throws -> ServerListing { throw PairFixtureError.changedElsewhere }
+}
+
+/// ADR 0048: another pair's folder that cannot be read blocks Save, once
+/// per pair however many sides wait on it.
+@MainActor
+@Test
+func anUnreadableFolderOfAnotherPairBlocksSaving() async {
+    let client = PairFixtureClient(warnings: [
+        PairReadinessWarning(side: .a, kind: .unverified(pairName: "Photos")),
+        PairReadinessWarning(side: .b, kind: .unverified(pairName: "Photos")),
+    ])
+    let editor = PairEditorViewModel(store: PairStore(client: client))
+    editor.name = "Second backup"
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/a")]), side: .left)
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/b")]), side: .right)
+    await editor.awaitReadinessCheck()
+    #expect(editor.readinessWarnings.isEmpty)
+    #expect(editor.uncheckedWarning == "A folder of “Photos” can't be read, so these folders can't be checked against it. Connect it, or give Foldover access to it, to save.")
+    #expect(!editor.canSave)
+    #expect(await editor.save() == false)
+}
+
+/// Review: Save comes back once a mode change lets the folders share.
+@MainActor
+@Test
+func anOverlapClearsWhenTheModeLetsTheFolderBeShared() async {
+    let editor = PairEditorViewModel(store: PairStore(client: SharedSourceClient()))
+    editor.name = "Second backup"
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/a")]), side: .left)
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/b")]), side: .right)
+    await editor.awaitReadinessCheck()
+    #expect(editor.overlapWarning != nil)
+    #expect(!editor.canSave)
+
+    editor.mode = .backupLeft
+    await editor.awaitReadinessCheck()
+    #expect(editor.overlapWarning == nil)
+    #expect(editor.canSave)
+}
+
+@MainActor
+@Test
+func editingAPairSendsItsIDToTheCheck() async {
+    let client = PairFixtureClient()
+    let store = PairStore(client: client)
+    let editor = PairEditorViewModel(store: store, editing: pairFixture())
+    await editor.awaitReadinessCheck()
+    #expect(await client.checks.map { $0.editing } == [pairFixture().id])
+    let fresh = PairEditorViewModel(store: store)
+    fresh.chooseFolder(.success([URL(fileURLWithPath: "/a")]), side: .left)
+    fresh.chooseFolder(.success([URL(fileURLWithPath: "/b")]), side: .right)
+    await fresh.awaitReadinessCheck()
+    #expect(await client.checks.count > 1)
+    #expect(await client.checks.last?.editing == nil)
+}
+
+@MainActor
+@Test
+func changingTheModeRerunsTheReadinessCheck() async {
+    let client = PairFixtureClient()
+    let editor = PairEditorViewModel(store: PairStore(client: client))
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/a")]), side: .left)
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/b")]), side: .right)
+    await editor.awaitReadinessCheck()
+    let checksBefore = await client.checks.count
+    editor.mode = .mirrorRight
+    await editor.awaitReadinessCheck()
+    #expect(await client.checks.count > checksBefore)
+    #expect(await client.checks.last?.mode == .mirrorRight)
 }
 
 @MainActor
@@ -646,6 +801,27 @@ func pairEditorWalksServerFoldersAndChoosesOne() async throws {
     #expect(editor.serverListing == photos)
     #expect(editor.useServerFolder(side: .right))
     #expect(editor.right == SelectedFolder(bytes: Data("sftp://nas/home/alice/Photos".utf8)))
+
+    // A highlighted row wins over the folder being browsed: the
+    // enclosing folder here, a listed folder below. A locator the
+    // listing does not offer is ignored.
+    #expect(editor.useServerFolder(side: .right, highlighted: home.locator))
+    #expect(editor.right == SelectedFolder(bytes: Data("sftp://nas/home/alice".utf8)))
+    await editor.openServerFolder("sftp://nas/~")
+    #expect(editor.serverListing == home)
+    #expect(editor.useServerFolder(side: .right, highlighted: photos.locator))
+    #expect(editor.right == SelectedFolder(bytes: Data("sftp://nas/home/alice/Photos".utf8)))
+    await editor.openServerFolder(photos.locator)
+    #expect(editor.useServerFolder(side: .right, highlighted: "sftp://elsewhere/x"))
+    #expect(editor.right == SelectedFolder(bytes: Data("sftp://nas/home/alice/Photos".utf8)))
+
+    // A highlighted row needs no text in the field: the button stays
+    // available, and the row is used.
+    editor.serverLocator = ""
+    #expect(!editor.canUseServerFolder(highlighted: nil))
+    #expect(editor.canUseServerFolder(highlighted: home.locator))
+    #expect(editor.useServerFolder(side: .right, highlighted: home.locator))
+    #expect(editor.right == SelectedFolder(bytes: Data("sftp://nas/home/alice".utf8)))
 
     // A server that does not answer leaves the last listing up.
     await editor.openServerFolder("sftp://nas/gone")
@@ -766,20 +942,22 @@ func planSentenceSaysWhatThePairWillDo() {
     editor.options.schedule = .onChange
     #expect(editor.planText == "Changes in either folder go to the other. A file deleted in one folder is archived in the other. Syncs when files change.")
 
+    // Times of day follow the Mac's clock format; pin a 24-hour one.
+    let plan = { PairEditorViewModel.planText(mode: editor.mode, options: editor.options, locale: Locale(identifier: "en_GB")) }
     editor.mode = .backupLeft
     editor.options.schedule = .daily(minutes: 120, days: Set(SyncDay.allCases))
-    #expect(editor.planText == "Folder A is copied to Folder B. Files you delete in A stay in B. Syncs every day at 02:00.")
+    #expect(plan() == "Folder A is copied to Folder B. Files you delete in A stay in B. Syncs every day at 02:00.")
 
     editor.mode = .mirrorLeft
-    #expect(editor.planText == "Folder B is made identical to A. Files you delete in A are archived in B, never deleted. Syncs every day at 02:00.")
+    #expect(plan() == "Folder B is made identical to A. Files you delete in A are archived in B, never deleted. Syncs every day at 02:00.")
 
     editor.mode = .mirrorRight
     editor.options.schedule = .daily(minutes: 18 * 60, days: [.monday, .tuesday, .wednesday, .thursday, .friday])
-    #expect(editor.planText == "Folder A is made identical to B. Files you delete in B are archived in A, never deleted. Syncs weekdays at 18:00.")
+    #expect(plan() == "Folder A is made identical to B. Files you delete in B are archived in A, never deleted. Syncs weekdays at 18:00.")
 
     editor.mode = .backupRight
     editor.options.schedule = .daily(minutes: 7 * 60 + 15, days: [.monday, .wednesday, .friday])
-    #expect(editor.planText == "Folder B is copied to Folder A. Files you delete in B stay in A. Syncs Mon, Wed, Fri at 07:15.")
+    #expect(plan() == "Folder B is copied to Folder A. Files you delete in B stay in A. Syncs Mon, Wed, Fri at 07:15.")
 
     editor.options.schedule = .every(minutes: 15)
     #expect(editor.planText.hasSuffix("Syncs every 15 minutes."))
@@ -1022,5 +1200,104 @@ func optionalHomeExclusionsRequireAnExplicitChoice(preset: PairStore.HomeExclusi
     editor.addHomeExclusionPreset(preset)
     for rule in preset.rules {
         #expect(editor.options.filters.filter { $0 == rule }.count == 1)
+    }
+}
+
+/// Volume reads that wait until the test lets each one finish, as a
+/// stalled network share's would.
+private actor HeldVolumeReads {
+    private(set) var count = 0
+    private var held: CheckedContinuation<Void, Never>?
+    private var started: CheckedContinuation<Void, Never>?
+
+    func read() async -> FolderVolume? {
+        count += 1
+        started?.resume()
+        started = nil
+        await withCheckedContinuation { held = $0 }
+        return FolderVolume(name: "Share", totalBytes: 100, availableBytes: 40)
+    }
+
+    func waitForRead(_ number: Int) async {
+        if count >= number { return }
+        await withCheckedContinuation { started = $0 }
+    }
+
+    func finish() {
+        held?.resume()
+        held = nil
+    }
+}
+
+/// A folder's disk is read one read at a time: while a read is out, as
+/// on a stalled share, asking again gets the reading from before and
+/// starts no other. A server or another Mac has no disk here to read.
+@MainActor
+@Test
+func aFolderHasOneVolumeReadOutAtATime() async {
+    let reads = HeldVolumeReads()
+    let store = PairStore(client: PairFixtureClient(catalog: []), volume: { _ in await reads.read() })
+    #expect(await store.volume(of: SelectedFolder(bytes: Data("sftp://nas.local/Photos".utf8))) == nil)
+    #expect(await store.volume(of: SelectedFolder(bytes: Data("peer://studio/share-1".utf8))) == nil)
+    #expect(await reads.count == 0)
+
+    let share = SelectedFolder(bytes: Data("/Volumes/Share/Photos".utf8))
+    let first = Task { await store.volume(of: share) }
+    await reads.waitForRead(1)
+    #expect(await store.volume(of: share) == nil, "Nothing has been read yet")
+    #expect(await reads.count == 1)
+    await reads.finish()
+    #expect(await first.value?.name == "Share")
+
+    let second = Task { await store.volume(of: share) }
+    await reads.waitForRead(2)
+    #expect(await store.volume(of: share)?.name == "Share", "The last reading stands in")
+    #expect(await reads.count == 2)
+    await reads.finish()
+    #expect(await second.value?.availableBytes == 40)
+}
+
+/// Pausing changes only the pair's automation: its settings and revision
+/// stay. An answer for another state is refused.
+@MainActor
+@Test
+func pausingAPairKeepsItsSettingsAndRevision() async throws {
+    let pair = pairFixture()
+    let store = PairStore(client: PairFixtureClient(catalog: [pair]))
+    await store.refresh()
+
+    try await store.setAutomation(.paused, of: pair)
+    #expect(store.pairs == [SyncPair(id: pair.id, revision: pair.revision, settings: pair.settings,
+                                     automation: .paused)])
+    #expect(!store.isSaving)
+
+    try await store.setAutomation(.running, of: store.pairs[0])
+    #expect(store.pairs == [pair])
+
+    let unchanged = PairStore(client: UnpausablePairClient(pair: pair))
+    await unchanged.refresh()
+    await #expect(throws: (any Error).self) {
+        try await unchanged.setAutomation(.paused, of: pair)
+    }
+    #expect(unchanged.pairs == [pair])
+}
+
+/// Answers every pause with the pair unchanged.
+private actor UnpausablePairClient: PairClient {
+    let pair: SyncPair
+
+    init(pair: SyncPair) { self.pair = pair }
+
+    func page(after: String?) async throws -> PairCatalogPage {
+        PairCatalogPage(pairs: after == nil ? [pair] : [], next: nil)
+    }
+    func create(_ settings: PairSettings) async throws -> SyncPair { pair }
+    func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair { pair }
+    func remove(_ pair: SyncPair) async throws -> SyncPair { pair }
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair { self.pair }
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] { [] }
+    func servers() async throws -> [NearbyServer] { [] }
+    func browse(_ locator: String) async throws -> ServerListing {
+        ServerListing(locator: locator, parent: nil, folders: [])
     }
 }

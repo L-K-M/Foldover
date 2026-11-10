@@ -14,10 +14,17 @@
 //!
 //! A name with a single spelling, such as any ASCII name, is looked up
 //! once, as before.
+//!
+//! A wide folder's listing is indexed, so `listed_on` and the `note_*`
+//! mutations stay proportional to the names they touch rather than to
+//! the whole folder: an exact map answers as given, a composed map
+//! answers through normalization, and both preserve the server's
+//! listing order for aliases that compose alike. The cache itself is
+//! bounded by folder count and by a conservative byte estimate.
 
-use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use foldover_net::sftp::{Attributes, Refused, Session};
 use foldover_types::SyncPath;
@@ -30,16 +37,273 @@ use crate::ScanError;
 /// over rather than grow without bound.
 const LISTED_FOLDERS: usize = 512;
 
+/// How many bytes of cached folder indexes a run may hold before the
+/// cache starts over rather than grow without bound. The estimate
+/// charges index and key overhead, not just the raw names, so the real
+/// cache stays under it.
+const LISTING_BYTES: usize = 32 * 1024 * 1024;
+
+// Charge folder keys, hash-map capacity and allocation slack even for views
+// without an index. Dirty parents also accumulate during ASCII-only writes.
+const FOLDER_OVERHEAD: usize = 3 * size_of::<(Vec<u8>, FolderView)>();
+
+/// Bytes charged per slot, live or tombstoned: the slot itself with
+/// `Vec` growth slack.
+const SLOT_BYTES: usize = 2 * size_of::<Option<Box<[u8]>>>();
+
+/// Bytes charged per live name beyond its raw bytes and composed key:
+/// its exact-map entry, its composed-map entry, the ordinal vector,
+/// hash-table slack and allocator slack, rounded up so the estimate
+/// stays conservative.
+const NAME_OVERHEAD: usize = size_of::<(Box<[u8]>, usize)>()
+    + size_of::<(Box<[u8]>, Vec<usize>)>()
+    + 4 * size_of::<usize>()
+    + 2 * size_of::<usize>()
+    + 4 * size_of::<usize>();
+
+/// Rebuild once tombstones outweigh live names, so a folder that loses
+/// many entries cannot grow its slot vector without bound.
+const COMPACT_SLOTS: usize = 64;
+
 /// One folder's listing as the run's mutations left it.
 pub(super) enum FolderView {
     /// What `read_dir` last showed, kept exact by the run's `note_*`.
-    Cached(Arc<Vec<Vec<u8>>>),
+    /// Behind a mutex so a mutation edits it in place instead of
+    /// cloning the whole listing to shadow it.
+    Cached(Arc<Mutex<IndexedNames>>),
     /// A `read_dir` is in flight; its snapshot stores only if no
     /// mutation marked the folder meanwhile.
     Fetching,
     /// The run changed the folder while uncached or mid-read, or a
     /// mutation's outcome is unknown: the next listing must refetch.
     Dirty,
+}
+
+/// A folder's names, indexed for the two lookups `listed_on` makes.
+///
+/// `slots` keeps the server's listing order and then the run's
+/// `note_added` order. Removals leave a tombstone rather than shift the
+/// vector, so the candidates that compose alike keep their relative
+/// order and the first listed one still answers. `exact` maps raw bytes
+/// to a slot for the as-given lookup; `nfc` maps composed bytes to live
+/// slots, in order, for the normalization lookup.
+pub(super) struct IndexedNames {
+    slots: Vec<Option<Box<[u8]>>>,
+    exact: HashMap<Box<[u8]>, usize>,
+    nfc: HashMap<Box<[u8]>, Vec<usize>>,
+    /// Conservative running byte estimate, for `LISTING_BYTES`.
+    bytes: usize,
+}
+
+impl IndexedNames {
+    fn new() -> Self {
+        Self {
+            slots: Vec::new(),
+            exact: HashMap::new(),
+            nfc: HashMap::new(),
+            bytes: 0,
+        }
+    }
+
+    /// A listing's names, in the order the server gave them.
+    fn from_listing(names: Vec<Vec<u8>>) -> Self {
+        let mut index = Self::new();
+        for name in names {
+            index.add(&name);
+        }
+        index
+    }
+
+    /// The conservative byte estimate this index charges the run.
+    fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// The listed name for `name`: exactly `name` when the folder holds
+    /// it, else the first listed name that composes alike.
+    fn listed_name(&self, name: &[u8]) -> Option<Box<[u8]>> {
+        if let Some(&slot) = self.exact.get(name) {
+            return self.slots[slot].clone();
+        }
+        let composed = compose(name).into_boxed_slice();
+        self.nfc
+            .get(composed.as_ref())
+            .and_then(|slots| slots.iter().find_map(|&slot| self.slots[slot].as_ref()))
+            .cloned()
+    }
+
+    /// Add `name` in listing order. A name already listed keeps the
+    /// position the server gave it.
+    fn add(&mut self, name: &[u8]) {
+        if self.exact.contains_key(name) {
+            return;
+        }
+        let composed = compose(name).into_boxed_slice();
+        self.bytes += SLOT_BYTES + NAME_OVERHEAD + 2 * name.len() + composed.len();
+        let slot = self.slots.len();
+        self.slots.push(Some(name.into()));
+        self.exact.insert(name.into(), slot);
+        self.nfc.entry(composed).or_default().push(slot);
+    }
+
+    /// Remove `name`'s slot, leaving a tombstone that keeps the order
+    /// of the names still listed.
+    fn remove(&mut self, name: &[u8]) {
+        let Some(slot) = self.exact.remove(name) else {
+            return;
+        };
+        let composed = compose(name).into_boxed_slice();
+        let empty = match self.nfc.get_mut(composed.as_ref()) {
+            Some(slots) => {
+                slots.retain(|&ordinal| ordinal != slot);
+                slots.is_empty()
+            }
+            None => false,
+        };
+        if empty {
+            self.nfc.remove(composed.as_ref());
+        }
+        self.slots[slot] = None;
+        self.bytes = self
+            .bytes
+            .saturating_sub(NAME_OVERHEAD + 2 * name.len() + composed.len());
+        if self.slots.len() > COMPACT_SLOTS && self.exact.len() * 2 < self.slots.len() {
+            self.compact();
+        }
+    }
+
+    /// Drop tombstones, keeping live names in listing order.
+    fn compact(&mut self) {
+        let mut slots = Vec::with_capacity(self.exact.len());
+        let mut exact = HashMap::with_capacity(self.exact.len());
+        let mut nfc: HashMap<Box<[u8]>, Vec<usize>> = HashMap::new();
+        let mut bytes = 0;
+        for listed in self.slots.drain(..).flatten() {
+            let composed = compose(&listed).into_boxed_slice();
+            bytes += SLOT_BYTES + NAME_OVERHEAD + 2 * listed.len() + composed.len();
+            let slot = slots.len();
+            exact.insert(listed.clone(), slot);
+            nfc.entry(composed).or_default().push(slot);
+            slots.push(Some(listed));
+        }
+        self.slots = slots;
+        self.exact = exact;
+        self.nfc = nfc;
+        self.bytes = bytes;
+    }
+}
+
+/// The run's folder views, bounded by folder count and by bytes.
+pub(super) struct Listings {
+    folders: HashMap<Vec<u8>, FolderView>,
+    /// Conservative total of the cached indexes' bytes.
+    bytes: usize,
+}
+
+impl Default for Listings {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Listings {
+    pub(super) fn new() -> Self {
+        Self {
+            folders: HashMap::new(),
+            bytes: 0,
+        }
+    }
+
+    /// Every view goes: a run past a bound starts over rather than
+    /// hold every listing it ever read.
+    fn clear(&mut self) {
+        self.folders.clear();
+        self.bytes = 0;
+    }
+
+    fn len(&self) -> usize {
+        self.folders.len()
+    }
+
+    /// The cached index at `parent`, if the folder is cached.
+    fn cached(&self, parent: &[u8]) -> Option<Arc<Mutex<IndexedNames>>> {
+        match self.folders.get(parent) {
+            Some(FolderView::Cached(index)) => Some(Arc::clone(index)),
+            _ => None,
+        }
+    }
+
+    /// Install `view` at `parent`, refunding the cached index it
+    /// replaces and charging the new one.
+    fn store(&mut self, parent: Vec<u8>, view: FolderView) {
+        self.store_bounded(parent, view, LISTING_BYTES);
+    }
+
+    fn store_bounded(&mut self, parent: Vec<u8>, mut view: FolderView, bound: usize) {
+        let overhead = FOLDER_OVERHEAD.saturating_add(parent.len());
+        let mut charge = overhead.saturating_add(view.bytes().unwrap_or(0));
+        if charge > bound {
+            // The fetched index can answer the current lookup without being
+            // retained. Keep a Dirty hint so the next lookup reads afresh.
+            view = FolderView::Dirty;
+            charge = overhead;
+        }
+        if charge > bound {
+            self.clear();
+            return;
+        }
+        let old_charge = self
+            .folders
+            .get(&parent)
+            .map_or(0, |old| overhead.saturating_add(old.bytes().unwrap_or(0)));
+        let retained = self.bytes.saturating_sub(old_charge);
+        if (!self.folders.contains_key(&parent) && self.len() >= LISTED_FOLDERS)
+            || retained.saturating_add(charge) > bound
+        {
+            self.clear();
+        } else {
+            self.bytes = retained;
+        }
+        self.bytes = self.bytes.saturating_add(charge);
+        self.folders.insert(parent, view);
+    }
+
+    /// Cache indexes that fit, evicting old views before crossing the bound.
+    fn store_cached(&mut self, parent: Vec<u8>, index: &Arc<Mutex<IndexedNames>>, bound: usize) {
+        self.store_bounded(parent, FolderView::Cached(Arc::clone(index)), bound);
+    }
+}
+
+#[cfg(test)]
+impl Listings {
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// Mark `parent` as a read in flight, as `listing_on` does.
+    pub(super) fn fetching(&mut self, parent: &[u8]) {
+        self.store(parent.to_vec(), FolderView::Fetching);
+    }
+
+    /// Whether `parent`'s view is Dirty.
+    pub(super) fn is_dirty(&self, parent: &[u8]) -> bool {
+        matches!(self.folders.get(parent), Some(FolderView::Dirty))
+    }
+}
+
+impl FolderView {
+    /// The cached index's conservative bytes, if cached.
+    fn bytes(&self) -> Option<usize> {
+        match self {
+            FolderView::Cached(index) => Some(
+                index
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .bytes(),
+            ),
+            _ => None,
+        }
+    }
 }
 
 impl SftpEndpoint {
@@ -87,8 +351,17 @@ impl SftpEndpoint {
         &self,
         path: &SyncPath,
     ) -> Result<Option<(Vec<u8>, Attributes)>, ScanError> {
-        let found = self.on_stored(path.as_bytes(), |remote| {
-            self.session()
+        self.lookup_on(&mut self.session(), path)
+    }
+
+    /// `lookup` without borrowing another pooled session.
+    pub(super) fn lookup_on(
+        &self,
+        session: &mut Session,
+        path: &SyncPath,
+    ) -> Result<Option<(Vec<u8>, Attributes)>, ScanError> {
+        let found = self.on_stored_with(session, path.as_bytes(), |session, remote| {
+            session
                 .lstat(remote)
                 .map(|attributes| (remote.to_vec(), attributes))
         });
@@ -102,7 +375,13 @@ impl SftpEndpoint {
     /// `stored` in the spelling its folder lists. A server that ignores
     /// normalization, as a Mac's does, finds an entry by either
     /// spelling, so only the listing tells which one the entry has.
+    #[cfg(test)]
     pub(super) fn listed(&self, stored: &[u8]) -> Vec<u8> {
+        self.listed_on(&mut self.session(), stored)
+    }
+
+    /// `listed` without borrowing another pooled session.
+    pub(super) fn listed_on(&self, session: &mut Session, stored: &[u8]) -> Vec<u8> {
         let (Some(parent), name) = split(stored) else {
             return stored.to_vec();
         };
@@ -113,18 +392,23 @@ impl SftpEndpoint {
             true => b"/".as_slice(),
             false => parent,
         };
-        let Some(names) = self.listing(parent) else {
+        let Some(index) = self.listing_on(session, parent) else {
             return stored.to_vec();
         };
+        // A short folder lock: it reads the index and nothing else.
+        // The global listings lock was released before this, so a
+        // mutation and a lookup never hold the two locks in opposite
+        // orders.
+        let listed = index
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .listed_name(name);
         // Where both spellings are stored, as given wins.
-        if names.iter().any(|listed| listed == name) {
-            return stored.to_vec();
+        match listed {
+            Some(listed) if listed.as_ref() == name => stored.to_vec(),
+            Some(listed) => join(parent, &listed),
+            None => stored.to_vec(),
         }
-        let composed = compose(name);
-        names
-            .iter()
-            .find(|listed| compose(listed) == composed)
-            .map_or_else(|| stored.to_vec(), |listed| join(parent, listed))
     }
 
     /// The names `read_dir` last showed for `parent`, or `None` when it
@@ -133,24 +417,24 @@ impl SftpEndpoint {
     /// folder pays one listing, not one per respellable name. Views
     /// track this run's own writes; another client's changes stay
     /// unseen until the run ends.
-    fn listing(&self, parent: &[u8]) -> Option<Arc<Vec<Vec<u8>>>> {
+    fn listing_on(&self, session: &mut Session, parent: &[u8]) -> Option<Arc<Mutex<IndexedNames>>> {
         {
             let mut listings = self
                 .listings
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            if let Some(FolderView::Cached(names)) = listings.get(parent) {
-                return Some(Arc::clone(names));
+            if let Some(index) = listings.cached(parent) {
+                return Some(index);
             }
             // Bounded: past this many folders the map clears rather
             // than hold every listing the run ever read.
             if listings.len() >= LISTED_FOLDERS {
                 listings.clear();
             }
-            listings.insert(parent.to_vec(), FolderView::Fetching);
+            listings.store(parent.to_vec(), FolderView::Fetching);
         }
-        let names: Option<Vec<Vec<u8>>> = self
-            .session()
+        // Remote I/O without either lock held.
+        let names: Option<Vec<Vec<u8>>> = session
             .read_dir(parent)
             .ok()
             .map(|entries| entries.into_iter().map(|(name, _)| name).collect());
@@ -160,25 +444,22 @@ impl SftpEndpoint {
             self.listings
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
-                .insert(parent.to_vec(), FolderView::Dirty);
+                .store(parent.to_vec(), FolderView::Dirty);
             return None;
         };
+        let index = Arc::new(Mutex::new(IndexedNames::from_listing(names)));
         let mut listings = self
             .listings
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        match listings.entry(parent.to_vec()) {
-            // Untouched while read_dir ran: the snapshot is exact.
-            Entry::Occupied(mut slot) if matches!(slot.get(), FolderView::Fetching) => {
-                let names = Arc::new(names);
-                *slot.get_mut() = FolderView::Cached(Arc::clone(&names));
-                Some(names)
-            }
-            // Changed meanwhile — serve what was read but keep the
-            // Dirty mark so the next call refetches rather than
-            // trust a snapshot taken mid-mutation.
-            _ => Some(Arc::new(names)),
+        // Untouched while read_dir ran: the snapshot is exact. Changed
+        // meanwhile — serve what was read but keep the Dirty mark so
+        // the next call refetches rather than trust a snapshot taken
+        // mid-mutation.
+        if matches!(listings.folders.get(parent), Some(FolderView::Fetching)) {
+            listings.store_cached(parent.to_vec(), &index, LISTING_BYTES);
         }
+        Some(index)
     }
 
     /// `added`'s name joined its parent's cached listing. A parent the
@@ -187,23 +468,27 @@ impl SftpEndpoint {
     pub(super) fn note_added(&self, added: &[u8]) {
         let parent = parent_key(added);
         let (_, name) = split(added);
-        match self
+        let mut listings = self
             .listings
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .entry(parent)
-        {
-            Entry::Occupied(mut slot) => match slot.get_mut() {
-                FolderView::Cached(names) => {
-                    let names = Arc::make_mut(names);
-                    if !names.iter().any(|listed| listed == name) {
-                        names.push(name.to_vec());
-                    }
+            .unwrap_or_else(|error| error.into_inner());
+        match listings.folders.get_mut(&parent) {
+            Some(FolderView::Cached(index)) => {
+                let mut index = index.lock().unwrap_or_else(|error| error.into_inner());
+                let before = index.bytes();
+                index.add(name);
+                let growth = index.bytes().saturating_sub(before);
+                drop(index);
+                listings.bytes = listings.bytes.saturating_add(growth);
+                if listings.bytes > LISTING_BYTES {
+                    listings.clear();
                 }
-                view => *view = FolderView::Dirty,
-            },
-            Entry::Vacant(slot) => {
-                slot.insert(FolderView::Dirty);
+            }
+            // A read in flight, or a view already untrustworthy: the
+            // mutation leaves the folder Dirty.
+            Some(view) => *view = FolderView::Dirty,
+            None => {
+                listings.store(parent, FolderView::Dirty);
             }
         }
     }
@@ -212,18 +497,22 @@ impl SftpEndpoint {
     pub(super) fn note_removed(&self, gone: &[u8]) {
         let parent = parent_key(gone);
         let (_, name) = split(gone);
-        match self
+        let mut listings = self
             .listings
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .entry(parent)
-        {
-            Entry::Occupied(mut slot) => match slot.get_mut() {
-                FolderView::Cached(names) => Arc::make_mut(names).retain(|listed| listed != name),
-                view => *view = FolderView::Dirty,
-            },
-            Entry::Vacant(slot) => {
-                slot.insert(FolderView::Dirty);
+            .unwrap_or_else(|error| error.into_inner());
+        match listings.folders.get_mut(&parent) {
+            Some(FolderView::Cached(index)) => {
+                let mut index = index.lock().unwrap_or_else(|error| error.into_inner());
+                let before = index.bytes();
+                index.remove(name);
+                let shrink = before.saturating_sub(index.bytes());
+                drop(index);
+                listings.bytes = listings.bytes.saturating_sub(shrink);
+            }
+            Some(view) => *view = FolderView::Dirty,
+            None => {
+                listings.store(parent, FolderView::Dirty);
             }
         }
     }
@@ -272,7 +561,7 @@ impl SftpEndpoint {
         self.listings
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .insert(remote.to_vec(), FolderView::Dirty);
+            .store(remote.to_vec(), FolderView::Dirty);
     }
 
     /// Every listing view keyed below `remote` may not match.
@@ -283,16 +572,18 @@ impl SftpEndpoint {
             true => remote.to_vec(),
             false => [remote, b"/"].concat(),
         };
-        for (folder, view) in self
+        let mut listings = self
             .listings
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .iter_mut()
-        {
+            .unwrap_or_else(|error| error.into_inner());
+        let mut refund: usize = 0;
+        for (folder, view) in listings.folders.iter_mut() {
             if folder.as_slice() == remote || folder.starts_with(&below) {
+                refund = refund.saturating_add(FolderView::bytes(view).unwrap_or(0));
                 *view = FolderView::Dirty;
             }
         }
+        listings.bytes = listings.bytes.saturating_sub(refund);
     }
 
     /// Whether `error` is the server's own answer — authoritative —
@@ -388,10 +679,14 @@ impl SftpEndpoint {
     /// that exist in the spelling stored, the rest composed, so a missing
     /// folder never gets a twin of one stored in the other spelling.
     pub(super) fn creatable(&self, path: &[u8]) -> Vec<u8> {
+        self.creatable_on(&mut self.session(), path)
+    }
+
+    /// `creatable` without borrowing another pooled session.
+    pub(super) fn creatable_on(&self, session: &mut Session, path: &[u8]) -> Vec<u8> {
         if !respellable(path) {
             return path.to_vec();
         }
-        let mut session = self.session();
         let mut stored: Vec<u8> = Vec::new();
         let mut missing = false;
         for component in path.split(|byte| *byte == b'/') {
@@ -420,27 +715,34 @@ impl SftpEndpoint {
     /// Where a new entry at `path` goes: in its parent as stored, under
     /// its composed name.
     pub(super) fn fresh(&self, path: &[u8]) -> Vec<u8> {
+        self.fresh_on(&mut self.session(), path)
+    }
+
+    pub(super) fn fresh_on(&self, session: &mut Session, path: &[u8]) -> Vec<u8> {
         let (parent, name) = split(path);
-        join(&self.directory(parent), &compose(name))
+        join(&self.directory_on(session, parent), &compose(name))
     }
 
     /// A new temporary's server path in `path`'s parent as stored.
-    pub(super) fn beside(&self, path: &[u8]) -> Vec<u8> {
+    pub(super) fn beside_on(&self, session: &mut Session, path: &[u8]) -> Vec<u8> {
         let (parent, _) = split(path);
-        join(&self.directory(parent), &super::temporary_name())
+        join(
+            &self.directory_on(session, parent),
+            &super::temporary_name(),
+        )
     }
 
     /// The folder `parent` as stored; the root for `None`. A folder
     /// missing in every spelling keeps the spelling given.
-    fn directory(&self, parent: Option<&[u8]>) -> Vec<u8> {
+    fn directory_on(&self, session: &mut Session, parent: Option<&[u8]>) -> Vec<u8> {
         let Some(parent) = parent else {
             return self.root.clone();
         };
         if !respellable(parent) {
             return self.remote(parent);
         }
-        self.on_stored(parent, |remote| {
-            self.session().lstat(remote).map(|_| remote.to_vec())
+        self.on_stored_with(session, parent, |session, remote| {
+            session.lstat(remote).map(|_| remote.to_vec())
         })
         .unwrap_or_else(|_| self.remote(parent))
     }
@@ -476,10 +778,49 @@ fn respellable(path: &[u8]) -> bool {
 
 /// `name` composed; bytes that are not UTF-8 stay as they are.
 pub(super) fn compose(name: &[u8]) -> Vec<u8> {
+    #[cfg(test)]
+    compose_calls::tick();
     match std::str::from_utf8(name) {
         Ok(text) => text.nfc().collect::<String>().into_bytes(),
         Err(_) => name.to_vec(),
     }
+}
+
+/// Counts `compose` calls in tests, to show a lookup's complexity.
+/// Test-only: the counter and its thread local do not exist in a
+/// production build.
+#[cfg(test)]
+mod compose_calls {
+    use std::cell::Cell;
+
+    thread_local! {
+        static CALLS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn tick() {
+        CALLS.with(|calls| calls.set(calls.get() + 1));
+    }
+
+    pub(super) fn reset() {
+        CALLS.with(|calls| calls.set(0));
+    }
+
+    pub(super) fn count() -> usize {
+        CALLS.with(|calls| calls.get())
+    }
+}
+
+/// Reset the test-only `compose` counter, so a test can measure one
+/// lookup. Test-only, like the counter itself.
+#[cfg(test)]
+pub(super) fn reset_compose_calls() {
+    compose_calls::reset();
+}
+
+/// How many times `compose` has run on this thread.
+#[cfg(test)]
+pub(super) fn compose_call_count() -> usize {
+    compose_calls::count()
 }
 
 /// `component` as given, composed and decomposed, without repeats.
@@ -543,5 +884,222 @@ mod tests {
         );
         assert_eq!(join(b"/", b"a"), b"/a");
         assert_eq!(join(b"/srv", b"a"), b"/srv/a");
+    }
+
+    /// The scan `listed_on` made before the index, kept so a test can
+    /// show the complexity the index removes.
+    fn linear_listed_name(names: &[Vec<u8>], name: &[u8]) -> Option<Box<[u8]>> {
+        if names.iter().any(|listed| listed == name) {
+            return Some(name.into());
+        }
+        let composed = compose(name);
+        names
+            .iter()
+            .find(|listed| compose(listed) == composed)
+            .map(|listed| listed.as_slice().into())
+    }
+
+    #[test]
+    fn an_indexed_lookup_normalizes_at_most_twice() {
+        const CACHED: usize = 10_000;
+        let mut listing = Vec::with_capacity(CACHED);
+        for file in 0..CACHED - 1 {
+            listing.push(format!("file-{file:05}.txt").into_bytes());
+        }
+        // The match is last, so the old scan composes every name before
+        // it finds one.
+        listing.push("caf\u{e9}.txt".as_bytes().to_vec());
+        let index = IndexedNames::from_listing(listing.clone());
+        let asked = "cafe\u{301}.txt".as_bytes();
+
+        // The old scan composes once per cached name before the match.
+        compose_calls::reset();
+        let scanned = linear_listed_name(&listing, asked);
+        assert_eq!(scanned.as_deref(), Some("caf\u{e9}.txt".as_bytes()));
+        assert!(
+            compose_calls::count() > 2,
+            "the linear scan composed {} names",
+            compose_calls::count()
+        );
+
+        // The index composes only the asked name.
+        compose_calls::reset();
+        let found = index.listed_name(asked);
+        assert_eq!(found.as_deref(), Some("caf\u{e9}.txt".as_bytes()));
+        assert!(
+            compose_calls::count() <= 2,
+            "the index composed {} names",
+            compose_calls::count()
+        );
+    }
+
+    #[test]
+    fn exact_spelling_wins_over_a_normalized_alias() {
+        let index = IndexedNames::from_listing(vec![
+            "cafe\u{301}.txt".as_bytes().to_vec(),
+            "caf\u{e9}.txt".as_bytes().to_vec(),
+        ]);
+        let asked = "caf\u{e9}.txt".as_bytes();
+        assert_eq!(index.listed_name(asked).as_deref(), Some(asked));
+    }
+
+    #[test]
+    fn ambiguous_aliases_keep_their_listing_order() {
+        // Two spellings that compose alike but are neither the composed
+        // form, so the composed ask cannot be answered exactly.
+        let (first, second) = ("a\u{301}\u{323}", "a\u{323}\u{301}");
+        // The composed form of both: `a` with a dot below, then acute.
+        let composed = "\u{1ea1}\u{301}";
+        assert_eq!(compose(first.as_bytes()), composed.as_bytes());
+        assert_eq!(compose(second.as_bytes()), composed.as_bytes());
+        let mut index =
+            IndexedNames::from_listing(vec![first.as_bytes().to_vec(), second.as_bytes().to_vec()]);
+        // The first listed candidate answers.
+        assert_eq!(
+            index.listed_name(composed.as_bytes()).as_deref(),
+            Some(first.as_bytes())
+        );
+        // Removing it leaves the second, still in order.
+        index.remove(first.as_bytes());
+        assert_eq!(
+            index.listed_name(composed.as_bytes()).as_deref(),
+            Some(second.as_bytes())
+        );
+        // The composed form is its own exact match once listed.
+        index.add(composed.as_bytes());
+        assert_eq!(
+            index.listed_name(composed.as_bytes()).as_deref(),
+            Some(composed.as_bytes())
+        );
+    }
+
+    #[test]
+    fn names_that_are_not_utf8_stay_as_they_are() {
+        let raw: &[u8] = b"caf\xff";
+        let index = IndexedNames::from_listing(vec![raw.to_vec(), b"plain".to_vec()]);
+        // Exact bytes answer exactly.
+        assert_eq!(index.listed_name(raw).as_deref(), Some(raw));
+        // A composed name never matches bytes that are not UTF-8.
+        assert_eq!(index.listed_name("caf\u{e9}".as_bytes()), None);
+    }
+
+    #[test]
+    fn concurrent_mutations_keep_the_index_consistent() {
+        use std::thread;
+
+        const THREADS: usize = 4;
+        const STEPS: usize = 200;
+        let index = Arc::new(Mutex::new(IndexedNames::new()));
+        let mut threads = Vec::new();
+        for thread in 0..THREADS {
+            let index = Arc::clone(&index);
+            threads.push(thread::spawn(move || {
+                for step in 0..STEPS {
+                    let name = format!("t{thread}-{step:03}");
+                    let mut index = index.lock().unwrap();
+                    index.add(name.as_bytes());
+                    assert_eq!(
+                        index.listed_name(name.as_bytes()).as_deref(),
+                        Some(name.as_bytes())
+                    );
+                    if step % 3 == 0 {
+                        index.remove(name.as_bytes());
+                        assert_eq!(index.listed_name(name.as_bytes()), None);
+                    }
+                }
+            }));
+        }
+        let reader = {
+            let index = Arc::clone(&index);
+            thread::spawn(move || {
+                for _ in 0..2_000 {
+                    let index = index.lock().unwrap();
+                    let _ = index.listed_name(b"t1-001");
+                }
+            })
+        };
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        reader.join().unwrap();
+        // Every name this run did not remove resolves; every removed one
+        // does not.
+        let index = index.lock().unwrap();
+        for thread in 0..THREADS {
+            for step in 0..STEPS {
+                let name = format!("t{thread}-{step:03}");
+                let found = index.listed_name(name.as_bytes());
+                if step % 3 == 0 {
+                    assert_eq!(found, None, "{name} should be gone");
+                } else {
+                    assert_eq!(found.as_deref(), Some(name.as_bytes()), "{name}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_folders_are_not_retained_in_the_cache() {
+        let index = Arc::new(Mutex::new(IndexedNames::from_listing(vec![
+            b"first".to_vec(),
+            b"second".to_vec(),
+        ])));
+        let mut listings = Listings::new();
+        listings.store_cached(b"/one".to_vec(), &index, 1);
+        assert!(listings.cached(b"/one").is_none());
+        assert!(listings.bytes <= 1);
+    }
+
+    #[test]
+    fn dirty_parent_views_are_bounded_and_charged() {
+        let mut listings = Listings::new();
+        for index in 0..(LISTED_FOLDERS * 3) {
+            listings.store(format!("/parent-{index}").into_bytes(), FolderView::Dirty);
+            assert!(listings.len() <= LISTED_FOLDERS);
+        }
+        assert!(
+            listings.bytes > 0,
+            "folder keys and views occupy memory too"
+        );
+    }
+
+    #[test]
+    fn byte_accounting_matches_the_index() {
+        let mut index = IndexedNames::new();
+        let mut expected = 0usize;
+        let mut live = 0usize;
+        let mut tombstones = 0usize;
+        for step in 0..300 {
+            let name = format!("caf\u{e9}-{step:03}");
+            let composed = compose(name.as_bytes());
+            expected += SLOT_BYTES + NAME_OVERHEAD + 2 * name.len() + composed.len();
+            live += 1;
+            index.add(name.as_bytes());
+            assert_eq!(index.bytes(), expected, "after adding {name}");
+            if step % 2 == 0 {
+                expected -= NAME_OVERHEAD + 2 * name.len() + composed.len();
+                live -= 1;
+                tombstones += 1;
+                if live + tombstones > COMPACT_SLOTS && live * 2 < live + tombstones {
+                    expected -= tombstones * SLOT_BYTES;
+                    tombstones = 0;
+                }
+                index.remove(name.as_bytes());
+                assert_eq!(index.bytes(), expected, "after removing {name}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_replaced_cached_view_refunds_its_bytes() {
+        let index = Arc::new(Mutex::new(IndexedNames::from_listing(vec![b"a".to_vec()])));
+        let mut listings = Listings::new();
+        listings.store(b"/one".to_vec(), FolderView::Cached(Arc::clone(&index)));
+        let charged = listings.bytes;
+        assert!(charged > 0);
+        listings.store(b"/one".to_vec(), FolderView::Dirty);
+        assert_eq!(listings.bytes, FOLDER_OVERHEAD + b"/one".len());
+        listings.store(b"/one".to_vec(), FolderView::Cached(Arc::clone(&index)));
+        assert_eq!(listings.bytes, charged);
     }
 }

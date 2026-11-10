@@ -48,7 +48,7 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{location, values};
+    use super::super::tests::{location, remove_and_purge, values};
     use super::*;
 
     #[test]
@@ -80,7 +80,7 @@ mod tests {
                 .is_err()
         );
 
-        database.remove_pair(&pair.id, pair.revision).unwrap();
+        remove_and_purge(&mut database, &pair.id, pair.revision);
         assert_eq!(database.watch_cursor(&pair.id, "left").unwrap(), None);
     }
 }

@@ -40,18 +40,28 @@ A performance audit found four costs that grow with a pair's size:
   overlapping one of those keeps nothing. The window never answers with a
   short page while more follow: a walk would not, and an empty page ends
   the CLI's listing.
-- **SFTP reads:** folders settle first, then files are read on up to four
-  sessions of the existing pool. As in ADR 0043, only the run's thread
-  records results and asks the run's control. Content verification is
-  unchanged. Endpoints without a session pool stay serial. A read waiting
-  for a session gives up when the run cancels, so a server that went away
-  cannot hold up cancelling.
+- **SFTP reads:** the walk lists one folder at a time, observes its folders
+  on the caller and reads its files on up to eight pooled sessions. As in ADR 0043, only the run's thread
+  records results and asks the run's control. The handoff holds at most
+  twice the worker count of queued, running and completed-but-unrecorded
+  owned jobs. Each folder's listing is released as its entries are handed
+  off; the walk does not retain the whole tree's file metadata. A single
+  wide flat folder is still materialized by `Session::read_dir`. Late
+  directory failures suppress any already read descendants. Content
+  verification is unchanged. Endpoints
+  without a session pool stay serial. A read waiting for a session gives
+  up when the run cancels, so a server that went away cannot hold up
+  cancelling.
 
 ## Measurements
 
-Local Linux host with heavy, varying unrelated load, synthetic data,
-release builds. SFTP latency is simulated at 5 ms per server message. No
-Mac, NAS or real WAN was measured.
+Synthetic data and release builds throughout the Linux and Mac tables. The
+LAN no-change runs below are real SSH-over-LAN measurements against a NAS.
+
+### Linux host
+
+Local Linux host with heavy, varying unrelated load. SFTP latency is
+simulated at 5 ms per server message.
 
 | What | Before | After |
 |---|---|---|
@@ -68,6 +78,42 @@ on both old and new code and is left out. A GitHub runner's medians, which
 the budgets allow for: 37 ms for the endpoint's archive pages, 45 ms for an
 unchanged snapshot and 275 ms for a full rewrite.
 
+### Mac
+
+A Mac Studio (M4 Max, 14 cores, 36 GB, macOS 27.0.1), on its internal
+APFS disk, shared with other builds at load averages between 40 and 185.
+Snapshot and endpoint archive rows run the same benchmarks on `ccc4982`
+and `d081589`. The other rows run on `d081589`, with the old behavior
+restored for Before: polls search the listing linearly, the service walks
+for every page and SFTP reads use one session. SFTP reads go
+to the system's `/usr/libexec/sftp-server` through a relay that adds 5 ms
+per server message, or nothing.
+
+| What | Before | After |
+|---|---|---|
+| Unchanged snapshot, 100,000 rows | 470 ms, 629 ms | 42 ms, 103 ms |
+| Every row of a snapshot changed, 100,000 rows | 701 ms, 653 ms | 544 ms, 549 ms |
+| Poll lookups, 20,000 directories | 674 ms, 535 ms | 1.91 ms, 1.91 ms |
+| Archive pages at the endpoint, 5,000 items in 50 folders | 2.12 s, 1.59 s | 107 ms, 75 ms |
+| Archive pages through the service, 5,000 items in one folder | 644 ms | 175 ms |
+| 300 × 1 KiB SFTP files, 5 ms per message | 66.6 s, 66.1 s | 16.9 s, 16.4 s |
+| 32 × 4 MiB SFTP files, 5 ms per message | 29.3 s, 30.0 s | 7.8 s, 7.4 s |
+| 300 × 1 KiB SFTP files, no added latency | 166 ms, 271 ms | 90 ms, 54 ms |
+| 32 × 4 MiB SFTP files, no added latency | 503 ms, 763 ms | 106 ms, 60 ms |
+
+Two values are two runs. Service pages are the median of 15 walks over
+the run: 514 ms to 1.55 s before, 64 to 306 ms after.
+
+### LAN no-change runs
+
+On a shared macOS host (M4 Max, 14 cores, macOS 27.0.1) against a NAS over
+SSH, three paired no-change runs of a 10k-file corpus (8 KiB files, 1,000 per
+folder) measured the remote observation at 130.501-134.597 s with four readers
+(median 133.013 s) and 69.623-76.648 s with eight (median 70.548 s). The host
+was busy with other agents, so this is not an idle qualification. See
+[perf/sftp.md](../../perf/sftp.md) for provenance, raw ranges and the
+one-write read-completion batching runs.
+
 ## Consequences
 
 - Another computer's change to an archive can take up to 30 seconds to
@@ -77,7 +123,8 @@ unchanged snapshot and 275 ms for a full rewrite.
   root that went away shows at the next walk.
 - A single folder holding very many items is still listed once per 1,000
   items, so such a run lists slowly.
-- A preview or sync on an SFTP folder can open up to four SSH connections
-  for reading, plus the run's lease connection.
+- A preview or sync on an SFTP folder can open up to eight SSH connections
+  for reading from a pool capped at nine, plus a separate lease connection,
+  for at most ten.
 - Budgets `db_snapshot_unchanged_100k`, `db_snapshot_rewrite_100k` and
   `archive_pages_5k` guard the snapshot and archive costs.

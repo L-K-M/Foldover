@@ -8,8 +8,9 @@ and the local Sol review of `origin/main` at `d081589`. Historical identifiers,
 evidence and acceptance conditions are retained for unresolved work. Source
 line numbers describe their review baseline unless current evidence is stated.
 Stronger historical priorities are preserved when optional findings overlap.
-Resolved entries, obsolete PR result tables and findings implemented in open
-PRs 209–211 are omitted. Those feature PRs remain open for owner review.
+Resolved entries, obsolete PR result tables, findings implemented in open PRs
+209–211 and 213–228, and work merged through PR 212 are omitted. Feature PRs
+remain open for owner review unless already merged.
 
 The original review assumed one person, disjoint sync roots, 100k–1M tracked
 files and interrupted large transfers. Linux source and CI evidence, simulations
@@ -113,7 +114,9 @@ Additional evidence (fifth pass): `PairSyncViewModel.swift:618-621` still filter
 
 Suggested fix: profile the retained acceptance sizes, including the fold's
 mapping/grouping and search/selection paths. Cache by row revision only where
-measurements show material repeated work.
+measurements show material repeated work. If search is the measured bottleneck,
+cache results by `(searchText, rowsRevision)` or debounce input by roughly 100
+milliseconds, then verify typing against at least 10,000 loaded rows.
 
 ### SOL-07: Pair-local copy limits do not protect a shared disk
 
@@ -153,7 +156,8 @@ run cursor. Frequently changing pairs can retain older versions that
 the app cannot reach. The UI admits older runs are omitted.
 
 Suggested fix: Cursor-page run history, preserving newest-first ordering;
-add date narrowing without loading every run into the app.
+bind cursors to the pair revision, add a Load Older action and offer date
+narrowing without loading every run into the app.
 
 If skipped: Users cannot browse all versions that retention promises
 are still present.
@@ -162,6 +166,9 @@ Acceptance: Reach a version older than the first 1000 runs through
 both app and CLI; additions during paging must not duplicate rows.
 
 Merged SOL26-13: Current source: `crates/foldover-service/src/archive.rs:33-34` and `apple/Foldover/ViewModels/ArchiveViewModel.swift:92`. The 1,000-run cap has a more flag and no run cursor. Effort: one day.
+
+PR 211 pages archived items while restoring one run. It does not page the
+archive-run list and therefore does not make older runs browseable.
 
 ### SOL-09: Background failures need an app-independent signal
 
@@ -237,6 +244,20 @@ single-occurrence failures in peer metadata scanning and installed-agent
 registration warrant stabilization if they recur; neither was established as
 a defect in the shipped improvements.
 
+Merged PR 212 adds measurements from an M4 Max Mac Studio and internal APFS
+for the ADR 0046 snapshot, archive, polling and relayed-SFTP changes. The host
+was heavily shared, and the record explicitly does not qualify a physical NAS
+or real WAN. On the same review host, one busy-host run also missed the
+Linux-calibrated hash and 10,000-file scan budgets, 114 ms against 60 ms and
+1,790 ms against 1,000 ms respectively. That sample identifies a qualification
+gap, not a stable regression. The P6 matrix still lacks retained release
+evidence for OpenSSH SFTP, a physical spinning disk, and Samba both with and
+without `vfs_fruit`.
+
+The retained checklist should automate Samba with and without `vfs_fruit`, NFS
+and OpenSSH where practical, and record the physical SFTP and HDD cases for
+each release candidate without weakening product budgets from one noisy run.
+
 ### F-01: `pairs update` re-asks for everything to change one option
 
 usability — important
@@ -254,26 +275,6 @@ existing option parser.
 
 Acceptance: `pairs set ID R --schedule changes` keeps every other
 option; a stale revision is still refused.
-
-### SOL-21: A live peer can keep a stalled stream waiting forever
-
-bugs — important
-
-Evidence: `crates/foldover-endpoint/src/link/stream.rs:50-94`
-waits for a frame or link shutdown. Unlike the ordinary request path,
-it has no stall deadline. Keepalives can keep a non-answering peer live.
-
-Impact: A connected peer that stops answering can hold a sync and
-its blocking worker indefinitely; cancellation is checked between
-frames, not during the blocked frame read.
-
-Suggested fix: Add cancellation-aware frame waits and a stall policy.
-Preserve legitimate long verification and watch streams with explicit
-progress/heartbeat semantics rather than one short timeout everywhere.
-
-Acceptance: A paired host accepting a request but never replying
-must release the caller on cancel and on the stall deadline. Slow
-healthy transfers and idle watches must remain valid.
 
 ### SOL-23: Many failed or unavailable paths multiply per-row work
 
@@ -303,24 +304,6 @@ Merged SOL26-07: Current source: `crates/foldover-engine/src/plan.rs:320` scans 
 
 Partial delivery: PR 185 indexes unavailable subtrees during local observation, and d5fa08f reduces protected-state ancestor traversal. Retain this finding for remaining per-row skip, failed-path and Undo normalization work; do not reimplement the shipped local observation index.
 
-### SOL-26: The SFTP chooser ignores a selected enclosing folder
-
-bugs — important
-
-Evidence: `apple/Foldover/Views/PairEditorView.swift:586-593`
-accepts a highlighted child only when it is in `folders`, but the
-Enclosing Folder row is represented separately by `parent`.
-
-Impact: Highlighting Enclosing Folder and choosing Use This Folder
-silently selects the currently browsed folder instead.
-
-Suggested fix: Validate highlighted selection against both parent and child
-entries before committing the locator. Keep the visible path and
-effective chosen root consistent.
-
-Acceptance: Tests for parent, child, no selection and stale
-selection; a UI tour verifies the saved root bytes match the selection.
-
 ### SOL-27: Deleted pairs keep their loaded preview state in memory
 
 general issues — important
@@ -345,30 +328,6 @@ the `SyncStore` search/decline maps have the same shape.
 Acceptance: Remove a pair with loaded pages and an outstanding
 request; its state stays forgotten after that request completes.
 
-### MUSE-01: Lease renewal is a non-atomic read-then-replace
-
-bugs — important
-
-Evidence: `crates/foldover-endpoint/src/lease.rs:287-301`
-(`HeldLease::renew`) reads `.foldover/lock`, checks the holder, then
-`replace_lock_file` without an exclusive claim. Takeover uses the
-exclusive-create protocol (ADR 0032); the steady-state beat does not.
-
-Impact: A reclaimer that wins between the check and the write can
-be overwritten by the old holder for up to one beat, briefly allowing
-two writers. The window is small but the lease is the only mutual
-exclusion on a shared folder.
-
-Suggested fix: Renew through the same exclusive-create claim path as
-takeover, or re-read after write and surface `LeaseError::Lost` on
-mismatch. Record the decision in ADR 0032 (amendment or "accepted
-risk with bound").
-
-Acceptance: Two processes: one holds and renews while the other
-reclaims; the loser observes `Lost` and never writes after takeover.
-
-Qualification: the read-then-replace shape remains in `HeldLease::renew`; the historical two-process takeover scenario has not been reproduced by this consolidation. Verify the complete lease protocol before selecting a fix; a post-write re-read alone does not establish mutual exclusion.
-
 ### MUSE-02: WorkProgress equality is a tautology
 
 general issues — important
@@ -389,24 +348,6 @@ Acceptance: A regression test shows a job-level transition (idle →
 working, waiting → copying) is observable and a pure counter tick is
 not.
 
-### MUSE-04: Archive pruning accepts timestamp-named files
-
-bugs — important
-
-Evidence: `crates/foldover-endpoint/src/local/archive.rs:272-305`
-collects any top-level entry whose name parses as a run timestamp and
-`remove_tree`s it; `archived_runs` filters to directories.
-
-Impact: A stray file named like a run folder would be deleted by
-retention. Low likelihood (Foldover only creates directories), real
-consequence (pruning is the only path that deletes data, per
-limitations).
-
-Suggested fix: Require `NodeKind::Directory` before scheduling removal.
-
-Acceptance: A file whose name matches the run format survives
-pruning; timestamp directories still expire.
-
 ### MIMO-01: The FSEvents history sentinel can swallow a change
 
 bugs — important
@@ -425,42 +366,6 @@ drain already-queued post-replay events before returning.
 
 Acceptance: Force a replay whose last event is a user change and
 observe it reported; a sentinel alone still reports nothing.
-
-### MIMO-03: Two runs can share one archive folder
-
-bugs — important
-
-Evidence: Run names are millisecond timestamps
-(`foldover-engine/src/run.rs:1106`, `foldover-endpoint/src/local/
-archive.rs:73`, `sftp.rs` same helper).
-
-Impact: A clock rollback or a restart inside one millisecond
-merges two runs into one archive folder; undo of the later run can
-put the earlier run's file back at a colliding path.
-
-Suggested fix: Make run names collision-proof (append the lease holder id
-or a short unique suffix); keep names sortable by time.
-
-Acceptance: Force the same name twice; the second run archives
-beside the first, and undo of either restores only its own entries.
-
-### MIMO-05: One failed run disables scheduled sync until a manual run
-
-bugs — important
-
-Evidence: `crates/foldover-service/src/sync.rs:563` treats
-`Failed` like `NeedsApproval`/`Undone` when claiming `Work::Scheduled`.
-
-Impact: A transient failure (network blip, timeout) stops
-unattended sync with no recovery except a person syncing by hand;
-ADR 0022's intent is to stop for *review*, not for retryable errors.
-
-Suggested fix: Retry scheduled work after `Failed`, or clear `Failed` after
-a cooldown; keep the block for states that genuinely await a person.
-Decide and document, since the current behavior may be deliberate.
-
-Acceptance: A scheduled run that fails once runs again on its next
-cadence; `NeedsApproval` and `Undone` still wait.
 
 ### MIMO-06: Undo can panic on edge-case and corrupt entries
 
@@ -562,6 +467,34 @@ must preserve the target's existing value and keep source quarantine from
 being introduced. Verify propagate, ignore, source-absent and network-exclusion
 policies with the native regression before changing the driver. This remains backlog;
 Phase 2 did not expand into driver changes.
+
+### SOL2-17: Run history collides at millisecond resolution
+
+general issues — nice-to-have
+
+`crates/foldover-db/src/database.rs:128-145` keys `run_history` by
+`(pair_id, started_ms)`, and `database/history.rs:45-79` records rows with
+`INSERT OR REPLACE`. Two runs that begin within one millisecond replace one
+another. A backward clock step can also sort a new row behind the retained 100
+and remove it, weakening the audit trail. PR 216 gives archive and journal run
+scopes unique names but does not change this history schema.
+
+Suggested fix: migrate history to a monotonic insertion or unique run
+identifier as its key and order, retaining wall time only for display. Test
+same-millisecond starts and a backward clock step across the retention limit.
+
+### SOL2-18: Cancelling an unknown pair reports success
+
+general issues — nice-to-have
+
+`foldover sync UUID --cancel` prints success and exits zero for any
+syntactically valid but unknown UUID. The responsive job service accepts the
+cancel request without an authoritative pair lookup, so automation cannot
+distinguish a typo or deleted pair from a stopped job.
+
+Suggested fix: retain or query the authoritative pair-ID set at the job
+service boundary and return `PAIR_NOT_FOUND` for unknown IDs. Cover an
+existing idle pair, a running pair and an unknown pair in the CLI regression.
 
 ### F-02: CLI JSON output prints paths as byte arrays
 
@@ -864,7 +797,8 @@ or see where it came from. For a local side the archived copy is reachable at
 implementable without new agent support.
 
 Suggested fix: offer Quick Look and "Show in Finder" for rows on a local side,
-built from the pair's root plus the archive path.
+built from the pair's root plus the archive path. For remote archives, provide
+an explicit downloaded preview rather than implying local access.
 
 `apple/Foldover/ViewModels/PairSyncViewModel.swift:621-624`. A finished sync
 already tells the user the archive folder name. Making that note a link that
@@ -916,22 +850,6 @@ Historical evidence: `crates/foldover-fs/src/root/content.rs` uses a 64 KiB `HAS
 
 Suggested fix: benchmark 256 KiB to 1 MiB buffers and reuse the content-hash buffer policy for resume prefixes only if measurements justify it.
 
-### MIMO-07a: Guard preview count subtraction
-
-bugs — nice-to-have
-
-`apple/Foldover/ViewModels/PairSyncViewModel.swift:656-660` subtracts the number of returned changes or failures from unsigned totals. The scan-error count already has a zero floor; the remaining subtractions rely on internally consistent agent data.
-
-Suggested fix: floor inconsistent totals at zero or use checked subtraction. Acceptance: malformed totals do not trap and valid hidden-row counts remain unchanged.
-
-### MIMO-07c: Mixed outcomes notify only conflicts
-
-usability — nice-to-have
-
-Historical evidence: `apple/Foldover/Stores/SyncStore.swift` selects a conflict alert before reporting failures from the same finished run. The user can miss the failure count when both outcomes occur.
-
-Suggested fix: include both conflicts and failures in the existing actionable notification. Acceptance: one mixed-result alert retains both counts.
-
 ### MIMO-07d: Sync while approval is pending re-prompts
 
 usability — nice-to-have
@@ -939,14 +857,6 @@ usability — nice-to-have
 Historical evidence: invoking Sync on a needs-approval result can run with zero approvals and return to the confirmation dialog. The exact current flow requires a native reproduction.
 
 Suggested fix: route the command to the existing captured approval request, or disable it while that request is pending. Preserve exact review-token binding.
-
-### MIMO-12a: Oversized IPC responses close the connection
-
-general issues — nice-to-have
-
-`crates/foldover-ipc/src/local.rs` fails in `write_value` when an output exceeds the frame limit, so the client receives "Agent closed before its response" instead of an explicit JSON-RPC error.
-
-Suggested fix: return a bounded JSON-RPC error for oversized responses and test that the client receives the actionable cause.
 
 ### MIMO-12b: A wedged IPC handler holds a connection permit
 
@@ -963,14 +873,6 @@ general issues — nice-to-have
 `archive.putBackAll`, endpoint browsing and pairing are single RPCs. PR 166 increased their deadlines, but progress and cancellation still require job handles. Related: SOL26-11 covers whole-run restore specifically.
 
 Suggested fix: use start/poll/cancel jobs when those surfaces next need progress, retaining the current slow-request budgets until then.
-
-### MIMO-13a: Reject zero mDNS pairing ports
-
-general issues — nice-to-have
-
-`crates/foldover-net/src/discovery.rs:267` validates the service port but accepts a parsed pairing port of zero.
-
-Suggested fix: reject zero pairing ports; test absent, valid and zero pairing advertisements.
 
 ### MIMO-13b: Qualify additional local state filesystems
 
@@ -996,14 +898,6 @@ Historical evidence: local and SFTP conflict-copy naming interpolate a `from` la
 
 Suggested fix: validate labels at the common naming boundary if untrusted callers are added. Keep this classified as hardening, not a demonstrated path escape.
 
-### MIMO-13e: Peer lease writes lack the read-size cap
-
-general issues — nice-to-have
-
-Historical evidence: `crates/foldover-endpoint/src/remote/serve.rs` accepts peer-supplied lease bytes for writing while lease reads cap data at 4096 bytes.
-
-Suggested fix: apply the same bounded lease-record validation before writing and test rejection without disk changes.
-
 ### MIMO-14a: Validate discovered SMB host URLs
 
 general issues — nice-to-have
@@ -1019,14 +913,6 @@ usability — nice-to-have
 `PairEditorView.swift` gives NumberField a declared range, but typed input bypasses the Stepper. Size and bandwidth setters clamp to safe arithmetic limits rather than the form's smaller upper bounds; the age setter already clamps to its declared maximum.
 
 Suggested fix: apply the displayed size and bandwidth bounds consistently on commit, without changing stored values silently when the control is inactive.
-
-### MIMO-14d: Review update-checker exception paths
-
-general issues — nice-to-have
-
-Historical evidence: `FoldoverSystem/UpdateChecker.swift:134,167` force-unwraps constant feed URLs and starts an `async let` that is not explicitly awaited if feed parsing throws. No failure was reproduced.
-
-Suggested fix: prefer fallible URL construction if feed URLs become configurable, and check cancellation/cleanup when parsing throws. Do not treat valid constant URLs as a current user-facing defect.
 
 ### MIMO-17: The app icon predates the platform's icon style
 
@@ -1048,8 +934,8 @@ cannot take the platform's current glass and shadow treatment and scales less
 crisply than a vector one. The menu-bar arrows are vector SVG templates, so the
 inconsistency is visible in the same asset catalog.
 
-Suggested fix: author the icon as an Icon Composer `.icon` asset and keep the
-rasters only as a fallback.
+Suggested fix: author the icon as an Icon Composer `.icon` asset, retain asset
+license/source provenance and keep the rasters only as a fallback.
 
 ### MIMO-18a: Scope Sync All while editing a pair
 
@@ -1076,6 +962,21 @@ and Sync", "Put Back All?" and the approval message should name the
 pair and its folders, so a reflex tap cannot hit the wrong pair.
 
 Suggested fix: name the pair and actual endpoint folders in approval and whole-run restore dialogs, while preserving captured review context.
+
+### SOL2-34: A remote-folder error can follow selection to another Mac
+
+usability — nice-to-have
+
+`apple/Foldover/Stores/MacToMacStore.swift:223-236` stores the result of
+`offered(by:)` in one global error. The remote-folder picker cancels its view
+task when the selected Mac changes, but a delayed failure from Mac A can still
+publish after a successful request for Mac B. The picker then shows an error
+for the wrong device.
+
+Suggested fix: return a request-local folder result or generation-key errors
+by device, and discard completion from any request that is no longer the
+picker's current Mac. Test a delayed A failure followed by a successful B
+selection.
 
 ### MIMO-20: A Status intent for Shortcuts
 
@@ -1136,6 +1037,21 @@ pair states, last errors and recent history into the pasteboard is the
 small version.
 
 Suggested fix: start with an explicit Copy Status action for versions, pair states, last errors and recent history; let the user inspect diagnostic data before sharing.
+
+### SOL2-27: Define a measurable crash-free release gate
+
+missing features — nice-to-have
+
+`PLAN.md:731,768-770,796-799` requires more than 99.5 percent crash-free
+sessions before 1.0, while the no-telemetry design defines neither a session
+denominator nor a local crash count. Maintainers therefore cannot establish
+that the release gate passed. The opt-in diagnostics bundle above can carry
+evidence but does not by itself define or collect the metric.
+
+Suggested fix: adopt a privacy-preserving, opt-in local session and crash
+counter that users can inspect through diagnostics, or record an owner decision
+that replaces the percentage with a measurable no-telemetry criterion. Define
+the observation window and denominator before the beta is used as evidence.
 
 ### MUSE-05a: Allow inspector width adjustment
 
@@ -1410,7 +1326,7 @@ Qualification: only one builder exists today; add identity only when a second bu
 
 ### `InfoButton`'s popover has no height limit
 
-general issues — nice-to-have
+visual issues and layout problems — nice-to-have
 
 `apple/Foldover/Views/InfoButton.swift:20-36`. The popover is `frame(width: 360)`
 with `fixedSize(horizontal: false, vertical: true)`, so its height grows with the
@@ -1495,39 +1411,13 @@ performance problems, stuttering, and jank — nice-to-have
 
 File and line: `apple/Foldover/ViewModels/ArchiveViewModel.swift:139-141`
 
-Impact: Mapping selected rows back to items costs O(selection × loaded items) on the main actor. Affects large recovery selections; no frame-time measurement.
+Impact: Mapping selected rows back to items costs O(selection × loaded items) on the main actor. Affects large recovery selections; no frame-time measurement. Selecting a full 1,000-item page performs about one million path comparisons.
 
 Suggested fix: Build one dictionary or selected-ID set per operation.
 
 Effort: one hour
 
 Fifth-pass evidence: ArchiveViewModel.putBack uses one linear store.items.first lookup per selected row. This is O(selection × loaded items); a native pause has not been measured, so retain it as a profiling/implementation proposal.
-
-### SOL26-05: The plan reports an obsolete project stage
-
-general issues — nice-to-have
-
-File and line: `PLAN.md:3; AGENTS.md:12`
-
-Impact: PLAN says P1 while the repository reports P6. Contributors receive conflicting status.
-
-Suggested fix: Update the status and retain explicit qualification gaps.
-
-Effort: 15 minutes
-
-### SOL26-06: Release publication does not require tagged-revision CI
-
-general issues — nice-to-have
-
-File and line: `.github/workflows/release.yml:40-61; .github/workflows/ci.yml:4`
-
-Impact: The release job builds and smoke-tests but does not require full suites for the tagged SHA. No defective release was observed.
-
-Suggested fix: Require successful CI for the tagged revision before publication.
-
-Effort: half a day
-
-Deferred PR 209 review suggestion: run `python3 scripts/test-release-notes.py` in PR-triggered CI as well as the release workflow. Acceptance: parser regressions fail a pull request before a tag is published. The CI workflow overlaps an existing dependency PR, so that wiring was deferred to avoid coordination conflicts.
 
 ### SOL26-10: Held reviews retain two item representations
 
@@ -1547,9 +1437,9 @@ missing features — nice-to-have
 
 File and line: `crates/foldover-engine/src/archive.rs:141`
 
-Impact: Large restores reserve the pair until all item operations finish, without user-visible counters or cancellation.
+Impact: Large restores reserve the pair until all item operations finish, without user-visible counters or cancellation. PR 211 bounds listing memory to 1,000-item pages, but restore remains serial inside one synchronous request and its failure report can still grow without a bound.
 
-Suggested fix: Expose restore-all as a cancellable job with counters.
+Suggested fix: Expose restore-all as a cancellable job with counters and bounded failure detail.
 
 Effort: one day
 
@@ -1565,17 +1455,19 @@ Suggested fix: Apply the contrast policy to waiting and old-name text; check lig
 
 Effort: two hours
 
-### SOL26-19: Onboarding copy obscures automatic first runs
+### SOL2-37: An unavailable fold remains enabled to VoiceOver
 
 usability — nice-to-have
 
-File and line: `apple/Foldover/ViewModels/MainViewModel.swift:694; apple/Foldover/Views/PairEditorView.swift:53`
+At `apple/Foldover/Views/FoldSheet.swift:821-831`, a fold that cannot run is
+only dimmed. VoiceOver still announces an enabled Sync action and can invoke
+it, after which the guard silently does nothing. This gives keyboard and
+assistive-technology users a different availability contract from the visual
+state.
 
-Impact: The guide says nothing changes until you sync, while the editor explains schedules can start after saving. First-time users get inconsistent guidance.
-
-Suggested fix: Explain manual and automatic starts together and point to required approval.
-
-Effort: one hour
+Suggested fix: expose the disabled accessibility state whenever `canFold` is
+false and omit the action in that state, while retaining the explanatory hint.
+Add an accessibility regression for both available and unavailable folds.
 
 ### SOL26-21: Copy a local sync receipt
 

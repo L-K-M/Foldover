@@ -95,6 +95,8 @@ struct PairRow: Identifiable, Equatable {
     let canCancel: Bool
     /// When the newest completed sync finished; nil before any success.
     let lastSuccess: Date?
+    /// A person paused its automatic syncs.
+    let automation: PairAutomation
 }
 
 /// The background agent's health as the status bar's dot shows it.
@@ -191,6 +193,8 @@ final class MainViewModel {
         if case .paused = automation.state { return true }
         return false
     }
+
+    var automationMutationPending: Bool { automation.mutationPending }
 
     /// Shown while automatic syncs are paused.
     var pauseText: String? {
@@ -330,11 +334,14 @@ final class MainViewModel {
     var pairRows: [PairRow] {
         pairs.map { pair in
             let pairSync = sync(for: pair)
-            return PairRow(id: pair.id, name: pair.settings.name, status: pairSync.shortStatus,
-                           symbol: pair.settings.mode.symbol, modeTitle: pair.settings.mode.title,
+            return PairRow(id: pair.id, name: pairSync.activeName, status: pairSync.shortStatus,
+                           symbol: pairSync.activeMode.symbol, modeTitle: pairSync.activeMode.title,
                            activity: pairSync.activity, conflicts: pairSync.conflictCount,
                            canSync: pairSync.canSync, canCancel: pairSync.canCancel,
-                           lastSuccess: pairSync.lastSuccess)
+                           lastSuccess: pairSync.lastSuccess, automation: pair.automation)
+        }.sorted {
+            let order = $0.name.localizedStandardCompare($1.name)
+            return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
         }
     }
 
@@ -387,6 +394,7 @@ final class MainViewModel {
     var pairsLoaded: Bool { pairStore.hasLoaded }
 
     var selectedSync: PairSyncViewModel? { selectedPair.map { sync(for: $0) } }
+    var selectedPairName: String? { selectedSync?.activeName }
 
     /// The change row selected in the main window's table, remembered
     /// per pair so switching pairs keeps each one's selection. It follows
@@ -425,22 +433,33 @@ final class MainViewModel {
     /// A local folder's URL; nil for SFTP and other-Mac folders.
     func localURL(_ folder: SelectedFolder) -> URL? { PairStore.localURL(folder) }
 
+    /// The disk or share a local folder is on, and how full it is.
+    func volume(of folder: SelectedFolder) async -> FolderVolume? { await pairStore.volume(of: folder) }
+
     /// Show the selected pair's folder on `side` in Finder.
     func reveal(_ side: FolderSide) {
-        guard let url = selectedFolderURL(side) else { return }
+        guard let folder = selectedSync?.activeFolder(side) else { return }
+        reveal(folder)
+    }
+
+    /// Show exactly the folder a view displays, without resolving it again
+    /// through settings that may already be saved for the next run.
+    func reveal(_ folder: SelectedFolder) {
+        guard let url = localURL(folder) else { return }
         pairStore.reveal([url])
     }
 
-    func canReveal(_ side: FolderSide) -> Bool { selectedFolderURL(side) != nil }
-
-    private func selectedFolderURL(_ side: FolderSide) -> URL? {
-        guard let settings = selectedPair?.settings else { return nil }
-        return localURL(side == .a ? settings.left : settings.right)
+    func canReveal(_ side: FolderSide) -> Bool {
+        selectedSync.map { canReveal($0.activeFolder(side)) } ?? false
     }
+
+    func canReveal(_ folder: SelectedFolder) -> Bool { localURL(folder) != nil }
 
     /// What the pair does, in the editor's words.
     func planText(for pair: SyncPair) -> String {
-        PairEditorViewModel.planText(mode: pair.settings.mode, options: pair.settings.options)
+        let plan = PairEditorViewModel.planText(mode: pair.settings.mode, options: pair.settings.options)
+        guard pair.automation == .paused else { return plan }
+        return plan + " " + String(localized: "Automatic syncs are paused until you resume the pair.")
     }
 
     /// The pair's skip rules and limits in a few words, e.g.
@@ -590,6 +609,7 @@ final class MainViewModel {
         case .sync: await before.sync()
         case .preview: await before.preview()
         }
+        await syncStore.waitWhileWorking(pair.id)
         let after = sync(for: pair)
         return after.requestError ?? after.statusText
     }
@@ -612,7 +632,10 @@ final class MainViewModel {
                     await group.next()
                     inFlight -= 1
                 }
-                group.addTask { await self.sync(for: pair).sync() }
+                group.addTask {
+                    await self.sync(for: pair).sync()
+                    await self.syncStore.waitWhileWorking(pair.id)
+                }
                 inFlight += 1
             }
         }
@@ -691,7 +714,7 @@ final class MainViewModel {
         )
         let syncStep = SetupStep(
             id: 3, title: String(localized: "Preview, then sync"),
-            detail: String(localized: "Nothing changes until you sync. Replaced and removed files stay in each folder's archive for 30 days."),
+            detail: String(localized: "Without a schedule, nothing changes until you sync; a pair with a schedule starts by itself. Replaced and removed files stay in each folder's archive for 30 days."),
             progress: .upcoming, action: nil
         )
         return [agentStep, pairStep, syncStep]
@@ -769,6 +792,27 @@ final class MainViewModel {
     }
 
     func cancelRemoval() { removalTarget = nil }
+
+    /// Whether `pair`'s automatic syncs can be paused or resumed now. A
+    /// pair that syncs only when asked has none to pause, but one paused
+    /// before its schedule changed can still be resumed.
+    func canChangeAutomation(of pair: SyncPair) -> Bool {
+        guard canConfigurePairs else { return false }
+        return pair.automation == .paused || pair.settings.options.schedule != .manual
+    }
+
+    /// Pause a running pair or resume a paused one. Manual syncs run
+    /// either way; a failure shows like any other operation's.
+    func toggleAutomation(of pair: SyncPair) async {
+        guard canChangeAutomation(of: pair) else { return }
+        operationError = nil
+        let next: PairAutomation = pair.automation == .paused ? .running : .paused
+        do {
+            try await pairStore.setAutomation(next, of: pair)
+        } catch {
+            operationError = PairStore.message(for: error)
+        }
+    }
 
     func removePair(_ pair: SyncPair) async {
         guard canConfigurePairs else { return }

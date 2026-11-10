@@ -1036,3 +1036,7 @@ fn a_name_a_folder_stores_decomposed_syncs_once() {
     assert!(right.contains_key("docs/caf\u{e9}.txt".as_bytes()));
     assert!(!right.contains_key("docs/cafe\u{301}.txt".as_bytes()));
 }
+
+mod archive_gate;
+
+mod archive_parallel;

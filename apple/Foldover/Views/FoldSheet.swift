@@ -97,6 +97,8 @@ struct FoldSheet: View {
     /// A fresh plan printing onto a blank sheet, by its token: its first
     /// lines spread in one after another.
     @State private var printing: String?
+    /// The disk under the folded leaf, read now and then while it lies there.
+    @State private var coveredVolume: FolderVolume?
 
     private static let headerHeight: CGFloat = 50
     private static let earSpring = Animation.spring(duration: 0.22, bounce: 0.3)
@@ -108,6 +110,9 @@ struct FoldSheet: View {
     private static let printedLines = 30
     /// Keys held with these are someone else's shortcut.
     private static let shortcutModifiers: EventModifiers = [.command, .option, .control, .shift]
+    /// How often the disk under the folded leaf is read again: its free
+    /// space shrinks as the run copies.
+    private static let volumeInterval = Duration.seconds(5)
 
     /// How the leaf comes back open.
     private enum Opening {
@@ -209,6 +214,7 @@ struct FoldSheet: View {
             if let turn = staged, turn.lineID != id { staged = nil }
         }
         .onChange(of: scene) { old, new in sceneChanged(from: old, to: new) }
+        .task(id: coveredFolder(scene)) { await watchVolume(coveredFolder(scene)) }
         // A gesture the system cancels never reaches onEnded.
         .onChange(of: pointerDown) { _, down in
             guard !down else { return }
@@ -221,7 +227,7 @@ struct FoldSheet: View {
         // A run already pressing when the pair is shown: the leaf is down.
         .onAppear {
             guard scene == .pressing else { return }
-            leafSide = FoldLeaf.automatic(pair.settings.mode, lines: plan?.lines ?? [])
+            leafSide = FoldLeaf.automatic(sync.activeMode, lines: plan?.lines ?? [])
             leafDown = true
             landed = true
             swing = 1
@@ -275,7 +281,7 @@ struct FoldSheet: View {
     private var pageWidth: CGFloat { max(0, halfWidth - FoldMetrics.creaseWidth / 2) }
 
     /// The page a message is set on, rather than across the gutter.
-    private var messagePage: FolderSide { FoldLeaf.messagePage(pair.settings.mode, missing: sync.missingSide) }
+    private var messagePage: FolderSide { FoldLeaf.messagePage(sync.activeMode, missing: sync.missingSide) }
 
     /// A person may fold a plan with lines while the pair can sync, the
     /// leaf is not already down or waiting for approval, and no turn
@@ -310,7 +316,27 @@ struct FoldSheet: View {
     }
 
     private func folder(_ side: FolderSide) -> SelectedFolder {
-        side == .a ? pair.settings.left : pair.settings.right
+        sync.activeFolder(side)
+    }
+
+    /// The folder under the leaf while a run presses.
+    private func coveredFolder(_ scene: FoldScene) -> SelectedFolder? {
+        scene == .pressing ? folder(FoldLeaf.landing(leafSide)) : nil
+    }
+
+    /// Read `folder`'s disk now and then while the leaf covers it; a
+    /// server or another Mac has none to read.
+    private func watchVolume(_ folder: SelectedFolder?) async {
+        coveredVolume = nil
+        guard let folder, viewModel.localURL(folder) != nil else { return }
+        while !Task.isCancelled {
+            let reading = await viewModel.volume(of: folder)
+            // A read that stalled can land after the run, or another fold,
+            // has moved on to another folder: it is not this one's disk.
+            guard !Task.isCancelled else { return }
+            coveredVolume = reading
+            try? await Task.sleep(for: Self.volumeInterval)
+        }
     }
 
     /// No shortcut modifier held.
@@ -362,6 +388,12 @@ struct FoldSheet: View {
                     .transition(.opacity)
             }
         }
+        .overlay(alignment: .topLeading) {
+            if scene == .pressing, landed {
+                deskNote
+                    .transition(.opacity)
+            }
+        }
         .overlay(alignment: .top) { dogEars(scene: scene, progress: progress) }
         .onGeometryChange(for: CGSize.self) { $0.size } action: { paperSize = $0 }
     }
@@ -392,7 +424,7 @@ struct FoldSheet: View {
             Color.clear
         } else {
             // A dog-ear's corner is folded back: the navy shows where it was.
-            let earShown = scene == .plan && progress == 0 && FoldLeaf.sides(pair.settings.mode).contains(side)
+            let earShown = scene == .plan && progress == 0 && FoldLeaf.sides(sync.activeMode).contains(side)
             Paper(facet: PaperFacet(side))
                 .clipShape(CornerCut(side: side, size: earShown ? earSize(side) : 0))
         }
@@ -406,11 +438,11 @@ struct FoldSheet: View {
     private func header(_ progress: Double) -> some View {
         // The mode is said above the paper, not printed on its fold.
         HStack(spacing: 0) {
-            FoldFolderLabel(viewModel: viewModel, folder: pair.settings.left, side: .a)
+            FoldFolderLabel(viewModel: viewModel, folder: sync.activeLeft, side: .a)
                 .opacity(pageInk(.a, progress))
                 .environment(\.colorScheme, ground(.a))
             Color.clear.frame(width: FoldMetrics.creaseWidth)
-            FoldFolderLabel(viewModel: viewModel, folder: pair.settings.right, side: .b)
+            FoldFolderLabel(viewModel: viewModel, folder: sync.activeRight, side: .b)
                 .opacity(pageInk(.b, progress))
                 .environment(\.colorScheme, ground(.b))
         }
@@ -425,97 +457,104 @@ struct FoldSheet: View {
 
     /// The page's body. The line list keeps one identity while a plan is
     /// shown, re-checked after a choice, or pressed, so its scroll
-    /// position stays put.
-    @ViewBuilder
+    /// position stays put. The stack fills the page even when a run
+    /// pressing with nothing listed shows nothing here; a bare group
+    /// left the paper shrunk to its labels and the leaf's back a card.
+    /// The group inside keeps each scene's animation on its own content,
+    /// so a swap between scenes is not animated: lines a run pressed
+    /// never fade back in as the leaf opens on its imprint.
     private func content(scene: FoldScene, entries: [FoldEntry], progress: Double) -> some View {
-        Group {
-            if scene == .imprint {
-                // Stamped on the page the leaf pressed, mid-page or above
-                // the failures it lists, once the leaf is open: the card is
-                // on the paper, and a lifted half has none.
-                VStack(spacing: 0) {
-                    if let imprint = sync.imprint, progress == 0 {
-                        onPage(FoldLeaf.landing(leafSide)) {
-                            VStack(spacing: 8) {
-                                // What the run left for a person comes before
-                                // where its archive is, when lines run short.
-                                FoldImprintView(imprint: imprint)
-                                    .layoutPriority(1)
-                                if let note = sync.archiveNote {
-                                    Text(note)
-                                        .font(.caption)
-                                        .foregroundStyle(FoldPalette.umber)
-                                        .multilineTextAlignment(.center)
-                                        .textSelection(.enabled)
+        ZStack {
+            Group {
+                if scene == .imprint {
+                    // Stamped on the page the leaf pressed, mid-page or above
+                    // the failures it lists, once the leaf is open: the card is
+                    // on the paper, and a lifted half has none.
+                    VStack(spacing: 0) {
+                        if let imprint = sync.imprint, progress == 0 {
+                            onPage(FoldLeaf.landing(leafSide)) {
+                                VStack(spacing: 8) {
+                                    // What the run left for a person comes before
+                                    // where its archive is, when lines run short.
+                                    FoldImprintView(imprint: imprint)
+                                        .layoutPriority(1)
+                                    if let note = sync.archiveNote {
+                                        Text(note)
+                                            .font(.caption)
+                                            .foregroundStyle(FoldPalette.umber)
+                                            .multilineTextAlignment(.center)
+                                            .textSelection(.enabled)
+                                    }
                                 }
+                                .padding(.top, 18)
+                                .padding(.bottom, 10)
+                                .padding(.horizontal, 12)
                             }
-                            .padding(.top, 18)
-                            .padding(.bottom, 10)
-                            .padding(.horizontal, 12)
+                            .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 1.1)),
+                                                    removal: .opacity.combined(with: .offset(y: -10))))
+                            .id(imprint.title)
+                            // Its notes wrap on a narrow page; failures listed
+                            // under it take the room that is left.
+                            .layoutPriority(1)
                         }
-                        .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 1.1)),
-                                                removal: .opacity.combined(with: .offset(y: -10))))
-                        .id(imprint.title)
-                        // Its notes wrap on a narrow page; failures listed
-                        // under it take the room that is left.
-                        .layoutPriority(1)
+                        if !entries.isEmpty { lineList(entries, scene: scene, progress: progress) }
                     }
-                    if !entries.isEmpty { lineList(entries, scene: scene, progress: progress) }
-                }
-                .frame(maxHeight: .infinity, alignment: entries.isEmpty ? .center : .top)
-                // A stamp lands once and stays: no bounce.
-                .animation(reduceMotion ? nil : .spring(duration: 0.22 * timeScale, bounce: 0), value: progress == 0)
-            } else if scene == .lifting {
-                onPage(messagePage) {
-                    VStack(spacing: 10) {
-                        ProgressView().controlSize(.small)
-                        Text(sync.statusText)
-                            .font(.callout)
-                            .foregroundStyle(FoldPalette.umber)
-                            .multilineTextAlignment(.center)
-                    }
-                    .padding(24)
-                    .frame(maxHeight: .infinity)
-                }
-                .opacity(pageInk(messagePage, progress))
-            } else if !entries.isEmpty {
-                lineList(entries, scene: scene, progress: progress)
-                    .opacity(scene == .comparing ? 0.42 : 1)
-                    .overlay {
-                        if scene == .comparing { ComparingSweep(paused: reduceMotion, timeScale: timeScale) }
-                    }
-            } else if scene == .comparing {
-                onPage(messagePage) {
-                    VStack(spacing: 10) {
-                        Text(sync.statusText)
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(FoldPalette.umber)
-                            .multilineTextAlignment(.center)
-                            .accessibilityAddTraits(.updatesFrequently)
-                        if let fraction = sync.progressFraction {
-                            ProgressView(value: fraction)
-                                .tint(FoldPalette.umber)
-                                .frame(maxWidth: 180)
-                                .accessibilityLabel("Progress")
+                    .frame(maxHeight: .infinity, alignment: entries.isEmpty ? .center : .top)
+                    // A stamp lands once and stays: no bounce.
+                    .animation(reduceMotion ? nil : .spring(duration: 0.22 * timeScale, bounce: 0), value: progress == 0)
+                } else if scene == .lifting {
+                    onPage(messagePage) {
+                        VStack(spacing: 10) {
+                            ProgressView().controlSize(.small)
+                            Text(sync.statusText)
+                                .font(.callout)
+                                .foregroundStyle(FoldPalette.umber)
+                                .multilineTextAlignment(.center)
                         }
+                        .padding(24)
+                        .frame(maxHeight: .infinity)
                     }
-                    .padding(24)
-                    .frame(maxHeight: .infinity)
-                }
-                .opacity(pageInk(messagePage, progress))
-                .frame(maxHeight: .infinity)
-                // Light may cross the gutter; print may not.
-                .overlay { ComparingSweep(paused: reduceMotion, timeScale: timeScale) }
-            } else if scene != .pressing {
-                // A run attached to mid-press has no lines here; the leaf
-                // covers one half and the navy shows through the other.
-                // A message lifts and fades with its page, as lines do.
-                placeholder
                     .opacity(pageInk(messagePage, progress))
+                } else if !entries.isEmpty {
+                    lineList(entries, scene: scene, progress: progress)
+                        .opacity(scene == .comparing ? 0.42 : 1)
+                        .overlay {
+                            if scene == .comparing { ComparingSweep(paused: reduceMotion, timeScale: timeScale) }
+                        }
+                } else if scene == .comparing {
+                    onPage(messagePage) {
+                        VStack {
+                            if let readout = sync.readout {
+                                FoldReadoutView(readout: readout, surface: .paper, reduceMotion: reduceMotion)
+                            } else {
+                                // A choice on its way to the agent: no job to measure.
+                                Text(sync.statusText)
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(FoldPalette.umber)
+                                    .multilineTextAlignment(.center)
+                            }
+                        }
+                        // As narrow at the sides as the plate, so a count
+                        // has the room there that it has on the leaf.
+                        .padding(.vertical, 24)
+                        .padding(.horizontal, 12)
+                        .frame(maxHeight: .infinity)
+                    }
+                    .opacity(pageInk(messagePage, progress))
+                    .frame(maxHeight: .infinity)
+                    // Light may cross the gutter; print may not.
+                    .overlay { ComparingSweep(paused: reduceMotion, timeScale: timeScale) }
+                } else if scene != .pressing {
+                    // A run attached to mid-press has no lines here; the leaf
+                    // covers one half and the navy shows through the other.
+                    // A message lifts and fades with its page, as lines do.
+                    placeholder
+                        .opacity(pageInk(messagePage, progress))
+                }
             }
+            .animation(reduceMotion ? nil : .spring(duration: 0.45 * timeScale, bounce: 0.15), value: scene)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(reduceMotion ? nil : .spring(duration: 0.45 * timeScale, bounce: 0.15), value: scene)
     }
 
     /// A message on one page: the page that is there when a folder is
@@ -793,7 +832,7 @@ struct FoldSheet: View {
 
     /// The halves a person may fold, each with its dog-ear.
     private func dogEars(scene: FoldScene, progress: Double) -> some View {
-        let sides = FoldLeaf.sides(pair.settings.mode)
+        let sides = FoldLeaf.sides(sync.activeMode)
         return HStack(spacing: 0) {
             if sides.contains(.a) { ear(.a) }
             Spacer(minLength: 0)
@@ -889,7 +928,7 @@ struct FoldSheet: View {
         }
         // A leaf still swinging open folds again from where it is; which
         // half folds is only how the sync looks.
-        if !opening { leafSide = side ?? FoldLeaf.automatic(pair.settings.mode, lines: plan?.lines ?? []) }
+        if !opening { leafSide = side ?? FoldLeaf.automatic(sync.activeMode, lines: plan?.lines ?? []) }
         self.voice = voice
         if let request = sync.foldApproval {
             approval = request
@@ -1026,7 +1065,7 @@ struct FoldSheet: View {
             if !leafDown {
                 // A leaf already up keeps its side rather than jump the crease.
                 if swing == 0, !opening {
-                    leafSide = FoldLeaf.automatic(pair.settings.mode, lines: plan?.lines ?? [])
+                    leafSide = FoldLeaf.automatic(sync.activeMode, lines: plan?.lines ?? [])
                 }
                 voice = .silent
                 fall()
@@ -1070,37 +1109,38 @@ struct FoldSheet: View {
     }
 
     /// What the folded leaf's cerulean back says while the run presses,
-    /// in white: the run's own progress, never a claim about any one line.
+    /// in white: the folder whose page it lies on, so each folder stays
+    /// named on its own side; the stage the run is in and its own
+    /// progress, never a claim about any one line; and that folder's disk.
     private var pressReadout: some View {
-        VStack(spacing: 10) {
-            Text(pair.settings.mode.title)
-                .font(FoldType.backEyebrow)
-                .textCase(.uppercase)
-                .tracking(FoldType.eyebrowTracking * 1.5)
-                .foregroundStyle(.white)
-            Text(sync.progressFraction.map { $0.formatted(.percent.precision(.fractionLength(0))) }
-                 ?? String(localized: "Pressing"))
-                .font(FoldType.figure)
-                .foregroundStyle(.white)
-                .contentTransition(.numericText())
-            Group {
-                if let fraction = sync.progressFraction {
-                    ProgressView(value: fraction)
-                } else {
-                    ProgressView().progressViewStyle(.linear)
-                }
+        let side = FoldLeaf.landing(leafSide)
+        let role = FoldRole(side, in: sync.activeMode)
+        // A two-way sync's copies go both ways: none is known to be coming.
+        let disk = coveredVolume.map { FoldDisk(volume: $0, toCopy: role == .destination ? sync.bytesLeft : nil) }
+        func name(_ detail: FoldRunFolder.Detail) -> some View {
+            FoldRunFolder(viewModel: viewModel, folder: folder(side), side: side, role: role, detail: detail)
+                .padding(.top, FoldRunFolder.top)
+        }
+        // The folder's name hangs from the top, level with the desk's; the
+        // readout keeps the middle of the rest. A short window drops the
+        // disk first, then where the folder is, then its name.
+        return ViewThatFits(in: .vertical) {
+            VStack(spacing: FoldRunFolder.gap) {
+                name(.full)
+                pressProgress(disk: disk)
+                    .frame(maxHeight: .infinity)
             }
-            .tint(.white)
-            .frame(maxWidth: 220)
-            .accessibilityLabel("Progress")
-            Text(sync.statusText)
-                .font(.callout)
-                .foregroundStyle(.white)
-                .multilineTextAlignment(.center)
-                .lineLimit(3)
-                .accessibilityAddTraits(.updatesFrequently)
-            Button("Stop") { Task { await sync.cancel() } }
-                .disabled(!sync.canCancel)
+            VStack(spacing: FoldRunFolder.gap) {
+                name(.full)
+                pressProgress(disk: nil)
+                    .frame(maxHeight: .infinity)
+            }
+            VStack(spacing: FoldRunFolder.gap) {
+                name(.nameOnly)
+                pressProgress(disk: nil)
+                    .frame(maxHeight: .infinity)
+            }
+            pressProgress(disk: nil)
         }
         // Controls drawn for a dark ground, legible on the cerulean.
         .environment(\.colorScheme, .dark)
@@ -1110,7 +1150,37 @@ struct FoldSheet: View {
         // Printed on a flat plate over the folded back: no facet ridge
         // runs through the words.
         .background { Kami(finish: .flat) }
+        // The whole plate as one named group, which the tour measures.
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(Text("Sync Progress"))
+        .accessibilityIdentifier("fold-plate")
         .offset(x: leafSide == .a ? halfWidth : 0)
+    }
+
+    private func pressProgress(disk: FoldDisk?) -> some View {
+        VStack(spacing: 14) {
+            if let readout = sync.readout {
+                FoldReadoutView(readout: readout, surface: .back, reduceMotion: reduceMotion)
+            }
+            if let disk {
+                FoldDiskView(disk: disk)
+                    .padding(.top, 8)
+            }
+            Button("Stop") { Task { await sync.cancel() } }
+                .disabled(!sync.canCancel)
+        }
+    }
+
+    /// What the desk says where the leaf lifted off, while it lies folded:
+    /// the folder that was there, and an arrow toward the leaf for which
+    /// way the data goes. It keeps to that page's width, clear of the
+    /// gutter.
+    private var deskNote: some View {
+        FoldDeskNote(viewModel: viewModel, folder: folder(leafSide), side: leafSide, mode: sync.activeMode)
+            .environment(\.colorScheme, .dark)
+            .frame(width: pageWidth)
+            .frame(maxHeight: .infinity)
+            .offset(x: leafSide == .a ? 0 : halfWidth + FoldMetrics.creaseWidth / 2)
     }
 
     // MARK: Desk

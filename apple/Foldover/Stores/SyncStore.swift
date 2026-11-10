@@ -188,9 +188,48 @@ struct WorkProgress: Equatable, Sendable {
     static func == (_: WorkProgress, _: WorkProgress) -> Bool { true }
 }
 
+/// The compact pair presentation a working job captured at claim time.
+/// It deliberately excludes options that may already have changed for the
+/// next run.
+struct RunningPair: Equatable, Sendable {
+    let revision: UInt64
+    let name: String
+    let left: SelectedFolder
+    let right: SelectedFolder
+    let mode: PairMode
+
+    init(revision: UInt64, name: String, left: SelectedFolder,
+         right: SelectedFolder, mode: PairMode) {
+        self.revision = revision
+        self.name = name
+        self.left = left
+        self.right = right
+        self.mode = mode
+    }
+
+    init(_ pair: SyncPair) {
+        self.init(revision: pair.revision, name: pair.settings.name,
+                  left: pair.settings.left, right: pair.settings.right,
+                  mode: pair.settings.mode)
+    }
+
+    init(_ pair: RunningPairSnapshot) {
+        let mode: PairMode = switch pair.mode {
+        case .sync: .sync
+        case .mirrorLeft: .mirrorLeft
+        case .mirrorRight: .mirrorRight
+        case .backupLeft: .backupLeft
+        case .backupRight: .backupRight
+        }
+        self.init(revision: pair.revision, name: pair.name,
+                  left: SelectedFolder(bytes: pair.leftRoot),
+                  right: SelectedFolder(bytes: pair.rightRoot), mode: mode)
+    }
+}
+
 enum PairSyncState: Equatable, Sendable {
     case idle
-    case working(SyncJob, cancelling: Bool, progress: WorkProgress = .none)
+    case working(SyncJob, cancelling: Bool, progress: WorkProgress = .none, pair: RunningPair)
     case previewed(PreviewSummary)
     /// Too many deletions for this run; nothing was written.
     case needsApproval(PreviewSummary)
@@ -329,12 +368,12 @@ private actor CoreSyncClient: SyncClient {
     private func state(_ state: SyncJobState) -> PairSyncState {
         switch state {
         case .idle: .idle
-        case .working(let job, let cancelling, let progress):
+        case .working(let job, let cancelling, let progress, let pair):
             .working(self.job(job), cancelling: cancelling, progress: WorkProgress(
                 listed: progress.listed, checked: progress.checked, changes: progress.changes,
                 applied: progress.applied, bytes: progress.bytes, copied: progress.copied,
                 rate: progress.rate, waitingFor: progress.waitingFor
-            ))
+            ), pair: RunningPair(pair))
         case .previewed(let preview): .previewed(summary(preview))
         case .needsApproval(let preview): .needsApproval(summary(preview))
         case .finished(let result): .finished(summary(result))
@@ -483,6 +522,10 @@ final class SyncStore {
     }
     private var requestErrors: [String: RequestFailure] = [:]
     private var failureSequence = 0
+    /// The failure each pair last showed, until it does something else.
+    /// A schedule retrying a folder another run keeps busy fails the same
+    /// way each time; it alerts once, not on every attempt (ADR 0047).
+    private var shownFailures: [String: String] = [:]
     private(set) var histories: [String: [RunRecord]] = [:]
     private(set) var listings: [String: ChangeListing] = [:]
     /// The text narrowing each pair's listed changes; view state held
@@ -551,10 +594,27 @@ final class SyncStore {
         knownStates.insert(pair.id)
         set(pair.id, state)
         if previous != state { await refreshHistory(pair.id) }
-        guard let previous, previous != state, let alert = Self.alert(for: pair, state: state) else {
+        let repeated = noteFailure(pair.id, state)
+        guard let previous, previous != state, !repeated,
+              let alert = Self.alert(for: pair, state: state) else {
             return
         }
         await self.alert(alert)
+    }
+
+    /// Remember the pair's failure, and whether `state` repeats the one it
+    /// last showed. Work in between, such as a retry, keeps it.
+    private func noteFailure(_ id: String, _ state: PairSyncState) -> Bool {
+        switch state {
+        case .failed(let message):
+            defer { shownFailures[id] = message }
+            return shownFailures[id] == message
+        case .working:
+            return false
+        default:
+            shownFailures[id] = nil
+            return false
+        }
     }
 
     nonisolated static func alert(for pair: SyncPair, state: PairSyncState) -> SyncAlert? {
@@ -568,6 +628,9 @@ final class SyncStore {
             body = String(localized: "An automatic sync stopped before archiving \(preview.archives) items. Open Foldover to review and approve it.")
         case .failed(let message):
             body = String(localized: "An automatic sync stopped: \(message)")
+        case .finished(let result) where result.conflicts > 0 && result.failureCount > 0:
+            // One alert per run: it must not hide the failures behind the conflicts.
+            body = String(localized: "\(result.conflicts) conflicts need your decision, and \(result.failureCount) items could not be synced.")
         case .finished(let result) where result.conflicts > 0:
             body = String(localized: "\(result.conflicts) conflicts need your decision.")
         case .finished(let result) where result.failureCount > 0:

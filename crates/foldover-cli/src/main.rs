@@ -2,10 +2,9 @@
 //! `status`). Depends on foldover-client. See PLAN.md §4.4.
 
 use foldover_client::{
-    DailySchedule, Durability, Filters, FolderRecords, MetadataPolicy, PairConfig, PairDraft,
-    PairId, PairOptions, PairRoot, Propagation, RemovalProtection, ReviewPolicy, ReviewToken,
-    Schedule, ScheduleInterval, Side, SocketLocation, SyncMode, SyncPath, TimeOfDay, Weekday,
-    Weekdays,
+    DailySchedule, Durability, Filters, FolderRecords, MetadataPolicy, PairDraft, PairId,
+    PairOptions, PairRoot, Propagation, RemovalProtection, ReviewPolicy, ReviewToken, Schedule,
+    ScheduleInterval, Side, SocketLocation, SyncMode, SyncPath, TimeOfDay, Weekday, Weekdays,
 };
 use foldover_client::{DeviceId, PeerStatus, ShareId, SyncItemKind, SyncStatus};
 use foldover_proto::local::PairRecord;
@@ -47,6 +46,7 @@ const USAGE: &str = "usage: foldover --version
        foldover pairs check NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]
        foldover pairs update ID REVISION NAME LEFT RIGHT MODE [OPTION VALUE]... [--socket PATH]
        foldover pairs remove ID REVISION [--socket PATH]
+       foldover pairs pause|resume ID [--socket PATH]
        foldover sync ID [--preview | --cancel | --undo | --approve LEFT RIGHT --review TOKEN | --keep-left PATH --review TOKEN | --keep-right PATH --review TOKEN | --keep-both PATH --review TOKEN | --skip PATH --review TOKEN | --changes [copies | updates | archives | conflicts | blocked | kept | moves]] [--progress] [--socket PATH]
        foldover sync --all [--socket PATH]
        foldover archive ID left|right [RUN [--put-back PATH | --put-back-all]] [--socket PATH]
@@ -54,7 +54,7 @@ const USAGE: &str = "usage: foldover --version
        foldover pause [MINUTES] [--socket PATH]
        foldover resume [--socket PATH]
        foldover safe-mode off [--socket PATH]
-       foldover automation [low-power pause|run] [--socket PATH]
+       foldover automation [low-power pause|run | effort gentle|full] [--socket PATH]
        foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]
        foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]
        foldover servers [browse sftp://[user@]host[:port]/path] [--socket PATH]
@@ -129,11 +129,13 @@ enum PeerCommand {
     Shares(DeviceId),
 }
 
-/// The environment policy (ADR 0036).
+/// The environment policy (ADR 0036) and automatic effort (ADR 0054).
 enum AutomationCommand {
     Status,
     /// Automatic syncs in Low Power Mode: `pause` (default) or `run`.
     LowPower(foldover_client::LowPowerSyncs),
+    /// How hard automatic syncs work: `gentle` (default) or `full`.
+    Effort(foldover_client::AutomaticEffort),
 }
 
 enum ArchiveCommand {
@@ -194,6 +196,9 @@ enum PairCommand {
         id: PairId,
         revision: u64,
     },
+    /// Hold the pair's automatic syncs until resumed.
+    Pause(PairId),
+    Resume(PairId),
 }
 
 /// Pair options named on the command line; the rest keep a base value.
@@ -325,6 +330,9 @@ async fn main() -> ExitCode {
             AutomationCommand::LowPower(syncs) => {
                 print_status(foldover_client::set_low_power_syncs(&location, syncs).await)
             }
+            AutomationCommand::Effort(effort) => {
+                print_status(foldover_client::set_automatic_effort(&location, effort).await)
+            }
         },
         Request::History(location, id) => match history(&location, id).await {
             Ok(()) => ExitCode::SUCCESS,
@@ -454,6 +462,19 @@ fn parse_request(args: &[OsString]) -> Request {
                 _ => Request::Usage,
             }
         }
+        [command, setting, value] if command == "automation" && setting == "effort" => {
+            match value.to_str() {
+                Some("gentle") => Request::Automation(
+                    location,
+                    AutomationCommand::Effort(foldover_client::AutomaticEffort::Gentle),
+                ),
+                Some("full") => Request::Automation(
+                    location,
+                    AutomationCommand::Effort(foldover_client::AutomaticEffort::Full),
+                ),
+                _ => Request::Usage,
+            }
+        }
         [command, ..] if command == "automation" => Request::Usage,
         [command, rest @ ..] if command == "peers" => match peer_command(rest) {
             Some(command) => Request::Peers(location, command),
@@ -511,6 +532,10 @@ fn pair_command(args: &[OsString]) -> Option<PairCommand> {
     match args {
         [] => Some(PairCommand::List),
         [command, id] if command == "show" => Some(PairCommand::Show(id.to_str()?.parse().ok()?)),
+        [command, id] if command == "pause" => Some(PairCommand::Pause(id.to_str()?.parse().ok()?)),
+        [command, id] if command == "resume" => {
+            Some(PairCommand::Resume(id.to_str()?.parse().ok()?))
+        }
         [command, id, revision] if command == "remove" => Some(PairCommand::Remove {
             id: id.to_str()?.parse().ok()?,
             revision: revision
@@ -884,7 +909,7 @@ async fn pairs(
         PairCommand::Check(draft) => {
             warn_sftp([draft.left(), draft.right()]);
             // JSON lines keep the machine-readable kinds and raw sides.
-            for warning in foldover_client::check_pair(location, &draft).await? {
+            for warning in foldover_client::check_pair(location, &draft, None).await? {
                 println!("{}", serde_json::to_string(&warning)?);
             }
             Ok(())
@@ -896,14 +921,17 @@ async fn pairs(
             options,
         } => {
             // A stale read is harmless: the revision check rejects the update.
-            let current = foldover_client::pair(location, id).await?;
+            let current = foldover_client::pair(location, id).await?.config;
             let draft = draft.with_options(options.apply(current.draft().options().clone()));
             warn_sftp([draft.left(), draft.right()]);
             print_pair(&foldover_client::update_pair(location, id, revision, &draft).await?)
         }
-        PairCommand::Remove { id, revision } => {
-            print_pair(&foldover_client::remove_pair(location, id, revision).await?)
-        }
+        PairCommand::Remove { id, revision } => print_pair(&foldover_client::PairState {
+            config: foldover_client::remove_pair(location, id, revision).await?,
+            automation: foldover_client::Automation::Running,
+        }),
+        PairCommand::Pause(id) => print_pair(&foldover_client::pause_pair(location, id).await?),
+        PairCommand::Resume(id) => print_pair(&foldover_client::resume_pair(location, id).await?),
     }
 }
 
@@ -918,7 +946,7 @@ async fn sync(
     // Cancellation must keep bypassing the configuration queue, even when
     // another request is waiting on a disconnected server.
     if !matches!(&command, SyncCommand::Cancel) {
-        let pair = foldover_client::pair(location, id).await?;
+        let pair = foldover_client::pair(location, id).await?.config;
         warn_sftp([pair.draft().left(), pair.draft().right()]);
     }
     if let SyncCommand::Changes(kind) = command {
@@ -1084,7 +1112,7 @@ async fn sync_all(location: &SocketLocation) -> Result<ExitCode, foldover_client
     let mut after = None;
     loop {
         let page = foldover_client::pairs(location, after).await?;
-        pairs.extend(page.pairs);
+        pairs.extend(page.pairs.into_iter().map(|pair| pair.config));
         let Some(next) = page.next else {
             break;
         };
@@ -1249,11 +1277,12 @@ async fn archive(
     side: Side,
     command: ArchiveCommand,
 ) -> Result<ExitCode, foldover_client::Error> {
+    let pair = foldover_client::pair(location, id).await?.config;
+    let revision = pair.revision();
     if matches!(
         &command,
         ArchiveCommand::PutBack { .. } | ArchiveCommand::PutBackAll(_)
     ) {
-        let pair = foldover_client::pair(location, id).await?;
         let root = match side {
             Side::Left => pair.draft().left(),
             Side::Right => pair.draft().right(),
@@ -1262,7 +1291,7 @@ async fn archive(
     }
     match command {
         ArchiveCommand::Runs => {
-            let runs = foldover_client::archive_runs(location, id, side).await?;
+            let runs = foldover_client::archive_runs(location, id, revision, side).await?;
             for run in &runs.runs {
                 println!("{}", serde_json::to_string(run)?);
             }
@@ -1273,9 +1302,15 @@ async fn archive(
         ArchiveCommand::Items(run) => {
             let mut after = None;
             loop {
-                let page =
-                    foldover_client::archive_items(location, id, side, &run, after.as_deref())
-                        .await?;
+                let page = foldover_client::archive_items(
+                    location,
+                    id,
+                    revision,
+                    side,
+                    &run,
+                    after.as_deref(),
+                )
+                .await?;
                 for item in &page.items {
                     println!("{}", serde_json::to_string(item)?);
                 }
@@ -1286,11 +1321,13 @@ async fn archive(
             }
         }
         ArchiveCommand::PutBack { run, path } => {
-            let placed = foldover_client::put_back(location, id, side, &run, &path).await?;
+            let placed =
+                foldover_client::put_back(location, id, revision, side, &run, &path).await?;
             println!("{}", serde_json::json!({ "path": placed }));
         }
         ArchiveCommand::PutBackAll(run) => {
-            let restored = foldover_client::put_back_all(location, id, side, &run).await?;
+            let restored =
+                foldover_client::put_back_all(location, id, revision, side, &run).await?;
             println!("{}", serde_json::to_string(&restored)?);
             if restored.failure_count > 0 {
                 eprintln!(
@@ -1392,9 +1429,13 @@ fn print_peers(status: &PeerStatus) -> Result<(), foldover_client::Error> {
     Ok(())
 }
 
-fn print_pair(pair: &PairConfig) -> Result<(), foldover_client::Error> {
+fn print_pair(pair: &foldover_client::PairState) -> Result<(), foldover_client::Error> {
     // JSON lines preserve raw path bytes and escape terminal control characters.
-    println!("{}", serde_json::to_string(&PairRecord::from(pair))?);
+    let record = PairRecord {
+        paused: pair.automation == foldover_client::Automation::Paused,
+        ..PairRecord::from(&pair.config)
+    };
+    println!("{}", serde_json::to_string(&record)?);
     Ok(())
 }
 
@@ -1420,6 +1461,13 @@ mod tests {
             job: foldover_client::SyncJob::Run,
             cancelling: false,
             progress: foldover_client::SyncProgress::default(),
+            pair: foldover_client::SyncPairContext {
+                revision: 1,
+                name: "Test pair".into(),
+                left_root: b"/left".to_vec(),
+                right_root: b"/right".to_vec(),
+                mode: foldover_client::PairMode::Sync,
+            },
         }
     }
 
@@ -1864,8 +1912,19 @@ mod tests {
             ]),
             Request::Pairs(_, PairCommand::Check(_))
         ));
+        assert!(matches!(
+            req(&["pairs", "pause", id]),
+            Request::Pairs(_, PairCommand::Pause(_))
+        ));
+        assert!(matches!(
+            req(&["pairs", "resume", id, "--socket", "/tmp/s"]),
+            Request::Pairs(_, PairCommand::Resume(_))
+        ));
         for args in [
             vec!["pairs", "show", "bad"],
+            vec!["pairs", "pause", "bad"],
+            vec!["pairs", "pause", id, "1"],
+            vec!["pairs", "resume"],
             vec!["pairs", "check", "Photos", "relative", "/b", "sync"],
             vec!["pairs", "check", "Photos", "/a", "/b"],
             vec!["pairs", "add", "Photos", "relative", "/b", "sync"],
@@ -2138,11 +2197,27 @@ mod tests {
                 AutomationCommand::LowPower(foldover_client::LowPowerSyncs::Run)
             )
         ));
+        assert!(matches!(
+            req(&["automation", "effort", "gentle"]),
+            Request::Automation(
+                _,
+                AutomationCommand::Effort(foldover_client::AutomaticEffort::Gentle)
+            )
+        ));
+        assert!(matches!(
+            req(&["automation", "effort", "full"]),
+            Request::Automation(
+                _,
+                AutomationCommand::Effort(foldover_client::AutomaticEffort::Full)
+            )
+        ));
         for args in [
             vec!["history"],
             vec!["history", "bad"],
             vec!["automation", "low-power"],
             vec!["automation", "low-power", "sometimes"],
+            vec!["automation", "effort"],
+            vec!["automation", "effort", "fast"],
             vec!["automation", "bogus", "pause"],
             vec!["archive", id],
             vec!["archive", id, "a"],

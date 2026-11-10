@@ -30,7 +30,7 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{location, values};
+    use super::super::tests::{location, remove_and_purge, values};
     use super::*;
 
     #[test]
@@ -51,7 +51,7 @@ mod tests {
         assert!(!database.automation_held(&pair.id).unwrap());
 
         hold(&mut database);
-        database.remove_pair(&pair.id, pair.revision).unwrap();
+        remove_and_purge(&mut database, &pair.id, pair.revision);
         assert!(!database.automation_held(&pair.id).unwrap());
     }
 }

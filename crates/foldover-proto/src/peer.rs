@@ -6,7 +6,13 @@ use serde::{Deserialize, Serialize};
 use crate::local::{PairDurability, PairPropagation, PairSettings};
 
 /// The peer protocol version; agents of other versions do not pair.
-pub const PEER_PROTOCOL: u32 = 1;
+/// 4: stream heartbeats keep cancellable long-running requests live;
+/// agents of version 3 do not understand the new transport frame.
+/// 3: archive run names carry a unique run ID after the pair, which an
+/// agent of version 2 cannot parse for listing, restoring or pruning.
+/// 2: archive run names carry their pair (ADR 0047), which an agent of
+/// version 1 accepts for writes but can neither list, restore nor prune.
+pub const PEER_PROTOCOL: u32 = 4;
 
 /// Pairing, after both sides derived the six-digit code. Each side sends
 /// its hello, then exactly one decision.
@@ -62,8 +68,8 @@ pub enum FolderOp {
     /// `volume`: whether the folder is on a network volume of the
     /// answering Mac.
     Volume,
-    /// `progress` replies while scanning, entries as data frames, then
-    /// `observed`.
+    /// `progress` replies while scanning and once with its final counts,
+    /// entries as data frames, then `observed`.
     Observe { scan: ScanSettings },
     /// Prove `path` still holds `entry`, then send it: `reading`, a file's
     /// data frames from byte `from` and their end, then `done`.

@@ -31,13 +31,14 @@ pub use foldover_endpoint::ObserveStep;
 pub use foldover_endpoint::Reach;
 pub use foldover_endpoint::event_now;
 pub use foldover_host::{
-    Environment, EnvironmentHold, LowPowerSyncs, NetworkCost, NetworkUse, PowerMode, local_time,
+    Environment, EnvironmentHold, LowPowerSyncs, NetworkCost, NetworkUse, PowerMode, ThreadEffort,
+    local_time,
 };
 pub use foldover_state::RecordedIdentities;
 pub use foldover_state::StateLocation;
 pub use foldover_state::WatchCursor;
 pub use foldover_state::{
-    Device, HISTORY_LIMIT, HistoryEntry, HistoryOutcome, MountSources, Pause, RunMarker,
+    Device, HISTORY_LIMIT, HistoryEntry, HistoryOutcome, MountSources, Pause, Purge, RunMarker,
     RunTrigger, Share,
 };
 pub use gates::{DeletionCounts, DeletionReview, InvalidDeletionCounts, RunContext};
@@ -54,7 +55,8 @@ pub use poll::{ChangePoll, PollMode, Polled};
 pub use readiness::{ReadinessWarning, missing_side, reconnect};
 pub use reconcile::reconcile_entry;
 pub use run::{
-    Action, Approval, Commit, Completion, Failure, NoProgress, PairRun, Preview, PreviewItem,
-    RunError, RunInputs, RunOutcome, RunProgress, RunReport, UndoReport,
+    Action, Approval, Commit, Completion, Effort, Failure, NoProgress, PairRun, PendingRunInputs,
+    Preview, PreviewItem, RunError, RunInputs, RunOutcome, RunPhase, RunProgress, RunReport,
+    UndoReport,
 };
 pub use watch::PairWatcher;

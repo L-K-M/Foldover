@@ -12,6 +12,7 @@ fn path(text: &str) -> SyncPath {
 fn run() -> RunScope {
     RunScope::new(
         UNIX_EPOCH + Duration::from_secs(EPOCH_SECONDS),
+        crate::test_pair(),
         PairOptions::default(),
     )
 }
@@ -53,6 +54,64 @@ fn names(folder: &MemoryEndpoint) -> Vec<String> {
         .into_keys()
         .map(|name| String::from_utf8(name).unwrap())
         .collect()
+}
+
+#[test]
+fn archive_pruning_removes_only_timestamped_directories() {
+    use crate::local::archive::archive_name;
+
+    let folder = MemoryEndpoint::new(Quirks::default());
+    let day = Duration::from_secs(86_400);
+    let now = UNIX_EPOCH + day * 100;
+    let run = archive_name(UNIX_EPOCH + day * 69);
+    let timestamp_file = archive_name(UNIX_EPOCH + day * 68);
+    let timestamp_link = archive_name(UNIX_EPOCH + day * 67);
+    folder
+        .put_file(
+            format!(".foldover/archive/{run}/file").as_bytes(),
+            b"archived",
+        )
+        .unwrap();
+    folder
+        .put_file(
+            format!(".foldover/archive/{timestamp_file}").as_bytes(),
+            b"not a run",
+        )
+        .unwrap();
+    folder
+        .put_link(
+            format!(".foldover/archive/{timestamp_link}").as_bytes(),
+            b"kept by the user",
+        )
+        .unwrap();
+
+    assert_eq!(
+        folder
+            .prune_archive(day * 30, now, Pruning::Everyone)
+            .unwrap(),
+        1
+    );
+    let state = folder.folder();
+    assert!(
+        state
+            .get(format!(".foldover/archive/{run}").as_bytes())
+            .is_none()
+    );
+    assert!(
+        state
+            .get(format!(".foldover/archive/{run}/file").as_bytes())
+            .is_none()
+    );
+    assert!(
+        state
+            .get(format!(".foldover/archive/{timestamp_file}").as_bytes())
+            .is_some()
+    );
+    assert!(
+        state
+            .get(format!(".foldover/archive/{timestamp_link}").as_bytes())
+            .is_some()
+    );
 }
 
 #[test]
@@ -129,8 +188,10 @@ fn a_two_step_replace_cut_short_leaves_the_old_archived_and_the_new_aside() {
     assert!(observed.entries().is_empty());
     assert_eq!(observed.leftovers().len(), 1);
     assert_eq!(right.archived_files(), [b"old".to_vec()]);
-    to.recover_leftover(&observed.leftovers()[0], &run())
-        .unwrap();
+    to.recover_leftover(&observed.leftovers()[0], &run(), &mut || {
+        ScanControl::Continue
+    })
+    .unwrap();
     let mut archived = right.archived_files();
     archived.sort();
     assert_eq!(archived, [b"new".to_vec(), b"old".to_vec()]);

@@ -261,6 +261,268 @@ fn fixture(options: Options, script: impl FnOnce(Fake) + Send + 'static) -> Sess
     Session::over(file(input), file(client), errors, options, None).unwrap()
 }
 
+#[test]
+fn read_finish_sends_close_and_stat_before_waiting_and_routes_reversed_replies() {
+    let mut session = fixture(snappy(), |mut server| {
+        server.handshake();
+        let Some((close, close_id, _)) = server.request() else {
+            return;
+        };
+        assert_eq!(close, wire::CLOSE);
+        // Waiting for CLOSE here would time out: both requests must be in flight.
+        let Some((stat, stat_id, fields)) = server.request() else {
+            return;
+        };
+        assert_eq!(stat, wire::LSTAT);
+        assert_eq!(Reader::new(&fields).bytes().unwrap(), b"file");
+        server.attrs(stat_id);
+        server.status(close_id, wire::STATUS_OK);
+        server.serve(|server, kind, id, _| {
+            assert_eq!(kind, wire::LSTAT);
+            server.attrs(id);
+        });
+    });
+    session
+        .close_read_and_lstat(Handle(b"read".to_vec()), b"file")
+        .unwrap();
+    session.lstat(b"next").unwrap();
+    assert!(session.alive());
+}
+
+#[test]
+fn read_finish_drains_close_refusals_and_stat_errors_before_reuse() {
+    let mut session = fixture(quick(), |mut server| {
+        server.handshake();
+        let (_, close_id, _) = server.request().unwrap();
+        let (_, stat_id, _) = server.request().unwrap();
+        server.status(stat_id, wire::STATUS_NO_SUCH_FILE);
+        server.status(close_id, wire::STATUS_PERMISSION_DENIED);
+        server.serve(|server, _, id, _| server.attrs(id));
+    });
+    let error = session
+        .close_read_and_lstat(Handle(b"read".to_vec()), b"gone")
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    session.lstat(b"next").unwrap();
+
+    let mut session = fixture(quick(), |mut server| {
+        server.handshake();
+        let (_, close_id, _) = server.request().unwrap();
+        let (_, stat_id, _) = server.request().unwrap();
+        server.status(close_id, wire::STATUS_PERMISSION_DENIED);
+        server.attrs(stat_id);
+        server.serve(|server, _, id, _| server.attrs(id));
+    });
+    session
+        .close_read_and_lstat(Handle(b"read".to_vec()), b"file")
+        .unwrap();
+    session.lstat(b"next").unwrap();
+}
+
+#[test]
+fn read_finish_discards_a_session_with_an_unanswered_close() {
+    let mut session = fixture(snappy(), |mut server| {
+        server.handshake();
+        if server.request().is_none() {
+            return;
+        }
+        let Some((_, stat_id, _)) = server.request() else {
+            return;
+        };
+        server.attrs(stat_id);
+        // Keep the connection open without answering CLOSE until the client drops it.
+        while server.request().is_some() {}
+    });
+    assert!(
+        session
+            .close_read_and_lstat(Handle(b"read".to_vec()), b"file")
+            .is_err()
+    );
+    assert!(!session.alive());
+    assert!(session.lstat(b"next").is_err());
+}
+
+#[derive(Default)]
+struct ReadTrace {
+    requests: Vec<(u64, usize)>,
+    bytes: usize,
+}
+
+/// Count actual framed requests, not calls into the client. Short replies
+/// emulate servers that return less than the requested chunk before EOF.
+fn counted_reads(size: usize, reply_limit: usize) -> (Session, Arc<Mutex<ReadTrace>>) {
+    let trace = Arc::new(Mutex::new(ReadTrace::default()));
+    let kept = Arc::clone(&trace);
+    let session = fixture(quick(), move |mut server| {
+        server.handshake();
+        server.serve(|server, kind, id, fields| match kind {
+            wire::READ => {
+                let mut fields = Reader::new(fields);
+                fields.bytes().unwrap();
+                let offset = fields.u64().unwrap();
+                let requested = fields.u32().unwrap() as usize;
+                let count = size
+                    .saturating_sub(offset as usize)
+                    .min(requested)
+                    .min(reply_limit);
+                {
+                    let mut trace = kept.lock().unwrap();
+                    trace.requests.push((offset, requested));
+                    trace.bytes += count;
+                }
+                if count == 0 {
+                    server.status(id, wire::STATUS_EOF);
+                } else {
+                    let data: Vec<_> = (0..count).map(|i| (offset as usize + i) as u8).collect();
+                    server.data(id, &data);
+                }
+            }
+            wire::LSTAT => server.attrs(id),
+            _ => panic!("unexpected request {kind}"),
+        });
+    });
+    (session, trace)
+}
+
+#[test]
+fn known_length_read_packet_budget() {
+    for size in [0, 1, 1024, CHUNK, CHUNK + 1, WINDOW * CHUNK] {
+        for from in [0, size / 3, size] {
+            let (mut session, trace) = counted_reads(size, CHUNK);
+            let mut content = Vec::new();
+            session
+                .read_from_bounded(
+                    &Handle(vec![1]),
+                    from as u64,
+                    (size - from) as u64,
+                    &mut |chunk| {
+                        content.extend_from_slice(chunk);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            assert_eq!(content, (from..size).map(|i| i as u8).collect::<Vec<_>>());
+            let trace = trace.lock().unwrap();
+            assert!(
+                trace.requests.len() <= (size - from).div_ceil(CHUNK) + 1,
+                "size {size}, from {from}: {} READs",
+                trace.requests.len()
+            );
+        }
+    }
+}
+
+#[test]
+fn bounded_reads_recover_short_data_and_report_growth() {
+    for (size, bound) in [(CHUNK + 9, CHUNK + 9), (7, 3), (3, 7)] {
+        let (mut session, _) = counted_reads(size, 997);
+        let mut content = Vec::new();
+        let result = session.read_from_bounded(&Handle(vec![1]), 0, bound as u64, &mut |chunk| {
+            content.extend_from_slice(chunk);
+            Ok(())
+        });
+        if size > bound {
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        } else {
+            result.unwrap();
+        }
+        assert_eq!(
+            content,
+            (0..size.min(bound + 1))
+                .map(|i| i as u8)
+                .collect::<Vec<_>>()
+        );
+        session.lstat(b"later").unwrap();
+    }
+}
+
+#[test]
+fn bounded_read_sink_failure_drains_reordered_replies() {
+    let mut session = fixture(quick(), move |mut server| {
+        server.handshake();
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            let (kind, id, _) = server.request().unwrap();
+            assert_eq!(kind, wire::READ);
+            ids.push(id);
+        }
+        for id in ids.into_iter().rev() {
+            server.data(id, &vec![0; CHUNK]);
+        }
+        server.serve(|server, kind, id, _| {
+            assert_eq!(kind, wire::LSTAT);
+            server.attrs(id);
+        });
+    });
+    let error = session
+        .read_from_bounded(&Handle(vec![1]), 0, (3 * CHUNK) as u64, &mut |_| {
+            Err(io::Error::other("cancelled"))
+        })
+        .unwrap_err();
+    assert_eq!(error.to_string(), "cancelled");
+    session.lstat(b"later").unwrap();
+}
+
+#[test]
+fn bounded_reads_reject_invalid_data_and_ranges() {
+    for data in [b"".as_slice(), b"too long"] {
+        let mut session = fixture(quick(), move |mut server| {
+            server.handshake();
+            server.serve(|server, kind, id, _| match kind {
+                wire::READ => server.data(id, data),
+                wire::LSTAT => server.attrs(id),
+                _ => panic!("unexpected request"),
+            });
+        });
+        assert_eq!(
+            session
+                .read_from_bounded(&Handle(vec![1]), 0, 1, &mut |_| Ok(()))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            session
+                .read_from_bounded(&Handle(vec![1]), u64::MAX, 1, &mut |_| Ok(()))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        session.lstat(b"later").unwrap();
+    }
+}
+
+#[test]
+fn an_access_probe_reads_one_batch_and_closes_the_handle() {
+    let reads = Arc::new(Mutex::new(0));
+    let kept = Arc::clone(&reads);
+    let mut session = fixture(quick(), move |mut server| {
+        server.handshake();
+        server.serve(|server, kind, id, _| match kind {
+            wire::OPENDIR => server.send(Writer::new(wire::HANDLE, id).bytes(b"dir").finish()),
+            wire::READDIR => {
+                *kept.lock().unwrap() += 1;
+                // A nonempty result must not cause the access probe to keep
+                // enumerating. A malformed NAME still fails parsing.
+                server.send(
+                    Writer::new(wire::NAME, id)
+                        .u32(1)
+                        .bytes(b"name")
+                        .bytes(b"name")
+                        .attributes(&Attributes::default())
+                        .finish(),
+                );
+            }
+            wire::CLOSE => server.status(id, wire::STATUS_OK),
+            wire::LSTAT => server.attrs(id),
+            _ => panic!("unexpected request"),
+        });
+    });
+    session.probe_directory(b".").unwrap();
+    session.lstat(b"later").unwrap();
+    assert_eq!(*reads.lock().unwrap(), 1);
+}
+
 /// A failed sink must not leave the window's pending answers to be
 /// mistaken for the next request's reply.
 #[test]

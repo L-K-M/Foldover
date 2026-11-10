@@ -46,6 +46,9 @@ same arguments as `add`; the FFI exports `check_pair` mirroring
 ## Consequences
 
 - A warning is advisory only; overlap remains the one check that blocks.
+  Since local protocol 18 `pair.check` reports it too, as `overlap` with
+  the other pair's name, so the editor can block Save before saving
+  would fail ([ADR 0047](0047-shared-one-way-sources.md)).
 - Checking an SFTP or shared folder opens it, so warnings appear once
   the server or Mac answers; while it cannot be reached, that side
   simply has no warnings.

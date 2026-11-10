@@ -222,12 +222,31 @@ where
                     ),
                 };
                 if let Some(output) = output {
-                    connection.write_value(&output).await?;
+                    match connection.write_value(&output).await {
+                        // Nothing of an oversized reply was sent. Answer
+                        // its request with the cause: closing here would
+                        // tell the client only "Agent closed before its
+                        // response".
+                        Err(Error::FrameTooLarge) => {
+                            connection.write_value(&oversized(&output)).await?;
+                        }
+                        result => result?,
+                    }
                 }
             }
             Ok::<(), Error>(())
         });
     }
+}
+
+/// The error that answers a request whose reply exceeds the frame limit.
+fn oversized(reply: &Value) -> Value {
+    let id = reply.get("id").cloned().unwrap_or(Value::Null);
+    let error = RpcError::new(
+        INTERNAL_ERROR,
+        "Response exceeds frame limit; refresh state and request fewer results",
+    );
+    Response::error(id, error).to_value()
 }
 
 async fn authorized<F, Fut>(
@@ -558,6 +577,37 @@ mod tests {
             Err(Error::Protocol(_))
         ));
         assert_eq!(handled.load(Ordering::Relaxed), 1);
+        serving.abort();
+    }
+
+    /// A reply over the frame limit answers its request with the cause
+    /// and leaves the connection usable; it used to close it.
+    #[tokio::test]
+    async fn an_oversized_reply_becomes_an_error_for_its_request() {
+        let directory = tempfile::tempdir().unwrap();
+        let location = SocketLocation::Path(directory.path().join("runtime/s"));
+        let server = bind(&location).unwrap();
+        let serving = tokio::spawn(serve(server, |request: Request| async move {
+            Ok(match request.id() {
+                Some(id) if id == &json!(1) => json!("x".repeat(MAX_FRAME_BYTES + 1)),
+                _ => json!("small"),
+            })
+        }));
+        let mut connection = connect(&location).await.unwrap();
+
+        let refused = connection.call(Request::call(1, DAEMON_STATUS, None)).await;
+        let Err(Error::Remote { code, message }) = refused else {
+            panic!("expected the agent's error, got {refused:?}");
+        };
+        assert_eq!(code, INTERNAL_ERROR);
+        assert!(message.contains("frame limit"), "{message}");
+        assert_eq!(
+            connection
+                .call(Request::call(2, DAEMON_STATUS, None))
+                .await
+                .unwrap(),
+            "small"
+        );
         serving.abort();
     }
 

@@ -17,6 +17,7 @@
 #   scripts/build.sh --clean        # wipe build output first
 #   scripts/build.sh --check        # print resolved config; build nothing
 #   scripts/build.sh --install      # also install what this run built
+#   scripts/build.sh --no-open      # do not open Finder or relaunch the app
 #
 # --install replaces /Applications/Foldover.app with the app this run
 # built. A running Foldover is quit first and reopened afterwards. Both
@@ -33,7 +34,7 @@
 #
 # Every produced artifact is copied into dist/ at the repo root (one
 # folder with the final outputs), and on macOS dist/ is opened in the
-# Finder when anything landed there.
+# Finder when anything landed there, unless --no-open is set.
 #
 # App builds target macOS 27 on Apple silicon and sign ad hoc
 # (CODE_SIGN_IDENTITY=-). Downloaded builds need the quarantine-removal
@@ -54,6 +55,7 @@ PROFILE="release"
 CLEAN=false
 CHECK=false
 INSTALL=false
+OPEN_GUI=true
 declare -a REQUESTED=()
 EXPLICIT=0
 
@@ -70,6 +72,7 @@ while [[ $# -gt 0 ]]; do
     --clean) CLEAN=true; shift ;;
     --check) CHECK=true; shift ;;
     --install) INSTALL=true; shift ;;
+    --no-open) OPEN_GUI=false; shift ;;
     core|app) REQUESTED+=("$1"); EXPLICIT=1; shift ;;
     all) REQUESTED=(core app); EXPLICIT=1; shift ;;
     *) echo "unknown argument: $1" >&2; usage 1 ;;
@@ -375,7 +378,7 @@ PY
   if launchctl print "$agent" >/dev/null 2>&1; then agent_loaded=true; fi
 
   local reopened=false
-  if $reopen; then
+  if $reopen && $OPEN_GUI; then
     echo "-- reopening Foldover"
     if open "$dest"; then
       reopened=true
@@ -385,7 +388,7 @@ PY
   fi
 
   local note=""
-  if $reopen && ! $reopened; then note=", but Foldover did not reopen"; fi
+  if $reopen && ! $reopened && $OPEN_GUI; then note=", but Foldover did not reopen"; fi
   if $agent_loaded; then
     if $reopened; then
       echo "-- Foldover restarts the background agent as it opens"
@@ -428,7 +431,7 @@ for line in "${RESULTS[@]}"; do echo "  $line"; done
 
 if [[ "$STAGED" -gt 0 ]]; then
   echo "  artifacts: $DIST"
-  [[ "$(uname -s)" == "Darwin" ]] && open "$DIST"
+  if $OPEN_GUI && [[ "$(uname -s)" == "Darwin" ]]; then open "$DIST"; fi
 fi
 
 exit "$FAILED"

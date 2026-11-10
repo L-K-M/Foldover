@@ -36,11 +36,18 @@ defaults the platform manages.
   person. It runs on the first tick after the hold lifts, which the next
   environment snapshot reports. Changes made during a hold are picked up
   then, like changes during a pause (ADR 0022).
+- **Per-pair pause:** a person can pause one pair
+  ([ADR 0022](0022-scheduled-runs.md)). It is a durable hold, separate
+  from the environment holds: it survives agent restarts, appears on the
+  pair, and a manual sync does not lift it.
 - **Status:** `automation.status` answers `low_power` and `held_by`
   (`lowPowerMode`, `expensiveNetwork` or `constrainedNetwork`), the hold
   an automatic sync would get now: the network's cost when any pair uses
   it, else the low-power hold local pairs would get. `automation.settings`
   sets `low_power` and answers the status. Both ride local protocol 12.
+  Protocol 23 adds `effort`, how hard automatic syncs work, to both; each
+  field `automation.settings` carries changes only that choice
+  ([ADR 0054](0054-gentle-automatic-syncs.md)).
 - **Surface:** the menu bar shows the hold under the pause controls, and
   Settings carries "Sync automatically in Low Power Mode" (off is
   pause); `foldover automation` prints the status and

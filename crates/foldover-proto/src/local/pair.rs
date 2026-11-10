@@ -11,6 +11,9 @@ pub const PAIR_CREATE: &str = "pair.create";
 pub const PAIR_UPDATE: &str = "pair.update";
 pub const PAIR_REMOVE: &str = "pair.remove";
 pub const PAIR_CHECK: &str = "pair.check";
+/// Pause a pair's automatic syncs until `pair.resume`; manual syncs run.
+pub const PAIR_PAUSE: &str = "pair.pause";
+pub const PAIR_RESUME: &str = "pair.resume";
 // Even maximum-length names and raw roots fit below the 1 MiB IPC frame limit.
 pub const PAIR_PAGE_SIZE: usize = 16;
 
@@ -404,14 +407,20 @@ pub struct PairRecord {
     pub id: String,
     pub revision: u64,
     pub configuration: PairInput,
+    /// A person paused the pair's automatic syncs. Not part of the
+    /// configuration: pausing keeps the revision.
+    #[serde(default)]
+    pub paused: bool,
 }
 
 impl From<&PairConfig> for PairRecord {
+    /// The record of a pair that is not paused.
     fn from(pair: &PairConfig) -> Self {
         Self {
             id: pair.id().to_string(),
             revision: pair.revision(),
             configuration: pair.draft().into(),
+            paused: false,
         }
     }
 }
@@ -455,6 +464,16 @@ pub struct PairUpdate {
     pub configuration: PairInput,
 }
 
+/// `pair.check`'s request: the folders and settings a person picked, and
+/// the pair they edit, whose own folders never overlap them.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PairCheck {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub configuration: PairInput,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairPage {
@@ -463,7 +482,8 @@ pub struct PairPage {
 }
 
 /// `pair.check`'s answer: what will not work as a person might expect
-/// with the folders they picked (PLAN.md §3.6). Never blocks saving.
+/// with the folders they picked (PLAN.md §3.6). Only `overlap` and
+/// `unverified` name something saving would refuse.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairWarnings {
@@ -482,6 +502,15 @@ pub enum PairWarning {
     /// This side cannot hold Foldover's `.foldover` records, so it can
     /// only be a Backup target that keeps none.
     RecordsUnsupported { side: PairSide },
+    /// This side's folder is, holds or sits inside a folder of the pair
+    /// named `pairName`, and only Mirror and Backup sources may share
+    /// one; saving would refuse it.
+    #[serde(rename_all = "camelCase")]
+    Overlap { side: PairSide, pair_name: String },
+    /// A folder of the pair named `pairName` is there but cannot be read,
+    /// so this side cannot be checked against it; saving would refuse.
+    #[serde(rename_all = "camelCase")]
+    Unverified { side: PairSide, pair_name: String },
 }
 
 #[cfg(test)]
@@ -547,6 +576,17 @@ mod tests {
                 PairWarning::NamesDiffer {
                     side: PairSide::Left,
                 },
+                PairWarning::RecordsUnsupported {
+                    side: PairSide::Right,
+                },
+                PairWarning::Overlap {
+                    side: PairSide::Left,
+                    pair_name: "Photos".into(),
+                },
+                PairWarning::Unverified {
+                    side: PairSide::Right,
+                    pair_name: "Photos".into(),
+                },
             ],
         };
         let json = serde_json::to_value(&warnings).unwrap();
@@ -556,6 +596,9 @@ mod tests {
                 {"kind":"cloudManaged","side":"left","provider":"iCloud Drive"},
                 {"kind":"metadataUnsupported","side":"right"},
                 {"kind":"namesDiffer","side":"left"},
+                {"kind":"recordsUnsupported","side":"right"},
+                {"kind":"overlap","side":"left","pairName":"Photos"},
+                {"kind":"unverified","side":"right","pairName":"Photos"},
             ]})
         );
         assert_eq!(

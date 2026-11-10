@@ -12,6 +12,10 @@
     <true/>
     <key>MaterializeDatalessFiles</key>
     <false/>
+    <!-- Four concurrent scans retain directory handles and use bounded read workers. -->
+    <!-- The per-user launchd default of 256 descriptors is too small for deep trees. -->
+    <key>SoftResourceLimits</key>
+    <dict><key>NumberOfFiles</key><integer>8192</integer></dict>
     <key>KeepAlive</key>
     <dict><key>SuccessfulExit</key><false/></dict>
     <key>ThrottleInterval</key>

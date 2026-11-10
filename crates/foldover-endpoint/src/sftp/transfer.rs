@@ -7,7 +7,7 @@ use std::cell::{Cell, RefCell};
 use std::io;
 
 use foldover_fs::{NativeMetadata, PARTIAL_MIN_BYTES, Resume};
-use foldover_net::sftp::{Attributes, FileKind};
+use foldover_net::sftp::{Attributes, FileKind, Session};
 use foldover_proto::peer::IncomingKind;
 use foldover_types::{EntryContent, EntryKind, EntryVersion, ScanControl, SyncPath};
 
@@ -43,13 +43,17 @@ impl Source<'_> {
         }
     }
 
-    fn link_target(&self, path: &SyncPath) -> Result<Vec<u8>, ApplyError> {
+    fn link_target(
+        &self,
+        path: &SyncPath,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<Vec<u8>, ApplyError> {
         match self {
             Self::Local(_, entry) => entry
                 .link_target()
                 .map(<[u8]>::to_vec)
                 .ok_or_else(|| ApplyError::Unsupported(path.clone())),
-            Self::Sftp(endpoint, _) => Ok(endpoint.read_link(path)?),
+            Self::Sftp(endpoint, _) => Ok(endpoint.read_link(path, control)?),
             Self::Peer(source) => source
                 .link_target()
                 .map(<[u8]>::to_vec)
@@ -66,7 +70,7 @@ impl Source<'_> {
         path: &SyncPath,
         from: u64,
         run: &RunScope,
-        control: &mut impl FnMut() -> ScanControl,
+        control: &mut dyn FnMut() -> ScanControl,
         sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
         error: &RefCell<Option<ApplyError>>,
     ) -> io::Result<()> {
@@ -74,10 +78,16 @@ impl Source<'_> {
         // goes. The wait asks the control too, so a cancel is not held
         // up; the reader asks it between chunks, never during a wait.
         let control = RefCell::new(control);
-        let mut checked = || (*control.borrow_mut())();
         // A cancel during a wait reaches the source as a failed write, so
         // it is noted here to come out as the cancel it is.
         let cancelled = Cell::new(false);
+        let mut checked = || {
+            let state = (*control.borrow_mut())();
+            if state == ScanControl::Cancel {
+                cancelled.set(true);
+            }
+            state
+        };
         let mut paced = |chunk: &[u8]| {
             if let Some(pace) = run.pace()
                 && pace.wait(chunk.len() as u64, &mut || (*control.borrow_mut())())
@@ -127,7 +137,7 @@ pub(crate) fn copy(
     // PLAN.md §4.9: a large file continues after what a broken-off copy
     // kept at the destination, unless the run keeps nothing there.
     let kept = match run.archiving() {
-        Archiving::Kept => kept(to, planned),
+        Archiving::Kept => kept(to, planned, control)?,
         Archiving::Off => 0,
     };
     let source = source(from, path, planned, run, control, kept)?;
@@ -151,7 +161,7 @@ pub(crate) fn copy(
                     local.receive_directory(path, carried, run, control)
                 }
                 EntryKind::Symlink => {
-                    let target = source.link_target(path)?;
+                    let target = source.link_target(path, control)?;
                     local.receive_link(path, destination.as_ref(), &target, run, control)
                 }
                 EntryKind::File => {
@@ -168,25 +178,41 @@ pub(crate) fn copy(
                         content,
                         from: kept,
                     };
+                    let control = RefCell::new(control);
+                    let mut destination_control = || (*control.borrow_mut())();
                     let received = local.receive_file(
                         path,
                         destination.as_ref(),
                         carried,
                         resume,
                         run,
-                        |sink| source.push(path, kept, run, control, sink, &failure),
+                        &mut destination_control,
+                        |sink| {
+                            let mut source_control = || (*control.borrow_mut())();
+                            source.push(path, kept, run, &mut source_control, sink, &failure)
+                        },
                     );
                     received.map_err(|error| failure.into_inner().unwrap_or(error))
                 }
             }
         }
         Endpoint::Sftp(remote) => {
-            let destination = receiving(remote, path, current, run, control)?;
-            send(
+            // Read an SFTP source link before holding the destination's
+            // session. Opposite-direction link copies must not each hold one
+            // endpoint while waiting for the other's one-session pool.
+            let link_target = match kind {
+                EntryKind::Symlink => Some(source.link_target(path, control)?),
+                EntryKind::File | EntryKind::Directory => None,
+            };
+            let mut session = remote.session_unless_cancelled(control)?;
+            let destination = receiving_on(remote, &mut session, path, current, run, control)?;
+            send_on(
                 remote,
+                &mut session,
                 &source,
                 path,
                 kind,
+                link_target.as_deref(),
                 expected,
                 destination.as_ref(),
                 run,
@@ -204,7 +230,7 @@ pub(crate) fn copy(
                 },
                 EntryKind::Directory => IncomingKind::Folder,
                 EntryKind::Symlink => IncomingKind::Link {
-                    target: source.link_target(path)?,
+                    target: source.link_target(path, control)?,
                 },
             };
             let native = source.native(run)?;
@@ -213,10 +239,19 @@ pub(crate) fn copy(
                 metadata: source.metadata(),
                 native: native.as_ref(),
             };
-            let received = remote.receive(path, current, kind, carried, run, |sink| {
-                source.push(path, kept, run, control, sink, &failure)
-            });
-            received.map_err(|error| failure.into_inner().unwrap_or(error))
+            let received = remote.receive(
+                path,
+                current,
+                kind,
+                carried,
+                run,
+                control,
+                |sink, checkpoint| source.push(path, kept, run, checkpoint, sink, &failure),
+            );
+            received.map_err(|error| match error {
+                error @ ApplyError::Write { .. } => failure.into_inner().unwrap_or(error),
+                error => error,
+            })
         }
     }
 }
@@ -239,7 +274,7 @@ pub(crate) fn update_metadata(
     }
     // Another Mac sends only the metadata, not the data with it.
     let (metadata, native) = match from {
-        Endpoint::Peer(remote) => remote.source_metadata(path, planned, run)?,
+        Endpoint::Peer(remote) => remote.source_metadata(path, planned, run, control)?,
         _ => {
             let source = source(from, path, planned, run, control, 0)?;
             let native = match to {
@@ -257,7 +292,7 @@ pub(crate) fn update_metadata(
                 metadata,
                 native: native.as_ref(),
             };
-            remote.receive_metadata(path, current, carried, run)
+            remote.receive_metadata(path, current, carried, run, control)
         }
         Endpoint::Local(local) => {
             let carried = Carried {
@@ -267,40 +302,62 @@ pub(crate) fn update_metadata(
             local.receive_metadata(path, current, carried, run, control)
         }
         Endpoint::Sftp(remote) => {
-            let attributes = receiving(remote, path, Expected::Present(current), run, control)?
-                .ok_or_else(|| ApplyError::DestinationChanged(path.clone()))?;
+            let mut session = remote.session_unless_cancelled(control)?;
+            let attributes = receiving_on(
+                remote,
+                &mut session,
+                path,
+                Expected::Present(current),
+                run,
+                control,
+            )?
+            .ok_or_else(|| ApplyError::DestinationChanged(path.clone()))?;
             if attributes.kind() != FileKind::Symlink {
-                remote.update_metadata(
+                remote.update_metadata_on(
+                    &mut session,
                     path,
                     current.version().kind(),
                     metadata,
                     run.options().metadata(),
                 )?;
             }
-            remote.metadata_version(path, current.version().content(), run.options().metadata())
+            remote.metadata_version_on(
+                &mut session,
+                path,
+                current.version().content(),
+                run.options().metadata(),
+            )
         }
     }
 }
 
 /// How much of `planned` a broken-off copy kept at `to`. Resuming only
 /// saves time, so a failure to find out starts the copy over.
-fn kept(to: &Endpoint, planned: &ObservedEntry) -> u64 {
+fn kept(
+    to: &Endpoint,
+    planned: &ObservedEntry,
+    control: &mut impl FnMut() -> ScanControl,
+) -> Result<u64, ApplyError> {
     let EntryContent::File(content) = planned.version().content() else {
-        return 0;
+        return Ok(0);
     };
     if planned.size() < PARTIAL_MIN_BYTES {
-        return 0;
+        return Ok(0);
     }
     let kept = match to {
         #[cfg(feature = "simulation")]
         Endpoint::Memory(_) => Ok(0),
         Endpoint::Local(local) => local.partial_length(&content),
-        Endpoint::Peer(remote) => remote.partial_length(&content),
+        Endpoint::Peer(remote) => remote.partial_length(&content, control),
         // Pipelined SFTP writes may land out of order, leaving holes no
         // digest there would catch; SFTP copies start over.
         Endpoint::Sftp(_) => Ok(0),
     };
-    kept.unwrap_or(0).min(planned.size())
+    match kept {
+        Err(ApplyError::Scan(ScanError::Cancelled)) => Err(ScanError::Cancelled.into()),
+        Ok(kept) => Ok(kept.min(planned.size())),
+        Err(_) => Ok(0),
+    }
 }
 
 /// `from`'s entry, a peer's read starting at byte `kept`.
@@ -322,45 +379,59 @@ fn source<'a>(
         // hashing it here first would only download it twice; the read
         // checks its stat stays put.
         Endpoint::Sftp(remote) if planned.version().kind() == EntryKind::File => {
+            let mut session = remote.session_unless_cancelled(control)?;
             let attributes = remote
-                .attributes(path)?
+                .attributes_on(&mut session, path)?
                 .filter(|attributes| {
                     attributes.kind() == FileKind::File && attributes.size == Some(planned.size())
                 })
                 .ok_or_else(|| ApplyError::SourceChanged(path.clone()))?;
             Source::Sftp(remote, attributes)
         }
-        Endpoint::Sftp(remote) => Source::Sftp(
-            remote,
-            remote
-                .verified(path, planned, run.options().metadata(), control)
-                .map_err(|error| match error {
-                    ApplyError::DestinationChanged(_) | ApplyError::Scan(ScanError::Changed(_)) => {
-                        ApplyError::SourceChanged(path.clone())
-                    }
-                    error => error,
-                })?,
-        ),
-        Endpoint::Peer(remote) => Source::Peer(remote.read(path, planned, run, kept)?),
+        Endpoint::Sftp(remote) => {
+            let mut session = remote.session_unless_cancelled(control)?;
+            Source::Sftp(
+                remote,
+                remote
+                    .verified_at_on(
+                        &mut session,
+                        path,
+                        planned,
+                        run.options().metadata(),
+                        control,
+                    )
+                    .map(|(_, attributes)| attributes)
+                    .map_err(|error| match error {
+                        ApplyError::DestinationChanged(_)
+                        | ApplyError::Scan(ScanError::Changed(_)) => {
+                            ApplyError::SourceChanged(path.clone())
+                        }
+                        error => error,
+                    })?,
+            )
+        }
+        Endpoint::Peer(remote) => Source::Peer(remote.read(path, planned, run, kept, control)?),
     })
 }
 
 /// What an SFTP `path` holds before receiving: nothing, or the verified
 /// entry the plan expected.
-fn receiving(
+fn receiving_on(
     remote: &SftpEndpoint,
+    session: &mut Session,
     path: &SyncPath,
     current: Expected<'_>,
     run: &RunScope,
     control: &mut impl FnMut() -> ScanControl,
 ) -> Result<Option<Attributes>, ApplyError> {
     match current {
-        Expected::Absent => match remote.attributes(path)? {
+        Expected::Absent => match remote.attributes_on(session, path)? {
             None => Ok(None),
             Some(_) => Err(ApplyError::DestinationChanged(path.clone())),
         },
         Expected::Present(current) => remote
-            .verified(path, current, run.options().metadata(), control)
+            .verified_at_on(session, path, current, run.options().metadata(), control)
+            .map(|(_, attributes)| attributes)
             .map(Some)
             .map_err(|error| match error {
                 ApplyError::Scan(ScanError::Changed(_)) => {
@@ -372,11 +443,13 @@ fn receiving(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn send(
+fn send_on(
     remote: &SftpEndpoint,
+    session: &mut Session,
     source: &Source<'_>,
     path: &SyncPath,
     kind: EntryKind,
+    link_target: Option<&[u8]>,
     expected: EntryContent,
     destination: Option<&Attributes>,
     run: &RunScope,
@@ -395,26 +468,27 @@ fn send(
                 return Err(ApplyError::Unsupported(path.clone()));
             }
             remote
-                .make_directory(path, synced_mode(DEFAULT_DIRECTORY))
-                .map_err(|source| match remote.attributes(path) {
+                .make_directory_on(session, path, synced_mode(DEFAULT_DIRECTORY))
+                .map_err(|source| match remote.attributes_on(session, path) {
                     Ok(Some(_)) => ApplyError::DestinationChanged(path.clone()),
                     _ => write_error(path, source),
                 })?;
-            remote.placed_version(path, None, policy, control)
+            remote.placed_version_on(session, path, None, policy, control)
         }
         EntryKind::Symlink => {
-            let target = source.link_target(path)?;
+            let target = link_target.expect("a symlink target is read before its destination");
             let staged = remote
-                .stage_link(path.as_bytes(), &target)
+                .stage_link_on(session, path.as_bytes(), target)
                 .map_err(|source| write_error(path, source))?;
-            remote.place(&staged, path, destination, run)?;
-            remote.placed_version(path, None, policy, control)
+            remote.place_on(session, &staged, path, destination, run)?;
+            remote.placed_version_on(session, path, None, policy, control)
         }
         EntryKind::File => {
             let failure = RefCell::new(None);
             let digest = RefCell::new(blake3::Hasher::new());
             let staged = remote
-                .upload(
+                .upload_on(
+                    session,
                     path.as_bytes(),
                     synced_mode(DEFAULT_FILE),
                     options.durability(),
@@ -435,20 +509,19 @@ fn send(
                 .map_err(|source| failure.take().unwrap_or_else(|| write_error(path, source)))?;
             let digest =
                 foldover_types::Digest::from_bytes(*digest.into_inner().finalize().as_bytes());
-            let applied = remote.set_metadata(&staged, EntryKind::File, metadata, policy);
-            let version = applied.and_then(|()| remote.staged_version(&staged, digest, policy));
+            let version = remote.set_file_metadata_on(session, &staged, digest, metadata, policy);
             let version = match version {
                 Ok(version) if version.content() == expected => version,
                 Ok(_) => {
-                    remote.discard(&staged);
+                    remote.discard_on(session, &staged);
                     return Err(ApplyError::ContentNotStored(path.clone()));
                 }
                 Err(source) => {
-                    remote.discard(&staged);
+                    remote.discard_on(session, &staged);
                     return Err(write_error(path, source));
                 }
             };
-            remote.place(&staged, path, destination, run)?;
+            remote.place_on(session, &staged, path, destination, run)?;
             Ok(version)
         }
     }

@@ -182,6 +182,7 @@ private struct PairMenuItems: View {
         Button("Stop") { Task { await window?.stopSelected() } }
             .keyboardShortcut(".")
             .disabled(!(sync?.canCancel ?? false))
+        automationItem
         // The completion card's Review button: preview again, listing
         // only the conflicts the sync left.
         Button("Review Conflicts") {
@@ -189,6 +190,23 @@ private struct PairMenuItems: View {
             Task { await sync.reviewConflicts() }
         }
         .disabled(!(sync?.canStart ?? false) || (sync?.completionCard?.conflicts ?? 0) == 0)
+    }
+
+    /// Pause or resume the selected pair's automatic syncs.
+    @ViewBuilder
+    private var automationItem: some View {
+        let pair = window?.selectedPair
+        let enabled = pair.map { window?.canChangeAutomation(of: $0) ?? false } ?? false
+        if let pair, pair.automation == .paused {
+            Button("Resume Pair") { Task { await window?.toggleAutomation(of: pair) } }
+                .disabled(!enabled)
+        } else {
+            Button("Pause Pair") {
+                guard let pair else { return }
+                Task { await window?.toggleAutomation(of: pair) }
+            }
+            .disabled(!enabled)
+        }
     }
 
     @ViewBuilder
@@ -232,12 +250,14 @@ private struct AutomaticSyncItems: View {
     var body: some View {
         if viewModel.isPaused {
             Button("Resume Automatic Syncs") { Task { await viewModel.resume() } }
+                .disabled(viewModel.automationMutationPending)
         } else {
             Menu("Pause Automatic Syncs") {
                 ForEach(PauseLength.allCases, id: \.self) { length in
                     Button(MainViewModel.title(length)) { Task { await viewModel.pause(length) } }
                 }
             }
+            .disabled(viewModel.automationMutationPending)
         }
     }
 }

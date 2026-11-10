@@ -467,14 +467,17 @@ pub struct LocalPairConfiguration {
     pub id: String,
     pub revision: u64,
     pub configuration: LocalPairDraft,
+    /// A person paused the pair's automatic syncs; editing keeps it.
+    pub paused: bool,
 }
 
-impl From<foldover_client::PairConfig> for LocalPairConfiguration {
-    fn from(pair: foldover_client::PairConfig) -> Self {
+impl From<foldover_client::PairState> for LocalPairConfiguration {
+    fn from(pair: foldover_client::PairState) -> Self {
         Self {
-            id: pair.id().to_string(),
-            revision: pair.revision(),
-            configuration: pair.draft().into(),
+            id: pair.config.id().to_string(),
+            revision: pair.config.revision(),
+            configuration: pair.config.draft().into(),
+            paused: pair.automation == foldover_client::Automation::Paused,
         }
     }
 }
@@ -544,6 +547,13 @@ pub enum ReadinessWarningKind {
     /// This folder cannot hold Foldover's `.foldover` records, so it can
     /// only be a Backup target that keeps none.
     RecordsUnsupported,
+    /// This folder is, holds or sits inside a folder of the pair named
+    /// `pair_name`; only Mirror and Backup sources may share one, so
+    /// saving would refuse it.
+    Overlap,
+    /// A folder of the pair named `pair_name` is there but cannot be read,
+    /// so this folder cannot be checked against it; saving would refuse.
+    Unverified,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
@@ -552,6 +562,8 @@ pub struct ReadinessWarning {
     pub kind: ReadinessWarningKind,
     /// The other sync engine's name, for `CloudManaged` only.
     pub provider: Option<String>,
+    /// The other pair's name, for `Overlap` and `Unverified` only.
+    pub pair_name: Option<String>,
 }
 
 impl From<foldover_client::PairWarning> for ReadinessWarning {
@@ -566,44 +578,95 @@ impl From<foldover_client::PairWarning> for ReadinessWarning {
                 side: sync_side(side),
                 kind: ReadinessWarningKind::CloudManaged,
                 provider: Some(provider),
+                pair_name: None,
             },
             Warning::MetadataUnsupported { side } => Self {
                 side: sync_side(side),
                 kind: ReadinessWarningKind::MetadataUnsupported,
                 provider: None,
+                pair_name: None,
             },
             Warning::NamesDiffer { side } => Self {
                 side: sync_side(side),
                 kind: ReadinessWarningKind::NamesDiffer,
                 provider: None,
+                pair_name: None,
             },
             Warning::RecordsUnsupported { side } => Self {
                 side: sync_side(side),
                 kind: ReadinessWarningKind::RecordsUnsupported,
                 provider: None,
+                pair_name: None,
+            },
+            Warning::Overlap { side, pair_name } => Self {
+                side: sync_side(side),
+                kind: ReadinessWarningKind::Overlap,
+                provider: None,
+                pair_name: Some(pair_name),
+            },
+            Warning::Unverified { side, pair_name } => Self {
+                side: sync_side(side),
+                kind: ReadinessWarningKind::Unverified,
+                provider: None,
+                pair_name: Some(pair_name),
             },
         }
     }
 }
 
 /// What will not work as a person might expect with `configuration`'s
-/// folders (PLAN.md §3.6). Warnings never block saving.
+/// folders (PLAN.md §3.6); `editing` is the pair the draft would
+/// replace. Only an overlap, or a folder that cannot be checked, names
+/// something saving would refuse.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn check_pair(
     configuration: LocalPairDraft,
+    editing: Option<String>,
 ) -> Result<Vec<ReadinessWarning>, AgentError> {
     let draft = configuration.try_into().map_err(invalid_configuration)?;
-    let warnings = foldover_client::check_pair(&foldover_client::SocketLocation::Default, &draft)
-        .await
-        .map_err(AgentError::read)?;
+    let editing = editing
+        .map(|id| id.parse())
+        .transpose()
+        .map_err(invalid_configuration)?;
+    let warnings =
+        foldover_client::check_pair(&foldover_client::SocketLocation::Default, &draft, editing)
+            .await
+            .map_err(AgentError::read)?;
     Ok(warnings.into_iter().map(Into::into).collect())
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn pair_remove(id: String, revision: u64) -> Result<LocalPairConfiguration, AgentError> {
     let id = id.parse().map_err(invalid_configuration)?;
-    Ok(
+    let config =
         foldover_client::remove_pair(&foldover_client::SocketLocation::Default, id, revision)
+            .await
+            .map_err(AgentError::from)?;
+    Ok(foldover_client::PairState {
+        config,
+        automation: foldover_client::Automation::Running,
+    }
+    .into())
+}
+
+/// Pause the pair's automatic syncs until `pair_resume`. Manual syncs
+/// still run, and a run in progress continues.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn pair_pause(id: String) -> Result<LocalPairConfiguration, AgentError> {
+    let id = id.parse().map_err(invalid_configuration)?;
+    Ok(
+        foldover_client::pause_pair(&foldover_client::SocketLocation::Default, id)
+            .await
+            .map_err(AgentError::from)?
+            .into(),
+    )
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn pair_resume(id: String) -> Result<LocalPairConfiguration, AgentError> {
+    let id = id.parse().map_err(invalid_configuration)?;
+    Ok(
+        foldover_client::resume_pair(&foldover_client::SocketLocation::Default, id)
             .await
             .map_err(AgentError::from)?
             .into(),
@@ -708,6 +771,7 @@ mod tests {
                     side: SyncSide::Left,
                     kind: ReadinessWarningKind::CloudManaged,
                     provider: Some("iCloud Drive".into()),
+                    pair_name: None,
                 },
             ),
             (
@@ -718,6 +782,7 @@ mod tests {
                     side: SyncSide::Right,
                     kind: ReadinessWarningKind::MetadataUnsupported,
                     provider: None,
+                    pair_name: None,
                 },
             ),
             (
@@ -728,6 +793,7 @@ mod tests {
                     side: SyncSide::Left,
                     kind: ReadinessWarningKind::NamesDiffer,
                     provider: None,
+                    pair_name: None,
                 },
             ),
             (
@@ -738,6 +804,31 @@ mod tests {
                     side: SyncSide::Right,
                     kind: ReadinessWarningKind::RecordsUnsupported,
                     provider: None,
+                    pair_name: None,
+                },
+            ),
+            (
+                PairWarning::Overlap {
+                    side: PairSide::Left,
+                    pair_name: "Photos".into(),
+                },
+                ReadinessWarning {
+                    side: SyncSide::Left,
+                    kind: ReadinessWarningKind::Overlap,
+                    provider: None,
+                    pair_name: Some("Photos".into()),
+                },
+            ),
+            (
+                PairWarning::Unverified {
+                    side: PairSide::Right,
+                    pair_name: "Photos".into(),
+                },
+                ReadinessWarning {
+                    side: SyncSide::Right,
+                    kind: ReadinessWarningKind::Unverified,
+                    provider: None,
+                    pair_name: Some("Photos".into()),
                 },
             ),
         ] {

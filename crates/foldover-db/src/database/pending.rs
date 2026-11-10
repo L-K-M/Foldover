@@ -5,13 +5,16 @@ use super::*;
 
 pub(super) fn visible_pairs() -> String {
     format!(
-        "(SELECT {PAIR_COLUMNS} FROM pending_pair UNION ALL SELECT {PAIR_COLUMNS} FROM pair WHERE NOT EXISTS (SELECT 1 FROM pending_pair WHERE pending_pair.id=pair.id))"
+        "(SELECT {PAIR_COLUMNS} FROM pending_pair WHERE id NOT IN (SELECT pair_id FROM pair_removal) UNION ALL SELECT {PAIR_COLUMNS} FROM pair WHERE NOT EXISTS (SELECT 1 FROM pending_pair WHERE pending_pair.id=pair.id) AND id NOT IN (SELECT pair_id FROM pair_removal))"
     )
 }
 
 pub(super) fn active_revision(connection: &Connection, id: &[u8]) -> Result<i64, Error> {
     connection
-        .query_row("SELECT revision FROM pair WHERE id=?1", [id], |row| {
+        .query_row(
+            "SELECT revision FROM pair WHERE id=?1 AND id NOT IN (SELECT pair_id FROM pair_removal)",
+            [id],
+            |row| {
             row.get(0)
         })
         .optional()?
@@ -43,7 +46,7 @@ impl Database {
         Ok(self
             .connection
             .query_row(
-                &format!("SELECT {PAIR_COLUMNS} FROM pair WHERE id=?1"),
+                &format!("SELECT {PAIR_COLUMNS} FROM pair WHERE id=?1 AND id NOT IN (SELECT pair_id FROM pair_removal)"),
                 [id],
                 pair_row,
             )
@@ -487,9 +490,9 @@ mod tests {
         database
             .change_base(&pair.id, 1, &[put(b"kept", b"v")], JournalChange::None)
             .unwrap();
-        // The active schema was unchanged by V27. Removing its new table
-        // and restoring V26's metadata recreates an existing V26 state.
-        database.connection.execute_batch("DROP TABLE pending_pair; UPDATE state_meta SET minimum_reader=26; PRAGMA user_version=26;").unwrap();
+        // V27 to V30 added tables and one column. Removing them and
+        // restoring V26's metadata recreates a V26 state.
+        database.connection.execute_batch("ALTER TABLE automation_setting DROP COLUMN automatic_effort; DROP TABLE pair_pause; DROP TABLE pair_removal; DROP TABLE pending_pair; UPDATE state_meta SET minimum_reader=26; PRAGMA user_version=26;").unwrap();
         drop(database);
 
         let mut database = Database::open(&location).unwrap();
@@ -509,6 +512,6 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(floor, 27);
+        assert_eq!(floor, 28);
     }
 }

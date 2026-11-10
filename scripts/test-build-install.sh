@@ -191,6 +191,19 @@ expect_status 0
 expect_installed old
 expect_no_call "launchctl"
 
+run "headless builds open no GUI" -- app --no-open
+expect_status 0
+expect_installed old
+expect_no_call "open "
+
+run "headless installs quit the replaced app without reopening it" app-running agent-running -- app --install --no-open
+expect_status 0
+expect_installed new
+[[ ! -e "$state/app-running" ]] || fail "$name: the running app was not quit"
+expect_no_call "open "
+expect_no_call "kickstart"
+expect_out "open Foldover to restart the background agent"
+
 run "installs nothing when the build fails" xcodebuild-fails -- app --install
 expect_status 1
 expect_installed old

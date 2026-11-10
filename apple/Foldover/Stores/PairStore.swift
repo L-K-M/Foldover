@@ -16,6 +16,21 @@ struct SelectedFolder: Equatable, Sendable {
     let bytes: Data
 }
 
+/// The disk or share a local folder is on, and how full it is.
+struct FolderVolume: Equatable, Sendable {
+    /// The name Finder shows, e.g. "Backup SSD".
+    let name: String
+    let totalBytes: UInt64
+    let availableBytes: UInt64
+
+    /// Read off the main thread; nil when macOS cannot say.
+    static func read(_ url: URL) async -> FolderVolume? {
+        await VolumeReader.read(url).map {
+            FolderVolume(name: $0.name, totalBytes: $0.totalBytes, availableBytes: $0.availableBytes)
+        }
+    }
+}
+
 /// When the agent syncs without being asked, after the first manual sync.
 enum SyncSchedule: Hashable, Sendable {
     case manual
@@ -112,10 +127,19 @@ struct PairSettings: Equatable, Sendable {
     }
 }
 
+/// Whether a pair's automatic syncs run, or wait until a person resumes
+/// them. Manual syncs run either way.
+enum PairAutomation: Equatable, Sendable {
+    case running
+    case paused
+}
+
 struct SyncPair: Identifiable, Equatable, Sendable {
     let id: String
     let revision: UInt64
     let settings: PairSettings
+    /// Not a setting: pausing keeps the revision, and editing keeps the pause.
+    var automation: PairAutomation = .running
 }
 
 struct PairCatalogPage: Sendable {
@@ -124,8 +148,9 @@ struct PairCatalogPage: Sendable {
 }
 
 /// What will not work as a person might expect with a picked folder
-/// (PLAN.md §3.6). The agent saves regardless; the editor blocks saving
-/// only over refused records.
+/// (PLAN.md §3.6). The editor blocks saving over refused records, folder
+/// overlaps and folders it cannot check; saving itself would refuse the
+/// last two.
 struct PairReadinessWarning: Equatable, Sendable {
     enum Kind: Equatable, Sendable {
         /// Another sync engine manages this folder; `provider` names it.
@@ -137,6 +162,13 @@ struct PairReadinessWarning: Equatable, Sendable {
         /// This folder cannot hold Foldover's `.foldover` records, so it
         /// can only be a Backup target that keeps none.
         case recordsUnsupported
+        /// This folder is, holds or sits inside a folder of the pair
+        /// `pairName`; only Mirror and Backup sources may share one, so
+        /// saving would refuse it.
+        case overlap(pairName: String)
+        /// A folder of the pair `pairName` is there but cannot be read, so
+        /// this folder cannot be checked against it; saving would refuse.
+        case unverified(pairName: String)
     }
 
     let side: FolderSide
@@ -175,7 +207,11 @@ protocol PairClient: Sendable {
     func create(_ settings: PairSettings) async throws -> SyncPair
     func update(_ pair: SyncPair, settings: PairSettings) async throws -> SyncPair
     func remove(_ pair: SyncPair) async throws -> SyncPair
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning]
+    /// Pause or resume the pair's automatic syncs.
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair
+    /// `editing` is the pair the settings would replace, or nil for a
+    /// new pair; its own folders never count as overlaps.
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning]
     /// Waits about two seconds while the agent browses the network.
     func servers() async throws -> [NearbyServer]
     /// Connecting to the server can take a few seconds.
@@ -203,8 +239,15 @@ private actor CorePairClient: PairClient {
         self.pair(try await FoldoverCore.pairRemove(id: pair.id, revision: pair.revision))
     }
 
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] {
-        try await FoldoverCore.checkPair(configuration: configuration(settings)).map(warning)
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws -> SyncPair {
+        switch automation {
+        case .paused: self.pair(try await FoldoverCore.pairPause(id: pair.id))
+        case .running: self.pair(try await FoldoverCore.pairResume(id: pair.id))
+        }
+    }
+
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] {
+        try await FoldoverCore.checkPair(configuration: configuration(settings), editing: editing).map(warning)
     }
 
     func servers() async throws -> [NearbyServer] {
@@ -231,6 +274,8 @@ private actor CorePairClient: PairClient {
         case .metadataUnsupported: .metadataUnsupported
         case .namesDiffer: .namesDiffer
         case .recordsUnsupported: .recordsUnsupported
+        case .overlap: .overlap(pairName: warning.pairName ?? "")
+        case .unverified: .unverified(pairName: warning.pairName ?? "")
         }
         return PairReadinessWarning(side: side, kind: kind)
     }
@@ -247,7 +292,7 @@ private actor CorePairClient: PairClient {
             name: draft.name, left: SelectedFolder(bytes: draft.leftRoot),
             right: SelectedFolder(bytes: draft.rightRoot), mode: mode(draft.mode),
             options: pairOptions(draft.options)
-        ))
+        ), automation: pair.paused ? .paused : .running)
     }
 
     private func coreMode(_ mode: PairMode) -> FoldoverCore.PairMode {
@@ -395,6 +440,12 @@ private enum PairStoreError: LocalizedError {
 final class PairStore {
     private let client: any PairClient
     private let revealInFinder: @MainActor ([URL]) -> Void
+    private let readVolume: @Sendable (URL) async -> FolderVolume?
+    /// Each local folder's last volume reading, and the folders whose
+    /// read is still out: one read per folder, so a stalled share never
+    /// gathers more.
+    @ObservationIgnored private var volumes: [Data: FolderVolume] = [:]
+    @ObservationIgnored private var volumeReads: Set<Data> = []
     private var generation = 0
     private(set) var pairs: [SyncPair] = []
     private(set) var isLoading = false
@@ -403,15 +454,30 @@ final class PairStore {
     private(set) var loadError: String?
 
     init(client: any PairClient = CorePairClient(),
-         reveal: @escaping @MainActor ([URL]) -> Void = { FinderReveal.reveal($0) }) {
+         reveal: @escaping @MainActor ([URL]) -> Void = { FinderReveal.reveal($0) },
+         volume: @escaping @Sendable (URL) async -> FolderVolume? = { await FolderVolume.read($0) }) {
         self.client = client
         revealInFinder = reveal
+        readVolume = volume
     }
 
     /// Select `urls` in Finder windows.
     func reveal(_ urls: [URL]) {
         guard !urls.isEmpty else { return }
         revealInFinder(urls)
+    }
+
+    /// The disk or share `folder` is on, and how full it is; nil for
+    /// SFTP and other-Mac folders, and when macOS cannot say. While the
+    /// folder's last read is still out, as on a stalled share, its
+    /// reading from before stands in.
+    func volume(of folder: SelectedFolder) async -> FolderVolume? {
+        guard let url = Self.localURL(folder) else { return nil }
+        guard volumeReads.insert(folder.bytes).inserted else { return volumes[folder.bytes] }
+        let reading = await readVolume(url)
+        volumeReads.remove(folder.bytes)
+        volumes[folder.bytes] = reading
+        return reading
     }
 
     func refresh() async {
@@ -443,9 +509,11 @@ final class PairStore {
     }
 
     /// What will not work as a person might expect with `settings`' folders
-    /// (PLAN.md §3.6); warnings never block saving.
-    func check(_ settings: PairSettings) async throws -> [PairReadinessWarning] {
-        try await client.check(settings)
+    /// (PLAN.md §3.6); `editing` is the pair the settings would replace.
+    /// Only an overlap, or a folder that cannot be checked, names something
+    /// saving would refuse.
+    func check(_ settings: PairSettings, editing: String?) async throws -> [PairReadinessWarning] {
+        try await client.check(settings, editing: editing)
     }
 
     /// SMB file servers seen on the local network (PLAN.md §3.8); waits
@@ -549,6 +617,21 @@ final class PairStore {
         let removed = try await client.remove(pair)
         guard removed.id == pair.id, removed.revision == pair.revision else { throw PairStoreError.invalidPage }
         pairs.removeAll { $0.id == pair.id }
+    }
+
+    /// Pause or resume the pair's automatic syncs. Its settings and
+    /// revision stay, so an open editor stays current.
+    func setAutomation(_ automation: PairAutomation, of pair: SyncPair) async throws {
+        guard !isSaving else { throw PairStoreError.saving }
+        generation += 1
+        isLoading = false
+        isSaving = true
+        defer { isSaving = false }
+        let changed = try await client.setAutomation(automation, of: pair)
+        guard changed.id == pair.id, changed.automation == automation else { throw PairStoreError.invalidPage }
+        if let index = pairs.firstIndex(where: { $0.id == pair.id }) {
+            pairs[index] = changed
+        }
     }
 
     static func message(for error: Error) -> String {

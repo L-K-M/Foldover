@@ -44,10 +44,16 @@ final class PairEditorViewModel: Identifiable {
     private(set) var savedPairID: String?
     /// What the agent says will not work as expected with the picked
     /// folders (PLAN.md §3.6); these never block saving, unlike
-    /// `recordsWarning`.
+    /// `recordsWarning`, `overlapWarning` and `uncheckedWarning`.
     private(set) var readinessWarnings: [String] = []
     /// Folders that cannot hold Foldover's `.foldover` records.
     private(set) var recordsRefused: Set<FolderSide> = []
+    /// Folders another pair already claims: the overlapping side and the
+    /// other pair's name, from the latest check.
+    private(set) var folderOverlaps: [(side: FolderSide, pairName: String)] = []
+    /// Pairs with a folder that is there but cannot be read, so the picked
+    /// folders cannot be checked against it, from the latest check.
+    private(set) var uncheckedPairs: [String] = []
     /// SMB servers found on the local network (PLAN.md §3.8); empty
     /// until the browse answers.
     private(set) var nearbyServers: [NearbyServer] = []
@@ -85,7 +91,7 @@ final class PairEditorViewModel: Identifiable {
     }
 
     var title: String { editing == nil ? String(localized: "New Pair") : String(localized: "Edit Pair") }
-    var canSave: Bool { !isSaving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && left != nil && right != nil && durabilityWarning == nil && canaryWarning == nil && dailyWarning == nil && recordsWarning == nil }
+    var canSave: Bool { !isSaving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && left != nil && right != nil && durabilityWarning == nil && canaryWarning == nil && dailyWarning == nil && recordsWarning == nil && overlapWarning == nil && uncheckedWarning == nil }
 
     private var backupTarget: FolderSide? { Self.backupTarget(mode) }
 
@@ -148,6 +154,31 @@ final class PairEditorViewModel: Identifiable {
             return String(localized: "\(name) can't hold Foldover's .foldover folder. To back up to it, turn on “Keep nothing in \(name)”.")
         }
         return String(localized: "\(name) can't hold Foldover's .foldover folder, so it can only be a Backup's target. Choose a Backup to \(name), then keep nothing in it.")
+    }
+
+    /// Saving refuses while another pair's folder cannot be read: whether
+    /// the picked folders overlap it is unknown (ADR 0048). One sentence
+    /// per pair, then what to do.
+    var uncheckedWarning: String? {
+        guard !uncheckedPairs.isEmpty else { return nil }
+        var sentences = uncheckedPairs.map { pairName in
+            String(localized: "A folder of “\(pairName)” can't be read, so these folders can't be checked against it.")
+        }
+        sentences.append(String(localized: "Connect it, or give Foldover access to it, to save."))
+        return sentences.joined(separator: " ")
+    }
+
+    /// A folder another pair already uses can be shared only as a
+    /// Mirror's or Backup's source; saving refuses anything else, so the
+    /// editor blocks it (PLAN.md §3.6). One sentence per overlapping
+    /// side, then the rule.
+    var overlapWarning: String? {
+        guard !folderOverlaps.isEmpty else { return nil }
+        var sentences = folderOverlaps.map { overlap in
+            String(localized: "\(PairSyncViewModel.folderName(overlap.side)) overlaps a folder of “\(overlap.pairName)”.")
+        }
+        sentences.append(String(localized: "Pairs can share a folder only as the source of a Mirror or Backup."))
+        return sentences.joined(separator: " ")
     }
 
     /// Exclusion rules as editable text, one per line. The text is kept as
@@ -405,27 +436,44 @@ final class PairEditorViewModel: Identifiable {
         }
     }
 
-    static func scheduleTitle(_ schedule: SyncSchedule) -> String {
+    static func scheduleTitle(_ schedule: SyncSchedule, locale: Locale = .autoupdatingCurrent) -> String {
         switch schedule {
         case .manual: String(localized: "Only when I click Sync Now")
         case .onChange: String(localized: "When files change")
         case .every(60): String(localized: "Every hour")
         case .every(1440): String(localized: "Every day")
         case .every(let minutes): String(localized: "Every \(minutes) minutes")
-        case .daily(let minutes, let days): dailyTitle(minutes: Int(minutes), days: days)
+        case .daily(let minutes, let days): dailyTitle(minutes: Int(minutes), days: days, locale: locale)
         }
     }
 
     /// Monday through Friday, the daily schedule titled "Weekdays".
     private static let weekdays: Set<SyncDay> = [.monday, .tuesday, .wednesday, .thursday, .friday]
 
-    private static func timeText(_ minutes: Int) -> String {
-        String(format: "%02d:%02d", minutes / 60, minutes % 60)
+    /// A time of day as the Mac's clock shows it, "18:00" or "6:00 PM":
+    /// the summary must read like the time picker it sits beside.
+    private static func timeText(_ minutes: Int, locale: Locale) -> String {
+        // A fixed day in UTC: only the hour and minute are formatted.
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .gmt
+        let parts = DateComponents(year: 2001, month: 1, day: 1, hour: minutes / 60, minute: minutes % 60)
+        guard let date = calendar.date(from: parts) else {
+            return String(format: "%02d:%02d", minutes / 60, minutes % 60)
+        }
+        // The short style is the locale's own pattern, the one the picker
+        // uses: `Date.FormatStyle` drops the leading zero of "02:30".
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.calendar = calendar
+        formatter.timeZone = .gmt
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
     }
 
-    /// "Every day at 02:30", "Weekdays at 18:00" or "Mon, Wed, Fri at 07:15".
-    private static func dailyTitle(minutes: Int, days: Set<SyncDay>) -> String {
-        let time = timeText(minutes)
+    /// "Every day at 02:30", "Weekdays at 6:00 PM" or "Mon, Wed, Fri at 07:15".
+    private static func dailyTitle(minutes: Int, days: Set<SyncDay>, locale: Locale) -> String {
+        let time = timeText(minutes, locale: locale)
         if days.count == SyncDay.allCases.count {
             return String(localized: "Every day at \(time)")
         }
@@ -442,13 +490,15 @@ final class PairEditorViewModel: Identifiable {
     /// What a pair will do, in at most three short sentences (PLAN.md
     /// §3.8): the direction, what happens to deleted files plus any
     /// unusual choices, and when syncs run.
-    static func planText(mode: PairMode, options: PairOptions) -> String {
+    static func planText(
+        mode: PairMode, options: PairOptions, locale: Locale = .autoupdatingCurrent
+    ) -> String {
         var consequence = [deletionClause(mode)]
         consequence.append(contentsOf: planDetails(mode: mode, options: options))
         let joined = consequence.joined(separator: "; ")
         let consequenceSentence = "\(joined.prefix(1).uppercased())\(joined.dropFirst())."
-        return [directionSentence(mode), consequenceSentence, scheduleSentence(options.schedule)]
-            .joined(separator: " ")
+        let schedule = scheduleSentence(options.schedule, locale: locale)
+        return [directionSentence(mode), consequenceSentence, schedule].joined(separator: " ")
     }
 
     private static func directionSentence(_ mode: PairMode) -> String {
@@ -473,16 +523,17 @@ final class PairEditorViewModel: Identifiable {
 
     /// When syncs run, from the schedule's own title; daily titles that
     /// name weekdays keep their capitals.
-    private static func scheduleSentence(_ schedule: SyncSchedule) -> String {
+    private static func scheduleSentence(_ schedule: SyncSchedule, locale: Locale) -> String {
         switch schedule {
         case .manual:
             return String(localized: "Syncs only when you click Sync Now.")
         case .daily(let minutes, let days) where days.isEmpty:
-            return String(localized: "Syncs at \(timeText(Int(minutes))) once you choose weekdays.")
+            let time = timeText(Int(minutes), locale: locale)
+            return String(localized: "Syncs at \(time) once you choose weekdays.")
         case .daily(_, let days) where days.count != SyncDay.allCases.count && days != weekdays:
-            return String(localized: "Syncs \(scheduleTitle(schedule)).")
+            return String(localized: "Syncs \(scheduleTitle(schedule, locale: locale)).")
         default:
-            let title = scheduleTitle(schedule)
+            let title = scheduleTitle(schedule, locale: locale)
             return String(localized: "Syncs \(title.prefix(1).lowercased())\(title.dropFirst()).")
         }
     }
@@ -709,9 +760,21 @@ final class PairEditorViewModel: Identifiable {
         isBrowsingServer = false
     }
 
+    /// Whether "Use This Folder" has a folder to try: a typed locator or a
+    /// highlighted row, which needs no text in the field.
+    func canUseServerFolder(highlighted: String?) -> Bool {
+        highlighted != nil || !serverLocator.isEmpty
+    }
+
     /// Use `serverLocator` for `side`; false, with the reason shown, when
-    /// it does not name a folder on a server.
-    func useServerFolder(side: PairFolderSide) -> Bool {
+    /// it does not name a folder on a server. Like an open panel, a row
+    /// highlighted in the listing wins over the folder being browsed: a
+    /// listed folder, or the enclosing folder.
+    func useServerFolder(side: PairFolderSide, highlighted: String? = nil) -> Bool {
+        if let highlighted, let listing = serverListing,
+           highlighted == listing.parent || listing.folders.contains(where: { $0.locator == highlighted }) {
+            serverLocator = highlighted
+        }
         let locator = serverLocator.trimmingCharacters(in: .whitespacesAndNewlines)
         guard Self.isServerLocator(locator) else {
             serverBrowseError = Self.serverLocatorHelp
@@ -778,12 +841,28 @@ final class PairEditorViewModel: Identifiable {
         guard let left, let right else {
             readinessWarnings = []
             recordsRefused = []
+            folderOverlaps = []
+            uncheckedPairs = []
             return
         }
         let settings = PairSettings(name: name, left: left, right: right, mode: mode, options: options)
-        guard let warnings = try? await store.check(settings), generation == checkGeneration else { return }
-        // Refused records get their own, blocking warning.
+        guard let warnings = try? await store.check(settings, editing: editing?.id),
+              generation == checkGeneration else { return }
+        // Refused records, overlaps and folders that cannot be checked
+        // get their own, blocking warnings.
         recordsRefused = Set(warnings.filter { $0.kind == .recordsUnsupported }.map(\.side))
+        folderOverlaps = warnings.compactMap { warning in
+            guard case .overlap(let pairName) = warning.kind else { return nil }
+            return (side: warning.side, pairName: pairName)
+        }
+        // One sentence per pair: both sides usually wait on the same one.
+        var unchecked: [String] = []
+        for warning in warnings {
+            if case .unverified(let pairName) = warning.kind, !unchecked.contains(pairName) {
+                unchecked.append(pairName)
+            }
+        }
+        uncheckedPairs = unchecked
         readinessWarnings = warnings.compactMap(text)
     }
 
@@ -812,13 +891,20 @@ final class PairEditorViewModel: Identifiable {
         case .recordsUnsupported:
             // Shown as `recordsWarning` instead.
             return nil
+        case .overlap:
+            // Shown as `overlapWarning` instead.
+            return nil
+        case .unverified:
+            // Shown as `uncheckedWarning` instead.
+            return nil
         }
     }
 
     func save() async -> Bool {
         guard !isSaving else { return false }
-        // A folder that refuses records must be known before saving, or a
-        // pair that can never sync slips through while the check runs.
+        // Refused records and overlaps must be known before saving, or a
+        // pair that can never sync or gets refused slips through while
+        // the check runs.
         isSaving = true
         await checkTask?.value
         isSaving = false

@@ -264,9 +264,10 @@ fn sighting<'a>(
     } else {
         name
     };
+    // Nothing listens on port 0: an advert naming it is malformed.
     let pairing: Option<u16> = match property(PAIRING_KEY) {
         None => None,
-        Some(port) => Some(port.parse().ok()?),
+        Some(port) => Some(port.parse().ok().filter(|port| *port != 0)?),
     };
 
     // Agents listen on IPv4; the network's own addresses before loopback.

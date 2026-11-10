@@ -7,7 +7,11 @@ use foldover_types::{Digest, ScanControl, SyncPath};
 
 use crate::prevent_materialization;
 
-use super::{DataResidency, EntryMetadata, NodeKind, Root};
+use super::extended::capture_observed_file;
+use super::{
+    DataResidency, EntryMetadata, ExtendedMetadata, MetadataCapture, MetadataReadError, NodeKind,
+    Root,
+};
 
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
 
@@ -23,6 +27,14 @@ pub enum HashError {
     Changed,
     #[error("Content hashing cancelled; no digest was returned")]
     Cancelled,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ObserveFileError {
+    #[error("Content observation failed: {0}")]
+    Hash(#[from] HashError),
+    #[error("Extended metadata observation failed: {0}")]
+    Metadata(#[from] MetadataReadError),
 }
 
 impl Root {
@@ -89,6 +101,25 @@ impl Root {
     ) -> Result<Digest, HashError> {
         let mut file = self.open_observed_file(path, expected, control)?;
         self.stream_observed_file(path, &mut file, expected, control, sink)
+    }
+
+    /// Observe a regular file's selected extended metadata and data digest
+    /// through one already-opened descriptor. The metadata capture runs before
+    /// the content stream, and the descriptor and root-relative binding are
+    /// checked around both. This is the fused form of `read_extended_metadata`
+    /// followed by `stream_observed_file` for a regular file.
+    pub fn observe_file(
+        &self,
+        path: &SyncPath,
+        expected: &EntryMetadata,
+        capture: MetadataCapture,
+        control: &mut impl FnMut(u64) -> ScanControl,
+    ) -> Result<(Digest, ExtendedMetadata), ObserveFileError> {
+        let mut file = self.open_observed_file(path, expected, control)?;
+        let extended = capture_observed_file(&file, expected, capture, control)?;
+        let digest =
+            self.stream_observed_file(path, &mut file, expected, control, &mut |_| Ok(()))?;
+        Ok((digest, extended))
     }
 
     pub(super) fn stream_observed_file(
@@ -338,5 +369,263 @@ mod tests {
                 .unwrap()),
             "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85"
         );
+    }
+
+    #[test]
+    fn fused_observation_matches_separate_content_and_metadata_reads() {
+        use super::super::{AccessControl, AttributeRole, CaptureRoles};
+
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("file");
+        fs::write(&file, b"fused payload").unwrap();
+        {
+            let handle = fs::File::open(&file).unwrap();
+            rustix::fs::fsetxattr(
+                &handle,
+                c"user.foldover.tag",
+                b"tag",
+                rustix::fs::XattrFlags::empty(),
+            )
+            .unwrap();
+            #[cfg(target_os = "macos")]
+            rustix::fs::fsetxattr(
+                &handle,
+                c"com.apple.ResourceFork",
+                b"fork bytes",
+                rustix::fs::XattrFlags::empty(),
+            )
+            .unwrap();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let status = std::process::Command::new("/bin/chmod")
+                .args([
+                    "+a",
+                    "everyone allow read,readattr,readextattr,readsecurity",
+                ])
+                .arg(&file)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+
+        let root = Root::open(directory.path()).unwrap();
+        let metadata = root.metadata(&path()).unwrap();
+        let separate_digest = root
+            .hash_file(&path(), &metadata, &mut |_| ScanControl::Continue)
+            .unwrap();
+
+        for capture in [
+            MetadataCapture::Full,
+            MetadataCapture::Values(CaptureRoles::ALL),
+            MetadataCapture::ValuesAndAccessControl(CaptureRoles::ALL),
+        ] {
+            let (digest, extended) = root
+                .observe_file(&path(), &metadata, capture, &mut |_| ScanControl::Continue)
+                .unwrap();
+            let separate = root
+                .read_extended_metadata(&path(), &metadata, capture, &mut |_| ScanControl::Continue)
+                .unwrap();
+            assert_eq!(digest, separate_digest, "capture {capture:?}");
+            assert_eq!(extended, separate, "capture {capture:?}");
+        }
+
+        let full = root
+            .read_extended_metadata(&path(), &metadata, MetadataCapture::Full, &mut |_| {
+                ScanControl::Continue
+            })
+            .unwrap();
+        assert!(
+            full.attributes()
+                .iter()
+                .any(|attribute| attribute.name() == b"user.foldover.tag")
+        );
+        #[cfg(target_os = "macos")]
+        {
+            assert!(
+                full.attributes()
+                    .iter()
+                    .any(|attribute| attribute.name() == b"com.apple.ResourceFork")
+            );
+            assert!(matches!(
+                full.access_control(),
+                AccessControl::MacOs(Some(bytes)) if !bytes.is_empty()
+            ));
+        }
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(full.access_control(), &AccessControl::NotReported);
+
+        // A filtered capture must skip roles its policy cannot use, and the
+        // fused result must equal a separate filtered read.
+        let filtered = MetadataCapture::Values(CaptureRoles::new(&[AttributeRole::Synced]));
+        let (digest, extended) = root
+            .observe_file(&path(), &metadata, filtered, &mut |_| ScanControl::Continue)
+            .unwrap();
+        assert_eq!(digest, separate_digest);
+        assert_eq!(
+            extended,
+            root.read_extended_metadata(&path(), &metadata, filtered, &mut |_| {
+                ScanControl::Continue
+            })
+            .unwrap()
+        );
+        assert_eq!(extended.access_control(), &AccessControl::NotReported);
+        assert!(
+            extended
+                .attributes()
+                .iter()
+                .all(|attribute| attribute.name() == b"user.foldover.tag")
+        );
+        assert!(
+            !extended
+                .attributes()
+                .iter()
+                .any(|attribute| attribute.name() == b"com.apple.ResourceFork")
+        );
+    }
+
+    #[test]
+    fn fused_observation_handles_zero_length_and_rejects_replacement_and_edits() {
+        use super::super::CaptureRoles;
+
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("file");
+        fs::write(&file, b"").unwrap();
+        let root = Root::open(directory.path()).unwrap();
+        let capture = MetadataCapture::Values(CaptureRoles::NONE);
+        let metadata = root.metadata(&path()).unwrap();
+        let (digest, extended) = root
+            .observe_file(&path(), &metadata, capture, &mut |_| ScanControl::Continue)
+            .unwrap();
+        assert_eq!(digest.as_bytes(), blake3::hash(b"").as_bytes());
+        assert_eq!(
+            extended,
+            root.read_extended_metadata(&path(), &metadata, capture, &mut |_| {
+                ScanControl::Continue
+            })
+            .unwrap()
+        );
+
+        let size = HASH_BUFFER_BYTES + 1;
+
+        // Replace the path while the content stream is underway. The held
+        // descriptor keeps the original bytes, but the observation must fail.
+        fs::write(&file, vec![b'x'; size]).unwrap();
+        let metadata = root.metadata(&path()).unwrap();
+        let mut swapped = false;
+        let result = root.observe_file(&path(), &metadata, capture, &mut |bytes| {
+            if bytes > 0 && !swapped {
+                swapped = true;
+                fs::remove_file(&file).unwrap();
+                fs::write(&file, b"a different size").unwrap();
+            }
+            ScanControl::Continue
+        });
+        assert!(matches!(
+            result,
+            Err(ObserveFileError::Hash(HashError::Changed))
+        ));
+
+        // Unlinking the observed path changes the held inode's link count, so
+        // the descriptor consistency check fails before content is read.
+        fs::write(&file, vec![b'x'; size]).unwrap();
+        let metadata = root.metadata(&path()).unwrap();
+        let mut calls = 0;
+        let result = root.observe_file(&path(), &metadata, capture, &mut |_| {
+            calls += 1;
+            if calls == 2 {
+                fs::remove_file(&file).unwrap();
+            }
+            ScanControl::Continue
+        });
+        assert!(matches!(
+            result,
+            Err(ObserveFileError::Metadata(MetadataReadError::Changed))
+        ));
+
+        // Growing the file during the content stream cannot extend its budget.
+        fs::write(&file, vec![b'x'; size]).unwrap();
+        let metadata = root.metadata(&path()).unwrap();
+        let mut maximum = 0;
+        let result = root.observe_file(&path(), &metadata, capture, &mut |bytes| {
+            maximum = maximum.max(bytes);
+            if bytes > 0 {
+                use std::io::Write;
+                let mut handle = fs::OpenOptions::new().append(true).open(&file).unwrap();
+                handle.write_all(&[b'y'; HASH_BUFFER_BYTES]).unwrap();
+            }
+            ScanControl::Continue
+        });
+        assert!(matches!(
+            result,
+            Err(ObserveFileError::Hash(HashError::Changed))
+        ));
+        assert_eq!(maximum, size as u64);
+
+        // Shrinking it during the content stream leaves the budget unreachable.
+        fs::write(&file, vec![b'x'; size]).unwrap();
+        let metadata = root.metadata(&path()).unwrap();
+        let result = root.observe_file(&path(), &metadata, capture, &mut |bytes| {
+            if bytes > 0 {
+                fs::write(&file, b"short").unwrap();
+            }
+            ScanControl::Continue
+        });
+        assert!(matches!(
+            result,
+            Err(ObserveFileError::Hash(HashError::Changed))
+        ));
+    }
+
+    #[test]
+    fn fused_observation_cancellation_never_yields_a_partial_result() {
+        use super::super::{AttributeRole, CaptureRoles};
+
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("file");
+        fs::write(&file, vec![b'x'; HASH_BUFFER_BYTES + 1]).unwrap();
+        let root = Root::open(directory.path()).unwrap();
+        let metadata = root.metadata(&path()).unwrap();
+        let capture = MetadataCapture::Values(CaptureRoles::NONE);
+
+        // Cancelled before the descriptor is opened.
+        assert!(matches!(
+            root.observe_file(&path(), &metadata, capture, &mut |_| ScanControl::Cancel),
+            Err(ObserveFileError::Hash(HashError::Cancelled))
+        ));
+        // Cancelled once the content stream is underway.
+        assert!(matches!(
+            root.observe_file(&path(), &metadata, capture, &mut |bytes| {
+                if bytes > 0 {
+                    ScanControl::Cancel
+                } else {
+                    ScanControl::Continue
+                }
+            }),
+            Err(ObserveFileError::Hash(HashError::Cancelled))
+        ));
+
+        // Cancelled while capturing a wanted value.
+        let handle = fs::File::open(&file).unwrap();
+        rustix::fs::fsetxattr(
+            &handle,
+            c"user.foldover.cancel",
+            b"value",
+            rustix::fs::XattrFlags::empty(),
+        )
+        .unwrap();
+        drop(handle);
+        let metadata = root.metadata(&path()).unwrap();
+        let capture = MetadataCapture::Values(CaptureRoles::new(&[AttributeRole::Synced]));
+        assert!(matches!(
+            root.observe_file(&path(), &metadata, capture, &mut |bytes| {
+                if bytes > 0 {
+                    ScanControl::Cancel
+                } else {
+                    ScanControl::Continue
+                }
+            }),
+            Err(ObserveFileError::Metadata(MetadataReadError::Cancelled))
+        ));
     }
 }

@@ -16,8 +16,8 @@
 // imprint of what the run reports it did: a routine sync plans afresh,
 // so the previewed lines are a forecast and are never shown as done.
 // This file holds the pure rules: which mark each half carries, what
-// each line is called, which ways a person may turn it, and which half
-// folds.
+// each line is called, which ways a person may turn it, which half
+// folds, and what a working job reads out.
 
 import Foundation
 
@@ -322,6 +322,124 @@ struct FoldImprint: Equatable {
     }
 }
 
+/// What a working job reads out: on the folded leaf's back while a run
+/// presses, and on the page while a preview compares.
+///
+/// A job compares the folders before it knows what it will change, and
+/// it finds their items as it goes: Folder A is listed and checked
+/// before Folder B is listed. A share of the items found so far would
+/// fall back as B's listing begins, and a share that went on to the
+/// plan would start over once the plan is made:
+///
+///   share of items found    0 → 100% (A checked) → 50% (B listed) → 100%
+///   share of bytes copied   0 → 100%
+///
+/// So while comparing the readout counts the items checked, a number
+/// that only grows, over a spinner rather than a bar; a share appears
+/// only once the plan says how much there is to do.
+struct FoldReadout: Equatable {
+    /// What the job is doing.
+    enum Stage: Hashable {
+        /// Listing and checking both folders: the total is not known.
+        case comparing
+        /// Carrying out the plan it made.
+        case syncing
+        /// Another Mac is syncing these folders; nothing moves here.
+        case waiting
+        /// Stop was pressed; the job is winding down.
+        case stopping
+    }
+
+    let stage: Stage
+    /// The large figure: the items checked while comparing, the share
+    /// done while syncing; none while waiting.
+    let figure: String?
+    /// What the figure counts, e.g. "items checked".
+    let caption: String?
+    /// How far the bar is filled; nil while nothing measures the whole
+    /// job, when a spinner stands in for the bar.
+    let fraction: Double?
+    /// Short lines under the bar, e.g. "1.2 GB of 40 GB · 85 MB/s".
+    let details: [String]
+
+    init(progress: WorkProgress, cancelling: Bool) {
+        if let holder = progress.waitingFor, !cancelling {
+            stage = .waiting
+            figure = nil
+            caption = nil
+            fraction = nil
+            details = [String(localized: "“\(holder)” is syncing these folders. This sync goes on once it is done.")]
+            return
+        }
+        // A stopping job's counts still hold, and can still move as the
+        // copies under way land; its speed and time left no longer do.
+        var measured = progress
+        if cancelling { measured.rate = 0 }
+        let measure = progress.changes > 0 ? Self.syncing(measured) : Self.comparing(measured)
+        stage = cancelling ? .stopping : (progress.changes > 0 ? .syncing : .comparing)
+        figure = measure.figure
+        caption = measure.caption
+        fraction = measure.fraction
+        details = measure.details
+    }
+
+    /// The stage's name, set above the figure.
+    var title: String {
+        switch stage {
+        case .comparing: String(localized: "Comparing")
+        case .syncing: String(localized: "Syncing")
+        case .waiting: String(localized: "Waiting")
+        case .stopping: String(localized: "Stopping")
+        }
+    }
+
+    /// The whole readout as one phrase, for VoiceOver.
+    var spoken: String {
+        let count = [figure, caption].compactMap { $0 }.joined(separator: " ")
+        return ([title, count] + details).filter { !$0.isEmpty }.joined(separator: ", ")
+    }
+
+    private typealias Measure = (figure: String, caption: String, fraction: Double?, details: [String])
+
+    /// The items checked so far, of those found so far: both only grow,
+    /// but the second can outrun the first at any time.
+    private static func comparing(_ progress: WorkProgress) -> Measure {
+        let caption = progress.checked == 1
+            ? String(localized: "item checked") : String(localized: "items checked")
+        let found = progress.listed > 0
+            ? [String(localized: "of \(progress.listed.formatted()) found so far")] : []
+        return (progress.checked.formatted(), caption, nil, found)
+    }
+
+    /// The share of the plan done: of its bytes when it copies any, else
+    /// of its changes. Rounded down, so it says 100% only once all of it
+    /// is done: all the data copied, or every change made.
+    private static func syncing(_ progress: WorkProgress) -> Measure {
+        let byBytes = progress.bytes > 0
+        let total = byBytes ? progress.bytes : progress.changes
+        let done = min(byBytes ? progress.copied : progress.applied, total)
+        let share = Double(done) / Double(total)
+        let percent = (Double(done) * 100 / Double(total)).rounded(.down)
+        let applied = progress.applied.formatted()
+        var details = [progress.changes == 1
+            ? String(localized: "\(applied) of 1 change")
+            : String(localized: "\(applied) of \(progress.changes.formatted()) changes")]
+        if byBytes {
+            let copied = PairSyncViewModel.byteText(progress.copied)
+            var line = String(localized: "\(copied) of \(PairSyncViewModel.byteText(progress.bytes))")
+            // The agent reports no rate until the first copy lands.
+            if progress.rate > 0 { line += " · " + PairSyncViewModel.throughputText(progress.rate) }
+            details.append(line)
+            if let seconds = PairSyncViewModel.secondsLeft(progress) {
+                let left = PairSyncViewModel.timeText(seconds)
+                details.append(String(localized: "about \(left) left"))
+            }
+        }
+        return ((percent / 100).formatted(.percent.precision(.fractionLength(0))),
+                byBytes ? String(localized: "copied") : String(localized: "done"), share, details)
+    }
+}
+
 /// Which half folds over the other.
 enum FoldLeaf {
     /// The halves a person may fold: a one-way mode's source, or either
@@ -354,6 +472,110 @@ enum FoldLeaf {
     static func messagePage(_ mode: PairMode, missing: FolderSide?) -> FolderSide {
         if let missing { return landing(missing) }
         return sides(mode) == [.b] ? .a : .b
+    }
+}
+
+/// Which way a folder's data goes in a run, for naming it on its own
+/// side while the leaf lies folded: the bare desk names the folder whose
+/// page lifted off, and the leaf's back the folder whose page it lies on.
+enum FoldRole: Equatable {
+    /// A one-way mode's source.
+    case source
+    /// A one-way mode's destination.
+    case destination
+    /// Either folder of a two-way sync, which both send and receive.
+    case either
+
+    init(_ side: FolderSide, in mode: PairMode) {
+        let sources = FoldLeaf.sides(mode)
+        if sources.count > 1 {
+            self = .either
+        } else {
+            self = sources.contains(side) ? .source : .destination
+        }
+    }
+
+    /// The small capitals over the folder's name: "From Folder A".
+    @MainActor
+    func eyebrow(_ side: FolderSide) -> String {
+        let folder = PairSyncViewModel.folderName(side)
+        return switch self {
+        case .source: String(localized: "From \(folder)")
+        case .destination: String(localized: "To \(folder)")
+        case .either: folder
+        }
+    }
+}
+
+/// Which way a run's data goes, as the arrow on the desk where the leaf
+/// lifted off draws it.
+enum FoldDirection: Equatable {
+    /// A Mirror makes the folder `toward` match the other.
+    case mirror(toward: FolderSide)
+    /// A Backup copies to the folder `toward`, which keeps what the other
+    /// deletes.
+    case backup(toward: FolderSide)
+    /// A two-way Sync carries changes both ways.
+    case both
+
+    init(_ mode: PairMode) {
+        switch mode {
+        case .sync: self = .both
+        case .mirrorLeft: self = .mirror(toward: .b)
+        case .mirrorRight: self = .mirror(toward: .a)
+        case .backupLeft: self = .backup(toward: .b)
+        case .backupRight: self = .backup(toward: .a)
+        }
+    }
+}
+
+/// The disk under the folded leaf, as the leaf's back reads it:
+/// how full it is and, while a one-way run copies to it, how much more
+/// is on its way.
+///
+///    ◔  BACKUP SSD
+///       812.4 GB free of 2 TB
+///       23.2 GB still to copy
+///
+/// Free space is what macOS reports now; what is left to copy is the
+/// plan's data not yet copied. Archived versions stay on the disk, so a
+/// sync frees nothing as it goes.
+struct FoldDisk: Equatable {
+    let name: String
+    /// The shares of the ring, 0…1: what the disk holds, and what the run
+    /// still copies there, as far as the free space reaches.
+    let stored: Double
+    let arriving: Double
+    /// "812.4 GB free of 2 TB".
+    let free: String
+    /// "23.2 GB still to copy"; nil while nothing is known to be coming.
+    let toCopy: String?
+    /// More is left to copy than is free.
+    let mayNotFit: Bool
+
+    /// `toCopy` is the data the run still copies to this disk; nil when
+    /// that is not known, as while comparing, stopping, or in a two-way
+    /// sync whose copies go both ways.
+    init(volume: FolderVolume, toCopy: UInt64?) {
+        name = volume.name
+        let total = Double(max(volume.totalBytes, 1))
+        let available = min(volume.availableBytes, volume.totalBytes)
+        stored = Double(volume.totalBytes - available) / total
+        let coming = toCopy ?? 0
+        arriving = Double(min(coming, available)) / total
+        free = String(localized: "\(PairSyncViewModel.byteText(available)) free of \(PairSyncViewModel.byteText(volume.totalBytes))")
+        self.toCopy = coming > 0 ? String(localized: "\(PairSyncViewModel.byteText(coming)) still to copy") : nil
+        mayNotFit = coming > available
+    }
+
+    /// The warning under the figures when the rest may not fit.
+    static var mayNotFitText: String {
+        String(localized: "There may not be enough space for the rest of this sync.")
+    }
+
+    /// The whole reading as one phrase, for VoiceOver.
+    var spoken: String {
+        ([name, free, toCopy] + [mayNotFit ? Self.mayNotFitText : nil]).compactMap { $0 }.joined(separator: ", ")
     }
 }
 

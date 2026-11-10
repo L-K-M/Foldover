@@ -1,14 +1,20 @@
 //! Each root keeps replaced and removed entries in
 //! `.foldover/archive/<run>/<path>`. `<run>` is the run's UTC start time,
-//! e.g. `2026-10-18T09-30-00.123Z`, so retention can delete whole runs by
-//! age without reading their contents.
+//! the pair that ran it and a unique run ID, e.g.
+//! `2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_0123456789abcdef0123456789abcdef`,
+//! so retention can delete whole runs by age without reading their
+//! contents, and pairs that share a folder, on one Mac or several, each
+//! list and prune their own runs (ADR 0047). The ID keeps runs that share
+//! a start millisecond distinct. Runs named before the ID carry only the
+//! time and pair, and runs from before the pair was named carry the time
+//! alone and belong to every pair.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use foldover_fs::{DirectoryScope, NodeKind, WriteError};
-use foldover_types::{Durability, SyncPath};
+use foldover_fs::{DirectoryScope, HashError, NodeKind, WriteError};
+use foldover_types::{Durability, PairId, SyncPath};
 
-use super::{ApplyError, LocalEndpoint, ScanError, child_path, protected};
+use super::{ApplyError, LocalEndpoint, ScanControl, ScanError, child_path, protected};
 
 /// Names tried for one put-back: the original, then `(restored)`,
 /// `(restored 2)` and so on.
@@ -22,11 +28,19 @@ const NAME_MAX: usize = 255;
 pub struct ArchivedRun {
     name: String,
     started: SystemTime,
+    owner: Option<PairId>,
 }
 
 impl ArchivedRun {
+    /// The run named `name`, which another Mac may have read; the pair
+    /// comes from the name.
     pub(crate) fn new(name: String, started: SystemTime) -> Self {
-        Self { name, started }
+        let owner = parse_run(name.as_bytes()).and_then(|(_, owner)| owner);
+        Self {
+            name,
+            started,
+            owner,
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -35,6 +49,41 @@ impl ArchivedRun {
 
     pub fn started(&self) -> SystemTime {
         self.started
+    }
+
+    /// The pair that ran it; `None` for a run from before runs were
+    /// named after their pair.
+    pub fn owner(&self) -> Option<PairId> {
+        self.owner
+    }
+}
+
+/// Whose expired runs a prune removes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Pruning {
+    /// A run of this pair prunes by its own clock. Its runs, and runs not
+    /// named after a pair, go at the retention. Other pairs' runs go only
+    /// at `OTHER_PAIRS_RETENTION_FACTOR` times it: a Mac whose clock runs
+    /// ahead cannot take another pair's runs early, and the runs of a pair
+    /// that no longer exists still go.
+    Pair(PairId),
+    /// Every run goes at the retention: the Mac sharing a folder prunes it
+    /// by its own clock for every Mac that writes it.
+    Everyone,
+}
+
+/// How many retentions another pair's run is kept by a pair's prune.
+const OTHER_PAIRS_RETENTION_FACTOR: u32 = 2;
+
+impl Pruning {
+    /// How old a run of `owner` must be before this prune removes it.
+    pub(crate) fn expiry(self, owner: Option<PairId>, retention: Duration) -> Duration {
+        match (self, owner) {
+            (Self::Pair(pair), Some(owner)) if owner != pair => {
+                retention.saturating_mul(OTHER_PAIRS_RETENTION_FACTOR)
+            }
+            _ => retention,
+        }
     }
 }
 
@@ -60,16 +109,21 @@ impl ArchivedItem {
 }
 
 pub(crate) const ARCHIVE_ROOT: &[u8] = b".foldover/archive";
+/// Between a run's start time and its pair in the run's folder name.
+const OWNER_SEPARATOR: u8 = b'_';
 const SECONDS_PER_DAY: u64 = 86_400;
 const SECONDS_PER_HOUR: u64 = 3_600;
 const SECONDS_PER_MINUTE: u64 = 60;
 const MILLIS_PER_SECOND: u64 = 1_000;
+/// The length of a run's unique ID as it appears in its folder name:
+/// a UUIDv4 in simple form.
+const RUN_ID_LEN: usize = 32;
 /// Days from 0000-03-01 to 1970-01-01 in the proleptic Gregorian calendar.
 const EPOCH_DAY_OFFSET: u64 = 719_468;
 const DAYS_PER_ERA: u64 = 146_097;
 
-/// A sortable, Finder-safe run name. Runs of one pair never share a
-/// millisecond, because they are serialized.
+/// A sortable, Finder-safe name of the time alone, as runs had before
+/// they were named after their pair; `run_name` adds the pair.
 pub fn archive_name(at: SystemTime) -> String {
     let since = at.duration_since(UNIX_EPOCH).unwrap_or_default();
     let seconds = since.as_secs();
@@ -84,8 +138,63 @@ pub fn archive_name(at: SystemTime) -> String {
     )
 }
 
+/// The pair-scoped prefix of a run name, also the complete legacy name
+/// from before runs carried a unique ID, e.g.
+/// `2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef`. The time
+/// comes first, so names still sort by it.
+pub fn run_name(at: SystemTime, pair: PairId) -> String {
+    format!("{}{}{pair}", archive_name(at), char::from(OWNER_SEPARATOR))
+}
+
+/// The folder name a new run of `pair` is given: `run_name` plus a
+/// UUIDv4, e.g.
+/// `2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_0123456789abcdef0123456789abcdef`,
+/// so runs sharing a millisecond still get their own archive and journal.
+pub(crate) fn unique_run_name(at: SystemTime, pair: PairId) -> String {
+    format!("{}_{}", run_name(at, pair), uuid::Uuid::new_v4().simple())
+}
+
+/// The pair a run name carries; `None` for a name of the time alone, or
+/// one that names no run.
+pub fn run_owner(name: &str) -> Option<PairId> {
+    parse_run(name.as_bytes()).and_then(|(_, owner)| owner)
+}
+
 /// The start time a run name encodes; `None` for any other name.
 pub(crate) fn archive_time(name: &[u8]) -> Option<SystemTime> {
+    parse_run(name).map(|(started, _)| started)
+}
+
+/// The start time and pair a run name encodes, the pair `None` for a
+/// name of the time alone; `None` for any other name. A run's unique ID
+/// may follow its pair: another `_`, then `RUN_ID_LEN` lowercase hex
+/// digits.
+pub(crate) fn parse_run(name: &[u8]) -> Option<(SystemTime, Option<PairId>)> {
+    let (time, owner) = match name.iter().position(|&byte| byte == OWNER_SEPARATOR) {
+        None => (name, None),
+        Some(separator) => {
+            let owner = &name[separator + 1..];
+            let owner = match owner.iter().position(|&byte| byte == OWNER_SEPARATOR) {
+                None => owner,
+                Some(id)
+                    if owner[id + 1..].len() == RUN_ID_LEN
+                        && owner[id + 1..]
+                            .iter()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)) =>
+                {
+                    &owner[..id]
+                }
+                Some(_) => return None,
+            };
+            let owner = std::str::from_utf8(owner).ok()?;
+            (&name[..separator], Some(owner.parse().ok()?))
+        }
+    };
+    Some((start_time(time)?, owner))
+}
+
+/// The start time a name of the time alone encodes.
+fn start_time(name: &[u8]) -> Option<SystemTime> {
     let text = std::str::from_utf8(name).ok()?;
     let number = |range: std::ops::Range<usize>| -> Option<u64> {
         let digits = text.get(range)?;
@@ -278,14 +387,23 @@ impl LocalEndpoint {
             if entry.metadata().kind() != NodeKind::Directory {
                 continue;
             }
-            let Some(started) = archive_time(entry.name()) else {
+            let Some((started, owner)) = parse_run(entry.name()) else {
                 continue;
             };
             if let Ok(name) = String::from_utf8(entry.name().to_vec()) {
-                runs.push(ArchivedRun { name, started });
+                runs.push(ArchivedRun {
+                    name,
+                    started,
+                    owner,
+                });
             }
         }
-        runs.sort_by_key(|run| std::cmp::Reverse(run.started));
+        runs.sort_by(|left, right| {
+            right
+                .started
+                .cmp(&left.started)
+                .then_with(|| right.name.cmp(&left.name))
+        });
         Ok(runs)
     }
 
@@ -358,15 +476,26 @@ impl LocalEndpoint {
         Err(ApplyError::Occupied(path.clone()))
     }
 
-    /// Permanently delete archived runs that started more than `retention`
-    /// before `now`. Other folders in the archive are kept. Returns the
-    /// number of runs removed.
-    pub fn prune_archive(&self, retention: Duration, now: SystemTime) -> Result<u64, ApplyError> {
+    /// Permanently delete archived runs that started more than their
+    /// expiry before `now`: `retention`, or longer for another pair's
+    /// runs (`Pruning`). Other folders in the archive are kept. Returns
+    /// the number of runs removed. `control` is asked as deletion
+    /// proceeds, so a long prune reports progress and can stop.
+    pub fn prune_archive(
+        &self,
+        retention: Duration,
+        now: SystemTime,
+        pruning: Pruning,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<u64, ApplyError> {
+        if control() == ScanControl::Cancel {
+            return Err(ScanError::Cancelled.into());
+        }
         let archive = SyncPath::try_from(ARCHIVE_ROOT).expect("the archive path is valid");
         // Data kept from broken-off copies follows the same retention.
         self.root
-            .prune_partials(retention, now)
-            .map_err(|source| io_error(&archive, source))?;
+            .prune_partials(retention, now, control)
+            .map_err(|source| prune_failure(&archive, source))?;
         let entries = match self.root.entries(DirectoryScope::At(&archive)) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -374,11 +503,18 @@ impl LocalEndpoint {
         };
         let mut expired = Vec::new();
         for entry in entries {
+            if control() == ScanControl::Cancel {
+                return Err(ScanError::Cancelled.into());
+            }
             let entry = entry.map_err(|source| io_error(&archive, source))?;
-            let Some(started) = archive_time(entry.name()) else {
+            if entry.metadata().kind() != NodeKind::Directory {
+                continue;
+            }
+            let Some((started, owner)) = parse_run(entry.name()) else {
                 continue;
             };
-            if now.duration_since(started).is_ok_and(|age| age > retention) {
+            let expiry = pruning.expiry(owner, retention);
+            if now.duration_since(started).is_ok_and(|age| age > expiry) {
                 let mut path = archive.as_bytes().to_vec();
                 path.push(b'/');
                 path.extend_from_slice(entry.name());
@@ -387,11 +523,8 @@ impl LocalEndpoint {
         }
         for path in &expired {
             self.root
-                .remove_tree(path)
-                .map_err(|source| ApplyError::Write {
-                    path: path.clone(),
-                    source,
-                })?;
+                .remove_tree(path, control)
+                .map_err(|source| prune_failure(path, source))?;
         }
         Ok(expired.len() as u64)
     }
@@ -462,11 +595,25 @@ fn io_error(path: &SyncPath, source: std::io::Error) -> ApplyError {
     })
 }
 
+/// A deletion `control` stopped is the scan's `Cancelled`: an
+/// interrupted prune reports a stop, never a failed write.
+fn prune_failure(path: &SyncPath, source: WriteError) -> ApplyError {
+    match source {
+        WriteError::Source(HashError::Cancelled) => ScanError::Cancelled.into(),
+        WriteError::Io(source) => io_error(path, source),
+        source => ApplyError::Write {
+            path: path.clone(),
+            source,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
     use std::fs;
+    use std::os::unix::fs::symlink;
 
     use proptest::prelude::*;
 
@@ -782,9 +929,141 @@ mod tests {
             "2026-10-18T09:30:00.123Z",
             "+026-10-18T09-30-00.123Z",
             "2026-10-18T09-30-00.123Z-copy",
+            // The format a run had between unique IDs and named pairs is
+            // obsolete: a `-` never starts the owner part of a name.
+            "2026-10-18T09-30-00.123Z-0123456789abcdef0123456789abcdef",
         ] {
             assert_eq!(archive_time(name.as_bytes()), None, "{name}");
         }
+    }
+
+    #[test]
+    fn run_names_carry_their_pair_after_the_time() {
+        let pair: PairId = "0123456789abcdef0123456789abcdef".parse().unwrap();
+        let name = run_name(at(1_792_315_800_123), pair);
+        assert_eq!(
+            name,
+            "2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(
+            parse_run(name.as_bytes()),
+            Some((at(1_792_315_800_123), Some(pair)))
+        );
+        assert_eq!(
+            parse_run(b"2026-10-18T09-30-00.123Z"),
+            Some((at(1_792_315_800_123), None))
+        );
+        assert_eq!(ArchivedRun::new(name.clone(), at(0)).owner(), Some(pair));
+        assert!(run_folder(&name).is_some());
+
+        // A unique run ID may follow the pair; the owner is recovered.
+        let unique = "2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_ffffffffffffffffffffffffffffffff";
+        assert_eq!(
+            parse_run(unique.as_bytes()),
+            Some((at(1_792_315_800_123), Some(pair)))
+        );
+        assert_eq!(archive_time(unique.as_bytes()), Some(at(1_792_315_800_123)));
+        assert!(run_folder(unique).is_some());
+        for name in [
+            "2026-10-18T09-30-00.123Z_",
+            "2026-10-18T09-30-00.123Z_0123456789ABCDEF0123456789ABCDEF",
+            "2026-10-18T09-30-00.123Z_0123456789abcdef",
+            "2026-10-18T09-30-00.123Z_00000000000000000000000000000000",
+            "2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_x",
+            "2026-10-18T09-30-00.123_0123456789abcdef0123456789abcdef",
+            "2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_",
+            "2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_fffffffffffffffffffffffffffffff",
+            "2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_fffffffffffffffffffffffffffffffff",
+            "2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_fffffffffffffffffffffffffffffffg",
+            "2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+            "2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_ffffffffffffffffffffffffffffffff_x",
+        ] {
+            assert_eq!(parse_run(name.as_bytes()), None, "{name}");
+            assert!(run_folder(name).is_none(), "{name}");
+        }
+    }
+
+    #[test]
+    fn cancelling_before_pruning_keeps_expired_archives() {
+        let directory = tempfile::tempdir().unwrap();
+        let archived = directory
+            .path()
+            .join(".foldover/archive")
+            .join(archive_name(at(0)))
+            .join("kept");
+        fs::create_dir_all(archived.parent().unwrap()).unwrap();
+        fs::write(&archived, b"keep me").unwrap();
+        let endpoint = crate::Endpoint::Local(LocalEndpoint::open(directory.path()).unwrap());
+
+        let result = endpoint.prune_archive(
+            Duration::from_secs(1),
+            at(2_000),
+            Pruning::Everyone,
+            &mut || crate::ScanControl::Cancel,
+        );
+        assert!(matches!(
+            result,
+            Err(ApplyError::Scan(ScanError::Cancelled))
+        ));
+        assert_eq!(fs::read(archived).unwrap(), b"keep me");
+    }
+
+    /// Control is asked as deletion proceeds: each removed entry is a
+    /// checkpoint the answer side turns into a heartbeat, and a stop ends
+    /// the prune cooperatively as `Cancelled`, never as a failed write.
+    #[test]
+    fn pruning_reports_progress_and_stops_at_a_checkpoint() {
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join(".foldover/archive");
+        for name in [archive_name(at(1_000)), archive_name(at(2_000))] {
+            let run = archive.join(&name);
+            fs::create_dir_all(run.join("folder")).unwrap();
+            fs::write(run.join("folder/file"), b"data").unwrap();
+        }
+        let endpoint = crate::Endpoint::Local(LocalEndpoint::open(directory.path()).unwrap());
+
+        // Two runs of a folder holding a file: six entries deleted, so
+        // control sees at least six checkpoints of real progress.
+        let calls = std::cell::Cell::new(0);
+        let pruned = endpoint.prune_archive(
+            Duration::from_secs(1),
+            at(60_000),
+            Pruning::Everyone,
+            &mut || {
+                calls.set(calls.get() + 1);
+                crate::ScanControl::Continue
+            },
+        );
+        assert_eq!(pruned.unwrap(), 2);
+        assert!(calls.get() >= 6, "checkpoints: {}", calls.get());
+
+        // Cancel once the file inside the run's folder is gone: the stop
+        // reaches the prune at the next checkpoint.
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join(".foldover/archive");
+        let old = archive.join(archive_name(at(1_000)));
+        fs::create_dir_all(old.join("folder")).unwrap();
+        let file = old.join("folder/file");
+        fs::write(&file, b"data").unwrap();
+        let endpoint = crate::Endpoint::Local(LocalEndpoint::open(directory.path()).unwrap());
+        let stopped = endpoint.prune_archive(
+            Duration::from_secs(1),
+            at(60_000),
+            Pruning::Everyone,
+            &mut || {
+                if file.exists() {
+                    crate::ScanControl::Continue
+                } else {
+                    crate::ScanControl::Cancel
+                }
+            },
+        );
+        assert!(matches!(
+            stopped,
+            Err(ApplyError::Scan(ScanError::Cancelled))
+        ));
+        assert!(!file.exists());
+        assert!(old.exists());
     }
 
     #[test]
@@ -798,11 +1077,22 @@ mod tests {
             fs::create_dir_all(run.join("folder")).unwrap();
             fs::write(run.join("folder/file"), name).unwrap();
         }
+        let timestamp_file = archive.join(archive_name(at(68 * day)));
+        let timestamp_link = archive.join(archive_name(at(67 * day)));
+        fs::write(&timestamp_file, b"not a run").unwrap();
+        symlink("kept by the user", &timestamp_link).unwrap();
         fs::create_dir_all(archive.join("kept by the user")).unwrap();
         let endpoint = LocalEndpoint::open(directory.path()).unwrap();
 
         let retention = Duration::from_secs(30 * 86_400);
-        assert_eq!(endpoint.prune_archive(retention, now).unwrap(), 1);
+        assert_eq!(
+            endpoint
+                .prune_archive(retention, now, Pruning::Everyone, &mut || {
+                    crate::ScanControl::Continue
+                })
+                .unwrap(),
+            1
+        );
         let mut left: Vec<_> = fs::read_dir(&archive)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
@@ -810,13 +1100,86 @@ mod tests {
         left.sort();
         assert_eq!(
             left,
-            [archive_name(at(71 * day)), "kept by the user".into()]
+            [
+                archive_name(at(67 * day)),
+                archive_name(at(68 * day)),
+                archive_name(at(71 * day)),
+                "kept by the user".into(),
+            ]
         );
-        assert_eq!(endpoint.prune_archive(retention, now).unwrap(), 0);
+        assert_eq!(fs::read(timestamp_file).unwrap(), b"not a run");
+        assert_eq!(
+            fs::read_link(timestamp_link).unwrap(),
+            std::path::Path::new("kept by the user")
+        );
+        assert_eq!(
+            endpoint
+                .prune_archive(retention, now, Pruning::Everyone, &mut || {
+                    crate::ScanControl::Continue
+                })
+                .unwrap(),
+            0
+        );
 
         let empty = tempfile::tempdir().unwrap();
         let endpoint = LocalEndpoint::open(empty.path()).unwrap();
-        assert_eq!(endpoint.prune_archive(retention, now).unwrap(), 0);
+        assert_eq!(
+            endpoint
+                .prune_archive(retention, now, Pruning::Everyone, &mut || {
+                    crate::ScanControl::Continue
+                })
+                .unwrap(),
+            0
+        );
+    }
+
+    /// Pairs sharing a folder each prune their own runs at the retention;
+    /// another pair's only at twice it, and untagged runs at it.
+    #[test]
+    fn a_pair_prunes_its_own_runs_and_others_only_much_later() {
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join(".foldover/archive");
+        let day = 86_400_000;
+        let now = at(100 * day);
+        let ours: PairId = "0123456789abcdef0123456789abcdef".parse().unwrap();
+        let theirs: PairId = "fedcba9876543210fedcba9876543210".parse().unwrap();
+        let names = [
+            run_name(at(100 * day - 31 * day), ours),
+            run_name(at(100 * day - 31 * day), theirs),
+            run_name(at(100 * day - 61 * day), theirs),
+            archive_name(at(100 * day - 31 * day)),
+            run_name(at(100 * day - 29 * day), ours),
+        ];
+        for name in &names {
+            fs::create_dir_all(archive.join(name)).unwrap();
+        }
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        let retention = Duration::from_secs(30 * 86_400);
+        assert_eq!(
+            endpoint
+                .prune_archive(retention, now, Pruning::Pair(ours), &mut || {
+                    crate::ScanControl::Continue
+                })
+                .unwrap(),
+            3
+        );
+        let mut left: Vec<_> = fs::read_dir(&archive)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        let mut kept = vec![names[1].clone(), names[4].clone()];
+        kept.sort();
+        assert_eq!(left, kept);
+        // The Mac sharing the folder prunes everyone's by the retention.
+        assert_eq!(
+            endpoint
+                .prune_archive(retention, now, Pruning::Everyone, &mut || {
+                    crate::ScanControl::Continue
+                })
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -825,8 +1188,19 @@ mod tests {
         let root = directory.path();
         let older = archive_name(at(1_000));
         let newer = archive_name(at(2_000));
+        let owned: PairId = "0123456789abcdef0123456789abcdef".parse().unwrap();
+        let tied_first = format!(
+            "{}_00000000000000000000000000000001",
+            run_name(at(2_000), owned)
+        );
+        let tied_second = format!(
+            "{}_00000000000000000000000000000002",
+            run_name(at(2_000), owned)
+        );
         fs::create_dir_all(root.join(".foldover/archive").join(&older).join("docs")).unwrap();
         fs::create_dir_all(root.join(".foldover/archive").join(&newer)).unwrap();
+        fs::create_dir_all(root.join(".foldover/archive").join(&tied_first)).unwrap();
+        fs::create_dir_all(root.join(".foldover/archive").join(&tied_second)).unwrap();
         fs::create_dir_all(root.join(".foldover/archive/not a run")).unwrap();
         let run = root.join(".foldover/archive").join(&older);
         fs::write(run.join("docs/b"), b"bb").unwrap();
@@ -837,7 +1211,7 @@ mod tests {
         let runs = endpoint.archived_runs().unwrap();
         assert_eq!(
             runs.iter().map(ArchivedRun::name).collect::<Vec<_>>(),
-            [&newer, &older]
+            [&tied_second, &tied_first, &newer, &older]
         );
         let (items, more) = endpoint.archived_items(&older, None, 2).unwrap();
         assert_eq!(

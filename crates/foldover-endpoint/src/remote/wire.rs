@@ -317,8 +317,10 @@ mod tests {
             (options, Propagation::Sync),
             (ignoring, Propagation::Ignore),
         ] {
-            let run = RunScope::new(UNIX_EPOCH, sent);
+            let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), sent);
+            let name = run.name().to_owned();
             let named = run_from(run_wire(&run)).unwrap();
+            assert_eq!(named.name(), name);
             assert_eq!(named.options().metadata().quarantine(), kept);
         }
     }

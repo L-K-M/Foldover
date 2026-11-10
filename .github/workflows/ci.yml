@@ -7,12 +7,15 @@ on:
   # Manual runs: dispatch goes through the API, so it still works when
   # webhook delivery is throttled and pull_request events stop arriving.
   workflow_dispatch:
+  # Called by release.yml so a tag must pass the full qualification suite
+  # before it can be published.
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -27,7 +30,14 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Cache downloads may fail independently of the build and test gates.
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        id: sccache
+        continue-on-error: true
+
+      - name: Compile without cache when setup fails
+        if: steps.sccache.outcome != 'success'
+        run: echo 'RUSTC_WRAPPER=' >> "$GITHUB_ENV"
 
       # The pinned toolchain (rust-toolchain.toml) is installed by the
       # rustup shim on first use; this step makes that explicit and logs
@@ -41,7 +51,7 @@ jobs:
       - name: cargo xtask ci
         run: cargo xtask ci
 
-      - name: Agent materialization policy template
+      - name: Agent materialization and resource policy template
         run: python3 scripts/test-materialization-policy.py --check-template
 
   deny:
@@ -49,7 +59,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
         with:
           tool: cargo-deny@0.20.2
 
@@ -60,7 +70,7 @@ jobs:
           echo "Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
 
       - name: cargo deny check
-        run: cargo deny check
+        run: cargo deny --locked check
 
       # The notices embed-agent.sh writes into the app, checked early on
       # Linux: fails on a linked crate without license text, a workspace
@@ -79,7 +89,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
         with:
           tool: shellcheck@0.11.0
 
@@ -93,6 +103,12 @@ jobs:
 
       - name: build.sh --install against a fake macOS toolchain
         run: bash scripts/test-build-install.sh
+
+      - name: Qualification harness regressions
+        run: python3 -m unittest discover -s perf -p 'test_*.py'
+
+      - name: Release notes regressions
+        run: python3 scripts/test-release-notes.py
 
       - name: Signed agent launch labels
         run: python3 scripts/test-agent-plist.py
@@ -115,6 +131,9 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Checker regressions
+        run: python3 -m unittest discover -s tools/doccheck -p 'test_*.py'
+
       - name: Check links, anchors, fences and tables
         run: python3 tools/doccheck/checkdocs.py .
 
@@ -136,7 +155,14 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Cache downloads may fail independently of the build and test gates.
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        id: sccache
+        continue-on-error: true
+
+      - name: Compile without cache when setup fails
+        if: steps.sccache.outcome != 'success'
+        run: echo 'RUSTC_WRAPPER=' >> "$GITHUB_ENV"
 
       - name: Log toolchain and image
         run: |
@@ -147,7 +173,7 @@ jobs:
 
       - name: cargo test (aarch64-apple-darwin)
         # Report every failing crate in one run.
-        run: cargo test --workspace --no-fail-fast --target aarch64-apple-darwin
+        run: cargo test --locked --workspace --no-fail-fast --target aarch64-apple-darwin
 
       - name: Agent and CLI process smoke
         run: cargo xtask agent-smoke
@@ -155,7 +181,7 @@ jobs:
       - name: Installed-code IPC authentication
         run: python3 scripts/test-installed-identity.py
 
-      - name: Launchd materialization policy
+      - name: Launchd materialization and resource policy
         run: python3 scripts/test-materialization-policy.py
 
       - name: Agent registration across rebuilt apps

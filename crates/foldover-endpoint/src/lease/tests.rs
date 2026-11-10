@@ -5,9 +5,10 @@ use foldover_types::PairRoot;
 use super::*;
 use crate::Reach;
 
-/// Short enough for tests; the order of the parts is what matters.
+/// Expiry tests stay short while filesystem work on a busy host has room
+/// to renew a live lease. Production timing is unchanged.
 const QUICK: LeaseTiming = LeaseTiming {
-    ttl: Duration::from_millis(150),
+    ttl: Duration::from_secs(1),
     beat: Duration::from_millis(10),
     poll: Duration::from_millis(20),
     wait: Duration::from_secs(5),
@@ -76,16 +77,86 @@ fn a_dead_lease_is_taken_over_and_its_holder_learns_it_lost() {
 }
 
 #[test]
+fn renewal_does_not_overwrite_a_pending_takeover_claim() {
+    let (directory, a, _) = folder();
+    let held = take(&a, holder("a/run", "Laptop"), QUICK, &mut proceed).unwrap();
+    let lock = directory.path().join(".foldover/lock");
+    let claim = directory.path().join(".foldover/lock.claim");
+    let before = fs::read(&lock).unwrap();
+    let successor = Record::of(&holder("b/run", "Studio"), 0).bytes();
+    fs::write(&claim, &successor).unwrap();
+
+    assert!(matches!(held.renew(), Err(LeaseError::Lost)));
+    assert_eq!(fs::read(lock).unwrap(), before);
+    assert_eq!(fs::read(claim).unwrap(), successor);
+}
+
+#[test]
+fn release_does_not_remove_a_lock_with_a_pending_takeover_claim() {
+    let (directory, a, b) = folder();
+    let held = take(&a, holder("a/run", "Laptop"), QUICK, &mut proceed).unwrap();
+    let lock = directory.path().join(".foldover/lock");
+    let claim = directory.path().join(".foldover/lock.claim");
+    let before = fs::read(&lock).unwrap();
+    let successor = Record::of(&holder("b/run", "Studio"), 0).bytes();
+    fs::write(&claim, &successor).unwrap();
+
+    drop(held);
+    assert_eq!(fs::read(&lock).unwrap(), before);
+    assert_eq!(fs::read(&claim).unwrap(), successor);
+
+    b.promote_claim().unwrap();
+    assert_eq!(fs::read(lock).unwrap(), successor);
+    assert!(!claim.exists());
+}
+
+#[test]
+fn renewal_and_release_consume_their_claims() {
+    let (directory, a, _) = folder();
+    let held = take(&a, holder("a/run", "Laptop"), QUICK, &mut proceed).unwrap();
+    let lock = directory.path().join(".foldover/lock");
+    let claim = directory.path().join(".foldover/lock.claim");
+
+    held.renew().unwrap();
+    assert_eq!(Record::parse(&fs::read(&lock).unwrap()).unwrap().beat, 1);
+    assert!(!claim.exists());
+
+    drop(held);
+    assert!(!lock.exists());
+    assert!(!claim.exists());
+}
+
+#[test]
+fn a_maximum_beat_is_lost_instead_of_wrapping() {
+    let (directory, a, _) = folder();
+    let held = take(&a, holder("a/run", "Laptop"), QUICK, &mut proceed).unwrap();
+    let lock = directory.path().join(".foldover/lock");
+    let maximum = Record::of(&holder("a/run", "Laptop"), u64::MAX).bytes();
+    fs::write(&lock, &maximum).unwrap();
+
+    assert!(matches!(held.renew(), Err(LeaseError::Lost)));
+    drop(held);
+    assert_eq!(fs::read(lock).unwrap(), maximum);
+}
+
+#[test]
 fn a_live_holder_keeps_its_lease_while_beating() {
     let (_directory, a, b) = folder();
-    let held = take(&a, holder("a/run", "Laptop"), QUICK, &mut proceed).unwrap();
     // A TTL well past a busy machine's stalls between beats, and a wait
     // long enough to take over a holder that stopped beating.
     let patient = LeaseTiming {
-        ttl: Duration::from_secs(1),
-        wait: Duration::from_millis(2_500),
+        ttl: Duration::from_secs(3),
+        wait: Duration::from_secs(5),
         ..QUICK
     };
+    // Renewal fences promotion against the holder's own TTL, not the
+    // waiter's. Giving only the waiter more time still loses a live holder
+    // when claim I/O takes longer than QUICK's 150 ms on a busy machine.
+    let held = take(&a, holder("a/run", "Laptop"), patient, &mut proceed).unwrap();
+    assert_eq!(
+        held.timing.ttl, patient.ttl,
+        "both agents need the patient TTL"
+    );
     let waiting = std::thread::scope(|scope| {
         let waiting =
             scope.spawn(move || take(&b, holder("b/run", "Studio"), patient, &mut proceed).is_ok());
@@ -112,6 +183,61 @@ fn a_claim_left_by_a_reclaimer_that_died_is_cleared_in_turn() {
     .unwrap();
     let taken = take(&b, holder("b/run", "Studio"), QUICK, &mut proceed);
     assert!(taken.is_ok());
+}
+
+#[test]
+fn an_orphaned_claim_is_recovered_before_a_free_lease_is_granted() {
+    let (directory, _, endpoint) = folder();
+    let claim = directory.path().join(".foldover/lock.claim");
+    fs::create_dir_all(claim.parent().unwrap()).unwrap();
+    fs::write(&claim, Record::of(&holder("dead/run", "Mini"), 0).bytes()).unwrap();
+
+    let held = take(&endpoint, holder("new/run", "Studio"), QUICK, &mut proceed).unwrap();
+    held.renew()
+        .expect("a granted lease must not be fenced by an orphaned claim");
+    drop(held);
+    assert!(!claim.exists());
+    assert!(!directory.path().join(".foldover/lock").exists());
+}
+
+#[test]
+fn a_free_lock_with_a_live_claim_is_busy_and_keeps_both_paths_untouched() {
+    let (directory, _, endpoint) = folder();
+    let claim = directory.path().join(".foldover/lock.claim");
+    let record = Record::of(&holder("other/run", "Mini"), 0).bytes();
+    fs::create_dir_all(claim.parent().unwrap()).unwrap();
+    fs::write(&claim, &record).unwrap();
+
+    let result = take(
+        &endpoint,
+        holder("new/run", "Studio"),
+        NO_WAIT,
+        &mut proceed,
+    );
+    assert!(matches!(result, Err(LeaseError::Busy { label }) if label == "Mini"));
+    assert_eq!(fs::read(claim).unwrap(), record);
+    assert!(!directory.path().join(".foldover/lock").exists());
+}
+
+#[test]
+fn a_dead_lock_and_claim_recover_within_one_wait() {
+    let (directory, a, b) = folder();
+    // Like STANDARD, this allows one TTL but not two. Starting the
+    // claim's clock only after the lock dies would make every retry time out.
+    let timing = LeaseTiming {
+        ttl: Duration::from_secs(2),
+        wait: Duration::from_secs(3),
+        ..QUICK
+    };
+    let _dead = take(&a, holder("a/run", "Laptop"), timing, &mut proceed).unwrap();
+    fs::write(
+        directory.path().join(".foldover/lock.claim"),
+        Record::of(&holder("c/run", "Mini"), 0).bytes(),
+    )
+    .unwrap();
+
+    let _taken = take(&b, holder("b/run", "Studio"), timing, &mut proceed)
+        .expect("a dead lock and claim must recover before the wait expires");
 }
 
 #[test]

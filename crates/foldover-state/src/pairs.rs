@@ -1,8 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::ffi::OsStrExt;
 
+pub use foldover_db::Purge;
 use foldover_db::{
-    BaseChange, Database, PairRow, PairValues, ResolutionRow, SnapshotRow, StateLocation,
+    BaseChange, BaseRow, Database, PairRow, PairValues, ReadView, ReadViewError, ResolutionRow,
+    SnapshotData, SnapshotRow, StateLocation,
 };
 use foldover_types::{
     BaselineEntry, DailySchedule, Durability, EndpointId, Filters, FolderRecords, InvalidPair,
@@ -12,7 +14,7 @@ use foldover_types::{
 };
 
 use crate::BaseUpdate;
-use crate::base::{decode, decode_entry, encode};
+use crate::base::{VERSION_BYTES, decode, decode_entry, encode};
 
 mod cursor;
 mod device;
@@ -165,12 +167,46 @@ impl PairStore {
         )
     }
 
+    /// Remove a pair at once; `purge_removed` deletes its rows later.
     pub fn remove(&mut self, id: PairId, revision: u64) -> Result<PairConfig, Error> {
         let revision = database_revision(revision)?;
         // Decode before deleting: corrupt domain records must not disappear silently.
         let current = self.pair(id)?.ok_or(Error::PairNotFound)?;
         self.database.remove_pair(id.as_bytes(), revision)?;
         Ok(current)
+    }
+
+    /// Delete up to `limit` rows of removed pairs, in one transaction.
+    pub fn purge_removed(&mut self, limit: usize) -> Result<Purge, Error> {
+        Ok(self.database.purge_removed_pairs(limit)?)
+    }
+
+    /// Whether removed pairs still have rows to purge.
+    pub fn removals_pending(&self) -> Result<bool, Error> {
+        Ok(self.database.has_removed_pairs()?)
+    }
+
+    /// Pause the pair's automatic syncs until it is resumed.
+    pub fn pause_pair(&mut self, id: PairId) -> Result<(), Error> {
+        Ok(self.database.pause_pair(id.as_bytes())?)
+    }
+
+    pub fn resume_pair(&mut self, id: PairId) -> Result<(), Error> {
+        Ok(self.database.resume_pair(id.as_bytes())?)
+    }
+
+    /// Every paused pair.
+    pub fn paused_pairs(&self) -> Result<BTreeSet<PairId>, Error> {
+        self.database
+            .paused_pairs()?
+            .into_iter()
+            .map(|id| {
+                let bytes = id
+                    .try_into()
+                    .map_err(|_| Error::InvalidStored("Paused pair ID"))?;
+                Ok(PairId::from_bytes(bytes)?)
+            })
+            .collect()
     }
 }
 
@@ -252,24 +288,7 @@ fn side_name(side: Side) -> &'static str {
 
 impl PairStore {
     pub fn snapshot(&self, id: PairId, side: Side) -> Result<Vec<SnapshotEntry>, Error> {
-        self.database
-            .snapshot(id.as_bytes(), side_name(side))?
-            .into_iter()
-            .filter_map(|row| {
-                let path = match SyncPath::try_from(row.path) {
-                    Ok(path) => path,
-                    Err(_) => return Some(Err(Error::InvalidStored("snapshot path"))),
-                };
-                // Versions here are cache hints, not the authoritative base.
-                // A corrupt hint must allow the full observation that replaces it.
-                let version = decode(&row.version).ok()?;
-                Some(Ok(SnapshotEntry {
-                    path,
-                    fingerprint: row.fingerprint,
-                    version,
-                }))
-            })
-            .collect()
+        decode_snapshot_rows(self.database.snapshot(id.as_bytes(), side_name(side))?)
     }
 
     /// Replace one side's observation, only while the pair keeps `revision`.
@@ -283,16 +302,101 @@ impl PairStore {
         let revision = database_revision(revision)?;
         let rows: Vec<_> = entries
             .iter()
-            .map(|entry| SnapshotRow {
-                path: entry.path.as_bytes().to_vec(),
-                fingerprint: entry.fingerprint.clone(),
-                version: encode(entry.version).to_vec(),
+            .map(|entry| EncodedSnapshot {
+                entry,
+                version: encode(entry.version),
             })
             .collect();
         Ok(self
             .database
-            .replace_snapshot(id.as_bytes(), revision, side_name(side), &rows)?)
+            .replace_snapshot_data(id.as_bytes(), revision, side_name(side), &rows)?)
     }
+
+    /// Replace one side's observation from rows already sorted by path with
+    /// no duplicates, as produced by a run's effective snapshot iterator.
+    /// Each row is encoded once into an owned entry, so no whole-tree vector
+    /// is built between the run and the database.
+    pub fn replace_snapshot_iter<I>(
+        &mut self,
+        id: PairId,
+        revision: u64,
+        side: Side,
+        entries: I,
+    ) -> Result<(), Error>
+    where
+        I: IntoIterator<Item = SnapshotEntry>,
+    {
+        let revision = database_revision(revision)?;
+        let rows = entries.into_iter().map(|entry| EncodedSnapshotOwned {
+            path: entry.path,
+            fingerprint: entry.fingerprint,
+            version: encode(entry.version),
+        });
+        Ok(self
+            .database
+            .replace_snapshot_sorted(id.as_bytes(), revision, side_name(side), rows)?)
+    }
+}
+
+struct EncodedSnapshot<'a> {
+    entry: &'a SnapshotEntry,
+    version: [u8; VERSION_BYTES],
+}
+
+impl SnapshotData for EncodedSnapshot<'_> {
+    fn path(&self) -> &[u8] {
+        self.entry.path.as_bytes()
+    }
+    fn fingerprint(&self) -> &[u8] {
+        &self.entry.fingerprint
+    }
+    fn version(&self) -> &[u8] {
+        &self.version
+    }
+}
+
+/// An owned snapshot row: the validated path and opaque fingerprint are kept
+/// as-is, and only the version is encoded into its stored fixed-width form.
+struct EncodedSnapshotOwned {
+    path: SyncPath,
+    fingerprint: Vec<u8>,
+    version: [u8; VERSION_BYTES],
+}
+
+impl SnapshotData for EncodedSnapshotOwned {
+    fn path(&self) -> &[u8] {
+        self.path.as_bytes()
+    }
+    fn fingerprint(&self) -> &[u8] {
+        &self.fingerprint
+    }
+    fn version(&self) -> &[u8] {
+        &self.version
+    }
+}
+
+fn decode_base_row(row: BaseRow) -> Result<(SyncPath, BaselineEntry), Error> {
+    let path = SyncPath::try_from(row.path).map_err(|_| Error::InvalidStored("base path"))?;
+    Ok((path, decode_entry(&row.left_version, &row.right_version)?))
+}
+
+fn decode_snapshot_row(row: SnapshotRow) -> Option<Result<SnapshotEntry, Error>> {
+    let path = match SyncPath::try_from(row.path) {
+        Ok(path) => path,
+        Err(_) => return Some(Err(Error::InvalidStored("snapshot path"))),
+    };
+    // Versions here are cache hints, not the authoritative base.
+    // A corrupt hint must allow the full observation that replaces it.
+    let version = decode(&row.version).ok()?;
+    Some(Ok(SnapshotEntry {
+        path,
+        fingerprint: row.fingerprint,
+        version,
+    }))
+}
+
+fn decode_snapshot_rows(rows: Vec<SnapshotRow>) -> Result<Vec<SnapshotEntry>, Error> {
+    rows.into_iter().filter_map(decode_snapshot_row).collect()
 }
 
 impl PairStore {
@@ -354,11 +458,7 @@ impl PairStore {
         self.database
             .base_rows(id.as_bytes())?
             .into_iter()
-            .map(|row| {
-                let path =
-                    SyncPath::try_from(row.path).map_err(|_| Error::InvalidStored("base path"))?;
-                Ok((path, decode_entry(&row.left_version, &row.right_version)?))
-            })
+            .map(decode_base_row)
             .collect()
     }
 
@@ -395,6 +495,132 @@ impl PairStore {
             .change_base(id.as_bytes(), revision, &changes, journal)?;
         Ok(())
     }
+
+    /// Capture one run's stored base and snapshot rows together, so the
+    /// engine can decode them outside the lock that captured them. The
+    /// view pins the pair's current revision and keeps the state's single
+    /// writer lease until it drops.
+    pub fn run_records(&self, id: PairId) -> Result<RunRecords, Error> {
+        // A run reads the active revision's base and caches; a saved
+        // replacement waits for the next run after activation.
+        let revision = self
+            .database
+            .active_pair(id.as_bytes())?
+            .ok_or(Error::PairNotFound)?
+            .revision;
+        Ok(RunRecords {
+            view: self.database.read_view(id.as_bytes(), revision)?,
+        })
+    }
+}
+
+/// A run's stored base and snapshot caches, pinned at one revision under
+/// the state's single writer. The view holds a clone of the writer lease,
+/// so the rows stay readable after the store closes and no later write can
+/// change them.
+pub struct RunRecords {
+    view: ReadView,
+}
+
+impl RunRecords {
+    /// Capacity for the stored base, counted from the same pinned view.
+    pub fn base_len(&self) -> Result<usize, Error> {
+        Ok(self.view.base_len()?)
+    }
+
+    /// Capacity for one stored snapshot. Malformed cache rows may be
+    /// omitted when visited, so this is an upper bound on decoded rows.
+    pub fn snapshot_len(&self, side: Side) -> Result<usize, Error> {
+        Ok(self.view.snapshot_len(side_name(side))?)
+    }
+
+    /// Visit the run's base rows in stored path order. Malformed paths and
+    /// base versions stay errors, as in [`PairStore::base`].
+    pub fn visit_base<F>(&self, mut visit: F) -> Result<(), Error>
+    where
+        F: FnMut(SyncPath, BaselineEntry),
+    {
+        self.view
+            .base_rows(|row| {
+                let path =
+                    SyncPath::try_from(row.path).map_err(|_| Error::InvalidStored("base path"))?;
+                let entry = decode_entry(row.left_version, row.right_version)?;
+                visit(path, entry);
+                Ok::<_, Error>(())
+            })
+            .map_err(read_view_error)?;
+        Ok(())
+    }
+
+    /// Visit one side's snapshot rows in stored path order. A malformed
+    /// snapshot version is a cache miss, as in [`PairStore::snapshot`];
+    /// malformed paths stay errors.
+    pub fn visit_snapshot<F>(&self, side: Side, mut visit: F) -> Result<(), Error>
+    where
+        F: FnMut(SnapshotEntry),
+    {
+        self.view
+            .snapshot(side_name(side), |row| {
+                let path = SyncPath::try_from(row.path)
+                    .map_err(|_| Error::InvalidStored("snapshot path"))?;
+                // Versions here are cache hints, not the authoritative base.
+                // A corrupt hint must allow the full observation that replaces it.
+                let Some(version) = decode(row.version).ok() else {
+                    return Ok(());
+                };
+                visit(SnapshotEntry {
+                    path,
+                    fingerprint: row.fingerprint.to_vec(),
+                    version,
+                });
+                Ok::<_, Error>(())
+            })
+            .map_err(read_view_error)?;
+        Ok(())
+    }
+
+    /// Decode the captured rows. A malformed snapshot version is a cache
+    /// miss, as in [`PairStore::snapshot`]; malformed paths and base
+    /// versions stay errors.
+    pub fn decode(self) -> Result<RunRecordInputs, Error> {
+        let mut base = BTreeMap::new();
+        self.visit_base(|path, entry| {
+            base.insert(path, entry);
+        })?;
+        let mut left_snapshot = Vec::new();
+        self.visit_snapshot(Side::Left, |mut entry| {
+            if let Some((path, _)) = base.get_key_value(&entry.path) {
+                entry.path = path.clone();
+            }
+            left_snapshot.push(entry);
+        })?;
+        let mut right_snapshot = Vec::new();
+        self.visit_snapshot(Side::Right, |mut entry| {
+            if let Some((path, _)) = base.get_key_value(&entry.path) {
+                entry.path = path.clone();
+            }
+            right_snapshot.push(entry);
+        })?;
+        Ok(RunRecordInputs {
+            base,
+            left_snapshot,
+            right_snapshot,
+        })
+    }
+}
+
+fn read_view_error(error: ReadViewError<Error>) -> Error {
+    match error {
+        ReadViewError::Driver(error) => Error::from(error),
+        ReadViewError::Visitor(error) => error,
+    }
+}
+
+/// Decoded base and snapshot rows of one captured run.
+pub struct RunRecordInputs {
+    pub base: BTreeMap<SyncPath, BaselineEntry>,
+    pub left_snapshot: Vec<SnapshotEntry>,
+    pub right_snapshot: Vec<SnapshotEntry>,
 }
 
 fn database_revision(revision: u64) -> Result<i64, InvalidPair> {
@@ -1039,6 +1265,87 @@ mod tests {
         assert_eq!(store.journal(pair.id()).unwrap(), None);
     }
 
+    /// PLAN.md §5.2: the per-batch journal cleanup must stay linear in a
+    /// run's writes. Ignored by default; run explicitly in release mode
+    /// on an idle host:
+    ///   cargo test --release -p foldover-state journal_batches_commit_linearly -- --ignored --nocapture
+    #[test]
+    #[ignore = "performance budget; run explicitly in release mode on an idle host"]
+    fn journal_batches_commit_linearly() {
+        use std::time::{Duration, Instant};
+
+        const BATCH: usize = 256;
+        const BASE: usize = 100_000;
+        // 1x, 2x, 4x and 8x the writes. The first measurement sets the
+        // linear expectation; the old per-batch cleanup grew as 1x, 4x,
+        // 16x and 64x, which this catches from 4x on.
+        let mut first: Option<(usize, Duration)> = None;
+        for entries in [BASE, 2 * BASE, 4 * BASE, 8 * BASE] {
+            let (_directory, location) = location();
+            let mut store = PairStore::open(&location).unwrap();
+            let pair = store.create(&draft(SyncMode::Sync)).unwrap();
+            let (updates, journal) = batch_writes(entries);
+            let started = Instant::now();
+            for (index, batch) in updates.chunks(BATCH).enumerate() {
+                let start = index * BATCH;
+                store
+                    .update_base(
+                        pair.id(),
+                        pair.revision(),
+                        batch,
+                        JournalUpdate::Record {
+                            run: "2026-10-20T10-00-00.000Z",
+                            entries: &journal[start..start + batch.len()],
+                        },
+                    )
+                    .unwrap();
+            }
+            let elapsed = started.elapsed();
+            eprintln!("{entries} writes in {BATCH}-row batches took {elapsed:?}");
+            if let Some((base, expected)) = first {
+                // Allow 3x per write for B-tree depth, WAL growth and host
+                // noise; the quadratic term would cost entries/base
+                // squared.
+                let allowed = expected * ((entries / base) as u32 * 3);
+                assert!(
+                    elapsed < allowed,
+                    "{entries} writes took {elapsed:?}; over 3x the linear {base}-write expectation"
+                );
+            } else {
+                first = Some((entries, elapsed));
+            }
+        }
+    }
+
+    /// `entries` writes and the journal entries a run records with them.
+    fn batch_writes(entries: usize) -> (Vec<BaseUpdate>, Vec<JournalEntry>) {
+        use foldover_types::{Digest, EntryContent, EntryVersion};
+
+        let version = EntryVersion::new(
+            EntryContent::File(Digest::from_bytes([7; Digest::BYTE_LEN])),
+            Digest::from_bytes([9; Digest::BYTE_LEN]),
+        );
+        let entry = BaselineEntry::new(version, version).unwrap();
+        let mut updates = Vec::with_capacity(entries);
+        let mut journal = Vec::with_capacity(entries);
+        for index in 0..entries {
+            let path = SyncPath::try_from(
+                format!("d-{:05}/f-{:05}", index / 1000, index % 1000).as_bytes(),
+            )
+            .unwrap();
+            updates.push(BaseUpdate::Record(path.clone(), entry));
+            journal.push(JournalEntry {
+                seq: index as u64,
+                path,
+                side: Side::Left,
+                action: JournalAction::Replace(version),
+                before: Some(entry),
+                moved_from: None,
+            });
+        }
+        (updates, journal)
+    }
+
     #[test]
     fn options_round_trip_and_metadata_changes_discard_the_base() {
         use foldover_types::{Digest, EntryContent, EntryVersion};
@@ -1245,6 +1552,529 @@ mod tests {
             .unwrap();
         assert!(matches!(
             store.base(pair.id()),
+            Err(Error::InvalidStored(_))
+        ));
+    }
+
+    #[test]
+    fn replace_snapshot_iter_matches_the_slice_api_across_pages() {
+        use foldover_types::{Digest, EntryContent, EntryVersion};
+
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        let pair = store.create(&draft(SyncMode::Sync)).unwrap();
+        let version = EntryVersion::new(
+            EntryContent::File(Digest::from_bytes([3; Digest::BYTE_LEN])),
+            Digest::from_bytes([4; Digest::BYTE_LEN]),
+        );
+        let entry = |path: &[u8], salt: u8| SnapshotEntry {
+            path: SyncPath::try_from(path).unwrap(),
+            fingerprint: vec![salt; 20],
+            version,
+        };
+        let stored: Vec<SnapshotEntry> = (0..400)
+            .map(|index| entry(format!("p-{index:04}").as_bytes(), 1))
+            .collect();
+        store
+            .replace_snapshot(pair.id(), pair.revision(), Side::Left, &stored)
+            .unwrap();
+
+        // Remove page-boundary rows, change one row, and add paths before,
+        // between, and after pages.
+        let mut replacement: Vec<SnapshotEntry> = (0..400)
+            .filter(|index| !matches!(*index, 0 | 255 | 256 | 399))
+            .map(|index| {
+                let salt = if index == 100 { 2 } else { 1 };
+                entry(format!("p-{index:04}").as_bytes(), salt)
+            })
+            .collect();
+        replacement.push(entry(b"p-0000a", 1));
+        replacement.push(entry(b"p-0255a", 1));
+        replacement.push(entry(b"p-0400", 1));
+        replacement.sort_by(|a, b| a.path.cmp(&b.path));
+
+        store
+            .replace_snapshot_iter(pair.id(), pair.revision(), Side::Left, replacement.clone())
+            .unwrap();
+        assert_eq!(store.snapshot(pair.id(), Side::Left).unwrap(), replacement);
+
+        // Empty iterator clears the side.
+        store
+            .replace_snapshot_iter(pair.id(), pair.revision(), Side::Left, std::iter::empty())
+            .unwrap();
+        assert!(store.snapshot(pair.id(), Side::Left).unwrap().is_empty());
+
+        // All-added through the iterator.
+        store
+            .replace_snapshot_iter(pair.id(), pair.revision(), Side::Left, replacement.clone())
+            .unwrap();
+        assert_eq!(store.snapshot(pair.id(), Side::Left).unwrap(), replacement);
+    }
+
+    #[test]
+    fn replace_snapshot_iter_rejects_unsorted_and_duplicate_input() {
+        use foldover_types::{Digest, EntryContent, EntryVersion};
+
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        let pair = store.create(&draft(SyncMode::Sync)).unwrap();
+        let version = EntryVersion::new(
+            EntryContent::Directory,
+            Digest::from_bytes([7; Digest::BYTE_LEN]),
+        );
+        let entry = |path: &[u8]| SnapshotEntry {
+            path: SyncPath::try_from(path).unwrap(),
+            fingerprint: b"fingerprint".to_vec(),
+            version,
+        };
+        let stored: Vec<SnapshotEntry> = (0..300)
+            .map(|index| entry(format!("p-{index:04}").as_bytes()))
+            .collect();
+        store
+            .replace_snapshot(pair.id(), pair.revision(), Side::Left, &stored)
+            .unwrap();
+
+        // Out of order in the middle, after some page writes.
+        let mut unsorted = stored.clone();
+        unsorted.swap(10, 20);
+        assert!(matches!(
+            store.replace_snapshot_iter(pair.id(), pair.revision(), Side::Left, unsorted,),
+            Err(Error::Storage(foldover_db::Error::UnsortedSnapshot))
+        ));
+        // A duplicate last row, after a real update write.
+        let mut duplicate = stored.clone();
+        duplicate.last_mut().unwrap().fingerprint = b"changed".to_vec();
+        let last = duplicate.last().unwrap().clone();
+        duplicate.push(last);
+        assert!(matches!(
+            store.replace_snapshot_iter(pair.id(), pair.revision(), Side::Left, duplicate,),
+            Err(Error::Storage(foldover_db::Error::UnsortedSnapshot))
+        ));
+        // Both rejected replacements rolled back.
+        assert_eq!(store.snapshot(pair.id(), Side::Left).unwrap(), stored);
+
+        // A stale revision changes nothing.
+        assert!(matches!(
+            store.replace_snapshot_iter(
+                pair.id(),
+                pair.revision() + 1,
+                Side::Left,
+                std::iter::empty(),
+            ),
+            Err(Error::StaleRevision)
+        ));
+        assert_eq!(store.snapshot(pair.id(), Side::Left).unwrap(), stored);
+    }
+
+    #[test]
+    fn captured_run_records_decode_like_the_pair_store() {
+        use foldover_types::{Digest, EntryContent, EntryVersion};
+
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        let pair = store.create(&draft(SyncMode::Sync)).unwrap();
+        let version = EntryVersion::new(
+            EntryContent::File(Digest::from_bytes([3; Digest::BYTE_LEN])),
+            Digest::from_bytes([4; Digest::BYTE_LEN]),
+        );
+        let base_path = SyncPath::try_from(b"file".as_slice()).unwrap();
+        store
+            .update_base(
+                pair.id(),
+                pair.revision(),
+                &[BaseUpdate::Record(
+                    base_path.clone(),
+                    BaselineEntry::new(version, version).unwrap(),
+                )],
+                JournalUpdate::None,
+            )
+            .unwrap();
+        let left = SnapshotEntry {
+            path: SyncPath::try_from(b"left".as_slice()).unwrap(),
+            fingerprint: b"left fingerprint".to_vec(),
+            version,
+        };
+        let right = SnapshotEntry {
+            path: SyncPath::try_from(b"right".as_slice()).unwrap(),
+            fingerprint: b"right fingerprint".to_vec(),
+            version,
+        };
+        store
+            .replace_snapshot(
+                pair.id(),
+                pair.revision(),
+                Side::Left,
+                std::slice::from_ref(&left),
+            )
+            .unwrap();
+        store
+            .replace_snapshot(
+                pair.id(),
+                pair.revision(),
+                Side::Right,
+                std::slice::from_ref(&right),
+            )
+            .unwrap();
+
+        let decoded = store.run_records(pair.id()).unwrap().decode().unwrap();
+        assert_eq!(decoded.base, store.base(pair.id()).unwrap());
+        assert_eq!(
+            decoded.base[&base_path],
+            BaselineEntry::new(version, version).unwrap()
+        );
+        assert_eq!(decoded.left_snapshot, [left]);
+        assert_eq!(decoded.right_snapshot, [right]);
+    }
+
+    #[test]
+    fn run_records_decode_keeps_snapshot_cache_rules_and_path_errors() {
+        use foldover_types::{Digest, EntryContent, EntryVersion};
+
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        let pair = store.create(&draft(SyncMode::Sync)).unwrap();
+        let version = EntryVersion::new(
+            EntryContent::Directory,
+            Digest::from_bytes([7; Digest::BYTE_LEN]),
+        );
+        let expected = SnapshotEntry {
+            path: SyncPath::try_from(b"kept".as_slice()).unwrap(),
+            fingerprint: b"opaque fingerprint".to_vec(),
+            version,
+        };
+        let mut unknown_kind = encode(version).to_vec();
+        unknown_kind[0] = u8::MAX;
+        let row = |path: &[u8], version: Vec<u8>| SnapshotRow {
+            path: path.to_vec(),
+            fingerprint: expected.fingerprint.clone(),
+            version,
+        };
+        store
+            .database
+            .replace_snapshot(
+                pair.id().as_bytes(),
+                database_revision(pair.revision()).unwrap(),
+                side_name(Side::Left),
+                &[
+                    row(expected.path.as_bytes(), encode(version).to_vec()),
+                    row(b"truncated", Vec::new()),
+                    row(b"unknown-kind", unknown_kind),
+                ],
+            )
+            .unwrap();
+        let decoded = store.run_records(pair.id()).unwrap().decode().unwrap();
+        assert_eq!(decoded.left_snapshot, std::slice::from_ref(&expected));
+        assert!(decoded.right_snapshot.is_empty());
+
+        store
+            .database
+            .replace_snapshot(
+                pair.id().as_bytes(),
+                database_revision(pair.revision()).unwrap(),
+                side_name(Side::Right),
+                &[SnapshotRow {
+                    path: b"../outside".to_vec(),
+                    fingerprint: Vec::new(),
+                    version: encode(version).to_vec(),
+                }],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.run_records(pair.id()).unwrap().decode(),
+            Err(Error::InvalidStored("snapshot path"))
+        ));
+        assert!(store.snapshot(pair.id(), Side::Right).is_err());
+
+        let base_version = encode(version);
+        store
+            .database
+            .change_base(
+                pair.id().as_bytes(),
+                database_revision(pair.revision()).unwrap(),
+                &[BaseChange::Put {
+                    path: b"kept",
+                    left_version: &[],
+                    right_version: &base_version,
+                }],
+                foldover_db::JournalChange::None,
+            )
+            .unwrap();
+        assert!(matches!(
+            store.run_records(pair.id()).unwrap().decode(),
+            Err(Error::InvalidStored(_))
+        ));
+        assert!(store.base(pair.id()).is_err());
+    }
+
+    #[test]
+    fn captured_run_records_stay_behind_a_config_change() {
+        use foldover_types::{Digest, EntryContent, EntryVersion};
+
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        let pair = store.create(&draft(SyncMode::Sync)).unwrap();
+        let version = EntryVersion::new(
+            EntryContent::Directory,
+            Digest::from_bytes([9; Digest::BYTE_LEN]),
+        );
+        let base_path = SyncPath::try_from(b"file".as_slice()).unwrap();
+        store
+            .update_base(
+                pair.id(),
+                pair.revision(),
+                &[BaseUpdate::Record(
+                    base_path.clone(),
+                    BaselineEntry::new(version, version).unwrap(),
+                )],
+                JournalUpdate::None,
+            )
+            .unwrap();
+        let entry = SnapshotEntry {
+            path: SyncPath::try_from(b"file".as_slice()).unwrap(),
+            fingerprint: b"fingerprint".to_vec(),
+            version,
+        };
+        store
+            .replace_snapshot(
+                pair.id(),
+                pair.revision(),
+                Side::Left,
+                std::slice::from_ref(&entry),
+            )
+            .unwrap();
+        let captured = store.run_records(pair.id()).unwrap();
+
+        // The pair's roots move and the next revision forgets the base.
+        let moved = PairDraft::new(
+            "Photos".into(),
+            LocalRoot::from_bytes(b"/elsewhere/\xff".to_vec()).unwrap(),
+            LocalRoot::from_bytes(b"/right".to_vec()).unwrap(),
+            SyncMode::Sync,
+        )
+        .unwrap();
+        let updated = store.update(pair.id(), pair.revision(), &moved).unwrap();
+        assert_eq!(updated.revision(), pair.revision() + 1);
+        assert!(store.base(pair.id()).unwrap().is_empty());
+
+        // Decoding the captured rows still returns the run's own inputs.
+        let decoded = captured.decode().unwrap();
+        assert_eq!(
+            decoded.base[&base_path],
+            BaselineEntry::new(version, version).unwrap()
+        );
+        assert_eq!(decoded.left_snapshot, [entry]);
+    }
+
+    #[test]
+    fn captured_run_records_stay_original_after_pair_removal_and_keep_the_writer_lease() {
+        use foldover_types::{Digest, EntryContent, EntryVersion};
+
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        let pair = store.create(&draft(SyncMode::Sync)).unwrap();
+        let version = EntryVersion::new(
+            EntryContent::File(Digest::from_bytes([8; Digest::BYTE_LEN])),
+            Digest::from_bytes([9; Digest::BYTE_LEN]),
+        );
+        let base_path = SyncPath::try_from(b"file".as_slice()).unwrap();
+        store
+            .update_base(
+                pair.id(),
+                pair.revision(),
+                &[BaseUpdate::Record(
+                    base_path.clone(),
+                    BaselineEntry::new(version, version).unwrap(),
+                )],
+                JournalUpdate::None,
+            )
+            .unwrap();
+        let entry = SnapshotEntry {
+            path: SyncPath::try_from(b"left".as_slice()).unwrap(),
+            fingerprint: b"left fingerprint".to_vec(),
+            version,
+        };
+        store
+            .replace_snapshot(
+                pair.id(),
+                pair.revision(),
+                Side::Left,
+                std::slice::from_ref(&entry),
+            )
+            .unwrap();
+        let captured = store.run_records(pair.id()).unwrap();
+
+        // The primary forgets the base, moves the roots, then removes the
+        // pair outright. The pinned view keeps the revision it captured.
+        store
+            .update_base(
+                pair.id(),
+                pair.revision(),
+                &[BaseUpdate::Forget(base_path.clone())],
+                JournalUpdate::None,
+            )
+            .unwrap();
+        let moved = PairDraft::new(
+            "Moved".into(),
+            LocalRoot::from_bytes(b"/moved/\xff".to_vec()).unwrap(),
+            LocalRoot::from_bytes(b"/right".to_vec()).unwrap(),
+            SyncMode::Sync,
+        )
+        .unwrap();
+        let updated = store.update(pair.id(), pair.revision(), &moved).unwrap();
+        store.remove(pair.id(), updated.revision()).unwrap();
+
+        // A pinned view keeps the single writer lease until it drops.
+        drop(store);
+        assert!(matches!(
+            PairStore::open(&location),
+            Err(Error::Storage(foldover_db::Error::WriterLocked(_)))
+        ));
+
+        // Decoding the captured rows still returns the run's own inputs.
+        let decoded = captured.decode().unwrap();
+        assert_eq!(
+            decoded.base[&base_path],
+            BaselineEntry::new(version, version).unwrap()
+        );
+        assert_eq!(decoded.left_snapshot, [entry]);
+
+        // Dropping the view in `decode` released the lease.
+        PairStore::open(&location).unwrap();
+    }
+
+    #[test]
+    fn decoded_snapshot_paths_share_base_backing() {
+        use foldover_types::{Digest, EntryContent, EntryVersion};
+
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        let pair = store.create(&draft(SyncMode::Sync)).unwrap();
+        let version = EntryVersion::new(
+            EntryContent::Directory,
+            Digest::from_bytes([11; Digest::BYTE_LEN]),
+        );
+        let base_path = SyncPath::try_from(b"shared/\xff".as_slice()).unwrap();
+        store
+            .update_base(
+                pair.id(),
+                pair.revision(),
+                &[BaseUpdate::Record(
+                    base_path.clone(),
+                    BaselineEntry::new(version, version).unwrap(),
+                )],
+                JournalUpdate::None,
+            )
+            .unwrap();
+        let entry = SnapshotEntry {
+            path: base_path,
+            fingerprint: b"fingerprint".to_vec(),
+            version,
+        };
+        store
+            .replace_snapshot(
+                pair.id(),
+                pair.revision(),
+                Side::Left,
+                std::slice::from_ref(&entry),
+            )
+            .unwrap();
+
+        let decoded = store.run_records(pair.id()).unwrap().decode().unwrap();
+        let base_key = decoded.base.keys().next().unwrap();
+        assert_eq!(base_key.as_bytes(), b"shared/\xff");
+        assert_eq!(
+            decoded.left_snapshot[0].path.as_bytes().as_ptr(),
+            base_key.as_bytes().as_ptr(),
+            "an equal raw snapshot path reuses the base Arc backing"
+        );
+    }
+
+    #[test]
+    fn run_records_visitors_keep_cache_rules() {
+        use foldover_types::{Digest, EntryContent, EntryVersion};
+
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        let pair = store.create(&draft(SyncMode::Sync)).unwrap();
+        let version = EntryVersion::new(
+            EntryContent::Directory,
+            Digest::from_bytes([7; Digest::BYTE_LEN]),
+        );
+        let expected = SnapshotEntry {
+            path: SyncPath::try_from(b"kept".as_slice()).unwrap(),
+            fingerprint: b"opaque fingerprint".to_vec(),
+            version,
+        };
+        let mut unknown_kind = encode(version).to_vec();
+        unknown_kind[0] = u8::MAX;
+        let row = |path: &[u8], version: Vec<u8>| SnapshotRow {
+            path: path.to_vec(),
+            fingerprint: expected.fingerprint.clone(),
+            version,
+        };
+        store
+            .database
+            .replace_snapshot(
+                pair.id().as_bytes(),
+                database_revision(pair.revision()).unwrap(),
+                side_name(Side::Left),
+                &[
+                    row(expected.path.as_bytes(), encode(version).to_vec()),
+                    row(b"truncated", Vec::new()),
+                    row(b"unknown-kind", unknown_kind),
+                ],
+            )
+            .unwrap();
+        let records = store.run_records(pair.id()).unwrap();
+        let mut left = Vec::new();
+        records
+            .visit_snapshot(Side::Left, |entry| left.push(entry))
+            .unwrap();
+        assert_eq!(left, [expected]);
+        let mut base = Vec::new();
+        records
+            .visit_base(|path, entry| base.push((path, entry)))
+            .unwrap();
+        assert!(base.is_empty());
+
+        // An invalid snapshot path is an error, not a cache miss.
+        store
+            .database
+            .replace_snapshot(
+                pair.id().as_bytes(),
+                database_revision(pair.revision()).unwrap(),
+                side_name(Side::Right),
+                &[SnapshotRow {
+                    path: b"../outside".to_vec(),
+                    fingerprint: Vec::new(),
+                    version: encode(version).to_vec(),
+                }],
+            )
+            .unwrap();
+        let records = store.run_records(pair.id()).unwrap();
+        assert!(matches!(
+            records.visit_snapshot(Side::Right, |_| ()),
+            Err(Error::InvalidStored("snapshot path"))
+        ));
+
+        // A bad base row stays an error rather than being skipped.
+        let base_version = encode(version);
+        store
+            .database
+            .change_base(
+                pair.id().as_bytes(),
+                database_revision(pair.revision()).unwrap(),
+                &[BaseChange::Put {
+                    path: b"kept",
+                    left_version: &[],
+                    right_version: &base_version,
+                }],
+                foldover_db::JournalChange::None,
+            )
+            .unwrap();
+        let records = store.run_records(pair.id()).unwrap();
+        assert!(matches!(
+            records.visit_base(|_, _| ()),
             Err(Error::InvalidStored(_))
         ));
     }

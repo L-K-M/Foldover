@@ -8,7 +8,8 @@ The agent records every finished run, manual or scheduled, in the pair's
 history (state schema v9): start and end time, trigger, outcome, counts,
 the run's archive folder and a failure message. Previews are not
 recorded. Each pair keeps its newest 100 runs; the history survives
-configuration edits and is removed with the pair.
+configuration edits, and the agent's background purge deletes it with
+the pair.
 
 Outcomes: **completed**, **cancelled** (including before anything was
 written), **needs approval** (stopped before writing) and **failed**.
