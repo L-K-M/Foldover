@@ -299,10 +299,11 @@ deletion ([ADR 0010](../adr/0010-local-metadata-inventory.md)).
   restarts ([ADR 0022](../adr/0022-scheduled-runs.md)).
 - **A new scheduled pair can start within seconds of saving it.** A
   daily pair's first sync does not wait for its first scheduled time.
-  An interval pair's starts once the agent has been running for one
-  interval, and a "When files change" pair's once it has been running
-  for an hour, which it usually has. Turn on Require approval before
-  syncing to hold it
+  An interval pair's first sync starts once the agent has been running
+  for one interval, and a "When files change" pair's first sync once it
+  has been running for an hour. The agent usually has; right after it
+  restarts, a new interval pair can wait most of an interval. Turn on
+  Require approval before syncing to hold the first sync
   ([ADR 0022](../adr/0022-scheduled-runs.md),
   [ADR 0039](../adr/0039-calendar-schedules.md)).
 - A disk that comes back is noticed within 5 seconds for "When files

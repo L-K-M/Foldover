@@ -79,7 +79,9 @@ longest-waiting pair first
   one that restarts daily. An interval pair is therefore also due once
   the wall clock shows a full interval since its last scheduled start
   or, before its first start under this agent, since the start of its
-  last recorded run, manual or scheduled. A missed interval runs once
+  last recorded run, manual or scheduled. Once it has started under
+  this agent only its scheduled starts count, as before: a manual sync
+  does not put off the next automatic one. A missed interval runs once
   when the Mac wakes or the agent starts, like a missed daily moment
   ([ADR 0039](0039-calendar-schedules.md)). A wall clock set back never
   holds a pair, since awake time still counts; one set forward costs a

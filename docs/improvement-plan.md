@@ -144,10 +144,11 @@ unattended unless it requires approval. The pair editor does say a
 scheduled pair can start by itself, and PR 188's message names "the
 first scheduled tick", so this may be intended.
 
-This pass documents the behavior (ADR 0039 still claimed the gate,
-limitations.md said nothing) and pins it in
-`daily_pairs_catch_up_a_missed_moment_once_at_the_next_tick`, whose
-first assertion passed only because a folder check was still pending.
+This pass corrects ADR 0039, which still claimed the gate, adds the
+behavior to limitations.md, which said nothing, and pins it in
+`daily_pairs_catch_up_a_missed_moment_once_at_the_next_tick`
+(`crates/foldover-service/src/lib.rs`), whose first assertion passed
+only because a folder check was still pending.
 Whether the first run should wait for the schedule is the owner's call:
 it trades a surprise at save time against a backup that does not exist
 until the first scheduled moment.
