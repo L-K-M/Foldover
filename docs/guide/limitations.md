@@ -4,9 +4,16 @@ What you need to know before trusting a pair with your data.
 
 ## Safety nets
 
-- **The first run always needs you.** Every pair's first run stops with
-  its preview until you review it; automatic schedules only start after
-  that ([ADR 0020](../adr/0020-run-execution.md),
+- **The first run does not wait for you unless you ask.** A new pair's
+  first sync runs its plan like any other, whether you start it or its
+  schedule does. A first Sync or Backup run infers no deletions, because
+  nothing records what either folder held before; a first Mirror run
+  archives what only its target holds, within the deletion fuse. To see
+  the plan first, choose Preview Changes before syncing, or turn on
+  **Require approval before syncing** in the pair editor
+  (`--review required`): then every run, scheduled ones included, stops
+  until you approve its plan
+  ([ADR 0020](../adr/0020-run-execution.md),
   [ADR 0022](../adr/0022-scheduled-runs.md)).
 - **Deletion fuse.** An interactive run stops when a target would lose
   both more than 50 paths and more than 1% of its paths; an unattended
@@ -17,6 +24,11 @@ What you need to know before trusting a pair with your data.
 - **A suddenly empty folder pauses the run.** If one side holds nothing
   while Foldover remembers content there, archiving on the other side
   waits for your review ([ADR 0020](../adr/0020-run-execution.md)).
+- **You can switch those two off.** The deletion fuse and the empty-folder
+  stop belong to **Stop unusually large removals** in the pair editor
+  (`--removal-protection`), on by default. Turning it off removes both;
+  the identity, canary, free-space and lease checks stay
+  ([ADR 0020](../adr/0020-run-execution.md)).
 - **Identity check.** The first sync writes `.foldover/id` in each
   folder. A missing or different file stops the run, which is how an
   unmounted disk does not look like a mass deletion
@@ -42,7 +54,7 @@ What you need to know before trusting a pair with your data.
 - **Time Machine skips Foldover's state.** A restored, older state could
   read changes in your folders as deletions to carry over, so it is
   never backed up. A Mac set up from a backup starts without pairs; add
-  them again, and each first sync shows its preview
+  them again, and preview each one before its first sync
   ([ADR 0009](../adr/0009-pair-state-storage.md)).
 
 ## Readiness warnings

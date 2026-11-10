@@ -1,6 +1,6 @@
 # Foldover — Plan
 
-Status: P1 implementation, 2026-10-17. Evidence: [docs/research](docs/research/README.md)
+Status: P2–P5 implemented, P6 (beta to 1.0) in progress, 2026-11-10. Evidence: [docs/research](docs/research/README.md)
 (competitor review: [competitors.md](docs/research/competitors.md)).
 
 ## 1. Summary
