@@ -6,6 +6,41 @@ use foldover_types::{Digest, LocalRoot, PairDraft, PairId, SyncMode};
 
 use super::*;
 
+/// ADR 0054: a gentle run copies one at a time between this Mac's disks,
+/// keeps its copies to a server, and syncs the same either way.
+#[test]
+fn a_gentle_run_narrows_only_local_copies_and_syncs_the_same() {
+    for right_kind in [RightKind::Local, RightKind::Sftp] {
+        if right_kind == RightKind::Sftp && sftp_server().is_none() {
+            continue;
+        }
+        let mut pair = fixture(SyncMode::Sync);
+        pair.right_kind = right_kind;
+        for index in 0..20 {
+            fs::write(
+                pair.left.path().join(format!("file-{index}")),
+                index.to_string(),
+            )
+            .unwrap();
+        }
+        let full = pair.prepare().workers();
+        pair.effort = Effort::Gentle;
+        let gentle = pair.prepare().workers();
+        match right_kind {
+            RightKind::Local => assert_eq!(gentle, NonZeroUsize::MIN),
+            RightKind::Sftp => assert_eq!(gentle, full),
+        }
+        let report = pair.sync();
+        assert_eq!(report.completion(), Completion::Finished);
+        for index in 0..20 {
+            assert_eq!(
+                fs::read(pair.right.path().join(format!("file-{index}"))).unwrap(),
+                index.to_string().as_bytes()
+            );
+        }
+    }
+}
+
 #[test]
 fn new_folders_with_sidecars_still_copy_readable_children() {
     for right_kind in [RightKind::Local, RightKind::Sftp] {
@@ -196,6 +231,7 @@ struct Fixture {
     /// In-memory folders that replace both temporary directories.
     memory: Option<[foldover_sim::MemoryEndpoint; 2]>,
     leases: LeaseTiming,
+    effort: Effort,
 }
 
 /// How the fixture reaches its right folder.
@@ -249,6 +285,7 @@ fn fixture(mode: SyncMode) -> Fixture {
         journal: None,
         memory: None,
         leases: TEST_LEASES,
+        effort: Effort::Full,
     }
 }
 
@@ -375,6 +412,7 @@ impl Fixture {
         )
         .with_skips(self.skips.clone())
         .with_lease_timing(self.leases)
+        .with_effort(self.effort)
     }
 
     fn try_prepare(&self) -> Result<PairRun, RunError> {

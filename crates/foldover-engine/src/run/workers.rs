@@ -15,7 +15,8 @@ use std::thread::{Scope, ScopedJoinHandle};
 use std::time::Duration;
 
 use foldover_endpoint::ApplyError;
-use foldover_types::{EntryVersion, ScanControl};
+use foldover_host::ThreadEffort;
+use foldover_types::{Effort, EntryVersion, ScanControl};
 
 use super::{Completion, Executor, RunProgress, Writer, is_archive, writes};
 use crate::PlanRow;
@@ -48,11 +49,13 @@ pub(super) struct Workers<'a> {
 impl<'a> Workers<'a> {
     /// Start `workers` threads in `threads`, unless one would do: then
     /// every write runs on the run's thread, exactly as in plan order.
-    /// Workers stop writing once `stop` is set.
+    /// Workers stop writing once `stop` is set. Each enters `effort`
+    /// itself: threads do not inherit the priority of their creator.
     pub(super) fn start<'scope>(
         threads: &'scope Scope<'scope, '_>,
         writer: Writer<'a>,
         workers: NonZeroUsize,
+        effort: Effort,
         stop: &'a AtomicBool,
     ) -> Self
     where
@@ -74,8 +77,10 @@ impl<'a> Workers<'a> {
         let queue = Arc::new(Mutex::new(queue));
         for _ in 0..workers {
             let (queue, landed) = (Arc::clone(&queue), landed_sender.clone());
-            let _: ScopedJoinHandle<'scope, ()> =
-                threads.spawn(move || work(writer, stop, &queue, &landed));
+            let _: ScopedJoinHandle<'scope, ()> = threads.spawn(move || {
+                let _effort = ThreadEffort::enter(effort);
+                work(writer, stop, &queue, &landed);
+            });
         }
         Self {
             jobs: Some(jobs),

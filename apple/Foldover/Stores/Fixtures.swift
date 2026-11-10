@@ -663,6 +663,11 @@ actor FixtureAutomationClient: AutomationClient {
         status.lowPower = syncs
         return status
     }
+
+    func setEffort(_ effort: AutomaticEffort) async throws -> AutomationStatus {
+        status.effort = effort
+        return status
+    }
 }
 
 actor FixtureMacToMacClient: MacToMacClient {

@@ -31,8 +31,17 @@ private actor AutomationFixtureClient: AutomationClient {
         return current
     }
 
+    func setEffort(_ effort: AutomaticEffort) async throws -> AutomationStatus {
+        if let failure { throw failure }
+        current.effort = effort
+        return current
+    }
+
     /// What the agent would report the environment holding now.
     func setHeldBy(_ hold: AutomationHold?) { current.heldBy = hold }
+
+    /// An effort choice made elsewhere, such as with the command-line tool.
+    func reportEffort(_ effort: AutomaticEffort) { current.effort = effort }
 
     func rejectRequests() { failure = AutomationFixtureError.unreachable }
     func acceptRequests() { failure = nil }
@@ -146,6 +155,10 @@ private actor DeferredAutomationClient: AutomationClient {
 
     func setLowPower(_ syncs: LowPowerSyncs) async throws -> AutomationStatus {
         try await act(AutomationStatus(state: .running, lowPower: syncs))
+    }
+
+    func setEffort(_ effort: AutomaticEffort) async throws -> AutomationStatus {
+        try await act(AutomationStatus(state: .running, effort: effort))
     }
 
     private func act(_ reply: AutomationStatus) async throws -> AutomationStatus {
@@ -379,6 +392,34 @@ func rapidLowPowerChoicesStayOrderedAndOptimistic() async {
     #expect(!store.mutationPending)
 }
 
+// An older Effort reply must not make the toggle bounce while a newer
+// choice waits behind it.
+@MainActor
+@Test
+func rapidEffortChoicesStayOrderedAndOptimistic() async {
+    let client = DeferredAutomationClient()
+    let store = AutomationStore(client: client)
+    await client.holdActions()
+
+    let full = Task { await store.setEffort(.full) }
+    #expect(await client.waitForParkedActions(1))
+    let gentle = Task { await store.setEffort(.gentle) }
+    #expect(await waitForPendingMutations(2, in: store))
+    #expect(store.effort == .gentle)
+    #expect(!(await client.waitForParkedActions(2, timeout: .milliseconds(50))))
+
+    await client.answerAction(AutomationStatus(state: .running, effort: .full))
+    #expect(await client.waitForParkedActions(2))
+    #expect(store.effort == .gentle)
+    await client.answerAction(AutomationStatus(state: .running, effort: .gentle))
+    await client.finishActions(AutomationStatus(state: .running, effort: .gentle))
+    await full.value
+    await gentle.value
+
+    #expect(store.effort == .gentle)
+    #expect(!store.mutationPending)
+}
+
 // Rollback uses the last server-confirmed choice, not the optimistic choice
 // that happened to be visible when a newer request was enqueued.
 @MainActor
@@ -400,6 +441,33 @@ func failedQueuedLowPowerChoicesRestoreTheConfirmedChoice() async {
     await pause.value
 
     #expect(store.lowPower == .pause)
+    #expect(store.error != nil)
+    #expect(!store.mutationPending)
+}
+
+// Rollback uses the last server-confirmed choice, not the optimistic choice
+// that happened to be visible when a newer request was enqueued.
+@MainActor
+@Test
+func failedQueuedEffortChoicesRestoreTheConfirmedChoice() async {
+    let client = DeferredAutomationClient()
+    let store = AutomationStore(client: client)
+    await store.setEffort(.full)
+    await client.holdActions()
+
+    let gentle = Task { await store.setEffort(.gentle) }
+    #expect(await client.waitForParkedActions(1))
+    let gentleAgain = Task { await store.setEffort(.gentle) }
+    #expect(await waitForPendingMutations(2, in: store))
+    #expect(store.effort == .gentle)
+    await client.failAction()
+    #expect(await client.waitForParkedActions(2))
+    await client.failAction()
+    await client.finishActions(AutomationStatus(state: .running, effort: .full))
+    await gentle.value
+    await gentleAgain.value
+
+    #expect(store.effort == .full)
     #expect(store.error != nil)
     #expect(!store.mutationPending)
 }
@@ -444,6 +512,44 @@ func lowPowerChoiceAndEnvironmentHoldsReachTheStatusText() async {
     #expect(viewModel.holdText == nil)
 }
 
+/// The effort choice rides every status report, like the Low Power choice.
+@MainActor
+@Test
+func effortDefaultsToGentleAndStatusReadsApplyIt() async {
+    let client = AutomationFixtureClient()
+    let automation = AutomationStore(client: client)
+
+    await automation.refresh()
+    #expect(automation.effort == .gentle)
+
+    await client.reportEffort(.full)
+    await automation.refresh()
+    #expect(automation.effort == .full)
+
+    await client.reportEffort(.gentle)
+    await automation.refresh()
+    #expect(automation.effort == .gentle)
+}
+
+@MainActor
+@Test
+func effortAndLowPowerChoicesStayIndependent() async {
+    let client = AutomationFixtureClient()
+    let automation = AutomationStore(client: client)
+
+    await automation.setLowPower(.run)
+    #expect(automation.lowPower == .run)
+    #expect(automation.effort == .gentle)
+
+    await automation.setEffort(.full)
+    #expect(automation.effort == .full)
+    #expect(automation.lowPower == .run)
+
+    await automation.setLowPower(.pause)
+    #expect(automation.lowPower == .pause)
+    #expect(automation.effort == .full)
+}
+
 @MainActor
 @Test
 func aFailedLowPowerChangeKeepsTheChoiceAndReportsTheError() async {
@@ -455,5 +561,19 @@ func aFailedLowPowerChangeKeepsTheChoiceAndReportsTheError() async {
     await client.rejectRequests()
     await automation.setLowPower(.pause)
     #expect(automation.lowPower == .run)
+    #expect(automation.error != nil)
+}
+
+@MainActor
+@Test
+func aFailedEffortChangeKeepsTheChoiceAndReportsTheError() async {
+    let client = AutomationFixtureClient()
+    let automation = AutomationStore(client: client)
+    await automation.setEffort(.full)
+    #expect(automation.effort == .full)
+
+    await client.rejectRequests()
+    await automation.setEffort(.gentle)
+    #expect(automation.effort == .full)
     #expect(automation.error != nil)
 }

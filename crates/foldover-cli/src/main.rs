@@ -54,7 +54,7 @@ const USAGE: &str = "usage: foldover --version
        foldover pause [MINUTES] [--socket PATH]
        foldover resume [--socket PATH]
        foldover safe-mode off [--socket PATH]
-       foldover automation [low-power pause|run] [--socket PATH]
+       foldover automation [low-power pause|run | effort gentle|full] [--socket PATH]
        foldover peers [start | open [MINUTES] | close | pair DEVICE [IP:PORT] | confirm DEVICE | cancel DEVICE | revoke DEVICE | shares DEVICE] [--socket PATH]
        foldover shares [add DEVICE PATH NAME | remove ID] [--socket PATH]
        foldover servers [browse sftp://[user@]host[:port]/path] [--socket PATH]
@@ -129,11 +129,13 @@ enum PeerCommand {
     Shares(DeviceId),
 }
 
-/// The environment policy (ADR 0036).
+/// The environment policy (ADR 0036) and automatic effort (ADR 0054).
 enum AutomationCommand {
     Status,
     /// Automatic syncs in Low Power Mode: `pause` (default) or `run`.
     LowPower(foldover_client::LowPowerSyncs),
+    /// How hard automatic syncs work: `gentle` (default) or `full`.
+    Effort(foldover_client::AutomaticEffort),
 }
 
 enum ArchiveCommand {
@@ -328,6 +330,9 @@ async fn main() -> ExitCode {
             AutomationCommand::LowPower(syncs) => {
                 print_status(foldover_client::set_low_power_syncs(&location, syncs).await)
             }
+            AutomationCommand::Effort(effort) => {
+                print_status(foldover_client::set_automatic_effort(&location, effort).await)
+            }
         },
         Request::History(location, id) => match history(&location, id).await {
             Ok(()) => ExitCode::SUCCESS,
@@ -453,6 +458,19 @@ fn parse_request(args: &[OsString]) -> Request {
                 Some("run") => Request::Automation(
                     location,
                     AutomationCommand::LowPower(foldover_client::LowPowerSyncs::Run),
+                ),
+                _ => Request::Usage,
+            }
+        }
+        [command, setting, value] if command == "automation" && setting == "effort" => {
+            match value.to_str() {
+                Some("gentle") => Request::Automation(
+                    location,
+                    AutomationCommand::Effort(foldover_client::AutomaticEffort::Gentle),
+                ),
+                Some("full") => Request::Automation(
+                    location,
+                    AutomationCommand::Effort(foldover_client::AutomaticEffort::Full),
                 ),
                 _ => Request::Usage,
             }
@@ -2179,11 +2197,27 @@ mod tests {
                 AutomationCommand::LowPower(foldover_client::LowPowerSyncs::Run)
             )
         ));
+        assert!(matches!(
+            req(&["automation", "effort", "gentle"]),
+            Request::Automation(
+                _,
+                AutomationCommand::Effort(foldover_client::AutomaticEffort::Gentle)
+            )
+        ));
+        assert!(matches!(
+            req(&["automation", "effort", "full"]),
+            Request::Automation(
+                _,
+                AutomationCommand::Effort(foldover_client::AutomaticEffort::Full)
+            )
+        ));
         for args in [
             vec!["history"],
             vec!["history", "bad"],
             vec!["automation", "low-power"],
             vec!["automation", "low-power", "sometimes"],
+            vec!["automation", "effort"],
+            vec!["automation", "effort", "fast"],
             vec!["automation", "bogus", "pause"],
             vec!["archive", id],
             vec!["archive", id, "a"],

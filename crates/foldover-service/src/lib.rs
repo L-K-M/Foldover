@@ -3650,6 +3650,226 @@ mod tests {
         );
     }
 
+    /// ADR 0054: automatic syncs run gently unless the person chooses full
+    /// effort; each setting changes only itself.
+    #[tokio::test]
+    async fn automatic_effort_defaults_to_gentle_and_changes_alone() {
+        let (_directory, service) = fixture();
+        let status = service
+            .handle(Request::call(1, AUTOMATION_STATUS, None))
+            .await
+            .unwrap();
+        assert_eq!(status["effort"], "gentle");
+
+        for params in [json!({"effort": "fast"}), json!({"effort": null})] {
+            assert_eq!(
+                service
+                    .handle(Request::call(2, AUTOMATION_SETTINGS, Some(params)))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                INVALID_PARAMS
+            );
+        }
+
+        let set = service
+            .handle(Request::call(
+                3,
+                AUTOMATION_SETTINGS,
+                Some(json!({"effort": "full"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            (&set["effort"], &set["low_power"]),
+            (&json!("full"), &json!("pause"))
+        );
+        let set = service
+            .handle(Request::call(
+                4,
+                AUTOMATION_SETTINGS,
+                Some(json!({"low_power": "run"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            (&set["effort"], &set["low_power"]),
+            (&json!("full"), &json!("run"))
+        );
+        let set = service
+            .handle(Request::call(
+                5,
+                AUTOMATION_SETTINGS,
+                Some(json!({"low_power": "pause", "effort": "gentle"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            (&set["effort"], &set["low_power"]),
+            (&json!("gentle"), &json!("pause"))
+        );
+    }
+
+    /// Two pairs on a one-minute schedule, each synced once by hand.
+    async fn two_scheduled_pairs(directory: &Path, service: &Service) -> [PairId; 2] {
+        let mut ids = Vec::new();
+        for name in ["First", "Second"] {
+            let mut input = input(directory, name);
+            input["options"]["schedule"] = json!({"kind": "every", "minutes": 1});
+            let pair = service
+                .handle(Request::call(1, PAIR_CREATE, Some(input)))
+                .await
+                .unwrap();
+            first_sync(service, &json!({"id": pair["id"]})).await;
+            ids.push(pair["id"].as_str().unwrap().parse().unwrap());
+        }
+        ids.try_into().unwrap()
+    }
+
+    async fn job_reached(reached: std::sync::mpsc::Receiver<()>) {
+        tokio::task::spawn_blocking(move || {
+            reached
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("the gated job to reach the gate within 10s")
+        })
+        .await
+        .unwrap();
+    }
+
+    /// ADR 0054: gentle automatic syncs start one at a time, and the pair
+    /// that waited goes next.
+    #[tokio::test]
+    async fn gentle_automatic_syncs_start_one_at_a_time_and_take_turns() {
+        let (directory, service) = fixture();
+        let ids = two_scheduled_pairs(directory.path(), &service).await;
+        let at = |seconds| service.scheduler.started() + std::time::Duration::from_secs(seconds);
+        let key = |id: PairId| json!({"id": id.to_string()});
+
+        let (reached, release) = service.jobs.gate_job();
+        let first = run_due_started(&service, at(61)).await;
+        assert_eq!(first.len(), 1, "{first:?}");
+        job_reached(reached).await;
+        // Both are due, but one is still syncing.
+        assert!(service.run_due(at(62)).is_empty());
+        release.send(()).unwrap();
+        settled(&service, &key(first[0])).await;
+
+        // Both are due again: the pair that waited goes first, whatever
+        // the catalog order.
+        let other = if first[0] == ids[0] { ids[1] } else { ids[0] };
+        assert_eq!(run_due_started(&service, at(122)).await, [other]);
+        settled(&service, &key(other)).await;
+    }
+
+    /// The pair whose turn it is keeps it while its folders are checked,
+    /// even when another due pair's check is fresher.
+    #[tokio::test]
+    async fn the_waiting_pair_keeps_its_turn_while_its_folders_are_checked() {
+        let (directory, service) = fixture();
+        let ids = two_scheduled_pairs(directory.path(), &service).await;
+        let at = |seconds| service.scheduler.started() + std::time::Duration::from_secs(seconds);
+        let key = |id: PairId| json!({"id": id.to_string()});
+
+        let first = run_due_started(&service, at(61)).await;
+        assert_eq!(first.len(), 1, "{first:?}");
+        settled(&service, &key(first[0])).await;
+        let other = if first[0] == ids[0] { ids[1] } else { ids[0] };
+
+        // Both are due; only the pair that ran has fresh folder checks.
+        service.scheduler.checked(first[0]);
+        assert!(service.run_due(at(122)).is_empty());
+        probes_idle(&service).await;
+        assert_eq!(service.run_due(at(122)), [other]);
+        settled(&service, &key(other)).await;
+    }
+
+    /// A gentle automatic sync also waits for one a person started.
+    #[tokio::test]
+    async fn a_gentle_automatic_sync_waits_for_a_manual_one() {
+        let (directory, service) = fixture();
+        let ids = two_scheduled_pairs(directory.path(), &service).await;
+        let at = |seconds| service.scheduler.started() + std::time::Duration::from_secs(seconds);
+        let key = |id: PairId| json!({"id": id.to_string()});
+
+        let (reached, release) = service.jobs.gate_job();
+        service
+            .handle(Request::call(2, SYNC_PREVIEW, Some(key(ids[0]))))
+            .await
+            .unwrap();
+        job_reached(reached).await;
+        assert!(run_due_started(&service, at(61)).await.is_empty());
+        release.send(()).unwrap();
+        settled(&service, &key(ids[0])).await;
+
+        let started = run_due_started(&service, at(62)).await;
+        assert_eq!(started.len(), 1, "{started:?}");
+        settled(&service, &key(started[0])).await;
+    }
+
+    /// Full effort keeps the old behavior: every due pair starts at once.
+    #[tokio::test]
+    async fn full_effort_starts_every_due_pair_together() {
+        let (directory, service) = fixture();
+        let ids = two_scheduled_pairs(directory.path(), &service).await;
+        service
+            .handle(Request::call(
+                2,
+                AUTOMATION_SETTINGS,
+                Some(json!({"effort": "full"})),
+            ))
+            .await
+            .unwrap();
+        let at = |seconds| service.scheduler.started() + std::time::Duration::from_secs(seconds);
+
+        let mut started = run_due_started(&service, at(61)).await;
+        started.sort();
+        let mut expected = ids.to_vec();
+        expected.sort();
+        assert_eq!(started, expected);
+        for id in ids {
+            settled(&service, &json!({"id": id.to_string()})).await;
+        }
+    }
+
+    /// ADR 0054: the hourly check counts from when the last run ended, so
+    /// a run longer than an hour is not followed at once by another.
+    #[tokio::test]
+    async fn the_hourly_check_counts_from_the_end_of_the_last_run() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Long");
+        input["options"]["schedule"] = json!({"kind": "onChange"});
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        let key = json!({"id": created["id"]});
+        first_sync(&service, &key).await;
+        service.scheduler.set_away(|_, _, _| false);
+        let at = |seconds| service.scheduler.started() + std::time::Duration::from_secs(seconds);
+        assert!(service.run_due(at(10)).is_empty());
+        caught_up(&service).await;
+
+        let (reached, release) = service.jobs.gate_job();
+        assert_eq!(run_due_started(&service, at(3_600)).await, [id]);
+        job_reached(reached).await;
+        // Still running two hours on.
+        assert!(service.run_due(at(3_600 + 7_200)).is_empty());
+        release.send(()).unwrap();
+        settled(&service, &key).await;
+
+        assert!(
+            run_due_started(&service, at(3_600 + 7_205))
+                .await
+                .is_empty()
+        );
+        assert_eq!(
+            run_due_started(&service, at(3_600 + 7_200 + 3_600)).await,
+            [id]
+        );
+        settled(&service, &key).await;
+    }
+
     fn sync_preview() -> SyncPreview {
         let deletions = || SyncDeletions {
             deletions: 0,

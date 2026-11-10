@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A "When files change" pair whose sync takes longer than an hour no
+  longer starts its hourly check again the moment that sync ends. The
+  hour now counts from when the pair's last preview or sync ended
+  (ADR 0054).
 - Removing a pair answers at once, however many files it tracks. It used
   to time out on large pairs and grey out Edit Pair and Remove Pair; the
   agent now deletes the pair's records in the background (ADR 0053).
@@ -51,6 +55,18 @@ All notable changes to this project are documented here. The format follows
   are skipped in both folders, preserving existing copies.
 
 ### Changed
+
+- Automatic syncs run gently by default: on this Mac's own disks they use
+  at most one processor core, instead of keeping several busy for minutes
+  and setting off macOS's CPU warning for foldoverd. They run one at a time
+  and wait while a sync you started runs. They run at low priority, and read
+  and copy one file at a time on this Mac's own disks. Syncs over the
+  network keep their parallel transfers. Large automatic syncs between
+  local disks take longer, several times longer while other apps use the
+  disk heavily; turn on "Run automatic syncs at full speed" in
+  Settings, or run `foldover automation effort full`, to use the whole
+  Mac. Syncs you start yourself always run at full speed (local protocol
+  23, ADR 0054).
 
 - A sync's progress on the folded sheet names its stage: Comparing,
   Syncing, Waiting or Stopping. While comparing it counts the items

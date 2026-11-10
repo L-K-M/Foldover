@@ -29,16 +29,17 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use foldover_endpoint::{
-    ApplyError, Endpoint, EndpointPair, Expected, Filter, HeldLease, InvalidFilter, LeaseError,
-    LeaseHolder, LeaseTiming, Observation, ObservationHints, ObserveStep, ObservedEntry,
-    ObservedVersion, PairRootError, Pruning, Reach, RunScope, ScanError, SnapshotBuilder,
-    access_denied,
+    ApplyError, Bottleneck, Endpoint, EndpointPair, Expected, Filter, HeldLease, InvalidFilter,
+    LeaseError, LeaseHolder, LeaseTiming, Observation, ObservationHints, ObserveStep,
+    ObservedEntry, ObservedVersion, PairRootError, Pruning, Reach, RunScope, ScanError,
+    SnapshotBuilder, access_denied,
 };
 use foldover_host::RunAwake;
 use foldover_state::{
     BaseUpdate, JournalAction, JournalEntry, MountSources, RecordedIdentities, RunRecords,
     SnapshotEntry,
 };
+pub use foldover_types::Effort;
 use foldover_types::{
     BaselineEntry, ChangeKind, ConflictKind, Durability, EndpointId, EntryContent, EntryDecision,
     EntryKind, EntryVersion, FolderRole, NameMatching, PairConfig, PairId, PairOptions, PathMap,
@@ -619,6 +620,7 @@ pub struct RunInputs {
     right_snapshot: PathMap<ObservedEntry>,
     reach: Reach,
     lease_timing: LeaseTiming,
+    effort: Effort,
 }
 
 impl RunInputs {
@@ -657,6 +659,7 @@ impl RunInputs {
             right_snapshot: PathMap::new(),
             reach: Reach::default(),
             lease_timing: LeaseTiming::STANDARD,
+            effort: Effort::Full,
         }
     }
 
@@ -680,6 +683,11 @@ impl RunInputs {
     /// Changes a person chose to leave alone in this run only.
     pub fn with_skips(self, skips: BTreeMap<SyncPath, Skip>) -> Self {
         Self { skips, ..self }
+    }
+
+    /// Run at `effort` (ADR 0054); `Full` unless set.
+    pub fn with_effort(self, effort: Effort) -> Self {
+        Self { effort, ..self }
     }
 
     /// Previous observations, whose versions are reused for entries with an
@@ -804,6 +812,7 @@ pub struct PairRun {
     lease_timing: LeaseTiming,
     /// The pair's options as this run applies them: see `run_options`.
     options: PairOptions,
+    effort: Effort,
     _awake: RunAwake,
 }
 
@@ -832,7 +841,7 @@ impl PairRun {
     /// `prepare` on endpoints opened elsewhere.
     pub(crate) fn prepare_on(
         inputs: RunInputs,
-        endpoints: EndpointPair,
+        mut endpoints: EndpointPair,
         control: &mut impl FnMut() -> ScanControl,
         progress: &dyn RunProgress,
     ) -> Result<Self, RunError> {
@@ -847,7 +856,9 @@ impl PairRun {
             right_snapshot,
             reach: _,
             lease_timing,
+            effort,
         } = inputs;
+        endpoints.set_effort(effort);
         let draft = pair.draft();
         // PLAN.md §3.5: idle sleep would stop a long scan or copy midway.
         let awake = foldover_host::keep_awake(draft.name()).map_err(RunError::KeepAwake)?;
@@ -1058,6 +1069,7 @@ impl PairRun {
             base,
             lease_timing,
             options,
+            effort,
             _awake: awake,
         })
     }
@@ -1399,7 +1411,7 @@ impl PairRun {
         let reverse = rows.iter().rev().filter(|row| is_archive(row.decision()));
         let writer = executor.writer();
         let stopped = thread::scope(|threads| {
-            let mut workers = Workers::start(threads, writer, self.workers(), &stop);
+            let mut workers = Workers::start(threads, writer, self.workers(), self.effort, &stop);
             let mut stopped = recovery_cancelled;
             let mut archiving = false;
             for (index, row) in forward.chain(reverse).enumerate() {
@@ -1612,9 +1624,19 @@ impl PairRun {
     /// Copies the run makes at once: as many as the slower folder takes.
     /// A copy between two servers holds a session on each, so two in
     /// opposite directions could each wait for the other's server once a
-    /// server refuses more sessions: such pairs copy one at a time.
+    /// server refuses more sessions: such pairs copy one at a time. A
+    /// gentle run between two of this Mac's disks copies one at a time on
+    /// its own thread; with a share, server or Mac on either side the
+    /// copies wait on the network and keep their number (ADR 0054).
     fn workers(&self) -> NonZeroUsize {
         let endpoint = |side| self.endpoints.endpoint(side);
+        if self.effort == Effort::Gentle
+            && [Side::Left, Side::Right]
+                .into_iter()
+                .all(|side| endpoint(side).bottleneck() == Bottleneck::Local)
+        {
+            return NonZeroUsize::MIN;
+        }
         if matches!(
             (endpoint(Side::Left), endpoint(Side::Right)),
             (Endpoint::Sftp(_), Endpoint::Sftp(_))

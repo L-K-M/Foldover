@@ -1,6 +1,7 @@
 //! `foldover-os` — driver layer. Host facilities: power assertions,
 //! network path (expensive/constrained), Keychain and Secret Service,
-//! cloud-managed folder detection and local wall-clock time. Calls the
+//! cloud-managed folder detection, thread priority and local wall-clock
+//! time. Calls the
 //! OS directly; depends only on the vocabulary crate. See PLAN.md §4.4.
 
 mod cloud;
@@ -28,11 +29,16 @@ mod power;
 #[allow(unsafe_code)]
 mod environment;
 
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod qos;
+
 use std::io;
+use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use foldover_types::LocalDateTime;
+use foldover_types::{Effort, LocalDateTime};
 
 /// `at` in the machine's local time zone, for calendar schedules
 /// (PLAN.md §3.5); `None` when the C library cannot answer.
@@ -77,6 +83,43 @@ impl IdleSleepAssertion {
         {
             let _ = reason;
             Ok(None)
+        }
+    }
+}
+
+/// Holds the calling thread at the priority a run's effort asks for, and
+/// restores the thread's previous priority when dropped (ADR 0054).
+/// macOS threads never inherit their creator's priority, so every thread
+/// a gentle run starts enters its effort itself.
+#[must_use = "the priority lasts only while the guard lives"]
+pub struct ThreadEffort {
+    #[cfg(target_os = "macos")]
+    _lowered: Option<qos::Lowered>,
+    /// Restoring changes the calling thread, so the guard stays on it.
+    _thread: PhantomData<*const ()>,
+}
+
+impl ThreadEffort {
+    /// `Full` leaves the thread as it is. `Gentle` moves a thread above
+    /// the utility class down to it, so the system runs it after the
+    /// person's own work and prefers efficiency cores. A thread the system
+    /// refuses to lower keeps its priority: priority is advice, and
+    /// stopping a sync over it would be worse. Elsewhere this does nothing.
+    pub fn enter(effort: Effort) -> Self {
+        #[cfg(target_os = "macos")]
+        return Self {
+            _lowered: match effort {
+                Effort::Full => None,
+                Effort::Gentle => qos::lower_to_utility(),
+            },
+            _thread: PhantomData,
+        };
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = effort;
+            Self {
+                _thread: PhantomData,
+            }
         }
     }
 }

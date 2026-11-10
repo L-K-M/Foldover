@@ -20,7 +20,7 @@ pub use foldover_proto::local::{
     SyncPairContext, SyncPreview, SyncProgress, SyncResult, SyncStatus, UndoResult,
 };
 pub use foldover_proto::local::{
-    AutomationHold, AutomationStatus, LowPowerSyncs, SyncItemKind, SyncItemPage,
+    AutomaticEffort, AutomationHold, AutomationStatus, LowPowerSyncs, SyncItemKind, SyncItemPage,
 };
 use foldover_proto::local::{
     ConflictKeep, SYNC_CANCEL, SYNC_ITEMS, SYNC_PREVIEW, SYNC_RESOLVE, SYNC_RUN, SYNC_STATUS,
@@ -224,7 +224,36 @@ pub async fn set_low_power_syncs(
     location: &SocketLocation,
     syncs: LowPowerSyncs,
 ) -> Result<AutomationStatus, Error> {
-    let params = serde_json::to_value(AutomationSettings { low_power: syncs })?;
+    change_automation(
+        location,
+        AutomationSettings {
+            low_power: Some(syncs),
+            ..AutomationSettings::default()
+        },
+    )
+    .await
+}
+
+/// Set how hard automatic syncs may work the Mac (ADR 0054).
+pub async fn set_automatic_effort(
+    location: &SocketLocation,
+    effort: AutomaticEffort,
+) -> Result<AutomationStatus, Error> {
+    change_automation(
+        location,
+        AutomationSettings {
+            effort: Some(effort),
+            ..AutomationSettings::default()
+        },
+    )
+    .await
+}
+
+async fn change_automation(
+    location: &SocketLocation,
+    settings: AutomationSettings,
+) -> Result<AutomationStatus, Error> {
+    let params = serde_json::to_value(settings)?;
     Ok(serde_json::from_value(
         call(location, AUTOMATION_SETTINGS, Some(params)).await?,
     )?)

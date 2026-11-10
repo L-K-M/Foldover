@@ -15,9 +15,9 @@ use foldover_state::{
     SnapshotEntry, StateLocation, WatchCursor,
 };
 use foldover_types::{
-    DeviceId, Durability, EndpointId, FolderRecords, FolderRole, LocalRoot, MAX_PAIR_NAME_BYTES,
-    PairConfig, PairDraft, PairId, PairRoot, PeerRoot, Resolution, SftpRoot, ShareId, Side,
-    SyncPath,
+    DeviceId, Durability, Effort, EndpointId, FolderRecords, FolderRole, LocalRoot,
+    MAX_PAIR_NAME_BYTES, PairConfig, PairDraft, PairId, PairRoot, PeerRoot, Resolution, SftpRoot,
+    ShareId, Side, SyncPath,
 };
 
 use crate::{Commit, PendingRunInputs, RunInputs};
@@ -546,6 +546,16 @@ impl Engine {
             LowPowerSyncs::Pause => foldover_state::LowPowerSyncs::Pause,
             LowPowerSyncs::Run => foldover_state::LowPowerSyncs::Run,
         })?)
+    }
+
+    /// How hard automatic syncs may work the Mac (ADR 0054); manual syncs
+    /// always run at full effort.
+    pub fn automatic_effort(&self) -> Result<Effort, Error> {
+        Ok(self.pairs.automatic_effort()?)
+    }
+
+    pub fn set_automatic_effort(&mut self, effort: Effort) -> Result<(), Error> {
+        Ok(self.pairs.set_automatic_effort(effort)?)
     }
 
     /// Whether the pair's syncs go over the network: an SFTP or paired
@@ -1509,6 +1519,11 @@ mod tests {
         );
         engine.set_low_power_syncs(LowPowerSyncs::Run).unwrap();
         assert_eq!(engine.low_power_syncs().unwrap(), LowPowerSyncs::Run);
+        assert_eq!(engine.automatic_hold(&local, low), None);
+        // Effort never holds a pair; it only changes how a run works.
+        assert_eq!(engine.automatic_effort().unwrap(), Effort::Gentle);
+        engine.set_automatic_effort(Effort::Full).unwrap();
+        assert_eq!(engine.automatic_effort().unwrap(), Effort::Full);
         assert_eq!(engine.automatic_hold(&local, low), None);
         // The network hold is unaffected by the low-power choice.
         assert_eq!(
