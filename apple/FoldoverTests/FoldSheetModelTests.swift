@@ -405,7 +405,7 @@ struct FoldSheetModelTests {
         // Nothing left to copy reads as nothing coming, not "Zero KB".
         #expect(FoldDisk(volume: disk, toCopy: 0).toCopy == nil)
 
-        // The bar stops at the free space; the words say the rest.
+        // The chart stops at the free space; the words say the rest.
         let tooMuch = FoldDisk(volume: disk, toCopy: 1_000_000_000_000)
         #expect(tooMuch.arriving == 0.4)
         #expect(tooMuch.mayNotFit)

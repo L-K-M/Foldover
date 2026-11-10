@@ -71,6 +71,17 @@ final class FoldTourTests: XCTestCase {
             XCTAssertTrue(disk.waitForExistence(timeout: 10), "The leaf should read out the backup disk")
             XCTAssertEqual(disk.label, "Backup SSD, 812.4 GB free of 2 TB, 23.2 GB still to copy")
             tour.snap("fold-midway-backup")
+            Stress(tour: tour, scenario: "syncing-backup").narrowToMinimum()
+            tour.pause(1)
+            // At the minimum with both side panes, the sheet may drop
+            // storage to keep sync progress readable. Give it room again.
+            XCTAssertTrue(plate.descendants(matching: .any)["fold-readout"].firstMatch.exists)
+            tour.snap("fold-midway-backup-narrow")
+            tour.key("i", [.command, .control])
+            XCTAssertTrue(disk.waitForExistence(timeout: 5), "Storage should return when the inspector is hidden")
+            XCTAssertTrue(plate.frame.insetBy(dx: -1, dy: -1).contains(disk.frame),
+                          "The storage readout should stay inside the leaf: \(disk.frame) in \(plate.frame)")
+            tour.snap("fold-midway-backup-narrow-storage")
             tour.app.terminate()
         }
     }
