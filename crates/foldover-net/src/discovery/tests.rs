@@ -51,6 +51,7 @@ fn other_versions_and_malformed_adverts_are_ignored() {
         &[("id", DEVICE)],
         &[("v", "1"), ("id", "abc")],
         &[("v", "1"), ("id", DEVICE), ("pairing", "lots")],
+        &[("v", "1"), ("id", DEVICE), ("pairing", "0")],
     ] {
         assert_eq!(
             sighting(&lan, 50123, advert(properties)),

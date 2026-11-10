@@ -892,14 +892,6 @@ Historical evidence: invoking Sync on a needs-approval result can run with zero 
 
 Suggested fix: route the command to the existing captured approval request, or disable it while that request is pending. Preserve exact review-token binding.
 
-### MIMO-12a: Oversized IPC responses close the connection
-
-general issues — nice-to-have
-
-`crates/foldover-ipc/src/local.rs` fails in `write_value` when an output exceeds the frame limit, so the client receives "Agent closed before its response" instead of an explicit JSON-RPC error.
-
-Suggested fix: return a bounded JSON-RPC error for oversized responses and test that the client receives the actionable cause.
-
 ### MIMO-12b: A wedged IPC handler holds a connection permit
 
 general issues — nice-to-have
@@ -915,14 +907,6 @@ general issues — nice-to-have
 `archive.putBackAll`, endpoint browsing and pairing are single RPCs. PR 166 increased their deadlines, but progress and cancellation still require job handles. Related: SOL26-11 covers whole-run restore specifically.
 
 Suggested fix: use start/poll/cancel jobs when those surfaces next need progress, retaining the current slow-request budgets until then.
-
-### MIMO-13a: Reject zero mDNS pairing ports
-
-general issues — nice-to-have
-
-`crates/foldover-net/src/discovery.rs:267` validates the service port but accepts a parsed pairing port of zero.
-
-Suggested fix: reject zero pairing ports; test absent, valid and zero pairing advertisements.
 
 ### MIMO-13b: Qualify additional local state filesystems
 
@@ -947,14 +931,6 @@ general issues — nice-to-have
 Historical evidence: local and SFTP conflict-copy naming interpolate a `from` label into a sibling name; `remote/serve.rs` applies `plain_label`, while current internal callers pass constants.
 
 Suggested fix: validate labels at the common naming boundary if untrusted callers are added. Keep this classified as hardening, not a demonstrated path escape.
-
-### MIMO-13e: Peer lease writes lack the read-size cap
-
-general issues — nice-to-have
-
-Historical evidence: `crates/foldover-endpoint/src/remote/serve.rs` accepts peer-supplied lease bytes for writing while lease reads cap data at 4096 bytes.
-
-Suggested fix: apply the same bounded lease-record validation before writing and test rejection without disk changes.
 
 ### MIMO-14a: Validate discovered SMB host URLs
 

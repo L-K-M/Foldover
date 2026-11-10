@@ -22,6 +22,13 @@ All notable changes to this project are documented here. The format follows
 - Removing a pair answers at once, however many files it tracks. It used
   to time out on large pairs and grey out Edit Pair and Remove Pair; the
   agent now deletes the pair's records in the background (ADR 0053).
+- A paired Mac can no longer leave a shared folder's lock unreadable by
+  writing an oversized lease record; the sharing Mac refuses it.
+- An agent reply too large for one message answers its request with that
+  reason. The app and the CLI used to see only "Agent closed before its
+  response".
+- A Mac advertising pairing on port 0 is ignored instead of being listed
+  as open for pairing.
 
 ### Changed
 
