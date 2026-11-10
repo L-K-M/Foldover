@@ -640,16 +640,10 @@ private struct ServerFolderPicker: View {
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
                 Button("Use This Folder") {
-                    // Like an open panel: a highlighted listed folder wins
-                    // over the folder being browsed.
-                    if let selection,
-                       viewModel.serverListing?.folders.contains(where: { $0.locator == selection }) == true {
-                        viewModel.serverLocator = selection
-                    }
-                    if viewModel.useServerFolder(side: side) { dismiss() }
+                    if viewModel.useServerFolder(side: side, highlighted: selection) { dismiss() }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(viewModel.serverLocator.isEmpty)
+                .disabled(!viewModel.canUseServerFolder(highlighted: selection))
             }
             .padding(16)
         }

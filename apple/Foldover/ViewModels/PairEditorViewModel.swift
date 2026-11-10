@@ -436,27 +436,44 @@ final class PairEditorViewModel: Identifiable {
         }
     }
 
-    static func scheduleTitle(_ schedule: SyncSchedule) -> String {
+    static func scheduleTitle(_ schedule: SyncSchedule, locale: Locale = .autoupdatingCurrent) -> String {
         switch schedule {
         case .manual: String(localized: "Only when I click Sync Now")
         case .onChange: String(localized: "When files change")
         case .every(60): String(localized: "Every hour")
         case .every(1440): String(localized: "Every day")
         case .every(let minutes): String(localized: "Every \(minutes) minutes")
-        case .daily(let minutes, let days): dailyTitle(minutes: Int(minutes), days: days)
+        case .daily(let minutes, let days): dailyTitle(minutes: Int(minutes), days: days, locale: locale)
         }
     }
 
     /// Monday through Friday, the daily schedule titled "Weekdays".
     private static let weekdays: Set<SyncDay> = [.monday, .tuesday, .wednesday, .thursday, .friday]
 
-    private static func timeText(_ minutes: Int) -> String {
-        String(format: "%02d:%02d", minutes / 60, minutes % 60)
+    /// A time of day as the Mac's clock shows it, "18:00" or "6:00 PM":
+    /// the summary must read like the time picker it sits beside.
+    private static func timeText(_ minutes: Int, locale: Locale) -> String {
+        // A fixed day in UTC: only the hour and minute are formatted.
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .gmt
+        let parts = DateComponents(year: 2001, month: 1, day: 1, hour: minutes / 60, minute: minutes % 60)
+        guard let date = calendar.date(from: parts) else {
+            return String(format: "%02d:%02d", minutes / 60, minutes % 60)
+        }
+        // The short style is the locale's own pattern, the one the picker
+        // uses: `Date.FormatStyle` drops the leading zero of "02:30".
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.calendar = calendar
+        formatter.timeZone = .gmt
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
     }
 
-    /// "Every day at 02:30", "Weekdays at 18:00" or "Mon, Wed, Fri at 07:15".
-    private static func dailyTitle(minutes: Int, days: Set<SyncDay>) -> String {
-        let time = timeText(minutes)
+    /// "Every day at 02:30", "Weekdays at 6:00 PM" or "Mon, Wed, Fri at 07:15".
+    private static func dailyTitle(minutes: Int, days: Set<SyncDay>, locale: Locale) -> String {
+        let time = timeText(minutes, locale: locale)
         if days.count == SyncDay.allCases.count {
             return String(localized: "Every day at \(time)")
         }
@@ -473,13 +490,15 @@ final class PairEditorViewModel: Identifiable {
     /// What a pair will do, in at most three short sentences (PLAN.md
     /// §3.8): the direction, what happens to deleted files plus any
     /// unusual choices, and when syncs run.
-    static func planText(mode: PairMode, options: PairOptions) -> String {
+    static func planText(
+        mode: PairMode, options: PairOptions, locale: Locale = .autoupdatingCurrent
+    ) -> String {
         var consequence = [deletionClause(mode)]
         consequence.append(contentsOf: planDetails(mode: mode, options: options))
         let joined = consequence.joined(separator: "; ")
         let consequenceSentence = "\(joined.prefix(1).uppercased())\(joined.dropFirst())."
-        return [directionSentence(mode), consequenceSentence, scheduleSentence(options.schedule)]
-            .joined(separator: " ")
+        let schedule = scheduleSentence(options.schedule, locale: locale)
+        return [directionSentence(mode), consequenceSentence, schedule].joined(separator: " ")
     }
 
     private static func directionSentence(_ mode: PairMode) -> String {
@@ -504,16 +523,17 @@ final class PairEditorViewModel: Identifiable {
 
     /// When syncs run, from the schedule's own title; daily titles that
     /// name weekdays keep their capitals.
-    private static func scheduleSentence(_ schedule: SyncSchedule) -> String {
+    private static func scheduleSentence(_ schedule: SyncSchedule, locale: Locale) -> String {
         switch schedule {
         case .manual:
             return String(localized: "Syncs only when you click Sync Now.")
         case .daily(let minutes, let days) where days.isEmpty:
-            return String(localized: "Syncs at \(timeText(Int(minutes))) once you choose weekdays.")
+            let time = timeText(Int(minutes), locale: locale)
+            return String(localized: "Syncs at \(time) once you choose weekdays.")
         case .daily(_, let days) where days.count != SyncDay.allCases.count && days != weekdays:
-            return String(localized: "Syncs \(scheduleTitle(schedule)).")
+            return String(localized: "Syncs \(scheduleTitle(schedule, locale: locale)).")
         default:
-            let title = scheduleTitle(schedule)
+            let title = scheduleTitle(schedule, locale: locale)
             return String(localized: "Syncs \(title.prefix(1).lowercased())\(title.dropFirst()).")
         }
     }
@@ -740,9 +760,21 @@ final class PairEditorViewModel: Identifiable {
         isBrowsingServer = false
     }
 
+    /// Whether "Use This Folder" has a folder to try: a typed locator or a
+    /// highlighted row, which needs no text in the field.
+    func canUseServerFolder(highlighted: String?) -> Bool {
+        highlighted != nil || !serverLocator.isEmpty
+    }
+
     /// Use `serverLocator` for `side`; false, with the reason shown, when
-    /// it does not name a folder on a server.
-    func useServerFolder(side: PairFolderSide) -> Bool {
+    /// it does not name a folder on a server. Like an open panel, a row
+    /// highlighted in the listing wins over the folder being browsed: a
+    /// listed folder, or the enclosing folder.
+    func useServerFolder(side: PairFolderSide, highlighted: String? = nil) -> Bool {
+        if let highlighted, let listing = serverListing,
+           highlighted == listing.parent || listing.folders.contains(where: { $0.locator == highlighted }) {
+            serverLocator = highlighted
+        }
         let locator = serverLocator.trimmingCharacters(in: .whitespacesAndNewlines)
         guard Self.isServerLocator(locator) else {
             serverBrowseError = Self.serverLocatorHelp

@@ -678,6 +678,15 @@ struct PairSyncViewModel {
         await store.showChanges(pair.id, filter: .conflicts)
     }
 
+    /// How many of `total` lie beyond the `shown` rows. The agent sends
+    /// counts and rows in separate fields: a total below the rows it came
+    /// with reads as nothing hidden, where a plain subtraction would end
+    /// the app.
+    private static func beyond(_ total: UInt64, shown: Int) -> UInt64 {
+        let shown = UInt64(shown)
+        return total > shown ? total - shown : 0
+    }
+
     /// Rows not shown because responses carry only the first changes.
     var hiddenRowsText: String? {
         let hiddenFailures: UInt64 = reviewable.map { preview in
@@ -692,11 +701,11 @@ struct PairSyncViewModel {
         }
         let hidden: UInt64
         if let preview = reviewable {
-            hidden = preview.total - UInt64(preview.changes.count)
+            hidden = Self.beyond(preview.total, shown: preview.changes.count)
         } else if case .finished(let result) = state {
-            hidden = result.failureCount - UInt64(result.failures.count)
+            hidden = Self.beyond(result.failureCount, shown: result.failures.count)
         } else if case .undone(let result) = state {
-            hidden = result.notUndoneCount - UInt64(result.notUndone.count)
+            hidden = Self.beyond(result.notUndoneCount, shown: result.notUndone.count)
         } else {
             hidden = 0
         }
