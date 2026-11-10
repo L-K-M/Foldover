@@ -131,6 +131,9 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Checker regressions
+        run: python3 -m unittest discover -s tools/doccheck -p 'test_*.py'
+
       - name: Check links, anchors, fences and tables
         run: python3 tools/doccheck/checkdocs.py .
 

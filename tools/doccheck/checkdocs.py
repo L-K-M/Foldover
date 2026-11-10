@@ -1,12 +1,29 @@
 #!/usr/bin/env python3
 """Check relative links/anchors across repo markdown, scratch-path leaks, fence balance, table column consistency."""
-import re, os, sys, unicodedata
+import re, os, subprocess, sys
 root = sys.argv[1]
-files = []
-for dp, dns, fns in os.walk(root):
-    dns[:] = [d for d in dns if d not in ('.git', 'node_modules')]
-    files += [os.path.join(dp, fn) for fn in fns if fn.endswith('.md')]
-files.sort()
+def markdown_files(root):
+    """Tracked and new Markdown files; ignored build output is not documentation."""
+    try:
+        listed = subprocess.run(
+            ['git', '-C', root, 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', '*.md'],
+            check=True, capture_output=True).stdout.decode('utf-8').split('\0')
+        found = [os.path.join(root, name) for name in listed if name]
+        # A tracked file deleted in the work tree is still listed.
+        return [f for f in found if os.path.isfile(f)]
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    # Not a git checkout (an exported archive): walk it.
+    found = []
+    for dp, dns, fns in os.walk(root):
+        dns[:] = [d for d in dns if d not in ('.git', 'node_modules')]
+        found += [os.path.join(dp, fn) for fn in fns if fn.endswith('.md')]
+    return found
+def cells(line):
+    """How many cells a table row has; escaped pipes and code spans do not split."""
+    row = re.sub(r'`[^`]*`', '', line.strip()).replace('\\|', '')
+    return row.strip('|').count('|') + 1
+files = sorted(markdown_files(root))
 def slug(h):
     h = h.strip().lower()
     h = re.sub(r'<[^>]+>', '', h)
@@ -45,10 +62,18 @@ for f in files:
     if txt.count('```') % 2:
         print(f'FENCE odd count in {os.path.relpath(f, root)}'); problems += 1
     infence = False
+    columns = None
     for i, line in enumerate(txt.splitlines(), 1):
         if line.lstrip().startswith('```'):
-            infence = not infence; continue
+            infence = not infence; columns = None; continue
         if infence: continue
+        if line.lstrip().startswith('|'):
+            if columns is None:
+                columns = cells(line)
+            elif cells(line) != columns:
+                print(f'TABLE {os.path.relpath(f, root)}:{i}: {cells(line)} cells in a table of {columns} columns'); problems += 1
+        else:
+            columns = None
         for m in re.finditer(r'\]\(([^)\s]+)\)', line):
             target = m.group(1)
             if re.match(r'^[a-z]+:', target) or target.startswith('mailto:'):
@@ -60,3 +85,4 @@ for f in files:
             if anchor and tf.endswith('.md') and anchor not in anchors.get(tf, set()):
                 print(f'BROKEN-ANCHOR {os.path.relpath(f, root)}:{i}: {target}'); problems += 1
 print(f'{problems} problems across {len(files)} files')
+sys.exit(1 if problems else 0)
