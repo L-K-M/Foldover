@@ -121,7 +121,7 @@ lets a `backup-*` target that cannot hold `.foldover` keep nothing: files
 replaced there are deleted, not archived, and Undo is unavailable
 (default `both`). `--schedule` takes
 `manual` (default), `changes` (sync shortly after files change, and an hour
-after the last sync)
+after the last preview or sync ends)
 or a number of minutes between automatic syncs, which start after the first
 sync you run yourself. `--exclude PATTERN` (repeatable) sets gitignore-style
 rules for files to skip in both folders; a `.foldoverignore` file in either

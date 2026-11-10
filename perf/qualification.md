@@ -51,7 +51,9 @@ current checkout's commit. The binary's SHA-256 is recorded independently.
 ([ADR 0054](../docs/adr/0054-gentle-automatic-syncs.md)): the runner sets
 `FOLDOVER_PERF_EFFORT` for the Rust harness, which lowers its run thread
 and passes the effort to the run. The default, `full`, measures a run a
-person starts.
+person starts. Re-running a recorded `command` alone always measures full
+effort; set `FOLDOVER_PERF_EFFORT` to the run's recorded `effort` to
+reproduce a gentle one.
 
 Use 10k files for development, 100k for comparisons and 1M for qualification.
 Vary `--bytes` (1/8/32 KiB and a separate large-file set) and `--width` for flat

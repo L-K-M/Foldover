@@ -66,8 +66,8 @@ private actor CoreAutomationClient: AutomationClient {
     }
 
     func setEffort(_ effort: AutomaticEffort) async throws -> AutomationStatus {
-        let effort: FoldoverCore.AutomaticEffort = effort == .full ? .full : .gentle
-        return convert(try await FoldoverCore.setAutomaticEffort(effort: effort))
+        let coreEffort: FoldoverCore.AutomaticEffort = effort == .full ? .full : .gentle
+        return convert(try await FoldoverCore.setAutomaticEffort(effort: coreEffort))
     }
 
     private func convert(_ state: FoldoverCore.AutomationState) -> AutomationStatus {

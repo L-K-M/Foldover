@@ -3730,7 +3730,7 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             reached
                 .recv_timeout(std::time::Duration::from_secs(10))
-                .unwrap()
+                .expect("the gated job to reach the gate within 10s")
         })
         .await
         .unwrap();

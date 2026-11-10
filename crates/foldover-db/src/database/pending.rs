@@ -490,9 +490,8 @@ mod tests {
         database
             .change_base(&pair.id, 1, &[put(b"kept", b"v")], JournalChange::None)
             .unwrap();
-        // The active schema was unchanged by V27 to V30. Removing their
-        // new tables and column and restoring V26's metadata recreates a
-        // V26 state.
+        // V27 to V30 added tables and one column. Removing them and
+        // restoring V26's metadata recreates a V26 state.
         database.connection.execute_batch("ALTER TABLE automation_setting DROP COLUMN automatic_effort; DROP TABLE pair_pause; DROP TABLE pair_removal; DROP TABLE pending_pair; UPDATE state_meta SET minimum_reader=26; PRAGMA user_version=26;").unwrap();
         drop(database);
 

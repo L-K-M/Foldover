@@ -100,6 +100,14 @@ mod tests {
             })
         );
         database.set_low_power("run").unwrap();
+        // The low power choice keeps the effort choice.
+        assert_eq!(
+            database.automation_setting().unwrap(),
+            Some(AutomationSettingRow {
+                low_power: "run".into(),
+                automatic_effort: "full".into(),
+            })
+        );
         database.set_automatic_effort("gentle").unwrap();
         drop(database);
 
