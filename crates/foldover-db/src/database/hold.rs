@@ -7,6 +7,14 @@ use rusqlite::{OptionalExtension, params};
 use super::{Database, Error};
 
 impl Database {
+    pub fn hold_automation(&mut self, pair: &[u8]) -> Result<(), Error> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO automation_hold (pair_id) VALUES (?1)",
+            [pair],
+        )?;
+        Ok(())
+    }
+
     pub fn release_automation(&mut self, pair: &[u8]) -> Result<(), Error> {
         self.connection.execute(
             "DELETE FROM automation_hold WHERE pair_id=?1",

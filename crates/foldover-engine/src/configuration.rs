@@ -24,6 +24,8 @@ use crate::{Commit, PendingRunInputs, RunInputs};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("Target backup catalog: {0}")]
+    TargetCatalog(#[from] std::io::Error),
     #[error(transparent)]
     State(foldover_state::Error),
     #[error(transparent)]
@@ -84,7 +86,7 @@ pub enum ErrorKind {
 impl Error {
     pub fn kind(&self) -> ErrorKind {
         match self {
-            Self::State(_) => ErrorKind::Storage,
+            Self::State(_) | Self::TargetCatalog(_) => ErrorKind::Storage,
             Self::PairNotFound | Self::DeviceNotPaired => ErrorKind::NotFound,
             Self::StaleRevision => ErrorKind::Changed,
             Self::Roots(PairRootError::Overlap(_))
@@ -248,7 +250,50 @@ impl Engine {
             self.pairs.resolutions(id)?,
             self.reach.clone(),
             self.pairs.run_records(id)?,
+            self.pairs.target_checkpoint(id)?,
         ))
+    }
+
+    /// Reserve a stable migration epoch before any target writes. Configuration
+    /// changes that invalidate the baseline also invalidate this reservation.
+    pub fn begin_target_catalog(&mut self, id: PairId) -> Result<(), Error> {
+        let pair = self.active_pair(id)?;
+        if crate::target_catalog::target_side(&pair).is_some() {
+            self.pairs.begin_target_catalog(
+                id,
+                pair.revision(),
+                *uuid::Uuid::new_v4().as_bytes(),
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn acknowledge_target_catalog(
+        &mut self,
+        id: PairId,
+        revision: u64,
+        expected: &foldover_state::target_store::Checkpoint,
+        next: &foldover_state::target_store::Checkpoint,
+        spent: &[SyncPath],
+    ) -> Result<(), Error> {
+        Ok(self
+            .pairs
+            .acknowledge_target_catalog(id, revision, expected, next, spent)?)
+    }
+
+    pub fn purge_target_catalog_rows(&mut self, id: PairId, limit: usize) -> Result<Purge, Error> {
+        Ok(self.pairs.purge_target_catalog_rows(id, limit)?)
+    }
+
+    pub fn purge_migrated_catalogs(&mut self, limit: usize) -> Result<Purge, Error> {
+        Ok(self.pairs.purge_migrated_catalogs(limit)?)
+    }
+
+    pub fn hold_target_undo(&mut self, id: PairId, revision: u64) -> Result<(), Error> {
+        if self.active_pair(id)?.revision() != revision {
+            return Err(Error::StaleRevision);
+        }
+        Ok(self.pairs.hold_automation(id)?)
     }
 
     /// What a run reads from state, for work outside the engine lock.

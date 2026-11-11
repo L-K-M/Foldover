@@ -815,6 +815,7 @@ dependencies = [
 name = "foldover-state"
 version = "0.2.0"
 dependencies = [
+ "blake3",
  "criterion",
  "foldover-db",
  "foldover-types",

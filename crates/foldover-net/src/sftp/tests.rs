@@ -37,6 +37,27 @@ fn session(directory: &Path) -> Option<Session> {
 }
 
 #[test]
+fn bounded_directory_reads_close_the_handle_and_leave_the_session_usable() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(mut session) = session(directory.path()) else {
+        return;
+    };
+    fs::write(directory.path().join("first"), b"a").unwrap();
+    fs::write(directory.path().join("second"), b"b").unwrap();
+    for (entries, bytes) in [(1, 100), (2, 10), (0, 0)] {
+        assert_eq!(
+            session
+                .read_dir_bounded(b".", entries, bytes)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(session.lstat(b"first").unwrap().size, Some(1));
+    }
+    assert_eq!(session.read_dir_bounded(b".", 2, 11).unwrap().len(), 2);
+}
+
+#[test]
 fn files_stream_both_ways_and_renames_never_replace_by_default() {
     let directory = tempfile::tempdir().unwrap();
     let Some(mut session) = session(directory.path()) else {

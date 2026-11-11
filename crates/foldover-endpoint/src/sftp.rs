@@ -12,6 +12,7 @@
 //! - `Durability::Full` is refused, not downgraded: namespace changes
 //!   have no protocol flush.
 
+mod catalog;
 mod sessions;
 mod spelling;
 mod transfer;
@@ -115,7 +116,7 @@ impl SftpEndpoint {
         let session = Session::connect(&target)
             .map_err(|source| ScanError::Unreachable(source.to_string()))?;
         let mut endpoint = Self::with_session(session, location.path())?;
-        endpoint.connect = Some(Box::new(move || Session::connect(&target)));
+        endpoint.connect = Some(std::sync::Arc::new(move || Session::connect(&target)));
         endpoint.server = Some(format!(
             "{}:{}",
             location.host(),
@@ -166,7 +167,7 @@ impl SftpEndpoint {
                 .map(|argument| (*argument).to_owned())
                 .collect::<Vec<_>>(),
         );
-        endpoint.connect = Some(Box::new(move || {
+        endpoint.connect = Some(std::sync::Arc::new(move || {
             let arguments: Vec<&std::ffi::OsStr> = arguments
                 .iter()
                 .map(std::ffi::OsString::as_os_str)

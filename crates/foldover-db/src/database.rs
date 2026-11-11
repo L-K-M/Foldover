@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
+mod compact;
 mod cursor;
 mod device;
 mod history;
@@ -24,6 +25,7 @@ mod removal;
 mod settings;
 mod share;
 mod starts;
+mod target_catalog;
 pub use cursor::WatchCursorRow;
 pub use device::DeviceRow;
 pub use history::HistoryRow;
@@ -36,6 +38,7 @@ pub use removal::Purge;
 pub use settings::AutomationSettingRow;
 pub use share::ShareRow;
 pub use starts::RunMarker;
+pub use target_catalog::TargetCatalogRow;
 
 const APPLICATION_ID: i64 = 0x464f4c44; // FOLD
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
@@ -66,11 +69,11 @@ const SNAPSHOT_PAGE: usize = 256;
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary, schedule_time, schedule_days, records, bandwidth_limit, review_policy, removal_protection";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 30] = [
+const MIGRATIONS: [&str; 31] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
     SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, SCHEMA_V15, SCHEMA_V16,
     SCHEMA_V17, SCHEMA_V18, SCHEMA_V19, SCHEMA_V20, SCHEMA_V21, SCHEMA_V22, SCHEMA_V23, SCHEMA_V24,
-    SCHEMA_V25, SCHEMA_V26, SCHEMA_V27, SCHEMA_V28, SCHEMA_V29, SCHEMA_V30,
+    SCHEMA_V25, SCHEMA_V26, SCHEMA_V27, SCHEMA_V28, SCHEMA_V29, SCHEMA_V30, SCHEMA_V31,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -484,6 +487,21 @@ CREATE TABLE pair_pause (
 // ignore the column and run at full effort, so the floor stays.
 const SCHEMA_V30: &str = "
 ALTER TABLE automation_setting ADD COLUMN automatic_effort TEXT NOT NULL DEFAULT 'gentle' CHECK(automatic_effort IN ('gentle','full'));
+";
+
+// A pair whose state now lives in the target's immutable catalog. The
+// epoch names the migration; generation 0's all-zero digest means the
+// target has not acknowledged it, so local writers are still allowed.
+// Older readers cannot route reads to the target, so the floor rises.
+const SCHEMA_V31: &str = "
+CREATE TABLE target_catalog (
+    pair_id BLOB NOT NULL REFERENCES pair(id) ON DELETE CASCADE,
+    epoch BLOB NOT NULL CHECK(length(epoch) = 16),
+    generation INTEGER NOT NULL CHECK(generation >= 0),
+    digest BLOB NOT NULL CHECK(length(digest) = 32),
+    PRIMARY KEY (pair_id)
+) STRICT, WITHOUT ROWID;
+UPDATE state_meta SET minimum_reader=max(minimum_reader,31) WHERE singleton=1;
 ";
 
 #[derive(Debug, thiserror::Error)]
@@ -947,6 +965,7 @@ impl Database {
             Some(current) if current != revision => return Err(Error::StaleRevision),
             Some(_) => {}
         }
+        target_catalog::require_no_acknowledged_target(&transaction, pair)?;
         let mut remove = transaction
             .prepare("DELETE FROM snapshot_entry WHERE pair_id=?1 AND side=?2 AND path=?3")?;
         let mut insert = transaction.prepare(
@@ -1153,6 +1172,7 @@ impl Database {
             Some(current) if current != revision => return Err(Error::StaleRevision),
             Some(_) => {}
         }
+        target_catalog::require_no_acknowledged_target(&transaction, pair)?;
         {
             let mut put = transaction.prepare(
                 "INSERT INTO base_entry (pair_id,path,left_version,right_version) VALUES (?1,?2,?3,?4)
@@ -1892,7 +1912,6 @@ pub(super) mod tests {
 
         let mut renamed = values();
         renamed.name = "renamed".into();
-        renamed.mode = "mirror-left".into();
         database.update_pair(&pair.id, 1, &renamed).unwrap();
         assert_eq!(database.base_rows(&pair.id).unwrap().len(), 1);
 
@@ -1905,13 +1924,22 @@ pub(super) mod tests {
         ));
         assert_eq!(database.base_rows(&pair.id).unwrap().len(), 1);
 
-        database.update_pair(&pair.id, 2, &moved).unwrap();
+        // A mode change invalidates the base too.
+        let mut mirrored = renamed.clone();
+        mirrored.mode = "mirror-left".into();
+        database.update_pair(&pair.id, 2, &mirrored).unwrap();
         assert!(database.base_rows(&pair.id).unwrap().is_empty());
 
         database
             .change_base(&pair.id, 3, &[put(b"a", b"1")], JournalChange::None)
             .unwrap();
-        remove_and_purge(&mut database, &pair.id, 3);
+        database.update_pair(&pair.id, 3, &moved).unwrap();
+        assert!(database.base_rows(&pair.id).unwrap().is_empty());
+
+        database
+            .change_base(&pair.id, 4, &[put(b"a", b"1")], JournalChange::None)
+            .unwrap();
+        remove_and_purge(&mut database, &pair.id, 4);
         let orphans: i64 = database
             .connection
             .query_row("SELECT count(*) FROM base_entry", [], |row| row.get(0))
@@ -2153,9 +2181,9 @@ pub(super) mod tests {
         assert_eq!(minimum_reader(&legacy.connection), legacy_reader);
         drop(legacy);
 
-        // v28 raised the floor last: older readers would show removed pairs.
+        // v31 raises the floor last: older readers cannot route to a target.
         let mut database = Database::open(&location).unwrap();
-        assert_eq!(minimum_reader(&database.connection), 28);
+        assert_eq!(minimum_reader(&database.connection), 31);
         assert_eq!(
             database
                 .connection
@@ -3071,8 +3099,90 @@ pub(super) mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!((schema, minimum), (SCHEMA_VERSION, 28));
+        assert_eq!((schema, minimum), (SCHEMA_VERSION, 31));
         assert!(minimum > 25, "a shipping reader must refuse these policies");
         assert_eq!(database.pair(&id).unwrap().unwrap().revision, 2);
+    }
+
+    #[test]
+    fn migration31_adds_the_target_catalog_and_raises_the_reader_floor() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        database
+            .change_base(&pair.id, 1, &[put(b"kept", b"v")], JournalChange::None)
+            .unwrap();
+        // Drop V31's table and floor, recreating a V30 state.
+        database
+            .connection
+            .execute_batch(
+                "DROP TABLE target_catalog; UPDATE state_meta SET minimum_reader=28; \
+                 PRAGMA user_version=30;",
+            )
+            .unwrap();
+        drop(database);
+
+        let database = Database::open(&location).unwrap();
+        assert_eq!(
+            database
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+        let minimum: i64 = database
+            .connection
+            .query_row(
+                "SELECT minimum_reader FROM state_meta WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(minimum, 31);
+        assert_eq!(
+            database.pair(&pair.id).unwrap().unwrap().values.name,
+            "pair"
+        );
+        assert_eq!(database.base_rows(&pair.id).unwrap().len(), 1);
+        assert_eq!(database.target_catalog(&pair.id).unwrap(), None);
+        let columns: Vec<String> = {
+            let mut statement = database
+                .connection
+                .prepare("SELECT name FROM pragma_table_info('target_catalog') ORDER BY cid")
+                .unwrap();
+            statement
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(columns, ["pair_id", "epoch", "generation", "digest"]);
+    }
+
+    #[test]
+    fn old_readers_are_refused_at_the_new_floor() {
+        let (_directory, location) = location();
+        let database = Database::open(&location).unwrap();
+        let floor: i64 = database
+            .connection
+            .query_row(
+                "SELECT minimum_reader FROM state_meta WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(floor, 31);
+        database
+            .connection
+            .execute("UPDATE state_meta SET minimum_reader=32", [])
+            .unwrap();
+        drop(database);
+        assert!(matches!(
+            Database::open(&location),
+            Err(Error::UnsupportedReader {
+                found: 32,
+                supported: 31
+            })
+        ));
     }
 }

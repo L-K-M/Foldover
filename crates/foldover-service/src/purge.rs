@@ -49,7 +49,7 @@ impl Service {
                     Ok(()) => purger.wake.notified().await,
                     Err(error) => {
                         // The rows stay hidden meanwhile.
-                        eprintln!("foldoverd: removed pairs' records stay for now: {error}");
+                        eprintln!("foldoverd: local record cleanup will retry: {error}");
                         // Woken by a removal, or timed out: either way, try again.
                         let _ = tokio::time::timeout(RETRY, purger.wake.notified()).await;
                     }
@@ -67,9 +67,15 @@ pub(crate) async fn purge(engine: &Arc<Mutex<Engine>>) -> Result<(), String> {
             let mut engine = engine
                 .lock()
                 .map_err(|_| "the sync engine failed".to_owned())?;
-            engine
+            match engine
                 .purge_removed(BATCH_ROWS)
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?
+            {
+                Purge::Pending => Ok(Purge::Pending),
+                Purge::Done => engine
+                    .purge_migrated_catalogs(BATCH_ROWS)
+                    .map_err(|error| error.to_string()),
+            }
         })
         .await
         .map_err(|_| "the purge step failed".to_owned())??;

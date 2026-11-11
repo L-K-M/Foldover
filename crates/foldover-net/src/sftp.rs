@@ -96,6 +96,7 @@ struct Extensions {
 enum DirectoryRead {
     All,
     Probe,
+    Bounded { entries: usize, name_bytes: usize },
 }
 
 pub struct Session {
@@ -274,6 +275,23 @@ impl Session {
         self.read_directory(path, DirectoryRead::All)
     }
 
+    /// Stop before accumulating more entries or filename bytes than the caller
+    /// can retain. This bounds private metadata listings from remote servers.
+    pub fn read_dir_bounded(
+        &mut self,
+        path: &[u8],
+        entries: usize,
+        name_bytes: usize,
+    ) -> io::Result<Vec<(Vec<u8>, Attributes)>> {
+        self.read_directory(
+            path,
+            DirectoryRead::Bounded {
+                entries,
+                name_bytes,
+            },
+        )
+    }
+
     /// Prove listing access with one batch, rather than enumerating a whole
     /// root that the subsequent observation will enumerate again.
     pub fn probe_directory(&mut self, path: &[u8]) -> io::Result<()> {
@@ -287,6 +305,7 @@ impl Session {
     ) -> io::Result<Vec<(Vec<u8>, Attributes)>> {
         let handle = self.handle(|id| Writer::new(wire::OPENDIR, id).bytes(path))?;
         let mut entries = Vec::new();
+        let mut name_bytes = 0_usize;
         let result = loop {
             let body = match self.request(|id| Writer::new(wire::READDIR, id).bytes(&handle.0)) {
                 Ok(body) => body,
@@ -305,6 +324,19 @@ impl Session {
                     reader.bytes()?;
                     let attributes = reader.attributes()?;
                     if name != b"." && name != b".." {
+                        if let DirectoryRead::Bounded {
+                            entries: count,
+                            name_bytes: bytes,
+                        } = mode
+                            && (entries.len() >= count
+                                || name.len() > bytes.saturating_sub(name_bytes))
+                        {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "Directory listing exceeds its limit",
+                            ));
+                        }
+                        name_bytes = name_bytes.saturating_add(name.len());
                         entries.push((name, attributes));
                     }
                 }

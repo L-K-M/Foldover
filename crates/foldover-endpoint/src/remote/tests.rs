@@ -5,11 +5,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use foldover_net::peer::Identity;
 use foldover_proto::peer::{
-    FolderOp, IncomingKind, NameCase, NameUnicode, PeerCall, PeerReply, VolumeKind,
+    CatalogOp, FolderError, FolderErrorKind, FolderOp, IncomingKind, NameCase, NameUnicode,
+    PeerCall, PeerReply, VolumeKind,
 };
-use foldover_types::{DeviceId, Digest, LocalRoot, PairOptions, PeerRoot, ShareId, SyncPath};
+use foldover_types::{
+    DeviceId, Digest, Durability, LocalRoot, PairId, PairOptions, PeerRoot, ShareId, SyncPath,
+};
 
 use super::*;
+use crate::CatalogFiles;
+use crate::catalog::CATALOG_FILE_LIMIT;
+use crate::lease::{LeaseHolder, LeaseTiming, OwnedLease};
 use crate::link::{Answer, NotRecorded, PeerHost, PeerLink, Presence};
 use crate::local::Carried;
 use crate::{Endpoint, Expected, RunScope};
@@ -1449,4 +1455,414 @@ fn a_peer_scans_count_ends_on_every_entry() {
             "reported partway: {partway:?}"
         );
     }
+}
+
+/// Starts two paired links, the answering one sharing `root` with the
+/// asking one, and returns the asking link and endpoint with both links
+/// and the runtime kept alive.
+fn catalog_peer(
+    root: LocalRoot,
+) -> (
+    tokio::runtime::Runtime,
+    PeerEndpoint,
+    Arc<PeerLink>,
+    Arc<PeerLink>,
+) {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let identities = [Identity::generate().unwrap(), Identity::generate().unwrap()];
+    let devices = identities
+        .each_ref()
+        .map(|identity| DeviceId::from_bytes(*identity.id().as_bytes()));
+    let [a_identity, b_identity] = identities;
+    let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let (a, b) = runtime.block_on(async {
+        let b = PeerLink::start(
+            b_identity,
+            "Studio".into(),
+            loopback,
+            Presence::Unlisted,
+            [devices[0]],
+            Arc::new(Sharing {
+                root,
+                cache: FolderCache::default(),
+                state: None,
+            }),
+        )
+        .unwrap();
+        let a = PeerLink::start(
+            a_identity,
+            "Laptop".into(),
+            loopback,
+            Presence::Unlisted,
+            [devices[1]],
+            Arc::new(Sharing {
+                root: LocalRoot::from_bytes(b"/".to_vec()).unwrap(),
+                cache: FolderCache::default(),
+                state: None,
+            }),
+        )
+        .unwrap();
+        a.reach(devices[1], b.address().unwrap());
+        (a, b)
+    });
+    let peer_root = PeerRoot::new(devices[1], ShareId::from_bytes([7; ShareId::BYTE_LEN]));
+    let endpoint = PeerEndpoint::open(Arc::clone(&a), &peer_root).unwrap();
+    (runtime, endpoint, a, b)
+}
+
+/// The pair every catalog test uses.
+fn catalog_pair() -> PairId {
+    PairId::from_bytes([0x42; PairId::BYTE_LEN]).unwrap()
+}
+
+struct MalformedCatalogPage(PeerReply);
+
+impl PeerHost for MalformedCatalogPage {
+    fn paired(&self, _: DeviceId, _: String) -> Result<(), NotRecorded> {
+        Ok(())
+    }
+
+    fn serve(&self, _: DeviceId, call: PeerCall, answer: &mut Answer) {
+        let PeerCall::Folder { op, .. } = call else {
+            return;
+        };
+        match *op {
+            FolderOp::NameMatching => {
+                let _ = answer.reply(&PeerReply::Names {
+                    case: NameCase::Exact,
+                    unicode: NameUnicode::Exact,
+                });
+            }
+            FolderOp::Catalog {
+                op: CatalogOp::List,
+                ..
+            } => {
+                let _ = answer.reply(&self.0);
+                let _ = answer.reply(&PeerReply::CatalogListed {
+                    names: Vec::new(),
+                    more: false,
+                });
+            }
+            _ => {
+                let _ = answer.reply(&PeerReply::Done);
+            }
+        }
+    }
+}
+
+#[test]
+fn malformed_peer_catalog_pages_are_refused() {
+    for reply in [
+        PeerReply::CatalogListed {
+            names: Vec::new(),
+            more: true,
+        },
+        PeerReply::CatalogListed {
+            names: vec!["../escape".into()],
+            more: false,
+        },
+        PeerReply::CatalogListed {
+            names: vec!["x".repeat(129)],
+            more: false,
+        },
+    ] {
+        let (_runtime, endpoint, _server) = peer_endpoint(Arc::new(MalformedCatalogPage(reply)));
+        let catalog = endpoint
+            .catalog_endpoint(catalog_pair(), Durability::Standard)
+            .unwrap();
+        assert_eq!(
+            catalog.catalog_list().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+}
+
+/// A catalog file's bytes travel as data frames, so a file crossing the
+/// 1 MiB block boundary still arrives whole, and the catalog's directory,
+/// lease and listing all live under the pair's private directory.
+#[test]
+fn a_peer_catalog_round_trips_through_its_private_directory() {
+    let shared = tempfile::tempdir().unwrap();
+    let root =
+        LocalRoot::from_bytes(shared.path().as_os_str().as_encoded_bytes().to_vec()).unwrap();
+    let (_runtime, endpoint, _a, _b) = catalog_peer(root);
+    let pair = catalog_pair();
+    let catalog = endpoint
+        .catalog_endpoint(pair, Durability::Standard)
+        .unwrap();
+
+    let private = shared.path().join(".foldover/state").join(pair.to_string());
+    assert!(
+        private.join("format").exists(),
+        "the catalog marker is created"
+    );
+
+    // One byte more than four 1 MiB blocks: the file leaves in five frames.
+    let bytes = vec![b'x'; 4 * 1024 * 1024 + 1];
+    catalog
+        .catalog_write("checkpoint-1", &bytes, Durability::Standard)
+        .unwrap();
+    assert_eq!(
+        catalog
+            .catalog_read("checkpoint-1", CATALOG_FILE_LIMIT)
+            .unwrap()
+            .as_deref(),
+        Some(bytes.as_slice())
+    );
+    assert!(private.join("checkpoint-1").exists());
+
+    // A second write of the same name reports it already exists, as the
+    // local endpoint does, so a caller can read back and compare.
+    assert_eq!(
+        catalog
+            .catalog_write("checkpoint-1", b"other", Durability::Standard)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::AlreadyExists
+    );
+
+    // An empty file round-trips too, distinguished from an absent one.
+    catalog
+        .catalog_write("empty", b"", Durability::Standard)
+        .unwrap();
+    assert_eq!(
+        catalog.catalog_read("empty", CATALOG_FILE_LIMIT).unwrap(),
+        Some(Vec::new())
+    );
+
+    // The listing carries the names; removal makes them absent.
+    let listed = catalog.catalog_list().unwrap();
+    assert!(listed.contains(&"checkpoint-1".to_owned()));
+    assert!(listed.contains(&"empty".to_owned()));
+    assert!(!listed.contains(&"absent".to_owned()));
+    catalog.catalog_remove("checkpoint-1").unwrap();
+    assert_eq!(
+        catalog
+            .catalog_read("checkpoint-1", CATALOG_FILE_LIMIT)
+            .unwrap(),
+        None
+    );
+    // Removing an absent file is nothing to do, not an error.
+    catalog.catalog_remove("checkpoint-1").unwrap();
+    assert!(
+        !catalog
+            .catalog_list()
+            .unwrap()
+            .contains(&"checkpoint-1".to_owned())
+    );
+}
+
+/// A catalog session's lease lives in its private directory, so two
+/// pairs targeting one shared folder never contend for the shared
+/// folder's own lease.
+#[test]
+fn a_catalog_lease_lives_in_the_private_directory() {
+    let shared = tempfile::tempdir().unwrap();
+    let root =
+        LocalRoot::from_bytes(shared.path().as_os_str().as_encoded_bytes().to_vec()).unwrap();
+    let (_runtime, endpoint, _a, _b) = catalog_peer(root);
+    let pair = catalog_pair();
+    let catalog = endpoint
+        .catalog_endpoint(pair, Durability::Standard)
+        .unwrap();
+    let endpoint = Endpoint::Peer(catalog);
+
+    let lease = OwnedLease::take(
+        Arc::new(endpoint),
+        LeaseHolder {
+            id: "catalog/test".into(),
+            label: "Catalog test".into(),
+        },
+        LeaseTiming::STANDARD,
+        &mut || ScanControl::Continue,
+    )
+    .unwrap();
+
+    let private = shared.path().join(".foldover/state").join(pair.to_string());
+    assert!(
+        private.join(".foldover/lock").exists(),
+        "the catalog lease is in its private directory"
+    );
+    assert!(
+        !shared.path().join(".foldover/lock").exists(),
+        "the shared folder's own lease is untouched"
+    );
+    // The lease renews and releases there, as any held lease does.
+    lease.renew().unwrap();
+    drop(lease);
+    assert!(!private.join(".foldover/lock").exists());
+}
+
+/// Full durability is the sharing Mac's promise to make: the catalog
+/// applies it to the marker and to each file, as its local endpoint does.
+#[test]
+fn a_peer_catalog_applies_full_durability() {
+    let shared = tempfile::tempdir().unwrap();
+    let root =
+        LocalRoot::from_bytes(shared.path().as_os_str().as_encoded_bytes().to_vec()).unwrap();
+    let (_runtime, endpoint, _a, _b) = catalog_peer(root);
+    let catalog = endpoint
+        .catalog_endpoint(catalog_pair(), Durability::Full)
+        .unwrap();
+    catalog
+        .catalog_write("durable", b"bytes", Durability::Full)
+        .unwrap();
+    assert_eq!(
+        catalog.catalog_read("durable", 1024).unwrap().as_deref(),
+        Some(&b"bytes"[..])
+    );
+}
+
+/// Names, limits and blob sizes are validated on both ends: a name that
+/// is not a plain catalog file, a read past the limit, and a blob past
+/// the 16 MiB bound are all refused before anything is written.
+#[test]
+fn a_catalog_endpoint_validates_names_limits_and_blobs() {
+    let shared = tempfile::tempdir().unwrap();
+    let root =
+        LocalRoot::from_bytes(shared.path().as_os_str().as_encoded_bytes().to_vec()).unwrap();
+    let (_runtime, endpoint, _a, _b) = catalog_peer(root);
+    let catalog = endpoint
+        .catalog_endpoint(catalog_pair(), Durability::Standard)
+        .unwrap();
+
+    for name in ["", ".hidden", "../escape", "a/b", "UPPER", &"x".repeat(129)] {
+        assert!(
+            catalog.catalog_read(name, 1024).is_err(),
+            "read {name:?} should be refused"
+        );
+        assert!(
+            catalog
+                .catalog_write(name, b"x", Durability::Standard)
+                .is_err(),
+            "write {name:?} should be refused"
+        );
+        assert!(
+            catalog.catalog_remove(name).is_err(),
+            "remove {name:?} should be refused"
+        );
+    }
+
+    // A read limit past the catalog's bound is refused here, and so is a
+    // blob past it, without a byte crossing the link.
+    assert_eq!(
+        catalog
+            .catalog_read("name", CATALOG_FILE_LIMIT + 1)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidData
+    );
+    let huge = vec![b'x'; CATALOG_FILE_LIMIT + 1];
+    assert_eq!(
+        catalog
+            .catalog_write("huge", &huge, Durability::Standard)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidData
+    );
+    assert!(
+        !shared
+            .path()
+            .join(".foldover/state")
+            .join(catalog_pair().to_string())
+            .join("huge")
+            .exists()
+    );
+
+    // An endpoint that is not scoped to a catalog has no catalog to read.
+    for error in [
+        endpoint.catalog_read("name", 1024).unwrap_err(),
+        endpoint.catalog_list().unwrap_err(),
+        endpoint.catalog_remove("name").unwrap_err(),
+    ] {
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+    }
+    assert!(
+        endpoint
+            .catalog_write("name", b"x", Durability::Standard)
+            .is_err()
+    );
+}
+
+/// `CatalogFiles` opens a peer target's catalog, takes its lease in the
+/// pair's private directory, and reads, writes, lists and removes through
+/// it, exactly as it does over a local one.
+#[test]
+fn catalog_files_open_over_a_peer_catalog_and_lease_privately() {
+    let shared = tempfile::tempdir().unwrap();
+    let root =
+        LocalRoot::from_bytes(shared.path().as_os_str().as_encoded_bytes().to_vec()).unwrap();
+    let (_runtime, endpoint, _a, _b) = catalog_peer(root);
+    let pair = catalog_pair();
+    let files = CatalogFiles::open(
+        Arc::new(Endpoint::Peer(endpoint)),
+        pair,
+        LeaseHolder {
+            id: "catalog/test".into(),
+            label: "Catalog test".into(),
+        },
+        Durability::Standard,
+        &mut || ScanControl::Continue,
+    )
+    .unwrap();
+
+    let bytes = b"checkpoint-bytes".to_vec();
+    files.write_new("checkpoint", &bytes).unwrap();
+    assert_eq!(
+        files
+            .read("checkpoint", CATALOG_FILE_LIMIT)
+            .unwrap()
+            .as_deref(),
+        Some(bytes.as_slice())
+    );
+    assert!(files.list().unwrap().contains(&"checkpoint".to_owned()));
+    // The lease beats and fences from the private directory.
+    files.tick().unwrap();
+    files.fence().unwrap();
+    files.remove("checkpoint").unwrap();
+    assert_eq!(files.read("checkpoint", CATALOG_FILE_LIMIT).unwrap(), None);
+
+    let private = shared.path().join(".foldover/state").join(pair.to_string());
+    assert!(
+        private.join(".foldover/lock").exists(),
+        "the catalog lease is in its private directory"
+    );
+    assert!(
+        !shared.path().join(".foldover/lock").exists(),
+        "the shared folder's own lease is untouched"
+    );
+    drop(files);
+    assert!(!private.join(".foldover/lock").exists());
+}
+
+/// The answering Mac validates the pair it is handed, so a request that
+/// does not name a pair is refused rather than served from the shared
+/// folder's own `.foldover`.
+#[test]
+fn a_catalog_request_with_a_malformed_pair_is_refused() {
+    let shared = tempfile::tempdir().unwrap();
+    let root =
+        LocalRoot::from_bytes(shared.path().as_os_str().as_encoded_bytes().to_vec()).unwrap();
+    let (_runtime, _endpoint, a, b) = catalog_peer(root);
+    let call = PeerCall::Folder {
+        share: ShareId::from_bytes([7; ShareId::BYTE_LEN]).to_string(),
+        op: Box::new(FolderOp::Catalog {
+            pair: "not-a-pair".into(),
+            op: CatalogOp::List,
+        }),
+    };
+    let mut exchange = a.ask(b.device(), call).unwrap();
+    let reply = exchange.reply().unwrap();
+    assert!(matches!(
+        reply,
+        PeerReply::Failed {
+            error: FolderError {
+                kind: FolderErrorKind::Invalid,
+                ..
+            }
+        }
+    ));
 }

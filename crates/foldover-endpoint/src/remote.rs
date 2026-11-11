@@ -20,14 +20,15 @@ use std::time::{Duration, Instant, SystemTime};
 use foldover_fs::{ForeignMetadata, NativeMetadata, WriteError};
 use foldover_proto::local::{PairDurability, PairPropagation};
 use foldover_proto::peer::{
-    FolderOp, IncomingKind, LeaseAction, LeaseFile, NameCase, NameUnicode, PeerCall, PeerReply,
-    ScanSettings, VolumeKind,
+    CatalogOp, FolderError, FolderErrorKind, FolderOp, IncomingKind, LeaseAction, LeaseFile,
+    NameCase, NameUnicode, PeerCall, PeerReply, ScanSettings, VolumeKind,
 };
 use foldover_types::{
     CaseMatching, Digest, Durability, EndpointId, EntryVersion, MetadataPolicy, NameMatching,
-    PairOptions, PeerRoot, Propagation, ScanControl, SyncPath, UnicodeMatching,
+    PairId, PairOptions, PeerRoot, Propagation, ScanControl, SyncPath, UnicodeMatching,
 };
 
+use crate::catalog::{CATALOG_ENTRIES_LIMIT, CATALOG_FILE_LIMIT, invalid};
 use crate::lease::LockFile;
 use crate::link::{Exchange, Incoming, LinkError, PeerLink, WatchHandle, Watched};
 use crate::local::{Archiving, Carried};
@@ -55,6 +56,11 @@ const STREAM_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(200);
 /// per counter, however many reports the other Mac sends: a hundred times
 /// the million files PLAN.md §5.3 budgets for.
 const MAX_STEPS_PER_SCAN: u64 = 100_000_000;
+
+/// The most bytes one catalog data frame carries. A catalog file may hold
+/// the whole 16 MiB blob limit, so it travels in 1 MiB blocks rather than
+/// one frame.
+pub(super) const CATALOG_CHUNK: usize = 1024 * 1024;
 
 /// Report the steps a peer's cumulative counter grew, at most
 /// `MAX_STEPS_PER_REPORT` of them and none past `MAX_STEPS_PER_SCAN`,
@@ -103,6 +109,17 @@ pub struct PeerEndpoint {
     link: Arc<PeerLink>,
     root: PeerRoot,
     names: NameMatching,
+    /// The pair's target catalog scope, when this endpoint is one. Every
+    /// lease operation then rides on a catalog request, so the catalog's
+    /// lease lives in its private directory rather than the shared
+    /// folder's own.
+    catalog: Option<CatalogScope>,
+}
+
+/// The private catalog directory of one pair inside a shared folder.
+#[derive(Clone, Copy)]
+struct CatalogScope {
+    pair: PairId,
 }
 
 impl PeerEndpoint {
@@ -113,6 +130,7 @@ impl PeerEndpoint {
             link,
             root: root.clone(),
             names: NameMatching::EXACT,
+            catalog: None,
         };
         match endpoint.reply(FolderOp::Probe)? {
             PeerReply::Done => {}
@@ -276,8 +294,145 @@ impl PeerEndpoint {
         }
     }
 
+    /// Scope this endpoint to the pair's target catalog: the private
+    /// directory `.foldover/state/<pair>` inside the shared folder. The
+    /// directory is opened and checked there, so a peer of another
+    /// version refuses here rather than mid-sync; no source-side
+    /// database is ever substituted.
+    pub(crate) fn catalog_endpoint(
+        &self,
+        pair: PairId,
+        durability: Durability,
+    ) -> io::Result<Self> {
+        let scoped = Self {
+            link: Arc::clone(&self.link),
+            root: self.root.clone(),
+            names: self.names,
+            catalog: Some(CatalogScope { pair }),
+        };
+        let op = scoped.catalog_call(CatalogOp::Open {
+            durability: pair_durability(durability),
+        })?;
+        match scoped.reply(op).map_err(scan_io)? {
+            PeerReply::Done => Ok(scoped),
+            _ => Err(scan_io(unexpected())),
+        }
+    }
+
+    /// Read one catalog file, at most `limit` bytes. The file's bytes
+    /// travel as data frames, not a JSON array.
+    pub(crate) fn catalog_read(&self, name: &str, limit: usize) -> io::Result<Option<Vec<u8>>> {
+        self.catalog_scope()?;
+        if limit > CATALOG_FILE_LIMIT {
+            return Err(invalid("Catalog read exceeds its limit"));
+        }
+        let mut exchange = self
+            .ask_catalog(CatalogOp::Read {
+                name: name.to_owned(),
+                limit: u64::try_from(limit).unwrap_or(u64::MAX),
+            })
+            .map_err(scan_io)?;
+        match catalog_reply(exchange.reply())? {
+            PeerReply::CatalogRead { found: false } => Ok(None),
+            PeerReply::CatalogRead { found: true } => {
+                let mut bytes = Vec::new();
+                loop {
+                    match exchange.next().map_err(link_io)? {
+                        Incoming::Data(chunk) => {
+                            if chunk.len() > limit.saturating_sub(bytes.len()) {
+                                return Err(invalid("Catalog file exceeds its limit"));
+                            }
+                            bytes.extend_from_slice(&chunk);
+                        }
+                        Incoming::End => break,
+                        Incoming::Reply(_) => return Err(scan_io(unexpected())),
+                    }
+                }
+                match catalog_reply(exchange.reply())? {
+                    PeerReply::Done => Ok(Some(bytes)),
+                    _ => Err(scan_io(unexpected())),
+                }
+            }
+            _ => Err(scan_io(unexpected())),
+        }
+    }
+
+    /// Write one catalog file, creating it only. The bytes travel as
+    /// data frames; an existing file is reported, never replaced.
+    pub(crate) fn catalog_write(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        durability: Durability,
+    ) -> io::Result<()> {
+        self.catalog_scope()?;
+        if bytes.len() > CATALOG_FILE_LIMIT {
+            return Err(invalid("Catalog file exceeds its limit"));
+        }
+        let mut exchange = self
+            .ask_catalog(CatalogOp::Write {
+                name: name.to_owned(),
+                durability: pair_durability(durability),
+            })
+            .map_err(scan_io)?;
+        for chunk in bytes.chunks(CATALOG_CHUNK) {
+            exchange.send_data(chunk).map_err(link_io)?;
+        }
+        exchange.end_data().map_err(link_io)?;
+        match catalog_reply(exchange.reply())? {
+            PeerReply::CatalogCreated { created: true } => Ok(()),
+            PeerReply::CatalogCreated { created: false } => Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Catalog file already exists",
+            )),
+            _ => Err(scan_io(unexpected())),
+        }
+    }
+
+    /// List the catalog's file names. The other Mac pages them, so a
+    /// catalog of the 250,000-file limit never overflows one frame.
+    pub(crate) fn catalog_list(&self) -> io::Result<Vec<String>> {
+        self.catalog_scope()?;
+        let mut exchange = self.ask_catalog(CatalogOp::List).map_err(scan_io)?;
+        let mut names = Vec::new();
+        loop {
+            match catalog_reply(exchange.reply())? {
+                PeerReply::CatalogListed { names: page, more } => {
+                    if page.len() > CATALOG_ENTRIES_LIMIT.saturating_sub(names.len()) {
+                        return Err(invalid("Too many catalog files"));
+                    }
+                    if page.is_empty() && more {
+                        return Err(invalid("Empty catalog page promises more files"));
+                    }
+                    for name in &page {
+                        crate::catalog::validate_name(name)?;
+                    }
+                    names.extend(page);
+                    if !more {
+                        return Ok(names);
+                    }
+                }
+                _ => return Err(scan_io(unexpected())),
+            }
+        }
+    }
+
+    /// Remove one catalog file; nothing to do if it is absent.
+    pub(crate) fn catalog_remove(&self, name: &str) -> io::Result<()> {
+        self.catalog_scope()?;
+        let mut exchange = self
+            .ask_catalog(CatalogOp::Remove {
+                name: name.to_owned(),
+            })
+            .map_err(scan_io)?;
+        match catalog_reply(exchange.reply())? {
+            PeerReply::Done => Ok(()),
+            _ => Err(scan_io(unexpected())),
+        }
+    }
+
     pub(crate) fn read_lock_file(&self, file: LockFile) -> Result<Option<Vec<u8>>, ScanError> {
-        match self.reply(lease_op(file, LeaseAction::Read))? {
+        match self.reply(self.lease_call(file, LeaseAction::Read)?)? {
             PeerReply::LeaseRead { content } => Ok(content),
             _ => Err(unexpected()),
         }
@@ -291,18 +446,18 @@ impl PeerEndpoint {
         let action = LeaseAction::Create {
             content: content.to_vec(),
         };
-        match self.reply(lease_op(file, action))? {
+        match self.reply(self.lease_call(file, action)?)? {
             PeerReply::LeaseCreated { created } => Ok(created),
             _ => Err(unexpected().into()),
         }
     }
 
     pub(crate) fn remove_lock_file(&self, file: LockFile) -> Result<(), ApplyError> {
-        done(self.reply(lease_op(file, LeaseAction::Remove))?)
+        done(self.reply(self.lease_call(file, LeaseAction::Remove)?)?)
     }
 
     pub(crate) fn promote_claim(&self) -> Result<(), ApplyError> {
-        done(self.reply(lease_op(LockFile::Lock, LeaseAction::Promote))?)
+        done(self.reply(self.lease_call(LockFile::Lock, LeaseAction::Promote)?)?)
     }
 
     /// Prove `path` still holds `planned` there, and start reading it
@@ -663,6 +818,54 @@ impl PeerEndpoint {
         placed(reply_or_source_changed(reply, path)?)
     }
 
+    /// The pair's catalog scope, or why this endpoint is not one.
+    fn catalog_scope(&self) -> io::Result<CatalogScope> {
+        self.catalog.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "This endpoint is not a target catalog",
+            )
+        })
+    }
+
+    /// A catalog request for this endpoint's pair.
+    fn catalog_call(&self, op: CatalogOp) -> io::Result<FolderOp> {
+        match &op {
+            CatalogOp::Read { name, .. }
+            | CatalogOp::Write { name, .. }
+            | CatalogOp::Remove { name } => crate::catalog::validate_name(name)?,
+            _ => {}
+        }
+        Ok(FolderOp::Catalog {
+            pair: self.catalog_scope()?.pair.to_string(),
+            op,
+        })
+    }
+
+    fn ask_catalog(&self, op: CatalogOp) -> Result<Exchange, ScanError> {
+        let op = self
+            .catalog_call(op)
+            .map_err(|error| ScanError::Peer(error.to_string()))?;
+        self.ask(op)
+    }
+
+    /// A lease operation. On a catalog endpoint it rides on a catalog
+    /// request, so the lease lands in the catalog's private directory;
+    /// otherwise it is the shared folder's own lease, as before.
+    fn lease_call(&self, file: LockFile, action: LeaseAction) -> Result<FolderOp, ScanError> {
+        let file = match file {
+            LockFile::Lock => LeaseFile::Lock,
+            LockFile::Claim => LeaseFile::Claim,
+        };
+        match self.catalog {
+            Some(scope) => Ok(FolderOp::Catalog {
+                pair: scope.pair.to_string(),
+                op: CatalogOp::Lease { file, action },
+            }),
+            None => Ok(lease_op(file, action)),
+        }
+    }
+
     fn ask(&self, op: FolderOp) -> Result<Exchange, ScanError> {
         let call = PeerCall::Folder {
             share: self.root.share().to_string(),
@@ -823,12 +1026,36 @@ fn placed(reply: PeerReply) -> Result<SyncPath, ApplyError> {
     }
 }
 
-fn lease_op(file: LockFile, action: LeaseAction) -> FolderOp {
-    let file = match file {
-        LockFile::Lock => LeaseFile::Lock,
-        LockFile::Claim => LeaseFile::Claim,
-    };
+fn lease_op(file: LeaseFile, action: LeaseAction) -> FolderOp {
     FolderOp::Lease { file, action }
+}
+
+fn scan_io(error: ScanError) -> io::Error {
+    io::Error::other(error)
+}
+
+fn link_io(error: LinkError) -> io::Error {
+    io::Error::other(error)
+}
+
+/// A catalog reply, with a refusal or a failure as this Mac's own error.
+fn catalog_reply(reply: Result<PeerReply, LinkError>) -> io::Result<PeerReply> {
+    match reply.map_err(link_io)? {
+        PeerReply::Failed { error } => Err(catalog_failure(&error)),
+        PeerReply::Refused { reason } => Err(io::Error::new(io::ErrorKind::Unsupported, reason)),
+        reply => Ok(reply),
+    }
+}
+
+/// A catalog failure on the answering Mac, as this Mac's own.
+fn catalog_failure(error: &FolderError) -> io::Error {
+    let kind = match error.kind {
+        FolderErrorKind::Missing => io::ErrorKind::NotFound,
+        FolderErrorKind::AccessDenied => io::ErrorKind::PermissionDenied,
+        FolderErrorKind::Invalid => io::ErrorKind::InvalidData,
+        _ => io::ErrorKind::Other,
+    };
+    io::Error::new(kind, error.message.clone())
 }
 
 fn pair_durability(durability: Durability) -> PairDurability {

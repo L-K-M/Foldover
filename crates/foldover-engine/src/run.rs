@@ -56,7 +56,7 @@ use crate::{
 };
 
 /// Base updates per commit: bounds the work a crash can make the next run redo.
-const COMMIT_BATCH: usize = 256;
+pub(super) const COMMIT_BATCH: usize = 256;
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 /// Free space a run leaves on each volume, so the system and other writers
 /// are not starved by a sync.
@@ -722,6 +722,7 @@ pub struct PendingRunInputs {
     resolutions: BTreeMap<SyncPath, Resolution>,
     reach: Reach,
     records: RunRecords,
+    checkpoint: Option<foldover_state::target_store::Checkpoint>,
 }
 
 impl PendingRunInputs {
@@ -731,6 +732,7 @@ impl PendingRunInputs {
         resolutions: BTreeMap<SyncPath, Resolution>,
         reach: Reach,
         records: RunRecords,
+        checkpoint: Option<foldover_state::target_store::Checkpoint>,
     ) -> Self {
         Self {
             pair,
@@ -738,6 +740,7 @@ impl PendingRunInputs {
             resolutions,
             reach,
             records,
+            checkpoint,
         }
     }
 
@@ -746,16 +749,73 @@ impl PendingRunInputs {
         &self.pair
     }
 
+    pub fn reach(&self) -> &Reach {
+        &self.reach
+    }
+
+    pub(crate) fn checkpoint(&self) -> Option<&foldover_state::target_store::Checkpoint> {
+        self.checkpoint.as_ref()
+    }
+    pub(crate) fn identities(&self) -> RecordedIdentities {
+        self.identities
+    }
+    pub(crate) fn records(&self) -> &RunRecords {
+        &self.records
+    }
+
+    pub fn decode_target(
+        self,
+        catalog: &foldover_state::target_store::Catalog,
+        store: &dyn foldover_state::target_store::BlobStore,
+    ) -> Result<RunInputs, crate::Error> {
+        let mut base = PathMapBuilder::with_capacity(0);
+        catalog.visit_base(store, &mut |path, entry| base.push(path, entry))?;
+        let base = Arc::new(base.freeze());
+        let mut left = SnapshotBuilder::new(Arc::clone(&base), Side::Left, 0);
+        catalog.visit_snapshot(store, Side::Left, &mut |mut entry| {
+            if let Some((path, _)) = base.get_key_value(&entry.path) {
+                entry.path = path.clone();
+            }
+            left.insert(entry.path, entry.version, &entry.fingerprint);
+        })?;
+        let left = left.freeze();
+        let mut right = SnapshotBuilder::new(Arc::clone(&base), Side::Right, 0);
+        catalog.visit_snapshot(store, Side::Right, &mut |mut entry| {
+            if let Some((path, _)) = base.get_key_value(&entry.path) {
+                entry.path = path.clone();
+            } else if let Some((path, _)) = left.get_key_value(&entry.path) {
+                entry.path = path.clone();
+            }
+            right.insert(entry.path, entry.version, &entry.fingerprint);
+        })?;
+        Ok(
+            RunInputs::with_base(self.pair, base, self.identities, self.resolutions)
+                .with_snapshot_tables(left, right.freeze())
+                .with_reach(self.reach),
+        )
+    }
+
     /// Decode the captured trees outside the engine lock, streaming each
     /// side into its map. Malformed snapshot cache versions are cache
     /// misses, and unreadable fingerprints are skipped, as before.
     pub fn decode(self) -> Result<RunInputs, crate::Error> {
+        if self
+            .checkpoint
+            .as_ref()
+            .is_some_and(|checkpoint| checkpoint.generation > 0)
+        {
+            return Err(std::io::Error::other(
+                "This pair's catalog must be read from its backup target",
+            )
+            .into());
+        }
         let Self {
             pair,
             identities,
             resolutions,
             reach,
             records,
+            checkpoint: _,
         } = self;
         let mut base = PathMapBuilder::with_capacity(records.base_len()?);
         records.visit_base(|path, entry| {

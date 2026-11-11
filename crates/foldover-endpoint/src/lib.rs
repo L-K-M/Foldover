@@ -77,6 +77,9 @@ mod observation_hints;
 #[cfg(unix)]
 pub use observation_hints::ObservationHints;
 
+mod catalog;
+pub use catalog::{CATALOG_FILE_LIMIT, CatalogFiles};
+
 mod lease;
 pub use lease::{HeldLease, LeaseError, LeaseHolder, LeaseTiming, LockFile};
 

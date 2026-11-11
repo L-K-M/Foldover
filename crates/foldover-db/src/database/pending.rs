@@ -139,10 +139,20 @@ pub(super) fn apply_update(
     values: &PairValues,
 ) -> Result<PairRow, Error> {
     // A base and conflict choices hold versions of these roots under
-    // these metadata categories; changing either invalidates them.
-    for table in ["base_entry", "resolution", "snapshot_entry", "run_journal"] {
+    // these metadata categories; changing either invalidates them. So do
+    // a changed mode or records, which reroute what the target must hold.
+    // The target catalog marker is reset with them, so the next job
+    // imports a fresh baseline under a new epoch. Name, schedule and the
+    // other display-only edits keep the marker and the caches.
+    for table in [
+        "base_entry",
+        "resolution",
+        "snapshot_entry",
+        "run_journal",
+        "target_catalog",
+    ] {
         transaction.execute(
-                &format!("DELETE FROM {table} WHERE pair_id=?1 AND EXISTS (SELECT 1 FROM pair WHERE id=?1 AND revision=?2 AND (left_root!=?3 OR right_root!=?4 OR modification_times!=?5 OR extended_attributes!=?6 OR permissions!=?7))"),
+                &format!("DELETE FROM {table} WHERE pair_id=?1 AND EXISTS (SELECT 1 FROM pair WHERE id=?1 AND revision=?2 AND (left_root!=?3 OR right_root!=?4 OR modification_times!=?5 OR extended_attributes!=?6 OR permissions!=?7 OR mode!=?8 OR records!=?9))"),
                 params![
                     id,
                     revision,
@@ -150,7 +160,9 @@ pub(super) fn apply_update(
                     values.right_root,
                     values.modification_times,
                     values.extended_attributes,
-                    values.permissions
+                    values.permissions,
+                    values.mode,
+                    values.records
                 ],
             )?;
     }
@@ -431,6 +443,188 @@ mod tests {
     }
 
     #[test]
+    fn reset_vs_preserved_marker() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        database
+            .change_base(
+                &pair.id,
+                1,
+                &[put(b"base", b"1")],
+                JournalChange::Record {
+                    run: "old-run",
+                    rows: &[JournalRow {
+                        seq: 0,
+                        path: b"base".to_vec(),
+                        side: "left".into(),
+                        action: "create".into(),
+                        version: b"1".to_vec(),
+                        base: None,
+                        source: None,
+                    }],
+                },
+            )
+            .unwrap();
+        database
+            .replace_snapshot(
+                &pair.id,
+                1,
+                "left",
+                &[SnapshotRow {
+                    path: b"base".to_vec(),
+                    fingerprint: b"f".to_vec(),
+                    version: b"1".to_vec(),
+                }],
+            )
+            .unwrap();
+        database
+            .record_resolution(
+                &pair.id,
+                1,
+                &ResolutionRow {
+                    path: b"base".to_vec(),
+                    keep: "left".into(),
+                    left_version: Some(b"l".to_vec()),
+                    right_version: None,
+                },
+            )
+            .unwrap();
+        let epoch = [4_u8; 16];
+        let marker = database.begin_target_catalog(&pair.id, 1, epoch).unwrap();
+        let acknowledged = TargetCatalogRow {
+            epoch,
+            generation: 1,
+            digest: [9_u8; 32],
+        };
+        database
+            .acknowledge_target_catalog(&pair.id, 1, &marker, &acknowledged)
+            .unwrap();
+
+        // A name-only deferred edit keeps the marker and every local cache.
+        let mut renamed = values();
+        renamed.name = "Renamed".into();
+        database.defer_pair_update(&pair.id, 1, &renamed).unwrap();
+        database.activate_pair_update(&pair.id).unwrap();
+        assert_eq!(
+            database.target_catalog(&pair.id).unwrap(),
+            Some(acknowledged)
+        );
+        assert_eq!(database.active_pair(&pair.id).unwrap().unwrap().revision, 2);
+        assert_eq!(database.base_rows(&pair.id).unwrap().len(), 1);
+        assert_eq!(database.snapshot(&pair.id, "left").unwrap().len(), 1);
+        assert_eq!(database.journal(&pair.id).unwrap().unwrap().1.len(), 1);
+        assert_eq!(database.resolutions(&pair.id).unwrap().len(), 1);
+
+        // So does a schedule-only direct edit.
+        let mut scheduled = renamed.clone();
+        scheduled.schedule = "every".into();
+        scheduled.schedule_minutes = Some(30);
+        database.update_pair(&pair.id, 2, &scheduled).unwrap();
+        assert_eq!(
+            database.target_catalog(&pair.id).unwrap(),
+            Some(acknowledged)
+        );
+        assert_eq!(database.base_rows(&pair.id).unwrap().len(), 1);
+        assert_eq!(database.snapshot(&pair.id, "left").unwrap().len(), 1);
+        assert_eq!(database.journal(&pair.id).unwrap().unwrap().1.len(), 1);
+        assert_eq!(database.resolutions(&pair.id).unwrap().len(), 1);
+
+        // Changing a metadata policy resets the marker and invalidates every
+        // local cache.
+        let mut metadata = scheduled.clone();
+        metadata.permissions = "sync".into();
+        database.update_pair(&pair.id, 3, &metadata).unwrap();
+        assert_eq!(database.target_catalog(&pair.id).unwrap(), None);
+        assert!(database.base_rows(&pair.id).unwrap().is_empty());
+        assert!(database.snapshot(&pair.id, "left").unwrap().is_empty());
+        assert!(database.journal(&pair.id).unwrap().is_none());
+        assert!(database.resolutions(&pair.id).unwrap().is_empty());
+
+        // A new migration begins at generation zero under the new epoch,
+        // and legacy writers work again while it is unacknowledged.
+        let epoch2 = [5_u8; 16];
+        let begun = database.begin_target_catalog(&pair.id, 4, epoch2).unwrap();
+        assert_eq!(
+            begun,
+            TargetCatalogRow {
+                epoch: epoch2,
+                generation: 0,
+                digest: [0; 32]
+            }
+        );
+        database
+            .change_base(&pair.id, 4, &[put(b"fresh", b"1")], JournalChange::None)
+            .unwrap();
+
+        // A mode change resets the marker too.
+        let second = TargetCatalogRow {
+            epoch: epoch2,
+            generation: 1,
+            digest: [1_u8; 32],
+        };
+        database
+            .acknowledge_target_catalog(&pair.id, 4, &begun, &second)
+            .unwrap();
+        let mut mirrored = metadata.clone();
+        mirrored.mode = "mirror-left".into();
+        database.update_pair(&pair.id, 4, &mirrored).unwrap();
+        assert_eq!(database.target_catalog(&pair.id).unwrap(), None);
+
+        // So does a records change.
+        let epoch3 = [6_u8; 16];
+        let third_begin = database.begin_target_catalog(&pair.id, 5, epoch3).unwrap();
+        let third = TargetCatalogRow {
+            epoch: epoch3,
+            generation: 1,
+            digest: [2_u8; 32],
+        };
+        database
+            .acknowledge_target_catalog(&pair.id, 5, &third_begin, &third)
+            .unwrap();
+        let mut sourced = mirrored.clone();
+        sourced.records = "source".into();
+        database.update_pair(&pair.id, 5, &sourced).unwrap();
+        assert_eq!(database.target_catalog(&pair.id).unwrap(), None);
+
+        // And a root change.
+        let epoch4 = [7_u8; 16];
+        let fourth_begin = database.begin_target_catalog(&pair.id, 6, epoch4).unwrap();
+        let fourth = TargetCatalogRow {
+            epoch: epoch4,
+            generation: 1,
+            digest: [3_u8; 32],
+        };
+        database
+            .acknowledge_target_catalog(&pair.id, 6, &fourth_begin, &fourth)
+            .unwrap();
+        let mut moved = sourced.clone();
+        moved.right_root = b"/new-target".to_vec();
+        database.update_pair(&pair.id, 6, &moved).unwrap();
+        assert_eq!(database.target_catalog(&pair.id).unwrap(), None);
+
+        // A name-only edit after a reset keeps the new marker, and the
+        // marker survives reopening.
+        let epoch5 = [8_u8; 16];
+        let fifth_begin = database.begin_target_catalog(&pair.id, 7, epoch5).unwrap();
+        let fifth = TargetCatalogRow {
+            epoch: epoch5,
+            generation: 1,
+            digest: [4_u8; 32],
+        };
+        database
+            .acknowledge_target_catalog(&pair.id, 7, &fifth_begin, &fifth)
+            .unwrap();
+        let mut renamed_again = moved.clone();
+        renamed_again.name = "Final".into();
+        database.update_pair(&pair.id, 7, &renamed_again).unwrap();
+        assert_eq!(database.target_catalog(&pair.id).unwrap(), Some(fifth));
+        drop(database);
+        let database = Database::open(&location).unwrap();
+        assert_eq!(database.target_catalog(&pair.id).unwrap(), Some(fifth));
+    }
+
+    #[test]
     fn an_idle_update_or_removal_uses_the_saved_revision() {
         let (_directory, location) = location();
         let mut database = Database::open(&location).unwrap();
@@ -490,9 +684,9 @@ mod tests {
         database
             .change_base(&pair.id, 1, &[put(b"kept", b"v")], JournalChange::None)
             .unwrap();
-        // V27 to V30 added tables and one column. Removing them and
+        // V27 to V31 added tables and one column. Removing them and
         // restoring V26's metadata recreates a V26 state.
-        database.connection.execute_batch("ALTER TABLE automation_setting DROP COLUMN automatic_effort; DROP TABLE pair_pause; DROP TABLE pair_removal; DROP TABLE pending_pair; UPDATE state_meta SET minimum_reader=26; PRAGMA user_version=26;").unwrap();
+        database.connection.execute_batch("ALTER TABLE automation_setting DROP COLUMN automatic_effort; DROP TABLE pair_pause; DROP TABLE pair_removal; DROP TABLE pending_pair; DROP TABLE target_catalog; UPDATE state_meta SET minimum_reader=26; PRAGMA user_version=26;").unwrap();
         drop(database);
 
         let mut database = Database::open(&location).unwrap();
@@ -512,6 +706,6 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(floor, 28);
+        assert_eq!(floor, 31);
     }
 }

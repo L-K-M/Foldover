@@ -14,13 +14,13 @@
 use std::io;
 use std::ops::{Deref, DerefMut};
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use foldover_net::sftp::Session;
 
 /// Opens another session to the same server.
-pub(super) type Connect = Box<dyn Fn() -> io::Result<Session> + Send + Sync>;
+pub(super) type Connect = Arc<dyn Fn() -> io::Result<Session> + Send + Sync>;
 
 /// Refusals in a row before the server is taken at its word that it
 /// took all the sessions it will; one failure can be transient.
@@ -73,6 +73,44 @@ impl Sessions {
         self.acquire(connect, None).expect("only a stop gives up")
     }
 
+    /// A catalog operation must surface an outage, including during lease
+    /// release. Try one reconnect instead of waiting indefinitely for a
+    /// session which may never return after a broken connection.
+    pub(super) fn borrow_once(&self, connect: Option<&Connect>) -> io::Result<Borrowed<'_>> {
+        let mut pool = self.lock();
+        if let Some(session) = pool.idle.pop() {
+            drop(pool);
+            return Ok(self.lend(session));
+        }
+        let connect = connect.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "The SFTP catalog connection closed",
+            )
+        })?;
+        if pool.open >= pool.limit {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "All SFTP catalog connections are in use",
+            ));
+        }
+        pool.open += 1;
+        drop(pool);
+        match panic::catch_unwind(AssertUnwindSafe(|| connect())) {
+            Ok(Ok(session)) => Ok(self.lend(session)),
+            Ok(Err(error)) => {
+                self.lock().open -= 1;
+                self.returned.notify_one();
+                Err(error)
+            }
+            Err(payload) => {
+                self.lock().open -= 1;
+                self.returned.notify_one();
+                panic::resume_unwind(payload)
+            }
+        }
+    }
+
     /// `borrow`, or `None` once `stopped` says so while none is idle. With
     /// every session lost and connects failing, a borrower otherwise waits
     /// as long as the outage lasts, and a cancelled run must not.
@@ -117,7 +155,7 @@ impl Sessions {
                 pool.open += 1;
                 pool.last_probe = Some(Instant::now());
                 drop(pool);
-                match panic::catch_unwind(AssertUnwindSafe(connect)) {
+                match panic::catch_unwind(AssertUnwindSafe(|| connect())) {
                     Ok(Ok(session)) => {
                         let mut pool = self.lock();
                         pool.refusals = 0;
@@ -255,7 +293,7 @@ mod tests {
         let opened = Arc::new(AtomicUsize::new(1));
         let counted = Arc::clone(&opened);
         let program = server.clone();
-        let connect: Connect = Box::new(move || {
+        let connect: Connect = Arc::new(move || {
             counted.fetch_add(1, Ordering::SeqCst);
             spawn(&program)
         });
@@ -289,7 +327,7 @@ mod tests {
         let connect: Connect = {
             let server = server.clone();
             let refusing = refusing.clone();
-            Box::new(move || {
+            Arc::new(move || {
                 if refusing.load(Ordering::SeqCst) {
                     Err(io::Error::other("too many sessions"))
                 } else {
@@ -338,7 +376,7 @@ mod tests {
             eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
             return;
         };
-        let refused: Connect = Box::new(|| Err(io::Error::other("too many sessions")));
+        let refused: Connect = Arc::new(|| Err(io::Error::other("too many sessions")));
         let sessions = Sessions::new(spawn(&server).unwrap(), 4);
 
         let first = sessions.borrow(Some(&refused));
@@ -370,7 +408,7 @@ mod tests {
             eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
             return;
         };
-        let refused: Connect = Box::new(|| Err(io::Error::other("no route to host")));
+        let refused: Connect = Arc::new(|| Err(io::Error::other("no route to host")));
         let sessions = Sessions::new(spawn(&server).unwrap(), 2);
         let held = sessions.borrow(Some(&refused));
         let stop = AtomicBool::new(false);
@@ -417,7 +455,7 @@ mod tests {
             eprintln!("sftp-server not found; set FOLDOVER_SFTP_SERVER to run SFTP tests");
             return;
         };
-        let panicking: Connect = Box::new(|| panic!("the connect failed loudly"));
+        let panicking: Connect = Arc::new(|| panic!("the connect failed loudly"));
         let sessions = Sessions::new(spawn(&server).unwrap(), 2);
         let _held = sessions.borrow(Some(&panicking));
 

@@ -16,6 +16,7 @@
 //! reclaimed by the same rule.
 
 use std::cell::Cell;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use foldover_types::ScanControl;
@@ -98,6 +99,67 @@ pub struct HeldLease<'a> {
     holder: LeaseHolder,
     renewed: Cell<Instant>,
     timing: LeaseTiming,
+    release: Release,
+}
+
+#[derive(Clone, Copy)]
+enum Release {
+    OnDrop,
+    Retain,
+}
+
+/// An owned lease for a catalog session that outlives its opening call.
+pub(crate) struct OwnedLease {
+    endpoint: Arc<Endpoint>,
+    holder: LeaseHolder,
+    timing: LeaseTiming,
+    renewed: Cell<Instant>,
+}
+
+impl OwnedLease {
+    pub(crate) fn take(
+        endpoint: Arc<Endpoint>,
+        holder: LeaseHolder,
+        timing: LeaseTiming,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<Self, LeaseError> {
+        let mut held = HeldLease::take(&endpoint, holder.clone(), timing, control, &mut |_| {})?;
+        let renewed = held.renewed.get();
+        held.release = Release::Retain;
+        drop(held);
+        Ok(Self {
+            endpoint,
+            holder,
+            timing,
+            renewed: Cell::new(renewed),
+        })
+    }
+
+    pub(crate) fn renew_if_due(&self) -> Result<(), LeaseError> {
+        if self.renewed.get().elapsed() < self.timing.beat {
+            return Ok(());
+        }
+        self.renew()
+    }
+
+    pub(crate) fn renew(&self) -> Result<(), LeaseError> {
+        let mut borrowed = HeldLease::held(&self.endpoint, self.holder.clone(), self.timing);
+        borrowed.release = Release::Retain;
+        borrowed.renew()?;
+        self.renewed.set(borrowed.renewed.get());
+        Ok(())
+    }
+}
+
+impl Drop for OwnedLease {
+    fn drop(&mut self) {
+        // The borrowed guard performs the same fenced release as every run.
+        drop(HeldLease::held(
+            &self.endpoint,
+            self.holder.clone(),
+            self.timing,
+        ));
+    }
 }
 
 /// A lease file's content.
@@ -295,6 +357,7 @@ impl<'a> HeldLease<'a> {
             holder,
             renewed: Cell::new(Instant::now()),
             timing,
+            release: Release::OnDrop,
         }
     }
 
@@ -379,6 +442,9 @@ impl<'a> HeldLease<'a> {
 
 impl Drop for HeldLease<'_> {
     fn drop(&mut self) {
+        if matches!(self.release, Release::Retain) {
+            return;
+        }
         // Promote our claim before removal. A crash then leaves an ordinary
         // advanced lease, never a free lock beside a stale claim.
         if matches!(self.advance_through_claim(), Ok(Some(_))) {

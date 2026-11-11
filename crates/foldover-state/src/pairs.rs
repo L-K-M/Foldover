@@ -25,6 +25,7 @@ mod pause;
 mod settings;
 mod share;
 mod starts;
+mod target;
 pub use cursor::WatchCursor;
 pub use device::Device;
 pub use history::{HISTORY_LIMIT, HistoryEntry, HistoryOutcome, RunTrigger};
@@ -1405,7 +1406,8 @@ mod tests {
         record(&mut store, 1);
 
         // Durability does not affect stored versions; the base stays.
-        let standard = PairOptions::new(options.metadata(), Durability::Standard);
+        let standard = PairOptions::new(options.metadata(), Durability::Standard)
+            .with_records(options.records());
         store
             .update(pair.id(), 1, &draft(SyncMode::Sync).with_options(standard))
             .unwrap();

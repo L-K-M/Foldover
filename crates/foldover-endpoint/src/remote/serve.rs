@@ -7,6 +7,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -17,13 +18,17 @@ use foldover_fs::Resume;
 use foldover_net::peer::MAX_MESSAGE;
 use foldover_proto::local::PairDurability;
 use foldover_proto::peer::{
-    FolderError, FolderErrorKind, FolderOp, Incoming, IncomingKind, LeaseAction, LeaseFile,
-    NameCase, NameUnicode, PeerReply, RunSettings, ScanSettings, VolumeKind, WireItem, WireRun,
+    CatalogOp, FolderError, FolderErrorKind, FolderOp, Incoming, IncomingKind, LeaseAction,
+    LeaseFile, NameCase, NameUnicode, PeerReply, RunSettings, ScanSettings, VolumeKind, WireItem,
+    WireRun,
 };
 use foldover_types::{
-    CaseMatching, Digest, Durability, EntryVersion, LocalRoot, MetadataPolicy, PairOptions,
+    CaseMatching, Digest, Durability, EntryVersion, LocalRoot, MetadataPolicy, PairId, PairOptions,
     Propagation, ScanControl, Side, SyncPath, UnicodeMatching,
 };
+
+use super::CATALOG_CHUNK;
+use crate::catalog::CATALOG_FILE_LIMIT;
 
 use super::wire;
 use crate::lease::{LEASE_LIMIT, LockFile};
@@ -136,6 +141,12 @@ pub fn serve_folder(
     if op == FolderOp::Watch {
         return watch(root, state, answer);
     }
+    // A catalog operation opens the pair's private directory instead of
+    // the shared folder itself, so its lease never meets the shared
+    // folder's own. The share was already checked before this call.
+    if let FolderOp::Catalog { pair, op } = &op {
+        return serve_catalog(root, pair, op.clone(), answer, state);
+    }
     // `open_protecting` canonicalizes the state path itself: pass it
     // through unchanged so resolution failures surface there instead of
     // silently disabling protection here. (A state path that is simply
@@ -192,7 +203,9 @@ pub fn serve_folder(
             })
             .map_err(|error| wire::scan_failure(&error)),
         FolderOp::Observe { scan } => return observe(&endpoint, root, scan, cache, answer),
-        FolderOp::Watch => unreachable!("answered before opening the folder"),
+        FolderOp::Watch | FolderOp::Catalog { .. } => {
+            unreachable!("answered before opening the folder")
+        }
         FolderOp::Lease { file, action } => lease(&endpoint, file, action),
         FolderOp::Read {
             path,
@@ -569,6 +582,225 @@ fn lease(
     }
 }
 
+/// Answer one operation on a pair's target catalog: the private directory
+/// `.foldover/state/<pair>` inside the shared folder. The pair is checked
+/// here, and the directory is opened from the shared folder's own
+/// endpoint, so share access control holds and the catalog's lease never
+/// meets the shared folder's own.
+fn serve_catalog(
+    root: &LocalRoot,
+    pair: &str,
+    op: CatalogOp,
+    answer: &mut Answer,
+    state: Option<&Path>,
+) {
+    let Ok(pair) = pair.parse::<PairId>() else {
+        return failed(answer, malformed());
+    };
+    // `open_protecting` canonicalizes the state path itself: pass it
+    // through unchanged, as every other caller does.
+    let endpoint =
+        match LocalEndpoint::open_protecting(Path::new(OsStr::from_bytes(root.as_bytes())), state)
+            .and_then(|endpoint| endpoint.probe_access().map(|()| endpoint))
+        {
+            Ok(endpoint) => endpoint,
+            Err(error) => return failed(answer, wire::scan_failure(&error)),
+        };
+    // `Open` creates and checks the directory's marker with the asking
+    // Mac's durability; every other operation finds it there already, so
+    // a marker write needs no stronger promise than a lease record's.
+    let durability = match &op {
+        CatalogOp::Open { durability } => durability_from(*durability),
+        _ => Durability::Standard,
+    };
+    let catalog = match endpoint.catalog_endpoint(pair, durability) {
+        Ok(catalog) => catalog,
+        Err(error) => return failed(answer, catalog_failure(&error)),
+    };
+    match op {
+        CatalogOp::Open { .. } => reply(answer, Ok(PeerReply::Done)),
+        CatalogOp::Read { name, limit } => catalog_read(&catalog, &name, limit, answer),
+        CatalogOp::Write { name, durability } => catalog_write(&catalog, &name, durability, answer),
+        CatalogOp::List => catalog_list(&catalog, answer),
+        CatalogOp::Remove { name } => reply(answer, catalog_remove(&catalog, &name)),
+        CatalogOp::Lease { file, action } => reply(answer, lease(&catalog, file, action)),
+    }
+}
+
+/// Send one reply, or the failure that replaced it.
+fn reply(answer: &mut Answer, reply: Result<PeerReply, FolderError>) {
+    match reply {
+        Ok(reply) => {
+            let _ = answer.reply(&reply);
+        }
+        Err(error) => failed(answer, error),
+    }
+}
+
+/// Send one catalog file: `catalogRead`, its data frames and their end,
+/// then `done`. The endpoint refuses a name that is not a regular file
+/// and a read beyond its limit.
+fn catalog_read(endpoint: &LocalEndpoint, name: &str, limit: u64, answer: &mut Answer) {
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    if limit > CATALOG_FILE_LIMIT {
+        return failed(answer, catalog_too_large());
+    }
+    match endpoint.catalog_read(name, limit) {
+        Ok(None) => {
+            let _ = answer.reply(&PeerReply::CatalogRead { found: false });
+        }
+        Ok(Some(bytes)) => {
+            if answer
+                .reply(&PeerReply::CatalogRead { found: true })
+                .is_err()
+            {
+                return;
+            }
+            // A file of at most 16 MiB leaves in 1 MiB frames.
+            for chunk in bytes.chunks(CATALOG_CHUNK) {
+                if answer.send_data(chunk).is_err() {
+                    return;
+                }
+            }
+            if answer.end_data().is_err() {
+                return;
+            }
+            let _ = answer.reply(&PeerReply::Done);
+        }
+        Err(error) => failed(answer, catalog_failure(&error)),
+    }
+}
+
+/// Write one catalog file from the asking Mac's data frames, creating it
+/// only. Bytes beyond the catalog's limit are refused before any file is
+/// written, and an existing file is reported rather than replaced.
+fn catalog_write(
+    endpoint: &LocalEndpoint,
+    name: &str,
+    durability: PairDurability,
+    answer: &mut Answer,
+) {
+    let mut bytes = Vec::new();
+    loop {
+        match answer.next_data() {
+            Ok(Some(chunk)) => {
+                if bytes.len().saturating_add(chunk.len()) > CATALOG_FILE_LIMIT {
+                    return failed(answer, catalog_too_large());
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(error) => {
+                return failed(answer, catalog_failure(&io::Error::other(error)));
+            }
+        }
+    }
+    match endpoint.catalog_write(name, &bytes, durability_from(durability)) {
+        Ok(()) => {
+            let _ = answer.reply(&PeerReply::CatalogCreated { created: true });
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let _ = answer.reply(&PeerReply::CatalogCreated { created: false });
+        }
+        Err(error) => failed(answer, catalog_failure(&error)),
+    }
+}
+
+/// Send the catalog's file names a frame-sized page at a time; `more`
+/// says whether another follows, so the 250,000-file limit never
+/// overflows one reply.
+fn catalog_list(endpoint: &LocalEndpoint, answer: &mut Answer) {
+    let names = match endpoint.catalog_list() {
+        Ok(names) => names,
+        Err(error) => return failed(answer, catalog_failure(&error)),
+    };
+    let mut rest = names.as_slice();
+    while !rest.is_empty() {
+        let (page, more) = catalog_page(rest);
+        if page.is_empty() {
+            return failed(
+                answer,
+                catalog_failure(&io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "A catalog name is too large for a peer reply",
+                )),
+            );
+        }
+        if answer
+            .reply(&PeerReply::CatalogListed {
+                names: page.to_vec(),
+                more,
+            })
+            .is_err()
+        {
+            return;
+        }
+        if !more {
+            return;
+        }
+        rest = &rest[page.len()..];
+    }
+    let _ = answer.reply(&PeerReply::CatalogListed {
+        names: Vec::new(),
+        more: false,
+    });
+}
+
+/// The longest prefix of `names` whose page fits one framed reply, and
+/// whether more names follow.
+fn catalog_page(names: &[String]) -> (&[String], bool) {
+    let mut bytes = serde_json::to_vec(&PeerReply::CatalogListed {
+        names: Vec::new(),
+        more: true,
+    })
+    .map_or(usize::MAX, |json| json.len())
+    .saturating_add(REPLY_TAG_BYTES);
+    let mut kept = 0;
+    for (index, name) in names.iter().enumerate() {
+        let item = serde_json::to_string(name)
+            .map_or(usize::MAX, |text| text.len())
+            .saturating_add(",".len());
+        if bytes.saturating_add(item) > MAX_MESSAGE {
+            break;
+        }
+        bytes = bytes.saturating_add(item);
+        kept = index + 1;
+    }
+    (&names[..kept], kept < names.len())
+}
+
+/// Remove one catalog file; nothing to do if it is absent. A directory
+/// or another non-regular entry is refused, never unlinked.
+fn catalog_remove(endpoint: &LocalEndpoint, name: &str) -> Result<PeerReply, FolderError> {
+    endpoint
+        .catalog_remove(name)
+        .map(|()| PeerReply::Done)
+        .map_err(|error| catalog_failure(&error))
+}
+
+/// A catalog failure on this Mac, for the asking one.
+fn catalog_failure(error: &io::Error) -> FolderError {
+    let kind = match error.kind() {
+        io::ErrorKind::NotFound => FolderErrorKind::Missing,
+        io::ErrorKind::PermissionDenied => FolderErrorKind::AccessDenied,
+        io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput => FolderErrorKind::Invalid,
+        _ => FolderErrorKind::Other,
+    };
+    FolderError {
+        kind,
+        path: None,
+        message: error.to_string(),
+    }
+}
+
+fn catalog_too_large() -> FolderError {
+    FolderError {
+        kind: FolderErrorKind::Invalid,
+        path: None,
+        message: "A catalog file exceeds the 16 MiB limit".into(),
+    }
+}
+
 /// Report changes in the folder until the asking Mac gives up: a burst of
 /// notifications is one `changed`, and `watching` every minute without
 /// changes proves the request is still wanted.
@@ -924,6 +1156,43 @@ mod tests {
         for name in ["", ".", "..", "a/b", "../x"] {
             assert!(RunScope::named(name, options.clone()).is_none(), "{name}");
         }
+    }
+
+    /// The listing pages at a frame's worth of names, so a catalog of the
+    /// 250,000-file limit never overflows one reply; a name that alone
+    /// would overflow a frame is left out, not sent forever.
+    #[test]
+    fn catalog_listings_page_within_one_frame() {
+        let names: Vec<String> = (0..500)
+            .map(|index| format!("c-0000-{index:016x}-{}", "a".repeat(100)))
+            .collect();
+        let mut rest = names.as_slice();
+        let mut pages = 0;
+        let mut seen = 0;
+        while !rest.is_empty() {
+            let (page, more) = catalog_page(rest);
+            assert!(!page.is_empty(), "an empty page would never finish");
+            let reply = PeerReply::CatalogListed {
+                names: page.to_vec(),
+                more,
+            };
+            assert!(
+                serde_json::to_vec(&reply).unwrap().len() + REPLY_TAG_BYTES <= MAX_MESSAGE,
+                "page {pages} overflows one frame"
+            );
+            seen += page.len();
+            pages += 1;
+            assert_eq!(more, seen < names.len());
+            rest = &rest[page.len()..];
+        }
+        assert_eq!(seen, names.len());
+        assert_eq!(pages, 1, "500 short names fit one page");
+
+        // A name that alone would overflow a frame is left out entirely;
+        // the listing refuses it rather than looping on an empty page.
+        let huge = vec!["x".repeat(MAX_MESSAGE)];
+        let (page, _) = catalog_page(&huge);
+        assert!(page.is_empty());
     }
 }
 

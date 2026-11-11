@@ -4,6 +4,7 @@
 
 mod base;
 mod pairs;
+pub mod target_store;
 
 pub use base::BaseUpdate;
 pub use foldover_db::StateLocation;
