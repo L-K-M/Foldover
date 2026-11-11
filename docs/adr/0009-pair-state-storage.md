@@ -62,7 +62,7 @@ same store. Startup failures are explicit. Configuration dispatch is covered by
   after the new copy is complete. Migration runs in one transaction; failure
   rolls back while retaining the backup. After a committed upgrade, only its
   completed recovery copy is kept; older recognized upgrade backups and their
-  rollback journals are removed. Cleanup also runs on open under the writer
+  SQLite sidecars are removed. Sidecars of the retained backup are preserved. Cleanup also runs on open under the writer
   lease, removing interrupted temporary copies. Legacy UUID-named backups
   are retained until a known-complete replacement exists. Backups at or above
   the current schema are left alone. Cleanup errors are reported.

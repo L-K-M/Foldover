@@ -42,10 +42,12 @@ struct Temporary(PathBuf);
 
 impl Drop for Temporary {
     fn drop(&mut self) {
-        // An interrupted copy can also leave a rollback journal. If removal
+        // An interrupted copy can also leave SQLite sidecars. If removal
         // fails here, the next open retries it and reports any persistent error.
         let _ = fs::remove_file(&self.0);
-        let _ = fs::remove_file(self.0.with_extension("db-journal"));
+        for extension in ["db-journal", "db-wal", "db-shm"] {
+            let _ = fs::remove_file(self.0.with_extension(extension));
+        }
     }
 }
 
@@ -62,7 +64,11 @@ pub(super) fn cleanup(directory: &Path, current_schema: i64) -> Result<(), Error
         }
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let base = name.strip_suffix("-journal").unwrap_or(name);
+        let base = name
+            .strip_suffix("-journal")
+            .or_else(|| name.strip_suffix("-wal"))
+            .or_else(|| name.strip_suffix("-shm"))
+            .unwrap_or(name);
         if let Some(id) = base
             .strip_prefix(TEMP_PREFIX)
             .and_then(|s| s.strip_suffix(".db"))
@@ -80,10 +86,11 @@ pub(super) fn cleanup(directory: &Path, current_schema: i64) -> Result<(), Error
         if schema >= current_schema {
             continue;
         }
-        if identity == COMPLETE && base == name {
+        let completed = identity == COMPLETE;
+        if completed && base == name {
             keep = Some(keep.map_or(schema, |previous: i64| previous.max(schema)));
         }
-        backups.push((schema, identity == COMPLETE && base == name, entry.path()));
+        backups.push((schema, completed, entry.path()));
     }
     if let Some(keep) = keep {
         for (schema, completed, path) in backups {
@@ -180,6 +187,51 @@ mod tests {
         assert!(!journal.exists());
         assert!(link.is_symlink());
         assert!(outside.path().exists());
+    }
+
+    #[test]
+    fn retained_backups_keep_their_sidecars_until_superseded() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch("CREATE TABLE original(value)")
+            .unwrap();
+        create(&connection, directory.path(), 27).unwrap();
+        let sidecars = ["journal", "wal", "shm"].map(|suffix| {
+            let path = directory
+                .path()
+                .join(format!("state-before-v27-completed.db-{suffix}"));
+            fs::write(&path, b"recovery state").unwrap();
+            path
+        });
+        cleanup(directory.path(), 28).unwrap();
+        for path in &sidecars {
+            assert!(path.exists(), "retained backup lost {}", path.display());
+        }
+        create(&connection, directory.path(), 28).unwrap();
+        cleanup(directory.path(), 29).unwrap();
+        for path in &sidecars {
+            assert!(
+                !path.exists(),
+                "obsolete sidecar leaked: {}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn abandoned_wal_sidecars_are_removed_on_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let name = format!("{TEMP_PREFIX}{}.db", uuid::Uuid::new_v4());
+        for suffix in ["wal", "shm"] {
+            fs::write(
+                directory.path().join(format!("{name}-{suffix}")),
+                b"partial",
+            )
+            .unwrap();
+        }
+        cleanup(directory.path(), 30).unwrap();
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 
     #[test]
