@@ -240,6 +240,8 @@ enum FixtureScenario: String {
     /// still comparing a large folder: the window opens on it mid-run,
     /// with nothing previewed on the sheet.
     case syncing
+    /// One working pair leaves Sync All disabled beside enabled menu commands.
+    case syncingSinglePair = "syncing-single-pair"
     case syncingReduced = "syncing-reduced"
     /// A sync waits while another Mac syncs the same folders.
     case syncingWaiting = "syncing-waiting"
@@ -265,8 +267,8 @@ enum FixtureScenario: String {
             return AgentReport(version: "0.1.0", safeModeStops: 3)
         case .agentFailed:
             throw FixtureError.agentUnavailable
-        case .noPairs, .manyPairs, .pairsFail, .syncing, .syncingReduced, .syncingWaiting, .syncingBackup,
-             .syncingBackupRight, .failedRun, .foldApproval:
+        case .noPairs, .manyPairs, .pairsFail, .syncing, .syncingSinglePair, .syncingReduced,
+             .syncingWaiting, .syncingBackup, .syncingBackupRight, .failedRun, .foldApproval:
             return AgentReport(version: "0.1.0")
         }
     }
@@ -295,6 +297,9 @@ actor FixturePairClient: PairClient {
     init(scenario: FixtureScenario? = nil) {
         self.scenario = scenario
         pairs = scenario == .noPairs ? [] : Fixtures.pairs(scenario)
+        if scenario == .syncingSinglePair {
+            pairs = pairs.filter { $0.id == Fixtures.photosID }
+        }
         if scenario == .manyPairs {
             pairs += (1...40).map { index in
                 SyncPair(id: "tour-menu-\(index)", revision: 1, settings: PairSettings(
@@ -396,7 +401,7 @@ actor FixtureSyncClient: SyncClient {
 
     init(pairs: FixturePairClient, scenario: FixtureScenario? = nil) {
         self.pairs = pairs
-        if scenario == .syncing || scenario == .syncingReduced {
+        if scenario == .syncing || scenario == .syncingSinglePair || scenario == .syncingReduced {
             states[Fixtures.photosID] = .working(.run, cancelling: false,
                                                  progress: WorkProgress(listed: 6_810_813, checked: 371_762),
                                                  pair: Fixtures.runningPair(Fixtures.photosID, scenario: scenario))

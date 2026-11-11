@@ -46,6 +46,65 @@ final class MenuBarTests: XCTestCase {
     }
 
     @MainActor
+    func testEnabledCommandsLookDifferentFromDisabledSyncsInBothAppearances() throws {
+        for appearance in [TourAppearance.light, .dark] {
+            let tour = Tour(self, appearance: appearance, scenario: "syncing-single-pair")
+            tour.launch()
+            defer { tour.app.terminate() }
+            tour.click(tour.app.statusItems.firstMatch, "menu bar extra")
+            let stop = tour.app.buttons["Stop Photos"]
+            XCTAssertTrue(stop.waitForExistence(timeout: Self.initialPairStateTimeout))
+            let pair = tour.app.buttons["menu-pair-f0000000000000000000000000000001"]
+            let primaryContrast = try inkContrast(pair)
+            let syncAll = tour.app.buttons["Sync All"]
+            XCTAssertTrue(syncAll.exists)
+            XCTAssertFalse(syncAll.isEnabled, "The only pair is already syncing")
+            let disabledContrast = try inkContrast(syncAll)
+            let pause = tour.app.descendants(matching: .any)["menu-pause-automatic-syncs"].firstMatch
+
+            for title in ["Stop Photos", "Pause Automatic Syncs", "Open Foldover", "Settings…", "Quit Foldover"] {
+                let command = title == "Pause Automatic Syncs" ? pause : tour.app.buttons[title]
+                XCTAssertTrue(command.exists, title)
+                XCTAssertTrue(command.isEnabled, title)
+                XCTAssertTrue(command.isHittable, title)
+                let contrast = try inkContrast(command)
+                // Glyph coverage and the panel's material vary across rows.
+                XCTAssertGreaterThan(contrast, primaryContrast * 0.8,
+                                     "\(title) should use primary text in \(appearance.rawValue) Mode")
+                XCTAssertGreaterThan(contrast, disabledContrast * 1.25,
+                                     "\(title) should not look disabled in \(appearance.rawValue) Mode")
+            }
+            tour.snap("menu-bar-command-contrast")
+            tour.click(pause, "automatic sync pause menu")
+            tour.click(pause.menuItems["For 1 Hour"], "pause for one hour")
+            let resume = tour.app.buttons["Resume Automatic Syncs"]
+            XCTAssertTrue(resume.waitForExistence(timeout: 5))
+            XCTAssertTrue(resume.isEnabled)
+            XCTAssertGreaterThan(try inkContrast(resume), primaryContrast * 0.8,
+                                 "Resume Automatic Syncs should use primary text")
+        }
+    }
+
+    /// Measure rendered ink, not just accessibility's enabled state. Comparing
+    /// with the pair's primary label avoids hard-coded system text colors.
+    @MainActor
+    private func inkContrast(_ element: XCUIElement) throws -> CGFloat {
+        let pixels = try XCTUnwrap(NSBitmapImageRep(data: element.screenshot().pngRepresentation))
+        var darkest: CGFloat = 1
+        var lightest: CGFloat = 0
+        for y in 0..<pixels.pixelsHigh {
+            for x in 0..<pixels.pixelsWide {
+                let color = try XCTUnwrap(pixels.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB))
+                let luminance = 0.2126 * color.redComponent + 0.7152 * color.greenComponent
+                    + 0.0722 * color.blueComponent
+                darkest = min(darkest, luminance)
+                lightest = max(lightest, luminance)
+            }
+        }
+        return lightest - darkest
+    }
+
+    @MainActor
     func testAWorkingPairCanBeStoppedFromTheMenuBar() {
         let tour = Tour(self, appearance: .light, scenario: "syncing")
         tour.launch()
