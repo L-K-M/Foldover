@@ -20,7 +20,7 @@ use std::time::{Instant, SystemTime};
 use foldover_engine::{
     Action, Approval, Commit, Completion, DeletionReview, Effort, Engine, KeepBothError,
     ObserveStep, PairRun, Preview, PreviewItem, RunContext, RunError, RunOutcome, RunProgress,
-    RunReport, ThreadEffort, UndoReport, missing_side, reconnect,
+    RunReport, TargetRun, ThreadEffort, UndoReport, missing_side, reconnect,
 };
 use foldover_proto::local::RpcError;
 use foldover_proto::local::{
@@ -259,6 +259,7 @@ struct State {
 #[derive(Default)]
 pub(crate) struct Jobs {
     state: Mutex<State>,
+    purge: Arc<crate::purge::Purger>,
     /// Archive listings kept between pages; what changes archives drops them.
     read_ahead: ReadAhead,
     /// Test-only rendezvous inside a mutating pair command.
@@ -270,6 +271,12 @@ pub(crate) struct Jobs {
 }
 
 impl Jobs {
+    pub(crate) fn with_purger(purge: Arc<crate::purge::Purger>) -> Self {
+        Self {
+            purge,
+            ..Self::default()
+        }
+    }
     pub(crate) fn read_ahead(&self) -> &ReadAhead {
         &self.read_ahead
     }
@@ -590,7 +597,16 @@ impl Jobs {
             #[cfg(test)]
             jobs.wait_job_gate();
             let done = match activation {
-                Ok(()) => perform(&engine, id, work, &cancel, held, skips, &progress),
+                Ok(()) => perform(
+                    &engine,
+                    id,
+                    work,
+                    &cancel,
+                    held,
+                    skips,
+                    &progress,
+                    &jobs.purge,
+                ),
                 Err(message) => (SyncStatus::Failed { message }, None).into(),
             };
             crate::history::record(&engine, id, work, started, &done.status);
@@ -927,20 +943,26 @@ impl Drop for Mutation {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The worker receives captured job inputs and the shared cleanup wakeup"
+)]
 fn perform(
-    engine: &Mutex<Engine>,
+    engine: &Arc<Mutex<Engine>>,
     id: PairId,
     work: Work,
     cancel: &AtomicBool,
     held: Option<Reviewed>,
     skips: BTreeMap<SyncPath, Skip>,
     progress: &Progress,
+    purger: &crate::purge::Purger,
 ) -> Done {
     let failed = |message: String| Done::from((SyncStatus::Failed { message }, None));
     let (captured, effort) = match engine.lock() {
-        Ok(engine) => (
+        Ok(mut engine) => (
             engine
-                .capture_run_inputs(id)
+                .begin_target_catalog(id)
+                .and_then(|()| engine.capture_run_inputs(id))
                 .and_then(|pending| engine.mounts(id).map(|mounts| (pending, mounts))),
             work.effort(&engine),
         ),
@@ -953,34 +975,73 @@ fn perform(
         Ok(captured) => captured,
         Err(error) => return failed(error.to_string()),
     };
-    // Decode the captured trees outside the lock, before endpoints,
-    // mounts or planning touch anything.
-    let inputs = match pending.decode() {
+    // Reconnect before reading the catalog, which now lives on the target.
+    if !matches!(work, Work::Scheduled)
+        && let Some(side) = missing_side(pending.configuration(), pending.reach())
+        && let Some(source) = mounts.side(side)
+    {
+        reconnect(pending.configuration(), side, source, pending.reach());
+    }
+    let revision = pending.configuration().revision();
+    let mut control = || {
+        if cancel.load(Ordering::Relaxed) {
+            ScanControl::Cancel
+        } else {
+            ScanControl::Continue
+        }
+    };
+    let mut target = match TargetRun::open(&pending, &mut control) {
+        Ok(target) => target,
+        Err(error) => return failed(error.to_string()),
+    };
+    let decoded = match &target {
+        Some(target) => target.decode(pending, &mut control),
+        None => pending.decode(),
+    };
+    let inputs = match decoded {
         Ok(inputs) => inputs.with_skips(skips).with_effort(effort),
         Err(error) => return failed(error.to_string()),
     };
+    let mut acknowledge = |expected: &_, next: &_, spent: &[_]| {
+        engine
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .acknowledge_target_catalog(id, revision, expected, next, spent)
+    };
+    if let Some(target) = &mut target {
+        if let Err(error) = target.acknowledge(&mut acknowledge) {
+            return failed(error.to_string());
+        }
+        // The pinned legacy reader dropped with pending. Reclaim old rows in
+        // bounded background steps while this job continues against the target.
+        purger.wake();
+    }
     let journal = match work {
         Work::Undo => {
-            let engine = engine.lock().unwrap_or_else(PoisonError::into_inner);
-            let journal = match engine.journal(id) {
-                Ok(Some(journal)) => journal,
+            let result = match &target {
+                Some(target) => target.journal(),
+                None => engine
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .journal(id),
+            };
+            match result {
+                Ok(Some(journal)) => Some(journal),
                 Ok(None) => return failed(RunError::NothingToUndo.to_string()),
                 Err(error) => return failed(error.to_string()),
-            };
-            // The engine holds the pair with its first change.
-            Some(journal)
+            }
         }
         Work::Preview | Work::Run(..) | Work::Scheduled => None,
     };
-    // Someone asked for this run: mount a share that went away. The
-    // scheduler makes its own, rate-limited attempts.
-    if !matches!(work, Work::Scheduled)
-        && let Some(side) = missing_side(inputs.configuration(), inputs.reach())
-        && let Some(source) = mounts.side(side)
-    {
-        reconnect(inputs.configuration(), side, source, inputs.reach());
-    }
+    let catalog_files = target.as_ref().map(TargetRun::files);
+    let lease_error = std::cell::RefCell::new(None);
     let mut control = || {
+        if let Some(files) = &catalog_files
+            && let Err(error) = files.tick()
+        {
+            *lease_error.borrow_mut() = Some(error.to_string());
+            return ScanControl::Cancel;
+        }
         if cancel.load(Ordering::Relaxed) {
             ScanControl::Cancel
         } else {
@@ -990,7 +1051,12 @@ fn perform(
     let run = match PairRun::prepare(inputs, &mut control, progress) {
         Ok(run) => run,
         // Nothing was written yet.
-        Err(RunError::Cancelled) => return (SyncStatus::Idle, None).into(),
+        Err(RunError::Cancelled) => {
+            return match lease_error.borrow_mut().take() {
+                Some(error) => failed(error),
+                None => (SyncStatus::Idle, None).into(),
+            };
+        }
         Err(error) => return failed(error.to_string()),
     };
     // Informational, like the snapshots below.
@@ -1008,25 +1074,51 @@ fn perform(
         if !run.snapshot_changed(side) {
             continue;
         }
-        let _ = engine
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .store_snapshot_iter(id, run.revision(), side, run.snapshot_iter(side));
+        if let Some(target) = &mut target {
+            if let Err(error) = target.snapshot(side, run.snapshot_iter(side), &mut acknowledge) {
+                return failed(error.to_string());
+            }
+        } else {
+            let _ = engine
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .store_snapshot_iter(id, run.revision(), side, run.snapshot_iter(side));
+        }
     }
     // A panic elsewhere cannot leave a half-applied transaction, so a
     // poisoned lock still guards a consistent store.
     let mut commit = |revision: u64, commit: Commit<'_>| {
-        engine
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .commit_run(id, revision, commit)
+        if let Some(target) = &mut target {
+            if matches!(commit, Commit::Identities { .. }) {
+                return engine
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .commit_run(id, revision, commit);
+            }
+            if matches!(commit, Commit::Undoing { .. }) {
+                engine
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .hold_target_undo(id, revision)?;
+            }
+            target.commit(commit, &mut acknowledge)
+        } else {
+            engine
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .commit_run(id, revision, commit)
+        }
     };
     let (approval, context) = match work {
         Work::Undo => {
             let Some(journal) = journal else {
                 return failed(RunError::NothingToUndo.to_string());
             };
-            return match run.undo(journal, SystemTime::now(), &mut commit, &mut control) {
+            let outcome = run.undo(journal, SystemTime::now(), &mut commit, &mut control);
+            if let Some(error) = lease_error.borrow_mut().take() {
+                return failed(error);
+            }
+            return match outcome {
                 Ok(report) => (
                     SyncStatus::Undone {
                         result: undone(&report),
@@ -1079,14 +1171,18 @@ fn perform(
         }
         Work::Scheduled => (Approval::default(), RunContext::Unattended),
     };
-    match run.execute(
+    let outcome = run.execute(
         approval,
         context,
         SystemTime::now(),
         &mut commit,
         &mut control,
         progress,
-    ) {
+    );
+    if let Some(error) = lease_error.borrow_mut().take() {
+        return failed(error);
+    }
+    match outcome {
         Ok(RunOutcome::Ran(report)) => {
             // A person's sync that ran ends a hold an undo left; one that
             // stopped before running leaves it.

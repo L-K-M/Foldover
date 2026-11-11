@@ -1,5 +1,6 @@
 mod apply;
 pub(crate) mod archive;
+mod catalog;
 mod conflict;
 pub(crate) mod filter;
 mod foreign;

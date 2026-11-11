@@ -111,15 +111,16 @@ impl Service {
     }
 
     fn new(engine: Engine) -> Self {
+        let purge = Arc::default();
         Self {
             run_marker: engine.run_marker(),
             engine: Arc::new(Mutex::new(engine)),
             commands: Arc::new(Semaphore::new(1)),
-            jobs: Arc::new(Jobs::default()),
+            jobs: Arc::new(Jobs::with_purger(Arc::clone(&purge))),
             scheduler: Arc::new(Scheduler::new(std::time::Instant::now())),
             peers: Arc::default(),
             safe_mode: Arc::default(),
-            purge: Arc::default(),
+            purge,
         }
     }
 
@@ -2268,8 +2269,17 @@ mod tests {
 
     #[tokio::test]
     async fn undo_reverts_the_newest_sync_and_holds_automatic_runs() {
+        for mode in ["sync", "backup", "mirror"] {
+            undo_and_hold(mode).await;
+        }
+    }
+
+    async fn undo_and_hold(mode: &str) {
         let (directory, service) = fixture();
         let mut input = input(directory.path(), "Docs");
+        if mode != "sync" {
+            input["mode"] = json!({"kind": mode, "source": "left"});
+        }
         input["options"]["schedule"] = json!({"kind": "every", "minutes": 1});
         let created = service
             .handle(Request::call(1, PAIR_CREATE, Some(input)))
@@ -2347,6 +2357,18 @@ mod tests {
             .unwrap();
         assert_eq!(settled(&service, &key).await["result"]["copied"], 1);
         assert_eq!(run_due_started(&service, at(600)).await.len(), 1);
+        settled(&service, &key).await;
+        if mode != "sync" {
+            crate::purge::purge(&service.engine).await.unwrap();
+            assert!(
+                fs::metadata(directory.path().join("state/state.db"))
+                    .unwrap()
+                    .len()
+                    < 1024 * 1024
+            );
+            assert!(right.join(".foldover/state").is_dir());
+            assert!(!left.join(".foldover/state").exists());
+        }
     }
 
     #[tokio::test]

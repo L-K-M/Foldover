@@ -15,7 +15,9 @@ mod poll;
 mod readiness;
 mod reconcile;
 mod run;
+mod target_catalog;
 mod watch;
+pub use target_catalog::TargetRun;
 
 #[cfg(test)]
 mod plan_properties;

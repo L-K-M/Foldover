@@ -10,5 +10,5 @@ pub use database::{
     AutomationSettingRow, BaseBlob, BaseChange, BaseRow, Database, DeviceRow, Error, HistoryRow,
     IdentityRow, JournalChange, JournalRow, MountRow, PairRow, PairValues, PauseRow, Purge,
     ReadView, ReadViewError, ResolutionRow, RunMarker, ShareRow, SnapshotBlob, SnapshotData,
-    SnapshotRow, StateLocation, WatchCursorRow,
+    SnapshotRow, StateLocation, TargetCatalogRow, WatchCursorRow,
 };

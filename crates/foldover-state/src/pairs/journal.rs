@@ -159,7 +159,7 @@ fn row(entry: &JournalEntry) -> Result<JournalRow, Error> {
     })
 }
 
-fn entry(row: JournalRow) -> Result<JournalEntry, Error> {
+pub(super) fn entry(row: JournalRow) -> Result<JournalEntry, Error> {
     let invalid = || Error::InvalidStored("journal entry");
     let version = decode(&row.version)?;
     let action = match row.action.as_str() {

@@ -6,13 +6,18 @@ use serde::{Deserialize, Serialize};
 use crate::local::{PairDurability, PairPropagation, PairSettings};
 
 /// The peer protocol version; agents of other versions do not pair.
+/// 5: `FolderOp::Catalog` reaches a pair's target catalog inside the
+/// shared folder, and the catalog's lease rides along on it. An agent of
+/// version 4 neither understands the request nor holds a catalog lease,
+/// so the link refuses it as another version: a target catalog is never
+/// served from the source Mac's own database.
 /// 4: stream heartbeats keep cancellable long-running requests live;
 /// agents of version 3 do not understand the new transport frame.
 /// 3: archive run names carry a unique run ID after the pair, which an
 /// agent of version 2 cannot parse for listing, restoring or pruning.
 /// 2: archive run names carry their pair (ADR 0047), which an agent of
 /// version 1 accepts for writes but can neither list, restore nor prune.
-pub const PEER_PROTOCOL: u32 = 4;
+pub const PEER_PROTOCOL: u32 = 5;
 
 /// Pairing, after both sides derived the six-digit code. Each side sends
 /// its hello, then exactly one decision.
@@ -142,6 +147,40 @@ pub enum FolderOp {
         version: Vec<u8>,
         from: String,
         options: PairSettings,
+    },
+    /// One operation on the pair's target catalog: the private directory
+    /// `.foldover/state/<pair>` inside the shared folder. The answering
+    /// Mac serves it with a local endpoint rooted there, so the catalog's
+    /// own lease never meets the shared folder's. `pair` is validated
+    /// there, and a catalog file's bytes travel as data frames beside the
+    /// JSON, never as a JSON byte array.
+    Catalog { pair: String, op: CatalogOp },
+}
+
+/// What a target catalog operation asks. A catalog holds immutable files
+/// of at most 16 MiB, written whole and read whole.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum CatalogOp {
+    /// Open the catalog directory, creating and checking its marker.
+    Open { durability: PairDurability },
+    /// Read `name`, at most `limit` bytes: `catalogRead`, then the file's
+    /// data frames and their end, then `done`.
+    Read { name: String, limit: u64 },
+    /// Write `name` from the data frames that follow, creating it only.
+    Write {
+        name: String,
+        durability: PairDurability,
+    },
+    /// List the catalog's file names, a frame-sized page at a time.
+    List,
+    /// Remove `name`; nothing to do if it is absent.
+    Remove { name: String },
+    /// A lease operation on the catalog's private directory, so a
+    /// catalog session never takes the shared folder's own lease.
+    Lease {
+        file: LeaseFile,
+        action: LeaseAction,
     },
 }
 
@@ -367,6 +406,20 @@ pub enum PeerReply {
     Received {
         version: Vec<u8>,
     },
+    /// A catalog read: `found` says whether the name is there. When it
+    /// is, the file's data frames and their end follow, then `done`.
+    CatalogRead {
+        found: bool,
+    },
+    /// A catalog write created the file, or found it already there.
+    CatalogCreated {
+        created: bool,
+    },
+    /// One page of a catalog listing; `more` says another follows.
+    CatalogListed {
+        names: Vec<String>,
+        more: bool,
+    },
     /// Bytes kept from a broken-off copy; 0 for none.
     Partial {
         length: u64,
@@ -434,6 +487,49 @@ mod tests {
             let reply: PeerReply = serde_json::from_value(json.clone()).unwrap();
             assert_eq!(serde_json::to_value(reply).unwrap(), json);
         }
+    }
+
+    /// A catalog operation round-trips with its pair, and an operation
+    /// that does not carry its fields, or is not one this Mac knows, is
+    /// refused: a catalog's name and durability decide what reaches the
+    /// other Mac's disk.
+    #[test]
+    fn catalog_operations_round_trip_and_reject_unknown_operations() {
+        let op = FolderOp::Catalog {
+            pair: "00112233445566778899aabbccddeeff".into(),
+            op: CatalogOp::Write {
+                name: "c-0000-0000000000000001-abcdef".into(),
+                durability: PairDurability::Full,
+            },
+        };
+        let json = serde_json::to_value(&op).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "kind": "catalog",
+                "pair": "00112233445566778899aabbccddeeff",
+                "op": {
+                    "kind": "write",
+                    "name": "c-0000-0000000000000001-abcdef",
+                    "durability": "full",
+                },
+            })
+        );
+        assert_eq!(serde_json::from_value::<FolderOp>(json).unwrap(), op);
+
+        // A catalog operation that does not carry its fields is refused.
+        let missing = serde_json::json!({
+            "kind": "catalog",
+            "pair": "00112233445566778899aabbccddeeff",
+            "op": {"kind": "write", "name": "checkpoint"},
+        });
+        assert!(serde_json::from_value::<FolderOp>(missing).is_err());
+        let unknown_op = serde_json::json!({
+            "kind": "catalog",
+            "pair": "00112233445566778899aabbccddeeff",
+            "op": {"kind": "restore", "name": "checkpoint"},
+        });
+        assert!(serde_json::from_value::<FolderOp>(unknown_op).is_err());
     }
 
     /// A scan that lets Gatekeeper's mark travel reads as before, so

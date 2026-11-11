@@ -1075,7 +1075,7 @@ fn cancelling_a_mutation_stops_while_every_session_is_busy() {
     let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), options);
 
     let (attempted, reconnecting) = mpsc::channel();
-    remote.connect = Some(Box::new(move || {
+    remote.connect = Some(std::sync::Arc::new(move || {
         let _ = attempted.send(());
         Err(io::Error::new(
             io::ErrorKind::NotConnected,
@@ -1136,7 +1136,7 @@ fn cancelling_archive_pruning_stops_while_every_session_is_busy() {
     };
 
     let (attempted, reconnecting) = mpsc::channel();
-    remote.connect = Some(Box::new(move || {
+    remote.connect = Some(std::sync::Arc::new(move || {
         let _ = attempted.send(());
         Err(io::Error::new(
             io::ErrorKind::NotConnected,

@@ -115,6 +115,64 @@ fn backup_name(name: &str) -> Option<(i64, &str)> {
     Some((schema, identity))
 }
 
+pub(super) fn has_large_backup(directory: &Path, limit: u64) -> Result<bool, Error> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file()
+            && entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| backup_name(name).is_some())
+            && entry.metadata()?.len() > limit
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub(super) fn create_local_recovery(
+    connection: &Connection,
+    directory: &Path,
+) -> Result<(), Error> {
+    let temporary = Temporary(directory.join(format!("{TEMP_PREFIX}{}.db", uuid::Uuid::new_v4())));
+    let destination = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(FILE_MODE)
+        .open(&temporary.0)?;
+    drop(destination);
+    connection.backup(
+        rusqlite::MAIN_DB,
+        &temporary.0,
+        None::<fn(rusqlite::backup::Progress)>,
+    )?;
+    File::open(&temporary.0)?.sync_all()?;
+    fs::rename(&temporary.0, directory.join("state-local-completed.db"))?;
+    File::open(directory)?.sync_all()?;
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let base = name
+            .strip_suffix("-journal")
+            .or_else(|| name.strip_suffix("-wal"))
+            .or_else(|| name.strip_suffix("-shm"))
+            .unwrap_or(name);
+        if backup_name(base).is_some_and(|(schema, _)| schema < super::SCHEMA_VERSION) {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    File::open(directory)?.sync_all()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

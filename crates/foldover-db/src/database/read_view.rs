@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
-use super::{BUSY_TIMEOUT, DATABASE_NAME, Database, Error};
+use super::{BUSY_TIMEOUT, DATABASE_NAME, Database, Error, JournalRow};
 
 /// One base row borrowed from a pinned read view. The slices point into the
 /// view's SQLite statement and are valid only for the visitor call.
@@ -127,6 +127,59 @@ impl ReadView {
                 version: blob_bytes(row, 2)?,
             };
             if let Err(error) = visit(blob) {
+                return Err(ReadViewError::Visitor(error));
+            }
+        }
+        Ok(())
+    }
+
+    /// The pinned journal's newest run, if any. The answer comes from the
+    /// same WAL snapshot as every other visit on this view.
+    pub fn journal_run(&self) -> Result<Option<String>, Error> {
+        let run: Option<String> = self.connection.query_row(
+            "SELECT max(run) FROM run_journal WHERE pair_id=?1",
+            [self.pair.as_slice()],
+            |row| row.get(0),
+        )?;
+        Ok(run)
+    }
+
+    /// Visit the pinned journal's newest run in write order. Rows are
+    /// streamed one at a time; no whole-run vector is built.
+    pub fn journal_rows<F, E>(&self, mut visit: F) -> Result<(), ReadViewError<E>>
+    where
+        F: FnMut(JournalRow) -> Result<(), E>,
+    {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT seq,path,side,action,version,base_left,base_right,source \
+                 FROM run_journal WHERE pair_id=?1 \
+                 AND run=(SELECT max(run) FROM run_journal WHERE pair_id=?1) \
+                 ORDER BY seq",
+            )
+            .map_err(Error::from)?;
+        let mut rows = statement
+            .query(params![self.pair.as_slice()])
+            .map_err(Error::from)?;
+        while let Some(row) = rows.next().map_err(Error::from)? {
+            let base = match (
+                row.get::<_, Option<Vec<u8>>>(5).map_err(Error::from)?,
+                row.get::<_, Option<Vec<u8>>>(6).map_err(Error::from)?,
+            ) {
+                (Some(left), Some(right)) => Some((left, right)),
+                _ => None,
+            };
+            let journal = JournalRow {
+                seq: row.get(0).map_err(Error::from)?,
+                path: row.get(1).map_err(Error::from)?,
+                side: row.get(2).map_err(Error::from)?,
+                action: row.get(3).map_err(Error::from)?,
+                version: row.get(4).map_err(Error::from)?,
+                base,
+                source: row.get(7).map_err(Error::from)?,
+            };
+            if let Err(error) = visit(journal) {
                 return Err(ReadViewError::Visitor(error));
             }
         }
@@ -428,6 +481,117 @@ mod tests {
         });
         assert!(matches!(outcome, Err(ReadViewError::Visitor("stop"))));
         assert_eq!(seen.get(), 1);
+    }
+
+    #[test]
+    fn journal_read_view_consistency() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        let first = [
+            JournalRow {
+                seq: 0,
+                path: b"a".to_vec(),
+                side: "left".into(),
+                action: "create".into(),
+                version: b"v0".to_vec(),
+                base: None,
+                source: None,
+            },
+            JournalRow {
+                seq: 1,
+                path: b"b".to_vec(),
+                side: "right".into(),
+                action: "replace".into(),
+                version: b"v1".to_vec(),
+                base: Some((b"l".to_vec(), b"r".to_vec())),
+                source: None,
+            },
+        ];
+        database
+            .change_base(
+                &pair.id,
+                pair.revision,
+                &[put(b"base", b"1")],
+                JournalChange::Record {
+                    run: "run-a",
+                    rows: &first,
+                },
+            )
+            .unwrap();
+        database
+            .replace_snapshot(&pair.id, pair.revision, "left", &[snapshot_row(b"s")])
+            .unwrap();
+        let view = database.read_view(&pair.id, pair.revision).unwrap();
+        assert_eq!(view.journal_run().unwrap().as_deref(), Some("run-a"));
+        let mut seen = Vec::new();
+        view.journal_rows(|row| {
+            seen.push(row);
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        assert_eq!(seen, first.to_vec());
+
+        // The writer commits a newer run and new base and snapshot rows;
+        // the view keeps the snapshot it pinned.
+        let second = [JournalRow {
+            seq: 0,
+            path: b"c".to_vec(),
+            side: "left".into(),
+            action: "metadata".into(),
+            version: b"v2".to_vec(),
+            base: None,
+            source: None,
+        }];
+        database
+            .change_base(
+                &pair.id,
+                pair.revision,
+                &[put(b"base", b"2")],
+                JournalChange::Record {
+                    run: "run-b",
+                    rows: &second,
+                },
+            )
+            .unwrap();
+        database
+            .replace_snapshot(&pair.id, pair.revision, "left", &[snapshot_row(b"t")])
+            .unwrap();
+        assert_eq!(view.journal_run().unwrap().as_deref(), Some("run-a"));
+        let mut seen = Vec::new();
+        view.journal_rows(|row| {
+            seen.push(row);
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        assert_eq!(seen, first.to_vec());
+        assert_eq!(view.base_len().unwrap(), 1);
+        assert_eq!(view.snapshot_len("left").unwrap(), 1);
+        let mut paths = Vec::new();
+        view.snapshot("left", |row| {
+            paths.push(row.path.to_vec());
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        assert_eq!(paths, [b"s".to_vec()]);
+
+        // A visitor error stops the stream and leaves the view usable.
+        let outcome = view.journal_rows(|_| -> Result<(), &'static str> { Err("stop") });
+        assert!(matches!(outcome, Err(ReadViewError::Visitor("stop"))));
+        assert_eq!(view.journal_run().unwrap().as_deref(), Some("run-a"));
+
+        // A pair with no journal reports none and visits nothing.
+        let other = database.create_pair(&values()).unwrap();
+        let empty = database.read_view(&other.id, other.revision).unwrap();
+        assert_eq!(empty.journal_run().unwrap(), None);
+        let mut visited = false;
+        empty
+            .journal_rows(|_| {
+                visited = true;
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        assert!(!visited);
     }
 
     #[test]

@@ -440,7 +440,13 @@ Endpoint-layer rules, not filters:
   before serving requests. Authenticated create/read/update/remove APIs and the CLI
   are implemented, as is the per-path base; the remaining state tables are pending.
 - Lives in `~/Library/Application Support/Foldover/state.db`: local disk,
-  because WAL does not work on network file systems. The directory is
+  because WAL does not work on network file systems. For Backup and Mirror,
+  this holds configuration, schedules, cursors, bounded history summaries
+  and the acknowledged target checkpoint. Their per-file baseline, scan
+  caches and undo journal live on the target as immutable checksummed files
+  ([ADR 0055](docs/adr/0055-target-backup-state.md)). Two-way pairs and a
+  Backup explicitly configured to keep no records on its target retain
+  local per-file state. The directory is
   excluded from Time Machine; the search index uses a `.noindex` suffix.
 - Tables:
   - `pair`, `endpoint`;
@@ -452,8 +458,10 @@ Endpoint-layer rules, not filters:
   - `device`.
 - Secrets stay in Keychain; the DB stores references.
 
-**Each endpoint root** gets one hidden `.foldover/` folder. Unlike GoodSync's
-`_gsdata_`, it holds no sync database:
+**Each endpoint root** gets one hidden `.foldover/` folder:
+- **`state/<pair>/`:** a one-way pair's target catalog: bounded immutable
+  blocks, versioned checkpoints and a separate catalog lease. This is a
+  portable file format, with no SQLite database opened on the target.
 - **`archive/`:** one folder per run, named by its start time, pair and a
   unique run ID;
   each pair lists and prunes its own runs, and another pair's only at
