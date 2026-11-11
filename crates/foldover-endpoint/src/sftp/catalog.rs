@@ -113,10 +113,11 @@ impl SftpEndpoint {
         let entries = self
             .sessions
             .borrow_once(self.connect.as_ref())?
-            .read_dir(&self.root)?;
-        if entries.len() > CATALOG_ENTRIES_LIMIT {
-            return Err(invalid("Too many catalog files"));
-        }
+            .read_dir_bounded(
+                &self.root,
+                CATALOG_ENTRIES_LIMIT,
+                CATALOG_ENTRIES_LIMIT * 128,
+            )?;
         Ok(entries
             .into_iter()
             .filter_map(|(name, attributes)| {
