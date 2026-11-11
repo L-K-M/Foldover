@@ -60,9 +60,10 @@ final class MenuBarTests: XCTestCase {
             XCTAssertTrue(syncAll.exists)
             XCTAssertFalse(syncAll.isEnabled, "The only pair is already syncing")
             let disabledContrast = try inkContrast(syncAll)
+            let pause = tour.app.descendants(matching: .any)["menu-pause-automatic-syncs"].firstMatch
 
-            for title in ["Stop Photos", "Open Foldover", "Settings…", "Quit Foldover"] {
-                let command = tour.app.buttons[title]
+            for title in ["Stop Photos", "Pause Automatic Syncs", "Open Foldover", "Settings…", "Quit Foldover"] {
+                let command = title == "Pause Automatic Syncs" ? pause : tour.app.buttons[title]
                 XCTAssertTrue(command.exists, title)
                 XCTAssertTrue(command.isEnabled, title)
                 XCTAssertTrue(command.isHittable, title)
@@ -74,6 +75,13 @@ final class MenuBarTests: XCTestCase {
                                      "\(title) should not look disabled in \(appearance.rawValue) Mode")
             }
             tour.snap("menu-bar-command-contrast")
+            tour.click(pause, "automatic sync pause menu")
+            tour.click(pause.menuItems["For 1 Hour"], "pause for one hour")
+            let resume = tour.app.buttons["Resume Automatic Syncs"]
+            XCTAssertTrue(resume.waitForExistence(timeout: 5))
+            XCTAssertTrue(resume.isEnabled)
+            XCTAssertGreaterThan(try inkContrast(resume), primaryContrast * 0.8,
+                                 "Resume Automatic Syncs should use primary text")
         }
     }
 

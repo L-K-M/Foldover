@@ -171,16 +171,24 @@ struct MenuBarView: View {
             if let hold = viewModel.holdText {
                 note(hold)
             }
-            Menu("Pause Automatic Syncs") {
+            Menu {
                 ForEach(PauseLength.allCases, id: \.self) { length in
                     Button(MainViewModel.title(length)) { Task { await viewModel.pause(length) } }
                 }
+            } label: {
+                HStack(spacing: 4) {
+                    Text("Pause Automatic Syncs")
+                    // Plain menus omit the native indicator; keep the disclosure visible.
+                    Image(systemName: "chevron.down")
+                        .font(.caption.weight(.semibold))
+                        .accessibilityHidden(true)
+                }
             }
             .menuStyle(.button)
-            // Unlike plain buttons, the native menu style keeps its disclosure arrow.
-            .buttonStyle(.borderless)
+            .menuIndicator(.hidden)
             .fixedSize()
             .disabled(viewModel.automationMutationPending)
+            .accessibilityIdentifier("menu-pause-automatic-syncs")
         }
     }
 
