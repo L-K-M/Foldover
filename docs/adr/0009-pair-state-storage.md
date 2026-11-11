@@ -56,9 +56,16 @@ same store. Startup failures are explicit. Configuration dispatch is covered by
 - A read-only compatibility check precedes writable SQLite opens and journal
   changes. Foreign databases and unsupported schema/minimum-reader versions
   are refused. They are not relabeled or migrated.
-- Existing supported containers get a unique SQLite online backup before
-  migration. Backup file and directory metadata are flushed. Migration runs
-  in one transaction; failure rolls back while retaining the backup.
+- Existing supported containers get a SQLite online backup before migration.
+  A private temporary copy is flushed and atomically published as
+  `state-before-vN-completed.db`; retries replace that schema's backup only
+  after the new copy is complete. Migration runs in one transaction; failure
+  rolls back while retaining the backup. After a committed upgrade, only its
+  completed recovery copy is kept; older recognized upgrade backups and their
+  rollback journals are removed. Cleanup also runs on open under the writer
+  lease, removing interrupted temporary copies. Legacy UUID-named backups
+  are retained until a known-complete replacement exists. Backups at or above
+  the current schema are left alone. Cleanup errors are reported.
 - Migrations are append-only steps; opening an older database runs every
   later step in one transaction. There is no destructive contraction or
   automatic downgrade. Restore decisions require stopping the writer and
