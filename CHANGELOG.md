@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Database upgrades keep one completed recovery backup instead of leaving a
+  full copy after every attempt. Failed and interrupted backup copies are
+  removed, and a successful upgrade removes superseded upgrade backups.
 - "Every hour", "Every day" and other interval schedules count time the
   Mac spends asleep and time the background agent is off. An interval
   used to count only awake time and start over whenever the agent

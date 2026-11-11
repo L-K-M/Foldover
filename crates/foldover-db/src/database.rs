@@ -14,6 +14,7 @@ mod device;
 mod history;
 mod hold;
 mod journal;
+mod migration_backup;
 mod mounts;
 mod pause;
 mod paused;
@@ -27,6 +28,7 @@ pub use cursor::WatchCursorRow;
 pub use device::DeviceRow;
 pub use history::HistoryRow;
 pub use journal::{JournalChange, JournalRow};
+use migration_backup::create as backup;
 pub use mounts::MountRow;
 pub use pause::PauseRow;
 pub use read_view::{BaseBlob, ReadView, ReadViewError, SnapshotBlob};
@@ -716,11 +718,13 @@ impl Database {
         if schema != old_schema {
             return Err(Error::InvalidState("Schema changed while opening state"));
         }
+        migration_backup::cleanup(&directory, schema)?;
         if schema < SCHEMA_VERSION {
             if matches!(shape, FileShape::Existing) {
                 backup(&connection, &directory, schema)?;
             }
             migrate(&mut connection, schema, &MIGRATIONS)?;
+            migration_backup::cleanup(&directory, SCHEMA_VERSION)?;
         }
         connection.pragma_update(None, "foreign_keys", true)?;
         connection.pragma_update(None, "synchronous", "FULL")?;
@@ -1360,28 +1364,6 @@ fn inspect(connection: &Connection, shape: FileShape) -> Result<i64, Error> {
     Ok(schema)
 }
 
-fn backup(connection: &Connection, directory: &Path, schema: i64) -> Result<(), Error> {
-    let path = directory.join(format!(
-        "state-before-v{schema}-{}.db",
-        uuid::Uuid::new_v4()
-    ));
-    let destination = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .mode(FILE_MODE)
-        .open(&path)?;
-    drop(destination);
-    connection.backup(
-        rusqlite::MAIN_DB,
-        &path,
-        None::<fn(rusqlite::backup::Progress)>,
-    )?;
-    File::open(&path)?.sync_all()?;
-    File::open(directory)?.sync_all()?;
-    Ok(())
-}
-
 /// Run every step after `from` in one transaction, so a failure leaves the
 /// database at its previous schema.
 fn migrate(connection: &mut Connection, from: i64, steps: &[&str]) -> Result<(), Error> {
@@ -1698,6 +1680,57 @@ pub(super) mod tests {
             Err(Error::UnsupportedReader { .. })
         ));
         assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn retrying_a_migration_keeps_only_one_backup_of_that_schema() {
+        let (directory, location) = location();
+        let database = Database::open(&location).unwrap();
+        backup(&database.connection, directory.path(), SCHEMA_VERSION).unwrap();
+        backup(&database.connection, directory.path(), SCHEMA_VERSION).unwrap();
+        let copies = fs::read_dir(directory.path())
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("state-before-")
+            })
+            .count();
+        assert_eq!(
+            copies, 1,
+            "migration retries must not accumulate database copies"
+        );
+    }
+
+    #[test]
+    fn opening_state_cleans_backups_only_after_the_upgrade_commits() {
+        let (directory, location) = location();
+        let path = directory.path().join(DATABASE_NAME);
+        drop(private_file(&path).unwrap());
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(SCHEMA_V1).unwrap();
+        connection
+            .pragma_update(None, "application_id", APPLICATION_ID)
+            .unwrap();
+        connection.pragma_update(None, "user_version", 1).unwrap();
+        drop(connection);
+        let old = directory
+            .path()
+            .join(format!("state-before-v1-{}.db", uuid::Uuid::new_v4()));
+        fs::write(&old, b"abandoned backup").unwrap();
+        let database = Database::open(&location).unwrap();
+        assert!(!old.exists());
+        let complete = directory.path().join("state-before-v1-completed.db");
+        assert!(complete.exists());
+        drop(database);
+        // Simulate cleanup interrupted after migration committed. Reopening
+        // must retry cleanup even though no new migration is needed.
+        fs::write(&old, b"leftover").unwrap();
+        drop(Database::open(&location).unwrap());
+        assert!(!old.exists());
+        assert!(complete.exists());
     }
 
     #[test]
