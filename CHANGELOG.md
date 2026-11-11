@@ -15,6 +15,8 @@ All notable changes to this project are documented here. The format follows
   reclaims the emptied local database and replaces large upgrade backups with
   a compact recovery copy. Two-way pairs and the explicit option to keep no
   Foldover records on a Backup target continue to use local state.
+- Enabled menu-bar actions use full-contrast text and icons instead of
+  looking disabled. Unavailable sync actions remain dimmed.
 - Database upgrades keep one completed recovery backup instead of leaving a
   full copy after every attempt. Failed and interrupted backup copies are
   removed, and a successful upgrade removes superseded upgrade backups.

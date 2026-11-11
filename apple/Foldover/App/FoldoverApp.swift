@@ -68,10 +68,10 @@ struct FoldoverApp: App {
            let domain = Bundle.main.bundleIdentifier {
             UserDefaults.standard.removePersistentDomain(forName: domain)
         }
-        // A tour's dark pass; the system's own appearance stays as it is.
-        if ProcessInfo.processInfo.arguments.contains(Fixtures.darkArgument) {
-            NSApplication.shared.appearance = NSAppearance(named: .darkAqua)
-        }
+        // Keep both tour appearances independent of the host's setting.
+        let appearance: NSAppearance.Name = ProcessInfo.processInfo.arguments.contains(Fixtures.darkArgument)
+            ? .darkAqua : .aqua
+        NSApplication.shared.appearance = NSAppearance(named: appearance)
         let scenario = FixtureScenario.current
         let pairs = FixturePairClient(scenario: scenario)
         let macToMac = MacToMacStore(client: FixtureMacToMacClient())
