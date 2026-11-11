@@ -732,7 +732,7 @@ mod tests {
     use foldover_proto::local::{
         SyncCounts, SyncDeletions, SyncJob, SyncPreview, SyncResult, SyncStatus,
     };
-    use foldover_proto::local::{SyncPairContext, SyncProgress};
+    use foldover_proto::local::{SyncPairContext, SyncProgress, UndoResult};
     use foldover_types::LocalDateTime;
     use serde_json::json;
     use std::{fs, os::unix::ffi::OsStrExt, path::Path, time::SystemTime};
@@ -1646,6 +1646,37 @@ mod tests {
 
         // That start covers the interval.
         assert!(run_due_started(&service, at(90)).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_scheduled_runs_retry_at_the_next_cadence() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Notes");
+        input["options"]["schedule"] = json!({"kind": "every", "minutes": 1});
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        let key = json!({"id": created["id"]});
+        let start = service.scheduler.started();
+        let at = |seconds| start + std::time::Duration::from_secs(seconds);
+
+        first_sync(&service, &key).await;
+        assert_eq!(run_due_started(&service, at(61)).await, [id]);
+        settled(&service, &key).await;
+
+        // Model that scheduled attempt publishing a failure. Its recorded
+        // start still owns this cadence; failure adds no arbitrary backoff.
+        service.jobs.force_status(
+            id,
+            SyncStatus::Failed {
+                message: "read error".into(),
+            },
+        );
+        assert!(service.run_due(at(90)).is_empty());
+        assert_eq!(run_due_started(&service, at(122)).await, [id]);
+        settled(&service, &key).await;
     }
 
     #[tokio::test]
@@ -3944,7 +3975,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unattended_runs_skip_pairs_whose_result_waits_for_review() {
+    async fn unattended_runs_preserve_human_decision_and_working_states() {
         let (directory, service) = fixture();
         let mut input = input(directory.path(), "Docs");
         input["options"]["schedule"] = json!({"kind": "every", "minutes": 1});
@@ -3959,13 +3990,22 @@ mod tests {
         let start = service.scheduler.started();
         let at = |seconds| start + std::time::Duration::from_secs(seconds);
 
-        // States a person must see are never replaced by the scheduler.
+        // States requiring a person's decision, plus active work, are never
+        // replaced by the scheduler.
         for status in [
             SyncStatus::NeedsApproval {
                 preview: sync_preview(),
             },
-            SyncStatus::Failed {
-                message: "read error".into(),
+            SyncStatus::Undone {
+                result: UndoResult {
+                    cancelled: false,
+                    removed: 0,
+                    restored: 0,
+                    beside: 0,
+                    not_undone: Vec::new(),
+                    not_undone_count: 0,
+                    archive: String::new(),
+                },
             },
             SyncStatus::Working {
                 job: SyncJob::Run,

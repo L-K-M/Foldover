@@ -738,8 +738,9 @@ impl Jobs {
     }
 
     /// Reserve the pair for `work` while a job runs. Unattended work never
-    /// replaces a stopped result waiting for a person (ADR 0022). An
-    /// optional preview alone does not suspend the pair's schedule.
+    /// replaces a result held for a person's decision. Failed runs retry at
+    /// the next cadence; an optional preview alone does not suspend the pair's
+    /// schedule.
     fn reserve_claim(
         self: &Arc<Self>,
         id: PairId,
@@ -755,16 +756,18 @@ impl Jobs {
                 Some((SyncStatus::Working { .. }, _)) => {
                     Some("This pair already has a preview or sync in progress")
                 }
-                // A folder another run was using is simply tried again.
+                // A failed run is tried again when the schedule next comes
+                // due, whether another run kept a folder's lease (ADR 0032)
+                // or the attempt itself errored: the attempt owns its
+                // cadence, then the scheduler retries without requiring a
+                // manual sync.
+                Some((SyncStatus::Failed { .. }, _)) if matches!(work, Work::Scheduled) => None,
                 Some((SyncStatus::Failed { .. }, AfterFailure::Retry)) => None,
                 // An undo waits too: an unattended run would redo it unseen.
-                Some((
-                    SyncStatus::NeedsApproval { .. }
-                    | SyncStatus::Undone { .. }
-                    | SyncStatus::Failed { .. },
-                    _,
-                )) if matches!(work, Work::Scheduled) => {
-                    Some("The pair is waiting for review; sync it manually")
+                Some((SyncStatus::NeedsApproval { .. } | SyncStatus::Undone { .. }, _))
+                    if matches!(work, Work::Scheduled) =>
+                {
+                    Some("The pair needs a manual sync before its schedule can continue")
                 }
                 _ => None,
             }
