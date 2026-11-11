@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Enabled menu-bar actions use full-contrast text and icons instead of
+  looking disabled. Unavailable sync actions remain dimmed.
 - Database upgrades keep one completed recovery backup instead of leaving a
   full copy after every attempt. Failed and interrupted backup copies are
   removed, and a successful upgrade removes superseded upgrade backups.

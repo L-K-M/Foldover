@@ -53,8 +53,8 @@ struct MenuBarView: View {
             Button { NSApplication.shared.terminate(nil) } label: { rowLabel("Quit Foldover") }
                 .keyboardShortcut("q")
         }
-        // Rows like a menu's: no bezels, spanning the width.
-        .buttonStyle(.borderless)
+        // Borderless buttons dim in this non-key panel even when enabled.
+        .buttonStyle(.plain)
         .padding(12)
         .frame(width: 300)
     }
