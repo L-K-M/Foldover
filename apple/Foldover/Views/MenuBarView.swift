@@ -177,6 +177,8 @@ struct MenuBarView: View {
                 }
             }
             .menuStyle(.button)
+            // Unlike plain buttons, the native menu style keeps its disclosure arrow.
+            .buttonStyle(.borderless)
             .fixedSize()
             .disabled(viewModel.automationMutationPending)
         }
