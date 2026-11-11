@@ -19,7 +19,7 @@ fn fixture() -> Fixture {
     let state = tempfile::tempdir().unwrap();
     let source = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
-    let mut engine = Engine::open(&StateLocation::Directory(state.path().to_owned())).unwrap();
+    let mut engine = Engine::open(&StateLocation::Directory(state.path().join("state"))).unwrap();
     let root = |path: &std::path::Path| {
         LocalRoot::from_bytes(path.as_os_str().as_bytes().to_vec()).unwrap()
     };
