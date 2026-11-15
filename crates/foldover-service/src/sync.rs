@@ -912,6 +912,15 @@ impl Jobs {
             Some("The pair's configuration is changing")
         } else if state.claiming.contains_key(&id) {
             Some("This pair already has a preview or sync starting")
+        } else if matches!(work, Work::Resume)
+            && !matches!(
+                state.jobs.get(&id).map(|job| &job.status),
+                Some(SyncStatus::Interrupted { resumes: true, .. })
+            )
+        {
+            // The scheduler chose the pair before taking this lock; a
+            // person may have declined the sync or changed its settings.
+            Some("The interrupted sync no longer continues by itself")
         } else {
             match state.jobs.get(&id).map(|job| (&job.status, job.after)) {
                 Some((SyncStatus::Working { .. }, _)) => {
@@ -953,6 +962,9 @@ impl Jobs {
             .claiming
             .remove(&id)
             .expect("claim reservation must be held");
+        // The job replaces any interrupted one; what started that one no
+        // longer describes the pair.
+        state.interrupted.remove(&id);
         let progress = Arc::new(Progress::default());
         let acknowledged = SyncStatus::Working {
             job: work.job(),

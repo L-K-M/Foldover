@@ -92,15 +92,17 @@ impl Service {
                 eprintln!("foldoverd: interrupted runs cannot be read: {error}");
                 Vec::new()
             });
-        let revisions = engine
-            .pairs()
-            .map(|pairs| {
-                pairs
-                    .iter()
-                    .map(|pair| (pair.id(), pair.revision()))
-                    .collect()
-            })
-            .unwrap_or_default();
+        // Without revisions, a person's interrupted sync waits for them.
+        let revisions = match engine.pairs() {
+            Ok(pairs) => pairs
+                .iter()
+                .map(|pair| (pair.id(), pair.revision()))
+                .collect(),
+            Err(error) => {
+                eprintln!("foldoverd: pairs cannot be read; interrupted syncs wait: {error}");
+                std::collections::HashMap::new()
+            }
+        };
         let service = Self::new(engine);
         service.safe_mode.judge(&stops, now);
         service.jobs.load_interrupted(&interrupted, &revisions);
@@ -1875,6 +1877,13 @@ mod tests {
         let changed = std::collections::HashMap::from([(id, revision + 1)]);
         service.jobs.load_interrupted(&interrupted, &changed);
         assert!(service.jobs.resumable().is_empty());
+        // A tick that chose the pair before then cannot start it.
+        assert!(
+            service
+                .jobs
+                .start(&service.engine, id, sync::Work::Resume)
+                .is_err()
+        );
     }
 
     #[tokio::test]

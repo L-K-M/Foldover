@@ -116,7 +116,7 @@ journal itself holds exactly the chain. Manual-pair resume
 (`Work::Resume`, persisted skips, schema v32) is implemented too.
 
 - **Marker table, not a history row.** A new table in a v31 migration
-  (current `SCHEMA_VERSION` is 30, `database.rs:41`):
+  (`SCHEMA_VERSION` was 30 when this was planned):
   `interrupted_run (pair_id PRIMARY KEY REFERENCES pair ON DELETE CASCADE,
   started_ms, trigger, revision, resume, unclean, chain)`. Keying by
   pair means a new admission replaces an older marker, so a stale
