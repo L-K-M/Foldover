@@ -3058,3 +3058,215 @@ fn a_copy_to_a_server_reports_what_the_next_observation_reuses() {
     assert_eq!(next.entries()[&name].version(), written.version);
     assert_eq!(requests(&log, SSH_FXP_OPEN), opened);
 }
+
+const SSH_FXP_WRITE: u64 = 6;
+const RESUMABLE: usize = 20 * 1024 * 1024;
+
+/// Bytes no two offsets of which repeat within a file this size.
+fn resumable_content() -> Vec<u8> {
+    (0..RESUMABLE as u32)
+        .map(|index| (index.wrapping_mul(2_654_435_761) >> 24) as u8)
+        .collect()
+}
+
+/// A local folder with `big`, an SFTP folder that keeps records, and the
+/// copy's inputs.
+struct Resumable {
+    local: Endpoint,
+    remote: Endpoint,
+    remote_directory: tempfile::TempDir,
+    _local_directory: tempfile::TempDir,
+    _logs: tempfile::TempDir,
+    log: PathBuf,
+    entry: ObservedEntry,
+    content: Vec<u8>,
+}
+
+fn resumable() -> Option<Resumable> {
+    let local_directory = tempfile::tempdir().unwrap();
+    let remote_directory = tempfile::tempdir().unwrap();
+    fs::create_dir(remote_directory.path().join(".foldover")).unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    let log = logs.path().join("packets");
+    let remote = Endpoint::Sftp(counted(remote_directory.path(), &log)?);
+    let local = Endpoint::Local(LocalEndpoint::open(local_directory.path()).unwrap());
+    let content = resumable_content();
+    fs::write(local_directory.path().join("big"), &content).unwrap();
+    let here = local
+        .observe_from(
+            PairOptions::default().metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+            &mut |_| {},
+        )
+        .unwrap();
+    let entry = here.entries()[&path(b"big")].clone();
+    Some(Resumable {
+        local,
+        remote,
+        remote_directory,
+        _local_directory: local_directory,
+        _logs: logs,
+        log,
+        entry,
+        content,
+    })
+}
+
+impl Resumable {
+    fn partial(&self) -> PathBuf {
+        let foldover_types::EntryContent::File(content) = self.entry.version().content() else {
+            unreachable!()
+        };
+        let name: String = content
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        self.remote_directory
+            .path()
+            .join(".foldover/partial")
+            .join(name)
+    }
+
+    fn copy(&self, run: &RunScope) -> Result<EntryVersion, ApplyError> {
+        self.remote.copy_from(
+            &self.local,
+            &path(b"big"),
+            &self.entry,
+            Expected::Absent,
+            run,
+            &mut proceed,
+        )
+    }
+}
+
+/// ADR 0058: a copy to a server the agent stopped during leaves its data
+/// staged by content; the next copy sends only what follows the
+/// acknowledged part, here 18 MiB kept with garbage in the unanswered
+/// window after it, and the placed file is whole.
+#[test]
+fn a_stopped_copy_to_a_server_resumes_after_its_acknowledged_writes() {
+    let Some(pair) = resumable() else { return };
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), PairOptions::default());
+    let kept = 18 * 1024 * 1024;
+    let window = foldover_net::sftp::WRITE_WINDOW_BYTES as usize;
+    let mut stopped = pair.content[..kept].to_vec();
+    stopped[kept - window / 2..].fill(0xa5);
+    fs::create_dir(pair.remote_directory.path().join(".foldover/partial")).unwrap();
+    fs::write(pair.partial(), &stopped).unwrap();
+
+    let writes = requests(&pair.log, SSH_FXP_WRITE);
+    let stored = pair.copy(&run).unwrap();
+    assert_eq!(stored.content(), pair.entry.version().content());
+    assert_eq!(
+        fs::read(pair.remote_directory.path().join("big")).unwrap(),
+        pair.content
+    );
+    assert!(!pair.partial().exists(), "the partial became the file");
+    let sent = requests(&pair.log, SSH_FXP_WRITE) - writes;
+    let rest = (RESUMABLE - (kept - window)).div_ceil(32 * 1024);
+    assert_eq!(sent, rest);
+}
+
+/// A partial longer than the file it would become is not this copy's.
+#[test]
+fn an_oversized_partial_starts_the_copy_over() {
+    let Some(pair) = resumable() else { return };
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), PairOptions::default());
+    fs::create_dir(pair.remote_directory.path().join(".foldover/partial")).unwrap();
+    fs::write(pair.partial(), vec![1; RESUMABLE + 1]).unwrap();
+    pair.copy(&run).unwrap();
+    assert_eq!(
+        fs::read(pair.remote_directory.path().join("big")).unwrap(),
+        pair.content
+    );
+}
+
+/// A folder that keeps no records keeps no partial either.
+#[test]
+fn a_server_folder_without_records_stages_beside_the_file() {
+    let Some(pair) = resumable() else { return };
+    let run =
+        RunScope::new(UNIX_EPOCH, crate::test_pair(), PairOptions::default()).without_archive();
+    pair.copy(&run).unwrap();
+    assert!(
+        !pair
+            .remote_directory
+            .path()
+            .join(".foldover/partial")
+            .exists()
+    );
+    assert_eq!(
+        fs::read(pair.remote_directory.path().join("big")).unwrap(),
+        pair.content
+    );
+}
+
+/// A copy stopped by a person keeps what the server acknowledged, and the
+/// next copy of the content finishes it.
+#[test]
+fn a_cancelled_copy_to_a_server_keeps_its_partial_for_the_next() {
+    let Some(pair) = resumable() else { return };
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), PairOptions::default());
+    let partial = pair.partial();
+    let stopped = pair.remote.copy_from(
+        &pair.local,
+        &path(b"big"),
+        &pair.entry,
+        Expected::Absent,
+        &run,
+        &mut || match fs::metadata(&partial) {
+            Ok(staged) if staged.len() >= 4 * 1024 * 1024 => ScanControl::Cancel,
+            _ => ScanControl::Continue,
+        },
+    );
+    assert!(matches!(
+        stopped,
+        Err(ApplyError::Scan(ScanError::Cancelled))
+    ));
+    let kept = fs::metadata(&partial).unwrap().len();
+    assert!(
+        (4 * 1024 * 1024..RESUMABLE as u64).contains(&kept),
+        "{kept}"
+    );
+    assert!(!pair.remote_directory.path().join("big").exists());
+
+    pair.copy(&run).unwrap();
+    assert_eq!(
+        fs::read(pair.remote_directory.path().join("big")).unwrap(),
+        pair.content
+    );
+    assert!(!partial.exists());
+}
+
+/// Partials follow the archive's retention.
+#[test]
+fn stale_partials_on_a_server_are_pruned_with_the_archive() {
+    let Some(pair) = resumable() else { return };
+    let partials = pair.remote_directory.path().join(".foldover/partial");
+    fs::create_dir(&partials).unwrap();
+    fs::write(partials.join("stale"), b"old").unwrap();
+    fs::write(partials.join("fresh"), b"new").unwrap();
+    let retention = Duration::from_secs(30 * 24 * 60 * 60);
+    fs::File::options()
+        .write(true)
+        .open(partials.join("stale"))
+        .unwrap()
+        .set_modified(SystemTime::now() - retention - Duration::from_secs(60))
+        .unwrap();
+    let Endpoint::Sftp(remote) = &pair.remote else {
+        unreachable!()
+    };
+    remote
+        .prune_archive(
+            retention,
+            SystemTime::now(),
+            crate::Pruning::Everyone,
+            &mut proceed,
+        )
+        .unwrap();
+    assert!(!partials.join("stale").exists());
+    assert!(partials.join("fresh").exists());
+}

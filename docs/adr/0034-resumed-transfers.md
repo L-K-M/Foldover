@@ -1,7 +1,8 @@
 # ADR 0034: Resumed transfers
 
 Status: Implemented for copies that land in a local folder, on this Mac or
-on a paired one; copies to SFTP servers start over
+on a paired one; copies from this Mac to SFTP servers resume under
+[ADR 0058](0058-sftp-resumed-uploads.md)
 
 ## Context
 

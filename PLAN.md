@@ -497,6 +497,7 @@ Run journal and Undo: [ADR 0029](docs/adr/0029-undo.md).
 Interrupted runs and journals that span them: [ADR 0055](docs/adr/0055-interrupted-runs.md).
 Observations stored as a run's writes leave them: [ADR 0056](docs/adr/0056-post-write-snapshots.md).
 Remote stats on SFTP targets: [ADR 0057](docs/adr/0057-sftp-stat-trust.md).
+Resumed copies to SFTP folders: [ADR 0058](docs/adr/0058-sftp-resumed-uploads.md).
 Name clashes between spellings a folder treats as one: [ADR 0030](docs/adr/0030-name-clashes.md).
 Hierarchy-aware candidate generation is implemented below the agent API;
 [ADR 0014](docs/adr/0014-tree-plan-candidates.md) records tree validation,

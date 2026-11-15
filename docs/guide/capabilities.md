@@ -31,7 +31,7 @@ A pair joins two folders. Each side can be:
 | Change detection | FSEvents hints plus a full check every run; hourly verification on "When files change" | FSEvents reports only this Mac's writes; on "When files change", other computers' writes at the top level and in recently active folders are found within 5 minutes, the rest by the hourly check; not while Low Power Mode or a costly network holds the pair | No notifications; on "When files change", the top level and recently active folders are checked every 5 minutes and everything hourly; not while Low Power Mode or a costly network holds the pair | The sharing Mac reports changes; a report broken for 30 seconds is asked again and its next answer counts as a change; hourly verification on "When files change" | [0002](../adr/0002-change-detection.md), [0022](../adr/0022-scheduled-runs.md), [0028](../adr/0028-sftp-endpoints.md), [0031](../adr/0031-mac-to-mac.md) |
 | Durability | Standard (`fsync`) or Full (`F_FULLFSYNC`, slower, also survives power loss) | Same settings; the guarantee is limited to what the mounted filesystem honors | Standard only; Full is rejected when you save the pair | Same settings; the sharing Mac's filesystem applies them | [0019](../adr/0019-local-write-primitives.md), [0028](../adr/0028-sftp-endpoints.md), [0031](../adr/0031-mac-to-mac.md) |
 | Identity checks | First sync writes `.foldover/id`; later runs stop if it is missing or different | Same | Same | Same | [0020](../adr/0020-run-execution.md), [0028](../adr/0028-sftp-endpoints.md), [0031](../adr/0031-mac-to-mac.md) |
-| Resumed copies | A copy that broke off after at least 16 MiB resumes where it stopped | Same code path | Starts over | Resumes on the paired Mac's folder | [0034](../adr/0034-resumed-transfers.md) |
+| Resumed copies | A copy that broke off after at least 16 MiB resumes where it stopped | Same code path | A copy from this Mac of at least 16 MiB resumes after what the server confirmed, also after a restart, unless the folder keeps no records; other copies start over | Resumes on the paired Mac's folder | [0034](../adr/0034-resumed-transfers.md), [0058](../adr/0058-sftp-resumed-uploads.md) |
 
 ## Notes
 
@@ -70,5 +70,8 @@ A pair joins two folders. Each side can be:
 - **Broken-off copies resume by content.** A folder keeps what arrived
   of a copy that failed after at least 16 MiB, and the next copy of the
   same content sends only the rest. An edited source starts over and its
-  stale partial is pruned with the archive; a copy into an SFTP folder
-  always starts over ([ADR 0034](../adr/0034-resumed-transfers.md)).
+  stale partial is pruned with the archive. A copy from this Mac into an
+  SFTP folder keeps what the server confirmed, even when the Mac
+  restarts, without reading it back; copies into SFTP from elsewhere
+  start over ([ADR 0034](../adr/0034-resumed-transfers.md),
+  [ADR 0058](../adr/0058-sftp-resumed-uploads.md)).

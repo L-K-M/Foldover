@@ -428,6 +428,11 @@ this is a policy change, not a refactor.
 
 ### W4: resume copies killed in flight (optional, last)
 
+**Status:** implemented as [ADR 0058](adr/0058-sftp-resumed-uploads.md).
+No offset is persisted: every byte more than the write window before the
+kept file's end was acknowledged, so the resume point follows from the
+remote size. Copies from SFTP or paired-Mac sources still start over.
+
 Killed staged copies go to the leftover pass on every endpoint kind, and
 SFTP destinations never keep partials.
 

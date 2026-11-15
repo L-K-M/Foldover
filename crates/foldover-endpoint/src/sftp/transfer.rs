@@ -9,7 +9,7 @@ use std::io;
 use foldover_fs::{NativeMetadata, PARTIAL_MIN_BYTES, Resume};
 use foldover_net::sftp::{Attributes, FileKind, Session};
 use foldover_proto::peer::IncomingKind;
-use foldover_types::{EntryContent, EntryKind, EntryVersion, ScanControl, SyncPath};
+use foldover_types::{Digest, EntryContent, EntryKind, EntryVersion, ScanControl, SyncPath};
 
 use super::{DEFAULT_DIRECTORY, DEFAULT_FILE, PERMISSION_BITS, SftpEndpoint, write_error};
 use crate::local::{Archiving, Carried};
@@ -73,7 +73,7 @@ impl Source<'_> {
         control: &mut dyn FnMut() -> ScanControl,
         sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
         error: &RefCell<Option<ApplyError>>,
-    ) -> io::Result<()> {
+    ) -> io::Result<Option<Digest>> {
         // PLAN.md §4.9: the pair's bandwidth limit paces the data as it
         // goes. The wait asks the control too, so a cancel is not held
         // up; the reader asks it between chunks, never during a wait.
@@ -100,16 +100,18 @@ impl Source<'_> {
         };
         let (control, sink) = (&mut checked, &mut paced);
         let pushed = match self {
-            Self::Local(endpoint, entry) => {
-                endpoint.read_entry_from(entry, from, control, &mut |chunk| sink(chunk))
-            }
+            // A local source reads the whole file, the skipped part too.
+            Self::Local(endpoint, entry) => endpoint
+                .read_entry_from(entry, from, control, &mut |chunk| sink(chunk))
+                .map(Some),
             Self::Sftp(endpoint, attributes) => endpoint
                 .read_file_from(path, attributes, from, control, sink)
+                .map(|()| None)
                 .map_err(|source| match source {
                     ScanError::Changed(_) => ApplyError::SourceChanged(path.clone()),
                     source => ApplyError::Scan(source),
                 }),
-            Self::Peer(source) => source.push(path, control, sink),
+            Self::Peer(source) => source.push(path, control, sink).map(|()| None),
         };
         pushed.map_err(|failure| {
             *error.borrow_mut() = Some(match cancelled.get() {
@@ -189,7 +191,9 @@ pub(crate) fn copy(
                         &mut destination_control,
                         |sink| {
                             let mut source_control = || (*control.borrow_mut())();
-                            source.push(path, kept, run, &mut source_control, sink, &failure)
+                            source
+                                .push(path, kept, run, &mut source_control, sink, &failure)
+                                .map(|_| ())
                         },
                     );
                     received.map_err(|error| failure.into_inner().unwrap_or(error))
@@ -204,6 +208,18 @@ pub(crate) fn copy(
                 EntryKind::Symlink => Some(source.link_target(path, control)?),
                 EntryKind::File | EntryKind::Directory => None,
             };
+            // ADR 0058: a large file from this Mac to a folder that keeps
+            // records is staged where a stopped copy can resume. Only a
+            // local source returns the whole file's digest from a
+            // resumed read; a server that keeps nothing starts over.
+            let partial = match (from, run.archiving(), expected) {
+                (Endpoint::Local(_), Archiving::Kept, EntryContent::File(content))
+                    if planned.size() >= PARTIAL_MIN_BYTES =>
+                {
+                    remote.claim_partial(content, planned.size())
+                }
+                _ => None,
+            };
             let mut session = remote.session_unless_cancelled(control)?;
             let destination = receiving_on(remote, &mut session, path, current, run, control)?;
             send_on(
@@ -215,6 +231,7 @@ pub(crate) fn copy(
                 link_target.as_deref(),
                 expected,
                 destination.as_ref(),
+                partial.as_ref(),
                 run,
                 control,
             )
@@ -246,7 +263,11 @@ pub(crate) fn copy(
                 carried,
                 run,
                 control,
-                |sink, checkpoint| source.push(path, kept, run, checkpoint, sink, &failure),
+                |sink, checkpoint| {
+                    source
+                        .push(path, kept, run, checkpoint, sink, &failure)
+                        .map(|_| ())
+                },
             );
             received.map_err(|error| match error {
                 error @ ApplyError::Write { .. } => failure.into_inner().unwrap_or(error),
@@ -452,6 +473,7 @@ fn send_on(
     link_target: Option<&[u8]>,
     expected: EntryContent,
     destination: Option<&Attributes>,
+    partial: Option<&super::Partial<'_>>,
     run: &RunScope,
     control: &mut impl FnMut() -> ScanControl,
 ) -> Result<EntryVersion, ApplyError> {
@@ -486,29 +508,47 @@ fn send_on(
         EntryKind::File => {
             let failure = RefCell::new(None);
             let digest = RefCell::new(blake3::Hasher::new());
-            let staged = remote
-                .upload_on(
+            // A resumed copy sends only the rest; the source's digest of
+            // the whole file stands for the bytes the server kept.
+            let whole = Cell::new(None);
+            let staged = match partial {
+                Some(partial) => remote.upload_partial_on(
+                    session,
+                    partial,
+                    synced_mode(DEFAULT_FILE),
+                    options.durability(),
+                    |start, sink| {
+                        whole.set(source.push(path, start, run, control, sink, &failure)?);
+                        Ok(())
+                    },
+                ),
+                None => remote.upload_on(
                     session,
                     path.as_bytes(),
                     synced_mode(DEFAULT_FILE),
                     options.durability(),
                     |sink| {
-                        source.push(
-                            path,
-                            0,
-                            run,
-                            control,
-                            &mut |chunk| {
-                                digest.borrow_mut().update(chunk);
-                                sink(chunk)
-                            },
-                            &failure,
-                        )
+                        source
+                            .push(
+                                path,
+                                0,
+                                run,
+                                control,
+                                &mut |chunk| {
+                                    digest.borrow_mut().update(chunk);
+                                    sink(chunk)
+                                },
+                                &failure,
+                            )
+                            .map(|_| ())
                     },
-                )
-                .map_err(|source| failure.take().unwrap_or_else(|| write_error(path, source)))?;
-            let digest =
-                foldover_types::Digest::from_bytes(*digest.into_inner().finalize().as_bytes());
+                ),
+            }
+            .map_err(|source| failure.take().unwrap_or_else(|| write_error(path, source)))?;
+            let digest = match whole.take() {
+                Some(digest) if partial.is_some() => digest,
+                _ => Digest::from_bytes(*digest.into_inner().finalize().as_bytes()),
+            };
             let version = remote.set_file_metadata_on(session, &staged, digest, metadata, policy);
             let version = match version {
                 Ok(version) if version.content() == expected => version,

@@ -76,14 +76,14 @@ impl LocalEndpoint {
 
     /// Push the entry's data from byte `from` on, for a copy that resumes.
     /// The skipped bytes are still read: the whole file must still be the
-    /// observed one.
+    /// observed one, and its digest, returned, covers them.
     pub(crate) fn read_entry_from(
         &self,
         entry: &LocalEntry,
         from: u64,
         control: &mut impl FnMut() -> ScanControl,
         sink: &mut impl FnMut(&[u8]) -> std::io::Result<()>,
-    ) -> Result<(), ApplyError> {
+    ) -> Result<Digest, ApplyError> {
         let mut skipped = 0u64;
         self.read_entry(entry, control, &mut |chunk| {
             let skip = usize::try_from(from - skipped)
@@ -95,7 +95,6 @@ impl LocalEndpoint {
                 rest => sink(rest),
             }
         })
-        .map(|_| ())
     }
 
     /// How much of the file with `content` a broken-off copy here kept.
