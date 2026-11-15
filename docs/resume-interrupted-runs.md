@@ -1,15 +1,12 @@
 # Continuing interrupted runs — implementation plan
 
-Written against `2e31ce29` (main after PR 283). Motivation: a run killed
-by a reboot or an agent stop loses no completed work today, but the run
-itself is gone — a manual pair waits for a person, a scheduled pair waits
-for its cadence, and the next run pays a full re-observation of both
-trees. For pairs whose far side is an SFTP server that observation reads
-and hashes every remote file, so "the next run finishes the work" can
-mean re-downloading the whole backup before anything resumes.
-
-This plan makes a stopped run continue unattended, and makes the
-continuing observation cost a walk instead of a re-read.
+Written against `2e31ce29` (main after PR 283), revised after review.
+Motivation: a run killed by a reboot or an agent stop loses no committed
+work today, but the run itself is gone — a manual pair waits for a
+person, and the next run pays a re-observation of both trees that for
+SFTP endpoints means re-reading every remote file. For large SFTP
+backups "the next run finishes the work" can mean re-downloading the
+whole backup first.
 
 ## What survives a stop today
 
@@ -17,194 +14,268 @@ continuing observation cost a walk instead of a re-read.
   (`COMMIT_BATCH`, `crates/foldover-engine/src/run.rs:59`), bound to the
   pair revision. A crash loses at most one uncommitted batch of records;
   the next run sees equal content on both sides and only records it.
-- Partial copies ≥ 16 MiB to local and paired-Mac destinations resume at
-  their offset via `.foldover/partial/<digest>` (ADR 0034). Copies to
-  SFTP destinations start over; unrecorded (`records=source`) targets
-  keep nothing (ADR 0040).
 - Leftover temporaries and displaced originals are recovered by the next
-  run's leftover pass (`run.rs` `recover_leftover`).
+  run's leftover pass (`crates/foldover-endpoint/src/local/apply.rs:409-433`).
 - A killed run's `.foldover/lock` lease dies within one TTL (~120–150 s,
-  ADR 0032); a successor run waits on the existing lease path.
+  ADR 0032); a successor run waits on the existing lease path, reporting
+  a wait on its own previous instance (the agent's instance ID is per
+  process).
+- **Scheduled pairs already continue.** A killed run writes no history
+  row (`history::record` runs only after the run returns,
+  `crates/foldover-service/src/sync.rs:596`), so `every` pairs count
+  their interval from the previous *recorded* start and `daily` pairs
+  from the last recorded run (`schedule.rs:268-273,301-315`): both are
+  due at the first tick after a restart. `changes` pairs re-run seconds
+  after start-up replay (ADR 0002/0022).
 - Convergence under interruption is simulation-tested
   (`random_edits_and_interrupted_runs_lose_nothing_and_converge`).
 
 ## What is lost today
 
-- **The trigger.** Job state is in-memory (`crates/foldover-service/src/
-  sync.rs`, `State.jobs`). A killed run leaves no history row and nothing
-  restarts it: manual pairs wait for a person; `every`/`daily` pairs wait
-  for the next due moment; `changes` pairs re-run seconds after start-up
-  replay (ADR 0002/0022).
+- **Manual pairs: nothing restarts them.** Job state is in-memory
+  (`sync.rs` `State.jobs`); a killed manual run leaves no history row,
+  no status, and waits for a person to sync again.
+- **In-flight copies never resume on a kill.** A staged
+  `.foldover-tmp-*` left by SIGKILL is archived as a leftover, not
+  resumed — on *every* endpoint kind, local and paired Mac included.
+  `.foldover/partial` resume (ADR 0034) only covers live-run failures:
+  an error path moves the staged file there. A reboot is not an error
+  path.
 - **The re-observation.** `SftpEndpoint::observe_entry` calls
   `version_on` unconditionally, which streams every remote file through
-  BLAKE3 (`crates/foldover-endpoint/src/sftp.rs:770-846`,
-  `read_range_on` :897-958). The stored-snapshot check at :786-791 runs
-  after the read and saves only a row rewrite. Local destinations re-hash
-  every file the killed run wrote, because the stored snapshot is the
-  *pre-run* observation (`sync.rs` stores it at :1007-1015, before
-  `execute`).
-- **In-flight copies.** Files under 16 MiB, and all files to SFTP
-  destinations, restart from zero.
+  BLAKE3 (`sftp.rs:770-846`, `read_range_on` :889-958). The
+  stored-snapshot check at :786-791 runs after the read and saves only a
+  row rewrite. Destinations also re-hash every file the killed run
+  wrote: the stored snapshot is the *pre-run* observation (`sync.rs`
+  stores it at :1007-1015, before `execute`).
+- **The run's identity.** The resuming run is a new run: new archive
+  folder, and its first non-empty journal batch deletes the killed
+  run's journal (`database/journal.rs`), so Undo afterwards covers only
+  the resumed run's writes.
+- **Intent held only in memory:** "skip in the next run" choices
+  (`sync.rs:251`), the reviewed preview a presented token binds to, and
+  an approval itself.
 
 ## Design stance
 
 Keep the ADR 0020 recovery model: no persisted plan, no operation
-journal for recovery. A "resumed" run is a *new* run whose base records
-make finished work a no-op. The work below removes the three remaining
-costs — the missing trigger, the re-read of the remote tree, and the
-re-hash of the just-written set — plus one optional per-file bound. A
-checkpoint-resume (persisted plan + cursor) stays out of scope; its
-remaining value after this plan is run-identity semantics (one history
-entry, one journal for Undo, approval carry-over), listed under
-follow-ups.
+journal for recovery. A "resumed" run is a new run whose base records
+make finished work a no-op; a persisted plan would be stale after hours
+of downtime, and convergence is already simulation-tested. The work
+below removes the remaining costs — the missing trigger and visibility
+for manual pairs, the re-read of the remote tree, the re-hash of the
+just-written set — and keeps the killed run's identity so Undo survives.
+
+Two exceptions in ADR 0020's model stay documented gaps, not new work:
+
+- **SFTP replace is two renames** (old into archive, temporary into
+  place): a kill between them leaves the path empty and the temporary
+  archived. The resumed run plans a `DeletedVersusEdited` conflict and
+  stops for a person — acceptable: it surfaces, never silently loses
+  (reconcile.rs; ADR 0020 already names this the journal exception).
+- **Graceful-stop semantics:** today SIGTERM records a clean stop while
+  the job runs on until SIGKILL (`foldoverd/src/main.rs:51-74`). If a
+  graceful stop ever cancels jobs, that cancel must *keep* the resume
+  marker — unlike a person's `sync.cancel`, which clears it.
 
 ## Work items
 
-Each item ships independently; order is by leverage for the motivating
-case (large SFTP backup), not dependency. W1 and W2 together reduce the
-continuation cost to a stat walk; W3 makes it unattended.
+Ordered by leverage; W1 and W3 each need an owner decision recorded in
+an ADR.
 
-### W1 — Stat-trust observation for SFTP
+### W3 — Continue runs the agent lost (marker, status, run identity)
 
-Today the SFTP observe reads every file on every run (ADR 0028's
-"Unchanged-stat proof: unavailable; contents and link targets are
-re-read"). Give it the reuse the local endpoint already has.
+Scheduled pairs already resume; this item delivers visibility, Undo
+continuity, manual-pair handling, and a crash-loop bound.
 
-- **Change.** In `observe_entry` (`sftp.rs:770`), test the stored
-  fingerprint *before* `self.version()`: when
-  `known.fingerprint().same_stat(&stat_key(attributes), size)` holds,
-  reuse `known` outright — no session, no read. Keep the existing
-  post-read equality check for the read path. Directory and symlink
-  handling is unchanged (directories already cost no request; symlink
-  targets are content and stay re-read, or reuse under the same rule —
-  decide in the ADR).
-- **Racy window.** Reuse only when the file was already ≥ `RACY_WINDOW`
-  old when its fingerprint was taken (mirror `local.rs`
-  `proves_unchanged_by`: `observed_at − mtime ≥ RACY_WINDOW`). SFTP
-  mtimes are whole seconds (ADR 0028); the window logic must account for
-  second-granularity, e.g. require `observed_at − mtime ≥ RACY_WINDOW +
-  1 s`.
-- **Periodic re-verification.** Reuse expires on the same cadence as
-  local (`Fingerprint::reread_after`/`read_within`: 3.5–7 days, spread
-  per stat, `local.rs:301,357-371`). An aged-out fingerprint re-reads
-  once and re-fingerprints, so a stat-preserving remote edit surfaces
-  within a week — the same guarantee ADR 0018 gives local roots.
-- **Trust scope — owner decision, needs an ADR.** Reusing remote stat
-  trusts the server not to change content while preserving
-  size+mtime+mode. ADR 0028 already accepts that residual risk in words
-  ("only noticed by the next full read"); this item makes it the default
-  path instead of the exception. Options: (a) all SFTP sides, matching
-  PLAN §4.8's "same size, same mtime, same file ID means unchanged"
-  model, with the weekly re-read as backstop — recommended, and needed
-  for the motivating backup case; (b) only sides Foldover alone writes
-  (Backup/Mirror targets), which is near-risk-free but leaves SFTP
-  *sources* paying full reads; (c) a per-pair option. Decide in the ADR,
-  which must also amend ADR 0028's differences table.
-- **Tests.** Unit: matching stat → no session opened; changed
-  size/mtime/mode → read; racy-window boundary; aged fingerprint → one
-  re-read then reuse. Integration against the `sftp-server` fixture
-  (`FOLDOVER_SFTP_SERVER`). Simulation seeds unchanged.
-- **Acceptance.** A no-change run over a million-file SFTP tree issues
-  no content reads for fingerprint-matched files; observe time drops to
-  the walk+stat bound measured in
-  `docs/performance/per-file-cost-budget.md` (~96 µs/file baseline).
+- **Marker = an open run-history row.** Write a "working" row at job
+  admission — inside `Jobs::start` while `engine_guard` is held
+  (`sync.rs:566-576`), since `publish_claim` holds the jobs lock and has
+  no engine handle (lock order is engine → jobs, `sync.rs:455-457`).
+  Finish the row in the `spawn` completion path after `history::record`
+  (`:596,881-887`). A killed agent leaves an unfinished row: the marker
+  *is* the history, and it carries the run's archive-folder name for
+  free. Never write one for a Preview. This replaces both a bespoke
+  marker table and a separate "interrupted" outcome — but still needs a
+  `run_history` schema change (`CHECK` on the outcome column,
+  `database.rs:160,237`) and the protocol surface below.
+- **Status.** A persisted non-blocking `Interrupted` state the claim,
+  `busy()` and edit paths treat as idle, and `sync.cancel` clears to
+  mean "do not resume" — distinct from `Working`, which would block
+  claims, gentle-effort slot counting and edits, and read a cancel flag
+  no job checks (`sync.rs:538-545,708-738,755-758`). Protocol, FFI, app
+  and CLI updates ride one `PROTOCOL_VERSION` bump with tests
+  (`scripts/test-agent.py`, app fixtures, UI tour).
+- **Resume through the scheduler's holds.** Widen `run_due_at`'s
+  candidates and `due()` to treat a marked pair as due at the first
+  tick — never a separate start path, which would skip safe mode,
+  pauses, `automation_hold`, pair pause and environment holds, all
+  checked only in `run_due`/`run_due_at` (`schedule.rs:700-768`). A
+  marked Undo or Preview resumes nothing: Undo already refuses without
+  its journal's run; previews are throwaway.
+- **Attempt count.** Cap resume at one retry after an unclean stop of a
+  resumed run: safe mode needs three unclean stops inside five minutes,
+  and launchd restarts the agent after ~30 s, so a run that crashes
+  later than ~2.5 minutes in would resume-crash forever otherwise.
+- **Continue the run's name.** The resumed run reuses the killed run's
+  recorded name (kept on the open history row): same archive folder,
+  journal rows append under `seq` continuing from the stored maximum,
+  and the first-batch journal delete keys on `run` so nothing is
+  replaced. Undo then covers the whole logical run — most of the "run
+  identity" benefit without a persisted plan.
+- **Manual pairs — owner decision.** Options: (a) default — status
+  `Interrupted`, "sync again to finish", no auto-write (recommended);
+  (b) auto-resume via a new `Work::Resume` that uses *interactive*
+  deletion gating — `RunContext::Unattended` stops only above 50% of a
+  side's paths while interactive review asks above 50 deletions and 1%
+  (`gates.rs:56-76`), so a scheduled-mode resume could archive up to
+  half a folder nobody saw — plus persisted skips and a refusal to
+  resume over saved-not-yet-activated edits (`sync.rs:251,566-576` for
+  where those live today). `Work::Scheduled` is wrong for manual pairs
+  on four more counts: gentle effort, no share remount (`:977`),
+  scheduled history trigger, and it never lifts an undo hold
+  (`:1093-1097`). The ADR records the choice.
+- **Tests.** Service tests with a pre-seeded open row: restart → due at
+  first tick → resumes; `automation_hold` and pair pause hold it;
+  cancel clears the marker; second unclean stop stops resuming; journal
+  appends under one run name and Undo spans both halves. Extend
+  `cargo xtask agent-smoke` with kill-mid-run-and-restart.
 
-### W2 — Post-write snapshots
+### W2 — Post-write snapshots (local first, then SFTP)
 
 Files a run writes have no stored fingerprint (the snapshot is
-pre-run), so even under W1 the continuing run re-reads the whole written
-set. The write path already fetches post-write attributes for
-verification (`staged_version_on`, `sftp.rs:921-935`; local
-`receive_file`; peer `PeerReply::Received`, `remote.rs:487`).
+pre-run), so the continuing run re-reads the whole written set.
 
-- **Change.** Have each endpoint write op surface the post-write stat
-  key it already read, assembled into `(path, ObservedEntry)` pairs per
-  side. Attach them to `Commit::Base` so the next snapshot write —
-  inside the same transaction as the base rows — records the post-write
-  fingerprint for every committed write, and drops fingerprints for
-  archived/removed paths. Atomic with the base commit: a fingerprint can
-  never outlive the write it proves.
-- **Scope.** All endpoints (local, SFTP, peer). For local it also
-  removes the cold re-hash of just-written files on the next run — the
-  same gap `docs/performance/million-file-engine-state-hot-paths.md`
-  proposal 2 identifies for steady-state runs.
+- **Mechanism.** A per-side list of `(path, ObservedEntry)` post-write
+  fingerprints rides `Commit::Base` (`BaseUpdate` has no side today —
+  new plumbing), upserted inside `change_base`'s transaction
+  (`database.rs:1136`) and dropped for archived/removed paths. Atomic
+  with the base commit: a fingerprint never outlives the write it
+  proves. Undo commits must drop the snapshot rows they revert — undo
+  never touches them today, and a put-back keeps size+mtime+mode, which
+  would trick stat-reuse into the wrong version.
+- **Local:** write versions come from the staged temporary's stat
+  *before* rename (`local/foreign.rs:169-201`, `local/apply.rs:231-237`),
+  and the local key holds ctime+inode, which the rename changes.
+  Re-stat after placement, as `receive_link`/`receive_directory`
+  already do (`foreign.rs:219,239`). The device matrix proves the key
+  matches a fresh scan on APFS, exFAT and SMB.
+- **SFTP:** choose between the staged `lstat`
+  (`staged_version_on`, `sftp.rs:1076-1087`, *not* the post-placement
+  path) and one extra LSTAT after `place_on` (:1211), which returns
+  nothing today. Caveat for the ADR: the SFTP digest covers bytes
+  *sent*, never read back, so under W1 written content is first
+  verified at the weekly re-read.
+- **Peer: out of scope.** This Mac's stored snapshot of a peer side is
+  not what skips work — peers keep a root-local cache on the serving
+  Mac (`endpoint.rs:265-274`), in memory, updated after an observe
+  (`remote/serve.rs`). A peer version belongs to the serving side and
+  needs no wire change; take it as a separate item or drop it.
 - **Tests.** First sync then a no-change run shows an observe with no
-  hashing/reading of written files; simulated runs interrupted mid-way
-  re-verify nothing already written. Snapshot rows agree with the base
-  they committed beside.
+  hashing of written files; simulated interrupted runs re-verify
+  nothing already written (needs a read counter to assert); undo
+  invalidates reverted rows.
 
-### W3 — Continue runs the agent lost
+### W1 — Stat-trust observation for SFTP targets (needs ADR + owner decision)
 
-Persist just enough to know a pair was working when the agent stopped,
-then resume it as a fresh run.
+Today the SFTP observe reads every file on every run — ADR 0028's
+"contents and link targets are re-read" is a deliberate contract, so
+this is a policy change, not a refactor.
 
-- **Marker.** Next state schema version: a per-pair "job working"
-  record (pair id, work kind, started), written at claim publication
-  (`Jobs::publish_claim`, `sync.rs:789`) and cleared in the `spawn`
-  completion path before the status publishes (`sync.rs:881-887`).
-  Best-effort like history: a lost clear leaves a stale marker that
-  resumes once, harmlessly.
-- **On start.** `Service::open` (before `start_scheduler`): pairs with a
-  marker get a working-state placeholder so `sync.status` reports the
-  pair as continuing rather than idle; the scheduler starts them at the
-  first tick as `Work::Scheduled` runs — unattended gates apply, so a
-  plan that still needs review stops `NeedsApproval` for a person.
-  Resume is skipped by every existing hold: crash-loop safe mode
-  (`run_due` already refuses), automation pause, per-pair pause,
-  `automation_hold` after undo, environment holds, and a pair whose
-  marker says the interrupted job was an Undo or a Preview.
-- **Policy decision.** Manual pairs: resume unattended too (recommended
-  — the run re-gates everything; worst case it stops for approval), or
-  surface an "interrupted — sync again" status and wait for a person.
-  Record the choice; the mechanism is the same either way.
-- **Status and history.** Optional but recommended: a new
-  `SyncStatus::Interrupted`-style outcome in history (alongside
-  completed/cancelled/needs-approval/failed), so the app can show "the
-  sync stopped when the agent did" instead of nothing. Wire, FFI, app
-  and CLI updates ride the same protocol bump.
-- **Edge cases.** An interrupted first sync resumes through the normal
-  first-run gates (identities still uncommitted). The stale lease of the
-  killed run waits out its TTL inside the resumed run's existing lease
-  acquisition. A pair edited or removed while down behaves as if
-  configured today (revision checks in commit already stop stale work).
-- **Tests.** Service tests with a pre-seeded marker: restart → resume
-  starts; `NeedsApproval`/`Undone` holds stay held; safe mode blocks.
-  Extend `cargo xtask agent-smoke` with a kill-mid-run-and-restart case.
+- **Scope — recommend (b), targets only, plus (c) opt-in.** Reuse
+  remote stat only on sides Foldover alone writes: Backup and Mirror
+  targets that keep records and are leased every run. That covers the
+  motivating case (backup *to* SFTP) without the (a) risk the original
+  plan's rationale overstated: PLAN §4.8's "unchanged" needs same size,
+  mtime **and file ID**, and SFTP v3 has neither inode nor ctime — the
+  fields that catch `touch -r`/`cp -p`/`rsync -t` rewrites. On an SFTP
+  *source* or two-way side, a stat-preserving edit would be silently
+  synced or stale for up to a week instead of raising a conflict.
+  `records=source` targets cannot satisfy (b) — no lease, and ADR 0040
+  notes another Mac writing the same target goes unnoticed — so they
+  stay re-read. Option (c) is a per-pair opt-in for sources and Sync
+  sides whose owners accept the weekly-detection risk.
+- **Reuse rule.** In `observe_entry` (`sftp.rs:770`), test
+  `known.fingerprint().same_stat(&stat_key(attributes), size)` *before*
+  `self.version()` — on the walk thread, like local (`local.rs:2010`),
+  not on a pool worker. Require complete attributes: `stat_key`
+  substitutes `u64::MAX`/`0` for absent size/mtime (`sftp.rs:1974-1987`),
+  and an epoch-0 mtime would look ancient, so missing fields refuse
+  reuse (the `from_key` contract at `local.rs:334` agrees). Share the
+  reuse predicate `pub(crate)` rather than copying local's private
+  helpers.
+- **Racy window across two clocks.** `observed_at` is this Mac's clock;
+  `mtime` is the server's, in whole seconds. If the server runs ≥3 s
+  behind, a just-edited file looks settled and a same-second same-size
+  edit reuses a stale version. Either measure the offset from files
+  Foldover itself creates (identity file, lease, staged temporaries) or
+  use an SFTP window of minutes–hours — nearly all backup files are
+  old, so a large window costs little. Decide in the ADR; test skew in
+  both directions.
+- **Refresh on confirming reads.** Today's post-read equality check
+  returns `known` with its old `observed_at` (`sftp.rs:786-791`,
+  justified only by "never reused unread"), so an aged fingerprint
+  would re-read forever and one taken inside the window would never
+  settle. A confirming re-read must record the new observation time —
+  the observation-cache path for that exists
+  (`observation_cache.rs:286-305`).
+- **Drop a contradicted fingerprint.** Execute still reads content:
+  destination digest checks (ADR 0034), `verified_at_on` on replace and
+  archive (`sftp.rs:978`, :1352). If a reused version was stale, those
+  fail once — and every run thereafter for a week. On contradiction,
+  delete the path's fingerprint so the next observe re-reads and
+  re-fingerprints.
+- **Weekly re-verification** on local's cadence
+  (`Fingerprint::reread_after`/`read_within`, `local.rs:301,357-371`) —
+  the only detection for stat-preserving remote edits, so the ADR must
+  say written SFTP content is verified at this cadence, never at write
+  time.
+- **Acceptance by request counts:** a no-change run issues no OPEN/READ
+  for fingerprint-matched files. (The 96 µs/file figure in
+  `per-file-cost-budget.md` is today's read-everything observe, not a
+  bound.)
+- **Tests.** Matching stat → no session request; changed stat → read;
+  skewed clocks both ways; missing size/mtime → no reuse; confirming
+  read refreshes age; contradicted fingerprint dropped. `sftp-server`
+  fixture (`FOLDOVER_SFTP_SERVER`). Simulation cannot cover this (no
+  SFTP endpoint; the memory endpoint's empty-key fingerprint never
+  reuses) — say so in the ADR.
 
-### W4 — Optional: resume copies to SFTP destinations
+### W4 — Resume copies killed in flight (optional, last)
 
-ADR 0034 leaves SFTP destinations restarting interrupted copies because
-pipelined writes can land out of order and nothing server-side hashes
-the staged bytes. Bounds: at most one file per worker. Options: stage
-SFTP copies sequentially so `.foldover/partial` applies (throughput cost
-inside a file, none across files), or keep per-range bookkeeping on the
-staged file. Decide with the perf numbers in
-`docs/performance/sftp-million-file-run-costs.md`; independent of W1–W3.
+Killed staged copies are archived on every endpoint kind, and SFTP
+destinations never keep partials. For the staged file: keep pipelined
+writes but persist the contiguous acknowledged offset; on resume,
+truncate beyond it and hash the source's prefix locally (the SFTP
+digest is computed over bytes sent anyway); keep the partial under
+`.foldover/partial`; exclude `records=source` targets (ADR 0040: no
+resume there). Sequential staging is **not** acceptable — it drops 16×
+32 KiB pipelining to one request on exactly the large files this is
+for. Also requires telling staged copies from displaced originals,
+which share the `.foldover-tmp-*` prefix — e.g. a name suffix or the
+partial marker itself.
 
-## Non-goals and follow-ups
+## Follow-ups outside this plan
 
-- **Checkpoint resume (persisted plan + cursor):** rejected for now —
-  after W1–W3 it saves only a stat walk, and its complexity sits on the
-  correctness-critical execute loop. Revisit if large-tree resumes still
-  hurt.
-- **Semantics W3 does not give:** the resuming run is a new run — its
-  first journal batch replaces the killed run's journal, so Undo covers
-  only the resuming run's writes; an over-fuse plan re-stops for a
-  person; history shows two runs. A later "run identity" item could
-  chain resumed runs into one logical unit if users miss these.
-- **`Durability::Full` on SFTP** stays refused (ADR 0028).
+- Persisted-plan checkpoint resume: still rejected — after W1–W3 it
+  saves only a stat walk, at the price of the execute loop's
+  correctness surface.
+- If manual auto-resume (W3(b)) is chosen: persisting skips, the
+  reviewed-preview binding, and pending-edit activation semantics each
+  deserve their own ADR section.
 
 ## Verification
 
-- `cargo xtask ci` on every change; `cargo deny check` untouched.
-- Simulation (`foldover-engine/src/run/tests/simulation.rs`): add seeds
-  that interrupt mid-execute and assert the follow-up run reads nothing
-  already written — the convergence property already exists.
-- SFTP: the `sftp-server` fixture tests for W1; `scripts/device-matrix.sh`
-  for local W2 paths on APFS/exFAT.
-- Performance qualification: rerun the million-file SFTP pipeline
-  (`docs/performance/sftp-lan-million-doc-pipeline.md`,
-  `perf/run-qualification.py`) before and after W1+W2; record observe
-  wall-time in the perf docs.
-- Docs: ADRs for W1 (stat-trust scope) and W3 (resume policy);
-  changelog entry per work item.
+- `cargo xtask ci` on every change.
+- Simulation seeds: interrupt mid-execute, assert the follow-up run
+  reads nothing already written (new read counter), undo across a
+  continued run name.
+- SFTP: `sftp-server` fixture tests for W1; `scripts/device-matrix.sh`
+  for local post-write fingerprints on APFS/exFAT/SMB.
+- `cargo xtask agent-smoke` extended: kill agent mid-run, restart,
+  assert resume.
+- Performance: rerun the million-file SFTP pipeline
+  (`perf/run-qualification.py`) before and after W1+W2; report observe
+  wall-time and remote request counts in `docs/performance/`.
+- Docs: ADRs for W1 (stat-trust scope and clock handling) and W3
+  (resume policy, manual-pair decision); changelog per work item.
