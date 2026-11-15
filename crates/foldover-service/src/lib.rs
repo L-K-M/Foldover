@@ -1757,6 +1757,39 @@ mod tests {
         assert!(run_due_started(&service, at(120)).await.is_empty());
     }
 
+    /// Declining an interrupted sync while its continuation is starting
+    /// stops that start: the job still reads interrupted until it
+    /// publishes, so the decline must reach the claim.
+    #[tokio::test]
+    async fn declining_an_interrupted_sync_stops_a_continuation_that_is_starting() {
+        let (directory, service) = fixture();
+        let created = service
+            .handle(Request::call(
+                1,
+                PAIR_CREATE,
+                Some(input(directory.path(), "Docs")),
+            ))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        assert_eq!(first_sync(&service, &key).await["state"], "finished");
+        interrupt(
+            &service,
+            id,
+            foldover_engine::WritingRun::Scheduled,
+            foldover_engine::Resume::Auto,
+            false,
+        );
+
+        let (cancel, _claim) = service.jobs.hold_claim(id, sync::Work::Scheduled);
+        service
+            .handle(Request::call(2, SYNC_CANCEL, Some(key)))
+            .await
+            .unwrap();
+        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
     #[tokio::test]
     async fn declined_and_crash_looping_interrupted_runs_do_not_continue() {
         let (directory, service) = fixture();

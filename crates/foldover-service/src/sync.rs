@@ -350,9 +350,14 @@ impl Jobs {
     }
 
     /// Show the pair idle once a person declined its interrupted run;
-    /// false when a job replaced that status meanwhile.
+    /// false when a job replaced that status meanwhile or is starting.
     pub(crate) fn clear_interrupted(&self, id: PairId) -> bool {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        // A start holding a claim still shows the interrupted job until it
+        // publishes its own; the caller must cancel that start instead.
+        if state.claiming.contains_key(&id) {
+            return false;
+        }
         if !matches!(
             state.jobs.get(&id).map(|job| &job.status),
             Some(SyncStatus::Interrupted { .. })
@@ -707,6 +712,20 @@ impl Jobs {
             done
         });
         Ok(acknowledged)
+    }
+
+    /// Hold a claim on `id` as a start does before it publishes its job,
+    /// with the claim's cancel flag, until the returned guard drops.
+    #[cfg(test)]
+    pub(crate) fn hold_claim(
+        self: &Arc<Self>,
+        id: PairId,
+        work: Work,
+    ) -> (Arc<AtomicBool>, Box<dyn std::any::Any>) {
+        let reservation = self
+            .reserve_claim(id, work)
+            .expect("the pair can be claimed");
+        (Arc::clone(&reservation.cancel), Box::new(reservation))
     }
 
     /// Start a test-provided job through the same claim and publish path.
