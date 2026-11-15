@@ -148,6 +148,18 @@ impl Reach {
     }
 }
 
+/// Whether a remote folder's unchanged stat may prove a file's version
+/// without reading it (ADR 0057). Local folders always may: their stat
+/// key holds the file's identity and change time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StatTrust {
+    /// Read every remote file's content to prove its version.
+    Read,
+    /// Reuse a settled remote file's version while its size, modification
+    /// time, mode and owner stay the same, rereading it about weekly.
+    Reuse,
+}
+
 /// What a write left at its path: the version stored, and, where the
 /// folder can tell, the entry as observed right after the write. Its
 /// stat lets the next run reuse the version without reading it again
@@ -271,6 +283,7 @@ impl Endpoint {
         base: Arc<PathMap<BaselineEntry>>,
         side: Side,
         hints: ObservationHints,
+        trust: StatTrust,
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<Observation, ScanError> {
@@ -279,7 +292,7 @@ impl Endpoint {
                 policy, filter, previous, base, side, hints, control, progress,
             ),
             Self::Sftp(endpoint) => endpoint.observe_owned(
-                policy, filter, previous, base, side, hints, control, progress,
+                policy, filter, previous, base, side, hints, trust, control, progress,
             ),
             // Peers keep a root-local cache on the serving Mac. Fold their
             // received observations into the caller's comparison afterward.

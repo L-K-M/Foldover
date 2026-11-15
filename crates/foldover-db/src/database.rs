@@ -1180,13 +1180,15 @@ impl Database {
         changes: &[BaseChange<'_>],
         journal: JournalChange<'_>,
     ) -> Result<(), Error> {
-        self.change_base_observed::<SnapshotRow>(pair, revision, changes, journal, &[])
+        self.change_base_observed::<SnapshotRow>(pair, revision, changes, journal, &[], &[])
     }
 
     /// `change_base`, also storing each side's entries as the writes behind
     /// the changes left them (ADR 0056), so the next run reuses their
-    /// versions unread. A snapshot row never outlives the base it proves.
-    /// `observed` holds `(side, row)` pairs, `side` `left` or `right`.
+    /// versions unread, and deleting the stored rows of `forgotten` paths,
+    /// whose writes failed, so the next run reads them (ADR 0057). A
+    /// snapshot row never outlives the base it proves. Both hold
+    /// `(side, …)` pairs, `side` `left` or `right`.
     pub fn change_base_observed<T: SnapshotData>(
         &mut self,
         pair: &[u8],
@@ -1194,6 +1196,7 @@ impl Database {
         changes: &[BaseChange<'_>],
         journal: JournalChange<'_>,
         observed: &[(&str, T)],
+        forgotten: &[(&str, &[u8])],
     ) -> Result<(), Error> {
         let transaction = self
             .connection
@@ -1242,6 +1245,13 @@ impl Database {
                         }
                     }
                 }
+            }
+        }
+        if !forgotten.is_empty() {
+            let mut forget = transaction
+                .prepare("DELETE FROM snapshot_entry WHERE pair_id=?1 AND side=?2 AND path=?3")?;
+            for (side, path) in forgotten {
+                forget.execute(params![pair, side, path])?;
             }
         }
         if !observed.is_empty() {
@@ -1975,6 +1985,7 @@ pub(super) mod tests {
                     ("right", row(b"a", b"fa", b"1")),
                     ("right", row(b"b", b"fb", b"2")),
                 ],
+                &[],
             )
             .unwrap();
         assert_eq!(
@@ -1982,6 +1993,22 @@ pub(super) mod tests {
             [row(b"a", b"fa", b"1"), row(b"b", b"fb", b"2")]
         );
         assert!(database.snapshot(&pair.id, "left").unwrap().is_empty());
+
+        // A failed write's path is read again next run.
+        database
+            .change_base_observed::<SnapshotRow>(
+                &pair.id,
+                1,
+                &[],
+                JournalChange::None,
+                &[],
+                &[("right", b"a"), ("left", b"b")],
+            )
+            .unwrap();
+        assert_eq!(
+            database.snapshot(&pair.id, "right").unwrap(),
+            [row(b"b", b"fb", b"2")]
+        );
 
         // A stale revision stores neither the base nor the observation.
         assert!(matches!(
@@ -1991,10 +2018,11 @@ pub(super) mod tests {
                 &[put(b"c", b"3")],
                 JournalChange::None,
                 &[("right", row(b"c", b"fc", b"3"))],
+                &[("right", b"b")],
             ),
             Err(Error::StaleRevision)
         ));
-        assert_eq!(database.snapshot(&pair.id, "right").unwrap().len(), 2);
+        assert_eq!(database.snapshot(&pair.id, "right").unwrap().len(), 1);
         assert_eq!(database.base_rows(&pair.id).unwrap().len(), 2);
     }
 

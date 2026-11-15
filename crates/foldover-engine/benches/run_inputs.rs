@@ -112,6 +112,7 @@ fn engine_with_inputs() -> (tempfile::TempDir, Engine, foldover_types::PairConfi
                 updates: &updates,
                 journal: &[],
                 observed: &[],
+                forgotten: &[],
             },
         )
         .unwrap();

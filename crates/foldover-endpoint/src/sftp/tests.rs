@@ -609,6 +609,7 @@ fn owned_observations_preserve_exact_cache_values_and_report_real_changes() {
                 Arc::new(foldover_types::PathMap::new()),
                 foldover_types::Side::Right,
                 crate::ObservationHints::default(),
+                StatTrust::Read,
                 &mut proceed,
                 &mut |_| {},
             )
@@ -630,6 +631,7 @@ fn owned_observations_preserve_exact_cache_values_and_report_real_changes() {
                 Arc::new(foldover_types::PathMap::new()),
                 foldover_types::Side::Right,
                 crate::ObservationHints::default(),
+                StatTrust::Read,
                 &mut proceed,
                 &mut |_| {},
             )
@@ -2835,5 +2837,159 @@ fn cached_spelling_writes_cannot_exceed_the_byte_budget() {
         let name = format!("{index:06}{}", "x".repeat(240));
         remote.note_added(&remote.remote(name.as_bytes()));
         assert!(remote.listings.lock().unwrap().retained_bytes() <= 32 * 1024 * 1024);
+    }
+}
+
+const SSH_FXP_OPEN: u64 = 3;
+
+/// Set `name`'s modification time `offset` seconds from now; negative is
+/// in the past, as a server clock behind this Mac's would show it.
+fn modified_at(directory: &Path, name: &str, offset: i64) {
+    let now = SystemTime::now();
+    let at = if offset < 0 {
+        now - Duration::from_secs(offset.unsigned_abs())
+    } else {
+        now + Duration::from_secs(offset.unsigned_abs())
+    };
+    fs::File::options()
+        .write(true)
+        .open(directory.join(name))
+        .unwrap()
+        .set_modified(at)
+        .unwrap();
+}
+
+fn observe_trusting(
+    remote: &SftpEndpoint,
+    previous: foldover_types::PathMap<ObservedEntry>,
+    trust: StatTrust,
+) -> Observation {
+    remote
+        .observe_owned(
+            PairOptions::default().metadata(),
+            &Filter::none(),
+            previous,
+            Arc::new(foldover_types::PathMap::new()),
+            foldover_types::Side::Right,
+            crate::ObservationHints::default(),
+            trust,
+            &mut proceed,
+            &mut |_| {},
+        )
+        .unwrap()
+}
+
+/// ADR 0057: where stats are trusted, a file modified more than an hour
+/// before it was read is proved by its stat and opened no more. A file
+/// modified within the hour, or after the read by a server clock ahead of
+/// this Mac's, a changed stat, and every file where stats are not
+/// trusted, are read.
+#[test]
+fn settled_remote_stats_prove_versions_only_where_trusted() {
+    let directory = tempfile::tempdir().unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    let log = logs.path().join("packets");
+    let Some(remote) = counted(directory.path(), &log) else {
+        return;
+    };
+    const HOUR: i64 = 60 * 60;
+    for (name, offset) in [
+        ("settled", -HOUR - 60),
+        ("resized", -HOUR - 60),
+        ("within", -HOUR + 60),
+        ("ahead", 30 * 60),
+    ] {
+        fs::write(directory.path().join(name), name).unwrap();
+        modified_at(directory.path(), name, offset);
+    }
+    fs::create_dir(directory.path().join("folder")).unwrap();
+    std::os::unix::fs::symlink("settled", directory.path().join("link")).unwrap();
+
+    let first = observe_trusting(&remote, foldover_types::PathMap::new(), StatTrust::Reuse);
+    let versions = first.versions();
+    let opened = requests(&log, SSH_FXP_OPEN);
+    assert_eq!(opened, 4, "every file is read once");
+
+    let again = observe_trusting(&remote, first.into_snapshot(), StatTrust::Reuse);
+    assert_eq!(again.versions(), versions);
+    assert_eq!(
+        requests(&log, SSH_FXP_OPEN) - opened,
+        2,
+        "only the unsettled files are read again"
+    );
+
+    fs::write(directory.path().join("resized"), b"longer content").unwrap();
+    modified_at(directory.path(), "resized", -HOUR - 60);
+    let opened = requests(&log, SSH_FXP_OPEN);
+    let changed = observe_trusting(&remote, again.into_snapshot(), StatTrust::Reuse);
+    assert_ne!(changed.versions(), versions);
+    assert_eq!(requests(&log, SSH_FXP_OPEN) - opened, 3);
+
+    let opened = requests(&log, SSH_FXP_OPEN);
+    observe_trusting(&remote, changed.into_snapshot(), StatTrust::Read);
+    assert_eq!(requests(&log, SSH_FXP_OPEN) - opened, 4);
+}
+
+/// ADR 0057: a confirming read records its time where stats are trusted,
+/// so a fingerprint can settle; elsewhere the stored one stands and the
+/// snapshot is not rewritten.
+#[test]
+fn confirming_reads_refresh_fingerprints_only_where_trusted() {
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    fs::write(directory.path().join("fresh"), b"fresh").unwrap();
+    for (trust, rewritten) in [(StatTrust::Read, false), (StatTrust::Reuse, true)] {
+        let first = observe_trusting(&remote, foldover_types::PathMap::new(), trust);
+        let mut again = observe_trusting(&remote, first.into_snapshot(), trust);
+        assert_eq!(again.finish_snapshot(), Some(rewritten), "{trust:?}");
+    }
+}
+
+/// `stat_key` writes placeholders for a missing size or modification
+/// time, which match each other; such a stat proves nothing.
+#[test]
+fn incomplete_remote_stats_prove_nothing() {
+    let settled = SystemTime::now() - Duration::from_secs(2 * 60 * 60);
+    let seconds = settled.duration_since(UNIX_EPOCH).unwrap().as_secs() as u32;
+    let complete = Attributes {
+        size: Some(4),
+        owner: Some((501, 20)),
+        permissions: Some(0o100_644),
+        times: Some((seconds, seconds)),
+    };
+    let incomplete = [
+        Attributes {
+            size: None,
+            ..complete
+        },
+        Attributes {
+            times: None,
+            ..complete
+        },
+    ];
+    let path = path(b"file");
+    let entry = |attributes: &Attributes| {
+        ObservedEntry::new(
+            EntryVersion::new(
+                foldover_types::EntryContent::Directory,
+                Digest::from_bytes([0; 32]),
+            ),
+            Fingerprint::from_key(
+                stat_key(attributes),
+                attributes.size.unwrap_or(0),
+                SystemTime::now(),
+            ),
+        )
+    };
+    let previous = BTreeMap::from([(path.clone(), entry(&complete))]);
+    let cache = Cache::Borrowed(&previous);
+    assert!(reusable(&path, &complete, &cache, StatTrust::Reuse).is_some());
+    assert!(reusable(&path, &complete, &cache, StatTrust::Read).is_none());
+    for attributes in incomplete {
+        let previous = BTreeMap::from([(path.clone(), entry(&attributes))]);
+        let cache = Cache::Borrowed(&previous);
+        assert!(reusable(&path, &attributes, &cache, StatTrust::Reuse).is_none());
     }
 }
