@@ -408,6 +408,14 @@ impl LocalEndpoint {
             &observed(&updated.metadata, extended.as_ref()),
             run.options.metadata(),
         );
+        // The content is the verified file's, so only that file's stat may
+        // prove it: a replacement that raced the update leaves no
+        // fingerprint, and the next run reads it.
+        if updated.metadata.identity() != destination.metadata.identity()
+            || updated.metadata.size() != destination.metadata.size()
+        {
+            return Ok(Written::unobserved(version));
+        }
         Ok(written(version, &updated, observed_at))
     }
 
