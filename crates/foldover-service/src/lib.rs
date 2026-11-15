@@ -1861,19 +1861,20 @@ mod tests {
         assert!(right.join("photo-0").exists());
 
         // Settings changed since it started: it waits for the person.
-        let mut engine = service.engine.lock().unwrap();
-        let revision = engine.active_pair(id).unwrap().revision();
-        engine
-            .admit_run(
-                id,
-                SystemTime::now(),
-                foldover_engine::WritingRun::Manual,
-                revision,
-                foldover_engine::Resume::Auto,
-            )
-            .unwrap();
-        let interrupted = engine.interrupted_at_start(false).unwrap();
-        drop(engine);
+        let (revision, interrupted) = {
+            let mut engine = service.engine.lock().unwrap();
+            let revision = engine.active_pair(id).unwrap().revision();
+            engine
+                .admit_run(
+                    id,
+                    SystemTime::now(),
+                    foldover_engine::WritingRun::Manual,
+                    revision,
+                    foldover_engine::Resume::Auto,
+                )
+                .unwrap();
+            (revision, engine.interrupted_at_start(false).unwrap())
+        };
         let changed = std::collections::HashMap::from([(id, revision + 1)]);
         service.jobs.load_interrupted(&interrupted, &changed);
         assert!(service.jobs.resumable().is_empty());
@@ -1883,6 +1884,44 @@ mod tests {
                 .jobs
                 .start(&service.engine, id, sync::Work::Resume)
                 .is_err()
+        );
+        // A setting saved during the sync, still waiting when the agent
+        // stopped, would take effect as the continuation starts: it waits
+        // for the person instead.
+        interrupt(
+            &service,
+            id,
+            foldover_engine::WritingRun::Manual,
+            foldover_engine::Resume::Auto,
+            false,
+        );
+        assert_eq!(service.jobs.resumable().len(), 1);
+        {
+            let mut engine = service.engine.lock().unwrap();
+            let active = engine.active_pair(id).unwrap();
+            let options = active
+                .draft()
+                .options()
+                .clone()
+                .with_filters(foldover_types::Filters::new(vec!["*.raw".into()]).unwrap());
+            let edited = active.draft().clone().with_options(options);
+            engine
+                .defer_pair_update(id, active.revision(), &edited)
+                .unwrap();
+        }
+        assert!(
+            service
+                .jobs
+                .start(&service.engine, id, sync::Work::Resume)
+                .is_err()
+        );
+        let status = service
+            .handle(Request::call(9, SYNC_STATUS, Some(key.clone())))
+            .await
+            .unwrap();
+        assert_eq!(
+            (&status["state"], &status["resumes"]),
+            (&json!("interrupted"), &json!(false))
         );
     }
 

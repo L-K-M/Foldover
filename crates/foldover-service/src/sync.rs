@@ -288,7 +288,8 @@ struct State {
     jobs: HashMap<PairId, Job>,
     /// What started each interrupted run an agent start found, so the
     /// scheduler continues it as the same kind of run (ADR 0055).
-    interrupted: HashMap<PairId, WritingRun>,
+    /// with the pair revision it ran under.
+    interrupted: HashMap<PairId, (WritingRun, u64)>,
     /// Pairs whose configuration is being replaced refuse new job claims.
     mutating: HashSet<PairId>,
     /// Pairs between a successful claim check and Working publication.
@@ -341,7 +342,7 @@ impl Jobs {
                     && run.unclean < UNCLEAN_STOPS_BEFORE_HOLDING
                     && settings_kept,
             };
-            state.interrupted.insert(run.pair, run.run);
+            state.interrupted.insert(run.pair, (run.run, run.revision));
             state.jobs.insert(
                 run.pair,
                 Job {
@@ -365,12 +366,28 @@ impl Jobs {
             .filter(|(_, job)| matches!(job.status, SyncStatus::Interrupted { resumes: true, .. }))
             .map(|(id, _)| {
                 let work = match state.interrupted.get(id) {
-                    Some(WritingRun::Manual) => Work::Resume,
-                    Some(WritingRun::Scheduled) | None => Work::Scheduled,
+                    Some((WritingRun::Manual, _)) => Work::Resume,
+                    Some((WritingRun::Scheduled, _)) | None => Work::Scheduled,
                 };
                 (*id, work)
             })
             .collect()
+    }
+
+    /// The revision the pair's interrupted run ran under.
+    fn interrupted_revision(&self, id: PairId) -> Option<u64> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.interrupted.get(&id).map(|(_, revision)| *revision)
+    }
+
+    /// The pair's interrupted run no longer continues by itself.
+    fn hold_interrupted(&self, id: PairId) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(job) = state.jobs.get_mut(&id)
+            && let SyncStatus::Interrupted { resumes, .. } = &mut job.status
+        {
+            *resumes = false;
+        }
     }
 
     pub(crate) fn is_interrupted(&self, id: PairId) -> bool {
@@ -686,6 +703,11 @@ impl Jobs {
     ) -> Result<SyncStatus, RpcError> {
         let reservation = self.reserve_claim(id, work)?;
         let cancel = Arc::clone(&reservation.cancel);
+        // A person's sync continues only under the settings it ran with.
+        let resumed_revision = match work {
+            Work::Resume => self.interrupted_revision(id),
+            _ => None,
+        };
         // One start time for the admission and the run's history row.
         let started = SystemTime::now();
         // Activation and claiming use the same engine-lock boundary as
@@ -698,6 +720,17 @@ impl Jobs {
             .activate_pair_update(id)
             .map_err(|error| error.to_string());
         let pair = engine_guard.active_pair(id).map_err(crate::engine_error)?;
+        // A setting saved while it ran takes effect at this activation;
+        // the person's sync then waits for them (ADR 0055).
+        if matches!(work, Work::Resume) && resumed_revision != Some(pair.revision()) {
+            drop(engine_guard);
+            drop(reservation);
+            self.hold_interrupted(id);
+            return Err(RpcError::new(
+                SYNC_BUSY,
+                "The pair's settings changed since its sync was interrupted",
+            ));
+        }
         // Changes a person chose to leave alone; spent by the run that
         // executes.
         let skips = engine_guard.skips(id).map_err(crate::engine_error)?;
