@@ -55,7 +55,8 @@ pub(crate) fn record(
 ) {
     let trigger = match work {
         Work::Preview => return,
-        Work::Run(..) => RunTrigger::Manual,
+        // A resumed sync is still the one a person started.
+        Work::Run(..) | Work::Resume => RunTrigger::Manual,
         Work::Scheduled => RunTrigger::Scheduled,
         Work::Undo => RunTrigger::Undo,
     };

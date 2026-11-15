@@ -50,6 +50,10 @@ pub(crate) enum Work {
     Run(Approval, Option<ReviewToken>),
     /// Unattended: stops instead of asking when deletions need approval.
     Scheduled,
+    /// Continue a person's sync the agent stopped during (ADR 0055): run
+    /// as theirs, but with no reviewed plan, so the interactive deletion
+    /// check and a required review stop it for them instead.
+    Resume,
     /// Undo the pair's newest writing run (ADR 0029).
     Undo,
 }
@@ -61,25 +65,30 @@ impl Work {
     fn effort(self, engine: &Engine) -> Effort {
         match self {
             Self::Scheduled => engine.automatic_effort().unwrap_or(Effort::Gentle),
-            Self::Preview | Self::Run(..) | Self::Undo => Effort::Full,
+            Self::Preview | Self::Run(..) | Self::Resume | Self::Undo => Effort::Full,
         }
     }
 
     /// How a writing run is admitted (ADR 0055); previews and undos are
-    /// not. A scheduled run continues by itself after the agent stops; a
-    /// person's sync waits for the next one.
+    /// not. Both kinds continue by themselves after the agent stops: a
+    /// scheduled run as a scheduled one, a person's sync as `Resume`.
     fn admission(self) -> Option<(WritingRun, Resume)> {
         match self {
-            Self::Run(..) => Some((WritingRun::Manual, Resume::Manual)),
+            Self::Run(..) | Self::Resume => Some((WritingRun::Manual, Resume::Auto)),
             Self::Scheduled => Some((WritingRun::Scheduled, Resume::Auto)),
             Self::Preview | Self::Undo => None,
         }
     }
 
+    /// Unattended work: it never replaces a result held for a person.
+    fn unattended(self) -> bool {
+        matches!(self, Self::Scheduled | Self::Resume)
+    }
+
     fn job(self) -> SyncJob {
         match self {
             Self::Preview => SyncJob::Preview,
-            Self::Run(..) | Self::Scheduled => SyncJob::Run,
+            Self::Run(..) | Self::Scheduled | Self::Resume => SyncJob::Run,
             Self::Undo => SyncJob::Undo,
         }
     }
@@ -251,7 +260,6 @@ impl Progress {
 struct Claim {
     /// The review the replaced job held.
     held: Option<Reviewed>,
-    skips: BTreeMap<SyncPath, Skip>,
     progress: Arc<Progress>,
     /// The status stored under the lock, to answer the start request
     /// with: a fast job can publish its result before `status(id)` is
@@ -278,9 +286,10 @@ enum MutationScope {
 #[derive(Default)]
 struct State {
     jobs: HashMap<PairId, Job>,
-    /// Changes a person chose to leave alone in the pair's next run; spent
-    /// by the next run that executes.
-    skips: HashMap<PairId, BTreeMap<SyncPath, Skip>>,
+    /// What started each interrupted run an agent start found, so the
+    /// scheduler continues it as the same kind of run (ADR 0055).
+    /// with the pair revision it ran under.
+    interrupted: HashMap<PairId, (WritingRun, u64)>,
     /// Pairs whose configuration is being replaced refuse new job claims.
     mutating: HashSet<PairId>,
     /// Pairs between a successful claim check and Working publication.
@@ -307,10 +316,20 @@ impl Jobs {
     }
 
     /// Show the runs an agent start found interrupted (ADR 0055). Called
-    /// before any job can start, so it replaces no job's result.
-    pub(crate) fn load_interrupted(&self, runs: &[InterruptedRun]) {
+    /// before any job can start, so it replaces no job's result. A
+    /// person's sync continues only under the settings they started it
+    /// with: `revisions` holds each pair's active revision.
+    pub(crate) fn load_interrupted(
+        &self,
+        runs: &[InterruptedRun],
+        revisions: &HashMap<PairId, u64>,
+    ) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         for run in runs {
+            let settings_kept = match run.run {
+                WritingRun::Scheduled => true,
+                WritingRun::Manual => revisions.get(&run.pair) == Some(&run.revision),
+            };
             let started = run
                 .started
                 .duration_since(std::time::UNIX_EPOCH)
@@ -319,8 +338,11 @@ impl Jobs {
                 });
             let status = SyncStatus::Interrupted {
                 started,
-                resumes: run.resume == Resume::Auto && run.unclean < UNCLEAN_STOPS_BEFORE_HOLDING,
+                resumes: run.resume == Resume::Auto
+                    && run.unclean < UNCLEAN_STOPS_BEFORE_HOLDING
+                    && settings_kept,
             };
+            state.interrupted.insert(run.pair, (run.run, run.revision));
             state.jobs.insert(
                 run.pair,
                 Job {
@@ -334,15 +356,38 @@ impl Jobs {
         }
     }
 
-    /// Pairs whose interrupted run continues by itself.
-    pub(crate) fn resumable(&self) -> HashSet<PairId> {
+    /// Pairs whose interrupted run continues by itself, with the work
+    /// that continues it.
+    pub(crate) fn resumable(&self) -> HashMap<PairId, Work> {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state
             .jobs
             .iter()
             .filter(|(_, job)| matches!(job.status, SyncStatus::Interrupted { resumes: true, .. }))
-            .map(|(id, _)| *id)
+            .map(|(id, _)| {
+                let work = match state.interrupted.get(id) {
+                    Some((WritingRun::Manual, _)) => Work::Resume,
+                    Some((WritingRun::Scheduled, _)) | None => Work::Scheduled,
+                };
+                (*id, work)
+            })
             .collect()
+    }
+
+    /// The revision the pair's interrupted run ran under.
+    fn interrupted_revision(&self, id: PairId) -> Option<u64> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.interrupted.get(&id).map(|(_, revision)| *revision)
+    }
+
+    /// The pair's interrupted run no longer continues by itself.
+    fn hold_interrupted(&self, id: PairId) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(job) = state.jobs.get_mut(&id)
+            && let SyncStatus::Interrupted { resumes, .. } = &mut job.status
+        {
+            *resumes = false;
+        }
     }
 
     pub(crate) fn is_interrupted(&self, id: PairId) -> bool {
@@ -365,6 +410,7 @@ impl Jobs {
             return false;
         }
         state.jobs.remove(&id);
+        state.interrupted.remove(&id);
         true
     }
 
@@ -483,14 +529,13 @@ impl Jobs {
     ) -> Result<(), RpcError> {
         let _mutation = self.mutation(id)?;
         let (_, _, (left, right)) = self.choice(engine, id, path, token)?;
-        self.state
+        // Stored, so the choice outlives an agent restart and a run
+        // continuing an interrupted one honors it (ADR 0055).
+        engine
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .skips
-            .entry(id)
-            .or_default()
-            .insert(path.clone(), Skip::new(left, right));
-        Ok(())
+            .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?
+            .record_skip(id, path, Skip::new(left, right))
+            .map_err(crate::engine_error)
     }
 
     /// A change or conflict from the pair's latest preview, while no job
@@ -658,6 +703,11 @@ impl Jobs {
     ) -> Result<SyncStatus, RpcError> {
         let reservation = self.reserve_claim(id, work)?;
         let cancel = Arc::clone(&reservation.cancel);
+        // A person's sync continues only under the settings it ran with.
+        let resumed_revision = match work {
+            Work::Resume => self.interrupted_revision(id),
+            _ => None,
+        };
         // One start time for the admission and the run's history row.
         let started = SystemTime::now();
         // Activation and claiming use the same engine-lock boundary as
@@ -670,6 +720,20 @@ impl Jobs {
             .activate_pair_update(id)
             .map_err(|error| error.to_string());
         let pair = engine_guard.active_pair(id).map_err(crate::engine_error)?;
+        // A setting saved while it ran takes effect at this activation;
+        // the person's sync then waits for them (ADR 0055).
+        if matches!(work, Work::Resume) && resumed_revision != Some(pair.revision()) {
+            drop(engine_guard);
+            drop(reservation);
+            self.hold_interrupted(id);
+            return Err(RpcError::new(
+                SYNC_BUSY,
+                "The pair's settings changed since its sync was interrupted",
+            ));
+        }
+        // Changes a person chose to leave alone; spent by the run that
+        // executes.
+        let skips = engine_guard.skips(id).map_err(crate::engine_error)?;
         // Admitted under the engine lock, which the jobs lock never spans.
         // Best effort: without the record the run still runs, it just
         // cannot show as interrupted or keep its journal for a successor.
@@ -691,11 +755,11 @@ impl Jobs {
         let claim = reservation.publish(SyncPairContext::from(&pair));
         let Claim {
             held,
-            skips,
             progress,
             acknowledged,
         } = claim;
         let engine = Arc::clone(engine);
+        #[cfg(test)]
         let jobs = Arc::clone(self);
         self.spawn(id, Some(Arc::clone(&engine)), admission, move || {
             #[cfg(test)]
@@ -706,8 +770,13 @@ impl Jobs {
             };
             crate::history::record(&engine, id, work, started, &done.status);
             // A skip lasts one executed run.
-            if matches!(done.status, SyncStatus::Finished { .. }) {
-                jobs.spend_skips(id);
+            if matches!(done.status, SyncStatus::Finished { .. })
+                && let Err(error) = engine
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .spend_skips(id)
+            {
+                eprintln!("foldoverd: the run's skips cannot be spent: {error}");
             }
             done
         });
@@ -876,6 +945,15 @@ impl Jobs {
             Some("The pair's configuration is changing")
         } else if state.claiming.contains_key(&id) {
             Some("This pair already has a preview or sync starting")
+        } else if matches!(work, Work::Resume)
+            && !matches!(
+                state.jobs.get(&id).map(|job| &job.status),
+                Some(SyncStatus::Interrupted { resumes: true, .. })
+            )
+        {
+            // The scheduler chose the pair before taking this lock; a
+            // person may have declined the sync or changed its settings.
+            Some("The interrupted sync no longer continues by itself")
         } else {
             match state.jobs.get(&id).map(|job| (&job.status, job.after)) {
                 Some((SyncStatus::Working { .. }, _)) => {
@@ -886,11 +964,11 @@ impl Jobs {
                 // or the attempt itself errored: the attempt owns its
                 // cadence, then the scheduler retries without requiring a
                 // manual sync.
-                Some((SyncStatus::Failed { .. }, _)) if matches!(work, Work::Scheduled) => None,
+                Some((SyncStatus::Failed { .. }, _)) if work.unattended() => None,
                 Some((SyncStatus::Failed { .. }, AfterFailure::Retry)) => None,
                 // An undo waits too: an unattended run would redo it unseen.
                 Some((SyncStatus::NeedsApproval { .. } | SyncStatus::Undone { .. }, _))
-                    if matches!(work, Work::Scheduled) =>
+                    if work.unattended() =>
                 {
                     Some("The pair needs a manual sync before its schedule can continue")
                 }
@@ -917,6 +995,9 @@ impl Jobs {
             .claiming
             .remove(&id)
             .expect("claim reservation must be held");
+        // The job replaces any interrupted one; what started that one no
+        // longer describes the pair.
+        state.interrupted.remove(&id);
         let progress = Arc::new(Progress::default());
         let acknowledged = SyncStatus::Working {
             job: work.job(),
@@ -940,24 +1021,14 @@ impl Jobs {
                 },
             )
             .and_then(|previous| previous.reviewed);
-        let skips = state.skips.get(&id).cloned().unwrap_or_default();
         drop(state);
         // The job may archive or prune; the listing must not outlive that.
         self.read_ahead.forget(id);
         Claim {
             held,
-            skips,
             progress,
             acknowledged,
         }
-    }
-
-    fn spend_skips(&self, id: PairId) {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .skips
-            .remove(&id);
     }
 
     /// Run `run` on the blocking pool and publish its result. A panic
@@ -1107,7 +1178,7 @@ fn perform(
             // The engine holds the pair with its first change.
             Some(journal)
         }
-        Work::Preview | Work::Run(..) | Work::Scheduled => None,
+        Work::Preview | Work::Run(..) | Work::Scheduled | Work::Resume => None,
     };
     // Someone asked for this run: mount a share that went away. The
     // scheduler makes its own, rate-limited attempts.
@@ -1215,6 +1286,7 @@ fn perform(
             )
         }
         Work::Scheduled => (Approval::default(), RunContext::Unattended),
+        Work::Resume => (Approval::default(), RunContext::Interactive),
     };
     match run.execute(
         approval,
@@ -1226,8 +1298,9 @@ fn perform(
     ) {
         Ok(RunOutcome::Ran(report)) => {
             // A person's sync that ran ends a hold an undo left; one that
-            // stopped before running leaves it.
-            if !matches!(work, Work::Scheduled) {
+            // stopped before running leaves it. A held pair's interrupted
+            // sync is never resumed, so `Resume` has none to end.
+            if matches!(work, Work::Run(..)) {
                 let _ = engine
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)

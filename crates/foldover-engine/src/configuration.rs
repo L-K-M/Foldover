@@ -462,6 +462,29 @@ impl Engine {
         Ok(self.pairs.interrupted_at_start(unclean)?)
     }
 
+    /// Changes a person chose to leave alone in the pair's next run.
+    pub fn skips(
+        &self,
+        id: PairId,
+    ) -> Result<std::collections::BTreeMap<SyncPath, foldover_types::Skip>, Error> {
+        Ok(self.pairs.skips(id)?)
+    }
+
+    /// Leave `path` alone in the pair's next run (PLAN.md §3.8, skip once).
+    pub fn record_skip(
+        &mut self,
+        id: PairId,
+        path: &SyncPath,
+        skip: foldover_types::Skip,
+    ) -> Result<(), Error> {
+        Ok(self.pairs.record_skip(id, path, skip)?)
+    }
+
+    /// A run executed: the pair's skips are spent.
+    pub fn spend_skips(&mut self, id: PairId) -> Result<(), Error> {
+        Ok(self.pairs.spend_skips(id)?)
+    }
+
     /// A person chose not to continue the pair's interrupted run.
     pub fn forget_interrupted(&mut self, id: PairId) -> Result<(), Error> {
         Ok(self.pairs.forget_interrupted(id)?)

@@ -1,8 +1,6 @@
 # ADR 0055: Interrupted runs
 
-Status: Implemented for scheduled runs; a person's runs wait for the next
-sync until manual-pair resume lands
-([plan](../resume-interrupted-runs.md), W3)
+Status: Implemented ([plan](../resume-interrupted-runs.md), W3)
 
 ## Context
 
@@ -57,12 +55,25 @@ Two designs were reviewed and rejected:
   whether it continues by itself. The agent keeps its runtime lock until
   the process exits, after the runtime has waited for a sync still
   running, so no second agent can find that sync's row.
-- **Continuing it.** A scheduled run continues by itself: the scheduler
-  treats the pair as due at its first tick, through the same holds as
-  every automatic sync (safe mode, the global pause, pair pauses, the
-  hold after an undo, Low Power Mode and costly networks). A person's
-  sync waits for the next sync. Cancelling an interrupted pair declines
-  it: the row is deleted and nothing continues it.
+- **Continuing it.** Both kinds of run continue by themselves (the
+  owner's decision of 2026-11-15 for a person's sync): the scheduler
+  treats the pair as due at its first tick, manual pairs included,
+  through the same holds as every automatic sync (safe mode, the global
+  pause, pair pauses, the hold after an undo, Low Power Mode and costly
+  networks). Cancelling an interrupted pair declines it: the row is
+  deleted and nothing continues it.
+  - A scheduled run continues as a scheduled one.
+  - A person's sync continues as `Work::Resume`: at full effort, with
+    the share remount and the manual history trigger, like the person's
+    own sync, and with the interactive deletion check. It presents no
+    reviewed plan, since that died with the old agent, so it stops for
+    approval above 50 deletions and 1% of a side, and whenever the pair
+    requires review: it starts unattended and halts at the fuse.
+  - A person's sync continues only under the settings it started with:
+    when the pair's revision changed, for example because a saved edit
+    was activated at the start, it waits for the person.
+  - "Skip in the next run" choices are stored (`pending_skip`, schema
+    v32) instead of held in memory, so the continuing run honors them.
 - **Undo covers the chain.** A run continuing one that wrote, or that
   itself continued one, keeps the journal: its first batch leaves the
   earlier runs' entries in place. Each run keeps its own name and archive
@@ -87,8 +98,10 @@ Two designs were reviewed and rejected:
 - After a restart, a pair whose sync stopped says so, in the app (the
   sidebar menu offers Don't Resume or Dismiss), the CLI and
   `sync.status`.
-- A scheduled backup continues at once instead of at its next interval,
-  and Undo after it reverts the whole logical sync.
+- A backup continues at once instead of at its next interval or the
+  person's next sync, and Undo after it reverts the whole logical sync.
+- A resumed sync of a pair an undo holds does not start: the hold keeps
+  every automatic start out until a person syncs.
 - A path written by both an interrupted run and the run continuing it
   goes back only to the first run's version, and is listed as changed
   since the sync: Undo judges every entry against the observation it
@@ -97,7 +110,5 @@ Two designs were reviewed and rejected:
   run's counts were in memory.
 - Older agents ignore the table: they replace the journal as before and
   show no interrupted run.
-- Still open, in the plan: manual pairs that continue by themselves
-  (`Work::Resume`, the owner's decision of 2026-11-15), and the
-  re-observation cost, which for SFTP folders means reading every remote
-  file again (W1, W2).
+- Still open, in the plan: the re-observation cost, which for SFTP
+  folders means reading every remote file again (W1, W2).
