@@ -47,7 +47,7 @@ pub use foldover_fs::{
 };
 
 #[cfg(unix)]
-pub use endpoint::{Bottleneck, Endpoint, ListedEntry, ListedKind, ObserveStep, Reach};
+pub use endpoint::{Bottleneck, Endpoint, ListedEntry, ListedKind, ObserveStep, Reach, Written};
 
 #[cfg(feature = "simulation")]
 mod memory;

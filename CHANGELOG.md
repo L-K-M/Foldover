@@ -55,6 +55,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The sync after one that copied files into a folder on this Mac no
+  longer reads those files again to check them: the sync that writes a
+  file records it as it landed. This spares the second sync of a large
+  new backup, and a sync continuing one the agent stopped during, from
+  rereading everything already copied (ADR 0056).
 - Automatic syncs run gently by default: on this Mac's own disks they use
   at most one processor core, instead of keeping several busy for minutes
   and setting off macOS's CPU warning for foldoverd. They run one at a time

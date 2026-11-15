@@ -148,6 +148,25 @@ impl Reach {
     }
 }
 
+/// What a write left at its path: the version stored, and, where the
+/// folder can tell, the entry as observed right after the write. Its
+/// stat lets the next run reuse the version without reading it again
+/// (ADR 0056).
+#[derive(Clone, Debug)]
+pub struct Written {
+    pub version: EntryVersion,
+    pub observed: Option<ObservedEntry>,
+}
+
+impl Written {
+    pub(crate) fn unobserved(version: EntryVersion) -> Self {
+        Self {
+            version,
+            observed: None,
+        }
+    }
+}
+
 impl Endpoint {
     /// Open a root and read its first entry, so refused access shows here.
     pub fn open(root: &PairRoot, reach: &Reach) -> Result<Self, ScanError> {
@@ -454,9 +473,24 @@ impl Endpoint {
         run: &RunScope,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<EntryVersion, ApplyError> {
-        match (self, source) {
+        self.copy_written(source, path, from, current, run, control)
+            .map(|written| written.version)
+    }
+
+    /// `copy_from`, with the entry as observed after the write where this
+    /// folder can tell, for the next run to reuse unread.
+    pub fn copy_written(
+        &self,
+        source: &Endpoint,
+        path: &SyncPath,
+        from: &ObservedEntry,
+        current: Expected<'_>,
+        run: &RunScope,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<Written, ApplyError> {
+        let version = match (self, source) {
             (Self::Local(to), Self::Local(from_endpoint)) => {
-                to.copy_from(from_endpoint, path, from, current, run, control)
+                return to.copy_written(from_endpoint, path, from, current, run, control);
             }
             #[cfg(feature = "simulation")]
             (Self::Memory(to), Self::Memory(from_endpoint)) => {
@@ -467,7 +501,8 @@ impl Endpoint {
                 Err(ApplyError::Unsupported(path.clone()))
             }
             _ => crate::sftp::copy(self, source, path, from, current, run, control),
-        }
+        }?;
+        Ok(Written::unobserved(version))
     }
 
     /// Give `path` `source`'s synced metadata, leaving content alone.
@@ -480,9 +515,31 @@ impl Endpoint {
         run: &RunScope,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<EntryVersion, ApplyError> {
-        match (self, source) {
+        self.update_metadata_written(source, path, from, current, run, control)
+            .map(|written| written.version)
+    }
+
+    /// `update_metadata_from`, with the entry as observed after the write
+    /// where this folder can tell.
+    pub fn update_metadata_written(
+        &self,
+        source: &Endpoint,
+        path: &SyncPath,
+        from: &ObservedEntry,
+        current: &ObservedEntry,
+        run: &RunScope,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<Written, ApplyError> {
+        let version = match (self, source) {
             (Self::Local(to), Self::Local(from_endpoint)) => {
-                to.update_metadata_from(from_endpoint, path, from, current, run, control)
+                return to.update_metadata_written(
+                    from_endpoint,
+                    path,
+                    from,
+                    current,
+                    run,
+                    control,
+                );
             }
             #[cfg(feature = "simulation")]
             (Self::Memory(to), Self::Memory(from_endpoint)) => {
@@ -493,7 +550,8 @@ impl Endpoint {
                 Err(ApplyError::Unsupported(path.clone()))
             }
             _ => crate::sftp::update_metadata(self, source, path, from, current, run, control),
-        }
+        }?;
+        Ok(Written::unobserved(version))
     }
 
     /// Delete archived runs past their expiry (`Pruning`). Another Mac's
