@@ -96,9 +96,10 @@ Two exceptions in ADR 0020's model stay documented gaps, not new work:
 
 ## Work items
 
-Ordered by leverage. W1 and W3 each need an owner decision recorded in
-an ADR. Suggested order: W3 (without manual auto-resume) → W2 local →
-W1 ADR and W1(b) → W2 SFTP → W4.
+Ordered by leverage. The owner decisions are recorded under
+[Owner decisions](#owner-decisions); each lands in its work item's ADR.
+Suggested order: W3 core → W3 manual-pair resume (`Work::Resume`) →
+W2 local → W1 ADR and W1(b) → W2 SFTP → W4.
 
 ### W3: continue runs the agent lost
 
@@ -209,11 +210,13 @@ Undo for both halves, handles manual pairs and bounds crash loops.
   `automation_hold`, pair pause and environment holds are checked only in
   `run_due`/`run_due_at` (`schedule.rs:700-768`), not in `Jobs::start`.
   The gentle-effort slot rule still applies.
-- **Manual pairs: owner decision.** A marker written by manual work gets
-  `resume = off` by default, so it shows "Interrupted, sync again to
-  finish" and the person's next sync continues the chain. That is
-  option (a), recommended. Option (b) auto-resumes through a new
-  `Work::Resume`. `Work::Scheduled` is wrong for manual work:
+- **Manual pairs resume automatically (owner decision, 2026-11-15).** A
+  marker written by manual work gets `resume = auto` like scheduled
+  work, and the scheduler starts it as a new `Work::Resume`. The
+  rejected alternative was `resume = off` with "Interrupted, sync again
+  to finish". Ship this as a second W3 slice, after the core marker,
+  status and chain: it needs persisted skips first. `Work::Scheduled`
+  is wrong for manual work:
   - It runs `RunContext::Unattended`, whose fuse stops only above 50% of
     a side's paths; an interactive run asks above 50 deletions and 1%
     (`crates/foldover-engine/src/gates.rs:1-4,56-76`). A scheduled-mode
@@ -223,12 +226,23 @@ Undo for both halves, handles manual pairs and bounds crash loops.
     (`foldover-service/src/history.rs:57-60`) and never lifts an undo
     hold (`:1093-1098`).
 
-  `Work::Resume` needs interactive gating, persisted skips, and a
-  refusal when the marker's `revision` differs from the active one. It
-  still stops with `NeedsApproval` above the interactive fuse and for
-  `review_policy = required` (`run.rs:1234-1252`), so (b) means "starts
-  unattended and halts at the fuse", not full auto-resume. The ADR
-  records the choice.
+  `Work::Resume` therefore runs with:
+  - interactive deletion gating;
+  - full effort, the share remount and the manual history trigger,
+    like a person's sync;
+  - persisted skips, so "skip in the next run" survives the restart
+    (a new table in the v31 migration, spent as today at `sync.rs:599`);
+  - a refusal when the marker's `revision` differs from the active one.
+    That pair shows "Interrupted, settings changed, sync again".
+
+  It still stops with `NeedsApproval` above the interactive fuse and for
+  `review_policy = required` (`run.rs:1234-1252`): it starts unattended
+  and halts at the fuse for a person. A resume never presents a review
+  token, because the reviewed preview is gone with the old process, so
+  it can never count as the approval the killed run had. The status
+  explains both stops. Tests: a manual marker resumes at the first tick;
+  a persisted skip is honored once; a changed revision refuses; a resume
+  over the fuse stops with `NeedsApproval`.
 - **Known cost.** The continued run's history row shows only its own
   counts; the killed attempt's counts were in memory. Accept it, or
   later persist running totals in the marker with each batch.
@@ -304,7 +318,8 @@ Today the SFTP observe reads every file on every run. ADR 0028's
 "contents and link targets are re-read" is a deliberate contract, so
 this is a policy change, not a refactor.
 
-- **Scope: (b) targets by default, (c) per-pair opt-in.** Reuse a remote
+- **Scope: (b) targets by default, (c) per-pair opt-in (owner
+  decision, 2026-11-15).** Reuse a remote
   stat only on sides Foldover alone writes: destination-role sides of
   Backup and Mirror pairs that keep records, which take a lease every
   run. That covers the motivating case, a backup *to* SFTP. PLAN §4.8's
@@ -346,11 +361,13 @@ this is a policy change, not a refactor.
   Mac's clock (`sftp.rs:780`); `mtime` comes from the server's clock, in
   whole seconds. If the server runs 3 s or more behind, a just-edited
   file looks settled and a same-second, same-size edit reuses a stale
-  version. Recommend a fixed SFTP window of one hour: nearly all backup
-  files are older, so it costs little and needs no clock measurement.
-  Measuring the offset from files Foldover creates (identity file,
-  lease, staged temporaries) is the alternative. The ADR decides; tests
-  cover skew in both directions.
+  version. Owner decision (2026-11-15): a fixed SFTP window of one hour.
+  A fingerprint is settled only when the file's server mtime is more
+  than an hour before this Mac's `observed_at`. Nearly all backup files
+  are older, so it costs little and needs no clock measurement. The
+  rejected alternative was measuring the offset from files Foldover
+  creates. Skew beyond an hour is outside the guarantee, and the ADR
+  says so. Tests cover skew in both directions within the hour.
 - **Refresh on confirming reads, in scope only.** Today's post-read
   equality check returns `known` with its old `observed_at`
   (`sftp.rs:782-791`), so an aged fingerprint would be re-read forever
@@ -414,18 +431,24 @@ SFTP destinations never keep partials.
   SFTP resume. ADR 0034's local resume hashes the kept destination bytes
   (`partial.rs:74-110`). W4 hashes the source's prefix, which verifies
   the source, not what the server stored, and a WRITE acknowledgement is
-  not durability. Recommend reading the kept prefix back and hashing it:
-  for backups over asymmetric links a download is cheaper than a
-  re-upload, and it keeps ADR 0034's guarantee. Trusting
-  acknowledgements is the documented alternative.
+  not durability. Owner decision (2026-11-15): trust the server's
+  acknowledgements and read nothing back. The rejected alternative was
+  reading the kept prefix back and hashing it. Clamping the offset to
+  the remote file's size still catches a short file. A prefix the server
+  acknowledged but lost or corrupted, for example on a NAS power loss,
+  goes undetected until the next full re-read: the weekly
+  re-verification under W1, or the next run without it. The ADR states
+  this trade and that it applies to SFTP destinations only; local and
+  paired-Mac partials keep ADR 0034's hash of the kept bytes.
 
 ## Follow-ups outside this plan
 
 - Persisted-plan checkpoint resume: still rejected. After W1 to W3 it
   saves only a stat walk, at the price of the execute loop's
   correctness surface.
-- If manual auto-resume (W3(b)) is chosen: persisting skips and the
-  reviewed-preview binding each deserve their own ADR section.
+- Persisting the reviewed-preview binding, so a resumed manual run
+  could keep the approval the killed run had. Out of scope: a resume
+  halts at the fuse instead.
 - Pre-existing: a local replace whose archive path already exists places
   the new content, then fails `set_aside` with no journal row
   (`local/apply.rs:273-285`), so Undo cannot revert it. The chain design
@@ -454,6 +477,17 @@ SFTP destinations never keep partials.
   - ADR for W4: the trust decision.
   - A changelog entry per work item.
 
+## Owner decisions
+
+Recorded 2026-11-15; each goes into its work item's ADR.
+
+| Question | Decision | Rejected alternatives |
+|---|---|---|
+| Manual pair killed mid-sync (W3) | Resume automatically as `Work::Resume`, halting at the interactive fuse | Show "Interrupted, sync again" and wait for a person |
+| Where SFTP stat-trust applies (W1) | Backup and Mirror targets that keep records by default; any SFTP side by per-pair opt-in | Targets only, with no opt-in; every SFTP side |
+| When a remote file counts as settled (W1) | Server mtime more than one hour before this Mac's observation time | Measuring the clock offset with a few-second window |
+| Verifying a resumed SFTP upload's kept prefix (W4) | Trust the server's acknowledgements; clamp to the remote size | Reading the prefix back and hashing it; not building W4 |
+
 ## Revision notes
 
 - **Round 1** (on `e9f2658`): adopted in full. Corrected the inventory,
@@ -480,3 +514,6 @@ SFTP destinations never keep partials.
   predicate, the W2 API change, and the W4 trust decision. Adjudicated:
   killed *scheduled* runs are due at the first tick after a restart;
   killed *manual* runs on `every`/`daily` pairs are not.
+- **Owner decisions** (2026-11-15): manual pairs resume automatically,
+  W1 scope (b) with (c) opt-in, a one-hour SFTP settling window, and W4
+  trusts acknowledgements. See [Owner decisions](#owner-decisions).
