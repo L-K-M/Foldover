@@ -186,19 +186,34 @@ def interrupt(database, pair):
     return started
 
 
-def interruption(cli, endpoint, pair, started):
+def marker(database, pair):
+    with closing(sqlite3.connect(database, timeout=COMMAND_SECONDS)) as connection:
+        return connection.execute("SELECT state,unclean FROM interrupted_run WHERE pair_id=?",
+                                  (bytes.fromhex(pair),)).fetchone()
+
+
+def interruption(cli, endpoint, database, pair, started):
     """After a restart, the sync the agent stopped during shows as
     interrupted until a person declines it (ADR 0055)."""
-    status = private_exchange(endpoint, "sync.status", {"id": pair}).get("result", {})
-    if status != {"state": "interrupted", "started": started, "resumes": False}:
-        raise RuntimeError(f"A restart did not show the interrupted sync: {status}")
+    found = marker(database, pair)
+    if found != ("interrupted", 1):
+        raise RuntimeError(f"A restart did not find the interrupted sync: {found}")
+    # macOS refuses private calls from this unsigned client; the CLI has
+    # no status command, so only other platforms read the status itself.
+    if sys.platform != "darwin":
+        status = private_exchange(endpoint, "sync.status", {"id": pair}).get("result", {})
+        if status != {"state": "interrupted", "started": started, "resumes": False}:
+            raise RuntimeError(f"A restart did not show the interrupted sync: {status}")
     declined = invoke(cli, endpoint, ("sync", pair, "--cancel"))
     status = json.loads(declined.stdout) if declined.returncode == 0 else {}
     if status.get("state") != "idle":
         raise RuntimeError(f"Declining the interrupted sync failed: {declined}")
-    again = private_exchange(endpoint, "sync.status", {"id": pair}).get("result", {})
-    if again.get("state") != "idle":
-        raise RuntimeError(f"A declined sync still shows: {again}")
+    if marker(database, pair) is not None:
+        raise RuntimeError("A declined sync is still recorded")
+    if sys.platform != "darwin":
+        again = private_exchange(endpoint, "sync.status", {"id": pair}).get("result", {})
+        if again.get("state") != "idle":
+            raise RuntimeError(f"A declined sync still shows: {again}")
 
 
 def restoration(cli, endpoint, directory):
@@ -394,7 +409,7 @@ def main():
             child.stderr.close()
             child = start(agent, cli, endpoint, environment)
             if docs is not None:
-                interruption(cli, endpoint, docs, started)
+                interruption(cli, endpoint, state / "state.db", docs, started)
             if pair is not None:
                 saved = invoke(cli, endpoint, ("pairs", "show", pair["id"]))
                 if saved.returncode != 0 or json.loads(saved.stdout) != pair:
