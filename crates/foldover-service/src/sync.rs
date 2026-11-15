@@ -287,7 +287,7 @@ enum MutationScope {
 struct State {
     jobs: HashMap<PairId, Job>,
     /// What started each interrupted run an agent start found, so the
-    /// scheduler continues it as the same kind of run (ADR 0055).
+    /// scheduler continues it as the same kind of run (ADR 0055), stored
     /// with the pair revision it ran under.
     interrupted: HashMap<PairId, (WritingRun, u64)>,
     /// Pairs whose configuration is being replaced refuse new job claims.
