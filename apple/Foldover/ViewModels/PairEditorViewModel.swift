@@ -139,8 +139,8 @@ final class PairEditorViewModel: Identifiable {
     }
 
     /// Whether every SFTP folder of the pair, not only a Backup's or
-    /// Mirror's target, skips reading files whose size and date are
-    /// unchanged (ADR 0057).
+    /// Mirror's target, skips reading files whose size, date,
+    /// permissions and owner are unchanged (ADR 0057).
     var trustsRemoteStatsEverywhere: Bool {
         get { options.remoteStats == .everywhere }
         set { options.remoteStats = newValue ? .everywhere : .targets }

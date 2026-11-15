@@ -1721,6 +1721,8 @@ mod tests {
             let values = [OsString::from("--remote-stats"), OsString::from(value)];
             assert!(option_changes(&values).is_none(), "{value:?}");
         }
+        let twice = ["--remote-stats", "everywhere", "--remote-stats", "targets"];
+        assert!(option_changes(&twice.map(OsString::from)).is_none());
     }
 
     #[test]

@@ -2196,6 +2196,39 @@ mod tests {
             .collect();
         stored.sort_by_key(|stats| *stats == RemoteStats::Everywhere);
         assert_eq!(stored, [RemoteStats::Targets, RemoteStats::Everywhere]);
+
+        // Updates, direct or saved for the next run, keep the choice.
+        let mut store = store;
+        let pair = store.create(&draft(SyncMode::Sync)).unwrap();
+        let everywhere = draft(SyncMode::Sync)
+            .with_options(PairOptions::default().with_remote_stats(RemoteStats::Everywhere));
+        let updated = store
+            .update(pair.id(), pair.revision(), &everywhere)
+            .unwrap();
+        assert_eq!(
+            updated.draft().options().remote_stats(),
+            RemoteStats::Everywhere
+        );
+        let targets = draft(SyncMode::Sync);
+        store
+            .defer_update(pair.id(), updated.revision(), &targets)
+            .unwrap();
+        store.activate_update(pair.id()).unwrap();
+        let active = store.pair(pair.id()).unwrap().unwrap();
+        assert_eq!(
+            active.draft().options().remote_stats(),
+            RemoteStats::Targets
+        );
+        let deferred = store
+            .defer_update(pair.id(), active.revision(), &everywhere)
+            .unwrap();
+        store.activate_update(pair.id()).unwrap();
+        let active = store.pair(pair.id()).unwrap().unwrap();
+        assert_eq!(active.revision(), deferred.revision());
+        assert_eq!(
+            active.draft().options().remote_stats(),
+            RemoteStats::Everywhere
+        );
     }
 
     #[test]
