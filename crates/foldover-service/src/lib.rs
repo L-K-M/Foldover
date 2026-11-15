@@ -1769,6 +1769,55 @@ mod tests {
         assert!(run_due_started(&service, at(120)).await.is_empty());
     }
 
+    /// ADR 0056: what a run copies into a local folder is stored as it
+    /// landed, so the next run reuses every version it wrote, reading no
+    /// file, and finds nothing to store.
+    #[tokio::test]
+    async fn the_run_after_a_sync_reuses_what_it_wrote_unread() {
+        let (directory, service) = fixture();
+        let created = service
+            .handle(Request::call(
+                1,
+                PAIR_CREATE,
+                Some(input(directory.path(), "Docs")),
+            ))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        let left = directory.path().join("Docs-left");
+        // Outside the racy window, so a stat can prove them unchanged.
+        let settled = SystemTime::now() - std::time::Duration::from_secs(60 * 60);
+        for name in ["a.txt", "b.txt"] {
+            fs::write(left.join(name), name).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(left.join(name))
+                .unwrap()
+                .set_modified(settled)
+                .unwrap();
+        }
+        let synced = first_sync(&service, &key).await;
+        assert_eq!(synced["result"]["copied"], 2, "{synced}");
+
+        let inputs = service
+            .engine
+            .lock()
+            .unwrap()
+            .capture_run_inputs(id)
+            .unwrap()
+            .decode()
+            .unwrap();
+        let next = foldover_engine::PairRun::prepare(
+            inputs,
+            &mut || foldover_types::ScanControl::Continue,
+            &foldover_engine::NoProgress,
+        )
+        .unwrap();
+        assert!(!next.snapshot_changed(Side::Right));
+        assert!(!next.snapshot_changed(Side::Left));
+    }
+
     /// Declining an interrupted sync while its continuation is starting
     /// stops that start: the job still reads interrupted until it
     /// publishes, so the decline must reach the claim.

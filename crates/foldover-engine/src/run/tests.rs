@@ -311,6 +311,7 @@ impl Store<'_> {
                 run,
                 updates,
                 journal,
+                ..
             } => {
                 // As the store does for a run continuing nothing: its
                 // first entries replace the journal's other runs.
@@ -1581,6 +1582,7 @@ fn captured_run_inputs_decode_like_the_wrapper() {
                     BaselineEntry::new(version, version).unwrap(),
                 )],
                 journal: &[],
+                observed: &[],
             },
         )
         .unwrap();
@@ -1668,6 +1670,7 @@ fn captured_inputs_stay_at_their_revision_when_the_config_moves() {
                     BaselineEntry::new(version, version).unwrap(),
                 )],
                 journal: &[],
+                observed: &[],
             },
         )
         .unwrap();
@@ -1703,6 +1706,7 @@ fn captured_inputs_stay_at_their_revision_when_the_config_moves() {
                 run: "run",
                 updates: &[],
                 journal: &[],
+                observed: &[],
             },
         ),
         Err(crate::Error::StaleRevision)
@@ -1740,6 +1744,7 @@ fn captured_inputs_survive_pair_removal() {
                     BaselineEntry::new(version, version).unwrap(),
                 )],
                 journal: &[],
+                observed: &[],
             },
         )
         .unwrap();

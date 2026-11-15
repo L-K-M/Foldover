@@ -5,7 +5,7 @@
 use foldover_db::{JournalChange, JournalRow};
 use foldover_types::{BaselineEntry, EntryVersion, PairId, Side, SyncPath};
 
-use super::{Error, PairStore, database_revision};
+use super::{Error, PairStore, SnapshotEntry, database_revision};
 use crate::BaseUpdate;
 use crate::base::{decode, decode_entry, encode};
 
@@ -95,6 +95,20 @@ impl PairStore {
         updates: &[BaseUpdate],
         journal: JournalUpdate<'_>,
     ) -> Result<(), Error> {
+        self.update_base_observed(id, revision, updates, journal, &[])
+    }
+
+    /// `update_base`, also storing each side's entries as the writes behind
+    /// the updates left them, so the next run reuses their versions unread
+    /// (ADR 0056).
+    pub fn update_base_observed(
+        &mut self,
+        id: PairId,
+        revision: u64,
+        updates: &[BaseUpdate],
+        journal: JournalUpdate<'_>,
+        observed: &[(Side, SnapshotEntry)],
+    ) -> Result<(), Error> {
         let revision = database_revision(revision)?;
         let rows: Vec<JournalRow>;
         let undone: Vec<i64>;
@@ -115,7 +129,7 @@ impl PairStore {
                 JournalChange::Record { run, rows: &rows }
             }
         };
-        self.change_base(id, revision, updates, change)
+        self.change_base(id, revision, updates, change, observed)
     }
 
     /// A person synced: automatic syncs may run again.

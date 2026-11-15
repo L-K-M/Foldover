@@ -111,6 +111,7 @@ fn engine_with_inputs() -> (tempfile::TempDir, Engine, foldover_types::PairConfi
                 run: "bench",
                 updates: &updates,
                 journal: &[],
+                observed: &[],
             },
         )
         .unwrap();

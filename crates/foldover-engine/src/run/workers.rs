@@ -14,9 +14,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{Scope, ScopedJoinHandle};
 use std::time::Duration;
 
-use foldover_endpoint::ApplyError;
+use foldover_endpoint::{ApplyError, Written};
 use foldover_host::ThreadEffort;
-use foldover_types::{Effort, EntryVersion, ScanControl};
+use foldover_types::{Effort, ScanControl};
 
 use super::{Completion, Executor, RunProgress, Writer, is_archive, writes};
 use crate::PlanRow;
@@ -27,7 +27,7 @@ const POLL: Duration = Duration::from_millis(100);
 
 /// A handed-out write, as it came back.
 enum Landed<'a> {
-    Copied(&'a PlanRow, Result<EntryVersion, ApplyError>),
+    Copied(&'a PlanRow, Result<Written, ApplyError>),
     Archived(&'a PlanRow, Result<(), ApplyError>),
     /// Stopped before it began: nothing to record.
     Skipped,

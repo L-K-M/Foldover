@@ -495,6 +495,7 @@ Pure deletion-review thresholds: [ADR 0013](docs/adr/0013-deletion-review-fuse.m
 Run execution, approvals and journal-free recovery: [ADR 0020](docs/adr/0020-run-execution.md).
 Run journal and Undo: [ADR 0029](docs/adr/0029-undo.md).
 Interrupted runs and journals that span them: [ADR 0055](docs/adr/0055-interrupted-runs.md).
+Observations stored as a run's writes leave them: [ADR 0056](docs/adr/0056-post-write-snapshots.md).
 Name clashes between spellings a folder treats as one: [ADR 0030](docs/adr/0030-name-clashes.md).
 Hierarchy-aware candidate generation is implemented below the agent API;
 [ADR 0014](docs/adr/0014-tree-plan-candidates.md) records tree validation,

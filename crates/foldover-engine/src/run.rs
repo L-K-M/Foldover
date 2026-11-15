@@ -32,7 +32,7 @@ use foldover_endpoint::{
     ApplyError, Bottleneck, Endpoint, EndpointPair, Expected, Filter, HeldLease, InvalidFilter,
     LeaseError, LeaseHolder, LeaseTiming, Observation, ObservationHints, ObserveStep,
     ObservedEntry, ObservedVersion, PairRootError, Pruning, Reach, RunScope, ScanError,
-    SnapshotBuilder, access_denied,
+    SnapshotBuilder, Written, access_denied,
 };
 use foldover_host::RunAwake;
 use foldover_state::{
@@ -193,6 +193,9 @@ pub enum Commit<'a> {
         run: &'a str,
         updates: &'a [BaseUpdate],
         journal: &'a [JournalEntry],
+        /// Entries as the writes behind `updates` left them, stored with
+        /// them so the next run reuses their versions unread (ADR 0056).
+        observed: &'a [(Side, SnapshotEntry)],
     },
     /// An undo's base restorations for paths it is about to revert; the
     /// pair's automatic syncs are held from then on, so none redoes it.
@@ -1363,6 +1366,7 @@ impl PairRun {
             scopes: &scopes,
             pending: Vec::new(),
             journal: Vec::new(),
+            observed: Vec::new(),
             written: 0,
             failed: PathPrefixIndex::new(),
         };
@@ -1371,10 +1375,12 @@ impl PairRun {
                 run: &name,
                 updates: &executor.pending,
                 journal: &executor.journal,
+                observed: &executor.observed,
             };
             commit(revision, updates).map_err(RunError::Commit)?;
             executor.pending.clear();
             executor.journal.clear();
+            executor.observed.clear();
             Ok::<_, RunError>(())
         };
 
@@ -1886,6 +1892,8 @@ struct Executor<'a> {
     pending: Vec<BaseUpdate>,
     /// The writes behind `pending`, committed with it.
     journal: Vec<JournalEntry>,
+    /// What those writes left, as observed right after each.
+    observed: Vec<(Side, SnapshotEntry)>,
     /// Writes journaled so far: the next entry's sequence number.
     written: u64,
     /// Paths whose change failed; their descendants are skipped.
@@ -1910,7 +1918,7 @@ impl Writer<'_> {
         &self,
         row: &PlanRow,
         control: &mut impl FnMut() -> ScanControl,
-    ) -> Result<EntryVersion, ApplyError> {
+    ) -> Result<Written, ApplyError> {
         let CandidateDecision::Entry(EntryDecision::Propagate { from, change }) = row.decision()
         else {
             unreachable!("only planned copies are handed out")
@@ -1950,17 +1958,17 @@ impl Writer<'_> {
         current: Option<&ObservedEntry>,
         change: ChangeKind,
         control: &mut impl FnMut() -> ScanControl,
-    ) -> Result<EntryVersion, ApplyError> {
+    ) -> Result<Written, ApplyError> {
         let endpoints = &self.run.endpoints;
         let from: &Endpoint = endpoints.endpoint(target.other());
         let to = endpoints.endpoint(target);
         match (change, current) {
             (ChangeKind::UpdateMetadata, Some(current)) => {
-                to.update_metadata_from(from, path, source, current, self.scope(target), control)
+                to.update_metadata_written(from, path, source, current, self.scope(target), control)
             }
             (_, current) => {
                 let current = current.map_or(Expected::Absent, Expected::Present);
-                to.copy_from(from, path, source, current, self.scope(target), control)
+                to.copy_written(from, path, source, current, self.scope(target), control)
             }
         }
     }
@@ -1996,7 +2004,7 @@ impl<'a> Executor<'a> {
     }
 
     /// Record the copy a worker made for `row`.
-    fn landed(&mut self, row: &PlanRow, result: Result<EntryVersion, ApplyError>) {
+    fn landed(&mut self, row: &PlanRow, result: Result<Written, ApplyError>) {
         let CandidateDecision::Entry(EntryDecision::Propagate { from, change }) = row.decision()
         else {
             unreachable!("only planned copies are handed out")
@@ -2004,7 +2012,7 @@ impl<'a> Executor<'a> {
         let source = self.run.observation(*from).entries().get(row.path());
         let source = source.expect("handed-out copies have a source").version();
         match result {
-            Ok(stored) => self.record(row.path(), *from, source, stored, *change),
+            Ok(written) => self.record(row.path(), *from, source, written, *change),
             Err(error) => self.fail(row.path(), &error),
         }
     }
@@ -2073,7 +2081,7 @@ impl<'a> Executor<'a> {
                     self.writer()
                         .propagate(path, source, target, entry(target), change, control);
                 match stored {
-                    Ok(stored) => self.record(path, from, source.version(), stored, change),
+                    Ok(written) => self.record(path, from, source.version(), written, change),
                     Err(error) => self.fail(path, &error),
                 }
             }
@@ -2158,9 +2166,10 @@ impl<'a> Executor<'a> {
         path: &SyncPath,
         from: Side,
         source: EntryVersion,
-        stored: EntryVersion,
+        written: Written,
         change: ChangeKind,
     ) {
+        let stored = written.version;
         // The write happened whatever the base says next.
         let action = match change {
             ChangeKind::Create => JournalAction::Create(stored),
@@ -2179,6 +2188,19 @@ impl<'a> Executor<'a> {
                     ChangeKind::Create | ChangeKind::ReplaceContent => self.report.copied += 1,
                 }
                 self.pending.push(BaseUpdate::Record(path.clone(), base));
+                if let Some(observed) = written
+                    .observed
+                    .filter(|observed| observed.version() == stored)
+                {
+                    self.observed.push((
+                        from.other(),
+                        SnapshotEntry {
+                            path: path.clone(),
+                            fingerprint: observed.fingerprint_bytes(),
+                            version: stored,
+                        },
+                    ));
+                }
             }
             Err(_) => self.fail_message(path, "Stored content differs from the source"),
         }

@@ -271,6 +271,11 @@ journal itself holds exactly the chain. Manual-pair resume
 
 ### W2: post-write snapshots (local first, then SFTP)
 
+**Status:** local folders are implemented as
+[ADR 0056](adr/0056-post-write-snapshots.md). Moves still report no
+observation, and the Undo drop moves to the SFTP part, where it matters:
+a local put-back changes the stat key's change time.
+
 Files a run writes have no stored fingerprint, because the snapshot is
 taken before the run, so the continuing run re-reads the whole written
 set.

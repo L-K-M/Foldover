@@ -511,7 +511,8 @@ impl Engine {
                 run,
                 updates,
                 journal,
-            } => Ok(self.pairs.update_base(
+                observed,
+            } => Ok(self.pairs.update_base_observed(
                 id,
                 revision,
                 updates,
@@ -519,6 +520,7 @@ impl Engine {
                     run,
                     entries: journal,
                 },
+                observed,
             )?),
             Commit::Undoing { updates } => {
                 Ok(self

@@ -1180,6 +1180,21 @@ impl Database {
         changes: &[BaseChange<'_>],
         journal: JournalChange<'_>,
     ) -> Result<(), Error> {
+        self.change_base_observed::<SnapshotRow>(pair, revision, changes, journal, &[])
+    }
+
+    /// `change_base`, also storing each side's entries as the writes behind
+    /// the changes left them (ADR 0056), so the next run reuses their
+    /// versions unread. A snapshot row never outlives the base it proves.
+    /// `observed` holds `(side, row)` pairs, `side` `left` or `right`.
+    pub fn change_base_observed<T: SnapshotData>(
+        &mut self,
+        pair: &[u8],
+        revision: i64,
+        changes: &[BaseChange<'_>],
+        journal: JournalChange<'_>,
+        observed: &[(&str, T)],
+    ) -> Result<(), Error> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1227,6 +1242,21 @@ impl Database {
                         }
                     }
                 }
+            }
+        }
+        if !observed.is_empty() {
+            let mut store = transaction.prepare(
+                "INSERT INTO snapshot_entry (pair_id,side,path,fingerprint,version) VALUES (?1,?2,?3,?4,?5)
+                 ON CONFLICT(pair_id,side,path) DO UPDATE SET fingerprint=excluded.fingerprint,version=excluded.version",
+            )?;
+            for (side, row) in observed {
+                store.execute(params![
+                    pair,
+                    side,
+                    row.path(),
+                    row.fingerprint(),
+                    row.version()
+                ])?;
             }
         }
         journal::apply(&transaction, pair, journal)?;
@@ -1919,6 +1949,53 @@ pub(super) mod tests {
             Err(Error::PairNotFound)
         ));
         assert_eq!(database.base_rows(&pair.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn observed_writes_update_the_snapshot_with_their_base() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        let row = |path: &[u8], fingerprint: &[u8], version: &[u8]| SnapshotRow {
+            path: path.to_vec(),
+            fingerprint: fingerprint.to_vec(),
+            version: version.to_vec(),
+        };
+        database
+            .replace_snapshot(&pair.id, 1, "right", &[row(b"a", b"old", b"0")])
+            .unwrap();
+
+        database
+            .change_base_observed(
+                &pair.id,
+                1,
+                &[put(b"a", b"1"), put(b"b", b"2")],
+                JournalChange::None,
+                &[
+                    ("right", row(b"a", b"fa", b"1")),
+                    ("right", row(b"b", b"fb", b"2")),
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            database.snapshot(&pair.id, "right").unwrap(),
+            [row(b"a", b"fa", b"1"), row(b"b", b"fb", b"2")]
+        );
+        assert!(database.snapshot(&pair.id, "left").unwrap().is_empty());
+
+        // A stale revision stores neither the base nor the observation.
+        assert!(matches!(
+            database.change_base_observed(
+                &pair.id,
+                2,
+                &[put(b"c", b"3")],
+                JournalChange::None,
+                &[("right", row(b"c", b"fc", b"3"))],
+            ),
+            Err(Error::StaleRevision)
+        ));
+        assert_eq!(database.snapshot(&pair.id, "right").unwrap().len(), 2);
+        assert_eq!(database.base_rows(&pair.id).unwrap().len(), 2);
     }
 
     #[test]

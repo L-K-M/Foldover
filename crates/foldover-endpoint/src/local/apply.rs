@@ -18,9 +18,10 @@ use foldover_types::{
 
 use super::archive::{ARCHIVE_ROOT, unique_run_name};
 use super::{
-    LocalEndpoint, LocalEntry, NodeKind, ObservedEntry, Payload, ScanControl, ScanError,
-    entry_version, metadata_version, observed,
+    Fingerprint, LocalEndpoint, LocalEntry, NodeKind, ObservedEntry, Payload, ScanControl,
+    ScanError, entry_version, metadata_version, observed,
 };
+use crate::Written;
 use crate::pace::Pace;
 
 /// What the plan observed on one side of a path.
@@ -153,6 +154,17 @@ pub enum ApplyError {
     InvalidPath(#[from] InvalidSyncPath),
 }
 
+/// `version` as the entry `placed` shows it, stat taken after `observed_at`.
+fn written(version: EntryVersion, placed: &LocalEntry, observed_at: SystemTime) -> Written {
+    Written {
+        version,
+        observed: Some(ObservedEntry::new(
+            version,
+            Fingerprint::new(&placed.metadata, observed_at),
+        )),
+    }
+}
+
 impl LocalEndpoint {
     /// Make `path` hold the source's entry and return the version stored
     /// here. Anything replaced is archived for this run, or deleted where
@@ -166,6 +178,23 @@ impl LocalEndpoint {
         run: &RunScope,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<EntryVersion, ApplyError> {
+        self.copy_written(source, path, from, current, run, control)
+            .map(|written| written.version)
+    }
+
+    /// `copy_from`, with the entry as a stat after placement shows it
+    /// (ADR 0056): the rename can change the stat key's change time, and
+    /// the key holds the file identity, so the staged file's stat cannot
+    /// prove the placed one.
+    pub fn copy_written(
+        &self,
+        source: &LocalEndpoint,
+        path: &SyncPath,
+        from: &ObservedEntry,
+        current: Expected<'_>,
+        run: &RunScope,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<Written, ApplyError> {
         self.guarded_subtree(path)?;
         let policy = run.options.metadata();
         let source_entry = source
@@ -194,10 +223,12 @@ impl LocalEndpoint {
                 self.root
                     .create_directory(path, &source.root, source_entry.metadata(), &run.options)
                     .map_err(|error| write_error(path, error))?;
+                let observed_at = SystemTime::now();
                 let created = self
                     .entry_at(path)?
                     .ok_or_else(|| ApplyError::DestinationChanged(path.clone()))?;
-                return Ok(self.entry_version(&created, policy, control)?);
+                let version = self.entry_version(&created, policy, control)?;
+                return Ok(written(version, &created, observed_at));
             }
             EntryKind::File => {
                 // PLAN.md §4.9: the pair's bandwidth limit paces the data
@@ -239,7 +270,7 @@ impl LocalEndpoint {
                     &observed(&metadata, Some(&extended)),
                     policy,
                 );
-                (staged.into_staged(), Some(version))
+                (staged.into_staged(), Some((version, metadata)))
             }
             EntryKind::Symlink => {
                 let target = source_entry
@@ -252,7 +283,7 @@ impl LocalEndpoint {
                 (staged, None)
             }
         };
-        if let Some(version) = version
+        if let Some((version, _)) = &version
             && version.content() != from.version().content()
         {
             return Err(ApplyError::ContentNotStored(path.clone()));
@@ -284,14 +315,31 @@ impl LocalEndpoint {
             self.set_aside(displaced, path, run)?;
         }
 
+        let observed_at = SystemTime::now();
         match version {
-            Some(version) => Ok(version),
+            // The placed file is the staged one when the rename kept its
+            // identity, size and modification time; then its stat proves
+            // the version computed from the staged file. Anything else,
+            // e.g. a write that raced the placement, leaves no
+            // fingerprint, and the next run reads the file.
+            Some((version, staged)) => {
+                let placed = self.entry_at(path).ok().flatten().filter(|placed| {
+                    placed.metadata.identity() == staged.identity()
+                        && placed.metadata.size() == staged.size()
+                        && placed.metadata.modified() == staged.modified()
+                });
+                Ok(match placed {
+                    Some(placed) => written(version, &placed, observed_at),
+                    None => Written::unobserved(version),
+                })
+            }
             // Links carry no copied metadata; record what was placed.
             None => {
                 let placed = self
                     .entry_at(path)?
                     .ok_or_else(|| ApplyError::DestinationChanged(path.clone()))?;
-                Ok(self.entry_version(&placed, policy, control)?)
+                let version = self.entry_version(&placed, policy, control)?;
+                Ok(written(version, &placed, observed_at))
             }
         }
     }
@@ -307,6 +355,21 @@ impl LocalEndpoint {
         run: &RunScope,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<EntryVersion, ApplyError> {
+        self.update_metadata_written(source, path, from, current, run, control)
+            .map(|written| written.version)
+    }
+
+    /// `update_metadata_from`, with the entry as the stat after the update
+    /// shows it (ADR 0056).
+    pub fn update_metadata_written(
+        &self,
+        source: &LocalEndpoint,
+        path: &SyncPath,
+        from: &ObservedEntry,
+        current: &ObservedEntry,
+        run: &RunScope,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<Written, ApplyError> {
         self.guarded(path)?;
         if from.version().content() != current.version().content() {
             return Err(ApplyError::Unsupported(path.clone()));
@@ -319,7 +382,7 @@ impl LocalEndpoint {
             .map_err(|error| changed_as(error, ApplyError::DestinationChanged(path.clone())))?;
         if destination.metadata.kind() == NodeKind::Symlink {
             // Link metadata is not copied; the content already matches.
-            return Ok(current.version());
+            return Ok(Written::unobserved(current.version()));
         }
         self.root
             .update_metadata(
@@ -333,17 +396,19 @@ impl LocalEndpoint {
                 WriteError::Changed => ApplyError::DestinationChanged(path.clone()),
                 error => write_error(path, error),
             })?;
+        let observed_at = SystemTime::now();
         let updated = self
             .entry_at(path)?
             .ok_or_else(|| ApplyError::DestinationChanged(path.clone()))?;
         let mut checkpoint = |_| control();
         let extended =
             self.optional_extended_metadata(&updated, run.options.metadata(), &mut checkpoint)?;
-        Ok(metadata_version(
+        let version = metadata_version(
             current.version().content(),
             &observed(&updated.metadata, extended.as_ref()),
             run.options.metadata(),
-        ))
+        );
+        Ok(written(version, &updated, observed_at))
     }
 
     /// Move the file or link at `from`, still `current`, to `to`, creating
