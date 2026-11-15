@@ -3,8 +3,9 @@
 
 use foldover_client::{
     DailySchedule, Durability, Filters, FolderRecords, MetadataPolicy, PairDraft, PairId,
-    PairOptions, PairRoot, Propagation, RemovalProtection, ReviewPolicy, ReviewToken, Schedule,
-    ScheduleInterval, Side, SocketLocation, SyncMode, SyncPath, TimeOfDay, Weekday, Weekdays,
+    PairOptions, PairRoot, Propagation, RemoteStats, RemovalProtection, ReviewPolicy, ReviewToken,
+    Schedule, ScheduleInterval, Side, SocketLocation, SyncMode, SyncPath, TimeOfDay, Weekday,
+    Weekdays,
 };
 use foldover_client::{DeviceId, PeerStatus, ShareId, SyncItemKind, SyncStatus};
 use foldover_proto::local::PairRecord;
@@ -60,7 +61,7 @@ const USAGE: &str = "usage: foldover --version
        foldover servers [browse sftp://[user@]host[:port]/path] [--socket PATH]
 LEFT, RIGHT: an absolute path, sftp://[user@]host[:port]/path, or peer://DEVICE/SHARE (see foldover peers shares)
 MODE: sync | mirror-left | mirror-right | backup-left | backup-right
-OPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --records (both | source: a backup-* target that cannot hold .foldover keeps nothing, archives nothing); --schedule (manual | changes | MINUTES | daily@HH:MM[:DAYS]); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --bandwidth-limit (MEGABYTES per second | none); --canary (PATH | none); --review (automatic | required); --removal-protection (enabled | disabled)
+OPTION: --times, --attributes, --permissions (sync | ignore); --durability (standard | full); --records (both | source: a backup-* target that cannot hold .foldover keeps nothing, archives nothing); --schedule (manual | changes | MINUTES | daily@HH:MM[:DAYS]); --exclude PATTERN (repeatable; '' clears); --max-size (MEGABYTES | none); --max-age (DAYS | none); --bandwidth-limit (MEGABYTES per second | none); --canary (PATH | none); --review (automatic | required); --removal-protection (enabled | disabled); --remote-stats (targets | everywhere: trust unchanged SFTP file stats in every folder, not only backup targets; edits that keep size and time are found within a week)
 Updates keep options that are not named.";
 
 enum Request {
@@ -221,6 +222,7 @@ struct OptionChanges {
     bandwidth_limit: Option<Option<u64>>,
     review_policy: Option<ReviewPolicy>,
     removal_protection: Option<RemovalProtection>,
+    remote_stats: Option<RemoteStats>,
 }
 
 impl OptionChanges {
@@ -253,6 +255,7 @@ impl OptionChanges {
         .expect("the bandwidth limit is checked when parsed")
         .with_review_policy(self.review_policy.unwrap_or(base.review_policy()))
         .with_removal_protection(self.removal_protection.unwrap_or(base.removal_protection()))
+        .with_remote_stats(self.remote_stats.unwrap_or(base.remote_stats()))
     }
 }
 
@@ -735,6 +738,14 @@ fn option_changes(args: &[OsString]) -> Option<OptionChanges> {
                 .replace(match value {
                     "enabled" => RemovalProtection::Enabled,
                     "disabled" => RemovalProtection::Disabled,
+                    _ => return None,
+                })
+                .is_some(),
+            "--remote-stats" => changes
+                .remote_stats
+                .replace(match value {
+                    "targets" => RemoteStats::Targets,
+                    "everywhere" => RemoteStats::Everywhere,
                     _ => return None,
                 })
                 .is_some(),
@@ -1689,6 +1700,27 @@ mod tests {
             updated.removal_protection(),
             foldover_client::RemovalProtection::Disabled
         );
+    }
+
+    #[test]
+    fn remote_stats_option_parses_and_updates_preserve_it() {
+        let changes = option_changes(&[
+            OsString::from("--remote-stats"),
+            OsString::from("everywhere"),
+        ])
+        .unwrap();
+        let everywhere = changes.apply(PairOptions::default());
+        assert_eq!(everywhere.remote_stats(), RemoteStats::Everywhere);
+        let changes =
+            option_changes(&[OsString::from("--times"), OsString::from("ignore")]).unwrap();
+        assert_eq!(
+            changes.apply(everywhere).remote_stats(),
+            RemoteStats::Everywhere
+        );
+        for value in ["sometimes", ""] {
+            let values = [OsString::from("--remote-stats"), OsString::from(value)];
+            assert!(option_changes(&values).is_none(), "{value:?}");
+        }
     }
 
     #[test]

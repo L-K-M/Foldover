@@ -68,12 +68,12 @@ impl Database {
             .checked_add(1)
             .ok_or(Error::InvalidState("Pair revision overflow"))?;
         transaction.execute(
-            &format!("INSERT OR REPLACE INTO pending_pair ({PAIR_COLUMNS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)"),
+            &format!("INSERT OR REPLACE INTO pending_pair ({PAIR_COLUMNS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)"),
             params![id, next_revision, values.name, values.left_root, values.right_root, values.mode,
                 values.modification_times, values.extended_attributes, values.permissions, values.durability,
                 values.schedule, values.schedule_minutes, values.filters, values.size_limit, values.age_limit,
                 values.canary, values.schedule_time, values.schedule_days, values.records, values.bandwidth_limit,
-                values.review_policy, values.removal_protection],
+                values.review_policy, values.removal_protection, values.remote_stats],
         )?;
         let row = transaction.query_row(
             &format!("SELECT {PAIR_COLUMNS} FROM pending_pair WHERE id=?1"),
@@ -168,7 +168,7 @@ pub(super) fn apply_update(
             // with the source: a folder without records has an identity
             // only this agent knows. SET expressions read the row as it
             // was, so `records=?19` and `mode=?6` hold only when unchanged.
-            "UPDATE pair SET revision=?23,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,schedule=?11,schedule_minutes=?12,filters=?13,size_limit=?14,age_limit=?15,canary=?16,schedule_time=?17,schedule_days=?18,records=?19,bandwidth_limit=?20,review_policy=?21,removal_protection=?22,left_identity=CASE WHEN left_root=?4 AND records=?19 AND (records='both' OR mode=?6) THEN left_identity END,right_identity=CASE WHEN right_root=?5 AND records=?19 AND (records='both' OR mode=?6) THEN right_identity END,left_mount=CASE WHEN left_root=?4 THEN left_mount END,right_mount=CASE WHEN right_root=?5 THEN right_mount END WHERE id=?1 AND revision=?2",
+            "UPDATE pair SET revision=?23,remote_stats=?24,name=?3,left_root=?4,right_root=?5,mode=?6,modification_times=?7,extended_attributes=?8,permissions=?9,durability=?10,schedule=?11,schedule_minutes=?12,filters=?13,size_limit=?14,age_limit=?15,canary=?16,schedule_time=?17,schedule_days=?18,records=?19,bandwidth_limit=?20,review_policy=?21,removal_protection=?22,left_identity=CASE WHEN left_root=?4 AND records=?19 AND (records='both' OR mode=?6) THEN left_identity END,right_identity=CASE WHEN right_root=?5 AND records=?19 AND (records='both' OR mode=?6) THEN right_identity END,left_mount=CASE WHEN left_root=?4 THEN left_mount END,right_mount=CASE WHEN right_root=?5 THEN right_mount END WHERE id=?1 AND revision=?2",
             params![
                 id,
                 revision,
@@ -192,7 +192,8 @@ pub(super) fn apply_update(
                 values.bandwidth_limit,
                 values.review_policy,
                 values.removal_protection,
-                next_revision
+                next_revision,
+                values.remote_stats
             ],
         )?;
     if changed == 0 {
@@ -500,7 +501,7 @@ mod tests {
             .unwrap();
         // V27 to V32 added tables and one column. Removing them and
         // restoring V26's metadata recreates a V26 state.
-        database.connection.execute_batch("DROP TABLE pending_skip; DROP TABLE interrupted_run; ALTER TABLE automation_setting DROP COLUMN automatic_effort; DROP TABLE pair_pause; DROP TABLE pair_removal; DROP TABLE pending_pair; UPDATE state_meta SET minimum_reader=26; PRAGMA user_version=26;").unwrap();
+        database.connection.execute_batch("ALTER TABLE pair DROP COLUMN remote_stats; DROP TABLE pending_skip; DROP TABLE interrupted_run; ALTER TABLE automation_setting DROP COLUMN automatic_effort; DROP TABLE pair_pause; DROP TABLE pair_removal; DROP TABLE pending_pair; UPDATE state_meta SET minimum_reader=26; PRAGMA user_version=26;").unwrap();
         drop(database);
 
         let mut database = Database::open(&location).unwrap();

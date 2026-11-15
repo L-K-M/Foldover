@@ -207,6 +207,17 @@ pub enum LargeRemovalProtection {
     Disabled,
 }
 
+/// Which remote folders take a file whose size, time, mode and owner are
+/// unchanged as unchanged, without reading it (ADR 0057).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum RemoteFileChecks {
+    /// Only a Backup's or Mirror's target that keeps records.
+    Targets,
+    /// Every remote folder; an edit that keeps size and time is found
+    /// within about a week.
+    Everywhere,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct LocalPairOptions {
     pub modification_times: MetadataSync,
@@ -229,6 +240,7 @@ pub struct LocalPairOptions {
     pub bandwidth_limit: Option<u64>,
     pub review_policy: SyncReviewPolicy,
     pub removal_protection: LargeRemovalProtection,
+    pub remote_stats: RemoteFileChecks,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -344,6 +356,10 @@ impl From<&foldover_client::PairOptions> for LocalPairOptions {
                 foldover_client::RemovalProtection::Enabled => LargeRemovalProtection::Enabled,
                 foldover_client::RemovalProtection::Disabled => LargeRemovalProtection::Disabled,
             },
+            remote_stats: match options.remote_stats() {
+                foldover_client::RemoteStats::Targets => RemoteFileChecks::Targets,
+                foldover_client::RemoteStats::Everywhere => RemoteFileChecks::Everywhere,
+            },
         }
     }
 }
@@ -406,16 +422,18 @@ impl TryFrom<LocalPairOptions> for foldover_client::PairOptions {
                         SyncReviewPolicy::Automatic => foldover_client::ReviewPolicy::Automatic,
                         SyncReviewPolicy::Required => foldover_client::ReviewPolicy::Required,
                     })
-                    .with_removal_protection(
-                        match options.removal_protection {
-                            LargeRemovalProtection::Enabled => {
-                                foldover_client::RemovalProtection::Enabled
-                            }
-                            LargeRemovalProtection::Disabled => {
-                                foldover_client::RemovalProtection::Disabled
-                            }
-                        },
-                    )
+                    .with_removal_protection(match options.removal_protection {
+                        LargeRemovalProtection::Enabled => {
+                            foldover_client::RemovalProtection::Enabled
+                        }
+                        LargeRemovalProtection::Disabled => {
+                            foldover_client::RemovalProtection::Disabled
+                        }
+                    })
+                    .with_remote_stats(match options.remote_stats {
+                        RemoteFileChecks::Targets => foldover_client::RemoteStats::Targets,
+                        RemoteFileChecks::Everywhere => foldover_client::RemoteStats::Everywhere,
+                    })
                 })
         })?
     }
@@ -743,6 +761,7 @@ mod tests {
                     bandwidth_limit: Some(2_000_000),
                     review_policy: SyncReviewPolicy::Required,
                     removal_protection: LargeRemovalProtection::Enabled,
+                    remote_stats: RemoteFileChecks::Everywhere,
                 },
             };
             let domain = foldover_client::PairDraft::try_from(draft.clone()).unwrap();

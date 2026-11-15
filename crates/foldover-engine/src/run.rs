@@ -43,8 +43,8 @@ pub use foldover_types::Effort;
 use foldover_types::{
     BaselineEntry, ChangeKind, ConflictKind, Durability, EndpointId, EntryContent, EntryDecision,
     EntryKind, EntryVersion, FolderRole, NameMatching, PairConfig, PairId, PairOptions, PathMap,
-    PathMapBuilder, PathPrefixIndex, Propagation, RemovalProtection, Resolution, ReviewPolicy,
-    ReviewToken, ScanControl, Side, Skip, SyncPath, UnicodeMatching,
+    PathMapBuilder, PathPrefixIndex, Propagation, RemoteStats, RemovalProtection, Resolution,
+    ReviewPolicy, ReviewToken, ScanControl, Side, Skip, SyncPath, UnicodeMatching,
 };
 use unicode_normalization::{UnicodeNormalization, is_nfc};
 
@@ -2260,12 +2260,16 @@ use workers::Workers;
 mod undo;
 pub use undo::UndoReport;
 
-/// Whether a remote stat may prove a file on `side` unchanged (ADR 0057):
-/// only on a Backup's or Mirror's target that keeps records, which only
-/// Foldover writes, under a lease each run. Elsewhere an edit that kept
-/// size and modification time would be overwritten or stay unseen for a
-/// week instead of raising a conflict.
+/// Whether a remote stat may prove a file on `side` unchanged (ADR 0057).
+/// By default only on a Backup's or Mirror's target that keeps records,
+/// which only Foldover writes, under a lease each run: elsewhere an edit
+/// that kept size and modification time would be overwritten or stay
+/// unseen for a week instead of raising a conflict, unless the pair's
+/// owner chose to accept that.
 fn stat_trust(draft: &foldover_types::PairDraft, side: Side) -> StatTrust {
+    if draft.options().remote_stats() == RemoteStats::Everywhere {
+        return StatTrust::Reuse;
+    }
     match draft.role(side) {
         FolderRole::Target if draft.unrecorded() != Some(side) => StatTrust::Reuse,
         FolderRole::Target | FolderRole::Source | FolderRole::TwoWay => StatTrust::Read,

@@ -169,6 +169,16 @@ you might expect. Only the last three below block saving
 - A file replaced on the server by another with the same size, time,
   mode and owner inside the same second is only noticed at the next full
   read ([ADR 0028](../adr/0028-sftp-endpoints.md)).
+- **Backup and Mirror targets are not read in full each sync.** A file
+  there whose size, time, mode and owner are unchanged, and that was
+  last changed more than an hour before Foldover last read it, is taken
+  as unchanged and read again only about once a week. An edit made there
+  by something else that keeps all four is found at that read. **Skip
+  unchanged SFTP files in every folder** in the pair editor
+  (`--remote-stats everywhere`) does the same for the pair's other SFTP
+  folders, where such an edit can be overwritten instead of reported as
+  a conflict. A server clock more than an hour off this Mac's is outside
+  this guarantee ([ADR 0057](../adr/0057-sftp-stat-trust.md)).
 - Only OpenSSH's `sftp-server` is tested; other servers may order
   symlink arguments differently
   ([ADR 0028](../adr/0028-sftp-endpoints.md)).

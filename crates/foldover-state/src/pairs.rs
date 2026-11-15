@@ -9,8 +9,8 @@ use foldover_db::{
 use foldover_types::{
     BaselineEntry, DailySchedule, Durability, EndpointId, Filters, FolderRecords, InvalidPair,
     LocalRoot, MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions, PairRoot, Propagation,
-    RemovalProtection, Resolution, ReviewPolicy, Schedule, ScheduleInterval, Side, Skip, SyncMode,
-    SyncPath, TimeOfDay, Weekdays,
+    RemoteStats, RemovalProtection, Resolution, ReviewPolicy, Schedule, ScheduleInterval, Side,
+    Skip, SyncMode, SyncPath, TimeOfDay, Weekdays,
 };
 
 use crate::BaseUpdate;
@@ -56,6 +56,8 @@ const REVIEW_AUTOMATIC: &str = "automatic";
 const REVIEW_REQUIRED: &str = "required";
 const REMOVAL_ENABLED: &str = "enabled";
 const REMOVAL_DISABLED: &str = "disabled";
+const REMOTE_STATS_TARGETS: &str = "targets";
+const REMOTE_STATS_EVERYWHERE: &str = "everywhere";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -761,6 +763,11 @@ fn values(draft: &PairDraft) -> PairValues {
             RemovalProtection::Disabled => REMOVAL_DISABLED,
         }
         .to_owned(),
+        remote_stats: match options.remote_stats() {
+            RemoteStats::Targets => REMOTE_STATS_TARGETS,
+            RemoteStats::Everywhere => REMOTE_STATS_EVERYWHERE,
+        }
+        .to_owned(),
     }
 }
 
@@ -870,6 +877,11 @@ fn from_row(row: PairRow) -> Result<PairConfig, Error> {
         REMOVAL_DISABLED => RemovalProtection::Disabled,
         _ => return Err(Error::InvalidStored("removal protection")),
     };
+    let remote_stats = match row.values.remote_stats.as_str() {
+        REMOTE_STATS_TARGETS => RemoteStats::Targets,
+        REMOTE_STATS_EVERYWHERE => RemoteStats::Everywhere,
+        _ => return Err(Error::InvalidStored("remote stats")),
+    };
     let draft = PairDraft::new(
         row.values.name,
         PairRoot::from_bytes(row.values.left_root)?,
@@ -884,7 +896,8 @@ fn from_row(row: PairRow) -> Result<PairConfig, Error> {
             .with_records(records)
             .with_bandwidth_limit(bandwidth_limit)?
             .with_review_policy(review_policy)
-            .with_removal_protection(removal_protection),
+            .with_removal_protection(removal_protection)
+            .with_remote_stats(remote_stats),
     );
     let revision = u64::try_from(row.revision).map_err(|_| Error::InvalidStored("revision"))?;
     Ok(PairConfig::from_stored(id, revision, draft)?)
@@ -1068,6 +1081,7 @@ mod tests {
                 bandwidth_limit: None,
                 review_policy: REVIEW_AUTOMATIC.into(),
                 removal_protection: REMOVAL_ENABLED.into(),
+                remote_stats: REMOTE_STATS_TARGETS.into(),
             })
             .unwrap();
         drop(database);
@@ -1104,6 +1118,7 @@ mod tests {
                 bandwidth_limit: None,
                 review_policy: REVIEW_AUTOMATIC.into(),
                 removal_protection: REMOVAL_ENABLED.into(),
+                remote_stats: REMOTE_STATS_TARGETS.into(),
             })
             .unwrap();
         let id = PairId::from_bytes(row.id.try_into().unwrap()).unwrap();
@@ -2159,6 +2174,28 @@ mod tests {
             records.visit_base(|_, _| ()),
             Err(Error::InvalidStored(_))
         ));
+    }
+
+    #[test]
+    fn remote_stats_round_trip_through_db_and_state() {
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        for stats in [RemoteStats::Targets, RemoteStats::Everywhere] {
+            let d =
+                draft(SyncMode::Sync).with_options(PairOptions::default().with_remote_stats(stats));
+            let saved = store.create(&d).unwrap();
+            assert_eq!(saved.draft().options().remote_stats(), stats);
+        }
+        drop(store);
+        let store = PairStore::open(&location).unwrap();
+        let mut stored: Vec<_> = store
+            .pairs()
+            .unwrap()
+            .iter()
+            .map(|pair| pair.draft().options().remote_stats())
+            .collect();
+        stored.sort_by_key(|stats| *stats == RemoteStats::Everywhere);
+        assert_eq!(stored, [RemoteStats::Targets, RemoteStats::Everywhere]);
     }
 
     #[test]

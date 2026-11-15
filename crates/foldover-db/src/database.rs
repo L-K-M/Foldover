@@ -67,14 +67,15 @@ const HAS_RESOLUTIONS: &str = "SELECT EXISTS(SELECT 1 FROM resolution WHERE pair
 /// bounds both the owned rows held during the merge and the writes applied
 /// before the next page read.
 const SNAPSHOT_PAGE: usize = 256;
-const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary, schedule_time, schedule_days, records, bandwidth_limit, review_policy, removal_protection";
+const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary, schedule_time, schedule_days, records, bandwidth_limit, review_policy, removal_protection, remote_stats";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 32] = [
+const MIGRATIONS: [&str; 33] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
     SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, SCHEMA_V15, SCHEMA_V16,
     SCHEMA_V17, SCHEMA_V18, SCHEMA_V19, SCHEMA_V20, SCHEMA_V21, SCHEMA_V22, SCHEMA_V23, SCHEMA_V24,
     SCHEMA_V25, SCHEMA_V26, SCHEMA_V27, SCHEMA_V28, SCHEMA_V29, SCHEMA_V30, SCHEMA_V31, SCHEMA_V32,
+    SCHEMA_V33,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -526,6 +527,14 @@ CREATE TABLE pending_skip (
 ) STRICT, WITHOUT ROWID;
 ";
 
+// Which remote folders may take an unchanged stat as an unchanged file
+// (ADR 0057). Older agents ignore the column and read every remote file,
+// which is safe, so the floor stays.
+const SCHEMA_V33: &str = "
+ALTER TABLE pair ADD COLUMN remote_stats TEXT NOT NULL DEFAULT 'targets' CHECK(remote_stats IN ('targets','everywhere'));
+ALTER TABLE pending_pair ADD COLUMN remote_stats TEXT NOT NULL DEFAULT 'targets' CHECK(remote_stats IN ('targets','everywhere'));
+";
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("State I/O: {0}")]
@@ -687,6 +696,7 @@ pub struct PairValues {
     pub bandwidth_limit: Option<i64>,
     pub review_policy: String,
     pub removal_protection: String,
+    pub remote_stats: String,
 }
 
 #[derive(Clone, Debug)]
@@ -788,7 +798,7 @@ impl Database {
     pub fn create_pair(&mut self, values: &PairValues) -> Result<PairRow, Error> {
         let id = uuid::Uuid::new_v4().into_bytes();
         self.connection.execute(
-            "INSERT INTO pair (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,schedule,schedule_minutes,filters,size_limit,age_limit,canary,schedule_time,schedule_days,records,bandwidth_limit,review_policy,removal_protection) VALUES (?1,1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
+            "INSERT INTO pair (id,revision,name,left_root,right_root,mode,modification_times,extended_attributes,permissions,durability,schedule,schedule_minutes,filters,size_limit,age_limit,canary,schedule_time,schedule_days,records,bandwidth_limit,review_policy,removal_protection,remote_stats) VALUES (?1,1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
             params![
                 id.as_slice(),
                 values.name,
@@ -810,7 +820,8 @@ impl Database {
                 values.records,
                 values.bandwidth_limit,
                 values.review_policy,
-                values.removal_protection
+                values.removal_protection,
+                values.remote_stats
             ],
         )?;
         self.pair(&id)?
@@ -1494,6 +1505,7 @@ fn pair_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairRow> {
             bandwidth_limit: row.get(19)?,
             review_policy: row.get(20)?,
             removal_protection: row.get(21)?,
+            remote_stats: row.get(22)?,
         },
     })
 }
@@ -1543,6 +1555,7 @@ pub(super) mod tests {
             bandwidth_limit: None,
             review_policy: "automatic".into(),
             removal_protection: "enabled".into(),
+            remote_stats: "targets".into(),
         }
     }
 
@@ -2324,6 +2337,8 @@ pub(super) mod tests {
                         rusqlite::types::Value::Null,
                         rusqlite::types::Value::Text("automatic".into()),
                         rusqlite::types::Value::Text("enabled".into()),
+                        // v33: the default, trusting only record-keeping targets.
+                        rusqlite::types::Value::Text("targets".into()),
                     ]);
                 }
             }
@@ -3188,6 +3203,8 @@ pub(super) mod tests {
                     row.extend([
                         rusqlite::types::Value::Text("automatic".into()),
                         rusqlite::types::Value::Text("enabled".into()),
+                        // v33: the default, trusting only record-keeping targets.
+                        rusqlite::types::Value::Text("targets".into()),
                     ]);
                 }
             }

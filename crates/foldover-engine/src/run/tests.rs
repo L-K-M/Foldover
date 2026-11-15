@@ -4656,5 +4656,14 @@ fn only_record_keeping_targets_trust_remote_stats() {
             right,
             "{mode:?} {records:?}"
         );
+        // The owner's opt-in covers every folder of the pair.
+        let options = draft
+            .options()
+            .clone()
+            .with_remote_stats(RemoteStats::Everywhere);
+        let everywhere = draft.with_options(options);
+        for side in [Side::Left, Side::Right] {
+            assert_eq!(stat_trust(&everywhere, side), StatTrust::Reuse);
+        }
     }
 }

@@ -28,8 +28,8 @@ pub use metadata_policy::{MetadataPolicy, Propagation};
 pub use names::{CaseMatching, NameMatching, UnicodeMatching};
 pub use options::{
     DailySchedule, Durability, Filters, FolderRecords, LocalDateTime, MIN_BANDWIDTH_LIMIT,
-    PairOptions, RemovalProtection, ReviewPolicy, Schedule, ScheduleInterval, TimeOfDay, Weekday,
-    Weekdays,
+    PairOptions, RemoteStats, RemovalProtection, ReviewPolicy, Schedule, ScheduleInterval,
+    TimeOfDay, Weekday, Weekdays,
 };
 pub use path_map::{InvalidSortedPathMap, PathMap, PathMapBuilder, PathMapIter};
 pub use review::{InvalidReviewToken, ReviewToken};

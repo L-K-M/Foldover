@@ -1000,6 +1000,24 @@ func reviewPolicyAndRemovalProtectionDefaultsComeFromEngine() {
 
 @MainActor
 @Test
+func trustingRemoteStatsEverywhereIsAnOptInThatSurvivesSaveAndReload() async {
+    #expect(PairOptions.defaults.remoteStats == .targets)
+    let client = PairFixtureClient()
+    let store = PairStore(client: client)
+    let editor = PairEditorViewModel(store: store)
+    #expect(!editor.trustsRemoteStatsEverywhere)
+    editor.name = "Server"
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/a")]), side: .left)
+    editor.chooseFolder(.success([URL(fileURLWithPath: "/b")]), side: .right)
+    editor.trustsRemoteStatsEverywhere = true
+    #expect(await editor.save())
+    #expect(await client.savedSettings?.options.remoteStats == .everywhere)
+    let reloaded = PairEditorViewModel(store: store, editing: store.pairs.first)
+    #expect(reloaded.trustsRemoteStatsEverywhere)
+}
+
+@MainActor
+@Test
 func reviewPolicyAndRemovalProtectionTogglesIndependently() {
     let store = PairStore(client: PairFixtureClient())
     let editor = PairEditorViewModel(store: store)
