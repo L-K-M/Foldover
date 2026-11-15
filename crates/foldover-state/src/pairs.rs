@@ -9,7 +9,7 @@ use foldover_db::{
 use foldover_types::{
     BaselineEntry, DailySchedule, Durability, EndpointId, Filters, FolderRecords, InvalidPair,
     LocalRoot, MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions, PairRoot, Propagation,
-    RemovalProtection, Resolution, ReviewPolicy, Schedule, ScheduleInterval, Side, SyncMode,
+    RemovalProtection, Resolution, ReviewPolicy, Schedule, ScheduleInterval, Side, Skip, SyncMode,
     SyncPath, TimeOfDay, Weekdays,
 };
 
@@ -424,6 +424,40 @@ impl PairStore {
                 Ok((path, resolution))
             })
             .collect()
+    }
+
+    /// Changes a person chose to leave alone in the pair's next run.
+    pub fn skips(&self, id: PairId) -> Result<BTreeMap<SyncPath, Skip>, Error> {
+        self.database
+            .skips(id.as_bytes())?
+            .into_iter()
+            .map(|row| {
+                let path =
+                    SyncPath::try_from(row.path).map_err(|_| Error::InvalidStored("skip path"))?;
+                let version = |bytes: Option<Vec<u8>>| bytes.as_deref().map(decode).transpose();
+                let skip = Skip::new(version(row.left_version)?, version(row.right_version)?);
+                Ok((path, skip))
+            })
+            .collect()
+    }
+
+    /// Leave `path` alone in the pair's next run while both sides still
+    /// hold `skip`'s versions.
+    pub fn record_skip(&mut self, id: PairId, path: &SyncPath, skip: Skip) -> Result<(), Error> {
+        let version = |version: Option<foldover_types::EntryVersion>| {
+            version.map(|version| encode(version).to_vec())
+        };
+        let row = foldover_db::SkipRow {
+            path: path.as_bytes().to_vec(),
+            left_version: version(skip.left()),
+            right_version: version(skip.right()),
+        };
+        Ok(self.database.record_skip(id.as_bytes(), &row)?)
+    }
+
+    /// A run executed: the pair's skips are spent.
+    pub fn spend_skips(&mut self, id: PairId) -> Result<(), Error> {
+        Ok(self.database.spend_skips(id.as_bytes())?)
     }
 
     /// Store a conflict choice, only while the pair keeps `revision`.
@@ -1442,6 +1476,28 @@ mod tests {
                 .schedule(),
             daily
         );
+    }
+
+    #[test]
+    fn skips_round_trip_until_spent() {
+        use foldover_types::{Digest, EntryContent, EntryVersion};
+
+        let (_directory, location) = location();
+        let mut store = PairStore::open(&location).unwrap();
+        let pair = store.create(&draft(SyncMode::Sync)).unwrap();
+        let version = EntryVersion::new(
+            EntryContent::File(Digest::from_bytes([5; Digest::BYTE_LEN])),
+            Digest::from_bytes([6; Digest::BYTE_LEN]),
+        );
+        let path = SyncPath::try_from(b"draft.txt".as_slice()).unwrap();
+        let skip = Skip::new(Some(version), None);
+        store.record_skip(pair.id(), &path, skip).unwrap();
+        assert_eq!(
+            store.skips(pair.id()).unwrap(),
+            BTreeMap::from([(path, skip)])
+        );
+        store.spend_skips(pair.id()).unwrap();
+        assert!(store.skips(pair.id()).unwrap().is_empty());
     }
 
     #[test]

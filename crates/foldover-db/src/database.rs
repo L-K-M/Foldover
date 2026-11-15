@@ -24,6 +24,7 @@ mod read_view;
 mod removal;
 mod settings;
 mod share;
+mod skip;
 mod starts;
 pub use cursor::WatchCursorRow;
 pub use device::DeviceRow;
@@ -37,6 +38,7 @@ pub use read_view::{BaseBlob, ReadView, ReadViewError, SnapshotBlob};
 pub use removal::Purge;
 pub use settings::AutomationSettingRow;
 pub use share::ShareRow;
+pub use skip::SkipRow;
 pub use starts::RunMarker;
 
 const APPLICATION_ID: i64 = 0x464f4c44; // FOLD
@@ -68,11 +70,11 @@ const SNAPSHOT_PAGE: usize = 256;
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary, schedule_time, schedule_days, records, bandwidth_limit, review_policy, removal_protection";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 31] = [
+const MIGRATIONS: [&str; 32] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
     SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, SCHEMA_V15, SCHEMA_V16,
     SCHEMA_V17, SCHEMA_V18, SCHEMA_V19, SCHEMA_V20, SCHEMA_V21, SCHEMA_V22, SCHEMA_V23, SCHEMA_V24,
-    SCHEMA_V25, SCHEMA_V26, SCHEMA_V27, SCHEMA_V28, SCHEMA_V29, SCHEMA_V30, SCHEMA_V31,
+    SCHEMA_V25, SCHEMA_V26, SCHEMA_V27, SCHEMA_V28, SCHEMA_V29, SCHEMA_V30, SCHEMA_V31, SCHEMA_V32,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -506,6 +508,21 @@ CREATE TABLE interrupted_run (
     wrote INTEGER NOT NULL CHECK(wrote IN (0,1)),
     keep_journal INTEGER NOT NULL CHECK(keep_journal IN (0,1)),
     chain_ms INTEGER NOT NULL CHECK(chain_ms >= 0)
+) STRICT, WITHOUT ROWID;
+";
+
+// Changes a person chose to leave alone in the pair's next run, with the
+// versions each side held, so the choice outlives an agent restart and a
+// run continuing an interrupted one honors it (ADR 0055). Older agents
+// ignore the table and forget the choice, as they always did, so the
+// floor stays.
+const SCHEMA_V32: &str = "
+CREATE TABLE pending_skip (
+    pair_id BLOB NOT NULL REFERENCES pair(id) ON DELETE CASCADE,
+    path BLOB NOT NULL CHECK(length(path) > 0 AND substr(path,1,1) != x'2f' AND instr(path,x'00') = 0),
+    left_version BLOB,
+    right_version BLOB,
+    PRIMARY KEY (pair_id, path)
 ) STRICT, WITHOUT ROWID;
 ";
 

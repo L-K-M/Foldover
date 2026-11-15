@@ -113,7 +113,7 @@ for a run that stopped without finishing, which keeps the journal for
 its successor but is never resumed), and the chain is two flags on the
 row (`wrote`, `keep_journal`) rather than a list of names, since the
 journal itself holds exactly the chain. Manual-pair resume
-(`Work::Resume`) is the next slice.
+(`Work::Resume`, persisted skips, schema v32) is implemented too.
 
 - **Marker table, not a history row.** A new table in a v31 migration
   (current `SCHEMA_VERSION` is 30, `database.rs:41`):

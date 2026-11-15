@@ -92,9 +92,18 @@ impl Service {
                 eprintln!("foldoverd: interrupted runs cannot be read: {error}");
                 Vec::new()
             });
+        let revisions = engine
+            .pairs()
+            .map(|pairs| {
+                pairs
+                    .iter()
+                    .map(|pair| (pair.id(), pair.revision()))
+                    .collect()
+            })
+            .unwrap_or_default();
         let service = Self::new(engine);
         service.safe_mode.judge(&stops, now);
-        service.jobs.load_interrupted(&interrupted);
+        service.jobs.load_interrupted(&interrupted, &revisions);
         Ok(service)
     }
 
@@ -1697,8 +1706,9 @@ mod tests {
             .admit_run(id, SystemTime::now(), run, revision, resume)
             .unwrap();
         let interrupted = engine.interrupted_at_start(unclean).unwrap();
+        let revisions = std::collections::HashMap::from([(id, revision)]);
         drop(engine);
-        service.jobs.load_interrupted(&interrupted);
+        service.jobs.load_interrupted(&interrupted, &revisions);
     }
 
     #[tokio::test]
@@ -1788,6 +1798,83 @@ mod tests {
             .await
             .unwrap();
         assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn a_persons_interrupted_sync_continues_as_theirs_and_stops_at_the_fuse() {
+        let (directory, service) = fixture();
+        let created = service
+            .handle(Request::call(
+                1,
+                PAIR_CREATE,
+                Some(input(directory.path(), "Photos")),
+            ))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        let left = directory.path().join("Photos-left");
+        let right = directory.path().join("Photos-right");
+        for index in 0..60 {
+            fs::write(left.join(format!("photo-{index}")), b"p").unwrap();
+        }
+        assert_eq!(first_sync_slow(&service, &key).await["state"], "finished");
+        let at = |seconds| service.scheduler.started() + std::time::Duration::from_secs(seconds);
+
+        // A manual pair: nothing schedules it, but its interrupted sync
+        // continues at once, recorded as the person's.
+        fs::write(left.join("new"), b"n").unwrap();
+        interrupt(
+            &service,
+            id,
+            foldover_engine::WritingRun::Manual,
+            foldover_engine::Resume::Auto,
+            false,
+        );
+        assert!(matches!(
+            service.jobs.resumable().get(&id),
+            Some(Work::Resume)
+        ));
+        assert_eq!(run_due_started(&service, at(30)).await, [id]);
+        assert_eq!(settled(&service, &key).await["state"], "finished");
+        assert!(right.join("new").exists());
+        let newest = service.engine.lock().unwrap().history(id, 1).unwrap();
+        assert_eq!(newest[0].trigger, foldover_engine::RunTrigger::Manual);
+        assert!(run_due_started(&service, at(60)).await.is_empty());
+
+        // Deleting more than a person's sync may without asking stops it
+        // for them, as their own sync would.
+        for index in 0..60 {
+            fs::remove_file(left.join(format!("photo-{index}"))).unwrap();
+        }
+        interrupt(
+            &service,
+            id,
+            foldover_engine::WritingRun::Manual,
+            foldover_engine::Resume::Auto,
+            false,
+        );
+        assert_eq!(run_due_started(&service, at(90)).await, [id]);
+        assert_eq!(settled_slow(&service, &key).await["state"], "needsApproval");
+        assert!(right.join("photo-0").exists());
+
+        // Settings changed since it started: it waits for the person.
+        let mut engine = service.engine.lock().unwrap();
+        let revision = engine.active_pair(id).unwrap().revision();
+        engine
+            .admit_run(
+                id,
+                SystemTime::now(),
+                foldover_engine::WritingRun::Manual,
+                revision,
+                foldover_engine::Resume::Auto,
+            )
+            .unwrap();
+        let interrupted = engine.interrupted_at_start(false).unwrap();
+        drop(engine);
+        let changed = std::collections::HashMap::from([(id, revision + 1)]);
+        service.jobs.load_interrupted(&interrupted, &changed);
+        assert!(service.jobs.resumable().is_empty());
     }
 
     #[tokio::test]
@@ -2605,6 +2692,9 @@ mod tests {
             ))
             .await
             .unwrap();
+        // Stored, so an agent restart keeps it (ADR 0055).
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        assert_eq!(service.engine.lock().unwrap().skips(id).unwrap().len(), 1);
 
         service
             .handle(Request::call(5, SYNC_PREVIEW, Some(key.clone())))
@@ -2621,6 +2711,7 @@ mod tests {
         assert_eq!(fs::read(left.join("gone")).unwrap(), b"g");
         assert!(right.join("now").exists());
         assert!(!right.join("later").exists());
+        assert!(service.engine.lock().unwrap().skips(id).unwrap().is_empty());
 
         // A skip lasts one run.
         let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});

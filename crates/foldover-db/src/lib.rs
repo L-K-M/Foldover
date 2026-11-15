@@ -9,6 +9,6 @@ mod database;
 pub use database::{
     AutomationSettingRow, BaseBlob, BaseChange, BaseRow, Database, DeviceRow, Error, HistoryRow,
     IdentityRow, InterruptedRow, JournalChange, JournalRow, MountRow, PairRow, PairValues,
-    PauseRow, Purge, ReadView, ReadViewError, ResolutionRow, RunEnd, RunMarker, ShareRow,
+    PauseRow, Purge, ReadView, ReadViewError, ResolutionRow, RunEnd, RunMarker, ShareRow, SkipRow,
     SnapshotBlob, SnapshotData, SnapshotRow, StateLocation, WatchCursorRow,
 };

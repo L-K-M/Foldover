@@ -718,6 +718,10 @@ impl Service {
         environment: Environment,
         local_now: Option<LocalDateTime>,
     ) -> Vec<PairId> {
+        // A run the agent stopped during continues at the first chance
+        // its holds allow, a person's sync too (ADR 0055). Read before the
+        // engine lock, which the jobs lock never spans.
+        let resumable = self.jobs.resumable();
         let (mut candidates, held, last_run, effort) = {
             let Ok(engine) = self.engine.lock() else {
                 return Vec::new();
@@ -734,7 +738,10 @@ impl Service {
             };
             let candidates = pairs
                 .into_iter()
-                .filter(|pair| pair.draft().options().schedule() != Schedule::Manual)
+                .filter(|pair| {
+                    pair.draft().options().schedule() != Schedule::Manual
+                        || resumable.contains_key(&pair.id())
+                })
                 // After an undo; an unreadable hold counts as held.
                 .filter(|pair| !engine.automation_held(pair.id()).unwrap_or(true))
                 .collect::<Vec<_>>();
@@ -798,13 +805,11 @@ impl Service {
             Effort::Gentle => 0,
         };
         self.scheduler.order_by_wait(&mut candidates);
-        // A scheduled run the agent stopped during continues at the first
-        // chance its holds allow (ADR 0055).
-        let resumable = self.jobs.resumable();
         let mut started = Vec::new();
         for pair in candidates {
             let recorded = last_run.get(&pair.id()).copied();
-            let due = resumable.contains(&pair.id())
+            let resume = resumable.get(&pair.id()).copied();
+            let due = resume.is_some()
                 || self
                     .scheduler
                     .due(&pair, now, local_now, recorded.and_then(local_time))
@@ -845,7 +850,7 @@ impl Service {
             // A busy pair is not due again until its job ends.
             if self
                 .jobs
-                .start(&self.engine, pair.id(), Work::Scheduled)
+                .start(&self.engine, pair.id(), resume.unwrap_or(Work::Scheduled))
                 .is_ok()
             {
                 self.scheduler.started_run(pair.id(), now);

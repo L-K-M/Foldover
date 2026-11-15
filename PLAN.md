@@ -261,9 +261,9 @@ scope is in [ADR 0011](docs/adr/0011-pair-configuration-api.md).
 - **Lifecycle:**
   - App quit → sync continues.
   - Agent crash → launchd restarts it; journal recovery runs before any new
-    work. A run it stopped during shows as interrupted; a scheduled one
-    continues by itself, a person's waits for the next sync
-    ([ADR 0055](docs/adr/0055-interrupted-runs.md)).
+    work. A run it stopped during shows as interrupted and continues by
+    itself; a person's sync continues as theirs and stops at the deletion
+    review ([ADR 0055](docs/adr/0055-interrupted-runs.md)).
   - App update → the version handshake detects the mismatch and the agent
     restarts onto the new binary.
   - Downgrade → the state DB records a minimum reader version. An older agent

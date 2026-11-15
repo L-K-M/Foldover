@@ -70,14 +70,17 @@ All notable changes to this project are documented here. The format follows
 ### Added
 
 - A sync that stops because the background agent stopped, for example at a
-  restart, now shows as interrupted instead of the pair reading Ready. An
-  automatic sync continues by itself as soon as nothing holds it, without
-  waiting for its next scheduled time; a sync you started waits for you to
-  sync again. Choose Don't Resume or Dismiss in the sidebar's menu, or run
-  `foldover sync ID --cancel`, to decline it. Undo after the continued
-  sync reverts all of it, not only the part after the restart. A sync that
-  keeps crashing the agent stops continuing by itself after two attempts
-  (local protocol 24, schema v31, ADR 0055).
+  restart, now shows as interrupted instead of the pair reading Ready, and
+  continues by itself as soon as nothing holds it, without waiting for its
+  next scheduled time or for you. A sync you started continues as yours:
+  it still stops to ask before removing more than 50 items and 1% of a
+  folder, or whenever the pair requires review, and it waits for you if
+  you changed the pair's settings meanwhile. Choose Don't Resume in the
+  sidebar's menu, or run `foldover sync ID --cancel`, to decline it. Undo
+  after the continued sync reverts all of it, not only the part after the
+  restart, and "skip in the next run" choices now survive a restart. A
+  sync that keeps crashing the agent stops continuing by itself after two
+  attempts (local protocol 24, schema v32, ADR 0055).
 - Pause Pair and Resume Pair, in the sidebar's menu and the Pair menu, and
   `foldover pairs pause|resume ID`: a paused pair's automatic syncs wait
   until you resume it, while Sync Now still works.
