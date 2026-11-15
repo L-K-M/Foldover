@@ -62,6 +62,9 @@ const EXECUTE_BITS: u32 = 0o111;
 const IDENTITY_FILE: &[u8] = b".foldover/id";
 const IDENTITY_FILE_LIMIT: usize = 64;
 const INTERNAL_DIRECTORY: &[u8] = b".foldover";
+/// Where large copies stage, by content, so a stopped one resumes
+/// (ADR 0058); local folders keep theirs at the same place (ADR 0034).
+const PARTIAL_DIRECTORY: &[u8] = b".foldover/partial";
 /// Names tried when putting an item back beside a newer one.
 const PUT_BACK_ATTEMPTS: u32 = 100;
 const RESTORED: &str = "restored";
@@ -103,6 +106,30 @@ pub struct SftpEndpoint {
     /// says. Their number stays: they wait on the server, not the
     /// processor (ADR 0054).
     effort: Effort,
+    /// Contents being staged in `PARTIAL_DIRECTORY`, so two copies of
+    /// one content in a run never write one file. Boxed: every
+    /// `Endpoint` is as large as this one.
+    partials: Box<Mutex<std::collections::HashSet<[u8; 32]>>>,
+}
+
+/// A content claimed for staging at `remote` in `PARTIAL_DIRECTORY`
+/// (ADR 0058), released when dropped.
+pub(crate) struct Partial<'a> {
+    endpoint: &'a SftpEndpoint,
+    content: [u8; 32],
+    /// The whole file's length.
+    size: u64,
+    remote: Vec<u8>,
+}
+
+impl Drop for Partial<'_> {
+    fn drop(&mut self) {
+        self.endpoint
+            .partials
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.content);
+    }
 }
 
 impl SftpEndpoint {
@@ -207,6 +234,7 @@ impl SftpEndpoint {
             root,
             listings: Mutex::default(),
             effort: Effort::Full,
+            partials: Box::default(),
         })
     }
 
@@ -1108,6 +1136,83 @@ impl SftpEndpoint {
         }
     }
 
+    /// Claim staging the `size`-byte file with `content` in the partial
+    /// folder; `None` while another copy of it stages there.
+    pub(crate) fn claim_partial(&self, content: Digest, size: u64) -> Option<Partial<'_>> {
+        let content = *content.as_bytes();
+        let claimed = self
+            .partials
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(content);
+        let name: String = content.iter().map(|byte| format!("{byte:02x}")).collect();
+        claimed.then(|| Partial {
+            endpoint: self,
+            content,
+            size,
+            remote: self.remote(&[PARTIAL_DIRECTORY, b"/", name.as_bytes()].concat()),
+        })
+    }
+
+    /// Stage `partial`'s file, continuing what a stopped copy left there
+    /// (ADR 0058). `produce` gets the byte it starts from and the sink.
+    /// Writes are trusted once acknowledged, and only an interrupted
+    /// write window past them is sent again: every byte more than
+    /// `WRITE_WINDOW_BYTES` before the kept file's end was acknowledged.
+    /// A failed write keeps the file for the next copy of this content.
+    fn upload_partial_on(
+        &self,
+        session: &mut Session,
+        partial: &Partial<'_>,
+        permissions: u32,
+        durability: Durability,
+        produce: impl FnOnce(u64, foldover_net::sftp::Chunks<'_>) -> io::Result<()>,
+    ) -> io::Result<Vec<u8>> {
+        if durability == Durability::Full {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "SFTP cannot guarantee full durability",
+            ));
+        }
+        let directory = self.remote(PARTIAL_DIRECTORY);
+        if let Err(error) = session.lstat(&directory) {
+            if error.kind() != io::ErrorKind::NotFound {
+                return Err(error);
+            }
+            // Another copy may have made it meanwhile.
+            if let Err(error) = session.make_directory(&directory, DEFAULT_DIRECTORY) {
+                session.lstat(&directory).map_err(|_| error)?;
+            }
+        }
+        let start = match session.lstat(&partial.remote) {
+            Ok(kept)
+                if kept.kind() == FileKind::File
+                    && kept.size.is_some_and(|size| size <= partial.size) =>
+            {
+                Some(
+                    kept.size
+                        .unwrap_or(0)
+                        .saturating_sub(foldover_net::sftp::WRITE_WINDOW_BYTES),
+                )
+            }
+            // Longer than the file it would be, or not a file: not ours.
+            Ok(_) => {
+                session.remove_file(&partial.remote)?;
+                None
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let (handle, start) = match start {
+            Some(start) => (session.open_write(&partial.remote)?, start),
+            None => (session.create_new(&partial.remote, permissions)?, 0),
+        };
+        let written = session.write_chunks_from(&handle, start, |sink| produce(start, sink));
+        let closed = session.close(handle);
+        written.and(closed)?;
+        Ok(partial.remote.clone())
+    }
+
     /// The version a staged file will have, from its attributes and the
     /// digest of the data written.
     fn staged_version_on(
@@ -1268,6 +1373,10 @@ impl SftpEndpoint {
                     return Err(error);
                 }
                 target
+            }
+            // A partial stages away from its folder; find it as stored.
+            None if temporary.starts_with(&self.remote(PARTIAL_DIRECTORY)) => {
+                self.fresh_on(session, path.as_bytes())
             }
             None => {
                 let folder = &temporary[..temporary
@@ -1533,6 +1642,8 @@ impl SftpEndpoint {
             return Err(ScanError::Cancelled.into());
         }
         let mut session = self.session_unless_cancelled(control)?;
+        // Data kept from stopped copies follows the same retention.
+        self.prune_partials_on(&mut session, retention, now, control)?;
         let archive = self.remote(ARCHIVE_ROOT);
         let runs = match session.read_dir(&archive) {
             Ok(runs) => runs,
@@ -1556,6 +1667,39 @@ impl SftpEndpoint {
             pruned += 1;
         }
         Ok(pruned)
+    }
+
+    /// Remove staged partials not written to for longer than `retention`.
+    fn prune_partials_on(
+        &self,
+        session: &mut Session,
+        retention: Duration,
+        now: SystemTime,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<(), ApplyError> {
+        let directory = self.remote(PARTIAL_DIRECTORY);
+        let entries = match session.read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(io_error(error).into()),
+        };
+        for (name, attributes) in entries {
+            if control() == ScanControl::Cancel {
+                return Err(ScanError::Cancelled.into());
+            }
+            let stale = now
+                .duration_since(modified(&attributes))
+                .is_ok_and(|age| age > retention);
+            if attributes.kind() != FileKind::File || !stale {
+                continue;
+            }
+            match session.remove_file(&[directory.as_slice(), b"/", &name].concat()) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(io_error(error).into()),
+            }
+        }
+        Ok(())
     }
 
     fn remove_tree_on(

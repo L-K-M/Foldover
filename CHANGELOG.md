@@ -55,6 +55,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- A large file copied from this Mac to an SFTP server continues where
+  it stopped if the sync is cancelled, the Mac restarts or the agent
+  stops, instead of starting over. Foldover keeps the part the server
+  confirmed in the server folder's `.foldover/partial` and sends only
+  the rest (ADR 0058).
 - A Backup or Mirror to an SFTP server no longer reads every file in the
   target on every sync. A file there that has not changed size, time,
   permissions or owner, and was last changed more than an hour before

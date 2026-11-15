@@ -33,6 +33,12 @@ const CHUNK: usize = 32 * 1024;
 /// Requests in flight while streaming, so throughput does not wait on
 /// every round trip.
 const WINDOW: usize = 16;
+/// How far past the server's acknowledged writes an interrupted
+/// `write_chunks` may have sent: a write goes out only once the oldest
+/// of `WINDOW` in flight was answered, so whatever a server stored, every
+/// byte more than this before the end of the file was acknowledged, in
+/// whatever order the server applied them.
+pub const WRITE_WINDOW_BYTES: u64 = (WINDOW * CHUNK) as u64;
 /// The largest response accepted from a broken or hostile server.
 const MAX_PACKET: usize = 1024 * 1024;
 /// How much of ssh's error output is kept for messages.
@@ -346,6 +352,16 @@ impl Session {
         })
     }
 
+    /// Open an existing file for writing, keeping its contents.
+    pub fn open_write(&mut self, path: &[u8]) -> io::Result<Handle> {
+        self.handle(|id| {
+            Writer::new(wire::OPEN, id)
+                .bytes(path)
+                .u32(wire::OPEN_WRITE)
+                .attributes(&Attributes::default())
+        })
+    }
+
     /// Stream a whole file to `sink`, keeping several reads in flight.
     /// On any error the replies already owed are drained so the wire
     /// stays aligned; if that drain fails the session is marked
@@ -495,8 +511,19 @@ impl Session {
         handle: &Handle,
         produce: impl FnOnce(Chunks<'_>) -> io::Result<()>,
     ) -> io::Result<u64> {
+        self.write_chunks_from(handle, 0, produce)
+    }
+
+    /// `write_chunks` from byte `start` of the file, for a copy that
+    /// resumes. Returns the file's length after the last chunk.
+    pub fn write_chunks_from(
+        &mut self,
+        handle: &Handle,
+        start: u64,
+        produce: impl FnOnce(Chunks<'_>) -> io::Result<()>,
+    ) -> io::Result<u64> {
         self.check_alive()?;
-        let mut offset = 0u64;
+        let mut offset = start;
         let mut pending = VecDeque::new();
         let mut buffer = Vec::with_capacity(CHUNK);
         let produced = produce(&mut |mut chunk: &[u8]| {

@@ -652,13 +652,15 @@ fn read(
     }
     let mut sent = Ok(());
     if source.metadata().kind() == foldover_fs::NodeKind::File {
-        sent = endpoint.read_entry_from(&source, from, &mut checkpoint, &mut |chunk| {
-            controlled
-                .answer
-                .borrow_mut()
-                .send_data(chunk)
-                .map_err(std::io::Error::other)
-        });
+        sent = endpoint
+            .read_entry_from(&source, from, &mut checkpoint, &mut |chunk| {
+                controlled
+                    .answer
+                    .borrow_mut()
+                    .send_data(chunk)
+                    .map_err(std::io::Error::other)
+            })
+            .map(|_| ());
     }
     if controlled.answer.borrow_mut().end_data().is_err() {
         return;
