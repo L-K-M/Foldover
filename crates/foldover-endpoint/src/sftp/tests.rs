@@ -3007,3 +3007,54 @@ fn incomplete_remote_stats_prove_nothing() {
         assert!(reusable(&path, &attributes, &cache, StatTrust::Reuse).is_none());
     }
 }
+
+/// ADR 0056: a copy to a server reports the file as an observation would
+/// list it, so where stats are trusted the next observation reuses it
+/// without opening it.
+#[test]
+fn a_copy_to_a_server_reports_what_the_next_observation_reuses() {
+    let local_directory = tempfile::tempdir().unwrap();
+    let remote_directory = tempfile::tempdir().unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    let log = logs.path().join("packets");
+    let Some(remote) = counted(remote_directory.path(), &log) else {
+        return;
+    };
+    let remote = Endpoint::Sftp(remote);
+    let local = Endpoint::Local(LocalEndpoint::open(local_directory.path()).unwrap());
+    let options = PairOptions::default();
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), options.clone());
+    fs::write(local_directory.path().join("settled"), b"old content").unwrap();
+    modified_at(local_directory.path(), "settled", -2 * 60 * 60);
+    let here = local
+        .observe_from(
+            options.metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+            &mut |_| {},
+        )
+        .unwrap();
+    let name = path(b"settled");
+    let written = remote
+        .copy_written(
+            &local,
+            &name,
+            &here.entries()[&name],
+            Expected::Absent,
+            &run,
+            &mut proceed,
+        )
+        .unwrap();
+    let observed = written.observed.expect("a placed file is listed");
+    assert_eq!(observed.version(), written.version);
+
+    let Endpoint::Sftp(sftp) = &remote else {
+        unreachable!()
+    };
+    let opened = requests(&log, SSH_FXP_OPEN);
+    let previous = foldover_types::PathMap::from_iter([(name.clone(), observed)]);
+    let next = observe_trusting(sftp, previous, StatTrust::Reuse);
+    assert_eq!(next.entries()[&name].version(), written.version);
+    assert_eq!(requests(&log, SSH_FXP_OPEN), opened);
+}

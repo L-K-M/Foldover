@@ -173,7 +173,19 @@ impl PairRun {
                 .filter(|(_, _, step)| *step != Step::PutBackBeside)
                 .flat_map(|(_, entry, _)| restore(entry))
                 .collect();
-            commit(revision, Commit::Undoing { updates: &restores }).map_err(RunError::Commit)?;
+            let forgotten: Vec<(Side, SyncPath)> = steps
+                .iter()
+                .flat_map(|(_, entry, _)| {
+                    std::iter::once(&entry.path)
+                        .chain(entry.moved_from.as_ref())
+                        .map(|path| (entry.side, path.clone()))
+                })
+                .collect();
+            let undoing = Commit::Undoing {
+                updates: &restores,
+                forgotten: &forgotten,
+            };
+            commit(revision, undoing).map_err(RunError::Commit)?;
             let mut undid: BTreeMap<&str, Vec<u64>> = BTreeMap::new();
             for (run, entry, step) in steps {
                 match self.undo_entry(entry, step, run, &scope, control) {

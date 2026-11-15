@@ -1,7 +1,6 @@
 # ADR 0056: Post-write snapshots
 
-Status: Implemented for local folders ([plan](../resume-interrupted-runs.md), W2);
-SFTP follows
+Status: Implemented ([plan](../resume-interrupted-runs.md), W2)
 
 ## Context
 
@@ -23,8 +22,9 @@ cannot prove the placed file.
   `update_metadata_written` return a `Written`: the stored version and,
   where the endpoint can prove it, the entry as an observation after
   placement would record it. `copy_from` and `update_metadata_from`
-  keep returning only the version. Only local folders report an
-  observation so far; SFTP and peer sides report none.
+  keep returning only the version. Local and SFTP folders report one;
+  another Mac's folder reports none, since the serving Mac keeps its
+  own observation of it.
 - **Local: a stat after placement.** After the rename, and after the
   previous content is set aside, the endpoint stats the placed path the
   same way a scan does. It reports the observation only if the file
@@ -32,6 +32,12 @@ cannot prove the placed file.
   anything else means another writer got there first, and the next run
   reads the file as before. Directories and symbolic links report the
   entry the write placed or created.
+- **SFTP: one LSTAT after placement.** After a file is written to a
+  server, the endpoint lists it once more. It reports the observation
+  only when the stat carries both size and modification time and yields
+  the stored version again; otherwise, or when the request fails, the
+  next run reads the file. With ADR 0057, that is what spares a backup
+  to SFTP from reading back what it just wrote.
 - **Stored with the base.** The engine keeps each reported observation
   whose version equals the version it records, and commits it in the
   same transaction as the base batch (`change_base_observed`). A stale
@@ -49,11 +55,14 @@ cannot prove the placed file.
   without reading the files, and finds no observation change to store.
 - Moves still report only a version; a moved file is read again by the
   next run.
-- Undo does not yet drop the snapshot rows of paths it restores. For
-  local folders this cannot reuse a wrong version: a put-back renames
-  the archived file into place, which changes its change time, so the
-  stored key no longer matches. SFTP stat keys hold no change time, so
-  the SFTP part of this work drops them.
+- **Undo forgets what it writes.** Before an undo batch writes its
+  paths, the commit holding its base restores drops their stored
+  observations. A put-back renames the archived file into place, which
+  keeps its size and time; on an SFTP folder, whose stat holds no change
+  time, a surviving row would prove the version the undo replaced.
+- An SFTP file's written content is first verified by a read at its
+  weekly reread, never at write time: the transfer digest covers the
+  bytes sent (ADR 0057).
 - Not verified on SMB shares; the device matrix covers APFS, HFS+,
   exFAT and FAT32 for the stat key a scan records, and the post-write
   stat uses the same code.

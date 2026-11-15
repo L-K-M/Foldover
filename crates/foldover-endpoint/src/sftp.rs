@@ -1463,6 +1463,48 @@ impl SftpEndpoint {
         }
     }
 
+    /// What a write that stored the regular file `version` at `path`
+    /// left there, as the next observation would list it (ADR 0056): one
+    /// LSTAT after placement. The observation is reported only when the
+    /// listed stat carries size and time and yields `version` again; a
+    /// failed or different stat only means the next run reads the file.
+    pub(crate) fn written(
+        &self,
+        path: &SyncPath,
+        version: EntryVersion,
+        policy: MetadataPolicy,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> crate::Written {
+        let unobserved = crate::Written::unobserved(version);
+        if version.kind() != EntryKind::File {
+            return unobserved;
+        }
+        let observed_at = SystemTime::now();
+        let Ok(mut session) = self.session_unless_cancelled(control) else {
+            return unobserved;
+        };
+        let Ok(Some(attributes)) = self.attributes_on(&mut session, path) else {
+            return unobserved;
+        };
+        drop(session);
+        let Some(size) = attributes.size.filter(|_| attributes.modified().is_some()) else {
+            return unobserved;
+        };
+        let listed = observed(&attributes)
+            .map(|listed| metadata_version(version.content(), &listed, policy))
+            .ok();
+        if attributes.kind() != FileKind::File || listed != Some(version) {
+            return unobserved;
+        }
+        crate::Written {
+            version,
+            observed: Some(ObservedEntry::new(
+                version,
+                Fingerprint::from_key(stat_key(&attributes), size, observed_at),
+            )),
+        }
+    }
+
     /// The version of an entry whose content is unchanged, from its
     /// current attributes.
     fn metadata_version_on(
