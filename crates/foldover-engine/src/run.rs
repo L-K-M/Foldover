@@ -203,7 +203,15 @@ pub enum Commit<'a> {
     },
     /// An undo's base restorations for paths it is about to revert; the
     /// pair's automatic syncs are held from then on, so none redoes it.
-    Undoing { updates: &'a [BaseUpdate] },
+    ///
+    /// `forgotten` names the paths the undo is about to write: their
+    /// stored observations go, since a put-back can keep a file's size and
+    /// time, which on an SFTP folder would prove the wrong version
+    /// (ADR 0056, ADR 0057).
+    Undoing {
+        updates: &'a [BaseUpdate],
+        forgotten: &'a [(Side, SyncPath)],
+    },
     /// Entries of `run` an undo reverted, so undoing again after a cancel
     /// or crash skips them.
     Undid { run: &'a str, seqs: &'a [u64] },

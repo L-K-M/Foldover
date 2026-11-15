@@ -336,7 +336,7 @@ impl Store<'_> {
                 }
                 updates
             }
-            Commit::Undoing { updates } => updates,
+            Commit::Undoing { updates, .. } => updates,
             Commit::Undid { run, seqs } => {
                 let recorded = self.journal.as_mut().and_then(|journal| {
                     journal.runs.iter_mut().find(|recorded| recorded.run == run)
@@ -3993,6 +3993,51 @@ fn undo_reverts_the_newest_run_and_the_next_preview_shows_the_redo() {
     assert!(pair.journal.is_none());
     // Syncing again would redo exactly what was undone.
     assert_eq!(pair.prepare().preview().items().len(), 5);
+}
+
+/// ADR 0056, ADR 0057: before an undo writes a path, it drops that path's
+/// stored observation, since a put-back can keep size and time.
+#[test]
+fn undo_forgets_the_observations_of_what_it_writes() {
+    let mut pair = fixture(SyncMode::Sync);
+    let left = pair.left.path().to_owned();
+    fs::write(left.join("edit.txt"), b"v1").unwrap();
+    fs::write(left.join("gone.txt"), b"g").unwrap();
+    pair.sync();
+    fs::write(left.join("edit.txt"), b"version 2").unwrap();
+    fs::remove_file(left.join("gone.txt")).unwrap();
+    fs::write(left.join("new.txt"), b"n").unwrap();
+    pair.ran(Approval::new(0, 1), at(1));
+
+    let journal = pair.journal.clone().expect("a journaled run");
+    let prepared = pair.prepare();
+    let mut store = pair.store();
+    let mut forgotten = Vec::new();
+    prepared
+        .undo(
+            journal,
+            at(2),
+            &mut |planned, commit| {
+                if let Commit::Undoing {
+                    forgotten: paths, ..
+                } = &commit
+                {
+                    forgotten.extend_from_slice(paths);
+                }
+                store.apply(planned, commit)
+            },
+            &mut proceed,
+        )
+        .unwrap();
+    forgotten.sort_by(|a, b| a.1.cmp(&b.1));
+    assert_eq!(
+        forgotten,
+        [
+            (Side::Right, path(b"edit.txt")),
+            (Side::Right, path(b"gone.txt")),
+            (Side::Right, path(b"new.txt")),
+        ]
+    );
 }
 
 /// ADR 0055: a run continuing an interrupted one keeps its journal, and

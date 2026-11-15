@@ -524,11 +524,14 @@ impl Engine {
                 observed,
                 forgotten,
             )?),
-            Commit::Undoing { updates } => {
-                Ok(self
-                    .pairs
-                    .update_base(id, revision, updates, JournalUpdate::Hold)?)
-            }
+            Commit::Undoing { updates, forgotten } => Ok(self.pairs.update_base_observed(
+                id,
+                revision,
+                updates,
+                JournalUpdate::Hold,
+                &[],
+                forgotten,
+            )?),
             Commit::Undid { run, seqs } => {
                 Ok(self
                     .pairs

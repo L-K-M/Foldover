@@ -515,7 +515,10 @@ impl Endpoint {
             }
             _ => crate::sftp::copy(self, source, path, from, current, run, control),
         }?;
-        Ok(Written::unobserved(version))
+        Ok(match self {
+            Self::Sftp(to) => to.written(path, version, run.options().metadata(), control),
+            _ => Written::unobserved(version),
+        })
     }
 
     /// Give `path` `source`'s synced metadata, leaving content alone.
@@ -564,7 +567,10 @@ impl Endpoint {
             }
             _ => crate::sftp::update_metadata(self, source, path, from, current, run, control),
         }?;
-        Ok(Written::unobserved(version))
+        Ok(match self {
+            Self::Sftp(to) => to.written(path, version, run.options().metadata(), control),
+            _ => Written::unobserved(version),
+        })
     }
 
     /// Delete archived runs past their expiry (`Pruning`). Another Mac's

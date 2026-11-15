@@ -63,9 +63,10 @@ All notable changes to this project are documented here. The format follows
   stay with the source are read in full as before, unless you turn on
   Skip unchanged SFTP files in every folder in the pair editor, or pass
   `--remote-stats everywhere` (local protocol 25, schema v33, ADR 0057).
-- The sync after one that copied files into a folder on this Mac no
-  longer reads those files again to check them: the sync that writes a
-  file records it as it landed. This spares the second sync of a large
+- The sync after one that copied files into a folder on this Mac, or
+  into a Backup or Mirror on an SFTP server, no longer reads those files
+  again to check them: the sync that writes a file records it as it
+  landed. This spares the second sync of a large
   new backup, and a sync continuing one the agent stopped during, from
   rereading everything already copied (ADR 0056).
 - Automatic syncs run gently by default: on this Mac's own disks they use
