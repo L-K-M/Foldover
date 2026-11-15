@@ -78,6 +78,15 @@ enum PairRemovalProtection: Hashable, Sendable {
     case disabled
 }
 
+/// Which SFTP folders take a file whose size, date, mode and owner are
+/// unchanged as unchanged, without reading it (ADR 0057).
+enum PairRemoteStats: Hashable, Sendable {
+    /// Only a Backup's or Mirror's target that keeps records.
+    case targets
+    /// Every SFTP folder of the pair.
+    case everywhere
+}
+
 /// Metadata categories and flush strength a pair uses.
 struct PairOptions: Equatable, Sendable {
     var syncModificationTimes: Bool
@@ -99,6 +108,7 @@ struct PairOptions: Equatable, Sendable {
     var bandwidthLimit: UInt64?
     var reviewPolicy: PairReviewPolicy
     var removalProtection: PairRemovalProtection
+    var remoteStats: PairRemoteStats
 
     /// The engine's defaults, so the app never restates them.
     static var defaults: PairOptions { pairOptions(FoldoverCore.defaultPairOptions()) }
@@ -329,6 +339,10 @@ private func pairOptions(_ options: LocalPairOptions) -> PairOptions {
     case .enabled: .enabled
     case .disabled: .disabled
     }
+    let remoteStats: PairRemoteStats = switch options.remoteStats {
+    case .targets: .targets
+    case .everywhere: .everywhere
+    }
     return PairOptions(
         syncModificationTimes: options.modificationTimes == .sync,
         syncExtendedAttributes: options.extendedAttributes == .sync,
@@ -342,7 +356,8 @@ private func pairOptions(_ options: LocalPairOptions) -> PairOptions {
         records: options.records == .sourceOnly ? .sourceOnly : .both,
         bandwidthLimit: options.bandwidthLimit,
         reviewPolicy: reviewPolicy,
-        removalProtection: removalProtection
+        removalProtection: removalProtection,
+        remoteStats: remoteStats
     )
 }
 
@@ -402,6 +417,10 @@ private func corePairOptions(_ options: PairOptions) -> LocalPairOptions {
     case .enabled: .enabled
     case .disabled: .disabled
     }
+    let remoteStats: RemoteFileChecks = switch options.remoteStats {
+    case .targets: .targets
+    case .everywhere: .everywhere
+    }
     return LocalPairOptions(
         modificationTimes: metadata(options.syncModificationTimes),
         extendedAttributes: metadata(options.syncExtendedAttributes),
@@ -415,7 +434,8 @@ private func corePairOptions(_ options: PairOptions) -> LocalPairOptions {
         records: options.records == .sourceOnly ? .sourceOnly : .both,
         bandwidthLimit: options.bandwidthLimit,
         reviewPolicy: reviewPolicy,
-        removalProtection: removalProtection
+        removalProtection: removalProtection,
+        remoteStats: remoteStats
     )
 }
 

@@ -1,7 +1,7 @@
 use foldover_types::{
     DailySchedule, Durability, Filters, FolderRecords, InvalidPair, MetadataPolicy, PairConfig,
-    PairDraft, PairOptions, PairRoot, Propagation, RemovalProtection, ReviewPolicy, Schedule,
-    ScheduleInterval, Side, SyncMode, SyncPath, TimeOfDay, Weekday, Weekdays,
+    PairDraft, PairOptions, PairRoot, Propagation, RemoteStats, RemovalProtection, ReviewPolicy,
+    Schedule, ScheduleInterval, Side, SyncMode, SyncPath, TimeOfDay, Weekday, Weekdays,
 };
 use serde::{Deserialize, Serialize};
 
@@ -127,6 +127,42 @@ pub enum PairRemovalProtection {
     Disabled,
 }
 
+/// Which remote folders take a file whose size, time, mode and owner are
+/// unchanged as unchanged without reading it (ADR 0057).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PairRemoteStats {
+    /// Only a Backup's or Mirror's target that keeps records.
+    #[default]
+    Targets,
+    /// Every remote folder of the pair.
+    Everywhere,
+}
+
+impl PairRemoteStats {
+    fn is_targets(&self) -> bool {
+        *self == Self::Targets
+    }
+}
+
+impl From<RemoteStats> for PairRemoteStats {
+    fn from(stats: RemoteStats) -> Self {
+        match stats {
+            RemoteStats::Targets => Self::Targets,
+            RemoteStats::Everywhere => Self::Everywhere,
+        }
+    }
+}
+
+impl From<PairRemoteStats> for RemoteStats {
+    fn from(stats: PairRemoteStats) -> Self {
+        match stats {
+            PairRemoteStats::Targets => Self::Targets,
+            PairRemoteStats::Everywhere => Self::Everywhere,
+        }
+    }
+}
+
 impl From<ReviewPolicy> for PairReviewPolicy {
     fn from(policy: ReviewPolicy) -> Self {
         match policy {
@@ -193,6 +229,9 @@ pub struct PairSettings {
     /// Whether unusually large removals or sudden emptying stop for review.
     #[serde(default)]
     pub removal_protection: PairRemovalProtection,
+    /// Which remote folders may take an unchanged stat as an unchanged file.
+    #[serde(default, skip_serializing_if = "PairRemoteStats::is_targets")]
+    pub remote_stats: PairRemoteStats,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -301,6 +340,7 @@ impl From<&PairOptions> for PairSettings {
             bandwidth_limit: options.bandwidth_limit(),
             review_policy: options.review_policy().into(),
             removal_protection: options.removal_protection().into(),
+            remote_stats: options.remote_stats().into(),
         }
     }
 }
@@ -360,6 +400,7 @@ impl TryFrom<PairSettings> for PairOptions {
                     options
                         .with_review_policy(settings.review_policy.into())
                         .with_removal_protection(settings.removal_protection.into())
+                        .with_remote_stats(settings.remote_stats.into())
                 })
         })?
     }
@@ -658,6 +699,19 @@ mod tests {
         assert_eq!(json["records"], json!("sourceOnly"));
         let read: PairSettings = serde_json::from_value(json).unwrap();
         assert_eq!(PairOptions::try_from(read).unwrap(), source_only);
+    }
+
+    /// Trusting every remote folder's stats travels only when chosen, so
+    /// the default reads as before on an agent that does not know it.
+    #[test]
+    fn remote_stats_travel_only_when_trusted_everywhere() {
+        let default = serde_json::to_value(PairSettings::from(&PairOptions::default())).unwrap();
+        assert!(default.get("remote_stats").is_none());
+        let everywhere = PairOptions::default().with_remote_stats(RemoteStats::Everywhere);
+        let json = serde_json::to_value(PairSettings::from(&everywhere)).unwrap();
+        assert_eq!(json["remote_stats"], json!("everywhere"));
+        let read: PairSettings = serde_json::from_value(json).unwrap();
+        assert_eq!(PairOptions::try_from(read).unwrap(), everywhere);
     }
 
     #[test]

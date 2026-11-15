@@ -1228,6 +1228,7 @@ public struct LocalPairOptions: Equatable, Hashable {
     public var bandwidthLimit: UInt64?
     public var reviewPolicy: SyncReviewPolicy
     public var removalProtection: LargeRemovalProtection
+    public var remoteStats: RemoteFileChecks
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1248,7 +1249,7 @@ public struct LocalPairOptions: Equatable, Hashable {
          */canary: Data?, records: FolderRecords, 
         /**
          * File data bytes per second the pair's copies share at most.
-         */bandwidthLimit: UInt64?, reviewPolicy: SyncReviewPolicy, removalProtection: LargeRemovalProtection) {
+         */bandwidthLimit: UInt64?, reviewPolicy: SyncReviewPolicy, removalProtection: LargeRemovalProtection, remoteStats: RemoteFileChecks) {
         self.modificationTimes = modificationTimes
         self.extendedAttributes = extendedAttributes
         self.permissions = permissions
@@ -1262,6 +1263,7 @@ public struct LocalPairOptions: Equatable, Hashable {
         self.bandwidthLimit = bandwidthLimit
         self.reviewPolicy = reviewPolicy
         self.removalProtection = removalProtection
+        self.remoteStats = remoteStats
     }
 
     
@@ -1292,7 +1294,8 @@ public struct FfiConverterTypeLocalPairOptions: FfiConverterRustBuffer {
                 records: FfiConverterTypeFolderRecords.read(from: &buf), 
                 bandwidthLimit: FfiConverterOptionUInt64.read(from: &buf), 
                 reviewPolicy: FfiConverterTypeSyncReviewPolicy.read(from: &buf), 
-                removalProtection: FfiConverterTypeLargeRemovalProtection.read(from: &buf)
+                removalProtection: FfiConverterTypeLargeRemovalProtection.read(from: &buf), 
+                remoteStats: FfiConverterTypeRemoteFileChecks.read(from: &buf)
         )
     }
 
@@ -1310,6 +1313,7 @@ public struct FfiConverterTypeLocalPairOptions: FfiConverterRustBuffer {
         FfiConverterOptionUInt64.write(value.bandwidthLimit, into: &buf)
         FfiConverterTypeSyncReviewPolicy.write(value.reviewPolicy, into: &buf)
         FfiConverterTypeLargeRemovalProtection.write(value.removalProtection, into: &buf)
+        FfiConverterTypeRemoteFileChecks.write(value.remoteStats, into: &buf)
     }
 }
 
@@ -3845,6 +3849,83 @@ public func FfiConverterTypeReadinessWarningKind_lift(_ buf: RustBuffer) throws 
 #endif
 public func FfiConverterTypeReadinessWarningKind_lower(_ value: ReadinessWarningKind) -> RustBuffer {
     return FfiConverterTypeReadinessWarningKind.lower(value)
+}
+
+
+
+/**
+ * Which remote folders take a file whose size, time, mode and owner are
+ * unchanged as unchanged, without reading it (ADR 0057).
+ */
+
+public enum RemoteFileChecks: Equatable, Hashable {
+    
+    /**
+     * Only a Backup's or Mirror's target that keeps records.
+     */
+    case targets
+    /**
+     * Every remote folder; an edit that keeps size and time is found
+     * within about a week.
+     */
+    case everywhere
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RemoteFileChecks: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRemoteFileChecks: FfiConverterRustBuffer {
+    typealias SwiftType = RemoteFileChecks
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RemoteFileChecks {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .targets
+        
+        case 2: return .everywhere
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RemoteFileChecks, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .targets:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .everywhere:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRemoteFileChecks_lift(_ buf: RustBuffer) throws -> RemoteFileChecks {
+    return try FfiConverterTypeRemoteFileChecks.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRemoteFileChecks_lower(_ value: RemoteFileChecks) -> RustBuffer {
+    return FfiConverterTypeRemoteFileChecks.lower(value)
 }
 
 

@@ -1,7 +1,6 @@
 # ADR 0057: Trusting remote stats on SFTP targets
 
-Status: Implemented for record-keeping targets
-([plan](../resume-interrupted-runs.md), W1); the per-pair opt-in follows
+Status: Implemented ([plan](../resume-interrupted-runs.md), W1)
 
 ## Context
 
@@ -27,8 +26,14 @@ about weekly (PLAN.md §4.8).
   or stay unseen for up to a week instead of raising a conflict. A
   target whose records stay with the source takes no lease, so another
   Mac could write it unnoticed (ADR 0040); it stays read. The engine
-  passes each side's `StatTrust` into the observation; a per-pair
-  opt-in for other SFTP folders follows.
+  passes each side's `StatTrust` into the observation.
+- **Opt-in elsewhere.** A pair's owner may extend this to every SFTP
+  folder of the pair (`remote_stats` = `everywhere`, schema v33, local
+  protocol 25; **Skip unchanged SFTP files in every folder** in the
+  editor, `--remote-stats everywhere` in the CLI), accepting that an
+  edit there which keeps size, time, mode and owner is found within a
+  week, and can be overwritten meanwhile instead of raising a conflict.
+  Older agents ignore the column and read every remote file.
 - **What proves it.** A regular file is reused unread when its listed
   stat carries both size and modification time, equals the stored
   fingerprint's size, time, mode and owner, the file was modified more

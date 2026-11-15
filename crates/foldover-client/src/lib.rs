@@ -46,7 +46,7 @@ pub use foldover_proto::local::{
 pub use foldover_proto::local::{PeerShareList, PeerShareRecord, ShareList, ShareRecord};
 pub use foldover_types::{
     DailySchedule, Durability, Filters, FolderRecords, InvalidPair, InvalidReviewToken, LocalRoot,
-    MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions, PairRoot, Propagation,
+    MetadataPolicy, PairConfig, PairDraft, PairId, PairOptions, PairRoot, Propagation, RemoteStats,
     RemovalProtection, ReviewPolicy, ReviewToken, Schedule, ScheduleInterval, Side, SyncMode,
     SyncPath, TimeOfDay, Weekday, Weekdays,
 };

@@ -138,6 +138,14 @@ final class PairEditorViewModel: Identifiable {
         set { options.removalProtection = newValue ? .enabled : .disabled }
     }
 
+    /// Whether every SFTP folder of the pair, not only a Backup's or
+    /// Mirror's target, skips reading files whose size, date,
+    /// permissions and owner are unchanged (ADR 0057).
+    var trustsRemoteStatsEverywhere: Bool {
+        get { options.remoteStats == .everywhere }
+        set { options.remoteStats = newValue ? .everywhere : .targets }
+    }
+
     /// A folder that cannot hold Foldover's records can only be a
     /// Backup's target that keeps none (PLAN.md §3.6); until it is,
     /// saving is blocked, since every sync would fail.

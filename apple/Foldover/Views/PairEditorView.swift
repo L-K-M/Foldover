@@ -382,6 +382,15 @@ struct PairEditorView: View {
                     message: Text("Stops unusually large removals or changes that would empty the other folder after one folder suddenly becomes empty. Review the plan to continue.")
                 )
             }
+            if viewModel.usesServerFolder {
+                HStack {
+                    Toggle("Skip unchanged SFTP files in every folder", isOn: $viewModel.trustsRemoteStatsEverywhere)
+                    InfoButton(
+                        title: Text("Skip unchanged SFTP files in every folder"),
+                        message: Text("A Backup or Mirror to an SFTP server doesn't read a target file again while its size, date, permissions and owner stay the same; each file is still read about once a week. Turn this on to do the same in this pair's other SFTP folders.\n\nSomething that edits a file there but keeps its size and date then goes unnoticed until the file is next read, within about a week, and a sync in the meantime can overwrite the edit instead of reporting a conflict.")
+                    )
+                }
+            }
         }
     }
 

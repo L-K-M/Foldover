@@ -266,6 +266,22 @@ pub enum RemovalProtection {
     Disabled,
 }
 
+/// Which of a pair's remote folders may take a file whose size, time,
+/// mode and owner are unchanged as unchanged, without reading it
+/// (ADR 0057). Local folders always may: their stat also holds the file's
+/// identity and change time.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum RemoteStats {
+    /// Only a Backup's or Mirror's target that keeps records, which only
+    /// Foldover writes.
+    #[default]
+    Targets,
+    /// Every remote folder of the pair. An edit there that keeps size and
+    /// time is found when the file is next read, within about a week,
+    /// instead of at once.
+    Everywhere,
+}
+
 /// Gitignore-style exclusion rules, one per line, and an optional file
 /// size limit. They apply to both folders, so an excluded entry never
 /// looks deleted on one side.
@@ -352,6 +368,7 @@ pub struct PairOptions {
     bandwidth_limit: Option<u64>,
     review_policy: ReviewPolicy,
     removal_protection: RemovalProtection,
+    remote_stats: RemoteStats,
 }
 
 impl PairOptions {
@@ -370,6 +387,7 @@ impl PairOptions {
             bandwidth_limit: None,
             review_policy: ReviewPolicy::Automatic,
             removal_protection: RemovalProtection::Enabled,
+            remote_stats: RemoteStats::Targets,
         }
     }
 
@@ -463,6 +481,17 @@ impl PairOptions {
 
     pub const fn removal_protection(&self) -> RemovalProtection {
         self.removal_protection
+    }
+
+    pub fn with_remote_stats(self, remote_stats: RemoteStats) -> Self {
+        Self {
+            remote_stats,
+            ..self
+        }
+    }
+
+    pub const fn remote_stats(&self) -> RemoteStats {
+        self.remote_stats
     }
 }
 
