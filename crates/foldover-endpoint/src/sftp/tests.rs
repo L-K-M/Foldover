@@ -2893,10 +2893,12 @@ fn settled_remote_stats_prove_versions_only_where_trusted() {
         return;
     };
     const HOUR: i64 = 60 * 60;
+    // Ten minutes either side of the hour, so a slow run cannot cross it.
+    const MARGIN: i64 = 10 * 60;
     for (name, offset) in [
-        ("settled", -HOUR - 60),
-        ("resized", -HOUR - 60),
-        ("within", -HOUR + 60),
+        ("settled", -HOUR - MARGIN),
+        ("resized", -HOUR - MARGIN),
+        ("within", -HOUR + MARGIN),
         ("ahead", 30 * 60),
     ] {
         fs::write(directory.path().join(name), name).unwrap();
@@ -2919,7 +2921,7 @@ fn settled_remote_stats_prove_versions_only_where_trusted() {
     );
 
     fs::write(directory.path().join("resized"), b"longer content").unwrap();
-    modified_at(directory.path(), "resized", -HOUR - 60);
+    modified_at(directory.path(), "resized", -HOUR - MARGIN);
     let opened = requests(&log, SSH_FXP_OPEN);
     let changed = observe_trusting(&remote, again.into_snapshot(), StatTrust::Reuse);
     assert_ne!(changed.versions(), versions);
@@ -2945,6 +2947,18 @@ fn confirming_reads_refresh_fingerprints_only_where_trusted() {
         let mut again = observe_trusting(&remote, first.into_snapshot(), trust);
         assert_eq!(again.finish_snapshot(), Some(rewritten), "{trust:?}");
     }
+
+    // Folders and links are read every run and never proved by stat, so
+    // their confirming reads rewrite nothing.
+    let directory = tempfile::tempdir().unwrap();
+    let Some(remote) = sftp(directory.path()) else {
+        return;
+    };
+    fs::create_dir(directory.path().join("folder")).unwrap();
+    std::os::unix::fs::symlink("folder", directory.path().join("link")).unwrap();
+    let first = observe_trusting(&remote, foldover_types::PathMap::new(), StatTrust::Reuse);
+    let mut again = observe_trusting(&remote, first.into_snapshot(), StatTrust::Reuse);
+    assert_eq!(again.finish_snapshot(), Some(false));
 }
 
 /// `stat_key` writes placeholders for a missing size or modification

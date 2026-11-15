@@ -814,12 +814,12 @@ impl SftpEndpoint {
         let observed_at = SystemTime::now();
         let version = self.version(path, attributes, policy, control)?;
 
-        // Read again and found the same: where stats are never trusted, the
-        // stored observation stands, so the snapshot has nothing to rewrite
-        // for this entry. Where they are, the read confirms the version now,
-        // so a fingerprint too fresh or too old to trust records the new
-        // time and can prove the file next run (ADR 0057).
-        if trust == StatTrust::Read
+        // Read again and found the same: the stored observation stands, so
+        // the snapshot has nothing to rewrite for this entry. Only a regular
+        // file where stats are trusted records the confirming read's time,
+        // so a fingerprint too fresh or too old to trust can prove the file
+        // next run (ADR 0057); folders and links are never proved by stat.
+        if (trust == StatTrust::Read || attributes.kind() != FileKind::File)
             && let Some(known) = previous.get(path)
             && known.version() == version
             && known.fingerprint().same_stat(&key, size)
